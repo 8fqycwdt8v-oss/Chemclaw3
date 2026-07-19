@@ -53,6 +53,19 @@ class Settings(BaseSettings):
     # (plan step 1.10). One DSN for the whole app.
     postgres_dsn: str = "postgresql://chemclaw:chemclaw@localhost:5432/chemclaw"
 
+    # QM job timeouts and mock-HPC timing (plan steps 1.2–1.4). Times are in
+    # seconds. The "mock_*" values only shape the simulated HPC job's duration
+    # so the durable path is observable; they vanish when a real backend lands.
+    qm_activity_timeout_seconds: float = 30.0
+    # Heartbeat timeout for the long-running poll: if a worker dies, Temporal
+    # waits at most this long before retrying the activity on another worker.
+    qm_poll_heartbeat_timeout_seconds: float = 10.0
+    # How often the poll loop heartbeats / re-checks the (mock) scheduler.
+    hpc_poll_interval_seconds: float = 2.0
+    # Simulated submission latency and total run time of the mock HPC job.
+    hpc_mock_submit_seconds: float = 1.0
+    hpc_mock_run_seconds: float = 6.0
+
 
 settings = Settings()
 """Process-wide configuration singleton. Import this, not the class."""
