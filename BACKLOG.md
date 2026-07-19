@@ -17,9 +17,25 @@ Prioritized open action items. Top = next. Keep in sync with `docs/implementatio
 ## Next — Phase 1: MAF + Temporal spine (first milestone)
 - [ ] Steps 1.1–1.10 (see plan). HPC mocked; prove worker-restart durability at CHECKMATE 1.
 
-## Open questions / awaiting input
-- [ ] Fold findings from the deep-research architecture review into the docs once it completes
-      (watch for retrosynthesis, DoE/Bayesian optimization, lab automation / SiLA2 gaps).
+## Capability gaps to triage (from `docs/research-review.md`) — decide per item
+- [ ] **Evaluation / scientific-output metrics layer** — benchmarks (step count, time-to-in-vitro)
+      + green-chemistry metrics (E-Factor, PMI). We gate *code* quality but not *scientific*
+      output. Strong candidate to make first-class (pairs with "tools aren't uniformly good").
+- [ ] **Chemical/biological safety layer** — distinct from Entra-ID/RBAC (IT security).
+      GxP / data-integrity + hazard checks. Decide scope.
+- [ ] Retrosynthesis + reaction prediction · DoE/Bayesian optimization · lab automation/SiLA2
+      closed-loop · process flowsheet synthesis · multimodal analytical data · domain foundation
+      models — all currently in `DEFERRED.md` with triggers; confirm or pull forward.
+- [ ] Design cautions to bake in: apply Skills/tools **selectively + measured per task** (not
+      universally); design the CoALA memory layer against DMR/LongMemEval, not by assumption.
+
+## Open questions / awaiting input (see `docs/research-review.md`)
+- [ ] Temporal vs. Restate/DBOS/Prefect/Dapr — no head-to-head source found; our choice stands
+      on maturity/fit. Revisit if operability/cost becomes a concern.
+- [ ] When does Markdown+NetworkX tip to Neo4j/Memgraph + GraphRAG? (deterministic traversal
+      sidesteps the NL-query risk for now.)
+- [ ] Concrete lab-automation/SiLA2 + DoE + retrosynthesis integration wiring.
+- [ ] Domain safety/compliance layer design beyond RBAC.
 
 ## Later
 - [ ] Phase 2 knowledge-graph core + PR-gate · Phase 3 fingerprint search · Phase 4 ELN
