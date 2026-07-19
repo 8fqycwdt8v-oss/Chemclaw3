@@ -11,6 +11,23 @@ on:
 jobs:
   check:
     runs-on: ubuntu-latest
+    # Real Postgres so the calculation-store integration tests run (not skip).
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_USER: chemclaw
+          POSTGRES_PASSWORD: chemclaw
+          POSTGRES_DB: chemclaw
+        ports:
+          - "5432:5432"
+        options: >-
+          --health-cmd "pg_isready -U chemclaw"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      CHEMCLAW_POSTGRES_DSN: postgresql://chemclaw:chemclaw@localhost:5432/chemclaw
     steps:
       - uses: actions/checkout@v4
 
@@ -21,6 +38,9 @@ jobs:
 
       - name: Sync dependencies
         run: uv sync
+
+      - name: Apply database migrations
+        run: make db-migrate
 
       - name: Lint + type + test
         run: make check

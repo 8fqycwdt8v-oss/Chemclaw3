@@ -8,6 +8,7 @@ requires-python = ">=3.11"
 dependencies = [
     "agent-framework-anthropic>=1.0.0b260709",
     "agent-framework-core>=1.11.0",
+    "psycopg[binary]>=3.2",
     "pydantic-settings>=2.5",
     "temporalio[pydantic]>=1.30.0",
 ]

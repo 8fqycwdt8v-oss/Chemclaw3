@@ -2,7 +2,7 @@
 # CLAUDE.md and CI both go through them, so behavior stays identical everywhere.
 # `uv run` executes inside the project venv without a manual activate step.
 
-.PHONY: install lint type test check up down
+.PHONY: install lint type test check db-migrate up down
 
 install:  ## Sync the venv with runtime + dev dependencies.
 	uv sync
@@ -18,6 +18,9 @@ test:  ## Run the test suite.
 	uv run pytest
 
 check: lint type test  ## The full gate CLAUDE.md requires green before a step is "done".
+
+db-migrate:  ## Apply infra/sql migrations to the configured database.
+	uv run python -m calc.migrate
 
 up:  ## Start the local dev stack (Temporal dev server + Postgres/pgvector).
 	docker compose -f infra/docker-compose.yml up -d
