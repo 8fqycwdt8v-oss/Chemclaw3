@@ -15,8 +15,10 @@ The design and the staged build order are the source of truth; read them before 
 Four layers, each with a single responsibility. **Never merge their concerns.**
 
 1. **MAF** (Microsoft Agent Framework) — conversation orchestration + short reasoning steps.
-2. **Temporal** — durable execution of long/expensive jobs (QM/DFT on HPC). Two task queues:
+2. **Temporal** — durable execution of long/expensive jobs. Early focus is fast local compute
+   (xTB/GFN2, ML predictors) + BoFire BO; **HPC/DFT is deferred** (D-010). Two task queues:
    `hpc-jobs` (few, heavy workers) and `background-jobs` (light workers: sync, re-index, reports).
+   Every result is persisted once via the calculation store — never recomputed (D-011).
 3. **Agent Skills** (`SKILL.md`) — "how do I do X" (judgment), loaded on demand.
 4. **Markdown knowledge graph in Git** (NetworkX indexer) — "what do we know" (data + relations).
 

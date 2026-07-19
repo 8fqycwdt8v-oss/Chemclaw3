@@ -3,23 +3,37 @@
 Prioritized open action items. Top = next. Keep in sync with `docs/implementation-plan.md`
 (phase/step numbers) at session end.
 
-## Now — Phase 1: MAF + Temporal spine (first milestone)
-- [ ] 1.1 Temporal worker process connects, registers on `hpc-jobs` queue (visible in UI).
-- [ ] 1.2 `QMJobWorkflow` skeleton + one trivial pure activity (`prepare_input`).
-- [ ] 1.3 Mock `submit_to_hpc` + `poll_hpc_status` with `activity.heartbeat()`; timeouts from config.
-- [ ] 1.4 `parse_qm_output` → pydantic result model.
-- [ ] 1.5 MAF agent + one skill + tool `submit_qm_job` (fire-and-forget, returns `job_id`).
-- [ ] 1.6–1.10 status tool · notify callback · `background-jobs` worker · Entra `oid` audit field · QM cache.
-- [ ] CHECKMATE 1 (G1–G7 + durability spike: restart worker mid-job, no completed activity re-runs).
+## Now — early compute focus (reprioritized; HPC/DFT deferred — D-010)
 
-## Done — Phase 0: foundation
-- [x] 0.1 Runtime = Python; ADR-0001 (`docs/adr/0001-python-runtime.md`) + D-001.
-- [x] 0.2 Tooling: uv, ruff, `mypy --strict`, pytest, pre-commit; `Makefile` `lint`/`type`/`test`/`check`/`up`.
-- [x] 0.3 Central `chemclaw/config.py` (`pydantic-settings`, `extra=forbid`) + documented `.env.example`.
-- [x] 0.4 Monorepo dirs with a README each: `agents/ workflows/ workers/ mcp/ skills/ knowledge/ infra/ docs/adr/`.
-- [x] 0.5 `infra/docker-compose.yml`: self-hosted Temporal (dev + UI) + Postgres/pgvector.
-- [x] 0.6 CI skeleton (GitHub Actions): `make check` (lint + type + test) on every push/PR.
-- [x] CHECKMATE 0 (G1–G7): `make check` green; config is single source; zero unused code.
+### Phase 1b — Result store / calc cache (first-class; "never compute twice")
+- [ ] 1b.1 Store interface `get/put` (Protocol); 1b.2 versioned key `(calc_type, calc_version, input_hash, params_hash)`.
+- [ ] 1b.3 In-memory backend (tests) + Postgres backend (`calculation_results` table).
+- [ ] 1b.4 One `cached(calculator)` wrapper (lookup-before-compute, DRY); hit/miss counter.
+- [ ] 1b.5 Temporal: lookup activity before compute, persist activity after. CHECKMATE 1b.
+
+### Phase 1c — Fast predictors + semiempirical (first *real* calculations)
+- [ ] 1c.1 Calculator contract + registry (no hardcoded branches).
+- [ ] 1c.2 xTB / **GFN2** MCP calculator (SMILES → energy/geometry; CPU, no HPC).
+- [ ] 1c.3 GNN solubility model (inference only; value + uncertainty).
+- [ ] 1c.4 pKa/property model(s) (the user's "pKs" — interpreted as pKa; confirm).
+- [ ] 1c.5 generic `CalculationWorkflow` + `submit_calculation`/`get_calculation_status`.
+- [ ] 1c.6 skill `calculation-selection`; 1c.7 optional graph note via PR-gate. CHECKMATE 1c.
+
+### Phase 1d — Bayesian optimization (BoFire, pulled forward)
+- [ ] 1d.1 Domain adapter (config → BoFire `Domain`, encapsulated).
+- [ ] 1d.2 ask/tell `propose_candidates`; 1d.3 objective eval via 1c calculators + store.
+- [ ] 1d.4 BO campaign as durable Temporal workflow; 1d.5 candidates PR-gated; 1d.6 progress metric. CHECKMATE 1d.
+
+## Done
+- [x] **Phase 0** — foundation (tooling, config, infra compose, CI, ADR-0001, layer READMEs). CHECKMATE 0 green.
+- [x] **Phase 1 spine (1.1–1.6, 1.9)** — hpc worker; `QMJobWorkflow` + activities (mock HPC, heartbeat poll,
+      parse); agent tools `submit_qm_job`/`get_qm_job_status`; MAF agent + `qm-job-submission` skill;
+      `requested_by` audit field; shared Temporal client + result models. Server-backed tests run in CI.
+- [x] **Orchestrator** — reconsidered MAF vs LangGraph → keep MAF (D-013).
+- Folded/deferred Phase-1 tails: **1.7** notify callback (defer until an async result must reach a live
+  session), **1.8** background-jobs worker (defer until a real bg job exists — no empty stub), **1.10** →
+  generalized into **Phase 1b**. **CHECKMATE 1** (worker-restart durability spike) runs against a live
+  Temporal (`make up`) — pending, do at end of the 1b–1d cluster.
 
 ## Capability gaps to triage (from `docs/research-review.md`) — decide per item
 - [x] **Evaluation / scientific-output metrics layer** → promoted to first-class **Phase 2b**
@@ -34,6 +48,11 @@ Prioritized open action items. Top = next. Keep in sync with `docs/implementatio
       universally); design the CoALA memory layer against DMR/LongMemEval, not by assumption.
 
 ## Open questions / awaiting input (see `docs/research-review.md`)
+- [ ] **"pKs models"** — interpreted as **pKa** prediction; confirm (could mean PK/ADMET). The
+      pluggable calculator registry (1c.1) makes a rename/swap cheap.
+- [ ] **Which models** for solubility (GNN weights + license?) and pKa (tool/model)? xTB binary
+      availability + license in the target runtime.
+- [ ] BoFire scope for v1: which problem (reaction-condition? formulation?) is the first real BO case?
 - [ ] Temporal vs. Restate/DBOS/Prefect/Dapr — no head-to-head source found; our choice stands
       on maturity/fit. Revisit if operability/cost becomes a concern.
 - [ ] When does Markdown+NetworkX tip to Neo4j/Memgraph + GraphRAG? (deterministic traversal

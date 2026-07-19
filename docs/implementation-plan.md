@@ -11,6 +11,15 @@ Erster baubarer Meilenstein ist der **MAF-+-Temporal-Spine**. Nach jedem Schritt
 steht ein **Quality-Gate ("Checkmate")**, das Code-Qualität, Einfachheit und Robustheit
 kritisch hinterfragt, bevor weitergebaut wird.
 
+> **Priorisierung (aktualisiert, Nutzerentscheidung).** Der **HPC-/DFT-Anschluss wird
+> aufgeschoben**. Zuerst kommen **schnelle, lokal lauffähige** Rechnungen: semiempirisches
+> **xTB (neuestes GFN, GFN2)** und ML-Prädiktoren (**GNN-Löslichkeit**, **pKa/Property**).
+> Jede Rechnung wird **persistiert** ("nie zweimal rechnen"), daher wird der Ergebnis-Store
+> zu einer eigenen, frühen First-Class-Schicht. **Bayesian Optimization mit der
+> `BoFire`-Bibliothek** als BO-Engine wird ebenfalls **vorgezogen**. Der Phase-1-Spine bleibt
+> gültig: sein gemockter Langlauf-Job ist das *Durability-Muster*, das alle diese Kalkulatoren
+> und BO-Kampagnen wiederverwenden — nur der schwere HPC/DFT-Fall wird später angeschlossen.
+
 **Oberstes Ziel:** Am Ende steht **kein Boilerplate**, sondern *einfacher, robuster,
 konfigurierbarer, gut dokumentierter* Code. Jeder Schritt ist so klein, dass sein Diff in
 einem Review vollständig durchdacht werden kann.
@@ -85,7 +94,11 @@ Zusätzlich alle 2 Phasen ein **tiefer Review-Durchgang** (`/code-review` bzw. R
 ## Phase 1 — MAF-+-Temporal-Spine  ⭐ erster Meilenstein
 
 Kleinste Schritte, jeweils einzeln testbar. HPC wird **gemockt**, damit der Durability-Pfad
-ohne SLURM beweisbar ist.
+ohne SLURM beweisbar ist. Der Mock-Job ist bewusst *generisch* — er steht für „eine lange,
+teure Rechnung" und ist damit zugleich (a) der Platzhalter für den **später** angeschlossenen
+HPC/DFT-Pfad und (b) das Muster, das die schnellen Kalkulatoren (Phase 1c) und BO-Kampagnen
+(Phase 1d) 1:1 wiederverwenden. **Status: implementiert** (Schritte 1.1–1.6, 1.9); die
+QM/DFT-Benennung ist die aufgeschobene Zielanwendung, die Mechanik ist rechenart-neutral.
 
 - **1.1** Temporal-Worker-Prozess (leer) startet, verbindet sich, meldet sich an
   `hpc-jobs`-Queue. Abnahme: sichtbar in der Web-UI.
@@ -101,14 +114,104 @@ ohne SLURM beweisbar ist.
 - **1.8** Zweite Task-Queue `background-jobs` + leichter Worker (nur registrieren, noch leer).
 - **1.9** Entra-ID-Claim (`oid`/`upn`) als Feld im Workflow-Input mitführen (v1 Platzhalter,
   aber im Datenmodell vorhanden für Audit).
-- **1.10** `CachedQMLookup`-Struktur: Hash(Molekül+Methode+Basissatz) → Cache-Lookup vor
-  Submit (Store v1 in Postgres, eine Tabelle).
+- **1.10** ~~`CachedQMLookup`-Struktur~~ → **verallgemeinert und vorgezogen als Phase 1b**
+  (Ergebnis-Store für *alle* Kalkulatoren, nicht nur QM). Der `qm_job_key`
+  (Molekül+Methode+Basissatz) ist bereits vorhanden und wird dort zum generischen Cache-Key.
 
 > **CHECKMATE 1** (G1–G7 + Durability-Spike): Worker **mitten im Job neu starten** → Workflow
 > setzt fort, keine abgeschlossene Activity wird wiederholt (Event-Replay in UI sichtbar).
 > Ist die MAF-`SkillsProvider`-API stabil genug (Spike, Abschnitt-15-Risiko)? Ist das
 > DIY-MAF↔Temporal-Muster auf **eine** dünne Adapterfunktion begrenzt (kein Framework-Bau)?
 > Sind alle Timeouts/Queues/Hashes konfigurierbar, nichts hartcodiert?
+
+---
+
+## Phase 1b — Ergebnis-Store / Berechnungs-Cache (querschnittlich, first-class)
+
+**Motivation (Nutzervorgabe):** Jede Rechnung wird **persistiert**, damit **nichts zweimal
+berechnet** wird. Verallgemeinert den QM-spezifischen Schritt 1.10 zu **einem** wiederverwendbaren
+Store, durch den *jeder* Kalkulator (xTB, Löslichkeit, pKa, später DFT) und jede
+BO-Zielfunktions-Auswertung läuft. Ein Store, ein Schreibpfad — kein Cache pro Kalkulator (DRY).
+
+- **1b.1** Store-Interface (Protokoll): `get(key) -> StoredResult | None`,
+  `put(key, result, provenance)`. Ein Vertrag, austauschbare Backends.
+- **1b.2** Kanonischer, **versionierter** Cache-Key:
+  `CalculationKey(calc_type, calc_version, input_hash, params_hash)`. Die **Kalkulator-Version
+  gehört in den Key**, damit ein Modell-/Methoden-Update den Cache nicht *still* vergiftet.
+- **1b.3** Zwei Backends hinter demselben Interface: **In-Memory** (Tests, beweist die
+  „compute-once"-Logik ohne DB) + **Postgres** (eine Tabelle `calculation_results`: Key,
+  JSONB-Ergebnis, Provenienz, `calc_version`, `created_at`). Schema-Migration als einfaches
+  SQL-Skript in `infra/`.
+- **1b.4** **Eine** Lookup-vor-Compute-Stelle: ein `cached(calculator)`-Wrapper, den jeder
+  Kalkulator erbt (DRY, keine Kopie). Cache-Hit/Miss wird als Zähler exponiert (Metrik-Schicht 2b).
+- **1b.5** Temporal-Einbettung: Store-Lookup als Activity **vor** dem teuren Compute,
+  Persistenz als Activity **danach** — dasselbe Muster, das der Spine (Phase 1) andeutet.
+
+> **CHECKMATE 1b** (G1–G7): Beweist ein Test, dass ein identischer Zweit-Call den Store trifft
+> und die Compute-Funktion **nicht erneut** aufruft? Invalidiert ein `calc_version`-Bump den
+> Key korrekt (alter Cache wird nicht fälschlich getroffen)? Ist der Store **ein** Interface mit
+> wirklich austauschbarem Backend (In-Memory ↔ Postgres, G1/G6)? Keine Cache-Logik dupliziert?
+
+---
+
+## Phase 1c — Schnelle Prädiktoren & Semiempirik (die ersten *echten* Rechnungen)
+
+HPC/DFT bleibt **aufgeschoben**. Fokus: **schnelle, lokal lauffähige** Rechnungen über denselben
+Durability-Pfad (Phase 1) und denselben Store (Phase 1b). Kalkulatoren sind **pluggable** —
+neuer Kalkulator = neuer Registry-Eintrag, kein Kern-Umbau (Generalisierung erst ab dem 2./3.
+Kalkulator, Rule of Three; xTB + Löslichkeit + pKa erfüllen das).
+
+- **1c.1** Kalkulator-Vertrag (Protokoll): `run(input) -> Result`, plus `name`, `version`.
+  **Registry** statt hartcodierter `if calc == …`-Ketten.
+- **1c.2** **xTB / GFN2** als MCP-Kalkulator: SMILES/3D → xTB (neuestes semiempirisches
+  **GFN2-xTB**, GFN-FF optional) → Energie / Geometrie / Deskriptoren. Deterministisch, CPU,
+  kein HPC. `xtb`-Binary hinter dünnem MCP-Server; Methode + Ladung/Multiplizität aus Config.
+- **1c.3** **GNN-Löslichkeitsmodell** als MCP-Kalkulator: SMILES → Löslichkeit **+ Unsicherheit**.
+  Nur Inferenz im Kern (kein Training); Modellgewichte/-version aus Config, im Cache-Key (1b.2).
+- **1c.4** **pKa-/Property-Modell(e)** analog (das vom Nutzer genannte „pKs"-Modell; hier als
+  **pKa** interpretiert — offene Frage im Backlog). Über dieselbe Registry, gleiches Muster.
+- **1c.5** Generischer `CalculationWorkflow(calc_name, input)` (verallgemeinert `QMJobWorkflow`):
+  Store-Lookup (1b) → Compute-Activity → Persist. Tools `submit_calculation` /
+  `get_calculation_status` (verallgemeinern 1.5/1.6). Fire-and-forget, nicht-blockierend.
+- **1c.6** Skill `calculation-selection`: das **Urteil**, welcher Kalkulator zu welcher Frage
+  (Löslichkeit? pKa? Konformer-Energie?) und welche Genauigkeitsstufe — Wahl/Schwellen aus Config.
+- **1c.7** Ergebnis optional als Graph-Note über das **PR-Gate** (nach Phase 2); ansonsten reicht
+  der Store als Persistenz. Kein zweiter Schreibpfad.
+
+> **CHECKMATE 1c** (G1–G7 + Fach-Plausibilität): Liefert xTB(GFN2) für ein Testmolekül eine
+> plausible Energie, und wird sie gecached (kein Zweitlauf)? Ist die Registry frei von
+> hartcodierten Kalkulator-Verzweigungen (G1)? Trennt der Code **MCP-Fähigkeit** (Rechnen)
+> sauber vom **Skill** (Auswahl-Urteil, G6)? Sind Modellversionen/Methoden konfigurierbar **und
+> Teil des Cache-Keys** (G3/1b.2)? Weist jede Vorhersage ihre **Unsicherheit** aus (fachlich
+> validierbar)?
+
+---
+
+## Phase 1d — Bayesian Optimization (BoFire, vorgezogen)
+
+**Vorgezogen (Nutzerentscheidung):** Optimierungs-Kampagnen (Reaktion/Prozess/Formulierung)
+nutzen die schnellen Prädiktoren (1c) und den Store (1b) als Zielfunktions-Auswertungen.
+**`BoFire`** ist die BO-Engine (Domain-Modellierung + BoTorch-Strategien) — wir bauen **keine**
+eigene BO, sondern kapseln BoFire hinter einem dünnen Adapter.
+
+- **1d.1** Domain-Adapter: Chemclaw-Config → BoFire-`Domain` (Inputs/Features, Constraints,
+  Objectives). BoFire-Typen bleiben **gekapselt**, lecken nicht in Agent/Skill.
+- **1d.2** Ask/Tell: `propose_candidates(domain, past_results, n) -> Candidates` über eine
+  BoFire-Strategie (SOBO/MOBO). Strategie + Acquisition-Function aus Config.
+- **1d.3** Zielfunktions-Auswertung = Kalkulatoren aus 1c über den Store (1b), **gemessene oder
+  vorhergesagte** Werte; die Provenienz (gemessen vs. prädiziert) wird mitgeführt.
+- **1d.4** BO-Kampagne als **Temporal-Workflow** (langlaufend, resumierbar): eine Runde =
+  `propose → evaluate` (fan-out Rechnungen) `→ tell → persist`. Überlebt Worker-Neustarts.
+- **1d.5** Kandidaten/Experimentvorschläge, die ins Wissen eingehen, über das **PR-Gate**
+  (nach Phase 2); reine Zwischenschritte bleiben nur im Store.
+- **1d.6** Metrik (Phase 2b): Optimierungs-Fortschritt (bestes Objective über Runden / Regret)
+  als registrierte wissenschaftliche Metrik.
+
+> **CHECKMATE 1d** (G1–G7 + Konvergenz-Spike): Schlägt eine BO-Runde für eine **bekannte
+> Test-Zielfunktion** sinnvolle Kandidaten vor und nähert sich über Runden dem bekannten Optimum?
+> Bleibt BoFire **hinter dem Adapter** (kein BoFire-Typ im Agenten, G6)? Nutzt die Auswertung den
+> Store (keine Doppelrechnung)? Läuft eine mehrrundige Kampagne **durabel** (Neustart mittendrin →
+> Fortsetzung)?
 
 ---
 
@@ -293,9 +396,11 @@ weiteren Retriever* hinter demselben Interface (5b.2) — kein Umbau des Harness
 
 ## Optionale spätere Bausteine (nach Bedarf, nicht v1)
 
-Tabular Foundation Model (`predict_from_tabular_context`, Lizenz prüfen) · xTB-Vorrechnung ·
-Skill-Katalog (PDF-Extraktion, Bild→SMILES, IUPAC↔SMILES, Visualisierung). Jede
-Vorhersage-Fähigkeit vor Produktivsetzung fachlich validieren, gleiches Human-Review-Gate.
+Tabular Foundation Model (`predict_from_tabular_context`, Lizenz prüfen) ·
+Skill-Katalog (PDF-Extraktion, Bild→SMILES, IUPAC↔SMILES, Visualisierung) · **HPC/DFT-Anschluss**
+(aufgeschoben, s. Deferred-Tabelle). Jede Vorhersage-Fähigkeit vor Produktivsetzung fachlich
+validieren, gleiches Human-Review-Gate. (xTB/GFN2 und BO sind **nicht** mehr hier — vorgezogen
+in Phase 1c/1d.)
 
 ---
 
@@ -303,11 +408,15 @@ Vorhersage-Fähigkeit vor Produktivsetzung fachlich validieren, gleiches Human-R
 
 | Entscheidung | Default v1 | Trigger für Wechsel |
 |---|---|---|
+| **HPC/DFT real** (`submit_to_hpc`, SLURM) | **aufgeschoben**; Mock-Spine beweist das Muster, Phase 1c/1d liefern die frühen Rechnungen | wenn schwere QM/DFT-Genauigkeit gebraucht wird **und** HPC-Zugang bereitsteht |
 | Postgres-RLS-Mirror des Graphen | **weglassen** | echte kombinatorische Projekt-Vertraulichkeit |
 | `knowledge/` eigenes Git-Repo | **Unterordner** | Governance-/Vertraulichkeitstrennung nötig |
 | Zweites Queue-System (pg-boss) | **nein**, nur Temporal-Task-Queues | — (revidiert) |
 | MAF Durable Extension | **nicht** für Jobs | nur sehr lange Konversationspausen |
 | Universelle ELN-Abstraktion | **nein**, Adapter pro Quelle | ab dritter ELN-Quelle |
+
+> **Vorgezogen** (nicht mehr „später"): **xTB/GFN2** und **ML-Prädiktoren** → Phase 1c;
+> **DoE/Bayesian Optimization (BoFire)** → Phase 1d; **Ergebnis-Store** → Phase 1b.
 
 ---
 
@@ -316,7 +425,12 @@ Vorhersage-Fähigkeit vor Produktivsetzung fachlich validieren, gleiches Human-R
 Leitfaden-Testfall: *"Erwartete Regioselektivität für späte C–H-Funktionalisierung von
 Verbindung X — und hatten wir ähnliche Substrate?"*
 
-- **P1:** Agent löst (gemockten) QM-Job asynchron aus und schließt ihn durabel ab.
+- **P1:** Agent löst (gemockten) Langlauf-Job asynchron aus und schließt ihn durabel ab.
+- **P1b:** Ein bereits berechnetes Ergebnis wird aus dem Store **wiederverwendet** statt neu
+  gerechnet (identischer Input → Cache-Hit, kein Zweitlauf).
+- **P1c:** xTB(GFN2) bzw. das Löslichkeits-/pKa-Modell liefert für Verbindung X ein **echtes,
+  gecachetes** Ergebnis (mit ausgewiesener Unsicherheit bei ML).
+- **P1d:** Eine BO-Runde schlägt den nächsten Kandidaten vor, ausgewertet über 1c/1b — durabel.
 - **P2:** Ergebnis wird zur zitierfähigen Graph-Note (PR-Gate).
 - **P3:** "ähnliche Substrate?" liefert echte Fingerprint-Treffer.
 - **P4:** Treffer stammen aus echten ELN-importierten Reaktionen.
@@ -325,7 +439,8 @@ Verbindung X — und hatten wir ähnliche Substrate?"*
 - **P5:** Antwort trennt projektspezifische Historie von übertragenem Playbook-Wissen.
 - **P5b:** Ein Entwicklungsbericht wird durabel aus Jahren interner Daten entworfen — jede
   Aussage zitiert ihre Quell-Note, unbelegte Trends verworfen, Entwurf PR-gegated.
-- **P6:** Nur berechtigte Nutzer lösen den DFT-Pfad aus; Audit-Trail vollständig.
+- **P6:** Nur berechtigte Nutzer lösen die teuren Rechen-Pfade (Kalkulatoren/BO, später HPC/DFT)
+  aus; Audit-Trail (`oid`) vollständig.
 
 Jede Phase gilt erst als abgeschlossen, wenn (a) ihr Abnahmekriterium demonstriert, (b) ihr
 CHECKMATE grün und (c) `make lint type test` grün ist. **Definition of Done pro Schritt:**

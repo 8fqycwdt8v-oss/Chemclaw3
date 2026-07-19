@@ -48,3 +48,30 @@ The synthesis engine (decompose → fan-out → adversarial-verify → cite → 
 source-agnostic; internal sources (graph, fingerprints, ORD/analytical data, TabPFN) and later
 external literature are interchangeable retrievers behind one interface. Long runs are Temporal
 background workflows; drafts are PR-gated. Plan Phase 5b.
+
+## D-010 — HPC/DFT deferred; lead with fast local calculators (user decision)
+The real HPC/SLURM DFT path is postponed. The mock spine (Phase 1) already proves the durable
+async pattern, so early value comes from **fast, locally runnable** compute instead: semiempirical
+**xTB (latest GFN, GFN2)** and ML predictors (**GNN solubility**, **pKa/property**). They reuse the
+identical Temporal durability pattern; only the heavy HPC/DFT backend is wired later, when that
+accuracy is actually needed and HPC access exists. Plan Phase 1c; DEFERRED.md row for HPC/DFT.
+
+## D-011 — Results are persisted once, never recomputed (calculation store, first-class)
+Every calculation goes through **one** result store keyed by
+`(calc_type, calc_version, input_hash, params_hash)` — the calculator version is in the key so a
+model/method update cannot silently poison the cache. One interface, swappable backend
+(in-memory for tests, Postgres for real). This generalizes the QM-only step 1.10 into a
+cross-cutting layer every calculator and every BO objective evaluation shares (DRY, no per-calc
+cache). Plan Phase 1b.
+
+## D-012 — BoFire is the Bayesian-optimization engine (no in-house BO), pulled forward
+Optimization campaigns use the fast predictors + store as objective evaluations. We adopt
+**BoFire** (domain modelling + BoTorch strategies) behind a thin adapter rather than building our
+own BO; BoFire types stay encapsulated and never leak into the agent/skill. BO is pulled forward
+from "defer until measured" because it drives which calculations are worth running. Plan Phase 1d.
+
+## D-013 — MAF stays the orchestrator (reaffirmed vs. LangGraph)
+Reconsidered MAF vs. LangGraph explicitly. LangGraph's main edge (durable/checkpointed execution)
+is largely moot here because durability lives in Temporal (D-002); MAF's native Agent-Skills
+(SKILL.md progressive disclosure) and Entra/Azure fit are load-bearing for our design. The agent
+layer is kept thin and framework-swappable, bounding MAF's maturity risk. Decision: keep MAF.
