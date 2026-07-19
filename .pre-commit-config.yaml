@@ -15,7 +15,7 @@ repos:
         types: [python]
       - id: mypy
         name: mypy (strict)
-        entry: uv run mypy chemclaw workflows workers tests
+        entry: uv run mypy chemclaw agents workflows workers tests
         language: system
         types: [python]
         pass_filenames: false

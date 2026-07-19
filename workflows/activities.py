@@ -10,13 +10,12 @@ workflow's concern, not theirs.
 """
 
 import asyncio
-import hashlib
 import re
 
 from temporalio import activity
 
 from chemclaw.config import settings
-from workflows.models import HpcJobHandle, QMJobInput, QMJobResult
+from workflows.models import HpcJobHandle, QMJobInput, QMJobResult, qm_job_key
 
 # Format the mock scheduler emits; parsed by `parse_qm_output`. Kept next to the
 # only two functions that produce/consume it so the contract stays local.
@@ -48,10 +47,7 @@ async def submit_to_hpc(job: QMJobInput) -> HpcJobHandle:
     Temporal UI. A real impl would SSH / call the scheduler API here.
     """
     await asyncio.sleep(settings.hpc_mock_submit_seconds)
-    digest = hashlib.sha1(
-        f"{job.molecule_smiles}|{job.method}|{job.basis_set}".encode()
-    ).hexdigest()[:12]
-    return HpcJobHandle(scheduler_job_id=f"mock-{digest}")
+    return HpcJobHandle(scheduler_job_id=f"mock-{qm_job_key(job)}")
 
 
 @activity.defn
@@ -90,4 +86,5 @@ async def parse_qm_output(job: QMJobInput, raw_output: str) -> QMJobResult:
         basis_set=job.basis_set,
         total_energy_hartree=float(energy_match.group(1)),
         converged=converged_match.group(1) == "True",
+        requested_by=job.requested_by,
     )

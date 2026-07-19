@@ -6,6 +6,8 @@ requires-python = ">=3.11"
 # Runtime deps are added per phase, only when a module actually imports them
 # (no speculative dependencies — see docs/adr/0001-python-runtime.md and CLAUDE.md).
 dependencies = [
+    "agent-framework-anthropic>=1.0.0b260709",
+    "agent-framework-core>=1.11.0",
     "pydantic-settings>=2.5",
     "temporalio[pydantic]>=1.30.0",
 ]

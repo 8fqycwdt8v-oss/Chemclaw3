@@ -66,6 +66,13 @@ class Settings(BaseSettings):
     hpc_mock_submit_seconds: float = 1.0
     hpc_mock_run_seconds: float = 6.0
 
+    # MAF agent (plan step 1.5). `agent_model` is the orchestration model name
+    # (ENV-overridable); the provider's API key is read by the chat client from
+    # its own env var (e.g. ANTHROPIC_API_KEY), not stored here. `skills_dir` is
+    # where the agent discovers SKILL.md files.
+    agent_model: str = "claude-sonnet-5"
+    skills_dir: str = "skills"
+
 
 settings = Settings()
 """Process-wide configuration singleton. Import this, not the class."""
