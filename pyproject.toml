@@ -1,0 +1,55 @@
+[project]
+name = "chemclaw"
+version = "0.0.0"
+description = "AI agent for pharmaceutical/chemical process R&D: MAF + Temporal + Agent Skills + a Markdown knowledge graph."
+requires-python = ">=3.11"
+# Runtime deps are added per phase, only when a module actually imports them
+# (no speculative dependencies — see docs/adr/0001-python-runtime.md and CLAUDE.md).
+dependencies = [
+    "pydantic-settings>=2.5",
+]
+
+[dependency-groups]
+# Dev toolchain. `uv sync` installs these; `make` targets drive them.
+dev = [
+    "ruff>=0.6",
+    "mypy>=1.11",
+    "pytest>=8.3",
+    "pre-commit>=3.8",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["chemclaw"]
+
+[tool.ruff]
+target-version = "py311"
+line-length = 100
+
+[tool.ruff.lint]
+# Pragmatic-but-strict: correctness, bugs, imports, comprehensions, pyupgrade,
+# plus mandatory docstrings (D) — CLAUDE.md requires a docstring on every module/function.
+select = ["E", "F", "W", "I", "B", "C4", "UP", "D"]
+# D203/D213 conflict with D211/D212; pick the modern (no blank line, summary-first) style.
+ignore = ["D203", "D213"]
+
+[tool.ruff.lint.pydocstyle]
+convention = "google"
+
+[tool.ruff.lint.per-file-ignores]
+# Tests document behavior in their names; module/function docstrings are not required there.
+"tests/*" = ["D100", "D103"]
+
+[tool.mypy]
+python_version = "3.11"
+strict = true
+# Fail loudly on a half-configured type environment rather than silently skipping.
+warn_unused_configs = true
+warn_redundant_casts = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra"

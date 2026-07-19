@@ -1,0 +1,26 @@
+# CI gate: lint + type + test on every push and PR. A red run blocks merge —
+# this is the automated half of the CLAUDE.md "green before done" rule and the
+# machine that enforces the PR-gate (plan step 2.7) on knowledge PRs later.
+name: ci
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.11"
+
+      - name: Sync dependencies
+        run: uv sync
+
+      - name: Lint + type + test
+        run: make check
