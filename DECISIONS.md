@@ -34,6 +34,15 @@ reports) use a separate `background-jobs` task queue instead of a second queue s
 Prove the async, durable job path end-to-end before building the rest; everything else hangs
 off this pattern. `submit_to_hpc` is mocked so durability is testable without SLURM. Plan Phase 1.
 
+## D-009 — Evaluation/metrics layer is first-class (Phase 2b)
+The external review (docs/research-review.md) showed tool augmentation is not uniformly
+beneficial (F8/F9) and that reproducible agent evaluation needs concrete benchmarks plus
+green-chemistry metrics (F7). So scientific-output quality gets its own cross-cutting layer
+(metric interface + eval harness + per-task tool-value A/B), and every later capability phase
+must register ≥1 metric. This is what lets us apply Skills/tools *selectively and measured*
+rather than universally. Chemical/biological safety is a *separate* concern and stays in the
+backlog (user decision), not part of this layer.
+
 ## D-008 — Deep-research/report harness: one core, pluggable retrievers
 The synthesis engine (decompose → fan-out → adversarial-verify → cite → synthesize) is
 source-agnostic; internal sources (graph, fingerprints, ORD/analytical data, TabPFN) and later

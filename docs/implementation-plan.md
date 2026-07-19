@@ -135,6 +135,41 @@ ohne SLURM beweisbar ist.
 
 ---
 
+## Phase 2b — Evaluations- & Metrik-Schicht (querschnittlich)
+
+Ziel: Nicht nur **Code**-Qualität (Checkmates) gaten, sondern auch **wissenschaftliche
+Output**-Qualität messbar machen. Begründung aus `docs/research-review.md`: (a) Tool-/Skill-
+Augmentierung verbessert die Leistung *nicht durchgängig* und ist aufgabenabhängig (F8/F9) —
+das lässt sich nur mit einer Metrik-Schicht selektiv statt universell steuern; (b) reproduzierbare
+Bewertung braucht konkrete Benchmarks + Green-Chemistry-Metriken (F7). Startet **minimal** und
+wächst mit jeder späteren Fähigkeit (jede Capability-Phase registriert ihre eigene Metrik).
+
+- **2b.1** Metrik-Interface (reine Funktion): `score(output, reference) -> MetricResult`
+  (Wert + Provenienz + optional Unsicherheit). Schwellen aus der Config, nicht im Code.
+- **2b.2** Eval-Harness: läuft ein Metrik-Set über ein versioniertes **Fall-Set** (Eval-Cases
+  als Notes im Graphen, Phase 2) und erzeugt einen bewerteten, zitierfähigen Report.
+- **2b.3** Seed-Metriken (bewusst wenige): Green-Chemistry **E-Factor** & **Process Mass
+  Intensity (PMI)**; Vorhersagegenauigkeit gegen zurückgehaltene ORD-Daten; (später,
+  kampagnenweit) Schrittzahl / Time-to-in-vitro.
+- **2b.4** **Per-Task-Tool-Nutzen** (adressiert F8/F9 direkt): A/B-Vergleich
+  Skill-/Tool-augmentiert vs. Basis-LLM auf einem Aufgaben-Set; festhalten, **wo** Tools real
+  helfen und wo sie eine eigene Fehlerklasse einführen. Ergebnis steuert selektiven Tool-Einsatz.
+- **2b.5** Verdrahtung mit den Gates: jede spätere Fähigkeits-Phase (3–5b) **muss ≥1
+  wissenschaftliche Metrik registrieren**; Regressionen werden wie Test-Fehler behandelt. Für
+  die Memory-Ebene (Phase 5) gehören Langzeit-/Temporal-Benchmarks (DMR, LongMemEval) hierher.
+
+Bewusst **noch nicht** first-class (bleibt im Backlog, Nutzerentscheidung): die
+chemische/biologische **Safety-/Compliance-Schicht** (Gefahren, GxP, Datenintegrität) — sie ist
+eigenständig und nicht Teil dieser Output-Qualitätsmetriken.
+
+> **CHECKMATE 2b** (G1–G7): Läuft der Eval-Harness reproduzierbar über das Fall-Set und
+> produziert zitierfähige Scores? Ist eine Metrik eine **reine, konfigurierbare** Funktion
+> (Schwellen in der Config, G3)? Zeigt der Per-Task-Tool-Vergleich mindestens einen Fall, in
+> dem Tooling **nicht** hilft (Beweis, dass die Schicht selektiv steuern kann, nicht nur
+> bestätigt)? Registriert jede folgende Phase ihre Metrik?
+
+---
+
 ## Phase 3 — Fingerprint-Suche (chemische Ähnlichkeit)
 
 - **3.1** MCP-Server `mcp-molfp` (~100 LOC): SMILES → ECFP4 (RDKit, radius 2, 2048 bit).
@@ -285,6 +320,8 @@ Verbindung X — und hatten wir ähnliche Substrate?"*
 - **P2:** Ergebnis wird zur zitierfähigen Graph-Note (PR-Gate).
 - **P3:** "ähnliche Substrate?" liefert echte Fingerprint-Treffer.
 - **P4:** Treffer stammen aus echten ELN-importierten Reaktionen.
+- **P2b:** Der Eval-Harness bewertet einen Output reproduzierbar (z. B. E-Factor/PMI) und zeigt
+  mindestens einen Task, in dem Tooling nicht hilft — selektiver Tool-Einsatz ist steuerbar.
 - **P5:** Antwort trennt projektspezifische Historie von übertragenem Playbook-Wissen.
 - **P5b:** Ein Entwicklungsbericht wird durabel aus Jahren interner Daten entworfen — jede
   Aussage zitiert ihre Quell-Note, unbelegte Trends verworfen, Entwurf PR-gegated.

@@ -18,11 +18,11 @@ Prioritized open action items. Top = next. Keep in sync with `docs/implementatio
 - [ ] Steps 1.1–1.10 (see plan). HPC mocked; prove worker-restart durability at CHECKMATE 1.
 
 ## Capability gaps to triage (from `docs/research-review.md`) — decide per item
-- [ ] **Evaluation / scientific-output metrics layer** — benchmarks (step count, time-to-in-vitro)
-      + green-chemistry metrics (E-Factor, PMI). We gate *code* quality but not *scientific*
-      output. Strong candidate to make first-class (pairs with "tools aren't uniformly good").
+- [x] **Evaluation / scientific-output metrics layer** → promoted to first-class **Phase 2b**
+      (see plan + D-009). No longer a backlog decision.
 - [ ] **Chemical/biological safety layer** — distinct from Entra-ID/RBAC (IT security).
-      GxP / data-integrity + hazard checks. Decide scope.
+      GxP / data-integrity + hazard checks. **Kept in backlog** (user decision); decide scope
+      before any capability phase that could propose a hazardous route/procedure.
 - [ ] Retrosynthesis + reaction prediction · DoE/Bayesian optimization · lab automation/SiLA2
       closed-loop · process flowsheet synthesis · multimodal analytical data · domain foundation
       models — all currently in `DEFERRED.md` with triggers; confirm or pull forward.
