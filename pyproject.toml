@@ -10,6 +10,8 @@ dependencies = [
     "agent-framework-core>=1.11.0",
     "psycopg[binary]>=3.2",
     "pydantic-settings>=2.5",
+    "rdkit>=2026.3.4",
+    "tblite>=0.7.0",
     "temporalio[pydantic]>=1.30.0",
 ]
 

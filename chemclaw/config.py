@@ -66,6 +66,12 @@ class Settings(BaseSettings):
     hpc_mock_submit_seconds: float = 1.0
     hpc_mock_run_seconds: float = 6.0
 
+    # xTB semiempirical calculator (plan step 1c.2). Method is the GFN parametrization
+    # (latest: GFN2-xTB). `xtb_embed_seed` fixes RDKit 3D embedding so results are
+    # reproducible; it is part of the cache key so changing it recomputes.
+    xtb_method: str = "GFN2-xTB"
+    xtb_embed_seed: int = 42
+
     # MAF agent (plan step 1.5). `agent_model` is the orchestration model name
     # (ENV-overridable); the provider's API key is read by the chat client from
     # its own env var (e.g. ANTHROPIC_API_KEY), not stored here. `skills_dir` is

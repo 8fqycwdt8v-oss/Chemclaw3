@@ -5,19 +5,22 @@ Prioritized open action items. Top = next. Keep in sync with `docs/implementatio
 
 ## Now — early compute focus (reprioritized; HPC/DFT deferred — D-010)
 
-### Phase 1b — Result store / calc cache (first-class; "never compute twice")
-- [ ] 1b.1 Store interface `get/put` (Protocol); 1b.2 versioned key `(calc_type, calc_version, input_hash, params_hash)`.
-- [ ] 1b.3 In-memory backend (tests) + Postgres backend (`calculation_results` table).
-- [ ] 1b.4 One `cached(calculator)` wrapper (lookup-before-compute, DRY); hit/miss counter.
-- [ ] 1b.5 Temporal: lookup activity before compute, persist activity after. CHECKMATE 1b.
+### Phase 1b — Result store / calc cache (first-class; "never compute twice") — DONE
+- [x] 1b.1 Store interface `get/put` (Protocol); 1b.2 versioned key `(calc_type, calc_version, input_hash, params_hash)`.
+- [x] 1b.3 In-memory backend (tests) + Postgres backend (`calculation_results` table) + `make db-migrate` + CI DB.
+- [x] 1b.4 One `cached_compute()` path (lookup-before-compute, DRY); returns was_cached for hit/miss metric.
+- [ ] 1b.5 Temporal lookup/persist activities — fold into 1c.5 (generic CalculationWorkflow) to avoid a stub.
 
 ### Phase 1c — Fast predictors + semiempirical (first *real* calculations)
-- [ ] 1c.1 Calculator contract + registry (no hardcoded branches).
-- [ ] 1c.2 xTB / **GFN2** MCP calculator (SMILES → energy/geometry; CPU, no HPC).
-- [ ] 1c.3 GNN solubility model (inference only; value + uncertainty).
-- [ ] 1c.4 pKa/property model(s) (the user's "pKs" — interpreted as pKa; confirm).
-- [ ] 1c.5 generic `CalculationWorkflow` + `submit_calculation`/`get_calculation_status`.
-- [ ] 1c.6 skill `calculation-selection`; 1c.7 optional graph note via PR-gate. CHECKMATE 1c.
+- [x] 1c.2 **xTB / GFN2** calculator via `tblite` (real single-point energy, RDKit 3D embed, CPU) —
+      `calc/xtb.py`, cached through the store (`run_cached_xtb`). Real GFN2 tests run everywhere.
+- [ ] 1c.1 Calculator contract + registry — build when the 2nd calculator (solubility) lands (Rule of Three).
+- [ ] 1c.3 GNN solubility model (inference only; value + uncertainty) — **needs model choice** (see open Qs).
+- [ ] 1c.4 pKa/property model(s) (the user's "pKs" — interpreted as pKa; confirm) — **needs model choice**.
+- [ ] 1c.5 expose calculators to the agent as tools (MCP or direct) + selection skill 1c.6.
+- [ ] 1c.7 optional graph note via PR-gate. CHECKMATE 1c.
+- Note: fast calcs run **without** a Temporal workflow (sub-second) — the store gives "never twice";
+  durability (Temporal) is reserved for long jobs (BO campaigns 1d, later HPC).
 
 ### Phase 1d — Bayesian optimization (BoFire, pulled forward)
 - [ ] 1d.1 Domain adapter (config → BoFire `Domain`, encapsulated).
