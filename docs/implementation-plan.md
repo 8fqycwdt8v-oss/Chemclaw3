@@ -187,6 +187,57 @@ ohne SLURM beweisbar ist.
 
 ---
 
+## Phase 5b — Deep-Research- & Report-Harness (Wissens-/Daten-Synthese)
+
+Ziel: Eine **on-demand, nutzerinvozierbare** Synthese-Engine über die **eigenen**
+akkumulierten Daten (Jahre an ELN-Läufen, Analytik, QM-Jobs, `campaign`- und
+`playbook`-Notes) — z. B. um einen **Entwicklungsbericht** zu entwerfen, in dem jede
+Aussage auf ihre Quell-Note zurückführbar ist.
+
+**Kernidee:** Dasselbe Deep-Research-Muster (*zerlegen → über Quellen ausfächern →
+jede Aussage gegen die Quell-Note adversarial verifizieren → zitieren → synthetisieren*),
+aber auf **interne Datenquellen** gerichtet statt auf das Web. Es ist die generelle,
+nutzerinvozierbare Verallgemeinerung der bereits geplanten Synthese-Jobs
+`campaign-narrative-synthesis` und `playbook-distillation` (Phase 5).
+
+**Ein Harness-Kern, austauschbare Quellen** (dasselbe Prinzip wie das ELN-Adapter-Muster,
+Abschnitt 12.4): ein *stabiler* Harness-Kern mit *pluggable* Source-Retrievern.
+
+- **5b.1** Harness-Kern als reine Orchestrierungs-Funktion: `decompose → fan-out →
+  verify → cite → synthesize`. Kennt nur das **Retriever-Interface**, keine konkrete Quelle.
+- **5b.2** Source-Retriever-Interface (Protokoll/ABC): `retrieve(query, filters) ->
+  EvidenceChunk[]`, jeder `EvidenceChunk` trägt **Pflicht-Rückverweis** auf seine Quell-Note.
+  Nur der Vertrag ist fix, nie die Form.
+- **5b.3** Konkrete Retriever als dünne Adapter über **bereits vorhandene** Bausteine:
+  Knowledge-Graph-Traversal (Phase 2), Fingerprint-/Substruktursuche (Phase 3),
+  ORD-/Analytik-Daten (Phase 4), TabPFN-Tabellen-Prognose (Abschnitt 12.5, optional).
+  Kein neuer Datenspeicher.
+- **5b.4** Adversarial-Verify-Schritt: jede synthetisierte Aussage muss durch ≥1
+  `EvidenceChunk` belegt sein; **unbelegte numerische Trends werden verworfen** (keine
+  erfundene Statistik in einem Entwicklungsbericht).
+- **5b.5** MAF-**Graph-Workflow** `development-report`: ein Knoten pro Berichtsabschnitt,
+  jeder deklariert explizit seine Gedächtnisebene (episodisch/semantisch, Abschnitt 9) —
+  die Provenienz-Trennung wird damit *strukturell* erzwungen, nicht nur per Konvention.
+- **5b.6** Lange Läufe (Bericht über Jahre an Daten = hunderte Retrievals/LLM-Calls) laufen
+  als **Temporal-`background-jobs`-Workflow** → resumierbar, überlebt Worker-Neustarts
+  (gleiches Fire-and-Forget-/Durability-Muster wie der QM-Spine, Phase 1).
+- **5b.7** Der Berichtsentwurf ist ein Artefakt und durchläuft das **PR-Gate** (Phase 2):
+  ein Prozesschemiker validiert, bevor er als verlässlich gilt (GxP: "AI schlägt vor,
+  Mensch zeichnet ab").
+
+Bewusst **noch nicht**: externe Literatur/Patente. Diese werden später zu *genau einem
+weiteren Retriever* hinter demselben Interface (5b.2) — kein Umbau des Harness-Kerns.
+
+> **CHECKMATE 5b** (G1–G7 + Zitat-Treue): Erzeugt eine Berichtsanfrage einen sektionierten
+> Entwurf, in dem **jede** Aussage auf eine Quell-Note verlinkt? Werden unbelegte Trends
+> nachweislich verworfen (Test mit einer Anfrage ohne Datengrundlage → leerer/als unbelegt
+> markierter Abschnitt statt Halluzination)? Ist der Harness-Kern **quellen-agnostisch**
+> (Retriever austauschbar ohne Kernänderung, G1/G6)? Läuft ein langer Report durabel
+> (Worker-Neustart mittendrin → Fortsetzung)? Ist der Entwurf PR-gegated, nicht direkt
+> im Hauptzweig?
+
+---
+
 ## Phase 6 — Identity, RBAC & Härtung
 
 - **6.1** MCP-Auth: FastMCP `AzureProvider`/`BearerAuthProvider` validiert Entra-JWTs;
@@ -235,6 +286,8 @@ Verbindung X — und hatten wir ähnliche Substrate?"*
 - **P3:** "ähnliche Substrate?" liefert echte Fingerprint-Treffer.
 - **P4:** Treffer stammen aus echten ELN-importierten Reaktionen.
 - **P5:** Antwort trennt projektspezifische Historie von übertragenem Playbook-Wissen.
+- **P5b:** Ein Entwicklungsbericht wird durabel aus Jahren interner Daten entworfen — jede
+  Aussage zitiert ihre Quell-Note, unbelegte Trends verworfen, Entwurf PR-gegated.
 - **P6:** Nur berechtigte Nutzer lösen den DFT-Pfad aus; Audit-Trail vollständig.
 
 Jede Phase gilt erst als abgeschlossen, wenn (a) ihr Abnahmekriterium demonstriert, (b) ihr
