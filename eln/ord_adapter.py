@@ -16,6 +16,7 @@ source: this and the free-text adapter share only the `ElnAdapter` contract, not
 """
 
 import json
+import logging
 from collections.abc import Iterable
 from datetime import UTC, datetime
 from pathlib import Path
@@ -26,6 +27,8 @@ from pydantic import ValidationError
 from chemclaw.config import settings
 from eln.adapter import ElnMappingError, RawEntry
 from eln.ord import Component, OrdReaction, ReactionStep, Role, StepKind
+
+logger = logging.getLogger(__name__)
 
 # ORD reaction-role -> our Role subset. Roles outside the subset (WORKUP,
 # INTERNAL_STANDARD, AUTHENTIC_STANDARD) collapse to REAGENT: they are auxiliary species,
@@ -73,7 +76,8 @@ class OrdJsonAdapter:
 
         A file that cannot be read/parsed at all, or that carries no usable creation
         timestamp, is skipped (not raised): one broken file must not abort the batch (the
-        same skip-and-continue stance as the free-text adapter). Mapping failures on an
+        same skip-and-continue stance as the free-text adapter). Such a file never reaches
+        the sync report, so it is logged at WARNING here. Mapping failures on an
         otherwise-readable message surface later, per-entry, through the sync report.
         """
         entries: list[RawEntry] = []
@@ -81,9 +85,11 @@ class OrdJsonAdapter:
             try:
                 payload = json.loads(path.read_text(encoding="utf-8"))
                 if not isinstance(payload, dict):
+                    logger.warning("skipping ORD export %s: not a JSON object", path.name)
                     continue
                 created = _created_at(payload)
-            except (OSError, json.JSONDecodeError, OrdFormatError):
+            except (OSError, json.JSONDecodeError, OrdFormatError) as exc:
+                logger.warning("skipping unreadable ORD export %s: %s", path.name, exc)
                 continue
             if created >= since:
                 entries.append(

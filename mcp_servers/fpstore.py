@@ -11,8 +11,10 @@ real, so the ranking lives in exactly one place (DRY), just like the calculation
 from typing import Protocol, runtime_checkable
 
 import psycopg
+from psycopg.rows import TupleRow
 from pydantic import BaseModel, Field
 
+from chemclaw import db
 from chemclaw.config import settings
 from chemclaw.errors import ChemclawError
 
@@ -149,11 +151,14 @@ class PostgresFingerprintStore:
             f"LIMIT %(k)s"
         )
 
-    async def _connect(self) -> psycopg.AsyncConnection:
-        """Open a connection that fails fast when the database is unreachable."""
-        return await psycopg.AsyncConnection.connect(
-            self._dsn, connect_timeout=settings.pg_connect_timeout_seconds
-        )
+    async def _connect(self) -> psycopg.AsyncConnection[TupleRow]:
+        """Open a connection that fails fast, with a clear message, when unreachable.
+
+        Delegates to the shared `chemclaw.db.connect` so a down/misconfigured database
+        reports "Postgres unreachable at <host>" instead of a raw psycopg traceback (DRY
+        with the calculation store).
+        """
+        return await db.connect(self._dsn)
 
     async def add(self, record: FingerprintRecord) -> None:
         """Insert or replace a fingerprint by id."""

@@ -9,6 +9,7 @@ this whole flow is tested in-memory; `workflows.eln_sync` wraps it as a Temporal
 with production stores, adapter, and submitter.
 """
 
+import logging
 from datetime import datetime
 
 from pydantic import BaseModel
@@ -18,6 +19,8 @@ from eln.adapter import ElnAdapter
 from eln.ingest import ingest_reaction
 from kg.pr_gate import NoteSubmitter
 from mcp_servers.fpstore import FingerprintStore
+
+logger = logging.getLogger(__name__)
 
 
 class RejectedEntry(BaseModel):
@@ -67,4 +70,10 @@ async def sync_entries(
             rejected.append(RejectedEntry(entry_id=raw.entry_id, reason=str(exc)))
             continue
         ingested.append(raw.entry_id)
+    # The summary is a return value the scheduler stores; also log the outcome so an admin
+    # running this under a Temporal Schedule sees it without opening the workflow result, and
+    # gets a WARNING trail of exactly which entries were rejected and why.
+    logger.info("eln sync: ingested=%d rejected=%d", len(ingested), len(rejected))
+    for entry in rejected:
+        logger.warning("eln sync rejected entry %s: %s", entry.entry_id, entry.reason)
     return IngestSummary(ingested=ingested, rejected=rejected, next_cursor=cursor)

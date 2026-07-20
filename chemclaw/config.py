@@ -35,6 +35,13 @@ class Settings(BaseSettings):
         extra="forbid",
     )
 
+    # Logging / observability. One config-driven switch for verbosity so an admin can raise
+    # it to DEBUG for troubleshooting without touching code; the format carries the timestamp,
+    # level, and logger name every diagnosis needs. Applied once per process by
+    # `chemclaw.logging.configure_logging`, called at each worker's entrypoint.
+    log_level: str = "INFO"
+    log_format: str = "%(asctime)s %(levelname)s %(name)s: %(message)s"
+
     # Temporal — durable execution of long scientific jobs (plan Phase 1).
     # `address` is the frontend gRPC endpoint; `namespace` isolates a team's jobs.
     temporal_address: str = "localhost:7233"

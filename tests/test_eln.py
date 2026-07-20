@@ -8,6 +8,7 @@ fingerprint-indexed", proven end to end without a database or git.
 
 import asyncio
 import json
+import logging
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -294,6 +295,20 @@ def test_fetch_skips_corrupt_json_file(tmp_path: Path) -> None:
     asyncio.run(_run())
 
 
+def test_fetch_logs_the_skipped_corrupt_file(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A dropped export file names itself at WARNING — the one admin signal it was skipped."""
+
+    async def _run() -> None:
+        (tmp_path / "corrupt.json").write_text("{not json", encoding="utf-8")
+        await JsonExportAdapter(str(tmp_path)).fetch_new_entries(_EPOCH)
+
+    with caplog.at_level(logging.WARNING):
+        asyncio.run(_run())
+    assert "corrupt.json" in caplog.text  # the specific file is identified, not silently lost
+
+
 def test_naive_timestamp_is_read_as_utc(tmp_path: Path) -> None:
     """A timestamp without an offset is treated as UTC.
 
@@ -402,6 +417,40 @@ def test_sync_ingests_batch_and_skips_bad_entries() -> None:
         assert len(sub.submissions) == 1  # only the good entry proposed a note
 
     asyncio.run(_run())
+
+
+def test_sync_logs_the_outcome_and_each_rejection(caplog: pytest.LogCaptureFixture) -> None:
+    """A sync run logs its ingested/rejected counts and a WARNING per rejected entry."""
+    good = RawEntry(
+        entry_id="good",
+        created_at=datetime(2026, 1, 1, tzinfo=UTC),
+        payload={
+            "id": "good",
+            "reactants": [{"smiles": "CCO"}, {"smiles": "CC(=O)O"}],
+            "products": [{"smiles": "CCOC(C)=O"}],
+        },
+    )
+    bad = RawEntry(
+        entry_id="bad-balance",
+        created_at=datetime(2026, 2, 1, tzinfo=UTC),
+        payload={"reactants": [{"smiles": "CCO"}], "products": [{"smiles": "CCCl"}]},
+    )
+
+    class _Adapter:
+        async def fetch_new_entries(self, since: datetime) -> list[RawEntry]:
+            return [good, bad]
+
+        def map_to_ord(self, raw: RawEntry) -> OrdReaction:
+            return JsonExportAdapter().map_to_ord(raw)
+
+    async def _run() -> None:
+        rxn, mol, sub = InMemoryFingerprintStore(), InMemoryFingerprintStore(), FakeSubmitter()
+        await sync_entries(_Adapter(), rxn, mol, sub, _EPOCH)
+
+    with caplog.at_level(logging.INFO):
+        asyncio.run(_run())
+    assert "ingested=1 rejected=1" in caplog.text  # the run outcome, without opening the result
+    assert "bad-balance" in caplog.text  # the specific rejected entry is named at WARNING
 
 
 def test_sync_rejects_degenerate_reaction_without_aborting_batch() -> None:

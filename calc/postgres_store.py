@@ -14,6 +14,7 @@ from psycopg.rows import TupleRow
 from psycopg.types.json import Jsonb
 
 from calc.store import CalculationKey, StoredResult
+from chemclaw import db
 from chemclaw.config import settings
 
 _UPSERT = """
@@ -42,14 +43,13 @@ class PostgresStore:
         self._dsn = dsn if dsn is not None else settings.postgres_dsn
 
     async def _connect(self) -> psycopg.AsyncConnection[TupleRow]:
-        """Open a connection that fails fast on an unreachable database.
+        """Open a connection that fails fast, with a clear message, on an unreachable database.
 
-        Without `connect_timeout`, an unreachable host hangs the calling activity
-        until its start-to-close timeout — the bound belongs to the connect.
+        Delegates to the shared `chemclaw.db.connect`, which applies the configured
+        connect timeout and turns a raw psycopg failure into a "Postgres unreachable at
+        <host>" `ConnectionError` (the bound belongs to the connect, not the activity).
         """
-        return await psycopg.AsyncConnection.connect(
-            self._dsn, connect_timeout=settings.pg_connect_timeout_seconds
-        )
+        return await db.connect(self._dsn)
 
     async def get(self, key: CalculationKey) -> StoredResult | None:
         """Return the stored result for `key`, or None on a miss."""

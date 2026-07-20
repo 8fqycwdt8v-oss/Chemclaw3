@@ -24,6 +24,7 @@ Expected entry shape (this ELN's format — known only here):
 """
 
 import json
+import logging
 import re
 from datetime import UTC, datetime
 from pathlib import Path
@@ -34,6 +35,8 @@ from pydantic import ValidationError
 from chemclaw.config import settings
 from eln.adapter import ElnMappingError, RawEntry
 from eln.ord import Component, OrdReaction, ReactionStep, Role, StepKind
+
+logger = logging.getLogger(__name__)
 
 # Deterministic free-text extractors for the two conditions an ELN reliably states in prose.
 # The temperature pattern *requires* the degree sign: "80 °C" is unambiguously a temperature,
@@ -101,17 +104,20 @@ class JsonExportAdapter:
         A file that cannot be read or parsed at all (I/O error, corrupt JSON, non-object
         payload, missing/bad timestamp) is skipped, not raised: one broken export file
         must not abort the whole fetch (same skip-and-continue stance as
-        `kg.graph.load_notes`). Reporting those broken files is out of scope here — this
-        method cannot even build a `RawEntry` for them to reject through the sync report.
+        `kg.graph.load_notes`). Such a file cannot become a `RawEntry`, so it never reaches
+        the sync report — instead it is logged at WARNING here, the one signal an admin gets
+        that a specific export file was dropped.
         """
         entries: list[RawEntry] = []
         for path in sorted(self._dir.glob("*.json")):
             try:
                 payload = json.loads(path.read_text(encoding="utf-8"))
                 if not isinstance(payload, dict):
+                    logger.warning("skipping ELN export %s: not a JSON object", path.name)
                     continue
                 created = _parse_timestamp(payload.get("timestamp"), path)
-            except (OSError, json.JSONDecodeError, ElnFormatError):
+            except (OSError, json.JSONDecodeError, ElnFormatError) as exc:
+                logger.warning("skipping unreadable ELN export %s: %s", path.name, exc)
                 continue
             if created >= since:
                 entries.append(

@@ -7,12 +7,14 @@ independently on their own queues (D-006).
 """
 
 import asyncio
+import logging
 from collections.abc import Callable, Sequence
 from typing import Any
 
 from temporalio.worker import Worker
 
 from chemclaw.config import settings
+from chemclaw.logging import configure_logging
 from chemclaw.temporal_client import connect
 from workflows.bo_activities import (
     evaluate_candidates,
@@ -36,6 +38,8 @@ from workflows.report_workflow import (
     propose_report,
     retrieve_section,
 )
+
+logger = logging.getLogger(__name__)
 
 # The workflows and activities this worker serves on the background-jobs queue. Module-level
 # so the registration is one list (and directly assertable in tests), not buried in main().
@@ -64,12 +68,20 @@ BACKGROUND_ACTIVITIES: Sequence[Callable[..., Any]] = [
 
 async def main() -> None:
     """Connect and poll the background-jobs queue for BO campaigns, graph writes, ELN sync."""
+    configure_logging()
     client = await connect()
     worker = Worker(
         client,
         task_queue=settings.background_task_queue,
         workflows=BACKGROUND_WORKFLOWS,
         activities=BACKGROUND_ACTIVITIES,
+    )
+    logger.info(
+        "background worker connected: address=%s namespace=%s queue=%s workflows=%s",
+        settings.temporal_address,
+        settings.temporal_namespace,
+        settings.background_task_queue,
+        [w.__name__ for w in BACKGROUND_WORKFLOWS],
     )
     await worker.run()
 

@@ -5,6 +5,52 @@ Prioritized open action items. Top = next. Keep in sync with `docs/implementatio
 
 ## Now — Phase 6 identity/RBAC & hardening (auth integration; needs live Azure/Temporal)
 
+## Admin-experience audit (configurability / error-handling / logging)
+
+### Done — P0 observability floor (D-026)
+- [x] Config-driven logging: `chemclaw/logging.py::configure_logging()` + `CHEMCLAW_LOG_LEVEL`/
+      `_LOG_FORMAT`, called at both workers' entrypoints. Worker startup logs (address/namespace/
+      queue/registered workflows). ELN sync logs `ingested/rejected` + a WARNING per rejection;
+      both adapters log skipped broken files. Shared `chemclaw/db.py::connect` → `ConnectionError`
+      "Postgres unreachable at <host>" with the DSN password redacted (not a retry-blocking
+      `ChemclawError`). Tests: `test_logging.py`, `test_db.py`, ELN caplog assertions.
+
+### Open — P1 pluggability & docs (from the audit; not yet done)
+- [ ] Cache hit-vs-compute log at the `calc/store.py` decision point (DEBUG) — answers the
+      recurring "why did this recompute?" (depends on the logging floor, now in place).
+- [ ] `settings.eln_adapter` selector so `workflows/eln_sync.py` isn't hardcoded to
+      `JsonExportAdapter()` (two adapters already exist — JSON + ORD — proving the need).
+- [ ] `skills_dir` → `list[str]` to match `FileSkillsSource`'s signature (lets an admin add a
+      second, e.g. team-private, skills directory) + a SKILL.md front-matter template/doc in
+      `skills/README.md` (+ optional `make skill-validate`, mirroring `make kg-validate`).
+- [ ] Centralize/​document the agent tool list — "add a capability = wrapper module + one line";
+      the `mcp_servers/` FastMCP servers are imported in-process, not attached over MCP (a
+      deliberate migration decision, see the MAF-analysis findings — MCP-client wiring is medium
+      effort and tension with KISS).
+
+### Open — P2 polish
+- [ ] `docs/runbook.md` (or a README "Operations" section): the four admin tasks (add skill /
+      add-repoint DB / add capability / troubleshoot a stuck job), the Temporal UI at :8080, and
+      `make db-migrate` re-run safety.
+- [ ] Optional startup preflight for `ANTHROPIC_API_KEY` presence (fail clearly at boot, not on
+      the first agent turn).
+- [ ] Migration-status visibility (no applied-migrations record today; `CREATE ... IF NOT EXISTS`
+      is idempotent but leaves no trail of what ran).
+
+### MAF out-of-the-box features (analysis done; adopt deliberately, not yet implemented)
+- [ ] **Function middleware** (`@function_middleware`) — one DRY GxP tool-audit trail
+      (name/args/result/latency) + cheap input guardrails over all agent tools. Sits on the
+      logging floor above. Top pick.
+- [ ] **OpenTelemetry** (`configure_otel_providers` from `agent_framework.observability`) — auto
+      spans/metrics per agent-run and tool-call; one startup call + an endpoint/toggle in config.
+- [ ] **Structured outputs** (`response_format` + `resp.value`) — force validated pydantic
+      payloads for agent proposals instead of parsing prose.
+- Do-not-adopt / defer: Redis/mem0 history (durability belongs to Temporal, and neither extra is
+      installed), the MAF `_harness` providers (duplicate the memory layer + background queue),
+      the wholesale MAF eval harness (have `evals/`; cherry-pick only its tool-call checks). FIDES
+      security layer is `@experimental` → a DEFERRED candidate for untrusted ELN/literature text.
+
+
 ## Done — Whole-repo production-readiness review (post-5b; commit d51f0b5, D-021)
 - [x] 4 adversarial review agents over all packages; ~45 verified findings fixed with regression
       tests (134 → 169 passing). Criticals: PR-gate submitter concurrency/checkout corruption
