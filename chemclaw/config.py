@@ -107,6 +107,24 @@ class Settings(BaseSettings):
     note_write_timeout_seconds: float = Field(default=120.0, gt=0)
     note_write_max_attempts: int = Field(default=3, ge=1)
 
+    # Evaluation & metric layer (plan Phase 2b). A metric is a pure function; its
+    # pass/fail threshold is config, never hardcoded (G3). The green-chemistry
+    # limits are dimensionless (kg waste or input per kg product) and process-
+    # dependent — these defaults are lenient gate values, tune them per chemistry.
+    # Versioned eval case-set. Its own directory, not under `knowledge_dir`: an eval
+    # case is a structured evaluation payload (output/reference), not a relational
+    # note, so it neither uses the note schema nor passes through kg-validate.
+    eval_case_dir: str = "evals/cases"
+    eval_efactor_max: float = 50.0
+    eval_pmi_max: float = 50.0
+    # Absolute error (in the prediction's own unit, e.g. log S) still counted as an
+    # accurate prediction against a held-out reference.
+    eval_prediction_tolerance: float = 1.0
+    # Noise floor for the per-task tool-utility A/B (plan step 2b.4): a metric delta
+    # within +/- this magnitude counts as "no effect", so tool augmentation is only
+    # credited (or blamed) for changes above measurement noise. Set per metric.
+    eval_ab_epsilon: float = 0.0
+
 
 settings = Settings()
 """Process-wide configuration singleton. Import this, not the class."""

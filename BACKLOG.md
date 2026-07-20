@@ -3,7 +3,23 @@
 Prioritized open action items. Top = next. Keep in sync with `docs/implementation-plan.md`
 (phase/step numbers) at session end.
 
-## Now — Phase 2: knowledge graph + PR-gate
+## Now — next capability phase (Phase 3 fingerprint search, or Phase 4 ELN)
+
+## Done — Phase 2b: evaluation & metric layer (cross-cutting)
+- [x] 2b.1 Metric interface: pure `Metric = (EvalCase) -> MetricResult` + registry
+      (`evals/metric.py`, `@metric` decorator = the 2b.5 extension seam). Thresholds from config (G3).
+- [x] 2b.2 Eval harness (`evals/harness.py`): `run_eval` over a versioned case-set +
+      `render_report` (citable Markdown, case id + provenance per row) + `load_eval_cases`
+      (frontmatter files) + `make eval` CLI. Cases versioned in `evals/cases/` (D-014).
+- [x] 2b.3 Seed metrics (`evals/metrics.py`): green-chemistry **E-factor** + **PMI** (mass balance),
+      **prediction_error** (vs held-out reference), **bo_regret** (1d.6). All pure, config-gated.
+- [x] 2b.4 Per-task tool-utility A/B (`evals/ab.py`): direction-aware delta, buckets help/hurt/
+      no-effect over a task set — proves ≥1 case where tooling does NOT help (F8/F9 steering).
+- [x] 2b.5 Wiring: each later capability phase registers ≥1 metric via `@metric`; regressions are
+      pinned by the test suite (expected pass/fail per case), not a CI hard-gate (the seed set
+      deliberately holds a failing case to prove gating). CHECKMATE 2b: see commit.
+
+## Prior — Phase 2: knowledge graph + PR-gate
 - [x] 2.1 Note schema (`kg/note.py`, one pydantic model); 2.2 parser (frontmatter → Note, clear errors).
 - [x] 2.3 Wikilink extraction + NetworkX indexer (`kg/graph.py`, `neighborhood` 1–2 hop traversal).
 - [x] 2.4 Validation CLI (`kg/validate.py`, `make kg-validate`) — broken links / dup ids / bad notes; in CI.
@@ -63,7 +79,9 @@ Prioritized open action items. Top = next. Keep in sync with `docs/implementatio
 - [x] Robustness: `optimize` and the durable BO workflow stop gracefully when a discrete candidate
       set is exhausted (`discrete_candidate_count`/`distinct_candidate_count` guard) instead of crashing
       inside BoFire. Tests: budget 2+10 over a 4-molecule library returns cleanly.
-- [ ] 1d.5 candidates PR-gated (after Phase 2); 1d.6 progress/regret metric (after Phase 2b). CHECKMATE 1d full.
+- [ ] 1d.5 candidates PR-gated (after Phase 2). CHECKMATE 1d full.
+- [x] 1d.6 progress/regret metric: `bo_regret` registered in the Phase 2b metric layer
+      (`evals/metrics.py`, direction-aware, non-negative) — Phase 1d's registered scientific metric.
 
 ## Done
 - [x] **Phase 0** — foundation (tooling, config, infra compose, CI, ADR-0001, layer READMEs). CHECKMATE 0 green.
