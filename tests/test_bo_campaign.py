@@ -40,6 +40,13 @@ def test_get_objective_unknown_raises() -> None:
         get_objective("does-not-exist")
 
 
+def test_campaign_spec_rejects_zero_initial() -> None:
+    """n_initial must be >= 1 so a surrogate has data to seed from (no empty history)."""
+    problem = build_problem(load_dataset())
+    with pytest.raises(ValueError, match="greater than or equal to 1"):
+        CampaignSpec(problem=problem, objective_name="reizman_suzuki", n_initial=0)
+
+
 def test_best_of_honors_direction() -> None:
     """best_of picks max for maximize and min for minimize."""
     params: list[Parameter] = [ContinuousParameter(name="x", lower=0.0, upper=1.0)]

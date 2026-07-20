@@ -8,6 +8,7 @@ the calculation store (Phase 1b) gives the "never compute twice" guarantee, so
 plumbing is shared with the pKa predictor via `calc.xtb_engine`.
 """
 
+import asyncio
 from importlib.metadata import version
 
 from pydantic import BaseModel, Field
@@ -76,7 +77,9 @@ async def run_cached_xtb(store: ResultStore, job: XtbInput) -> tuple[XtbResult, 
     )
 
     async def _compute() -> dict[str, object]:
-        return run_xtb(job).model_dump()
+        # Offload the blocking RDKit+tblite work so the event loop stays free.
+        result = await asyncio.to_thread(run_xtb, job)
+        return result.model_dump()
 
     payload, was_cached = await cached_compute(store, key, _compute)
     return XtbResult.model_validate(payload), was_cached

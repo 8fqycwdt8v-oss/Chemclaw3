@@ -99,10 +99,11 @@ class CampaignSpec(BaseModel):
     """
 
     problem: OptimizationProblem
-    objective_name: str
-    n_initial: int = 5
-    n_rounds: int = 10
-    batch: int = 1
+    objective_name: str = Field(min_length=1)
+    # A surrogate needs >=1 seed point; batch >=1 per round; rounds may be 0.
+    n_initial: int = Field(default=5, ge=1)
+    n_rounds: int = Field(default=10, ge=0)
+    batch: int = Field(default=1, ge=1)
 
 
 class CampaignResult(BaseModel):

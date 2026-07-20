@@ -11,6 +11,8 @@ uncertainty; never present the value as exact. v1 covers O-H/S-H acids (carboxyl
 acids, phenols, alcohols, thiols); N-H and C-H acids are a later extension.
 """
 
+import asyncio
+
 from pydantic import BaseModel, Field
 from rdkit import Chem
 
@@ -82,6 +84,9 @@ def predict_pka(job: PkaInput) -> PkaResult:
     if not anions:
         raise ValueError(f"no acidic O-H/S-H site to deprotonate in {job.smiles!r}")
 
+    # Acid and anions share one geometry policy (MMFF where parametrized, else the
+    # embedded geometry). The calibration was fitted through this exact code path,
+    # so any systematic geometry effect is absorbed into slope/intercept.
     numbers, positions = geometry(neutral, settings.xtb_embed_seed, optimize=True)
     energy_acid = gfn2_energy(settings.xtb_method, numbers, positions, solvent=settings.pka_solvent)
 
@@ -124,7 +129,9 @@ async def run_cached_pka(store: ResultStore, job: PkaInput) -> tuple[PkaResult, 
     )
 
     async def _compute() -> dict[str, object]:
-        return predict_pka(job).model_dump()
+        # Offload the blocking RDKit+tblite work so the event loop stays free.
+        result = await asyncio.to_thread(predict_pka, job)
+        return result.model_dump()
 
     payload, was_cached = await cached_compute(store, key, _compute)
     return PkaResult.model_validate(payload), was_cached

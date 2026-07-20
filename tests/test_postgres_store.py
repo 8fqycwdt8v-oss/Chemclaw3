@@ -11,10 +11,19 @@ import asyncio
 import psycopg
 import pytest
 
-from calc.migrate import migrate
+from calc.migrate import _statements, migrate
 from calc.postgres_store import PostgresStore
 from calc.store import CalculationKey, StoredResult
 from chemclaw.config import settings
+
+
+def test_statements_split_ignores_comment_semicolons() -> None:
+    """Multi-statement SQL splits into individual commands, even with `;` in comments."""
+    sql = "-- a; comment with semicolon\nCREATE TABLE t (id int);\nCREATE INDEX i ON t (id);\n"
+    statements = _statements(sql)
+    assert len(statements) == 2
+    assert statements[0].startswith("CREATE TABLE")
+    assert statements[1].startswith("CREATE INDEX")
 
 
 async def _store_or_skip() -> PostgresStore:

@@ -30,6 +30,10 @@ _DATA = Path(__file__).resolve().parent / "data" / "reizman_suzuki_case_1.csv"
 _CATALYST = "catalyst"
 _CONTINUOUS = ["t_res", "temperature", "catalyst_loading"]
 _OBJECTIVE = "yld"
+# Surrogate hyperparameters. Fixed for reproducibility; a benchmark-emulator
+# detail, not environment config, so named here rather than in global settings.
+_RF_N_ESTIMATORS = 200
+_RF_RANDOM_STATE = 0
 
 
 def load_dataset() -> pd.DataFrame:
@@ -75,7 +79,7 @@ class YieldSurrogate:
         """Fit the surrogate on the dataset."""
         categories = sorted(frame[_CATALYST].unique().tolist())
         features = np.array([cls._encode(row.to_dict(), categories) for _, row in frame.iterrows()])
-        model = RandomForestRegressor(n_estimators=200, random_state=0)
+        model = RandomForestRegressor(n_estimators=_RF_N_ESTIMATORS, random_state=_RF_RANDOM_STATE)
         model.fit(features, frame[_OBJECTIVE].to_numpy())
         return cls(model, categories)
 

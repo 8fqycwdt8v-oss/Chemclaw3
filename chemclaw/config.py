@@ -16,6 +16,7 @@ here — no speculative "for later" settings. New phases add their own fields wh
 the first real consumer lands.
 """
 
+from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -60,8 +61,9 @@ class Settings(BaseSettings):
     # Heartbeat timeout for the long-running poll: if a worker dies, Temporal
     # waits at most this long before retrying the activity on another worker.
     qm_poll_heartbeat_timeout_seconds: float = 10.0
-    # How often the poll loop heartbeats / re-checks the (mock) scheduler.
-    hpc_poll_interval_seconds: float = 2.0
+    # How often the poll loop heartbeats / re-checks the (mock) scheduler. Must be
+    # positive — a zero interval would make the poll loop never advance.
+    hpc_poll_interval_seconds: float = Field(default=2.0, gt=0)
     # Simulated submission latency and total run time of the mock HPC job.
     hpc_mock_submit_seconds: float = 1.0
     hpc_mock_run_seconds: float = 6.0
