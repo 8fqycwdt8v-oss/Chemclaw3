@@ -19,7 +19,12 @@ Prioritized open action items. Top = next. Keep in sync with `docs/implementatio
       background queue): fetch → map → validate → **index reaction+compound fingerprints** (Phase 3)
       + **PR-gated `reaction` note** (Phase 2). Reject-and-continue; idempotent. Registered on the
       bg worker. Seed corpus in `eln/exports/`. Server test in CI; full chain tested in-memory.
-- [ ] CHECKMATE 4 (G1–G7 + deep review over Phase 3+4) — running.
+- [x] CHECKMATE 4 (G1–G7 + deep review over Phase 3+4): end-to-end chain sound; 3 real bugs fixed —
+      (F1) mapping failures (unknown role / schema violation) now raise a contract-level
+      `ElnMappingError` so the batch sync rejects-and-continues instead of aborting (also removes a
+      G6 leak); (F2) structured `temperature_c`/`time_h` of `0` no longer discarded as falsy by the
+      `or` fallthrough (ice-bath 0 °C preserved); (F3) temperature regex now requires the degree sign
+      so `13C NMR`/`pH 7 C` can't fabricate a temperature; + dead-param cleanup. **Phase 4 complete.**
 
 ## Done — Phase 3: fingerprint search (molecules + reactions) — COMPLETE
 - [x] 3.1 `mcp-molfp` capability: ECFP4 (Morgan r2, 2048-bit) via RDKit (`mcp_servers/molfp/

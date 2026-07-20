@@ -13,9 +13,8 @@ from datetime import datetime
 
 from pydantic import BaseModel
 
-from eln.adapter import ElnAdapter
+from eln.adapter import ElnAdapter, ElnMappingError
 from eln.ingest import IngestError, ingest_reaction
-from eln.json_adapter import ElnFormatError
 from kg.pr_gate import NoteSubmitter
 from mcp_servers.fpstore import FingerprintStore
 
@@ -56,7 +55,9 @@ async def sync_entries(
         try:
             reaction = adapter.map_to_ord(raw)
             await ingest_reaction(reaction, reaction_store, molecule_store, submitter)
-        except (IngestError, ElnFormatError) as exc:
+        except (IngestError, ElnMappingError) as exc:
+            # ElnMappingError covers *any* adapter's mapping failure (bad shape, unknown
+            # role, schema violation); IngestError covers a reaction that fails validation.
             rejected.append(RejectedEntry(entry_id=raw.entry_id, reason=str(exc)))
             continue
         ingested.append(raw.entry_id)

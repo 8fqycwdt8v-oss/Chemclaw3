@@ -15,6 +15,15 @@ from pydantic import BaseModel, Field
 from eln.ord import OrdReaction
 
 
+class ElnMappingError(ValueError):
+    """An adapter could not map a raw entry to a canonical reaction (G4).
+
+    Defined at the contract level (not in a concrete adapter) so the sync's
+    reject-and-continue handler catches *any* adapter's mapping failure, not just one
+    adapter's error type. Concrete adapters raise this (or a subclass) for a bad entry.
+    """
+
+
 class RawEntry(BaseModel):
     """One raw ELN entry: its id, its creation time, and its source-shaped payload.
 

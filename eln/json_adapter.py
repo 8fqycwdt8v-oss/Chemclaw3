@@ -21,16 +21,21 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from pydantic import ValidationError
+
 from chemclaw.config import settings
-from eln.adapter import RawEntry
+from eln.adapter import ElnMappingError, RawEntry
 from eln.ord import Component, OrdReaction, Role
 
 # Deterministic free-text extractors for the two conditions an ELN reliably states in prose.
-_TEMPERATURE = re.compile(r"(-?\d+(?:\.\d+)?)\s*°?\s*C\b")
+# The temperature pattern *requires* the degree sign: "80 °C" is unambiguously a temperature,
+# whereas a space-less/degree-less "13C" (as in "13C NMR") or "pH 7 C" is not — demanding `°`
+# avoids fabricating a temperature from spectroscopy or label text.
+_TEMPERATURE = re.compile(r"(-?\d+(?:\.\d+)?)\s*°\s*C\b")
 _TIME_HOURS = re.compile(r"(\d+(?:\.\d+)?)\s*h(?:ours?|rs?)?\b")
 
 
-class ElnFormatError(ValueError):
+class ElnFormatError(ElnMappingError):
     """A raw entry did not match this ELN's expected JSON shape (G4)."""
 
 
@@ -59,7 +64,23 @@ class JsonExportAdapter:
         return entries
 
     def map_to_ord(self, raw: RawEntry) -> OrdReaction:
-        """Map one JSON entry to a canonical `OrdReaction` (structured + free-text)."""
+        """Map one JSON entry to a canonical `OrdReaction` (structured + free-text).
+
+        Any mapping failure — a missing field, an unknown role, or a schema violation
+        (e.g. a reactant tagged as a product) — becomes an `ElnFormatError`, so the sync's
+        reject-and-continue handler treats one bad entry as a rejection, not a crash (G4).
+        """
+        try:
+            return self._build(raw)
+        except ElnFormatError:
+            raise
+        except (ValueError, ValidationError) as exc:
+            raise ElnFormatError(
+                f"entry {raw.entry_id!r}: cannot map to a reaction: {exc}"
+            ) from exc
+
+    def _build(self, raw: RawEntry) -> OrdReaction:
+        """Do the actual field mapping (structured fields win; prose fills the gaps)."""
         payload = raw.payload
         inputs = [_component(item, Role.REACTANT) for item in _list(payload, "reactants")]
         outcomes = [_component(item, Role.PRODUCT) for item in _list(payload, "products")]
@@ -68,10 +89,9 @@ class JsonExportAdapter:
             reaction_id=raw.entry_id,
             inputs=inputs,
             outcomes=outcomes,
-            temperature_c=_first_field(payload, "temperature_c")
-            or _extract_float(_TEMPERATURE, procedure),
-            time_h=_first_field(payload, "time_h") or _extract_float(_TIME_HOURS, procedure),
-            yield_percent=_yield(outcomes, payload),
+            temperature_c=_condition(payload, "temperature_c", _TEMPERATURE, procedure),
+            time_h=_condition(payload, "time_h", _TIME_HOURS, procedure),
+            yield_percent=_yield(payload),
             provenance=f"eln:{payload.get('operator', 'unknown')}",
         )
 
@@ -98,19 +118,23 @@ def _component(item: dict[str, Any], default_role: Role) -> Component:
     )
 
 
-def _first_field(payload: dict[str, Any], key: str) -> float | None:
-    """Return a structured float field if present (the deterministic path wins)."""
-    value = payload.get(key)
-    return float(value) if value is not None else None
+def _condition(
+    payload: dict[str, Any], key: str, pattern: re.Pattern[str], text: str
+) -> float | None:
+    """A condition value: the structured field if present, else the prose regex fallback.
 
-
-def _extract_float(pattern: re.Pattern[str], text: str) -> float | None:
-    """Return the first regex-captured float in `text`, or None (free-text fallback)."""
+    The structured field wins whenever it is present — including a legitimate `0` (an
+    ice-bath 0 °C), which a truthiness check would wrongly discard and overwrite with a
+    prose match.
+    """
+    structured = payload.get(key)
+    if structured is not None:
+        return float(structured)
     match = pattern.search(text)
     return float(match.group(1)) if match else None
 
 
-def _yield(outcomes: list[Component], payload: dict[str, Any]) -> float | None:
+def _yield(payload: dict[str, Any]) -> float | None:
     """Take the yield from the first product's structured field (per-product in this ELN)."""
     products = payload.get("products") or [{}]
     value = products[0].get("yield_percent")

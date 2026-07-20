@@ -22,7 +22,8 @@ from datetime import UTC, datetime
 from rdkit import Chem
 
 from chemclaw.config import settings
-from eln.json_adapter import ElnFormatError, JsonExportAdapter
+from eln.adapter import ElnMappingError
+from eln.json_adapter import JsonExportAdapter
 from eln.ord import OrdReaction
 
 
@@ -77,7 +78,7 @@ def main() -> int:
     for raw in entries:
         try:
             problems = validate_ord(adapter.map_to_ord(raw))
-        except ElnFormatError as exc:
+        except ElnMappingError as exc:
             print(f"{raw.entry_id}: unmappable — {exc}")
             total_problems += 1
             continue

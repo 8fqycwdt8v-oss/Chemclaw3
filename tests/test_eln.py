@@ -137,6 +137,49 @@ def test_adapter_rejects_malformed_entry() -> None:
         JsonExportAdapter().map_to_ord(raw)
 
 
+def test_unknown_role_is_a_mapping_error_not_a_crash() -> None:
+    """An unknown role becomes an ElnFormatError (so the sync can reject-and-continue)."""
+    raw = RawEntry(
+        entry_id="e4",
+        created_at=_EPOCH,
+        payload={
+            "reactants": [{"smiles": "CCO", "role": "base"}],  # 'base' is not a Role
+            "products": [{"smiles": "CCO"}],
+        },
+    )
+    with pytest.raises(ElnFormatError, match="cannot map"):
+        JsonExportAdapter().map_to_ord(raw)
+
+
+def test_zero_celsius_structured_field_is_preserved() -> None:
+    """A structured 0 °C (ice bath) is kept, not discarded as falsy and overwritten by prose."""
+    raw = RawEntry(
+        entry_id="e5",
+        created_at=_EPOCH,
+        payload={
+            "reactants": [{"smiles": "CCO"}],
+            "products": [{"smiles": "CCO"}],
+            "temperature_c": 0,
+            "procedure": "then warmed to 80 °C",
+        },
+    )
+    assert JsonExportAdapter().map_to_ord(raw).temperature_c == 0.0
+
+
+def test_temperature_regex_ignores_nmr_labels() -> None:
+    """Prose like '13C NMR' does not fabricate a 13 °C temperature (needs the degree sign)."""
+    raw = RawEntry(
+        entry_id="e6",
+        created_at=_EPOCH,
+        payload={
+            "reactants": [{"smiles": "CCO"}],
+            "products": [{"smiles": "CCO"}],
+            "procedure": "Characterized by 13C NMR; adjusted to pH 7 C.",
+        },
+    )
+    assert JsonExportAdapter().map_to_ord(raw).temperature_c is None
+
+
 def test_fetch_only_returns_entries_after_cursor(tmp_path: Path) -> None:
     """fetch_new_entries returns only entries strictly newer than `since`, oldest first."""
 
@@ -219,15 +262,24 @@ def test_sync_ingests_batch_and_skips_bad_entries() -> None:
                 "products": [{"smiles": "CCOC(C)=O"}],
             },
         )
-        bad = RawEntry(
-            entry_id="bad",
+        bad_balance = RawEntry(
+            entry_id="bad-balance",
             created_at=datetime(2026, 2, 1, tzinfo=UTC),
             payload={"reactants": [{"smiles": "CCO"}], "products": [{"smiles": "CCCl"}]},
+        )
+        # An unmappable entry (unknown role) must be rejected, not abort the whole batch.
+        unmappable = RawEntry(
+            entry_id="unmappable",
+            created_at=datetime(2026, 3, 1, tzinfo=UTC),
+            payload={
+                "reactants": [{"smiles": "CCO", "role": "base"}],
+                "products": [{"smiles": "CCO"}],
+            },
         )
 
         class _Adapter:
             async def fetch_new_entries(self, since: datetime) -> list[RawEntry]:
-                return [good, bad]
+                return [good, bad_balance, unmappable]
 
             def map_to_ord(self, raw: RawEntry) -> OrdReaction:
                 return JsonExportAdapter().map_to_ord(raw)
@@ -235,10 +287,12 @@ def test_sync_ingests_batch_and_skips_bad_entries() -> None:
         rxn, mol, sub = InMemoryFingerprintStore(), InMemoryFingerprintStore(), _FakeSubmitter()
         summary = await sync_entries(_Adapter(), rxn, mol, sub, _EPOCH)
 
-        assert summary.ingested == ["good"]
-        assert [r.entry_id for r in summary.rejected] == ["bad"]
-        assert "mass balance" in summary.rejected[0].reason
-        assert summary.next_cursor == datetime(2026, 2, 1, tzinfo=UTC)  # newest seen
+        assert summary.ingested == ["good"]  # the good entry survives both bad ones
+        assert {r.entry_id for r in summary.rejected} == {"bad-balance", "unmappable"}
+        reasons = {r.entry_id: r.reason for r in summary.rejected}
+        assert "mass balance" in reasons["bad-balance"]
+        assert "cannot map" in reasons["unmappable"]
+        assert summary.next_cursor == datetime(2026, 3, 1, tzinfo=UTC)  # newest seen
         assert len(sub.captured) == 1  # only the good entry proposed a note
 
     asyncio.run(_run())
