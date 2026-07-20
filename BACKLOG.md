@@ -16,7 +16,12 @@ Prioritized open action items. Top = next. Keep in sync with `docs/implementatio
       each section declares its memory layer (structural provenance separation). Registered on bg worker.
 - [x] 5b.7 Draft is a PR-gated `report` note citing every source. `development-report` skill (judgment:
       decompose, write only what evidence supports, keep evidenced vs analogy apart).
-- [ ] CHECKMATE 5b (G1–G7 + citation fidelity) — running.
+- [x] CHECKMATE 5b (G1–G7 + citation fidelity): core correct (verify_claims guards the `all([])`
+      trap; every chunk cited), no new store. 4 fixes — (F1/F2) report id is now ref-safe + unique
+      (slug + title hash) instead of a raw slug that broke git branches and collided across titles;
+      (F3) fingerprint-retriever citation honesty documented (PR-gate catches a pending-note link);
+      (F4) `load_notes` resilient to a malformed note (no longer aborts retrieval); + docstring
+      honesty on substring matching and the verify gate. **Phase 5b complete.**
 
 ## Done — Phase 5: memory layers (episodic + semantic, no new infra — D-019)
 - [x] 5.1/5.2/5.3 episodic: `memory/chains.py` (chain detection — product A = reactant B via the

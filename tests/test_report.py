@@ -90,6 +90,28 @@ def test_report_note_cites_every_source() -> None:
     asyncio.run(_run())
 
 
+def test_report_id_is_ref_safe_and_unique() -> None:
+    """The report id is a valid git-ref/path (no punctuation) and unique per exact title."""
+
+    async def _run() -> None:
+        async def _note(title: str) -> str:
+            report = await gather_report(
+                ReportRequest(
+                    title=title,
+                    sections=[ReportSection(heading="S", query="q", memory_layer="episodic")],
+                ),
+                [],
+            )
+            return report_note(report).id
+
+        punct = await _note("Q3: Yield/Cost Analysis!")
+        assert set(punct) <= set("abcdefghijklmnopqrstuvwxyz0123456789-")  # ref/path-safe
+        # Titles that slug alike stay distinct via the title hash (no collision/overwrite).
+        assert await _note("Widget Development") != await _note("widget development")
+
+    asyncio.run(_run())
+
+
 # --- adversarial verify (5b.4) --------------------------------------------------------
 
 

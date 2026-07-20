@@ -32,8 +32,11 @@ class GraphRetriever:
     async def retrieve(self, query: str, filters: dict[str, Any]) -> list[EvidenceChunk]:
         """Return chunks from notes matching `query` (substring) under type/tag `filters`.
 
-        Deterministic, case-insensitive substring match over a note's id, tags, and body —
-        the graph is the source of truth, so a match is a real, citable note, never a guess.
+        Deterministic, case-insensitive substring match over a note's id, tags, and body. Each
+        hit is a real, existing note (this reads the graph), so its citation always resolves;
+        but substring matching is a coarse *candidate* filter — a short query can match
+        incidentally (`ester` in `polyester`). The `development-report` skill judges relevance;
+        this retriever only guarantees the note exists, not that it answers the question.
         """
         if not self._dir.exists():
             return []
@@ -72,7 +75,12 @@ class FingerprintReactionRetriever:
 
         A query that is not a valid reaction SMILES yields no evidence (not an error) — each
         retriever answers only what its source can, so prose queries simply return empty here.
-        Each match cites the corresponding `reaction-<id>` note.
+        Each match cites the corresponding `reaction-<id>` note. Unlike the graph retriever, this
+        cites from the fingerprint index, whose entries are written at ingestion while the note
+        is merged separately (D-018): a reaction indexed but whose note is still pending review
+        yields a citation the report PR's kg-validate flags as dangling — surfacing the pending
+        note to the reviewer (the PR-gate working), not silently corrupting the graph. Reports
+        are therefore run over the merged corpus, as campaigns are.
         """
         try:
             matches = await find_similar_reactions(self._store, query)

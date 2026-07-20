@@ -10,6 +10,8 @@ declares each section's memory layer, so evidenced and analogical content stay s
 separated (5b.5).
 """
 
+import hashlib
+import re
 from typing import Any, Literal
 
 from pydantic import BaseModel, Field
@@ -65,6 +67,18 @@ class Claim(BaseModel):
     citations: list[str]
 
 
+def _report_id(title: str) -> str:
+    """A ref-safe, unique note id from a report title.
+
+    The title is slugged to `[a-z0-9-]` only (so the id is a valid git branch and file path —
+    a raw title with `/`, `:`, etc. would break `GitNoteSubmitter`), and a short hash of the
+    exact title is appended so distinct titles that slug alike (case/punctuation) stay unique.
+    """
+    slug = re.sub(r"[^a-z0-9]+", "-", title.lower()).strip("-")
+    digest = hashlib.sha256(title.encode()).hexdigest()[:8]
+    return f"report-{slug}-{digest}" if slug else f"report-{digest}"
+
+
 async def gather_section(
     section: ReportSection, retrievers: list[SourceRetriever]
 ) -> SynthesizedSection:
@@ -96,6 +110,11 @@ def verify_claims(
     A claim is supported only if it cites at least one source note and *every* cited note
     was actually retrieved. An uncited claim or one citing a note not in the evidence — a
     fabricated statistic — is discarded, not softened.
+
+    This is the gate the `development-report` skill runs over each prose claim it synthesizes
+    from the gathered evidence (5b.4): `gather_report` returns evidence chunks that are cited
+    by construction, but LLM-written *claims about* that evidence are only trustworthy once
+    checked here, which is why the guard lives in code, tested, not left to the prose step.
     """
     known = {chunk.source_note_id for chunk in evidence}
     supported: list[Claim] = []
@@ -124,9 +143,8 @@ def report_note(report: Report) -> Note:
         for chunk in section.evidence:
             lines.append(f"- {chunk.content} ([[{chunk.source_note_id}]], via {chunk.retriever})")
         lines.append("")
-    slug = report.title.lower().replace(" ", "-")
     return Note(
-        id=f"report-{slug}",
+        id=_report_id(report.title),
         type="report",
         created_by="agent",
         source="report:development-report",
