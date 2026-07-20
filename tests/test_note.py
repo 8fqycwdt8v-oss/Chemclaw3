@@ -60,6 +60,13 @@ def test_file_without_frontmatter_is_not_a_note(tmp_path: Path) -> None:
         parse_note(tmp_path / "README.md")
 
 
+def test_frontmatter_body_key_does_not_crash(tmp_path: Path) -> None:
+    """A stray `body:` frontmatter key is ignored, not a TypeError (G4)."""
+    text = "---\nid: x\ntype: t\nbody: stray\n---\nreal body\n"
+    note = parse_note(_write(tmp_path / "f.md", text))
+    assert note.body.strip() == "real body"
+
+
 def test_agent_authored_provenance(tmp_path: Path) -> None:
     """created_by carries the GxP provenance line for the PR-gate."""
     note = parse_note(

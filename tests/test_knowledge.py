@@ -36,8 +36,8 @@ def test_note_from_qm_result_maps_fields() -> None:
     assert note.compound_smiles == "CCO"
     assert note.source == "qm:oid-42"  # provenance carried
     assert note.id.startswith("job-")
-    links = note.outgoing_links()
-    assert len(links) == 1 and links[0].startswith("compound-")  # reachable by traversal
+    # No dangling wikilink to a non-existent compound note (would fail kg-validate).
+    assert note.outgoing_links() == []
 
 
 def test_write_knowledge_node_uses_the_pr_gate(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -90,6 +90,17 @@ def test_git_submitter_pushes_branch(tmp_path: Path) -> None:
     )
     assert "note/job-abc" in remote_refs.stdout
     assert note.type == "job-result"  # sanity on the model used above
+
+    # Simulate the PR being merged, then re-submit the identical note: the base now
+    # contains it, so submit is an idempotent no-op (nothing to commit), not an error.
+    for cmd in (
+        ["checkout", "-q", "main"],
+        ["merge", "-q", "note/job-abc"],
+        ["push", "-q", "origin", "main"],
+    ):
+        subprocess.run(["git", "-C", str(work), *cmd], check=True)
+    ref_again = asyncio.run(submitter.submit(submission))
+    assert ref_again == "note/job-abc"
 
 
 def test_qm_workflow_publishes_to_graph(monkeypatch: pytest.MonkeyPatch) -> None:

@@ -70,8 +70,11 @@ def read_note(path: Path) -> Note | None:
         raise NoteError(f"{path}: malformed frontmatter: {exc}") from exc
     if not post.metadata:
         return None
+    # The Markdown body is authoritative; a stray `body:` frontmatter key must not
+    # collide with the body kwarg (which would be an uncaught TypeError).
+    metadata = {key: value for key, value in post.metadata.items() if key != "body"}
     try:
-        return Note(body=post.content, **post.metadata)
+        return Note(body=post.content, **metadata)
     except ValidationError as exc:
         raise NoteError(f"{path}: invalid note: {exc}") from exc
 

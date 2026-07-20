@@ -7,8 +7,6 @@ directly); `write_knowledge_node` is the Temporal activity that runs it and
 submits, on the `background-jobs` queue.
 """
 
-import hashlib
-
 from temporalio import activity
 
 from kg.git_submitter import default_submitter
@@ -17,26 +15,22 @@ from kg.pr_gate import propose_note
 from workflows.models import QMJobInput, QMJobResult, qm_job_key
 
 
-def _compound_id(smiles: str) -> str:
-    """A stable compound-note id from a SMILES (method-independent)."""
-    return "compound-" + hashlib.sha1(smiles.strip().encode()).hexdigest()[:12]
-
-
 def note_from_qm_result(result: QMJobResult) -> Note:
     """Map a QM job result to an agent-authored `job-result` note.
 
-    The note links to the compound it describes (a method-independent id) so it is
-    reachable by graph traversal, and carries the requester as provenance. The note
-    id is the calculation key, so re-writing the same calculation is idempotent.
+    The molecule is identified structurally via the `compound_smiles` field and
+    named in the body. It deliberately does *not* wikilink to a compound note that
+    may not exist — a dangling link would fail `kg.validate` on the very PR this
+    opens; linking compound notes is a separate step once they are created. The
+    note id is the calculation key, so re-writing the same calculation is idempotent.
     """
     job = QMJobInput(
         molecule_smiles=result.molecule_smiles,
         method=result.method,
         basis_set=result.basis_set,
     )
-    compound_id = _compound_id(result.molecule_smiles)
     body = (
-        f"Calculation for [[{compound_id}]] (`{result.molecule_smiles}`), "
+        f"Calculation for `{result.molecule_smiles}`, "
         f"method {result.method}/{result.basis_set}.\n\n"
         f"- total energy: {result.total_energy_hartree:.6f} Hartree\n"
         f"- converged: {result.converged}\n"

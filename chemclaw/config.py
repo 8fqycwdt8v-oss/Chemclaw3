@@ -102,6 +102,10 @@ class Settings(BaseSettings):
     # branch on this remote before a human merges.
     note_base_branch: str = "main"
     git_remote: str = "origin"
+    # Publishing a QM result as a graph note is best-effort: bounded attempts + its
+    # own timeout so a persistent failure gives up instead of retrying forever.
+    note_write_timeout_seconds: float = Field(default=120.0, gt=0)
+    note_write_max_attempts: int = Field(default=3, ge=1)
 
 
 settings = Settings()

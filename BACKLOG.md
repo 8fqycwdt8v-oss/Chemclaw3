@@ -18,7 +18,11 @@ Prioritized open action items. Top = next. Keep in sync with `docs/implementatio
       propose_knowledge_note) registered on the MAF agent; shared `default_submitter` (DRY).
 - [x] Wire `write_knowledge_node` into a workflow caller: `QMJobWorkflow` gains opt-in
       `publish_to_graph`, routing the note write to the background-jobs queue (best-effort). Server test.
-- [ ] CHECKMATE 2 (G1–G7 + deep review over Phase 1+2): in progress.
+- [x] CHECKMATE 2 (G1–G7 + deep review over Phase 1+2): 5 findings fixed — (F1) bounded retry so
+      best-effort publish gives up instead of hanging; (F2) job-result note no longer dangling-links a
+      non-existent compound note (would fail kg-validate); (F3) git submitter idempotent on identical
+      re-submit; (F4) stray `body:` frontmatter key no longer crashes the parser; (F5) dedicated
+      note-write timeout/attempts config. **Phase 2 complete.**
 
 ## Later compute items (reprioritized; HPC/DFT deferred — D-010)
 

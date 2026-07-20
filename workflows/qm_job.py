@@ -77,7 +77,10 @@ class QMJobWorkflow:
                     write_knowledge_node,
                     result,
                     task_queue=settings.background_task_queue,
-                    start_to_close_timeout=timedelta(seconds=settings.bo_activity_timeout_seconds),
+                    start_to_close_timeout=timedelta(seconds=settings.note_write_timeout_seconds),
+                    # Bounded attempts: a persistent publish failure must eventually
+                    # raise so the best-effort handler runs, not retry forever.
+                    retry_policy=RetryPolicy(maximum_attempts=settings.note_write_max_attempts),
                 )
             except ActivityError:
                 workflow.logger.warning(

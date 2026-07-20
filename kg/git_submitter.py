@@ -34,9 +34,10 @@ class GitNoteSubmitter:
         self._repo_dir = repo_dir
         self._base = base_branch if base_branch is not None else settings.note_base_branch
         self._remote = remote if remote is not None else settings.git_remote
+        self._last_stderr = ""
 
-    async def _git(self, *args: str) -> None:
-        """Run one git command in the repo, raising GitSubmitError on failure."""
+    async def _run(self, *args: str) -> int:
+        """Run one git command in the repo; return its exit code (no raise)."""
         process = await asyncio.create_subprocess_exec(
             "git",
             "-C",
@@ -46,8 +47,13 @@ class GitNoteSubmitter:
             stderr=asyncio.subprocess.PIPE,
         )
         _, stderr = await process.communicate()
-        if process.returncode != 0:
-            raise GitSubmitError(f"git {' '.join(args)} failed: {stderr.decode().strip()}")
+        self._last_stderr = stderr.decode().strip()
+        return process.returncode or 0
+
+    async def _git(self, *args: str) -> None:
+        """Run one git command, raising GitSubmitError on a non-zero exit."""
+        if await self._run(*args) != 0:
+            raise GitSubmitError(f"git {' '.join(args)} failed: {self._last_stderr}")
 
     async def submit(self, submission: NoteSubmission) -> str:
         """Create the branch off the base, write+commit the note, and push it.
@@ -62,6 +68,10 @@ class GitNoteSubmitter:
         note_path.write_text(submission.content, encoding="utf-8")
 
         await self._git("add", submission.path)
+        # Idempotent: if the note is byte-identical to what the base already has,
+        # there is nothing to commit — re-proposing it is a no-op, not an error.
+        if await self._run("diff", "--cached", "--quiet") == 0:
+            return submission.branch
         await self._git("commit", "-m", submission.title)
         await self._git("push", "--force-with-lease", "-u", self._remote, submission.branch)
         return submission.branch
