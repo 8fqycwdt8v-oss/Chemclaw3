@@ -31,8 +31,10 @@ Prioritized open action items. Top = next. Keep in sync with `docs/implementatio
 - [x] 1d.2b categorical BO support (`CategoricalParameter`) + real reaction benchmark:
       **Reizman Suzuki–Miyaura** (`bo/benchmarks/reizman_suzuki.py`, data vendored from Summit/MIT),
       RandomForest yield surrogate → BoFire mixed categorical+continuous campaign beats dataset median.
-- [ ] 1d.3 wire a 1c **calculator** as a BO objective (via the store) — the registry's real caller.
-- [ ] 1d.4 wrap `optimize()` in a durable Temporal campaign workflow (resumable long runs).
+- [x] 1d.4 **durable BO campaign**: `BoCampaignWorkflow` (Temporal) + activities (heavy BoFire work
+      isolated) + `bo/objectives.py` name→objective registry + **`workers/background_worker.py`**
+      (first real background-jobs job — retro-satisfies 1.8, no empty stub). Server test runs in CI.
+- [ ] 1d.3 register a 1c **calculator** as a named BO objective (via the store) alongside reizman_suzuki.
 - [ ] 1d.5 candidates PR-gated (after Phase 2); 1d.6 progress/regret metric (after Phase 2b). CHECKMATE 1d full.
 
 ## Done
@@ -42,9 +44,9 @@ Prioritized open action items. Top = next. Keep in sync with `docs/implementatio
       `requested_by` audit field; shared Temporal client + result models. Server-backed tests run in CI.
 - [x] **Orchestrator** — reconsidered MAF vs LangGraph → keep MAF (D-013).
 - Folded/deferred Phase-1 tails: **1.7** notify callback (defer until an async result must reach a live
-  session), **1.8** background-jobs worker (defer until a real bg job exists — no empty stub), **1.10** →
-  generalized into **Phase 1b**. **CHECKMATE 1** (worker-restart durability spike) runs against a live
-  Temporal (`make up`) — pending, do at end of the 1b–1d cluster.
+  session); **1.8** background-jobs worker — **DONE** (`workers/background_worker.py`, hosts the BO
+  campaign); **1.10** → generalized into **Phase 1b**. **CHECKMATE 1** (worker-restart durability spike)
+  runs against a live Temporal (`make up`) — pending, needs a live cluster (not runnable in sandbox).
 
 ## Capability gaps to triage (from `docs/research-review.md`) — decide per item
 - [x] **Evaluation / scientific-output metrics layer** → promoted to first-class **Phase 2b**

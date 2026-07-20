@@ -82,6 +82,10 @@ class Settings(BaseSettings):
     pka_calibration_intercept: float = -29.3116
     pka_uncertainty: float = 1.6
 
+    # Durable BO campaign (plan step 1d.4). A single round (BoFire propose + evaluate)
+    # can be slow, so activities get a generous start-to-close budget.
+    bo_activity_timeout_seconds: float = 300.0
+
     # MAF agent (plan step 1.5). `agent_model` is the orchestration model name
     # (ENV-overridable); the provider's API key is read by the chat client from
     # its own env var (e.g. ANTHROPIC_API_KEY), not stored here. `skills_dir` is

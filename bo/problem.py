@@ -88,3 +88,38 @@ class Candidate(BaseModel):
     """A proposed point to evaluate next."""
 
     params: dict[str, ParamValue]
+
+
+class CampaignSpec(BaseModel):
+    """A durable BO campaign's configuration (plan step 1d.4).
+
+    `objective_name` names the objective a worker resolves via `bo.objectives`; a
+    Temporal workflow cannot carry a Python callable across its boundary, so the
+    objective is referenced by name and looked up in the evaluate activity.
+    """
+
+    problem: OptimizationProblem
+    objective_name: str
+    n_initial: int = 5
+    n_rounds: int = 10
+    batch: int = 1
+
+
+class CampaignResult(BaseModel):
+    """The outcome of a campaign: the best point found and the full history."""
+
+    best: Observation
+    history: list[Observation]
+
+
+def best_of(problem: OptimizationProblem, observations: list[Observation]) -> Observation:
+    """Return the best observation for the problem's optimization direction."""
+    best = observations[0]
+    for observation in observations[1:]:
+        if problem.objective.direction == "minimize":
+            improved = observation.value < best.value
+        else:
+            improved = observation.value > best.value
+        if improved:
+            best = observation
+    return best
