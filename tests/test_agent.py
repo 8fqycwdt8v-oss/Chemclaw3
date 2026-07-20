@@ -17,6 +17,9 @@ def test_agent_advertises_qm_tools() -> None:
         "predict_pka",
         "submit_qm_job",
         "get_qm_job_status",
+        "find_notes",
+        "expand_note",
+        "propose_knowledge_note",
     } <= tool_names
 
 

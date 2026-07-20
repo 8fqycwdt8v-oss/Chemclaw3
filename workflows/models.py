@@ -28,6 +28,9 @@ class QMJobInput(BaseModel):
     method: str = Field(min_length=1)
     basis_set: str = Field(min_length=1)
     requested_by: str = "unknown"
+    # When true, the completed result is proposed as a PR-gated graph note (2.8).
+    # Opt-in, so a calculation is only published to the graph when deliberately asked.
+    publish_to_graph: bool = False
 
 
 def qm_job_key(job: QMJobInput) -> str:

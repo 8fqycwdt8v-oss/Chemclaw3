@@ -5,13 +5,18 @@ import subprocess
 from pathlib import Path
 
 import pytest
+from temporalio.client import Client
+from temporalio.worker import Worker
 
 import workflows.knowledge as knowledge
+from chemclaw.config import settings
 from kg.git_submitter import GitNoteSubmitter
 from kg.note import Note
 from kg.pr_gate import NoteSubmission
+from tests.temporal_env import QM_ACTIVITIES, pydantic_client, start_env_or_skip
 from workflows.knowledge import note_from_qm_result, write_knowledge_node
-from workflows.models import QMJobResult
+from workflows.models import QMJobInput, QMJobResult
+from workflows.qm_job import QMJobWorkflow
 
 _RESULT = QMJobResult(
     molecule_smiles="CCO",
@@ -44,7 +49,7 @@ def test_write_knowledge_node_uses_the_pr_gate(monkeypatch: pytest.MonkeyPatch) 
             captured.append(submission)
             return f"pr://{submission.branch}"
 
-    monkeypatch.setattr(knowledge, "_default_submitter", lambda: _Fake())
+    monkeypatch.setattr(knowledge, "default_submitter", lambda: _Fake())
     ref = asyncio.run(write_knowledge_node(_RESULT))
 
     assert ref.startswith("pr://note/job-")
@@ -85,3 +90,47 @@ def test_git_submitter_pushes_branch(tmp_path: Path) -> None:
     )
     assert "note/job-abc" in remote_refs.stdout
     assert note.type == "job-result"  # sanity on the model used above
+
+
+def test_qm_workflow_publishes_to_graph(monkeypatch: pytest.MonkeyPatch) -> None:
+    """With publish_to_graph, a completed QM job proposes a note on the bg queue."""
+    captured: list[NoteSubmission] = []
+
+    class _Fake:
+        async def submit(self, submission: NoteSubmission) -> str:
+            captured.append(submission)
+            return f"pr://{submission.branch}"
+
+    monkeypatch.setattr(knowledge, "default_submitter", lambda: _Fake())
+
+    async def _run() -> None:
+        async with await start_env_or_skip() as env:
+            client: Client = pydantic_client(env)
+            async with (
+                Worker(
+                    client,
+                    task_queue="test-hpc-pub",
+                    workflows=[QMJobWorkflow],
+                    activities=QM_ACTIVITIES,
+                ),
+                Worker(
+                    client,
+                    task_queue=settings.background_task_queue,
+                    activities=[write_knowledge_node],
+                ),
+            ):
+                await client.execute_workflow(
+                    QMJobWorkflow.run,
+                    QMJobInput(
+                        molecule_smiles="CCO",
+                        method="B3LYP",
+                        basis_set="def2-SVP",
+                        publish_to_graph=True,
+                    ),
+                    id="qm-publish-test",
+                    task_queue="test-hpc-pub",
+                )
+        assert len(captured) == 1  # the completed result was proposed as a note
+        assert captured[0].path.startswith("knowledge/job-result/job-")
+
+    asyncio.run(_run())

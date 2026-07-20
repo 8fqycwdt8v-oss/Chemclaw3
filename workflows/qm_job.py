@@ -12,6 +12,7 @@ from datetime import timedelta
 
 from temporalio import workflow
 from temporalio.common import RetryPolicy
+from temporalio.exceptions import ActivityError
 
 # Activities, models, and config are ordinary modules that must bypass the
 # workflow sandbox's re-import isolation (the standard Temporal pattern).
@@ -23,6 +24,7 @@ with workflow.unsafe.imports_passed_through():
         prepare_input,
         submit_to_hpc,
     )
+    from workflows.knowledge import write_knowledge_node
     from workflows.models import QMJobInput, QMJobResult
 
 # Transient failures (a flaky scheduler call) are worth retrying; a `ValueError`
@@ -58,9 +60,27 @@ class QMJobWorkflow:
             heartbeat_timeout=timedelta(seconds=settings.qm_poll_heartbeat_timeout_seconds),
             retry_policy=_RETRY,
         )
-        return await workflow.execute_activity(
+        result = await workflow.execute_activity(
             parse_qm_output,
             args=[prepared, raw_output],
             start_to_close_timeout=activity_timeout,
             retry_policy=_RETRY,
         )
+
+        # Optionally publish the result as a PR-gated graph note (step 2.8). It runs
+        # on the light background-jobs queue (git write, not HPC), and a failure to
+        # publish must not fail the (successful, cached) calculation — so the note
+        # write is best-effort and its outcome is not part of the returned result.
+        if job.publish_to_graph:
+            try:
+                await workflow.execute_activity(
+                    write_knowledge_node,
+                    result,
+                    task_queue=settings.background_task_queue,
+                    start_to_close_timeout=timedelta(seconds=settings.bo_activity_timeout_seconds),
+                )
+            except ActivityError:
+                workflow.logger.warning(
+                    "knowledge-note publish failed for %s", result.molecule_smiles
+                )
+        return result

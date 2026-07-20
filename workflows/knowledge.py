@@ -11,9 +11,9 @@ import hashlib
 
 from temporalio import activity
 
-from kg.git_submitter import GitNoteSubmitter
+from kg.git_submitter import default_submitter
 from kg.note import Note
-from kg.pr_gate import NoteSubmitter, propose_note
+from kg.pr_gate import propose_note
 from workflows.models import QMJobInput, QMJobResult, qm_job_key
 
 
@@ -51,12 +51,7 @@ def note_from_qm_result(result: QMJobResult) -> Note:
     )
 
 
-def _default_submitter() -> NoteSubmitter:
-    """The production submitter (git feature branch). Overridden in tests."""
-    return GitNoteSubmitter()
-
-
 @activity.defn
 async def write_knowledge_node(result: QMJobResult) -> str:
     """Write a QM result to the graph as a PR-gated note; return the PR reference."""
-    return await propose_note(note_from_qm_result(result), _default_submitter())
+    return await propose_note(note_from_qm_result(result), default_submitter())

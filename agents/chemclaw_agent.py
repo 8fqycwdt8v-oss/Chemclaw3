@@ -14,6 +14,7 @@ from typing import Any
 from agent_framework import Agent, FileSkillsSource, SkillsProvider
 
 from agents.calc_tools import compute_xtb_energy, predict_pka, predict_solubility
+from agents.graph_tools import expand_note, find_notes, propose_knowledge_note
 from agents.qm_tools import get_qm_job_status, submit_qm_job
 from chemclaw.config import settings
 
@@ -23,8 +24,12 @@ _INSTRUCTIONS = (
     "point) — it runs inline and caches, so comparing related molecules is cheap. "
     "Heavy quantum-mechanical jobs are slow: submit them with submit_qm_job, which "
     "returns a job id immediately; report that id instead of waiting, and use "
-    "get_qm_job_status to check progress. Consult a loaded skill for the judgment "
-    "on which calculator fits the question and how far to trust the result."
+    "get_qm_job_status to check progress. Before computing, check what is already "
+    "known: find_notes then expand_note traverse the knowledge graph (cite the note "
+    "ids you use). New findings worth keeping go through propose_knowledge_note, "
+    "which opens a PR for human review — never assert agent-written notes as "
+    "established fact until merged. Consult a loaded skill for the judgment on which "
+    "calculator or note fits the question and how far to trust the result."
 )
 
 
@@ -51,6 +56,9 @@ def build_agent(chat_client: Any | None = None) -> Agent:
             predict_pka,
             submit_qm_job,
             get_qm_job_status,
+            find_notes,
+            expand_note,
+            propose_knowledge_note,
         ],
         context_providers=[skills],
     )

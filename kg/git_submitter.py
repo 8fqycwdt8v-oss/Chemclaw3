@@ -14,7 +14,7 @@ import asyncio
 from pathlib import Path
 
 from chemclaw.config import settings
-from kg.pr_gate import NoteSubmission
+from kg.pr_gate import NoteSubmission, NoteSubmitter
 
 
 class GitSubmitError(RuntimeError):
@@ -65,3 +65,8 @@ class GitNoteSubmitter:
         await self._git("commit", "-m", submission.title)
         await self._git("push", "--force-with-lease", "-u", self._remote, submission.branch)
         return submission.branch
+
+
+def default_submitter() -> NoteSubmitter:
+    """The production note submitter (git feature branch). Overridden in tests."""
+    return GitNoteSubmitter()

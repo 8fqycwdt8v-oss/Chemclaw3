@@ -14,9 +14,11 @@ Prioritized open action items. Top = next. Keep in sync with `docs/implementatio
       push) — tested against a local bare remote. PR-object creation is the git platform's step.
 - [x] 2.8 Temporal activity `write_knowledge_node` (`workflows/knowledge.py`): QM result → agent
       `job-result` note (links to a method-independent compound id) → PR-gate. Registered on the bg worker.
-- [ ] Agent tools for graph query/write (wire `kg.graph`/`propose_note` as MAF tools).
-- [ ] Wire `write_knowledge_node` into a workflow caller (e.g. optional final step after a QM job).
-- [ ] CHECKMATE 2 (G1–G7 + deep review over Phase 1+2): QM job → PR with valid note → query finds it.
+- [x] Agent tools for graph query/write (`agents/graph_tools.py`: find_notes, expand_note,
+      propose_knowledge_note) registered on the MAF agent; shared `default_submitter` (DRY).
+- [x] Wire `write_knowledge_node` into a workflow caller: `QMJobWorkflow` gains opt-in
+      `publish_to_graph`, routing the note write to the background-jobs queue (best-effort). Server test.
+- [ ] CHECKMATE 2 (G1–G7 + deep review over Phase 1+2): in progress.
 
 ## Later compute items (reprioritized; HPC/DFT deferred — D-010)
 
