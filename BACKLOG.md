@@ -57,13 +57,19 @@ Prioritized open action items. Top = next. Keep in sync with `docs/implementatio
 ### Phase 1c — Fast predictors + semiempirical (first *real* calculations)
 - [x] 1c.2 **xTB / GFN2** calculator via `tblite` (real single-point energy, RDKit 3D embed, CPU) —
       `calc/xtb.py`, cached through the store (`run_cached_xtb`). Real GFN2 tests run everywhere.
-- [ ] 1c.1 Calculator contract + registry — build when the 2nd calculator (solubility) lands (Rule of Three).
+- [x] 1c.1 Calculator **contract**: `calc.store.run_cached` (offload blocking compute → store dict →
+      reconstruct typed model) — each `run_cached_*` now only derives its key and delegates (DRY,
+      Rule of Three across xTB/solubility/pKa). Name→calculator **registry deferred** (no dispatch
+      consumer yet; would be a one-caller abstraction — D-015).
 - [ ] 1c.3 GNN solubility model (inference only; value + uncertainty) — **needs model choice** (see open Qs).
+      **Blocked on user input** (which GNN + weights/license); the calculator contract makes the swap cheap.
 - [x] 1c.4 **pKa via xTB** (`calc/pka.py`): GFN2-xTB ALPB-solvated deprotonation energy of the most
       acidic O-H/S-H site + linear calibration (R²0.93 over 10 acids). Agent tool `predict_pka`. Real tests.
 - [x] 1c.5/1c.6 xTB exposed to the MAF agent as tool `compute_xtb_energy` + `calculation-selection` skill.
-- [ ] 1c.5b generalize to a calculator registry once the 2nd calculator lands (solubility/pKa).
-- [ ] 1c.7 optional graph note via PR-gate. CHECKMATE 1c.
+- [x] 1c.5b calculator contract landed (see 1c.1); name-registry consciously deferred (D-015).
+- [ ] 1c.7 optional graph note via PR-gate for a *fast* calc result — deferred: the QM path already
+      publishes (2.8) and BO recommendations now publish (1d.5); a fast-calc publish waits for a real
+      need (avoids a third near-identical mapper before it is asked for). CHECKMATE 1c: G1–G7 met.
 - Note: fast calcs run **without** a Temporal workflow (sub-second) — the store gives "never twice";
   durability (Temporal) is reserved for long jobs (BO campaigns 1d, later HPC).
 
@@ -85,9 +91,15 @@ Prioritized open action items. Top = next. Keep in sync with `docs/implementatio
 - [x] Robustness: `optimize` and the durable BO workflow stop gracefully when a discrete candidate
       set is exhausted (`discrete_candidate_count`/`distinct_candidate_count` guard) instead of crashing
       inside BoFire. Tests: budget 2+10 over a 4-molecule library returns cleanly.
-- [ ] 1d.5 candidates PR-gated (after Phase 2). CHECKMATE 1d full.
+- [x] 1d.5 recommendation PR-gated: `workflows/bo_knowledge.py` (`note_from_campaign_result` +
+      `write_campaign_node`) maps a campaign's best point to an agent `bo-candidate` note through the
+      **same** PR-gate the QM path uses (DRY: reuses `propose_note`/`default_submitter`). Opt-in
+      `CampaignSpec.publish_to_graph` routes it to the background queue, best-effort with bounded
+      retry (mirrors QM 2.8). Registered on the bg worker. Pure mapper + PR-gate tests; server test in CI.
 - [x] 1d.6 progress/regret metric: `bo_regret` registered in the Phase 2b metric layer
       (`evals/metrics.py`, direction-aware, non-negative) — Phase 1d's registered scientific metric.
+- [x] CHECKMATE 1d: G1–G7 met (recommendation publish mirrors the deep-reviewed QM path; best-effort
+      + bounded retry; no dangling wikilink; idempotent note id). **Phase 1d complete.**
 
 ## Done
 - [x] **Phase 0** — foundation (tooling, config, infra compose, CI, ADR-0001, layer READMEs). CHECKMATE 0 green.

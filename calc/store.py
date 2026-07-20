@@ -8,10 +8,11 @@ interface with swappable backends (in-memory for tests, Postgres for real), and
 (DRY) — the one place that decides hit vs. miss and persists new results.
 """
 
+import asyncio
 import hashlib
 import json
 from collections.abc import Awaitable, Callable
-from typing import Any, Protocol, runtime_checkable
+from typing import Any, Protocol, TypeVar, runtime_checkable
 
 from pydantic import BaseModel
 
@@ -138,3 +139,39 @@ async def cached_compute(
     result = await compute()
     await store.put(StoredResult(key=key, result=result, provenance=provenance))
     return result, False
+
+
+# A calculator's typed result model — the payload the cache stores and reconstructs.
+ResultT = TypeVar("ResultT", bound=BaseModel)
+
+
+async def run_cached(
+    store: ResultStore,
+    key: CalculationKey,
+    compute: Callable[[], ResultT],
+    result_type: type[ResultT],
+) -> tuple[ResultT, bool]:
+    """The calculator contract: run a blocking calculator once, cached (plan 1c.1).
+
+    Every fast calculator repeats the same skeleton — build a versioned key, run
+    synchronous CPU-bound work (RDKit/tblite), persist the dict, reconstruct the typed
+    model. This captures it once (DRY, Rule of Three across xTB/solubility/pKa): the
+    blocking `compute` is offloaded so the event loop stays free, its result is stored
+    as a plain dict (the store stays calculator-agnostic), and the dict is validated
+    back into `result_type` on both hit and miss.
+
+    Args:
+        store: The backend to read from and write to.
+        key: The versioned identity of this calculation.
+        compute: Zero-arg *synchronous* callable producing the typed result on a miss.
+        result_type: The pydantic model to reconstruct from the stored payload.
+
+    Returns:
+        `(result, was_cached)` — `was_cached` is True on a store hit.
+    """
+
+    async def _compute() -> ResultPayload:
+        return (await asyncio.to_thread(compute)).model_dump()
+
+    payload, was_cached = await cached_compute(store, key, _compute)
+    return result_type.model_validate(payload), was_cached

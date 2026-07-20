@@ -7,11 +7,14 @@ and recomputes.
 
 import asyncio
 
+from pydantic import BaseModel
+
 from calc.store import (
     CalculationKey,
     InMemoryStore,
     StoredResult,
     cached_compute,
+    run_cached,
 )
 
 
@@ -81,6 +84,33 @@ def test_input_dict_ordering_does_not_change_key() -> None:
     k1 = CalculationKey.build("xtb", "gfn2", inputs={"a": 1, "b": 2})
     k2 = CalculationKey.build("xtb", "gfn2", inputs={"b": 2, "a": 1})
     assert k1.as_str() == k2.as_str()
+
+
+def test_run_cached_contract_offloads_and_reconstructs_typed_model() -> None:
+    """The calculator contract computes once and returns the typed model on a hit."""
+
+    class _Res(BaseModel):
+        energy: float
+
+    async def _run() -> None:
+        store = InMemoryStore()
+        calls = 0
+
+        def compute() -> _Res:  # synchronous, as a real calculator's inner fn is
+            nonlocal calls
+            calls += 1
+            return _Res(energy=1.5)
+
+        key = CalculationKey.build("demo", "v1", inputs={"smiles": "CCO"})
+        first, cached1 = await run_cached(store, key, compute, _Res)
+        second, cached2 = await run_cached(store, key, compute, _Res)
+
+        assert isinstance(first, _Res) and isinstance(second, _Res)  # reconstructed on hit
+        assert first.energy == second.energy == 1.5
+        assert (cached1, cached2) == (False, True)
+        assert calls == 1  # never computed twice
+
+    asyncio.run(_run())
 
 
 def test_store_get_returns_none_on_miss() -> None:

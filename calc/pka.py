@@ -11,12 +11,10 @@ uncertainty; never present the value as exact. v1 covers O-H/S-H acids (carboxyl
 acids, phenols, alcohols, thiols); N-H and C-H acids are a later extension.
 """
 
-import asyncio
-
 from pydantic import BaseModel, Field
 from rdkit import Chem
 
-from calc.store import CalculationKey, ResultStore, cached_compute
+from calc.store import CalculationKey, ResultStore, run_cached
 from calc.xtb_engine import geometry, gfn2_energy, parse_molecule
 from chemclaw.config import settings
 
@@ -127,11 +125,4 @@ async def run_cached_pka(store: ResultStore, job: PkaInput) -> tuple[PkaResult, 
         inputs={"smiles": job.smiles},
         params={"embed_seed": settings.xtb_embed_seed},
     )
-
-    async def _compute() -> dict[str, object]:
-        # Offload the blocking RDKit+tblite work so the event loop stays free.
-        result = await asyncio.to_thread(predict_pka, job)
-        return result.model_dump()
-
-    payload, was_cached = await cached_compute(store, key, _compute)
-    return PkaResult.model_validate(payload), was_cached
+    return await run_cached(store, key, lambda: predict_pka(job), PkaResult)

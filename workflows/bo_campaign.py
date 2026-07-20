@@ -11,6 +11,7 @@ from datetime import timedelta
 
 from temporalio import workflow
 from temporalio.common import RetryPolicy
+from temporalio.exceptions import ActivityError
 
 with workflow.unsafe.imports_passed_through():
     from bo.problem import (
@@ -27,6 +28,7 @@ with workflow.unsafe.imports_passed_through():
         propose_initial,
         propose_next,
     )
+    from workflows.bo_knowledge import write_campaign_node
 
 # Bad data (an unknown objective name, a malformed problem) will not fix itself on
 # retry, so fail fast instead of looping (gate G4).
@@ -73,4 +75,23 @@ class BoCampaignWorkflow:
                 retry_policy=_RETRY,
             )
 
-        return CampaignResult(best=best_of(spec.problem, history), history=history)
+        result = CampaignResult(best=best_of(spec.problem, history), history=history)
+
+        # Optionally publish the recommendation as a PR-gated graph note (step 1d.5),
+        # on the light background-jobs queue. Best-effort: a failed git write must not
+        # fail the (completed) campaign, so bound the retries and swallow the error.
+        if spec.publish_to_graph:
+            try:
+                await workflow.execute_activity(
+                    write_campaign_node,
+                    args=[spec.objective_name, result],
+                    task_queue=settings.background_task_queue,
+                    start_to_close_timeout=timedelta(seconds=settings.note_write_timeout_seconds),
+                    retry_policy=RetryPolicy(maximum_attempts=settings.note_write_max_attempts),
+                )
+            except ActivityError:
+                workflow.logger.warning(
+                    "bo-candidate publish failed for objective %s", spec.objective_name
+                )
+
+        return result

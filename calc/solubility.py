@@ -14,7 +14,7 @@ from pydantic import BaseModel, Field
 from rdkit import Chem
 from rdkit.Chem import Crippen, Descriptors, rdMolDescriptors
 
-from calc.store import CalculationKey, ResultStore, cached_compute
+from calc.store import CalculationKey, ResultStore, run_cached
 
 CALC_TYPE = "solubility"
 
@@ -119,9 +119,4 @@ async def run_cached_solubility(
         calc_version=f"{active.name}@{active.version}",
         inputs={"smiles": job.smiles},
     )
-
-    async def _compute() -> dict[str, object]:
-        return predict_solubility(job, active).model_dump()
-
-    payload, was_cached = await cached_compute(store, key, _compute)
-    return SolubilityResult.model_validate(payload), was_cached
+    return await run_cached(store, key, lambda: predict_solubility(job, active), SolubilityResult)

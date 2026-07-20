@@ -104,6 +104,8 @@ class CampaignSpec(BaseModel):
     n_initial: int = Field(default=5, ge=1)
     n_rounds: int = Field(default=10, ge=0)
     batch: int = Field(default=1, ge=1)
+    # Opt-in: publish the campaign's recommendation as a PR-gated graph note (1d.5).
+    publish_to_graph: bool = False
 
 
 class CampaignResult(BaseModel):

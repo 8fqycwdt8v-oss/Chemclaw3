@@ -18,6 +18,7 @@ from workflows.bo_activities import (
     propose_next,
 )
 from workflows.bo_campaign import BoCampaignWorkflow
+from workflows.bo_knowledge import write_campaign_node
 from workflows.knowledge import write_knowledge_node
 
 
@@ -33,6 +34,7 @@ async def main() -> None:
             propose_next,
             evaluate_candidates,
             write_knowledge_node,
+            write_campaign_node,
         ],
     )
     await worker.run()
