@@ -28,7 +28,10 @@ Prioritized open action items. Top = next. Keep in sync with `docs/implementatio
 - [x] 1d.1 Domain adapter (`bo/engine.py`, BoFire fully encapsulated behind neutral `bo/problem.py` types).
 - [x] 1d.2 ask/tell: `initial_candidates` (random seed) + `propose_candidates` (SOBO); `optimize()` loop
       (`bo/campaign.py`) — convergence-tested on known minima/maxima (CHECKMATE 1d spike met).
-- [ ] 1d.3 objective eval via 1c calculators + store (currently `evaluate` is injected; wire a calculator).
+- [x] 1d.2b categorical BO support (`CategoricalParameter`) + real reaction benchmark:
+      **Reizman Suzuki–Miyaura** (`bo/benchmarks/reizman_suzuki.py`, data vendored from Summit/MIT),
+      RandomForest yield surrogate → BoFire mixed categorical+continuous campaign beats dataset median.
+- [ ] 1d.3 wire a 1c **calculator** as a BO objective (via the store) — the registry's real caller.
 - [ ] 1d.4 wrap `optimize()` in a durable Temporal campaign workflow (resumable long runs).
 - [ ] 1d.5 candidates PR-gated (after Phase 2); 1d.6 progress/regret metric (after Phase 2b). CHECKMATE 1d full.
 

@@ -12,11 +12,17 @@ import pytest
 
 from bo.campaign import optimize
 from bo.engine import propose_candidates
-from bo.problem import ContinuousParameter, Objective, OptimizationProblem
+from bo.problem import (
+    ContinuousParameter,
+    Objective,
+    OptimizationProblem,
+    Parameter,
+    ParamValue,
+)
 
 warnings.filterwarnings("ignore")
 
-_PARAMS = [
+_PARAMS: list[Parameter] = [
     ContinuousParameter(name="x1", lower=-2.0, upper=2.0),
     ContinuousParameter(name="x2", lower=-2.0, upper=2.0),
 ]
@@ -28,8 +34,8 @@ def test_minimize_converges_toward_known_optimum() -> None:
         parameters=_PARAMS, objective=Objective(name="y", direction="minimize")
     )
 
-    async def evaluate(params: dict[str, float]) -> float:
-        return (params["x1"] - 1.0) ** 2 + (params["x2"] + 0.5) ** 2
+    async def evaluate(params: dict[str, ParamValue]) -> float:
+        return (float(params["x1"]) - 1.0) ** 2 + (float(params["x2"]) + 0.5) ** 2
 
     result = asyncio.run(optimize(problem, evaluate, n_initial=6, n_rounds=10))
     assert result.best.value < 0.3  # well below a random guess in this box
@@ -43,8 +49,8 @@ def test_maximize_direction_is_honored() -> None:
         parameters=_PARAMS, objective=Objective(name="y", direction="maximize")
     )
 
-    async def evaluate(params: dict[str, float]) -> float:
-        return -((params["x1"] - 0.5) ** 2) - (params["x2"] - 0.25) ** 2
+    async def evaluate(params: dict[str, ParamValue]) -> float:
+        return -((float(params["x1"]) - 0.5) ** 2) - (float(params["x2"]) - 0.25) ** 2
 
     result = asyncio.run(optimize(problem, evaluate, n_initial=6, n_rounds=10))
     assert result.best.value > -0.3  # close to the maximum of 0

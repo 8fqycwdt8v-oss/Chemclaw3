@@ -1,20 +1,24 @@
 """Framework-neutral specification of a Bayesian-optimization problem (Phase 1d).
 
-These types describe *what* to optimize — continuous parameters with bounds and a
-single objective — without any BoFire types. Agents, skills, and the campaign
-loop depend only on these; the BoFire mapping is isolated in `bo.engine` (G6).
-v1 supports continuous inputs and one scalar objective (KISS); mixed/categorical
-inputs and multi-objective come when a real problem needs them.
+These types describe *what* to optimize — continuous and categorical parameters
+and a single objective — without any BoFire types. Agents, skills, and the
+campaign loop depend only on these; the BoFire mapping is isolated in `bo.engine`
+(G6). v1 supports continuous + categorical inputs and one scalar objective;
+multi-objective comes when a real problem needs it.
 """
 
-from typing import Literal
+from typing import Annotated, Literal
 
 from pydantic import BaseModel, Field, model_validator
+
+# A parameter value is a float (continuous) or a category label (categorical).
+ParamValue = float | str
 
 
 class ContinuousParameter(BaseModel):
     """A continuous decision variable with inclusive bounds."""
 
+    kind: Literal["continuous"] = "continuous"
     name: str = Field(min_length=1)
     lower: float
     upper: float
@@ -27,6 +31,25 @@ class ContinuousParameter(BaseModel):
         return self
 
 
+class CategoricalParameter(BaseModel):
+    """A categorical decision variable — one of a fixed set of labels (e.g. a catalyst)."""
+
+    kind: Literal["categorical"] = "categorical"
+    name: str = Field(min_length=1)
+    categories: list[str] = Field(min_length=2)
+
+    @model_validator(mode="after")
+    def _unique_categories(self) -> "CategoricalParameter":
+        """Category labels must be distinct."""
+        if len(self.categories) != len(set(self.categories)):
+            raise ValueError(f"parameter {self.name!r}: categories must be unique")
+        return self
+
+
+# Discriminated union so a serialized problem round-trips to the right parameter type.
+Parameter = Annotated[ContinuousParameter | CategoricalParameter, Field(discriminator="kind")]
+
+
 class Objective(BaseModel):
     """The scalar quantity to optimize, and the direction."""
 
@@ -37,7 +60,7 @@ class Objective(BaseModel):
 class OptimizationProblem(BaseModel):
     """A full problem: the decision variables and the single objective."""
 
-    parameters: list[ContinuousParameter] = Field(min_length=1)
+    parameters: list[Parameter] = Field(min_length=1)
     objective: Objective
 
     @model_validator(mode="after")
@@ -56,7 +79,7 @@ class Observation(BaseModel):
     campaign fed by predicted values stays honest about its evidence (D-011).
     """
 
-    params: dict[str, float]
+    params: dict[str, ParamValue]
     value: float
     provenance: str = "measured"
 
@@ -64,4 +87,4 @@ class Observation(BaseModel):
 class Candidate(BaseModel):
     """A proposed point to evaluate next."""
 
-    params: dict[str, float]
+    params: dict[str, ParamValue]

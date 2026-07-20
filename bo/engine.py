@@ -6,19 +6,39 @@ Nothing BoFire leaks past this boundary (gate G6), so the engine could be swappe
 without touching the campaign, agents, or skills.
 """
 
+from typing import Any
+
 import pandas as pd
 from bofire.data_models.domain.api import Domain, Inputs, Outputs
-from bofire.data_models.features.api import ContinuousInput, ContinuousOutput
+from bofire.data_models.features.api import (
+    CategoricalInput,
+    ContinuousInput,
+    ContinuousOutput,
+)
 from bofire.data_models.objectives.api import MaximizeObjective, MinimizeObjective
 from bofire.data_models.strategies.api import RandomStrategy, SoboStrategy
 from bofire.strategies import api as strategies
 
-from bo.problem import Candidate, Observation, OptimizationProblem
+from bo.problem import (
+    Candidate,
+    CategoricalParameter,
+    ContinuousParameter,
+    Observation,
+    OptimizationProblem,
+    ParamValue,
+)
 
 
 def _to_domain(problem: OptimizationProblem) -> Domain:
     """Translate our problem into a BoFire `Domain` (inputs + one objective output)."""
-    inputs = [ContinuousInput(key=p.name, bounds=(p.lower, p.upper)) for p in problem.parameters]
+    inputs = []
+    for parameter in problem.parameters:
+        if isinstance(parameter, ContinuousParameter):
+            inputs.append(
+                ContinuousInput(key=parameter.name, bounds=(parameter.lower, parameter.upper))
+            )
+        else:
+            inputs.append(CategoricalInput(key=parameter.name, categories=parameter.categories))
     objective = (
         MinimizeObjective(w=1.0)
         if problem.objective.direction == "minimize"
@@ -28,6 +48,11 @@ def _to_domain(problem: OptimizationProblem) -> Domain:
     return Domain(inputs=Inputs(features=inputs), outputs=Outputs(features=[output]))
 
 
+def _cast(parameter: ContinuousParameter | CategoricalParameter, raw: Any) -> ParamValue:
+    """Coerce a dataframe cell to the parameter's value type (float or category str)."""
+    return float(raw) if isinstance(parameter, ContinuousParameter) else str(raw)
+
+
 def _observations_to_frame(
     problem: OptimizationProblem, observations: list[Observation]
 ) -> pd.DataFrame:
@@ -35,7 +60,7 @@ def _observations_to_frame(
     objective_key = problem.objective.name
     rows = []
     for obs in observations:
-        row: dict[str, float] = dict(obs.params)
+        row: dict[str, object] = dict(obs.params)
         row[objective_key] = obs.value
         row[f"valid_{objective_key}"] = 1
         rows.append(row)
@@ -44,9 +69,9 @@ def _observations_to_frame(
 
 def _frame_to_candidates(problem: OptimizationProblem, frame: pd.DataFrame) -> list[Candidate]:
     """Extract the parameter columns of an ask() result into our `Candidate` type."""
-    names = [p.name for p in problem.parameters]
     return [
-        Candidate(params={name: float(row[name]) for name in names}) for _, row in frame.iterrows()
+        Candidate(params={p.name: _cast(p, row[p.name]) for p in problem.parameters})
+        for _, row in frame.iterrows()
     ]
 
 

@@ -359,6 +359,7 @@ dependencies = [
     { name = "psycopg", extra = ["binary"] },
     { name = "pydantic-settings" },
     { name = "rdkit" },
+    { name = "scikit-learn" },
     { name = "tblite" },
     { name = "temporalio", extra = ["pydantic"] },
 ]
@@ -382,6 +383,7 @@ requires-dist = [
     { name = "psycopg", extras = ["binary"], specifier = ">=3.2" },
     { name = "pydantic-settings", specifier = ">=2.5" },
     { name = "rdkit", specifier = ">=2026.3.4" },
+    { name = "scikit-learn", specifier = ">=1.9.0" },
     { name = "tblite", specifier = ">=0.7.0" },
     { name = "temporalio", extras = ["pydantic"], specifier = ">=1.30.0" },
 ]

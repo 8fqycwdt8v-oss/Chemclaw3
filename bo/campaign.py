@@ -13,10 +13,10 @@ from collections.abc import Awaitable, Callable
 from pydantic import BaseModel
 
 from bo.engine import initial_candidates, propose_candidates
-from bo.problem import Candidate, Observation, OptimizationProblem
+from bo.problem import Candidate, Observation, OptimizationProblem, ParamValue
 
 # Evaluate a candidate's parameters to its objective value.
-Evaluate = Callable[[dict[str, float]], Awaitable[float]]
+Evaluate = Callable[[dict[str, ParamValue]], Awaitable[float]]
 
 
 class CampaignResult(BaseModel):
