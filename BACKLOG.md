@@ -3,7 +3,21 @@
 Prioritized open action items. Top = next. Keep in sync with `docs/implementation-plan.md`
 (phase/step numbers) at session end.
 
-## Now — next capability phase (Phase 3 fingerprint search, or Phase 4 ELN)
+## Now — Phase 3: fingerprint search (molecule path done; reactions next)
+- [x] 3.1 `mcp-molfp` capability: ECFP4 (Morgan r2, 2048-bit) via RDKit (`mcp_servers/molfp/
+      fingerprint.py`), config-sized, deterministic. Thin FastMCP `server.py` advertises the tools.
+      (Dir is `mcp_servers/`, not `mcp/` — the `mcp` name is the SDK's, D-016.)
+- [x] 3.2 Postgres `bit(2048)` table + HNSW `bit_jaccard_ops` index (`infra/sql/002_...sql`) +
+      `PostgresFingerprintStore` (Tanimoto in SQL). In-memory backend proves the ranking everywhere.
+- [x] 3.3 `find_similar_molecules(smiles, top_k)` (Tanimoto, threshold+top_k from config) +
+      `find_substructure_matches` (exact RDKit match), backend-agnostic (`mcp_servers/molfp/search.py`).
+- [x] 3.5 `reaction-search` skill: the judgment (similarity vs substructure, what Tanimoto counts as
+      precedent, combine with metadata/graph) — thresholds in config, not code (G6).
+- [ ] 3.4 `mcp-rxnfp` (DRFP reaction fingerprints) + `find_similar_reactions` — deferred: needs the
+      `drfp` dep and a real reaction corpus; mirrors the molecule path (build when reactions land).
+- [ ] CHECKMATE 3 — running (deep review over the molecule path).
+
+
 
 ## Done — Phase 2b: evaluation & metric layer (cross-cutting)
 - [x] 2b.1 Metric interface: pure `Metric = (EvalCase) -> MetricResult` + registry
