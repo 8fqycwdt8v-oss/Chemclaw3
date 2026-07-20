@@ -1,17 +1,27 @@
 """The Chemclaw MAF agent (plan step 1.5).
 
-`build_agent` wires the conversation agent: the QM job tools plus a
-`SkillsProvider` that discovers `SKILL.md` files under the configured skills
-directory (progressive disclosure — the model sees skill names/descriptions and
-loads a skill body only when it needs the judgment). The chat client is
-injectable so the wiring can be built and tested without live credentials; the
-default builds the configured Anthropic client, which reads its own API key from
-the environment at call time.
+`build_agent` wires the conversation agent: the tools, a `SkillsProvider` that discovers
+`SKILL.md` files under the configured skills directory (progressive disclosure — the model
+sees skill names/descriptions and loads a skill body only when it needs the judgment), an
+in-memory session history so a chat accumulates a thread, and a `CompactionProvider` that
+keeps that thread within a token budget (see `_build_compaction`). The chat client is
+injectable so the wiring can be built and tested without live credentials; the default builds
+the configured Anthropic client, which reads its own API key from the environment at call time.
 """
 
 from typing import Any
 
-from agent_framework import Agent, FileSkillsSource, SkillsProvider
+from agent_framework import (
+    Agent,
+    CharacterEstimatorTokenizer,
+    CompactionProvider,
+    FileSkillsSource,
+    InMemoryHistoryProvider,
+    SkillsProvider,
+    SlidingWindowStrategy,
+    TokenBudgetComposedStrategy,
+    ToolResultCompactionStrategy,
+)
 
 from agents.bo_tools import suggest_next_experiment
 from agents.calc_tools import compute_xtb_energy, predict_pka, predict_solubility
@@ -70,6 +80,8 @@ def build_agent(chat_client: Any | None = None) -> Agent:
     """
     client = chat_client if chat_client is not None else _default_chat_client()
     skills = SkillsProvider(FileSkillsSource([settings.skills_dir]))
+    history = InMemoryHistoryProvider()
+    compaction = _build_compaction(history.source_id)
     return Agent(
         client=client,
         name="chemclaw",
@@ -89,7 +101,46 @@ def build_agent(chat_client: Any | None = None) -> Agent:
             suggest_next_experiment,
             propose_knowledge_note,
         ],
-        context_providers=[skills],
+        # Order matters: history loads/stores the thread, then compaction trims it — so
+        # compaction runs last and sees the full context (before the model) and the freshly
+        # stored history (after the run).
+        context_providers=[history, skills, compaction],
+    )
+
+
+def _build_compaction(history_source_id: str) -> CompactionProvider:
+    """Build the token-budget compaction that keeps a chat thread within context.
+
+    Compaction is triggered only when the included context exceeds the configured token budget
+    ("reduce when applicable"), then reclaims tokens cheapest-first without any LLM call:
+    collapse older tool-result payloads (the big evidence sweeps and full ELN recipes) into a
+    short cited trace, then slide the conversation window; the composed strategy's built-in
+    fallback drops the oldest groups if still over budget. System instructions and skills are
+    always preserved. The same strategy runs `before_run` (guard the model input) and
+    `after_run` (shrink the persisted history so the next turn starts smaller).
+
+    Args:
+        history_source_id: The history provider whose stored messages `after_run` compacts.
+
+    Returns:
+        A configured `CompactionProvider`.
+    """
+    tokenizer = CharacterEstimatorTokenizer()
+    strategy = TokenBudgetComposedStrategy(
+        token_budget=settings.agent_context_token_budget,
+        tokenizer=tokenizer,
+        strategies=[
+            ToolResultCompactionStrategy(
+                keep_last_tool_call_groups=settings.agent_keep_last_tool_groups
+            ),
+            SlidingWindowStrategy(keep_last_groups=settings.agent_keep_last_conversation_groups),
+        ],
+    )
+    return CompactionProvider(
+        before_strategy=strategy,
+        after_strategy=strategy,
+        tokenizer=tokenizer,
+        history_source_id=history_source_id,
     )
 
 

@@ -99,6 +99,17 @@ class Settings(BaseSettings):
     # where the agent discovers SKILL.md files.
     agent_model: str = "claude-sonnet-5"
     skills_dir: str = "skills"
+    # Conversation context management (MAF compaction). The agent keeps a session thread and
+    # composes tool calls that return large payloads (evidence sweeps, full ELN recipes), so a
+    # long chat would grow unbounded. Compaction runs only when the included context exceeds
+    # `agent_context_token_budget` (measured with a char/4 estimator — no external tokenizer),
+    # then reclaims tokens cheapest-first: collapse stale tool-result dumps to a short trace
+    # (keeping the newest `agent_keep_last_tool_groups` verbatim), then drop older conversation
+    # turns beyond `agent_keep_last_conversation_groups`. System instructions/skills are always
+    # kept. No LLM summarizer — deterministic and credential-free.
+    agent_context_token_budget: int = Field(default=100_000, ge=1)
+    agent_keep_last_tool_groups: int = Field(default=2, ge=0)
+    agent_keep_last_conversation_groups: int = Field(default=12, ge=1)
 
     # Markdown knowledge graph (plan Phase 2). Directory of note files the indexer
     # reads; retrieval is graph traversal over their [[wikilinks]] (D-004).
