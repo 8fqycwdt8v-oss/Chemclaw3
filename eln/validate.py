@@ -22,9 +22,10 @@ from datetime import UTC, datetime
 from rdkit import Chem
 
 from chemclaw.config import settings
-from eln.adapter import ElnMappingError
+from eln.adapter import ElnAdapter, ElnMappingError
 from eln.json_adapter import JsonExportAdapter
 from eln.ord import OrdReaction
+from eln.ord_adapter import OrdJsonAdapter
 
 
 def _elements(smiles_list: list[str]) -> tuple[set[str], list[str]]:
@@ -51,7 +52,11 @@ def validate_ord(reaction: OrdReaction) -> list[str]:
     chemistry.
     """
     problems: list[str] = []
-    input_elements, bad_inputs = _elements([c.smiles for c in reaction.inputs])
+    # Species introduced by a procedure step (a mid-run reagent, a quench, a wash) can supply
+    # elements too, so they count on the input side of the balance — otherwise a product atom
+    # legitimately coming from a workup reagent would be falsely flagged.
+    input_smiles = [c.smiles for c in (*reaction.inputs, *reaction.step_components())]
+    input_elements, bad_inputs = _elements(input_smiles)
     output_elements, bad_outputs = _elements([c.smiles for c in reaction.outcomes])
 
     for smiles in [*bad_inputs, *bad_outputs]:
@@ -65,30 +70,39 @@ def validate_ord(reaction: OrdReaction) -> list[str]:
     return problems
 
 
-def main() -> int:
-    """CLI: map and validate every ELN entry in a directory; report problems (plan 4.4).
-
-    Run as `python -m eln.validate [export_dir]`. Exits non-zero if any entry is unmappable
-    (bad ELN shape) or fails structure/mass-balance validation, so it can gate an ELN sync.
-    """
-    export_dir = sys.argv[1] if len(sys.argv) > 1 else settings.eln_export_dir
-    adapter = JsonExportAdapter(export_dir)
+def _validate_source(adapter: ElnAdapter, label: str) -> int:
+    """Map + validate every entry an adapter offers; print problems, return their count."""
     entries = asyncio.run(adapter.fetch_new_entries(datetime.min.replace(tzinfo=UTC)))
-    total_problems = 0
+    problems = 0
     for raw in entries:
         try:
-            problems = validate_ord(adapter.map_to_ord(raw))
+            issues = validate_ord(adapter.map_to_ord(raw))
         except ElnMappingError as exc:
-            print(f"{raw.entry_id}: unmappable — {exc}")
-            total_problems += 1
+            print(f"{label}/{raw.entry_id}: unmappable — {exc}")
+            problems += 1
             continue
-        for problem in problems:
-            print(f"{raw.entry_id}: {problem}")
-        total_problems += len(problems)
-    if total_problems:
-        print(f"\n{total_problems} problem(s) across {len(entries)} entr(ies) in {export_dir}")
+        for issue in issues:
+            print(f"{label}/{raw.entry_id}: {issue}")
+        problems += len(issues)
+    if not problems:
+        print(f"OK: {len(entries)} entr(ies) from {label} are valid")
+    return problems
+
+
+def main() -> int:
+    """CLI: map and validate every ELN entry from both adapters; report problems (plan 4.4).
+
+    Run as `python -m eln.validate [free_text_export_dir]`. Validates both the free-text JSON
+    export (positional arg or `eln_export_dir`) and the native ORD export (`ord_export_dir`),
+    so both ingestion paths are gated. Exits non-zero if any entry is unmappable or fails
+    structure/mass-balance validation.
+    """
+    export_dir = sys.argv[1] if len(sys.argv) > 1 else settings.eln_export_dir
+    total = _validate_source(JsonExportAdapter(export_dir), "free-text")
+    total += _validate_source(OrdJsonAdapter(), "ord")
+    if total:
+        print(f"\n{total} problem(s) found")
         return 1
-    print(f"OK: {len(entries)} entr(ies) in {export_dir} are valid")
     return 0
 
 

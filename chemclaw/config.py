@@ -156,6 +156,10 @@ class Settings(BaseSettings):
     # PR-gate work. ELN-specific format lives only in the adapter, never in config (G6).
     eln_export_dir: str = "eln/exports"
     eln_sync_timeout_seconds: float = Field(default=300.0, gt=0)
+    # A second concrete adapter reads native Open Reaction Database messages (human-readable
+    # ORD JSON) from this directory — the "structured recipe" path, alongside the free-text
+    # JSON export above. Same `ElnAdapter` contract, so both flow through the one sync loop.
+    ord_export_dir: str = "eln/exports/ord"
 
     # Memory layers (plan Phase 5). The semantic layer distils a playbook only from reactions
     # whose DRFP similarity clears this floor and that recur across >=2 projects — higher than

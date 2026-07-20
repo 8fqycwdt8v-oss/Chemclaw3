@@ -8,6 +8,14 @@ from the **free-text** procedure by deterministic regex (temperature, time). Gen
 unstructured cases the regex cannot resolve are escalated to the `eln-reaction-extraction`
 skill (per-field LLM), which is judgment and lives outside this deterministic adapter.
 
+A detailed development recipe is more than its headline conditions, so the free-text
+procedure is also **segmented into ordered steps** (`OrdReaction.steps`) and preserved
+verbatim (`procedure_text`). Segmentation is deterministic and lossless: it splits the
+prose on numbered markers or sentence boundaries, keeps each segment's exact text, and
+labels it with a coarse `StepKind` plus any per-step temperature/time the regex finds.
+Linking a SMILES to a step from prose alone would be a guess, so free-text steps carry no
+`components` — that (like any genuinely unstructured field) is the LLM skill's job.
+
 Expected entry shape (this ELN's format — known only here):
     {"id": "...", "timestamp": "ISO-8601",
      "reactants": [{"smiles": "...", "role": "reactant", "mass_mg": 460}, ...],
@@ -25,7 +33,7 @@ from pydantic import ValidationError
 
 from chemclaw.config import settings
 from eln.adapter import ElnMappingError, RawEntry
-from eln.ord import Component, OrdReaction, Role
+from eln.ord import Component, OrdReaction, ReactionStep, Role, StepKind
 
 # Deterministic free-text extractors for the two conditions an ELN reliably states in prose.
 # The temperature pattern *requires* the degree sign: "80 °C" is unambiguously a temperature,
@@ -37,6 +45,43 @@ from eln.ord import Component, OrdReaction, Role
 # "-10 °C" still matches because nothing numeric precedes its sign.
 _TEMPERATURE = re.compile(r"(?<![\d.])(-?\d+(?:\.\d+)?)\s*°\s*C\b")
 _TIME_HOURS = re.compile(r"(\d+(?:\.\d+)?)\s*h(?:ours?|rs?)?\b")
+
+# Procedure segmentation. A numbered marker ("1.", "2)", "Step 3:") is the strongest signal
+# of an author-intended step boundary; absent numbering, fall back to sentence boundaries.
+# `\d+[.)]` needs whitespace after it so a decimal ("0.5 h") or amount ("2.0 g") is never a
+# split point — only a genuine list marker is.
+_STEP_MARKER = re.compile(r"(?:^|\s)(?:step\s*)?\d+[.)]\s+", re.IGNORECASE)
+_SENTENCE_END = re.compile(r"(?<=[.;])\s+")
+
+# Coarse step labels, checked in this priority order. Distinctive terminal operations
+# (purification, workup) win over the ubiquitous "add"; the verbatim text is always kept on
+# the step, so a mislabel loses nothing. Substring match (not word) tolerates inflections
+# ("crystallized", "washing"). Lowercased before matching.
+_STEP_KEYWORDS: tuple[tuple[StepKind, tuple[str, ...]], ...] = (
+    (StepKind.PURIFICATION, ("crystalli", "chromatograph", "triturat", "distil", "slurr")),
+    (
+        StepKind.WORKUP,
+        (
+            "quench",
+            "wash",
+            "extract",
+            "filter",
+            "concentrat",
+            "evaporat",
+            "partition",
+            "brine",
+            "separat",
+            "dry over",
+            "dried over",
+        ),
+    ),
+    (
+        StepKind.ADDITION,
+        ("add", "charg", "dissolv", "combin", "introduc", "treat with", "dropwise", "portionwise"),
+    ),
+    (StepKind.TEMPERATURE, ("cool", "chill", "warm", "heat", "reflux", "ice bath", "°c")),
+    (StepKind.STIR, ("stir", "age", "hold", "maintain")),
+)
 
 
 class ElnFormatError(ElnMappingError):
@@ -110,7 +155,52 @@ class JsonExportAdapter:
             yield_percent=_yield(payload),
             provenance=f"eln:{payload.get('operator', 'unknown')}",
             project=payload.get("project"),
+            steps=_segment_steps(procedure),
+            procedure_text=procedure or None,
         )
+
+
+def _segment_steps(procedure: str) -> list[ReactionStep]:
+    """Split a free-text procedure into ordered, coarsely-labeled steps (lossless).
+
+    Each returned step keeps its source segment verbatim and carries any temperature/time
+    the regex can read from that segment; species are left unlinked (see the module
+    docstring). An empty or whitespace-only procedure yields no steps.
+    """
+    return [
+        ReactionStep(
+            index=i,
+            kind=_classify(segment),
+            text=segment,
+            temperature_c=_search(_TEMPERATURE, segment),
+            duration_h=_search(_TIME_HOURS, segment),
+        )
+        for i, segment in enumerate(_split_segments(procedure), start=1)
+    ]
+
+
+def _split_segments(procedure: str) -> list[str]:
+    """Break a procedure into step segments on numbered markers, else sentence boundaries."""
+    text = procedure.strip()
+    if not text:
+        return []
+    parts = _STEP_MARKER.split(text) if _STEP_MARKER.search(text) else _SENTENCE_END.split(text)
+    return [stripped for part in parts if (stripped := part.strip(" .;\n\t"))]
+
+
+def _classify(segment: str) -> StepKind:
+    """Label a step by the first keyword group it matches, else `CUSTOM` (best-effort)."""
+    low = segment.lower()
+    for kind, keywords in _STEP_KEYWORDS:
+        if any(word in low for word in keywords):
+            return kind
+    return StepKind.CUSTOM
+
+
+def _search(pattern: re.Pattern[str], text: str) -> float | None:
+    """First numeric group the pattern matches in `text`, as a float, else `None`."""
+    match = pattern.search(text)
+    return float(match.group(1)) if match else None
 
 
 def _list(payload: dict[str, Any], key: str) -> list[Any]:
@@ -151,8 +241,7 @@ def _condition(
     structured = payload.get(key)
     if structured is not None:
         return float(structured)
-    match = pattern.search(text)
-    return float(match.group(1)) if match else None
+    return _search(pattern, text)
 
 
 def _yield(payload: dict[str, Any]) -> float | None:
