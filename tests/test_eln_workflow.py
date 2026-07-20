@@ -1,0 +1,69 @@
+"""Server-backed test for the durable ELN sync workflow (plan step 4.5).
+
+Runs the real `ElnSyncWorkflow` on Temporal's time-skipping server (CI; skips offline),
+proving the durable path ingests the seed ELN corpus end-to-end: fetch → map → validate →
+index (in-memory here) → PR-gate (fake). Stores and submitter are swapped via the module
+factories so no database or git is needed.
+"""
+
+import asyncio
+from datetime import UTC, datetime
+
+import pytest
+from temporalio.client import Client
+from temporalio.worker import Worker
+
+import workflows.eln_sync as eln_sync
+from chemclaw.config import settings
+from kg.pr_gate import NoteSubmission
+from mcp_servers.fpstore import InMemoryFingerprintStore
+from tests.temporal_env import pydantic_client, start_env_or_skip
+from workflows.eln_sync import ElnSyncWorkflow, sync_eln_entries
+
+
+def test_eln_sync_workflow_ingests_seed_corpus(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The workflow ingests every seed ELN entry and reports them, durably."""
+    captured: list[NoteSubmission] = []
+
+    class _Fake:
+        async def submit(self, submission: NoteSubmission) -> str:
+            captured.append(submission)
+            return f"pr://{submission.branch}"
+
+    reaction_store = InMemoryFingerprintStore()
+    molecule_store = InMemoryFingerprintStore()
+    monkeypatch.setattr(eln_sync, "_reaction_store", lambda: reaction_store)
+    monkeypatch.setattr(eln_sync, "_molecule_store", lambda: molecule_store)
+    monkeypatch.setattr(eln_sync, "default_submitter", lambda: _Fake())
+
+    async def _run() -> None:
+        async with await start_env_or_skip() as env:
+            client: Client = pydantic_client(env)
+            async with Worker(
+                client,
+                task_queue="test-eln",
+                workflows=[ElnSyncWorkflow],
+                activities=[sync_eln_entries],
+            ):
+                summary = await client.execute_workflow(
+                    ElnSyncWorkflow.run,
+                    datetime.min.replace(tzinfo=UTC),
+                    id="eln-sync-test",
+                    task_queue="test-eln",
+                )
+        # The seed corpus (eln/exports) has two valid reactions.
+        assert set(summary.ingested) == {"eln-2026-001", "eln-2026-002"}
+        assert summary.rejected == []
+        assert len(captured) == 2  # both proposed a reaction note
+        assert len(await reaction_store.all_records()) == 2
+
+    asyncio.run(_run())
+
+
+def test_background_worker_registers_eln_sync() -> None:
+    """The ELN sync activity/workflow are wired onto the background worker (regression)."""
+    from workers.background_worker import BACKGROUND_ACTIVITIES, BACKGROUND_WORKFLOWS
+
+    assert ElnSyncWorkflow in BACKGROUND_WORKFLOWS
+    assert sync_eln_entries in BACKGROUND_ACTIVITIES
+    assert settings.background_task_queue  # the queue the sync runs on

@@ -1,0 +1,56 @@
+# Local dev stack: a self-hosted Temporal dev server and a pgvector-enabled
+# Postgres. Brought up with `make up`. This is the durable-execution + storage
+# spine the app builds on (plan step 0.5); it is NOT a production topology.
+#
+# Ports/credentials mirror the defaults in `.env.example` / `chemclaw/config.py`,
+# so a fresh checkout connects with no extra configuration.
+
+services:
+  postgres:
+    # pgvector image so the fingerprint store (Phase 3) and QM cache (step 1.10)
+    # share one database. `bit(2048)` + HNSW needs pgvector >= 0.7.
+    image: pgvector/pgvector:pg16
+    environment:
+      POSTGRES_USER: chemclaw
+      POSTGRES_PASSWORD: chemclaw
+      POSTGRES_DB: chemclaw
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U chemclaw"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  temporal:
+    # Official all-in-one dev server: frontend + history + matching + web UI in
+    # one container with an in-memory store. Perfect for local durability tests,
+    # never for production.
+    image: temporalio/auto-setup:1.25.2
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      DB: postgres12
+      DB_PORT: 5432
+      POSTGRES_USER: chemclaw
+      POSTGRES_PWD: chemclaw
+      POSTGRES_SEEDS: postgres
+    ports:
+      - "7233:7233"  # frontend gRPC — matches CHEMCLAW_TEMPORAL_ADDRESS
+
+  temporal-ui:
+    # Web UI to watch workflows/event history — the primary way we verify
+    # durability spikes (worker restart mid-job) by eye at each CHECKMATE.
+    image: temporalio/ui:2.31.2
+    depends_on:
+      - temporal
+    environment:
+      TEMPORAL_ADDRESS: temporal:7233
+    ports:
+      - "8080:8080"
+
+volumes:
+  postgres-data:
