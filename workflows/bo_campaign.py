@@ -13,7 +13,14 @@ from temporalio import workflow
 from temporalio.common import RetryPolicy
 
 with workflow.unsafe.imports_passed_through():
-    from bo.problem import CampaignResult, CampaignSpec, Observation, best_of
+    from bo.problem import (
+        CampaignResult,
+        CampaignSpec,
+        Observation,
+        best_of,
+        discrete_candidate_count,
+        distinct_candidate_count,
+    )
     from chemclaw.config import settings
     from workflows.bo_activities import (
         evaluate_candidates,
@@ -48,7 +55,11 @@ class BoCampaignWorkflow:
             retry_policy=_RETRY,
         )
 
+        space = discrete_candidate_count(spec.problem)
         for _ in range(spec.n_rounds):
+            # Stop early if a purely discrete candidate set is exhausted.
+            if space is not None and distinct_candidate_count(history) + spec.batch > space:
+                break
             proposed = await workflow.execute_activity(
                 propose_next,
                 args=[spec.problem, history, spec.batch],

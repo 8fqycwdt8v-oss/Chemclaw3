@@ -17,6 +17,8 @@ from bo.problem import (
     OptimizationProblem,
     ParamValue,
     best_of,
+    discrete_candidate_count,
+    distinct_candidate_count,
 )
 
 # Evaluate a candidate's parameters to its objective value.
@@ -59,7 +61,12 @@ async def optimize(
         The best observation found and the ordered evaluation history.
     """
     history = await _evaluate(initial_candidates(problem, n_initial), evaluate, provenance)
+    space = discrete_candidate_count(problem)
     for _ in range(n_rounds):
+        # A purely discrete space can be exhausted: once too few distinct candidates
+        # remain to propose a full batch, stop rather than crash inside BoFire.
+        if space is not None and distinct_candidate_count(history) + batch > space:
+            break
         proposed = propose_candidates(problem, history, batch)
         history.extend(await _evaluate(proposed, evaluate, provenance))
     return CampaignResult(best=best_of(problem, history), history=history)

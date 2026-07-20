@@ -39,8 +39,9 @@ Prioritized open action items. Top = next. Keep in sync with `docs/implementatio
       BoFire drives a pure-categorical domain by exhaustive-discrete acquisition — finds a top molecule
       without evaluating the whole library (test: best found evaluating 9/14). Constraint: evaluation
       budget must be < library size, else the unique-candidate pool exhausts.
-- [ ] Robustness: `optimize`/BO workflow should stop gracefully when a discrete candidate set is
-      exhausted (budget >= library size) instead of crashing inside BoFire. (G4 follow-up.)
+- [x] Robustness: `optimize` and the durable BO workflow stop gracefully when a discrete candidate
+      set is exhausted (`discrete_candidate_count`/`distinct_candidate_count` guard) instead of crashing
+      inside BoFire. Tests: budget 2+10 over a 4-molecule library returns cleanly.
 - [ ] 1d.5 candidates PR-gated (after Phase 2); 1d.6 progress/regret metric (after Phase 2b). CHECKMATE 1d full.
 
 ## Done

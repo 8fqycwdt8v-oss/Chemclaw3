@@ -124,3 +124,25 @@ def best_of(problem: OptimizationProblem, observations: list[Observation]) -> Ob
         if improved:
             best = observation
     return best
+
+
+def discrete_candidate_count(problem: OptimizationProblem) -> int | None:
+    """Distinct candidates in a purely discrete space, or None if it is infinite.
+
+    Any continuous parameter makes the space infinite (returns None). For an
+    all-categorical problem it is the product of the category counts — the size at
+    which unique-candidate proposals exhaust the space and BoFire's discrete
+    acquisition can no longer return a fresh point.
+    """
+    total = 1
+    for parameter in problem.parameters:
+        if isinstance(parameter, CategoricalParameter):
+            total *= len(parameter.categories)
+        else:
+            return None
+    return total
+
+
+def distinct_candidate_count(observations: list[Observation]) -> int:
+    """How many distinct parameter combinations appear in the observations."""
+    return len({tuple(sorted(o.params.items())) for o in observations})

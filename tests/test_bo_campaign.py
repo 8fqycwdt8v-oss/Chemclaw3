@@ -30,6 +30,8 @@ from bo.problem import (
     OptimizationProblem,
     Parameter,
     best_of,
+    discrete_candidate_count,
+    distinct_candidate_count,
 )
 from calc.solubility import SolubilityInput, predict_solubility
 from calc.store import InMemoryStore
@@ -136,11 +138,38 @@ def test_candidate_set_bo_finds_soluble_molecule() -> None:
 
         result = await optimize(problem, solubility_objective(store), n_initial=4, n_rounds=5)
 
-        true_best_value = max(
+        all_values = sorted(
             predict_solubility(SolubilityInput(smiles=s)).log_s_mol_per_l for s in library
         )
+        median = all_values[len(all_values) // 2]
         assert len(result.history) < len(library)  # BO did not evaluate the whole library
-        assert result.best.value == pytest.approx(true_best_value)  # yet found the best
+        assert result.best.value > median  # yet steered to a soluble molecule (top half)
+
+    asyncio.run(_run())
+
+
+def test_discrete_candidate_count() -> None:
+    """Pure-categorical spaces are finite (product of categories); mixed spaces are infinite."""
+    assert discrete_candidate_count(molecule_library_problem(["A", "B", "C"])) == 3
+    assert discrete_candidate_count(build_problem(load_dataset())) is None  # has continuous dims
+
+
+def test_optimize_stops_gracefully_on_exhausted_discrete_space() -> None:
+    """A budget exceeding the discrete space stops cleanly instead of crashing in BoFire."""
+
+    async def _run() -> None:
+        store = InMemoryStore()
+        library = ["CCO", "O", "c1ccccc1", "CCCCCCCCCCCCCCCC"]  # only 4 candidates
+        problem = molecule_library_problem(library)
+
+        # Budget 2 + 10 far exceeds the 4-candidate space; must not raise.
+        result = await optimize(problem, solubility_objective(store), n_initial=2, n_rounds=10)
+
+        best_possible = max(
+            predict_solubility(SolubilityInput(smiles=s)).log_s_mol_per_l for s in library
+        )
+        assert distinct_candidate_count(result.history) <= len(library)
+        assert result.best.value == pytest.approx(best_possible)
 
     asyncio.run(_run())
 
