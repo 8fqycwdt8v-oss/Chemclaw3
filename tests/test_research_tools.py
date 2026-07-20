@@ -75,3 +75,17 @@ def test_empty_when_nothing_matches(tmp_path: Path, monkeypatch: pytest.MonkeyPa
     monkeypatch.setattr(research_tools, "_reaction_store", lambda: store)
 
     assert asyncio.run(gather_evidence("no-such-term-xyz")) == []
+
+
+def test_sweep_is_capped_to_the_budget(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A broad match over many notes is truncated to the configured chunk budget (token-frugal)."""
+    for i in range(10):
+        (tmp_path / f"n{i}.md").write_text(
+            f"---\nid: reaction-{i}\ntype: reaction\n---\nyield noted.\n", encoding="utf-8"
+        )
+    monkeypatch.setattr(settings, "knowledge_dir", str(tmp_path))
+    monkeypatch.setattr(settings, "gather_evidence_max_chunks", 3)
+
+    chunks = asyncio.run(gather_evidence("yield"))
+
+    assert len(chunks) == 3

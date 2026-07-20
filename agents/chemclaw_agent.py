@@ -13,6 +13,7 @@ from typing import Any
 
 from agent_framework import Agent, FileSkillsSource, SkillsProvider
 
+from agents.bo_tools import suggest_next_experiment
 from agents.calc_tools import compute_xtb_energy, predict_pka, predict_solubility
 from agents.graph_tools import expand_note, find_notes, propose_knowledge_note
 from agents.qm_tools import get_qm_job_status, submit_qm_job
@@ -39,7 +40,13 @@ _INSTRUCTIONS = (
     "functional group (then find_notes on a hit's SMILES to reach the reactions using it). "
     "(3) For properties use compute_xtb_energy / predict_pka / predict_solubility (inline, "
     "cached); heavy QM goes through submit_qm_job (returns a job id — report it, poll with "
-    "get_qm_job_status).\n"
+    "get_qm_job_status). (4) To answer 'which experiment/condition next', call "
+    "suggest_next_experiment: build the decision space and the runs-so-far from the evidence "
+    "you gathered, and it returns the point(s) to try next (proposals a human runs).\n"
+    "Be proactive with tools, not just when asked to compute: when a question turns on a "
+    "property the record does not state — e.g. weighing a solvent not yet tried against the "
+    "ones in the ELN — compute it yourself (predict_solubility and the others) and fold the "
+    "prediction, with its uncertainty, into the answer rather than leaving the gap.\n"
     "Discipline: cite the note id behind every claim; keep evidenced history separate from "
     "transferred analogy; say plainly when the data is silent rather than inventing it. "
     "Anything new worth keeping — a distilled rule, a proposed protocol or set of conditions — "
@@ -79,6 +86,7 @@ def build_agent(chat_client: Any | None = None) -> Agent:
             find_similar_reactions,
             find_similar_molecules,
             find_substructure_matches,
+            suggest_next_experiment,
             propose_knowledge_note,
         ],
         context_providers=[skills],

@@ -178,6 +178,10 @@ class Settings(BaseSettings):
     report_section_timeout_seconds: float = Field(default=300.0, gt=0)
     # How much of a source note's body a report carries as an evidence excerpt.
     report_excerpt_chars: int = Field(default=240, gt=0)
+    # Cap on how many evidence chunks `gather_evidence` hands the agent in one sweep, so a
+    # broad question over a large corpus fills only as much context as it needs (the agent
+    # narrows the query or drills in with expand_note when the sweep is truncated).
+    gather_evidence_max_chunks: int = Field(default=40, ge=1)
 
     @model_validator(mode="after")
     def _poll_faster_than_heartbeat(self) -> "Settings":

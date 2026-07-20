@@ -15,6 +15,7 @@ evidenced fact from transferred analogy, and drafting new protocols — lives in
 `deep-research` skill, not here. This tool only gathers.
 """
 
+from chemclaw.config import settings
 from mcp_servers.fpstore import default_reaction_store
 from report.evidence import EvidenceChunk, SourceRetriever
 from report.retrievers import FingerprintReactionRetriever, GraphRetriever
@@ -49,7 +50,9 @@ async def gather_evidence(
 
     Returns:
         Evidence chunks, each with its content, the `source_note_id` to cite/expand, and which
-        retriever found it.
+        retriever found it. Capped at the configured budget so a broad sweep does not flood the
+        context; if you hit the cap, narrow the query (a `note_type`/`tag` filter) rather than
+        assume you have seen everything.
     """
     filters: dict[str, str] = {}
     if note_type is not None:
@@ -71,4 +74,4 @@ async def gather_evidence(
         if key not in seen:
             seen.add(key)
             unique.append(chunk)
-    return unique
+    return unique[: settings.gather_evidence_max_chunks]
