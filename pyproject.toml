@@ -8,6 +8,10 @@ requires-python = ">=3.11"
 dependencies = [
     "agent-framework-anthropic>=1.0.0b260709",
     "agent-framework-core>=1.11.0",
+    "bofire[optimization]>=0.4.1",
+    "llvmlite>=0.43",
+    "mordredcommunity>=2.0.7",
+    "numba>=0.60",
     "psycopg[binary]>=3.2",
     "pydantic-settings>=2.5",
     "rdkit>=2026.3.4",
@@ -60,9 +64,10 @@ warn_redundant_casts = true
 # which produces false attr-defined errors. Skip analysing it so its names are
 # treated as untyped rather than scattering per-call ignores across the codebase.
 [[tool.mypy.overrides]]
-module = ["rdkit.*"]
+module = ["rdkit.*", "bofire.*", "pandas", "pandas.*"]
 follow_imports = "skip"
 follow_imports_for_stubs = true
+ignore_missing_imports = true
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

@@ -24,9 +24,12 @@ Prioritized open action items. Top = next. Keep in sync with `docs/implementatio
   durability (Temporal) is reserved for long jobs (BO campaigns 1d, later HPC).
 
 ### Phase 1d — Bayesian optimization (BoFire, pulled forward)
-- [ ] 1d.1 Domain adapter (config → BoFire `Domain`, encapsulated).
-- [ ] 1d.2 ask/tell `propose_candidates`; 1d.3 objective eval via 1c calculators + store.
-- [ ] 1d.4 BO campaign as durable Temporal workflow; 1d.5 candidates PR-gated; 1d.6 progress metric. CHECKMATE 1d.
+- [x] 1d.1 Domain adapter (`bo/engine.py`, BoFire fully encapsulated behind neutral `bo/problem.py` types).
+- [x] 1d.2 ask/tell: `initial_candidates` (random seed) + `propose_candidates` (SOBO); `optimize()` loop
+      (`bo/campaign.py`) — convergence-tested on known minima/maxima (CHECKMATE 1d spike met).
+- [ ] 1d.3 objective eval via 1c calculators + store (currently `evaluate` is injected; wire a calculator).
+- [ ] 1d.4 wrap `optimize()` in a durable Temporal campaign workflow (resumable long runs).
+- [ ] 1d.5 candidates PR-gated (after Phase 2); 1d.6 progress/regret metric (after Phase 2b). CHECKMATE 1d full.
 
 ## Done
 - [x] **Phase 0** — foundation (tooling, config, infra compose, CI, ADR-0001, layer READMEs). CHECKMATE 0 green.
