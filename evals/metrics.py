@@ -21,16 +21,26 @@ class _ProcessMasses:
     """
 
     def __init__(self, output: dict[str, Any]) -> None:
-        """Validate and hold the input masses and product mass (kg)."""
+        """Validate and hold the input masses and product mass (kg).
+
+        Rejects a mass balance where the product exceeds the total input, which is
+        physically impossible (mass is not created) and would otherwise yield a
+        negative E-factor that silently passes the gate (G4).
+        """
         self.inputs = _positive_masses(output.get("input_masses_kg"))
         self.product = _positive_scalar(output.get("product_mass_kg"), "product_mass_kg")
+        if self.product > sum(self.inputs):
+            raise MetricError(
+                f"product_mass_kg {self.product:.4g} exceeds total input "
+                f"{sum(self.inputs):.4g} kg — mass balance violated"
+            )
 
 
 def _positive_masses(raw: Any) -> list[float]:
     """Coerce a non-empty list of non-negative input masses, else `MetricError`."""
     if not isinstance(raw, (list, tuple)) or not raw:
         raise MetricError("output.input_masses_kg must be a non-empty list of masses")
-    masses = [float(x) for x in raw]
+    masses = [_scalar(x, "output.input_masses_kg entry") for x in raw]
     if any(m < 0 for m in masses):
         raise MetricError("output.input_masses_kg must be non-negative")
     return masses
@@ -38,9 +48,7 @@ def _positive_masses(raw: Any) -> list[float]:
 
 def _positive_scalar(raw: Any, field: str) -> float:
     """Coerce a strictly positive scalar (a product mass divides), else `MetricError`."""
-    if raw is None:
-        raise MetricError(f"output.{field} is required")
-    value = float(raw)
+    value = _scalar(raw, f"output.{field}")
     if value <= 0:
         raise MetricError(f"output.{field} must be > 0")
     return value
@@ -121,8 +129,10 @@ def bo_regret(case: EvalCase) -> MetricResult:
 
     Plan step 1d.6 — Phase 1d's registered scientific metric. Reads `output.best_value`
     and `reference.optimum`, with `output.direction` ("maximize"/"minimize") giving the
-    sign so regret is non-negative. It is a progress metric with no pass threshold
-    (`passed` is None): scale is problem-specific, so a report cites it, not gates on it.
+    sign. Regret is non-negative when the reference is the true optimum; a negative value
+    is meaningful and kept (not clamped) — it flags that the search *beat* the recorded
+    reference, i.e. the reference is too loose. It is a progress metric with no pass
+    threshold (`passed` is None): scale is problem-specific, so a report cites it, not gates.
     """
     if case.reference is None:
         raise MetricError("bo_regret needs a reference with `optimum`")
@@ -141,7 +151,7 @@ def bo_regret(case: EvalCase) -> MetricResult:
         unit=None,
         passed=None,
         provenance=(
-            f"regret = |optimum {optimum:.4g} - best {best:.4g}| = {value:.4g} ({direction})"
+            f"regret = optimum {optimum:.4g} vs best {best:.4g} = {value:.4g} ({direction})"
         ),
     )
 

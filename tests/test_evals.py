@@ -115,6 +115,39 @@ def test_load_rejects_malformed_case(tmp_path) -> None:  # type: ignore[no-untyp
         load_eval_cases(str(tmp_path))
 
 
+def test_load_rejects_misspelled_key(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    """An unknown top-level key is rejected, not silently dropped (G4)."""
+    text = "---\nid: x\nmetrics: [e_factor]\noutputt: {}\n---\ntypo in `output`\n"
+    (tmp_path / "typo.md").write_text(text, encoding="utf-8")
+    with pytest.raises(EvalCaseError, match="invalid eval case"):
+        load_eval_cases(str(tmp_path))
+
+
+def test_unknown_metric_names_the_case() -> None:
+    """A mistyped metric name surfaces as a case-named error, not a raw crash (G4)."""
+    case = EvalCase(id="c", metrics=["e_facto"], output={})
+    with pytest.raises(EvalCaseError, match="case 'c' metric 'e_facto'"):
+        run_eval([case], "v1")
+
+
+def test_non_scalar_mass_is_a_clear_error() -> None:
+    """A list where a scalar mass is expected is a MetricError, not a TypeError (G4)."""
+    case = EvalCase(
+        id="c", metrics=["pmi"], output={"input_masses_kg": [1], "product_mass_kg": [1, 2]}
+    )
+    with pytest.raises(MetricError, match="product_mass_kg"):
+        get_metric("pmi")(case)
+
+
+def test_mass_balance_violation_is_rejected() -> None:
+    """A product heavier than the total input is impossible, not a negative-E pass (G4)."""
+    case = EvalCase(
+        id="c", metrics=["e_factor"], output={"input_masses_kg": [1], "product_mass_kg": 5}
+    )
+    with pytest.raises(MetricError, match="mass balance"):
+        get_metric("e_factor")(case)
+
+
 def test_tool_utility_surfaces_where_tools_do_not_help() -> None:
     """A/B over a task set finds a task where augmentation hurts (F8/F9 evidence)."""
     tasks = [

@@ -17,7 +17,13 @@ Prioritized open action items. Top = next. Keep in sync with `docs/implementatio
       no-effect over a task set — proves ≥1 case where tooling does NOT help (F8/F9 steering).
 - [x] 2b.5 Wiring: each later capability phase registers ≥1 metric via `@metric`; regressions are
       pinned by the test suite (expected pass/fail per case), not a CI hard-gate (the seed set
-      deliberately holds a failing case to prove gating). CHECKMATE 2b: see commit.
+      deliberately holds a failing case to prove gating).
+- [x] CHECKMATE 2b (G1–G7 + deep review): 5 robustness findings fixed — (F1) `EvalCase`
+      `extra="forbid"` so a misspelled frontmatter key can't silently drop and mis-score;
+      (F2) unknown metric name wrapped as case-named `EvalCaseError`, not a raw traceback;
+      (F3) mass coercion routes through the guarded `_scalar` (no escaping `TypeError`);
+      (F4) mass-balance violation (product > input) rejected, not a negative-E gate pass;
+      (F5) `bo_regret` provenance/docstring corrected (signed, not `|abs|`). **Phase 2b complete.**
 
 ## Prior — Phase 2: knowledge graph + PR-gate
 - [x] 2.1 Note schema (`kg/note.py`, one pydantic model); 2.2 parser (frontmatter → Note, clear errors).

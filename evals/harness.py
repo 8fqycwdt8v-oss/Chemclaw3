@@ -56,10 +56,11 @@ def run_eval(cases: list[EvalCase], case_set_version: str) -> EvalReport:
     results: list[ScoredResult] = []
     for case in cases:
         for name in case.metrics:
-            fn = get_metric(name)
             try:
-                mr = fn(case)
+                mr = get_metric(name)(case)
             except ValueError as exc:
+                # Covers both an unknown metric name and a metric's own MetricError,
+                # so either way the failure names the case + metric that caused it.
                 raise EvalCaseError(f"case {case.id!r} metric {name!r}: {exc}") from exc
             results.append(
                 ScoredResult(
