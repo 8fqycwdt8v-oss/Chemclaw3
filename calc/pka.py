@@ -15,7 +15,7 @@ from pydantic import BaseModel, Field
 from rdkit import Chem
 
 from calc.store import CalculationKey, ResultStore, run_cached
-from calc.xtb_engine import geometry, gfn2_energy, parse_molecule
+from calc.xtb_engine import engine_version, geometry, gfn2_energy, parse_molecule
 from chemclaw.config import settings
 
 CALC_TYPE = "pka"
@@ -110,18 +110,28 @@ def predict_pka(job: PkaInput) -> PkaResult:
     )
 
 
+def _calc_version() -> str:
+    """Cache-key version tying pKa results to method, engine, solvent, and calibration.
+
+    The engine build is included (see `calc.xtb_engine.engine_version`) so a tblite
+    upgrade recomputes, exactly as the xTB energy key does.
+    """
+    return (
+        f"{settings.xtb_method}+tblite-{engine_version()}/alpb-{settings.pka_solvent}/"
+        f"cal-{settings.pka_calibration_slope}:{settings.pka_calibration_intercept}"
+    )
+
+
 async def run_cached_pka(store: ResultStore, job: PkaInput) -> tuple[PkaResult, bool]:
     """Return a pKa prediction for `job`, reusing the store on a repeat.
 
-    The key is versioned by method, solvent, and calibration, so recalibrating or
-    switching solvent recomputes rather than serving a stale pKa.
+    The key is versioned by method, engine build, solvent, and calibration, so an
+    engine upgrade, a recalibration, or a solvent switch recomputes rather than
+    serving a stale pKa.
     """
     key = CalculationKey.build(
         calc_type=CALC_TYPE,
-        calc_version=(
-            f"{settings.xtb_method}/alpb-{settings.pka_solvent}/"
-            f"cal-{settings.pka_calibration_slope}:{settings.pka_calibration_intercept}"
-        ),
+        calc_version=_calc_version(),
         inputs={"smiles": job.smiles},
         params={"embed_seed": settings.xtb_embed_seed},
     )

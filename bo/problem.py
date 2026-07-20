@@ -117,6 +117,8 @@ class CampaignResult(BaseModel):
 
 def best_of(problem: OptimizationProblem, observations: list[Observation]) -> Observation:
     """Return the best observation for the problem's optimization direction."""
+    if not observations:
+        raise ValueError("no observations")
     best = observations[0]
     for observation in observations[1:]:
         if problem.objective.direction == "minimize":
@@ -148,3 +150,14 @@ def discrete_candidate_count(problem: OptimizationProblem) -> int | None:
 def distinct_candidate_count(observations: list[Observation]) -> int:
     """How many distinct parameter combinations appear in the observations."""
     return len({tuple(sorted(o.params.items())) for o in observations})
+
+
+def space_exhausted(space: int | None, history: list[Observation], batch: int) -> bool:
+    """Whether a purely discrete space is too exhausted to propose a full batch.
+
+    A finite (all-categorical) space runs out of fresh points: once fewer than
+    `batch` distinct candidates remain, BoFire's discrete acquisition cannot
+    return one and would crash, so a campaign loop must stop cleanly instead.
+    `space` is None for an infinite (any-continuous) space, which never exhausts.
+    """
+    return space is not None and distinct_candidate_count(history) + batch > space

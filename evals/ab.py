@@ -14,11 +14,15 @@ from chemclaw.config import settings
 
 
 class TaskScores(BaseModel):
-    """One task scored twice by the same metric: baseline vs. tool-augmented."""
+    """One task scored twice by the same metric: baseline vs. tool-augmented.
+
+    Scores must be finite: a NaN would make every epsilon comparison false (a
+    silent "no effect") and poison `net_delta`, so it is rejected at the model.
+    """
 
     task_id: str = Field(min_length=1)
-    baseline: float
-    augmented: float
+    baseline: float = Field(allow_inf_nan=False)
+    augmented: float = Field(allow_inf_nan=False)
 
 
 class ToolUtility(BaseModel):

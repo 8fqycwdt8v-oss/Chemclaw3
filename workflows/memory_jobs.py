@@ -17,6 +17,8 @@ with workflow.unsafe.imports_passed_through():
     from kg.git_submitter import default_submitter
     from memory.jobs import distill_playbooks, synthesize_campaigns
 
+from workflows.publish import BAD_DATA_RETRY
+
 
 async def _all_reactions() -> list[OrdReaction]:
     """Read and map every ELN reaction (the memory jobs reason over the full corpus)."""
@@ -53,6 +55,7 @@ class CampaignSynthesisWorkflow:
         return await workflow.execute_activity(
             synthesize_campaigns_activity,
             start_to_close_timeout=timedelta(seconds=settings.memory_job_timeout_seconds),
+            retry_policy=BAD_DATA_RETRY,
         )
 
 
@@ -66,4 +69,5 @@ class PlaybookDistillationWorkflow:
         return await workflow.execute_activity(
             distill_playbooks_activity,
             start_to_close_timeout=timedelta(seconds=settings.memory_job_timeout_seconds),
+            retry_policy=BAD_DATA_RETRY,
         )

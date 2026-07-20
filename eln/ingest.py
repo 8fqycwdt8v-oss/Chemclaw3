@@ -9,6 +9,7 @@ signs off. Stores and submitter are injected, so the whole flow is testable in-m
 no database or git. Indexing is idempotent (id-keyed upserts), so re-ingesting is safe.
 """
 
+from chemclaw.errors import ChemclawError
 from eln.chem import canonical_smiles
 from eln.note import note_from_ord_reaction
 from eln.ord import OrdReaction
@@ -19,7 +20,7 @@ from mcp_servers.molfp.search import record_for
 from mcp_servers.rxnfp.search import record_for_reaction
 
 
-class IngestError(ValueError):
+class IngestError(ChemclawError):
     """A reaction failed validation and was not ingested (carries the problems)."""
 
 

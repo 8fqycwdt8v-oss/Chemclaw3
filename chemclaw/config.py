@@ -16,7 +16,7 @@ here — no speculative "for later" settings. New phases add their own fields wh
 the first real consumer lands.
 """
 
-from pydantic import Field
+from pydantic import Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -35,10 +35,6 @@ class Settings(BaseSettings):
         extra="forbid",
     )
 
-    # Deployment context. Kept free-form (dev/ci/staging/prod) rather than an
-    # enum so ops can name environments without a code change.
-    app_env: str = "dev"
-
     # Temporal — durable execution of long scientific jobs (plan Phase 1).
     # `address` is the frontend gRPC endpoint; `namespace` isolates a team's jobs.
     temporal_address: str = "localhost:7233"
@@ -53,20 +49,23 @@ class Settings(BaseSettings):
     # Postgres/pgvector — fingerprint store (Phase 3) and QM result cache
     # (plan step 1.10). One DSN for the whole app.
     postgres_dsn: str = "postgresql://chemclaw:chemclaw@localhost:5432/chemclaw"
+    # Fail fast when the database is unreachable instead of hanging until the
+    # enclosing activity's start-to-close timeout expires (libpq connect_timeout).
+    pg_connect_timeout_seconds: int = Field(default=10, gt=0)
 
     # QM job timeouts and mock-HPC timing (plan steps 1.2–1.4). Times are in
     # seconds. The "mock_*" values only shape the simulated HPC job's duration
     # so the durable path is observable; they vanish when a real backend lands.
-    qm_activity_timeout_seconds: float = 30.0
+    qm_activity_timeout_seconds: float = Field(default=30.0, gt=0)
     # Heartbeat timeout for the long-running poll: if a worker dies, Temporal
     # waits at most this long before retrying the activity on another worker.
-    qm_poll_heartbeat_timeout_seconds: float = 10.0
+    qm_poll_heartbeat_timeout_seconds: float = Field(default=10.0, gt=0)
     # How often the poll loop heartbeats / re-checks the (mock) scheduler. Must be
     # positive — a zero interval would make the poll loop never advance.
     hpc_poll_interval_seconds: float = Field(default=2.0, gt=0)
     # Simulated submission latency and total run time of the mock HPC job.
-    hpc_mock_submit_seconds: float = 1.0
-    hpc_mock_run_seconds: float = 6.0
+    hpc_mock_submit_seconds: float = Field(default=1.0, gt=0)
+    hpc_mock_run_seconds: float = Field(default=6.0, gt=0)
 
     # xTB semiempirical calculator (plan step 1c.2). Method is the GFN parametrization
     # (latest: GFN2-xTB). `xtb_embed_seed` fixes RDKit 3D embedding so results are
@@ -83,10 +82,13 @@ class Settings(BaseSettings):
     pka_calibration_slope: float = 0.28733
     pka_calibration_intercept: float = -29.3116
     pka_uncertainty: float = 1.6
+    # Reported log-S RMSE of the Reizman-descriptor solubility model (calc step 1c.3):
+    # model uncertainty attached to every prediction, config like `pka_uncertainty`.
+    solubility_rmse_log: float = 0.75
 
     # Durable BO campaign (plan step 1d.4). A single round (BoFire propose + evaluate)
     # can be slow, so activities get a generous start-to-close budget.
-    bo_activity_timeout_seconds: float = 300.0
+    bo_activity_timeout_seconds: float = Field(default=300.0, gt=0)
     # Seed for BoFire's random design + SOBO strategies, so a campaign is reproducible
     # (deterministic seeding + proposals) rather than flaky run-to-run.
     bo_seed: int = 42
@@ -105,6 +107,10 @@ class Settings(BaseSettings):
     # branch on this remote before a human merges.
     note_base_branch: str = "main"
     git_remote: str = "origin"
+    # The checkout the GitNoteSubmitter mutates (`git checkout -B` switches its whole
+    # working tree). Point it at a dedicated clone of the knowledge repo in production;
+    # the "." default only suits a dev checkout with nothing else running in it.
+    note_repo_dir: str = "."
     # Publishing a QM result as a graph note is best-effort: bounded attempts + its
     # own timeout so a persistent failure gives up instead of retrying forever.
     note_write_timeout_seconds: float = Field(default=120.0, gt=0)
@@ -125,7 +131,9 @@ class Settings(BaseSettings):
     eval_prediction_tolerance: float = 1.0
     # Noise floor for the per-task tool-utility A/B (plan step 2b.4): a metric delta
     # within +/- this magnitude counts as "no effect", so tool augmentation is only
-    # credited (or blamed) for changes above measurement noise. Set per metric.
+    # credited (or blamed) for changes above measurement noise. One global scalar —
+    # a comparison does not know which metric produced its scores, so set it to the
+    # noisiest metric's floor (per-metric floors need a per-metric parameter first).
     eval_ab_epsilon: float = 0.0
 
     # Fingerprint search (plan Phase 3, mcp-molfp). ECFP4 = Morgan radius 2, 2048 bits;
@@ -159,6 +167,21 @@ class Settings(BaseSettings):
     # development-report workflow — one section is one activity, so a long report resumes
     # section by section after a worker restart.
     report_section_timeout_seconds: float = Field(default=300.0, gt=0)
+    # How much of a source note's body a report carries as an evidence excerpt.
+    report_excerpt_chars: int = Field(default=240, gt=0)
+
+    @model_validator(mode="after")
+    def _poll_faster_than_heartbeat(self) -> "Settings":
+        """The poll loop must beat faster than Temporal's heartbeat timeout.
+
+        Otherwise every `poll_hpc_status` activity is declared dead between two
+        heartbeats and retried in a loop — a mis-set interval must fail at startup.
+        """
+        if self.hpc_poll_interval_seconds >= self.qm_poll_heartbeat_timeout_seconds:
+            raise ValueError(
+                "hpc_poll_interval_seconds must be smaller than qm_poll_heartbeat_timeout_seconds"
+            )
+        return self
 
 
 settings = Settings()

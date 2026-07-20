@@ -17,17 +17,13 @@ with workflow.unsafe.imports_passed_through():
     from eln.json_adapter import JsonExportAdapter
     from eln.sync import IngestSummary, sync_entries
     from kg.git_submitter import default_submitter
-    from mcp_servers.fpstore import PostgresFingerprintStore
+    from mcp_servers.fpstore import default_molecule_store, default_reaction_store
 
+from workflows.publish import BAD_DATA_RETRY
 
-def _reaction_store() -> PostgresFingerprintStore:
-    """The production reaction fingerprint store (Postgres). Overridden in tests."""
-    return PostgresFingerprintStore("reaction_fingerprints", settings.drfp_bits)
-
-
-def _molecule_store() -> PostgresFingerprintStore:
-    """The production molecule fingerprint store (Postgres). Overridden in tests."""
-    return PostgresFingerprintStore("molecule_fingerprints", settings.ecfp_bits)
+# Module-level indirection so tests swap the production stores for in-memory ones.
+_reaction_store = default_reaction_store
+_molecule_store = default_molecule_store
 
 
 @activity.defn
@@ -49,4 +45,6 @@ class ElnSyncWorkflow:
             sync_eln_entries,
             since,
             start_to_close_timeout=timedelta(seconds=settings.eln_sync_timeout_seconds),
+            # Bad data must reject-and-continue inside the sync, never retry the batch.
+            retry_policy=BAD_DATA_RETRY,
         )

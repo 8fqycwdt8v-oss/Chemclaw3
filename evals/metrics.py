@@ -27,7 +27,7 @@ class _ProcessMasses:
         physically impossible (mass is not created) and would otherwise yield a
         negative E-factor that silently passes the gate (G4).
         """
-        self.inputs = _positive_masses(output.get("input_masses_kg"))
+        self.inputs = _nonnegative_masses(output.get("input_masses_kg"))
         self.product = _positive_scalar(output.get("product_mass_kg"), "product_mass_kg")
         if self.product > sum(self.inputs):
             raise MetricError(
@@ -36,8 +36,12 @@ class _ProcessMasses:
             )
 
 
-def _positive_masses(raw: Any) -> list[float]:
-    """Coerce a non-empty list of non-negative input masses, else `MetricError`."""
+def _nonnegative_masses(raw: Any) -> list[float]:
+    """Coerce a non-empty list of non-negative input masses, else `MetricError`.
+
+    Zero is allowed for an individual input entry (an unused feed adds nothing);
+    the product mass, which divides, is separately required to be > 0.
+    """
     if not isinstance(raw, (list, tuple)) or not raw:
         raise MetricError("output.input_masses_kg must be a non-empty list of masses")
     masses = [_scalar(x, "output.input_masses_kg entry") for x in raw]
@@ -138,7 +142,11 @@ def bo_regret(case: EvalCase) -> MetricResult:
         raise MetricError("bo_regret needs a reference with `optimum`")
     best = _scalar(case.output.get("best_value"), "output.best_value")
     optimum = _scalar(case.reference.get("optimum"), "reference.optimum")
-    direction = case.output.get("direction", "maximize")
+    # Required, no default: silently assuming "maximize" would sign-flip the
+    # regret of a minimize campaign (G4).
+    direction = case.output.get("direction")
+    if direction is None:
+        raise MetricError("output.direction is required (maximize/minimize)")
     if direction == "maximize":
         value = optimum - best
     elif direction == "minimize":
@@ -157,9 +165,15 @@ def bo_regret(case: EvalCase) -> MetricResult:
 
 
 def _scalar(raw: Any, field: str) -> float:
-    """Coerce a required numeric field, else a `MetricError` naming it (G4)."""
+    """Coerce a required numeric field, else a `MetricError` naming it (G4).
+
+    Booleans are rejected explicitly: YAML parses `yes`/`no` as bools, and
+    `float(True)` would silently score a non-number as 1.0.
+    """
     if raw is None:
         raise MetricError(f"{field} is required")
+    if isinstance(raw, bool):
+        raise MetricError(f"{field} must be a number, got {raw!r}")
     try:
         return float(raw)
     except (TypeError, ValueError) as exc:

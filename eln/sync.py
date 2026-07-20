@@ -13,8 +13,9 @@ from datetime import datetime
 
 from pydantic import BaseModel
 
-from eln.adapter import ElnAdapter, ElnMappingError
-from eln.ingest import IngestError, ingest_reaction
+from chemclaw.errors import ChemclawError
+from eln.adapter import ElnAdapter
+from eln.ingest import ingest_reaction
 from kg.pr_gate import NoteSubmitter
 from mcp_servers.fpstore import FingerprintStore
 
@@ -30,7 +31,10 @@ class IngestSummary(BaseModel):
     """The outcome of one sync run: what was ingested, what was rejected, the next cursor.
 
     `next_cursor` is the newest entry timestamp seen, which the scheduler persists and
-    passes as `since` next run so each entry is processed once.
+    passes as `since` next run. Fetching is inclusive at the cursor (see `ElnAdapter`),
+    so an entry stamped exactly at `next_cursor` may be re-fetched next run — harmless,
+    because ingestion is idempotent (id-keyed upserts + idempotent note branch), and it
+    guarantees a same-second entry exported after this run is never skipped.
     """
 
     ingested: list[str]
@@ -55,9 +59,11 @@ async def sync_entries(
         try:
             reaction = adapter.map_to_ord(raw)
             await ingest_reaction(reaction, reaction_store, molecule_store, submitter)
-        except (IngestError, ElnMappingError) as exc:
-            # ElnMappingError covers *any* adapter's mapping failure (bad shape, unknown
-            # role, schema violation); IngestError covers a reaction that fails validation.
+        except ChemclawError as exc:
+            # The shared bad-data base covers *any* per-entry failure: an adapter's
+            # mapping error, a validation failure, and a fingerprint that cannot be
+            # computed (e.g. a schema-valid but degenerate reaction). Enumerating
+            # concrete types here once turned one bad entry into a batch abort.
             rejected.append(RejectedEntry(entry_id=raw.entry_id, reason=str(exc)))
             continue
         ingested.append(raw.entry_id)

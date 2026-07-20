@@ -9,8 +9,13 @@ capability surfaces them; the `reaction-search` skill decides how to set them (G
 
 from rdkit import Chem
 
-from chemclaw.config import settings
-from mcp_servers.fpstore import FingerprintError, FingerprintRecord, FingerprintStore, Match
+from mcp_servers.fpstore import (
+    FingerprintError,
+    FingerprintRecord,
+    FingerprintStore,
+    Match,
+    find_matches,
+)
 from mcp_servers.molfp.fingerprint import ecfp_bitstring
 
 
@@ -30,12 +35,7 @@ async def find_similar_molecules(
     `top_k` and `threshold` default to the configured values. Raises `FingerprintError`
     on an unparseable query so the caller never searches with a meaningless fingerprint.
     """
-    query_bits = ecfp_bitstring(smiles)
-    return await store.find_similar(
-        query_bits,
-        top_k if top_k is not None else settings.fingerprint_top_k,
-        threshold if threshold is not None else settings.fingerprint_similarity_threshold,
-    )
+    return await find_matches(store, ecfp_bitstring(smiles), top_k, threshold)
 
 
 async def find_substructure_matches(store: FingerprintStore, query: str) -> list[FingerprintRecord]:

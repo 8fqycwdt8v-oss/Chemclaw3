@@ -115,7 +115,6 @@ async def cached_compute(
     store: ResultStore,
     key: CalculationKey,
     compute: Callable[[], Awaitable[ResultPayload]],
-    provenance: str = "computed",
 ) -> tuple[ResultPayload, bool]:
     """Return a result for `key`, computing and persisting it only on a miss.
 
@@ -127,7 +126,6 @@ async def cached_compute(
         store: The backend to read from and write to.
         key: The versioned identity of this calculation.
         compute: Zero-arg coroutine that produces the result on a miss.
-        provenance: How the result is obtained; stored with it.
 
     Returns:
         `(result, was_cached)` — `was_cached` is True on a store hit, so callers
@@ -137,7 +135,7 @@ async def cached_compute(
     if hit is not None:
         return hit.result, True
     result = await compute()
-    await store.put(StoredResult(key=key, result=result, provenance=provenance))
+    await store.put(StoredResult(key=key, result=result))
     return result, False
 
 
@@ -158,7 +156,9 @@ async def run_cached(
     model. This captures it once (DRY, Rule of Three across xTB/solubility/pKa): the
     blocking `compute` is offloaded so the event loop stays free, its result is stored
     as a plain dict (the store stays calculator-agnostic), and the dict is validated
-    back into `result_type` on both hit and miss.
+    back into `result_type` on both hit and miss. Two *concurrent* misses on the same
+    key both compute and last-writer-wins on the upsert — benign duplicate work for
+    deterministic calculators; per-key in-flight dedup is deliberately not built.
 
     Args:
         store: The backend to read from and write to.

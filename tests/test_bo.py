@@ -13,11 +13,15 @@ import pytest
 from bo.campaign import optimize
 from bo.engine import propose_candidates
 from bo.problem import (
+    CategoricalParameter,
     ContinuousParameter,
     Objective,
+    Observation,
     OptimizationProblem,
     Parameter,
     ParamValue,
+    best_of,
+    space_exhausted,
 )
 
 warnings.filterwarnings("ignore")
@@ -63,10 +67,27 @@ def test_propose_requires_observations() -> None:
         propose_candidates(problem, [], n=1)
 
 
+def test_best_of_empty_raises() -> None:
+    """No observations is a clear error, not a bare IndexError (G4)."""
+    problem = OptimizationProblem(parameters=_PARAMS, objective=Objective(name="y"))
+    with pytest.raises(ValueError, match="no observations"):
+        best_of(problem, [])
+
+
+def test_space_exhausted_predicate() -> None:
+    """Exhaustion: finite space with too few fresh candidates left for a full batch."""
+    history = [Observation(params={"c": "a"}, value=1.0)]
+    assert space_exhausted(None, history, 5) is False  # infinite space never exhausts
+    assert space_exhausted(2, history, 1) is False  # 1 seen + 1 <= 2
+    assert space_exhausted(2, history, 2) is True  # 1 seen + 2 > 2
+
+
 def test_problem_validation() -> None:
     """Inverted bounds and duplicate parameter names are rejected up front."""
     with pytest.raises(ValueError, match="lower must be < upper"):
         ContinuousParameter(name="x", lower=1.0, upper=1.0)
+    with pytest.raises(ValueError, match="categories must be unique"):
+        CategoricalParameter(name="cat", categories=["a", "a"])
     with pytest.raises(ValueError, match="unique"):
         OptimizationProblem(
             parameters=[

@@ -5,10 +5,11 @@ fingerprint index (G4):
 
 1. **Structure** — every component SMILES parses in RDKit; an unparseable structure is a
    corrupt record, not a reaction.
-2. **Mass balance** — atoms are conserved: a product cannot contain an element, or more of
-   an element, than the inputs supply (you cannot create atoms). This is the sound
-   necessary condition for a real reaction (inputs may be in excess, so it is `>=`, not
-   equality). It reuses the same mass-conservation principle as the green-chemistry metric.
+2. **Mass balance** — element conservation only: a product cannot contain an ELEMENT that
+   no input supplies (you cannot create atoms). The ELN export carries no stoichiometric
+   coefficients (a dimerization lists A once for 2 A → A–A), so comparing per-molecule
+   atom *counts* is unsound and falsely rejects valid reactions; element-set subsumption
+   is the strongest check that stays a sound necessary condition.
 
 Returns a list of human-readable problems (empty = valid), so the sync can log exactly why
 an entry was rejected and the CLI can report them.
@@ -16,7 +17,6 @@ an entry was rejected and the CLI can report them.
 
 import asyncio
 import sys
-from collections import Counter
 from datetime import UTC, datetime
 
 from rdkit import Chem
@@ -27,41 +27,41 @@ from eln.json_adapter import JsonExportAdapter
 from eln.ord import OrdReaction
 
 
-def _atom_counts(smiles_list: list[str]) -> tuple[Counter[str], list[str]]:
-    """Sum element counts (with explicit H) over SMILES; collect any that fail to parse."""
-    total: Counter[str] = Counter()
+def _elements(smiles_list: list[str]) -> tuple[set[str], list[str]]:
+    """Collect the element symbols (with explicit H) over SMILES, plus any unparseable ones."""
+    found: set[str] = set()
     bad: list[str] = []
     for smiles in smiles_list:
         mol = Chem.MolFromSmiles(smiles)
         if mol is None:
             bad.append(smiles)
             continue
-        total.update(atom.GetSymbol() for atom in Chem.AddHs(mol).GetAtoms())
-    return total, bad
+        found.update(atom.GetSymbol() for atom in Chem.AddHs(mol).GetAtoms())
+    return found, bad
 
 
 def validate_ord(reaction: OrdReaction) -> list[str]:
     """Return the reaction's validation problems (empty list if it is valid).
 
-    Checks that every component SMILES parses and that atoms are conserved (no product
-    element exceeds the input supply). Provenance and role consistency are already enforced
-    by the schema, so this focuses on the chemistry.
+    Checks that every component SMILES parses and that no product contains an element
+    absent from all inputs. Atom *counts* are deliberately not compared: the export has
+    no stoichiometric coefficients, so a valid dimerization (2 A → A–A with A listed
+    once, the normal ELN convention) would fail a per-molecule count check. Provenance
+    and role consistency are already enforced by the schema, so this focuses on the
+    chemistry.
     """
     problems: list[str] = []
-    input_atoms, bad_inputs = _atom_counts([c.smiles for c in reaction.inputs])
-    output_atoms, bad_outputs = _atom_counts([c.smiles for c in reaction.outcomes])
+    input_elements, bad_inputs = _elements([c.smiles for c in reaction.inputs])
+    output_elements, bad_outputs = _elements([c.smiles for c in reaction.outcomes])
 
     for smiles in [*bad_inputs, *bad_outputs]:
         problems.append(f"unparseable SMILES: {smiles!r}")
     if bad_inputs or bad_outputs:
         return problems  # cannot check balance without valid structures
 
-    for element, count in output_atoms.items():
-        if count > input_atoms.get(element, 0):
-            problems.append(
-                f"mass balance: products need {count} {element} but inputs supply "
-                f"{input_atoms.get(element, 0)}"
-            )
+    for element in sorted(output_elements):
+        if element not in input_elements:
+            problems.append(f"mass balance: products contain {element} but no input supplies it")
     return problems
 
 

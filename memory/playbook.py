@@ -13,6 +13,7 @@ import networkx as nx
 from pydantic import BaseModel
 
 from chemclaw.config import settings
+from chemclaw.errors import ChemclawError
 from eln.ord import OrdReaction
 from kg.note import Note
 from mcp_servers.fpstore import FingerprintError, tanimoto
@@ -26,7 +27,7 @@ class PlaybookCandidate(BaseModel):
     projects: list[str]
 
 
-class PlaybookError(ValueError):
+class PlaybookError(ChemclawError):
     """A playbook was built without the mandatory evidence references (plan 5.4)."""
 
 
@@ -41,6 +42,10 @@ def find_playbook_candidates(
     similar). A cluster is a candidate only if its members carry at least two distinct
     projects. Reactions without a project cannot evidence cross-project recurrence and are
     ignored. Deterministic and order-independent (sorted output).
+
+    Pairwise Tanimoto clustering is O(n²) in fingerprintable reactions — fine at today's
+    scale, noticeable around ~10^4 reactions; the Postgres HNSW index (Phase 3) is the
+    escape hatch when that day comes.
     """
     floor = threshold if threshold is not None else settings.playbook_similarity_threshold
     # A degenerate/unparseable reaction is dropped, never fatal: one bad reaction must not
@@ -74,19 +79,20 @@ def find_playbook_candidates(
     return candidates
 
 
-def playbook_note(playbook_id: str, summary: str, evidence_reaction_ids: list[str]) -> Note:
+def playbook_note(note_id: str, summary: str, evidence_reaction_ids: list[str]) -> Note:
     """Build an agent `playbook` note citing its evidence; reject one with no citations.
 
+    `note_id` is the full note id (e.g. from `memory.ids.stable_id("playbook", ...)`).
     `summary` is the distilled rule (from the `playbook-distillation` skill); every playbook
     must cite the reactions that evidence it via `[[reaction-<id>]]` wikilinks, so a reviewer
     (a process chemist) can trace the rule to real experiments before approving the merge.
     """
     if not evidence_reaction_ids:
-        raise PlaybookError(f"playbook {playbook_id!r} has no evidence references")
+        raise PlaybookError(f"playbook {note_id!r} has no evidence references")
     citations = "\n".join(f"- [[reaction-{rid}]]" for rid in evidence_reaction_ids)
     body = f"{summary}\n\nEvidence:\n{citations}\n"
     return Note(
-        id=f"playbook-{playbook_id}",
+        id=note_id,
         type="playbook",
         created_by="agent",
         source="memory:cross-project-distillation",

@@ -6,17 +6,23 @@ replayable. The objective is resolved by name via `bo.objectives` because a
 workflow cannot pass a Python callable into an activity.
 """
 
+import asyncio
+
 from temporalio import activity
 
 from bo.engine import initial_candidates, propose_candidates
 from bo.objectives import get_objective
 from bo.problem import Candidate, Observation, OptimizationProblem
 
+# BoFire fitting is CPU-bound (GP fit + acquisition optimization); run it off the
+# event loop so heartbeats and concurrent activities keep flowing (the same
+# discipline as `calc.store.run_cached`).
+
 
 @activity.defn
 async def propose_initial(problem: OptimizationProblem, n: int) -> list[Candidate]:
     """Space-filling seed candidates (random design) for a new campaign."""
-    return initial_candidates(problem, n)
+    return await asyncio.to_thread(initial_candidates, problem, n)
 
 
 @activity.defn
@@ -24,7 +30,7 @@ async def propose_next(
     problem: OptimizationProblem, observations: list[Observation], n: int
 ) -> list[Candidate]:
     """Model-guided candidates from the observations so far (BoFire SOBO)."""
-    return propose_candidates(problem, observations, n)
+    return await asyncio.to_thread(propose_candidates, problem, observations, n)
 
 
 @activity.defn

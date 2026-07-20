@@ -16,6 +16,8 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from chemclaw.errors import ChemclawError
+
 
 class MetricResult(BaseModel):
     """One metric's verdict on one case: the value and everything needed to cite it.
@@ -54,7 +56,7 @@ class EvalCase(BaseModel):
     reference: dict[str, Any] | None = None
 
 
-class MetricError(ValueError):
+class MetricError(ChemclawError):
     """A metric could not be computed for a case (missing/invalid inputs, G4)."""
 
 

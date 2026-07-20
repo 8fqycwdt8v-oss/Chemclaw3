@@ -10,8 +10,6 @@ evaluation is heavy and non-deterministic, hence an activity resolved by name.
 from datetime import timedelta
 
 from temporalio import workflow
-from temporalio.common import RetryPolicy
-from temporalio.exceptions import ActivityError
 
 with workflow.unsafe.imports_passed_through():
     from bo.problem import (
@@ -20,7 +18,7 @@ with workflow.unsafe.imports_passed_through():
         Observation,
         best_of,
         discrete_candidate_count,
-        distinct_candidate_count,
+        space_exhausted,
     )
     from chemclaw.config import settings
     from workflows.bo_activities import (
@@ -30,9 +28,7 @@ with workflow.unsafe.imports_passed_through():
     )
     from workflows.bo_knowledge import write_campaign_node
 
-# Bad data (an unknown objective name, a malformed problem) will not fix itself on
-# retry, so fail fast instead of looping (gate G4).
-_RETRY = RetryPolicy(non_retryable_error_types=["ValueError"])
+from workflows.publish import BAD_DATA_RETRY, publish_note_best_effort
 
 
 @workflow.defn
@@ -48,31 +44,31 @@ class BoCampaignWorkflow:
             propose_initial,
             args=[spec.problem, spec.n_initial],
             start_to_close_timeout=timeout,
-            retry_policy=_RETRY,
+            retry_policy=BAD_DATA_RETRY,
         )
         history: list[Observation] = await workflow.execute_activity(
             evaluate_candidates,
             args=[spec.objective_name, seed],
             start_to_close_timeout=timeout,
-            retry_policy=_RETRY,
+            retry_policy=BAD_DATA_RETRY,
         )
 
         space = discrete_candidate_count(spec.problem)
         for _ in range(spec.n_rounds):
             # Stop early if a purely discrete candidate set is exhausted.
-            if space is not None and distinct_candidate_count(history) + spec.batch > space:
+            if space_exhausted(space, history, spec.batch):
                 break
             proposed = await workflow.execute_activity(
                 propose_next,
                 args=[spec.problem, history, spec.batch],
                 start_to_close_timeout=timeout,
-                retry_policy=_RETRY,
+                retry_policy=BAD_DATA_RETRY,
             )
             history += await workflow.execute_activity(
                 evaluate_candidates,
                 args=[spec.objective_name, proposed],
                 start_to_close_timeout=timeout,
-                retry_policy=_RETRY,
+                retry_policy=BAD_DATA_RETRY,
             )
 
         result = CampaignResult(best=best_of(spec.problem, history), history=history)
@@ -81,17 +77,8 @@ class BoCampaignWorkflow:
         # on the light background-jobs queue. Best-effort: a failed git write must not
         # fail the (completed) campaign, so bound the retries and swallow the error.
         if spec.publish_to_graph:
-            try:
-                await workflow.execute_activity(
-                    write_campaign_node,
-                    args=[spec.objective_name, result],
-                    task_queue=settings.background_task_queue,
-                    start_to_close_timeout=timedelta(seconds=settings.note_write_timeout_seconds),
-                    retry_policy=RetryPolicy(maximum_attempts=settings.note_write_max_attempts),
-                )
-            except ActivityError:
-                workflow.logger.warning(
-                    "bo-candidate publish failed for objective %s", spec.objective_name
-                )
+            await publish_note_best_effort(
+                write_campaign_node, [spec.objective_name, result], label=spec.objective_name
+            )
 
         return result

@@ -34,7 +34,10 @@ async def migrate(dsn: str | None = None) -> list[str]:
     """Apply every `infra/sql/*.sql` file in order; return the names applied."""
     target = dsn if dsn is not None else settings.postgres_dsn
     applied: list[str] = []
-    async with await psycopg.AsyncConnection.connect(target) as conn:
+    # connect_timeout: fail fast on an unreachable database instead of hanging.
+    async with await psycopg.AsyncConnection.connect(
+        target, connect_timeout=settings.pg_connect_timeout_seconds
+    ) as conn:
         for path in sorted(_SQL_DIR.glob("*.sql")):
             for statement in _statements(path.read_text()):
                 await conn.execute(statement)

@@ -17,7 +17,7 @@ Expected entry shape (this ELN's format — known only here):
 
 import json
 import re
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -30,8 +30,12 @@ from eln.ord import Component, OrdReaction, Role
 # Deterministic free-text extractors for the two conditions an ELN reliably states in prose.
 # The temperature pattern *requires* the degree sign: "80 °C" is unambiguously a temperature,
 # whereas a space-less/degree-less "13C" (as in "13C NMR") or "pH 7 C" is not — demanding `°`
-# avoids fabricating a temperature from spectroscopy or label text.
-_TEMPERATURE = re.compile(r"(-?\d+(?:\.\d+)?)\s*°\s*C\b")
+# avoids fabricating a temperature from spectroscopy or label text. The lookbehind stops a
+# `-` preceded by a digit/dot from being read as a minus sign: in a range like "60-80 °C"
+# the dash is a separator, so the match is the upper bound 80, never a sign-flipped -80.
+# Extracting the upper bound is the deliberate (documented) reading of a range; a genuine
+# "-10 °C" still matches because nothing numeric precedes its sign.
+_TEMPERATURE = re.compile(r"(?<![\d.])(-?\d+(?:\.\d+)?)\s*°\s*C\b")
 _TIME_HOURS = re.compile(r"(\d+(?:\.\d+)?)\s*h(?:ours?|rs?)?\b")
 
 
@@ -47,12 +51,24 @@ class JsonExportAdapter:
         self._dir = Path(export_dir if export_dir is not None else settings.eln_export_dir)
 
     async def fetch_new_entries(self, since: datetime) -> list[RawEntry]:
-        """Return entries whose `timestamp` is strictly after `since`, oldest first."""
+        """Return entries whose `timestamp` is at or after `since`, oldest first.
+
+        A file that cannot be read or parsed at all (I/O error, corrupt JSON, non-object
+        payload, missing/bad timestamp) is skipped, not raised: one broken export file
+        must not abort the whole fetch (same skip-and-continue stance as
+        `kg.graph.load_notes`). Reporting those broken files is out of scope here — this
+        method cannot even build a `RawEntry` for them to reject through the sync report.
+        """
         entries: list[RawEntry] = []
         for path in sorted(self._dir.glob("*.json")):
-            payload = json.loads(path.read_text(encoding="utf-8"))
-            created = _parse_timestamp(payload.get("timestamp"), path)
-            if created > since:
+            try:
+                payload = json.loads(path.read_text(encoding="utf-8"))
+                if not isinstance(payload, dict):
+                    continue
+                created = _parse_timestamp(payload.get("timestamp"), path)
+            except (OSError, json.JSONDecodeError, ElnFormatError):
+                continue
+            if created >= since:
                 entries.append(
                     RawEntry(
                         entry_id=str(payload.get("id") or path.stem),
@@ -97,7 +113,7 @@ class JsonExportAdapter:
         )
 
 
-def _list(payload: dict[str, Any], key: str) -> list[dict[str, Any]]:
+def _list(payload: dict[str, Any], key: str) -> list[Any]:
     """Return a required list field, raising `ElnFormatError` if it is missing/empty."""
     value = payload.get(key)
     if not isinstance(value, list) or not value:
@@ -105,8 +121,12 @@ def _list(payload: dict[str, Any], key: str) -> list[dict[str, Any]]:
     return value
 
 
-def _component(item: dict[str, Any], default_role: Role) -> Component:
+def _component(item: Any, default_role: Role) -> Component:
     """Build a `Component` from one JSON species (role defaults if unstated)."""
+    if not isinstance(item, dict):
+        # A bare string (["CCO"]) would AttributeError on .get and crash the sync
+        # instead of being rejected as one bad entry (G4).
+        raise ElnFormatError(f"component is not an object: {item!r}")
     smiles = item.get("smiles")
     if not smiles:
         raise ElnFormatError(f"component missing 'smiles': {item!r}")
@@ -136,17 +156,29 @@ def _condition(
 
 
 def _yield(payload: dict[str, Any]) -> float | None:
-    """Take the yield from the first product's structured field (per-product in this ELN)."""
-    products = payload.get("products") or [{}]
-    value = products[0].get("yield_percent")
+    """Take the yield from the first product's structured field (per-product in this ELN).
+
+    `_build` already guarantees `products` is a non-empty list, but not that its items
+    are objects — a bare string here must be a mapping error, not an AttributeError.
+    """
+    first = _list(payload, "products")[0]
+    if not isinstance(first, dict):
+        raise ElnFormatError(f"product is not an object: {first!r}")
+    value = first.get("yield_percent")
     return float(value) if value is not None else None
 
 
 def _parse_timestamp(value: Any, path: Path) -> datetime:
-    """Parse an ISO-8601 timestamp (accepting a trailing 'Z'), else `ElnFormatError`."""
+    """Parse an ISO-8601 timestamp (accepting a trailing 'Z'), else `ElnFormatError`.
+
+    A naive timestamp (no UTC offset) is read as UTC: exports from tools that omit the
+    offset are common, UTC is the least-surprising reading, and a naive datetime would
+    later raise `TypeError` when compared against the sync's offset-aware cursor.
+    """
     if not isinstance(value, str):
         raise ElnFormatError(f"{path.name}: missing 'timestamp'")
     try:
-        return datetime.fromisoformat(value.replace("Z", "+00:00"))
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
     except ValueError as exc:
         raise ElnFormatError(f"{path.name}: bad timestamp {value!r}: {exc}") from exc
+    return parsed if parsed.tzinfo is not None else parsed.replace(tzinfo=UTC)

@@ -8,7 +8,9 @@ functions as tools, inferring their schema from the signature and docstring, so
 the docstrings below are also the tool descriptions the model reads.
 """
 
+from pydantic import ValidationError
 from temporalio.client import WorkflowExecutionStatus
+from temporalio.common import WorkflowIDReusePolicy
 from temporalio.exceptions import WorkflowAlreadyStartedError
 from temporalio.service import RPCError
 
@@ -23,8 +25,10 @@ async def submit_qm_job(molecule_smiles: str, method: str, basis_set: str) -> st
 
     Runs asynchronously as a durable Temporal workflow; use the returned id with
     `get_qm_job_status` to check progress. Identical requests (same molecule,
-    method, and basis set) share one job id, so re-submitting is a safe no-op
-    that returns the existing id rather than launching a duplicate calculation.
+    method, and basis set) share one job id, so re-submitting is a safe no-op —
+    whether the job is still running or already completed — that returns the
+    existing id rather than launching a duplicate calculation (D-011: a stored
+    result is never recomputed). Only a *failed* job is re-run on re-submit.
 
     Args:
         molecule_smiles: The molecule as a SMILES string.
@@ -42,9 +46,13 @@ async def submit_qm_job(molecule_smiles: str, method: str, basis_set: str) -> st
             job,
             id=f"qm-{qm_job_key(job)}",
             task_queue=settings.hpc_task_queue,
+            # The default reuse policy only rejects while the workflow is OPEN;
+            # a completed job would silently recompute. Allowing re-use only after
+            # a *failure* makes submit idempotent across the job's whole lifetime.
+            id_reuse_policy=WorkflowIDReusePolicy.ALLOW_DUPLICATE_FAILED_ONLY,
         )
     except WorkflowAlreadyStartedError:
-        # Same id already running or done: the identical calculation is in flight,
+        # Same id already running or completed: the identical calculation exists,
         # so return its id rather than launching a duplicate (idempotent submit).
         return f"qm-{qm_job_key(job)}"
     return handle.id
@@ -71,8 +79,13 @@ async def get_qm_job_status(job_id: str) -> QMJobStatus:
     result = None
     if status == WorkflowExecutionStatus.COMPLETED:
         result = await handle.result()
-    return QMJobStatus(
-        job_id=job_id,
-        status=status.name if status is not None else "UNKNOWN",
-        result=result,
-    )
+    try:
+        return QMJobStatus(
+            job_id=job_id,
+            status=status.name if status is not None else "UNKNOWN",
+            result=result,
+        )
+    except ValidationError as exc:
+        # A valid workflow id whose result is not a QMJobResult (a foreign
+        # workflow) → a clear error, not an opaque pydantic crash (G4).
+        raise ValueError(f"workflow {job_id!r} is not a QM job") from exc

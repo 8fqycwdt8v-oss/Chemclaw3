@@ -93,6 +93,21 @@ def test_mass_balance_violation_is_a_problem() -> None:
     assert any("mass balance" in p and "Cl" in p for p in problems)
 
 
+def test_dimerization_passes_mass_balance() -> None:
+    """2 A → A–A with A listed once (normal ELN convention) is valid.
+
+    The export carries no stoichiometric coefficients, so only element presence — not
+    atom counts — is checked.
+    """
+    dimerization = OrdReaction(
+        reaction_id="rxn-dimer",
+        inputs=[Component(smiles="C=C", role=Role.REACTANT)],
+        outcomes=[Component(smiles="C=CCC", role=Role.PRODUCT)],  # doubled carbons
+        provenance="eln:chemist-a",
+    )
+    assert validate_ord(dimerization) == []
+
+
 # --- adapter --------------------------------------------------------------------------
 
 
@@ -151,6 +166,23 @@ def test_unknown_role_is_a_mapping_error_not_a_crash() -> None:
         JsonExportAdapter().map_to_ord(raw)
 
 
+def test_non_dict_component_is_a_mapping_error() -> None:
+    """A bare-string species (e.g. "reactants": ["CCO"]) is an ElnFormatError.
+
+    Previously it raised AttributeError, escaping the sync's reject-and-continue
+    handler (G4).
+    """
+    for key in ("reactants", "products"):
+        payload: dict[str, object] = {
+            "reactants": [{"smiles": "CCO"}],
+            "products": [{"smiles": "CCO"}],
+        }
+        payload[key] = ["CCO"]  # a string where an object is expected
+        raw = RawEntry(entry_id=f"bad-{key}", created_at=_EPOCH, payload=payload)
+        with pytest.raises(ElnFormatError, match="not an object"):
+            JsonExportAdapter().map_to_ord(raw)
+
+
 def test_zero_celsius_structured_field_is_preserved() -> None:
     """A structured 0 °C (ice bath) is kept, not discarded as falsy and overwritten by prose."""
     raw = RawEntry(
@@ -180,8 +212,33 @@ def test_temperature_regex_ignores_nmr_labels() -> None:
     assert JsonExportAdapter().map_to_ord(raw).temperature_c is None
 
 
+def _prose_entry(procedure: str) -> RawEntry:
+    """A minimal entry whose only condition source is the given procedure prose."""
+    return RawEntry(
+        entry_id="prose",
+        created_at=_EPOCH,
+        payload={
+            "reactants": [{"smiles": "CCO"}],
+            "products": [{"smiles": "CCO"}],
+            "procedure": procedure,
+        },
+    )
+
+
+def test_temperature_range_extracts_upper_bound_not_negative() -> None:
+    """A range like "60-80 °C" yields 80 (the documented upper-bound reading), never -80."""
+    reaction = JsonExportAdapter().map_to_ord(_prose_entry("heated at 60-80 °C overnight"))
+    assert reaction.temperature_c == 80.0
+
+
+def test_genuine_negative_temperature_still_extracted() -> None:
+    """A real minus sign ("-10 °C") and a bare "0 °C" both still extract from prose."""
+    assert JsonExportAdapter().map_to_ord(_prose_entry("cooled to -10 °C")).temperature_c == -10.0
+    assert JsonExportAdapter().map_to_ord(_prose_entry("stirred at 0 °C")).temperature_c == 0.0
+
+
 def test_fetch_only_returns_entries_after_cursor(tmp_path: Path) -> None:
-    """fetch_new_entries returns only entries strictly newer than `since`, oldest first."""
+    """fetch_new_entries returns only entries at or after `since`, oldest first."""
 
     async def _run() -> None:
         for name, ts in [("a", "2026-01-01T00:00:00Z"), ("b", "2026-06-01T00:00:00Z")]:
@@ -200,6 +257,66 @@ def test_fetch_only_returns_entries_after_cursor(tmp_path: Path) -> None:
         cutoff = datetime(2026, 3, 1, tzinfo=UTC)
         new = await adapter.fetch_new_entries(cutoff)
         assert [e.entry_id for e in new] == ["b"]  # only the June entry
+
+    asyncio.run(_run())
+
+
+def _write_entry(path: Path, entry_id: str, timestamp: str) -> None:
+    """Write a minimal valid export file for the fetch tests."""
+    path.write_text(
+        json.dumps(
+            {
+                "id": entry_id,
+                "timestamp": timestamp,
+                "reactants": [{"smiles": "CCO"}],
+                "products": [{"smiles": "CCO"}],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+
+def test_fetch_includes_entry_exactly_at_cursor(tmp_path: Path) -> None:
+    """An entry stamped exactly at the cursor is fetched (inclusive boundary).
+
+    A same-second entry exported after a sync run must not be skipped forever;
+    re-ingesting a boundary entry is idempotent, so inclusivity is safe.
+    """
+
+    async def _run() -> None:
+        _write_entry(tmp_path / "a.json", "a", "2026-03-01T00:00:00Z")
+        new = await JsonExportAdapter(str(tmp_path)).fetch_new_entries(
+            datetime(2026, 3, 1, tzinfo=UTC)
+        )
+        assert [e.entry_id for e in new] == ["a"]
+
+    asyncio.run(_run())
+
+
+def test_fetch_skips_corrupt_json_file(tmp_path: Path) -> None:
+    """One corrupt export file is skipped, not allowed to abort the whole fetch (G4)."""
+
+    async def _run() -> None:
+        (tmp_path / "corrupt.json").write_text("{not json", encoding="utf-8")
+        _write_entry(tmp_path / "good.json", "good", "2026-01-01T00:00:00Z")
+        new = await JsonExportAdapter(str(tmp_path)).fetch_new_entries(_EPOCH)
+        assert [e.entry_id for e in new] == ["good"]
+
+    asyncio.run(_run())
+
+
+def test_naive_timestamp_is_read_as_utc(tmp_path: Path) -> None:
+    """A timestamp without an offset is treated as UTC.
+
+    A naive datetime would later raise TypeError when compared against the sync's
+    offset-aware cursor.
+    """
+
+    async def _run() -> None:
+        _write_entry(tmp_path / "naive.json", "naive", "2026-01-01T00:00:00")  # no offset
+        new = await JsonExportAdapter(str(tmp_path)).fetch_new_entries(_EPOCH)
+        assert [e.entry_id for e in new] == ["naive"]
+        assert new[0].created_at == datetime(2026, 1, 1, tzinfo=UTC)
 
     asyncio.run(_run())
 
@@ -294,5 +411,45 @@ def test_sync_ingests_batch_and_skips_bad_entries() -> None:
         assert "cannot map" in reasons["unmappable"]
         assert summary.next_cursor == datetime(2026, 3, 1, tzinfo=UTC)  # newest seen
         assert len(sub.captured) == 1  # only the good entry proposed a note
+
+    asyncio.run(_run())
+
+
+def test_sync_rejects_degenerate_reaction_without_aborting_batch() -> None:
+    """A degenerate reaction (CCO>>CCO) with no computable fingerprint is a rejection.
+
+    It is schema-valid and passes validation, but fingerprinting fails; that must be a
+    per-entry rejection — the batch continues and the cursor still advances (G4).
+    """
+
+    async def _run() -> None:
+        degenerate = RawEntry(
+            entry_id="degenerate",
+            created_at=datetime(2026, 1, 1, tzinfo=UTC),
+            payload={"reactants": [{"smiles": "CCO"}], "products": [{"smiles": "CCO"}]},
+        )
+        good = RawEntry(
+            entry_id="good",
+            created_at=datetime(2026, 2, 1, tzinfo=UTC),
+            payload={
+                "reactants": [{"smiles": "CCO"}, {"smiles": "CC(=O)O"}],
+                "products": [{"smiles": "CCOC(C)=O"}],
+            },
+        )
+
+        class _Adapter:
+            async def fetch_new_entries(self, since: datetime) -> list[RawEntry]:
+                return [degenerate, good]
+
+            def map_to_ord(self, raw: RawEntry) -> OrdReaction:
+                return JsonExportAdapter().map_to_ord(raw)
+
+        rxn, mol, sub = InMemoryFingerprintStore(), InMemoryFingerprintStore(), _FakeSubmitter()
+        summary = await sync_entries(_Adapter(), rxn, mol, sub, _EPOCH)
+
+        assert summary.ingested == ["good"]
+        assert [r.entry_id for r in summary.rejected] == ["degenerate"]
+        assert "fingerprint" in summary.rejected[0].reason
+        assert summary.next_cursor == datetime(2026, 2, 1, tzinfo=UTC)  # cursor advanced
 
     asyncio.run(_run())

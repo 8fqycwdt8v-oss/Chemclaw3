@@ -6,11 +6,17 @@ than exact values (a semiempirical estimate with ~1.6 pKa uncertainty).
 """
 
 import asyncio
+from importlib.metadata import version
 
 import pytest
 
-from calc.pka import PkaInput, predict_pka, run_cached_pka
+from calc.pka import PkaInput, _calc_version, predict_pka, run_cached_pka
 from calc.store import InMemoryStore
+
+
+def test_calc_version_embeds_engine_build() -> None:
+    """The pKa cache key carries the tblite build, so an engine upgrade recomputes (D-011)."""
+    assert version("tblite") in _calc_version()
 
 
 def test_acid_ordering_is_physical() -> None:

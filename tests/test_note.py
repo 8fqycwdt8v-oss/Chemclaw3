@@ -3,7 +3,9 @@
 from pathlib import Path
 
 import pytest
+from pydantic import ValidationError
 
+from chemclaw.errors import ChemclawError
 from kg.note import Note, NoteError, parse_note, read_note
 
 _VALID = """---
@@ -65,6 +67,38 @@ def test_frontmatter_body_key_does_not_crash(tmp_path: Path) -> None:
     text = "---\nid: x\ntype: t\nbody: stray\n---\nreal body\n"
     note = parse_note(_write(tmp_path / "f.md", text))
     assert note.body.strip() == "real body"
+
+
+@pytest.mark.parametrize(
+    "bad",
+    [
+        "a/../../../../etc/x",  # path traversal out of the repo
+        "a/b",  # any path separator
+        "a..b",  # invalid git ref component even though slug chars
+        ".hidden",  # leading dot (dotfile / ref rules)
+        "-flag",  # leading dash reads as a CLI flag
+        "a b",  # whitespace
+    ],
+)
+def test_unsafe_id_and_type_rejected_at_model(bad: str) -> None:
+    """Ids/types become file paths and git refs; anything non-slug is refused (G4)."""
+    with pytest.raises(ValidationError, match="safe note slug"):
+        Note(id=bad, type="compound")
+    with pytest.raises(ValidationError, match="safe note slug"):
+        Note(id="ok", type=bad)
+
+
+def test_unsafe_id_from_file_raises_note_error(tmp_path: Path) -> None:
+    """A traversal id arriving via parsed frontmatter (external data) is a NoteError."""
+    text = "---\nid: a/../../../../etc/x\ntype: t\n---\nbody\n"
+    with pytest.raises(NoteError, match="invalid note"):
+        parse_note(_write(tmp_path / "g.md", text))
+
+
+def test_note_error_is_chemclaw_error() -> None:
+    """Bad note data joins the one catchable bad-data contract (and stays a ValueError)."""
+    assert issubclass(NoteError, ChemclawError)
+    assert issubclass(NoteError, ValueError)
 
 
 def test_agent_authored_provenance(tmp_path: Path) -> None:

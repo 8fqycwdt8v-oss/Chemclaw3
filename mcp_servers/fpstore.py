@@ -14,9 +14,10 @@ import psycopg
 from pydantic import BaseModel, Field
 
 from chemclaw.config import settings
+from chemclaw.errors import ChemclawError
 
 
-class FingerprintError(ValueError):
+class FingerprintError(ChemclawError):
     """A fingerprint could not be computed or two fingerprints are incomparable (G4)."""
 
 
@@ -112,17 +113,23 @@ class PostgresFingerprintStore:
     the same class serves the molecule and reaction fingerprint tables. Similarity is
     Tanimoto (= 1 - Jaccard distance) in SQL, accelerated by the table's HNSW
     `bit_jaccard_ops` index; the ranking semantics match the in-memory backend up to HNSW
-    recall. A short-lived connection per call (KISS — the calc store's choice).
+    recall. Note the threshold interaction: the `WHERE` filter applies *after* the ordered
+    HNSW scan, so a selective threshold can return fewer than `top_k` rows even when that
+    many qualify in the table (bounded by `hnsw.ef_search`) — approximate by design.
+    A short-lived connection per call (KISS — the calc store's choice).
     """
 
     def __init__(self, table: str, width: int, dsn: str | None = None) -> None:
         """Bind to `table` with fingerprint `width`, on the given (or configured) DSN.
 
         `table` and `width` come from trusted domain constants, never user input, so
-        interpolating them into the SQL is safe. If `width` disagrees with the table's
-        `bit(N)` column, Postgres raises a bit-length error (a loud failure, not a silent
-        pad).
+        interpolating them into the SQL is safe; the identifier check below enforces
+        that trust boundary against any future caller. If `width` disagrees with the
+        table's `bit(N)` column, Postgres raises a bit-length error (a loud failure,
+        not a silent pad).
         """
+        if not table.isidentifier():
+            raise ValueError(f"table must be a plain SQL identifier, got {table!r}")
         self._table = table
         self._dsn = dsn if dsn is not None else settings.postgres_dsn
         self._upsert = (
@@ -142,9 +149,15 @@ class PostgresFingerprintStore:
             f"LIMIT %(k)s"
         )
 
+    async def _connect(self) -> psycopg.AsyncConnection:
+        """Open a connection that fails fast when the database is unreachable."""
+        return await psycopg.AsyncConnection.connect(
+            self._dsn, connect_timeout=settings.pg_connect_timeout_seconds
+        )
+
     async def add(self, record: FingerprintRecord) -> None:
         """Insert or replace a fingerprint by id."""
-        async with await psycopg.AsyncConnection.connect(self._dsn) as conn:
+        async with await self._connect() as conn:
             await conn.execute(
                 self._upsert, {"id": record.id, "label": record.label, "bits": record.bits}
             )
@@ -152,7 +165,7 @@ class PostgresFingerprintStore:
 
     async def all_records(self) -> list[FingerprintRecord]:
         """Return every stored record (bits as a text bitstring)."""
-        async with await psycopg.AsyncConnection.connect(self._dsn) as conn:
+        async with await self._connect() as conn:
             async with conn.cursor() as cur:
                 await cur.execute(self._all)
                 rows = await cur.fetchall()
@@ -160,9 +173,37 @@ class PostgresFingerprintStore:
 
     async def find_similar(self, query_bits: str, top_k: int, threshold: float) -> list[Match]:
         """Return up to `top_k` records with Tanimoto >= `threshold`, most similar first."""
-        async with await psycopg.AsyncConnection.connect(self._dsn) as conn:
+        async with await self._connect() as conn:
             async with conn.cursor() as cur:
                 params = {"q": query_bits, "threshold": threshold, "k": top_k}
                 await cur.execute(self._similar, params)
                 rows = await cur.fetchall()
         return [Match(id=r[0], label=r[1], similarity=float(r[2])) for r in rows]
+
+
+async def find_matches(
+    store: FingerprintStore,
+    query_bits: str,
+    top_k: int | None = None,
+    threshold: float | None = None,
+) -> list[Match]:
+    """Search a store with the configured `top_k`/`threshold` defaults applied.
+
+    The one place the generic search knobs fall back to config, so the molecule
+    and reaction entry points cannot drift in how they default (DRY).
+    """
+    return await store.find_similar(
+        query_bits,
+        top_k if top_k is not None else settings.fingerprint_top_k,
+        threshold if threshold is not None else settings.fingerprint_similarity_threshold,
+    )
+
+
+def default_molecule_store() -> PostgresFingerprintStore:
+    """The production molecule (ECFP4) store — one place pairs table and bit width."""
+    return PostgresFingerprintStore("molecule_fingerprints", settings.ecfp_bits)
+
+
+def default_reaction_store() -> PostgresFingerprintStore:
+    """The production reaction (DRFP) store — one place pairs table and bit width."""
+    return PostgresFingerprintStore("reaction_fingerprints", settings.drfp_bits)

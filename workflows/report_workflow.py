@@ -15,7 +15,8 @@ from temporalio import activity, workflow
 with workflow.unsafe.imports_passed_through():
     from chemclaw.config import settings
     from kg.git_submitter import default_submitter
-    from mcp_servers.fpstore import PostgresFingerprintStore
+    from kg.pr_gate import propose_note
+    from mcp_servers.fpstore import default_reaction_store
     from report.evidence import SourceRetriever
     from report.harness import (
         Report,
@@ -27,17 +28,12 @@ with workflow.unsafe.imports_passed_through():
     )
     from report.retrievers import FingerprintReactionRetriever, GraphRetriever
 
-from kg.pr_gate import propose_note
+from workflows.publish import BAD_DATA_RETRY, publish_note
 
 
 def default_retrievers() -> list[SourceRetriever]:
     """The production source retrievers (graph + reaction fingerprint). Overridden in tests."""
-    return [
-        GraphRetriever(),
-        FingerprintReactionRetriever(
-            PostgresFingerprintStore("reaction_fingerprints", settings.drfp_bits)
-        ),
-    ]
+    return [GraphRetriever(), FingerprintReactionRetriever(default_reaction_store())]
 
 
 @activity.defn
@@ -62,14 +58,14 @@ class DevelopmentReportWorkflow:
         timeout = timedelta(seconds=settings.report_section_timeout_seconds)
         sections = [
             await workflow.execute_activity(
-                retrieve_section, section, start_to_close_timeout=timeout
+                retrieve_section,
+                section,
+                start_to_close_timeout=timeout,
+                retry_policy=BAD_DATA_RETRY,
             )
             for section in request.sections
         ]
         report = Report(title=request.title, sections=sections)
-        return await workflow.execute_activity(
-            propose_report,
-            report,
-            task_queue=settings.background_task_queue,
-            start_to_close_timeout=timedelta(seconds=settings.note_write_timeout_seconds),
-        )
+        # The note reference *is* this workflow's result, so the publish is not
+        # best-effort — but it shares the bounded-attempts discipline (G4).
+        return await publish_note(propose_report, [report])

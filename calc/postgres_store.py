@@ -10,6 +10,7 @@ The DSN comes from the one config source.
 import json
 
 import psycopg
+from psycopg.rows import TupleRow
 from psycopg.types.json import Jsonb
 
 from calc.store import CalculationKey, StoredResult
@@ -40,9 +41,19 @@ class PostgresStore:
         """Use the given DSN, or the configured one by default."""
         self._dsn = dsn if dsn is not None else settings.postgres_dsn
 
+    async def _connect(self) -> psycopg.AsyncConnection[TupleRow]:
+        """Open a connection that fails fast on an unreachable database.
+
+        Without `connect_timeout`, an unreachable host hangs the calling activity
+        until its start-to-close timeout — the bound belongs to the connect.
+        """
+        return await psycopg.AsyncConnection.connect(
+            self._dsn, connect_timeout=settings.pg_connect_timeout_seconds
+        )
+
     async def get(self, key: CalculationKey) -> StoredResult | None:
         """Return the stored result for `key`, or None on a miss."""
-        async with await psycopg.AsyncConnection.connect(self._dsn) as conn:
+        async with await self._connect() as conn:
             async with conn.cursor() as cur:
                 await cur.execute(_SELECT, (key.as_str(),))
                 row = await cur.fetchone()
@@ -56,7 +67,7 @@ class PostgresStore:
     async def put(self, stored: StoredResult) -> None:
         """Persist `stored`, overwriting any existing result for its key."""
         key = stored.key
-        async with await psycopg.AsyncConnection.connect(self._dsn) as conn:
+        async with await self._connect() as conn:
             async with conn.cursor() as cur:
                 await cur.execute(
                     _UPSERT,

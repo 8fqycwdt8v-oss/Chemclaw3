@@ -8,12 +8,10 @@ the calculation store (Phase 1b) gives the "never compute twice" guarantee, so
 plumbing is shared with the pKa predictor via `calc.xtb_engine`.
 """
 
-from importlib.metadata import version
-
 from pydantic import BaseModel, Field
 
 from calc.store import CalculationKey, ResultStore, run_cached
-from calc.xtb_engine import geometry, gfn2_energy, parse_molecule
+from calc.xtb_engine import engine_version, geometry, gfn2_energy, parse_molecule
 from chemclaw.config import settings
 
 CALC_TYPE = "xtb"
@@ -41,7 +39,7 @@ def _calc_version() -> str:
     Including the tblite version means an engine upgrade (which can shift
     energies) is a cache miss, not a silent stale hit.
     """
-    return f"{settings.xtb_method}+tblite-{version('tblite')}"
+    return f"{settings.xtb_method}+tblite-{engine_version()}"
 
 
 def run_xtb(job: XtbInput) -> XtbResult:

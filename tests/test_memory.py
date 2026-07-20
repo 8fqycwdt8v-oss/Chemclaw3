@@ -83,6 +83,25 @@ def test_reagent_match_does_not_chain() -> None:
     assert detect_chains([a, b]) == []  # water is a's product but only b's solvent
 
 
+def test_two_shared_compounds_produce_two_links() -> None:
+    """A pair sharing two product→reactant compounds yields one link per compound.
+
+    Regression: a single edge attribute used to be overwritten per compound, silently
+    dropping all but the last handoff from the campaign's evidence.
+    """
+    a = _reaction("a", ["CCO"], ["CC=O", "O"])  # two products, both consumed by b
+    b = _reaction("b", ["CC=O", "O"], ["CC(O)O"])
+    chains = detect_chains([a, b])
+    assert len(chains) == 1
+    links = chains[0].links
+    assert len(links) == 2
+    assert all(link.from_reaction == "a" and link.to_reaction == "b" for link in links)
+    assert {link.via_compound for link in links} == {"CC=O", "O"}
+    # The campaign note renders one handoff line per shared compound.
+    note = campaign_note_from_chain(chains[0], {"a": a, "b": b})
+    assert note.body.count("product of a → reactant of b") == 2
+
+
 def test_cycle_is_flagged_not_a_false_sequence() -> None:
     """A reversible pair (A→B and B→A) is a chain marked unordered, not a fake causal order."""
     a = _reaction("a", ["CCO"], ["CC=O"])
@@ -155,11 +174,12 @@ def test_degenerate_reaction_does_not_abort_distillation() -> None:
 
 def test_playbook_note_requires_evidence() -> None:
     """A playbook with citations builds; one without is rejected (Belegverweise verpflichtend)."""
-    note = playbook_note("esterification", "Fischer esterification recurs.", ["x", "y"])
+    note = playbook_note("playbook-ester", "Fischer esterification recurs.", ["x", "y"])
     assert note.type == "playbook"
+    assert note.id == "playbook-ester"  # the full note id is passed in, not re-prefixed
     assert note.outgoing_links() == ["reaction-x", "reaction-y"]  # mandatory evidence
     with pytest.raises(PlaybookError, match="no evidence"):
-        playbook_note("empty", "no evidence here", [])
+        playbook_note("playbook-empty", "no evidence here", [])
 
 
 # --- jobs (5.3/5.4 wiring) ------------------------------------------------------------

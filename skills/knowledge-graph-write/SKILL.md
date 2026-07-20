@@ -21,7 +21,8 @@ graph.
 ## Shaping the note
 
 - **type**: the smallest accurate kind (`compound`, `reaction`, `job-result`,
-  `campaign`, `playbook`, `eval-case`).
+  `campaign`, `playbook`). Eval cases are *not* graph notes — they live under
+  `eval_case_dir`, outside the graph (D-014).
 - **id**: stable, human-readable, unique (e.g. `reaction-suzuki-<substrate>`);
   the id is how other notes link to this one, so it should not change.
 - **links**: connect the note to what it relates to with `[[wikilinks]]` in the

@@ -153,6 +153,26 @@ def test_graph_retriever_matches_and_cites_notes(tmp_path: Path) -> None:
     asyncio.run(_run())
 
 
+def test_graph_retriever_excerpt_strips_wikilinks(tmp_path: Path) -> None:
+    """An excerpt never carries a source note's `[[wikilink]]` into the report verbatim.
+
+    A copied link would add unintended (possibly dangling) graph edges to the report
+    note; the link target survives as plain text, the brackets do not.
+    """
+
+    async def _run() -> None:
+        (tmp_path / "a.md").write_text(
+            "---\nid: campaign-a\ntype: campaign\n---\n"
+            "See [[reaction-b]] for the esterification.\n",
+            encoding="utf-8",
+        )
+        hits = await GraphRetriever(str(tmp_path)).retrieve("esterification", {})
+        assert hits[0].content == "See reaction-b for the esterification."
+        assert "[[" not in hits[0].content
+
+    asyncio.run(_run())
+
+
 def test_fingerprint_retriever_cites_reaction_notes() -> None:
     """The fingerprint retriever cites reaction notes for structurally similar reactions."""
 

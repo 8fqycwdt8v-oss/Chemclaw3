@@ -15,6 +15,7 @@ from rdkit import Chem
 from rdkit.Chem import Crippen, Descriptors, rdMolDescriptors
 
 from calc.store import CalculationKey, ResultStore, run_cached
+from chemclaw.config import settings
 
 CALC_TYPE = "solubility"
 
@@ -57,13 +58,13 @@ class EsolBaseline:
     """Delaney (2004) ESOL model — a closed form over four RDKit descriptors.
 
     log S = 0.16 − 0.63·clogP − 0.0062·MW + 0.066·(rotatable bonds) − 0.74·(aromatic
-    proportion). Reported RMSE ≈ 0.75 log units, used as a constant uncertainty. A
-    transparent, license-free default until a trained model replaces it.
+    proportion). The reported RMSE (`settings.solubility_rmse_log`, ≈ 0.75 log units)
+    is used as a constant uncertainty. A transparent, license-free default until a
+    trained model replaces it.
     """
 
     name = "esol-delaney"
     version = "2004"
-    _rmse_log = 0.75
 
     def predict(self, mol: Chem.Mol) -> tuple[float, float]:
         """Return (log S mol/L, uncertainty) from the ESOL descriptor equation."""
@@ -75,7 +76,7 @@ class EsolBaseline:
             sum(1 for atom in mol.GetAtoms() if atom.GetIsAromatic()) / heavy if heavy else 0.0
         )
         log_s = 0.16 - 0.63 * clogp - 0.0062 * mw + 0.066 * rotatable - 0.74 * aromatic_proportion
-        return log_s, self._rmse_log
+        return log_s, settings.solubility_rmse_log
 
 
 # The default model. Swap this (or pass another) when a trained GNN is available.

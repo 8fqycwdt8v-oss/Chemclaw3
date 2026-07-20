@@ -9,12 +9,11 @@ is the `reaction-search` skill's call (G6).
 
 from mcp.server.fastmcp import FastMCP
 
-from chemclaw.config import settings
 from mcp_servers.fpstore import (
     FingerprintRecord,
     FingerprintStore,
     Match,
-    PostgresFingerprintStore,
+    default_molecule_store,
 )
 from mcp_servers.molfp.search import (
     find_similar_molecules,
@@ -23,7 +22,7 @@ from mcp_servers.molfp.search import (
 )
 
 server = FastMCP("mcp-molfp")
-_store: FingerprintStore = PostgresFingerprintStore("molecule_fingerprints", settings.ecfp_bits)
+_store: FingerprintStore = default_molecule_store()
 
 
 @server.tool()
