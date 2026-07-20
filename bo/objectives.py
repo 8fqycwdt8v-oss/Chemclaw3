@@ -1,12 +1,12 @@
-"""Named BO objectives (plan step 1d.4).
+"""Named BO objectives (plan steps 1d.3, 1d.4).
 
 A Temporal workflow cannot carry a Python callable across its boundary, so a
 durable campaign references its objective by name and the evaluate activity
 resolves it here. This registry is the generic-dispatch point that justifies a
-lookup table (Rule of Three): the durable campaign resolves by name today, and
-calculator-backed objectives will register here next. Objectives are built lazily
-and cached per process, so an expensive setup (e.g. fitting a surrogate) happens
-once per worker.
+lookup table (Rule of Three): the durable campaign resolves by name, and a
+calculator-backed objective (1d.3) registers alongside the reaction benchmark.
+Objectives are built lazily and cached per process where construction is
+expensive (e.g. fitting a surrogate).
 """
 
 from collections.abc import Awaitable, Callable
@@ -14,8 +14,37 @@ from functools import cache
 
 from bo.benchmarks.reizman_suzuki import load_benchmark
 from bo.problem import ParamValue
+from calc.postgres_store import PostgresStore
+from calc.solubility import SolubilityInput, run_cached_solubility
+from calc.store import ResultStore
 
 Objective = Callable[[dict[str, ParamValue]], Awaitable[float]]
+
+# The parameter key a molecule-scoring objective reads its candidate from.
+MOLECULE_KEY = "molecule"
+
+
+def solubility_objective(store: ResultStore) -> Objective:
+    """A BO objective that scores a candidate molecule by cached predicted log S.
+
+    This is the calculator-backed objective of plan step 1d.3: each evaluation runs
+    the solubility calculator through the store, so a molecule revisited during a
+    search is served from the store and never recomputed (D-011). The store is
+    injected so the objective is testable without a database.
+
+    The candidate molecule is read from `params[MOLECULE_KEY]`. Note: a campaign
+    optimizing *only* over a molecule set is candidate enumeration, which BoFire's
+    surrogate strategies do not drive (they need a continuous dimension); this
+    objective is meant to be composed into a problem that has one.
+    """
+
+    async def evaluate(params: dict[str, ParamValue]) -> float:
+        result, _ = await run_cached_solubility(
+            store, SolubilityInput(smiles=str(params[MOLECULE_KEY]))
+        )
+        return result.log_s_mol_per_l
+
+    return evaluate
 
 
 @cache
@@ -25,9 +54,15 @@ def _reizman_suzuki() -> Objective:
     return objective
 
 
-# Name → factory. Factories are cached, so lookups are cheap after the first.
+def _solubility_max() -> Objective:
+    """Calculator-backed solubility objective on the production (Postgres) store."""
+    return solubility_objective(PostgresStore())
+
+
+# Name → factory. Factories are cached where construction is expensive.
 _REGISTRY: dict[str, Callable[[], Objective]] = {
     "reizman_suzuki": _reizman_suzuki,
+    "solubility_max": _solubility_max,
 }
 
 

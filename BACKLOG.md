@@ -34,8 +34,12 @@ Prioritized open action items. Top = next. Keep in sync with `docs/implementatio
 - [x] 1d.4 **durable BO campaign**: `BoCampaignWorkflow` (Temporal) + activities (heavy BoFire work
       isolated) + `bo/objectives.py` name→objective registry + **`workers/background_worker.py`**
       (first real background-jobs job — retro-satisfies 1.8, no empty stub). Server test runs in CI.
-- [ ] 1d.3 register a 1c **calculator** as a named BO objective (via the store) alongside reizman_suzuki.
+- [x] 1d.3 **calculator-backed objective**: `solubility_objective(store)` (cached solubility via the
+      store) registered as `solubility_max`. Note: BoFire surrogate strategies can't drive a
+      *pure-categorical* (molecule-only) domain — candidate-set/enumeration support is a later item.
 - [ ] 1d.5 candidates PR-gated (after Phase 2); 1d.6 progress/regret metric (after Phase 2b). CHECKMATE 1d full.
+- [ ] Candidate-set BO (optimize over a molecule library) — needs an acquisition-over-candidates path
+      (BoFire SOBO requires a continuous dim); revisit if molecule-selection BO is a real need.
 
 ## Done
 - [x] **Phase 0** — foundation (tooling, config, infra compose, CI, ADR-0001, layer READMEs). CHECKMATE 0 green.

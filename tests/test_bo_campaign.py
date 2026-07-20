@@ -15,7 +15,11 @@ from temporalio.client import Client
 from temporalio.worker import Worker
 
 from bo.benchmarks.reizman_suzuki import build_problem, load_dataset
-from bo.objectives import get_objective
+from bo.objectives import (
+    MOLECULE_KEY,
+    get_objective,
+    solubility_objective,
+)
 from bo.problem import (
     CampaignSpec,
     ContinuousParameter,
@@ -25,6 +29,8 @@ from bo.problem import (
     Parameter,
     best_of,
 )
+from calc.solubility import SolubilityInput, predict_solubility
+from calc.store import InMemoryStore
 from tests.temporal_env import pydantic_client, start_env_or_skip
 from workflows.bo_activities import evaluate_candidates, propose_initial, propose_next
 from workflows.bo_campaign import BoCampaignWorkflow
@@ -76,6 +82,30 @@ def test_activities_seed_and_evaluate() -> None:
         assert all(o.value >= 0 for o in observations)  # yields are non-negative
 
     asyncio.run(_run())
+
+
+def test_solubility_objective_scores_via_calculator() -> None:
+    """The calculator-backed objective (1d.3) scores a molecule via the cached calculator."""
+
+    async def _run() -> None:
+        store = InMemoryStore()
+        objective = solubility_objective(store)
+
+        ethanol = await objective({MOLECULE_KEY: "CCO"})
+        hexadecane = await objective({MOLECULE_KEY: "CCCCCCCCCCCCCCCC"})
+
+        # The objective returns exactly the calculator's predicted log S...
+        assert ethanol == predict_solubility(SolubilityInput(smiles="CCO")).log_s_mol_per_l
+        assert ethanol > hexadecane  # ethanol far more soluble than the alkane
+        # ...and a repeat is served from the store (same value, no recompute error).
+        assert await objective({MOLECULE_KEY: "CCO"}) == ethanol
+
+    asyncio.run(_run())
+
+
+def test_get_objective_resolves_calculator_objective() -> None:
+    """The calculator-backed objective is registered and resolvable by name."""
+    assert callable(get_objective("solubility_max"))
 
 
 def test_durable_campaign_runs_end_to_end() -> None:
