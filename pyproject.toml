@@ -10,6 +10,7 @@ dependencies = [
     "agent-framework-core>=1.11.0",
     "bofire[optimization]>=0.4.1",
     "llvmlite>=0.43",
+    "mcp>=1.2.0",
     "mordredcommunity>=2.0.7",
     "networkx>=3.6.1",
     "numba>=0.60",

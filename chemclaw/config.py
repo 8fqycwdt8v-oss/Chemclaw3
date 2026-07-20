@@ -125,6 +125,16 @@ class Settings(BaseSettings):
     # credited (or blamed) for changes above measurement noise. Set per metric.
     eval_ab_epsilon: float = 0.0
 
+    # Fingerprint search (plan Phase 3, mcp-molfp). ECFP4 = Morgan radius 2, 2048 bits;
+    # both are config so the fingerprint definition (and thus the stored column width)
+    # is a deliberate, versioned choice, not a magic number. The similarity threshold is
+    # the Tanimoto floor a match must clear to count as a structural neighbor — the
+    # capability exposes it, the `reaction-search` skill decides how to wield it (G6).
+    ecfp_radius: int = Field(default=2, ge=0)
+    ecfp_bits: int = Field(default=2048, gt=0)
+    fingerprint_top_k: int = Field(default=10, ge=1)
+    fingerprint_similarity_threshold: float = Field(default=0.3, ge=0.0, le=1.0)
+
 
 settings = Settings()
 """Process-wide configuration singleton. Import this, not the class."""
