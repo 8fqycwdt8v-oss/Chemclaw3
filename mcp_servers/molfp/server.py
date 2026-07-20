@@ -1,24 +1,29 @@
-"""mcp-molfp: the FastMCP server exposing the fingerprint capability (plan step 3.1).
+"""mcp-molfp: the FastMCP server exposing the molecule capability (plan step 3.1).
 
-A thin transport wrapper — all logic lives in `fingerprint`/`store`/`search`, so this
-file just advertises the capability as MCP tools over the production (Postgres) store.
-Run as `python -m mcp_servers.molfp.server` (stdio transport). Judgment stays out: the
-tools compute and search; when a similarity counts as precedent is the `reaction-search`
-skill's call (G6).
+A thin transport wrapper — all logic lives in `fingerprint`/`search` and the generic
+`fpstore`, so this file just advertises the capability as MCP tools over the production
+(Postgres) molecule table. Run as `python -m mcp_servers.molfp.server` (stdio transport).
+Judgment stays out: the tools compute and search; when a similarity counts as precedent
+is the `reaction-search` skill's call (G6).
 """
 
 from mcp.server.fastmcp import FastMCP
 
-from mcp_servers.molfp.postgres_store import PostgresFingerprintStore
+from chemclaw.config import settings
+from mcp_servers.fpstore import (
+    FingerprintRecord,
+    FingerprintStore,
+    Match,
+    PostgresFingerprintStore,
+)
 from mcp_servers.molfp.search import (
     find_similar_molecules,
     find_substructure_matches,
     record_for,
 )
-from mcp_servers.molfp.store import FingerprintStore, Match, MoleculeRecord
 
 server = FastMCP("mcp-molfp")
-_store: FingerprintStore = PostgresFingerprintStore()
+_store: FingerprintStore = PostgresFingerprintStore("molecule_fingerprints", settings.ecfp_bits)
 
 
 @server.tool()
@@ -33,7 +38,7 @@ async def similar_molecules(
 
 
 @server.tool()
-async def substructure_matches(query: str) -> list[MoleculeRecord]:
+async def substructure_matches(query: str) -> list[FingerprintRecord]:
     """Return stored molecules containing the `query` fragment (SMARTS or SMILES)."""
     return await find_substructure_matches(_store, query)
 

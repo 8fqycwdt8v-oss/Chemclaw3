@@ -7,9 +7,11 @@
 -- fingerprint width requires a matching schema change (a deliberate, rare event).
 CREATE EXTENSION IF NOT EXISTS vector;
 
+-- `label` is the human structure string (here a SMILES); the column is named neutrally
+-- because the molecule and reaction fingerprint tables share one generic store.
 CREATE TABLE IF NOT EXISTS molecule_fingerprints (
     id         TEXT        PRIMARY KEY,
-    smiles     TEXT        NOT NULL,
+    label      TEXT        NOT NULL,
     bits       bit(2048)   NOT NULL,
     created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );

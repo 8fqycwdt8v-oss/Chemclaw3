@@ -1,10 +1,11 @@
-"""ECFP4 fingerprints + Tanimoto — the deterministic capability core (plan step 3.1).
+"""ECFP4 fingerprints — the molecule capability core (plan step 3.1).
 
 Pure, GPU-free, model-free: a SMILES becomes an ECFP4 (Morgan radius 2, 2048-bit)
 fingerprint via RDKit, stored as a fixed-width bitstring so it maps directly onto a
 Postgres `bit(2048)` column. Radius and width come from config, so the fingerprint
-definition is a versioned choice, not a magic number. This module holds no judgment —
-what Tanimoto score counts as a relevant precedent is a Skill decision (G6).
+definition is a versioned choice, not a magic number. Ranking (`tanimoto`) and the store
+are the domain-neutral `mcp_servers.fpstore`; this module is only the molecule-specific
+"SMILES → bits" step and holds no judgment (G6).
 """
 
 from functools import lru_cache
@@ -13,10 +14,7 @@ from rdkit import Chem
 from rdkit.Chem import rdFingerprintGenerator
 
 from chemclaw.config import settings
-
-
-class FingerprintError(ValueError):
-    """A SMILES could not be parsed into a molecule (G4)."""
+from mcp_servers.fpstore import FingerprintError
 
 
 @lru_cache(maxsize=8)
@@ -41,20 +39,3 @@ def ecfp_bitstring(smiles: str) -> str:
     """
     fp = _generator(settings.ecfp_radius, settings.ecfp_bits).GetFingerprint(_parse(smiles))
     return str(fp.ToBitString())
-
-
-def tanimoto(bits_a: str, bits_b: str) -> float:
-    """Tanimoto (Jaccard) similarity of two equal-length fingerprint bitstrings.
-
-    `intersection / union` of set bits; two all-zero fingerprints are defined as 0.0
-    (no shared structure to speak of). Operates on the stored bitstrings directly, so
-    the in-memory backend ranks neighbors without RDKit — the same ordering the
-    Postgres backend produces in SQL. (The all-zero case is a guard only: every real
-    molecule sets at least one Morgan bit, so a fingerprint from a valid SMILES is never
-    empty — where pgvector's Jaccard would return NaN and the two backends could differ.)
-    """
-    if len(bits_a) != len(bits_b):
-        raise FingerprintError("cannot compare fingerprints of different widths")
-    a, b = int(bits_a, 2), int(bits_b, 2)
-    union = (a | b).bit_count()
-    return (a & b).bit_count() / union if union else 0.0

@@ -132,6 +132,11 @@ class Settings(BaseSettings):
     # capability exposes it, the `reaction-search` skill decides how to wield it (G6).
     ecfp_radius: int = Field(default=2, ge=0)
     ecfp_bits: int = Field(default=2048, gt=0)
+    # DRFP reaction fingerprint width (plan step 3.4, mcp-rxnfp). Its own field, not shared
+    # with ecfp_bits — a different fingerprint whose folded length is an independent choice,
+    # though both default to 2048 (matching their bit(N) columns). top_k/threshold below are
+    # shared: they are generic fingerprint-search knobs, not molecule-specific.
+    drfp_bits: int = Field(default=2048, gt=0)
     fingerprint_top_k: int = Field(default=10, ge=1)
     fingerprint_similarity_threshold: float = Field(default=0.3, ge=0.0, le=1.0)
 

@@ -1,10 +1,11 @@
 # `mcp_servers/` — MCP capability servers
 
 **Responsibility:** deterministic capability ("do X"), each as a small,
-self-contained MCP server in its own process. Implemented: `molfp`
-(`mcp-molfp`, SMILES → ECFP4 + structural search). Planned: `mcp-rxnfp`
-(reaction DRFP). Each server stays ~100 LOC by keeping the capability logic in a
-plain, testable module and making the server file a thin FastMCP wrapper.
+self-contained MCP server in its own process. Implemented: `molfp` (`mcp-molfp`,
+SMILES → ECFP4 + similarity/substructure search) and `rxnfp` (`mcp-rxnfp`,
+reaction SMILES → DRFP + reaction similarity). Both share the generic Tanimoto
+store `mcp_servers/fpstore.py` (Rule-of-Three extraction), so each server file
+stays a thin FastMCP wrapper over a plain, testable capability module.
 
 **Why `mcp_servers/` and not `mcp/`:** the directory cannot be named `mcp` — that
 package name is taken by the installed MCP SDK (`from mcp.server.fastmcp import

@@ -3,7 +3,9 @@
 Prioritized open action items. Top = next. Keep in sync with `docs/implementation-plan.md`
 (phase/step numbers) at session end.
 
-## Now — Phase 3: fingerprint search (molecule path done; reactions next)
+## Now — next capability phase (Phase 4 ELN ingestion, or Phase 5 memory)
+
+## Done — Phase 3: fingerprint search (molecules + reactions) — COMPLETE
 - [x] 3.1 `mcp-molfp` capability: ECFP4 (Morgan r2, 2048-bit) via RDKit (`mcp_servers/molfp/
       fingerprint.py`), config-sized, deterministic. Thin FastMCP `server.py` advertises the tools.
       (Dir is `mcp_servers/`, not `mcp/` — the `mcp` name is the SDK's, D-016.)
@@ -13,8 +15,11 @@ Prioritized open action items. Top = next. Keep in sync with `docs/implementatio
       `find_substructure_matches` (exact RDKit match), backend-agnostic (`mcp_servers/molfp/search.py`).
 - [x] 3.5 `reaction-search` skill: the judgment (similarity vs substructure, what Tanimoto counts as
       precedent, combine with metadata/graph) — thresholds in config, not code (G6).
-- [ ] 3.4 `mcp-rxnfp` (DRFP reaction fingerprints) + `find_similar_reactions` — deferred: needs the
-      `drfp` dep and a real reaction corpus; mirrors the molecule path (build when reactions land).
+- [x] 3.4 `mcp-rxnfp` (DRFP reaction fingerprints, `mcp_servers/rxnfp/`) + `find_similar_reactions`
+      + thin FastMCP server + `infra/sql/003`. Reactions are the 2nd fingerprint domain, so the
+      Tanimoto store is now the **generic** `mcp_servers/fpstore.py` shared by molfp+rxnfp (D-017,
+      DRY); molfp refactored onto it (molecule tests still green = no regression). `reaction-search`
+      skill covers both molecule and reaction search.
 - [x] CHECKMATE 3 (G1–G7 + deep review): core correct, MCP/skill split clean, threshold configurable.
       4 fixes — (F1) docstrings no longer overclaim exact HNSW ordering (approximate NN, up to recall);
       (F2) `bit(N)` width derived from `ecfp_bits` (single source; mismatch fails loud, not silent pad);

@@ -1,22 +1,22 @@
 """High-level molecule search over a fingerprint store (plan step 3.3).
 
-The two capability entry points the MCP server and agent call: `find_similar_molecules`
-(Tanimoto neighbors) and `find_substructure_matches` (molecules containing a query
-fragment). Both take the store as a seam so they are backend-agnostic and testable with
-the in-memory store. Defaults (top_k, threshold) come from config — the capability
-surfaces them; the `reaction-search` skill decides how to set them per task (G6).
+The two molecule capability entry points the MCP server and agent call:
+`find_similar_molecules` (Tanimoto neighbors) and `find_substructure_matches` (molecules
+containing a query fragment). Both take the store as a seam so they are backend-agnostic
+and testable with the in-memory store. Defaults (top_k, threshold) come from config — the
+capability surfaces them; the `reaction-search` skill decides how to set them (G6).
 """
 
 from rdkit import Chem
 
 from chemclaw.config import settings
-from mcp_servers.molfp.fingerprint import FingerprintError, ecfp_bitstring
-from mcp_servers.molfp.store import FingerprintStore, Match, MoleculeRecord
+from mcp_servers.fpstore import FingerprintError, FingerprintRecord, FingerprintStore, Match
+from mcp_servers.molfp.fingerprint import ecfp_bitstring
 
 
-def record_for(record_id: str, smiles: str) -> MoleculeRecord:
-    """Build a `MoleculeRecord` (id + SMILES + freshly computed ECFP4) for insertion."""
-    return MoleculeRecord(id=record_id, smiles=smiles, bits=ecfp_bitstring(smiles))
+def record_for(record_id: str, smiles: str) -> FingerprintRecord:
+    """Build a `FingerprintRecord` (id + SMILES label + freshly computed ECFP4)."""
+    return FingerprintRecord(id=record_id, label=smiles, bits=ecfp_bitstring(smiles))
 
 
 async def find_similar_molecules(
@@ -38,7 +38,7 @@ async def find_similar_molecules(
     )
 
 
-async def find_substructure_matches(store: FingerprintStore, query: str) -> list[MoleculeRecord]:
+async def find_substructure_matches(store: FingerprintStore, query: str) -> list[FingerprintRecord]:
     """Return stored molecules that contain the `query` fragment.
 
     The query is interpreted as SMARTS (the right language for a substructure pattern; a
@@ -51,9 +51,9 @@ async def find_substructure_matches(store: FingerprintStore, query: str) -> list
     pattern = Chem.MolFromSmarts(query) or Chem.MolFromSmiles(query)
     if pattern is None:
         raise FingerprintError(f"unparseable substructure query: {query!r}")
-    matches: list[MoleculeRecord] = []
+    matches: list[FingerprintRecord] = []
     for record in await store.all_records():
-        mol = Chem.MolFromSmiles(record.smiles)
+        mol = Chem.MolFromSmiles(record.label)
         if mol is not None and mol.HasSubstructMatch(pattern):
             matches.append(record)
     return matches

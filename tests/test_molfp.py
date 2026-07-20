@@ -11,13 +11,13 @@ import asyncio
 import pytest
 
 from chemclaw.config import settings
-from mcp_servers.molfp.fingerprint import FingerprintError, ecfp_bitstring, tanimoto
+from mcp_servers.fpstore import FingerprintError, InMemoryFingerprintStore, tanimoto
+from mcp_servers.molfp.fingerprint import ecfp_bitstring
 from mcp_servers.molfp.search import (
     find_similar_molecules,
     find_substructure_matches,
     record_for,
 )
-from mcp_servers.molfp.store import InMemoryFingerprintStore
 
 
 def test_ecfp_is_deterministic_and_config_sized() -> None:
