@@ -7,74 +7,32 @@ directly. No running cluster required.
 """
 
 import asyncio
-from collections.abc import Callable, Sequence
-from typing import Any
 
 import pytest
-from temporalio.client import Client, WorkflowFailureError
+from temporalio.client import WorkflowFailureError
 from temporalio.contrib.pydantic import pydantic_data_converter
 from temporalio.exceptions import ActivityError
-from temporalio.testing import WorkflowEnvironment
 from temporalio.worker import Replayer, Worker
 
-from chemclaw.config import settings
-from workflows.activities import (
-    parse_qm_output,
-    poll_hpc_status,
-    prepare_input,
-    submit_to_hpc,
-)
+from tests.temporal_env import QM_ACTIVITIES, pydantic_client, start_env_or_skip
+from workflows.activities import parse_qm_output, prepare_input
 from workflows.models import QMJobInput
 from workflows.qm_job import QMJobWorkflow
 
-_ACTIVITIES: Sequence[Callable[..., Any]] = [
-    prepare_input,
-    submit_to_hpc,
-    poll_hpc_status,
-    parse_qm_output,
-]
 _TASK_QUEUE = "test-hpc"
-
-
-async def _start_env() -> WorkflowEnvironment:
-    """Start the time-skipping test server, or skip if its binary can't be fetched.
-
-    The server binary is downloaded on first use; in a network-restricted sandbox
-    that fails, so the server-backed tests skip locally but run fully in CI (where
-    the download succeeds). Pure activity tests below never depend on this.
-    """
-    try:
-        return await WorkflowEnvironment.start_time_skipping()
-    except RuntimeError as exc:  # pragma: no cover - environment-dependent
-        pytest.skip(f"Temporal test server unavailable (offline sandbox): {exc}")
-
-
-@pytest.fixture(autouse=True)
-def _fast_mock(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Shrink the mock-HPC sleeps so the durable path runs in milliseconds."""
-    monkeypatch.setattr(settings, "hpc_mock_submit_seconds", 0.0)
-    monkeypatch.setattr(settings, "hpc_mock_run_seconds", 0.02)
-    monkeypatch.setattr(settings, "hpc_poll_interval_seconds", 0.01)
-
-
-def _pydantic_client(env: WorkflowEnvironment) -> Client:
-    """Rebuild the env's client with our pydantic data converter."""
-    config = env.client.config()
-    config["data_converter"] = pydantic_data_converter
-    return Client(**config)
 
 
 def test_qm_job_runs_to_typed_result() -> None:
     """A submitted job completes durably and returns a parsed `QMJobResult`."""
 
     async def _run() -> None:
-        async with await _start_env() as env:
-            client = _pydantic_client(env)
+        async with await start_env_or_skip() as env:
+            client = pydantic_client(env)
             async with Worker(
                 client,
                 task_queue=_TASK_QUEUE,
                 workflows=[QMJobWorkflow],
-                activities=_ACTIVITIES,
+                activities=QM_ACTIVITIES,
             ):
                 result = await client.execute_workflow(
                     QMJobWorkflow.run,
@@ -93,13 +51,13 @@ def test_workflow_history_replays_deterministically() -> None:
     """Re-running the recorded history must not raise — proves resume-safety."""
 
     async def _run() -> None:
-        async with await _start_env() as env:
-            client = _pydantic_client(env)
+        async with await start_env_or_skip() as env:
+            client = pydantic_client(env)
             async with Worker(
                 client,
                 task_queue=_TASK_QUEUE,
                 workflows=[QMJobWorkflow],
-                activities=_ACTIVITIES,
+                activities=QM_ACTIVITIES,
             ):
                 handle = await client.start_workflow(
                     QMJobWorkflow.run,
@@ -133,13 +91,13 @@ def test_bad_input_surfaces_as_workflow_failure() -> None:
     """A blank SMILES makes the whole job fail loudly (activity error propagates)."""
 
     async def _run() -> None:
-        async with await _start_env() as env:
-            client = _pydantic_client(env)
+        async with await start_env_or_skip() as env:
+            client = pydantic_client(env)
             async with Worker(
                 client,
                 task_queue=_TASK_QUEUE,
                 workflows=[QMJobWorkflow],
-                activities=_ACTIVITIES,
+                activities=QM_ACTIVITIES,
             ):
                 with pytest.raises(WorkflowFailureError) as excinfo:
                     await client.execute_workflow(

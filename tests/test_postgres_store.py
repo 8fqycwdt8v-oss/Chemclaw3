@@ -8,13 +8,10 @@ version.
 
 import asyncio
 
-import psycopg
-import pytest
-
-from calc.migrate import _statements, migrate
+from calc.migrate import _statements
 from calc.postgres_store import PostgresStore
 from calc.store import CalculationKey, StoredResult
-from chemclaw.config import settings
+from tests.pg import migrated_db_or_skip
 
 
 def test_statements_split_ignores_comment_semicolons() -> None:
@@ -28,12 +25,7 @@ def test_statements_split_ignores_comment_semicolons() -> None:
 
 async def _store_or_skip() -> PostgresStore:
     """Return a migrated Postgres store, or skip if no database is reachable."""
-    try:
-        conn = await psycopg.AsyncConnection.connect(settings.postgres_dsn)
-        await conn.close()
-    except psycopg.OperationalError as exc:  # pragma: no cover - env-dependent
-        pytest.skip(f"Postgres unavailable (offline sandbox): {exc}")
-    await migrate()
+    await migrated_db_or_skip()
     return PostgresStore()
 
 

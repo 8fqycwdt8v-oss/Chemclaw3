@@ -13,9 +13,9 @@ from temporalio.worker import Worker
 
 import workflows.report_workflow as report_workflow
 from chemclaw.config import settings
-from kg.pr_gate import NoteSubmission
 from report.evidence import EvidenceChunk
 from report.harness import ReportRequest, ReportSection
+from tests.conftest import FakeSubmitter
 from tests.temporal_env import pydantic_client, start_env_or_skip
 from workflows.report_workflow import (
     DevelopmentReportWorkflow,
@@ -37,15 +37,9 @@ class _FakeRetriever:
 
 def test_report_workflow_drafts_and_pr_gates(monkeypatch: pytest.MonkeyPatch) -> None:
     """The workflow retrieves each section durably and proposes one cited report note."""
-    captured: list[NoteSubmission] = []
-
-    class _Fake:
-        async def submit(self, submission: NoteSubmission) -> str:
-            captured.append(submission)
-            return f"pr://{submission.branch}"
-
+    fake = FakeSubmitter()
     monkeypatch.setattr(report_workflow, "default_retrievers", lambda: [_FakeRetriever()])
-    monkeypatch.setattr(report_workflow, "default_submitter", lambda: _Fake())
+    monkeypatch.setattr(report_workflow, "default_submitter", lambda: fake)
 
     async def _run() -> None:
         request = ReportRequest(
@@ -70,7 +64,7 @@ def test_report_workflow_drafts_and_pr_gates(monkeypatch: pytest.MonkeyPatch) ->
                     task_queue=settings.background_task_queue,
                 )
         assert ref.startswith("pr://note/report-")
-        body = captured[0].content
+        body = fake.submissions[0].content
         assert "[[reaction-a]]" in body  # the supported section cites its source
         assert "No supporting data found" in body  # the safety section is marked, not invented
 

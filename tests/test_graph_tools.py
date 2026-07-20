@@ -8,7 +8,7 @@ import pytest
 import agents.graph_tools as graph_tools
 from agents.graph_tools import expand_note, find_notes, propose_knowledge_note
 from chemclaw.config import settings
-from kg.pr_gate import NoteSubmission
+from tests.conftest import FakeSubmitter
 
 
 def _seed(tmp_path: Path) -> None:
@@ -48,18 +48,12 @@ def test_expand_unknown_note_raises(tmp_path: Path, monkeypatch: pytest.MonkeyPa
 
 def test_propose_knowledge_note_uses_gate(monkeypatch: pytest.MonkeyPatch) -> None:
     """The write tool proposes an agent note through the (fake) PR-gate."""
-    captured: list[NoteSubmission] = []
-
-    class _Fake:
-        async def submit(self, submission: NoteSubmission) -> str:
-            captured.append(submission)
-            return f"pr://{submission.branch}"
-
-    monkeypatch.setattr(graph_tools, "default_submitter", lambda: _Fake())
+    fake = FakeSubmitter()
+    monkeypatch.setattr(graph_tools, "default_submitter", lambda: fake)
     ref = asyncio.run(
         propose_knowledge_note(
             id="reaction-x", type="reaction", body="From [[compound-a]].", source="eln-1"
         )
     )
     assert ref == "pr://note/reaction-x"
-    assert captured[0].path.endswith("reaction/reaction-x.md")
+    assert fake.submissions[0].path.endswith("reaction/reaction-x.md")

@@ -11,7 +11,6 @@ import asyncio
 import pytest
 
 from eln.ord import Component, OrdReaction, Role
-from kg.pr_gate import NoteSubmission
 from memory.campaign import campaign_note_from_chain
 from memory.chains import detect_chains
 from memory.interaction import note_from_confirmed_answer
@@ -21,17 +20,7 @@ from memory.playbook import (
     find_playbook_candidates,
     playbook_note,
 )
-
-
-class _FakeSubmitter:
-    """Captures proposed notes instead of pushing a git branch."""
-
-    def __init__(self) -> None:
-        self.notes: list[NoteSubmission] = []
-
-    async def submit(self, submission: NoteSubmission) -> str:
-        self.notes.append(submission)
-        return f"pr://{submission.branch}"
+from tests.conftest import FakeSubmitter
 
 
 def _reaction(
@@ -189,21 +178,21 @@ def test_synthesize_campaigns_proposes_notes_via_pr_gate() -> None:
     """The campaign job proposes one PR-gated campaign note per detected chain."""
     a = _reaction("a", ["CCO"], ["CC=O"], project="proj-x")
     b = _reaction("b", ["CC=O"], ["CC(O)O"], project="proj-x")
-    sub = _FakeSubmitter()
+    sub = FakeSubmitter()
     refs = asyncio.run(synthesize_campaigns([a, b], sub))
     assert len(refs) == 1
-    assert sub.notes[0].path.startswith("knowledge/campaign/campaign-")
+    assert sub.submissions[0].path.startswith("knowledge/campaign/campaign-")
 
 
 def test_distill_playbooks_proposes_evidence_backed_notes() -> None:
     """The playbook job proposes a cross-project playbook note citing its evidence."""
     ester_x = _reaction("x", ["CCO", "CC(=O)O"], ["CCOC(C)=O"], project="proj-x")
     ester_y = _reaction("y", ["CCCO", "CC(=O)O"], ["CCCOC(C)=O"], project="proj-y")
-    sub = _FakeSubmitter()
+    sub = FakeSubmitter()
     refs = asyncio.run(distill_playbooks([ester_x, ester_y], sub))
     assert len(refs) == 1
-    assert sub.notes[0].path.startswith("knowledge/playbook/playbook-")
-    assert "proj-x" in sub.notes[0].content and "proj-y" in sub.notes[0].content
+    assert sub.submissions[0].path.startswith("knowledge/playbook/playbook-")
+    assert "proj-x" in sub.submissions[0].content and "proj-y" in sub.submissions[0].content
 
 
 # --- user interaction (5.5) -----------------------------------------------------------

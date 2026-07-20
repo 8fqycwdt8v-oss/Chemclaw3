@@ -20,8 +20,8 @@ from eln.note import note_from_ord_reaction
 from eln.ord import Component, OrdReaction, Role
 from eln.sync import sync_entries
 from eln.validate import validate_ord
-from kg.pr_gate import NoteSubmission
 from mcp_servers.fpstore import InMemoryFingerprintStore
+from tests.conftest import FakeSubmitter
 
 _EPOCH = datetime.min.replace(tzinfo=UTC)
 
@@ -39,17 +39,6 @@ def _ester() -> OrdReaction:
         yield_percent=85.0,
         provenance="eln:chemist-a",
     )
-
-
-class _FakeSubmitter:
-    """Captures submissions instead of pushing a git branch."""
-
-    def __init__(self) -> None:
-        self.captured: list[NoteSubmission] = []
-
-    async def submit(self, submission: NoteSubmission) -> str:
-        self.captured.append(submission)
-        return f"pr://{submission.branch}"
 
 
 # --- schema ---------------------------------------------------------------------------
@@ -339,12 +328,12 @@ def test_ingest_indexes_and_proposes() -> None:
     """A valid reaction is indexed (reaction + compounds) and proposed via the PR-gate."""
 
     async def _run() -> None:
-        rxn, mol, sub = InMemoryFingerprintStore(), InMemoryFingerprintStore(), _FakeSubmitter()
+        rxn, mol, sub = InMemoryFingerprintStore(), InMemoryFingerprintStore(), FakeSubmitter()
         ref = await ingest_reaction(_ester(), rxn, mol, sub)
         assert ref == "pr://note/reaction-rxn-1"
         assert len(await rxn.all_records()) == 1  # the reaction fingerprint
         assert len(await mol.all_records()) == 3  # ethanol, acetic acid, ethyl acetate
-        assert sub.captured[0].path.startswith("knowledge/reaction/reaction-rxn-1")
+        assert sub.submissions[0].path.startswith("knowledge/reaction/reaction-rxn-1")
 
     asyncio.run(_run())
 
@@ -353,7 +342,7 @@ def test_ingest_rejects_invalid_without_side_effects() -> None:
     """An invalid reaction raises and writes nothing to the index or the graph (G4)."""
 
     async def _run() -> None:
-        rxn, mol, sub = InMemoryFingerprintStore(), InMemoryFingerprintStore(), _FakeSubmitter()
+        rxn, mol, sub = InMemoryFingerprintStore(), InMemoryFingerprintStore(), FakeSubmitter()
         bad = _ester().model_copy(
             update={"outcomes": [Component(smiles="CCCl", role=Role.PRODUCT)]}
         )
@@ -361,7 +350,7 @@ def test_ingest_rejects_invalid_without_side_effects() -> None:
             await ingest_reaction(bad, rxn, mol, sub)
         assert await rxn.all_records() == []
         assert await mol.all_records() == []
-        assert sub.captured == []
+        assert sub.submissions == []
 
     asyncio.run(_run())
 
@@ -401,7 +390,7 @@ def test_sync_ingests_batch_and_skips_bad_entries() -> None:
             def map_to_ord(self, raw: RawEntry) -> OrdReaction:
                 return JsonExportAdapter().map_to_ord(raw)
 
-        rxn, mol, sub = InMemoryFingerprintStore(), InMemoryFingerprintStore(), _FakeSubmitter()
+        rxn, mol, sub = InMemoryFingerprintStore(), InMemoryFingerprintStore(), FakeSubmitter()
         summary = await sync_entries(_Adapter(), rxn, mol, sub, _EPOCH)
 
         assert summary.ingested == ["good"]  # the good entry survives both bad ones
@@ -410,7 +399,7 @@ def test_sync_ingests_batch_and_skips_bad_entries() -> None:
         assert "mass balance" in reasons["bad-balance"]
         assert "cannot map" in reasons["unmappable"]
         assert summary.next_cursor == datetime(2026, 3, 1, tzinfo=UTC)  # newest seen
-        assert len(sub.captured) == 1  # only the good entry proposed a note
+        assert len(sub.submissions) == 1  # only the good entry proposed a note
 
     asyncio.run(_run())
 
@@ -444,7 +433,7 @@ def test_sync_rejects_degenerate_reaction_without_aborting_batch() -> None:
             def map_to_ord(self, raw: RawEntry) -> OrdReaction:
                 return JsonExportAdapter().map_to_ord(raw)
 
-        rxn, mol, sub = InMemoryFingerprintStore(), InMemoryFingerprintStore(), _FakeSubmitter()
+        rxn, mol, sub = InMemoryFingerprintStore(), InMemoryFingerprintStore(), FakeSubmitter()
         summary = await sync_entries(_Adapter(), rxn, mol, sub, _EPOCH)
 
         assert summary.ingested == ["good"]

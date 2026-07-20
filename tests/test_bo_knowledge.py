@@ -11,7 +11,7 @@ from temporalio.worker import Worker
 import workflows.bo_knowledge as bo_knowledge
 from bo.problem import CampaignResult, CampaignSpec, Observation
 from chemclaw.config import settings
-from kg.pr_gate import NoteSubmission
+from tests.conftest import FakeSubmitter
 from tests.temporal_env import pydantic_client, start_env_or_skip
 from workflows.bo_activities import evaluate_candidates, propose_initial, propose_next
 from workflows.bo_campaign import BoCampaignWorkflow
@@ -55,30 +55,18 @@ def test_note_id_is_stable_for_the_same_recommendation() -> None:
 
 def test_write_campaign_node_uses_the_pr_gate(monkeypatch: pytest.MonkeyPatch) -> None:
     """The activity proposes the mapped note through the (fake) submitter."""
-    captured: list[NoteSubmission] = []
-
-    class _Fake:
-        async def submit(self, submission: NoteSubmission) -> str:
-            captured.append(submission)
-            return f"pr://{submission.branch}"
-
-    monkeypatch.setattr(bo_knowledge, "default_submitter", lambda: _Fake())
+    fake = FakeSubmitter()
+    monkeypatch.setattr(bo_knowledge, "default_submitter", lambda: fake)
     ref = asyncio.run(write_campaign_node("reizman_suzuki", _RESULT))
 
     assert ref.startswith("pr://note/bo-reizman_suzuki-")
-    assert captured[0].path.startswith("knowledge/bo-candidate/bo-reizman_suzuki-")
+    assert fake.submissions[0].path.startswith("knowledge/bo-candidate/bo-reizman_suzuki-")
 
 
 def test_campaign_publishes_recommendation_to_graph(monkeypatch: pytest.MonkeyPatch) -> None:
     """With publish_to_graph, a finished campaign proposes a bo-candidate note (bg queue)."""
-    captured: list[NoteSubmission] = []
-
-    class _Fake:
-        async def submit(self, submission: NoteSubmission) -> str:
-            captured.append(submission)
-            return f"pr://{submission.branch}"
-
-    monkeypatch.setattr(bo_knowledge, "default_submitter", lambda: _Fake())
+    fake = FakeSubmitter()
+    monkeypatch.setattr(bo_knowledge, "default_submitter", lambda: fake)
 
     async def _run() -> None:
         from bo.benchmarks.reizman_suzuki import build_problem, load_dataset
@@ -111,7 +99,7 @@ def test_campaign_publishes_recommendation_to_graph(monkeypatch: pytest.MonkeyPa
                     id="bo-publish-test",
                     task_queue="test-bo-pub",
                 )
-        assert len(captured) == 1  # the recommendation was proposed as a note
-        assert captured[0].path.startswith("knowledge/bo-candidate/bo-")
+        assert len(fake.submissions) == 1  # the recommendation was proposed as a note
+        assert fake.submissions[0].path.startswith("knowledge/bo-candidate/bo-")
 
     asyncio.run(_run())

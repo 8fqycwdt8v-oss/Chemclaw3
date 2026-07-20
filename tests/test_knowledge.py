@@ -13,6 +13,7 @@ from chemclaw.config import settings
 from kg.git_submitter import GitNoteSubmitter, GitSubmitError
 from kg.note import Note
 from kg.pr_gate import NoteSubmission
+from tests.conftest import FakeSubmitter
 from tests.temporal_env import QM_ACTIVITIES, pydantic_client, start_env_or_skip
 from workflows.knowledge import note_from_qm_result, write_knowledge_node
 from workflows.models import QMJobInput, QMJobResult
@@ -42,18 +43,12 @@ def test_note_from_qm_result_maps_fields() -> None:
 
 def test_write_knowledge_node_uses_the_pr_gate(monkeypatch: pytest.MonkeyPatch) -> None:
     """The activity proposes the mapped note through the (fake) submitter."""
-    captured: list[NoteSubmission] = []
-
-    class _Fake:
-        async def submit(self, submission: NoteSubmission) -> str:
-            captured.append(submission)
-            return f"pr://{submission.branch}"
-
-    monkeypatch.setattr(knowledge, "default_submitter", lambda: _Fake())
+    fake = FakeSubmitter()
+    monkeypatch.setattr(knowledge, "default_submitter", lambda: fake)
     ref = asyncio.run(write_knowledge_node(_RESULT))
 
     assert ref.startswith("pr://note/job-")
-    assert captured[0].path.startswith("knowledge/job-result/job-")
+    assert fake.submissions[0].path.startswith("knowledge/job-result/job-")
 
 
 def _clone(remote: Path, dest: Path) -> Path:
@@ -194,14 +189,8 @@ def test_submitter_refuses_path_escaping_the_checkout(tmp_path: Path) -> None:
 
 def test_qm_workflow_publishes_to_graph(monkeypatch: pytest.MonkeyPatch) -> None:
     """With publish_to_graph, a completed QM job proposes a note on the bg queue."""
-    captured: list[NoteSubmission] = []
-
-    class _Fake:
-        async def submit(self, submission: NoteSubmission) -> str:
-            captured.append(submission)
-            return f"pr://{submission.branch}"
-
-    monkeypatch.setattr(knowledge, "default_submitter", lambda: _Fake())
+    fake = FakeSubmitter()
+    monkeypatch.setattr(knowledge, "default_submitter", lambda: fake)
 
     async def _run() -> None:
         async with await start_env_or_skip() as env:
@@ -230,7 +219,7 @@ def test_qm_workflow_publishes_to_graph(monkeypatch: pytest.MonkeyPatch) -> None
                     id="qm-publish-test",
                     task_queue="test-hpc-pub",
                 )
-        assert len(captured) == 1  # the completed result was proposed as a note
-        assert captured[0].path.startswith("knowledge/job-result/job-")
+        assert len(fake.submissions) == 1  # the completed result was proposed as a note
+        assert fake.submissions[0].path.startswith("knowledge/job-result/job-")
 
     asyncio.run(_run())

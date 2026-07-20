@@ -16,8 +16,9 @@ Prioritized open action items. Top = next. Keep in sync with `docs/implementatio
       recomputes completed jobs, report publish got the bounded retry discipline
       (`workflows/publish.py`), vacuous-green eval gate fails loudly. Cross-cutting: CLAUDE.md
       status un-falsified, `.env.example` complete, CI runs eval+eln-validate, dependency hygiene.
-- [ ] Test-helper dedup pass (shared FakeSubmitter/temporal_env/_store_or_skip) — in flight;
-      follow-up commit.
+- [x] Test-helper dedup pass: one `FakeSubmitter` in conftest (replaced ~10 local fakes),
+      QM tests use `tests/temporal_env.py` (inline copies + cross-test private imports gone),
+      shared `tests/pg.py` Postgres bootstrap, redundant `fast_mock` fixtures deleted.
 - [ ] Multi-process note-submit serialization (lock is per-process; per-submission worktrees or
       a distributed lock) — revisit when >1 background worker replica exists.
 
