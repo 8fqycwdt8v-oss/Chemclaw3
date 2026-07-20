@@ -72,6 +72,16 @@ class Settings(BaseSettings):
     xtb_method: str = "GFN2-xTB"
     xtb_embed_seed: int = 42
 
+    # xTB-based pKa predictor (plan step 1c.4): pKa from the GFN2-xTB solvated
+    # (ALPB) deprotonation energy via a linear calibration pKa = slope*dE + intercept.
+    # Defaults fitted over 10 reference O-H acids (R^2 0.93, residual ~1.6 pKa units);
+    # recalibrate against a proper dataset before production. Changing any of these
+    # invalidates the cache (they are part of the key).
+    pka_solvent: str = "water"
+    pka_calibration_slope: float = 0.28733
+    pka_calibration_intercept: float = -29.3116
+    pka_uncertainty: float = 1.6
+
     # MAF agent (plan step 1.5). `agent_model` is the orchestration model name
     # (ENV-overridable); the provider's API key is read by the chat client from
     # its own env var (e.g. ANTHROPIC_API_KEY), not stored here. `skills_dir` is

@@ -16,9 +16,12 @@ question and how far to trust it.
 - **Electronic energy / relative stability / conformer energy** → `compute_xtb_energy`
   (GFN2-xTB semiempirical single point). Fast, deterministic, good for *relative*
   comparisons of related structures.
-- **A measured-like physicochemical property** (solubility, pKa, …) → the
-  corresponding property predictor once available. Prefer a predictor with a
-  reported uncertainty, and always surface that uncertainty to the user.
+- **Aqueous solubility** → `predict_solubility` (fast property model; reports an
+  uncertainty — surface it).
+- **pKa of an acidic O-H/S-H site** → `predict_pka` (GFN2-xTB solvated
+  deprotonation energy + calibration; ~1.6 pKa-unit uncertainty). Only O-H/S-H
+  acids (carboxylic acids, phenols, alcohols, thiols); it errors on molecules with
+  no such site, and N-H/C-H acids are out of scope for now.
 
 ## Reading results honestly
 

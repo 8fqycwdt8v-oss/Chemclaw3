@@ -16,7 +16,8 @@ Prioritized open action items. Top = next. Keep in sync with `docs/implementatio
       `calc/xtb.py`, cached through the store (`run_cached_xtb`). Real GFN2 tests run everywhere.
 - [ ] 1c.1 Calculator contract + registry — build when the 2nd calculator (solubility) lands (Rule of Three).
 - [ ] 1c.3 GNN solubility model (inference only; value + uncertainty) — **needs model choice** (see open Qs).
-- [ ] 1c.4 pKa/property model(s) (the user's "pKs" — interpreted as pKa; confirm) — **needs model choice**.
+- [x] 1c.4 **pKa via xTB** (`calc/pka.py`): GFN2-xTB ALPB-solvated deprotonation energy of the most
+      acidic O-H/S-H site + linear calibration (R²0.93 over 10 acids). Agent tool `predict_pka`. Real tests.
 - [x] 1c.5/1c.6 xTB exposed to the MAF agent as tool `compute_xtb_energy` + `calculation-selection` skill.
 - [ ] 1c.5b generalize to a calculator registry once the 2nd calculator lands (solubility/pKa).
 - [ ] 1c.7 optional graph note via PR-gate. CHECKMATE 1c.

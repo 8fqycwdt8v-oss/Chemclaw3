@@ -14,6 +14,7 @@ def test_agent_advertises_qm_tools() -> None:
     assert {
         "compute_xtb_energy",
         "predict_solubility",
+        "predict_pka",
         "submit_qm_job",
         "get_qm_job_status",
     } <= tool_names
