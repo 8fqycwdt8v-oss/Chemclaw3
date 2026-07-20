@@ -14,6 +14,7 @@ from kg.pr_gate import NoteSubmitter, propose_note
 from memory.campaign import campaign_note_from_chain
 from memory.chains import detect_chains
 from memory.ids import stable_id
+from memory.optimization import find_optimization_campaigns, optimization_campaign_note
 from memory.playbook import PlaybookCandidate, find_playbook_candidates, playbook_note
 
 
@@ -35,6 +36,20 @@ async def distill_playbooks(reactions: list[OrdReaction], submitter: NoteSubmitt
             stable_id("playbook", candidate.reaction_ids),
             _summary(candidate, by_id),
             candidate.reaction_ids,
+        )
+        refs.append(await propose_note(note, submitter))
+    return refs
+
+
+async def synthesize_optimization_campaigns(
+    reactions: list[OrdReaction], submitter: NoteSubmitter
+) -> list[str]:
+    """Group same-transformation runs and propose an `optimization-campaign` note for each."""
+    by_id = {r.reaction_id: r for r in reactions}
+    refs: list[str] = []
+    for campaign in find_optimization_campaigns(reactions):
+        note = optimization_campaign_note(
+            stable_id("optimization", campaign.reaction_ids), campaign, by_id
         )
         refs.append(await propose_note(note, submitter))
     return refs

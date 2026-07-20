@@ -25,9 +25,11 @@ from workflows.eln_sync import ElnSyncWorkflow, sync_eln_entries
 from workflows.knowledge import write_knowledge_node
 from workflows.memory_jobs import (
     CampaignSynthesisWorkflow,
+    OptimizationCampaignWorkflow,
     PlaybookDistillationWorkflow,
     distill_playbooks_activity,
     synthesize_campaigns_activity,
+    synthesize_optimization_campaigns_activity,
 )
 from workflows.report_workflow import (
     DevelopmentReportWorkflow,
@@ -42,6 +44,7 @@ BACKGROUND_WORKFLOWS: list[type] = [
     ElnSyncWorkflow,
     CampaignSynthesisWorkflow,
     PlaybookDistillationWorkflow,
+    OptimizationCampaignWorkflow,
     DevelopmentReportWorkflow,
 ]
 BACKGROUND_ACTIVITIES: Sequence[Callable[..., Any]] = [
@@ -53,6 +56,7 @@ BACKGROUND_ACTIVITIES: Sequence[Callable[..., Any]] = [
     sync_eln_entries,
     synthesize_campaigns_activity,
     distill_playbooks_activity,
+    synthesize_optimization_campaigns_activity,
     retrieve_section,
     propose_report,
 ]

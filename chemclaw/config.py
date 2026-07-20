@@ -165,6 +165,11 @@ class Settings(BaseSettings):
     # whose DRFP similarity clears this floor and that recur across >=2 projects — higher than
     # the search floor, since a playbook claims "same transformation", not just "related".
     playbook_similarity_threshold: float = Field(default=0.5, ge=0.0, le=1.0)
+    # The episodic layer groups an *optimization campaign* — repeated runs of the **same
+    # transformation** (a screen varying conditions/reagents) — by DRFP similarity. Higher than
+    # the playbook floor: an optimization series is the same reaction re-run, not merely related
+    # chemistry, so the grouping must be tight to avoid merging distinct transformations.
+    optimization_similarity_threshold: float = Field(default=0.7, ge=0.0, le=1.0)
     memory_job_timeout_seconds: float = Field(default=300.0, gt=0)
 
     # Report harness (plan Phase 5b). Per-section retrieval budget for the durable

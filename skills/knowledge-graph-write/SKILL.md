@@ -21,8 +21,10 @@ graph.
 ## Shaping the note
 
 - **type**: the smallest accurate kind (`compound`, `reaction`, `job-result`,
-  `campaign`, `playbook`). Eval cases are *not* graph notes — they live under
-  `eval_case_dir`, outside the graph (D-014).
+  `campaign`, `optimization-campaign`, `playbook`, `report`, `protocol`). Use
+  `protocol` for an agent-proposed set of conditions/procedure (a proposal, not an
+  observed result — it must cite the evidence it rests on). Eval cases are *not*
+  graph notes — they live under `eval_case_dir`, outside the graph (D-014).
 - **id**: stable, human-readable, unique (e.g. `reaction-suzuki-<substrate>`);
   the id is how other notes link to this one, so it should not change.
 - **links**: connect the note to what it relates to with `[[wikilinks]]` in the

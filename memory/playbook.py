@@ -9,15 +9,13 @@ playbook with no citations is inadmissible (plan 5.4: Belegverweise verpflichten
 distilled rule's prose is the `playbook-distillation` skill's judgment, layered on this base.
 """
 
-import networkx as nx
 from pydantic import BaseModel
 
 from chemclaw.config import settings
 from chemclaw.errors import ChemclawError
 from eln.ord import OrdReaction
 from kg.note import Note
-from mcp_servers.fpstore import FingerprintError, tanimoto
-from mcp_servers.rxnfp.fingerprint import drfp_bitstring
+from memory.similarity import cluster_by_similarity, reaction_fingerprints
 
 
 class PlaybookCandidate(BaseModel):
@@ -48,34 +46,17 @@ def find_playbook_candidates(
     escape hatch when that day comes.
     """
     floor = threshold if threshold is not None else settings.playbook_similarity_threshold
-    # A degenerate/unparseable reaction is dropped, never fatal: one bad reaction must not
-    # abort distillation for the whole corpus (G4). Only projected, fingerprintable reactions
-    # can evidence cross-project recurrence.
-    fingerprints: dict[str, str] = {}
-    project_of: dict[str, str] = {}
-    for reaction in reactions:
-        if not reaction.project:
-            continue
-        try:
-            fingerprints[reaction.reaction_id] = drfp_bitstring(reaction.reaction_smiles())
-        except FingerprintError:
-            continue
-        project_of[reaction.reaction_id] = reaction.project
-    scoped_ids = list(fingerprints)
-
-    graph: nx.Graph = nx.Graph()
-    graph.add_nodes_from(scoped_ids)
-    for i, a in enumerate(scoped_ids):
-        for b in scoped_ids[i + 1 :]:
-            if tanimoto(fingerprints[a], fingerprints[b]) >= floor:
-                graph.add_edge(a, b)
+    # Only *projected*, fingerprintable reactions can evidence cross-project recurrence, so
+    # scope to those before clustering (a degenerate reaction is dropped by the fingerprinter).
+    projected = [r for r in reactions if r.project]
+    fingerprints = reaction_fingerprints(projected)
+    project_of = {r.reaction_id: r.project for r in projected if r.reaction_id in fingerprints}
 
     candidates: list[PlaybookCandidate] = []
-    for component in nx.connected_components(graph):
-        projects = sorted({project_of[r] for r in component})
+    for cluster in cluster_by_similarity(fingerprints, floor):
+        projects = sorted({p for r in cluster if (p := project_of.get(r))})
         if len(projects) >= 2:
-            candidates.append(PlaybookCandidate(reaction_ids=sorted(component), projects=projects))
-    candidates.sort(key=lambda c: c.reaction_ids[0])
+            candidates.append(PlaybookCandidate(reaction_ids=cluster, projects=projects))
     return candidates
 
 
