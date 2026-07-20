@@ -3,7 +3,18 @@
 Prioritized open action items. Top = next. Keep in sync with `docs/implementation-plan.md`
 (phase/step numbers) at session end.
 
-## Now — early compute focus (reprioritized; HPC/DFT deferred — D-010)
+## Now — Phase 2: knowledge graph + PR-gate
+- [x] 2.1 Note schema (`kg/note.py`, one pydantic model); 2.2 parser (frontmatter → Note, clear errors).
+- [x] 2.3 Wikilink extraction + NetworkX indexer (`kg/graph.py`, `neighborhood` 1–2 hop traversal).
+- [x] 2.4 Validation CLI (`kg/validate.py`, `make kg-validate`) — broken links / dup ids / bad notes; in CI.
+- [x] 2.5/2.6 skills `knowledge-graph-query` + `knowledge-graph-write` (judgment).
+- [x] 2.7 **PR-gate** built once (`kg/pr_gate.py` `propose_note` + `NoteSubmitter` seam + `kg/render.py`);
+      agent-only, notes land at `<knowledge_dir>/<type>/<id>.md` on a per-note branch. Tested with a fake.
+- [ ] 2.6b real `NoteSubmitter` (git branch + push + GitHub PR) — thin adapter; integration-only.
+- [ ] 2.8 Temporal activity `write_knowledge_node`: QM/calc result → Note → PR-gate (reuse propose_note).
+- [ ] Agent tools for graph query/write (wire `kg.graph`/`propose_note` as MAF tools). CHECKMATE 2.
+
+## Later compute items (reprioritized; HPC/DFT deferred — D-010)
 
 ### Phase 1b — Result store / calc cache (first-class; "never compute twice") — DONE
 - [x] 1b.1 Store interface `get/put` (Protocol); 1b.2 versioned key `(calc_type, calc_version, input_hash, params_hash)`.
