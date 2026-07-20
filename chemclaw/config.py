@@ -98,6 +98,10 @@ class Settings(BaseSettings):
     # Markdown knowledge graph (plan Phase 2). Directory of note files the indexer
     # reads; retrieval is graph traversal over their [[wikilinks]] (D-004).
     knowledge_dir: str = "knowledge"
+    # PR-gate git settings (plan steps 2.7, 2.8): agent notes branch off this base
+    # branch on this remote before a human merges.
+    note_base_branch: str = "main"
+    git_remote: str = "origin"
 
 
 settings = Settings()

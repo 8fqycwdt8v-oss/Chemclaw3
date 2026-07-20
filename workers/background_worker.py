@@ -18,16 +18,22 @@ from workflows.bo_activities import (
     propose_next,
 )
 from workflows.bo_campaign import BoCampaignWorkflow
+from workflows.knowledge import write_knowledge_node
 
 
 async def main() -> None:
-    """Connect and poll the background-jobs queue for BO campaigns."""
+    """Connect and poll the background-jobs queue for BO campaigns and graph writes."""
     client = await connect()
     worker = Worker(
         client,
         task_queue=settings.background_task_queue,
         workflows=[BoCampaignWorkflow],
-        activities=[propose_initial, propose_next, evaluate_candidates],
+        activities=[
+            propose_initial,
+            propose_next,
+            evaluate_candidates,
+            write_knowledge_node,
+        ],
     )
     await worker.run()
 

@@ -10,9 +10,13 @@ Prioritized open action items. Top = next. Keep in sync with `docs/implementatio
 - [x] 2.5/2.6 skills `knowledge-graph-query` + `knowledge-graph-write` (judgment).
 - [x] 2.7 **PR-gate** built once (`kg/pr_gate.py` `propose_note` + `NoteSubmitter` seam + `kg/render.py`);
       agent-only, notes land at `<knowledge_dir>/<type>/<id>.md` on a per-note branch. Tested with a fake.
-- [ ] 2.6b real `NoteSubmitter` (git branch + push + GitHub PR) — thin adapter; integration-only.
-- [ ] 2.8 Temporal activity `write_knowledge_node`: QM/calc result → Note → PR-gate (reuse propose_note).
-- [ ] Agent tools for graph query/write (wire `kg.graph`/`propose_note` as MAF tools). CHECKMATE 2.
+- [x] 2.6b real `NoteSubmitter`: `kg/git_submitter.py` `GitNoteSubmitter` (branch off base, write, commit,
+      push) — tested against a local bare remote. PR-object creation is the git platform's step.
+- [x] 2.8 Temporal activity `write_knowledge_node` (`workflows/knowledge.py`): QM result → agent
+      `job-result` note (links to a method-independent compound id) → PR-gate. Registered on the bg worker.
+- [ ] Agent tools for graph query/write (wire `kg.graph`/`propose_note` as MAF tools).
+- [ ] Wire `write_knowledge_node` into a workflow caller (e.g. optional final step after a QM job).
+- [ ] CHECKMATE 2 (G1–G7 + deep review over Phase 1+2): QM job → PR with valid note → query finds it.
 
 ## Later compute items (reprioritized; HPC/DFT deferred — D-010)
 
