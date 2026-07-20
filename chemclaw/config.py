@@ -95,6 +95,10 @@ class Settings(BaseSettings):
     agent_model: str = "claude-sonnet-5"
     skills_dir: str = "skills"
 
+    # Markdown knowledge graph (plan Phase 2). Directory of note files the indexer
+    # reads; retrieval is graph traversal over their [[wikilinks]] (D-004).
+    knowledge_dir: str = "knowledge"
+
 
 settings = Settings()
 """Process-wide configuration singleton. Import this, not the class."""

@@ -44,3 +44,6 @@ jobs:
 
       - name: Lint + type + test
         run: make check
+
+      - name: Validate knowledge graph
+        run: make kg-validate
