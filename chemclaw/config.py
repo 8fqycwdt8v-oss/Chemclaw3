@@ -155,6 +155,11 @@ class Settings(BaseSettings):
     playbook_similarity_threshold: float = Field(default=0.5, ge=0.0, le=1.0)
     memory_job_timeout_seconds: float = Field(default=300.0, gt=0)
 
+    # Report harness (plan Phase 5b). Per-section retrieval budget for the durable
+    # development-report workflow — one section is one activity, so a long report resumes
+    # section by section after a worker restart.
+    report_section_timeout_seconds: float = Field(default=300.0, gt=0)
+
 
 settings = Settings()
 """Process-wide configuration singleton. Import this, not the class."""

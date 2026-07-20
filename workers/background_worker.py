@@ -29,6 +29,11 @@ from workflows.memory_jobs import (
     distill_playbooks_activity,
     synthesize_campaigns_activity,
 )
+from workflows.report_workflow import (
+    DevelopmentReportWorkflow,
+    propose_report,
+    retrieve_section,
+)
 
 # The workflows and activities this worker serves on the background-jobs queue. Module-level
 # so the registration is one list (and directly assertable in tests), not buried in main().
@@ -37,6 +42,7 @@ BACKGROUND_WORKFLOWS: list[type] = [
     ElnSyncWorkflow,
     CampaignSynthesisWorkflow,
     PlaybookDistillationWorkflow,
+    DevelopmentReportWorkflow,
 ]
 BACKGROUND_ACTIVITIES: Sequence[Callable[..., Any]] = [
     propose_initial,
@@ -47,6 +53,8 @@ BACKGROUND_ACTIVITIES: Sequence[Callable[..., Any]] = [
     sync_eln_entries,
     synthesize_campaigns_activity,
     distill_playbooks_activity,
+    retrieve_section,
+    propose_report,
 ]
 
 

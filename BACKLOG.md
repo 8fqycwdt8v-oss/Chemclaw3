@@ -3,7 +3,20 @@
 Prioritized open action items. Top = next. Keep in sync with `docs/implementation-plan.md`
 (phase/step numbers) at session end.
 
-## Now — next capability phase (Phase 5b report harness, or Phase 6 identity/RBAC)
+## Now — Phase 6 identity/RBAC & hardening (auth integration; needs live Azure/Temporal)
+
+## Done — Phase 5b: report / deep-research harness (no new store — D-020)
+- [x] 5b.1/5b.2 Source-agnostic harness core (`report/harness.py`) over the `SourceRetriever`
+      contract + mandatory-citation `EvidenceChunk` (`report/evidence.py`).
+- [x] 5b.3 Two concrete retrievers (`report/retrievers.py`): `GraphRetriever` (Phase 2) +
+      `FingerprintReactionRetriever` (Phase 3) — thin adapters, no new store.
+- [x] 5b.4 Adversarial verify (`verify_claims`): a claim survives only if it cites retrieved
+      evidence; uncited/fabricated claims discarded. Unsupported sections marked, not invented.
+- [x] 5b.5/5b.6 Durable `DevelopmentReportWorkflow` (per-section activities = resumable long runs),
+      each section declares its memory layer (structural provenance separation). Registered on bg worker.
+- [x] 5b.7 Draft is a PR-gated `report` note citing every source. `development-report` skill (judgment:
+      decompose, write only what evidence supports, keep evidenced vs analogy apart).
+- [ ] CHECKMATE 5b (G1–G7 + citation fidelity) — running.
 
 ## Done — Phase 5: memory layers (episodic + semantic, no new infra — D-019)
 - [x] 5.1/5.2/5.3 episodic: `memory/chains.py` (chain detection — product A = reactant B via the
