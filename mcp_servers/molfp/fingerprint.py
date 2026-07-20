@@ -49,7 +49,9 @@ def tanimoto(bits_a: str, bits_b: str) -> float:
     `intersection / union` of set bits; two all-zero fingerprints are defined as 0.0
     (no shared structure to speak of). Operates on the stored bitstrings directly, so
     the in-memory backend ranks neighbors without RDKit — the same ordering the
-    Postgres backend produces in SQL.
+    Postgres backend produces in SQL. (The all-zero case is a guard only: every real
+    molecule sets at least one Morgan bit, so a fingerprint from a valid SMILES is never
+    empty — where pgvector's Jaccard would return NaN and the two backends could differ.)
     """
     if len(bits_a) != len(bits_b):
         raise FingerprintError("cannot compare fingerprints of different widths")

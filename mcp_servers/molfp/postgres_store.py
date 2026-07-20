@@ -3,9 +3,12 @@
 Implements the same `FingerprintStore` interface as `InMemoryFingerprintStore`, backed
 by the `molecule_fingerprints` table (see `infra/sql/002_molecule_fingerprints.sql`).
 Similarity ranking is Tanimoto (= 1 - Jaccard distance) computed in SQL and accelerated
-by the HNSW `bit_jaccard_ops` index, so search scales to real corpora. It returns the
-same order as the in-memory backend (similarity desc, then id) — the ranking contract is
-identical, only the execution differs. The DSN comes from the one config source.
+by the HNSW `bit_jaccard_ops` index, so search scales to real corpora. Its query
+semantics (threshold `>=`, `similarity desc, id` order) match the in-memory backend, but
+HNSW is an *approximate* nearest-neighbour index: on a large corpus its order and
+membership agree with the exact in-memory backend only up to HNSW recall (`hnsw.ef_search`),
+and the post-index `WHERE` filter can return fewer than `top_k` even when more rows
+qualify. The DSN comes from the one config source.
 """
 
 import psycopg
@@ -13,13 +16,17 @@ import psycopg
 from chemclaw.config import settings
 from mcp_servers.molfp.store import Match, MoleculeRecord
 
-_UPSERT = """
+# The cast width is the one config value, not a repeated literal — and it must match the
+# `bit(N)` column in infra/sql/002. If they disagree, Postgres raises a bit-length error
+# on insert/search (a loud failure), instead of silently padding to the column width.
+_WIDTH = settings.ecfp_bits
+
+_UPSERT = f"""
     INSERT INTO molecule_fingerprints (id, smiles, bits)
-    VALUES (%(id)s, %(smiles)s, %(bits)s::bit(2048))
+    VALUES (%(id)s, %(smiles)s, %(bits)s::bit({_WIDTH}))
     ON CONFLICT (id) DO UPDATE SET
         smiles = EXCLUDED.smiles,
-        bits = EXCLUDED.bits,
-        created_at = now()
+        bits = EXCLUDED.bits
 """
 
 _ALL = "SELECT id, smiles, bits::text FROM molecule_fingerprints"
@@ -27,11 +34,11 @@ _ALL = "SELECT id, smiles, bits::text FROM molecule_fingerprints"
 # Tanimoto = 1 - Jaccard distance (`<%%>`; `%` is doubled to escape psycopg formatting).
 # Filter by the threshold first, then rank by distance and truncate — the same
 # "threshold then top-k" semantics as the in-memory backend. Ties break by id.
-_SIMILAR = """
-    SELECT id, smiles, 1 - (bits <%%> %(q)s::bit(2048)) AS similarity
+_SIMILAR = f"""
+    SELECT id, smiles, 1 - (bits <%%> %(q)s::bit({_WIDTH})) AS similarity
     FROM molecule_fingerprints
-    WHERE 1 - (bits <%%> %(q)s::bit(2048)) >= %(threshold)s
-    ORDER BY bits <%%> %(q)s::bit(2048), id
+    WHERE 1 - (bits <%%> %(q)s::bit({_WIDTH})) >= %(threshold)s
+    ORDER BY bits <%%> %(q)s::bit({_WIDTH}), id
     LIMIT %(k)s
 """
 

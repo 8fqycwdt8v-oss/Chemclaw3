@@ -15,7 +15,11 @@ Prioritized open action items. Top = next. Keep in sync with `docs/implementatio
       precedent, combine with metadata/graph) — thresholds in config, not code (G6).
 - [ ] 3.4 `mcp-rxnfp` (DRFP reaction fingerprints) + `find_similar_reactions` — deferred: needs the
       `drfp` dep and a real reaction corpus; mirrors the molecule path (build when reactions land).
-- [ ] CHECKMATE 3 — running (deep review over the molecule path).
+- [x] CHECKMATE 3 (G1–G7 + deep review): core correct, MCP/skill split clean, threshold configurable.
+      4 fixes — (F1) docstrings no longer overclaim exact HNSW ordering (approximate NN, up to recall);
+      (F2) `bit(N)` width derived from `ecfp_bits` (single source; mismatch fails loud, not silent pad);
+      (F3) substructure docstring clarified (SMARTS-first); (F4) all-zero-fp guard noted. **Molecule
+      path complete.**
 
 
 

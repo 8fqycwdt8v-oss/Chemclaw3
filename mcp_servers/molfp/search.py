@@ -39,11 +39,14 @@ async def find_similar_molecules(
 
 
 async def find_substructure_matches(store: FingerprintStore, query: str) -> list[MoleculeRecord]:
-    """Return stored molecules that contain the `query` fragment (SMARTS or SMILES).
+    """Return stored molecules that contain the `query` fragment.
 
-    Exact RDKit substructure matching over the corpus — a structural filter, not a
-    similarity score. v1 scans all records; a pattern-fingerprint prefilter is a later
-    optimization for large corpora (ECFP bits cannot screen substructures soundly).
+    The query is interpreted as SMARTS (the right language for a substructure pattern; a
+    plain SMILES is also valid SMARTS), with a SMILES parse as a fallback for the rare
+    string that fails as SMARTS. Exact RDKit matching over the corpus — a structural
+    filter, not a similarity score. v1 scans all records; a pattern-fingerprint prefilter
+    is a later optimization for large corpora (ECFP bits cannot screen substructures
+    soundly).
     """
     pattern = Chem.MolFromSmarts(query) or Chem.MolFromSmiles(query)
     if pattern is None:

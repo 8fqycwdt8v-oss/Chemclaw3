@@ -51,8 +51,10 @@ class FingerprintStore(Protocol):
 class InMemoryFingerprintStore:
     """Process-local `FingerprintStore` for tests and single-run use.
 
-    Proves the Tanimoto ranking without a database; the Postgres backend produces the
-    same ordering in SQL. Keyed by record id, so re-adding an id replaces it.
+    Computes exact Tanimoto ranking without a database — the reference the Postgres
+    backend matches (its SQL uses the same threshold and tie-break, exactly for small
+    corpora, up to HNSW recall for large ones). Keyed by record id, so re-adding an id
+    replaces it.
     """
 
     def __init__(self) -> None:
