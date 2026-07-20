@@ -15,9 +15,11 @@ from temporalio.client import Client
 from temporalio.worker import Worker
 
 from bo.benchmarks.reizman_suzuki import build_problem, load_dataset
+from bo.campaign import optimize
 from bo.objectives import (
     MOLECULE_KEY,
     get_objective,
+    molecule_library_problem,
     solubility_objective,
 )
 from bo.problem import (
@@ -106,6 +108,41 @@ def test_solubility_objective_scores_via_calculator() -> None:
 def test_get_objective_resolves_calculator_objective() -> None:
     """The calculator-backed objective is registered and resolvable by name."""
     assert callable(get_objective("solubility_max"))
+
+
+def test_candidate_set_bo_finds_soluble_molecule() -> None:
+    """Candidate-set BO over a molecule library finds a top molecule sub-exhaustively."""
+
+    async def _run() -> None:
+        store = InMemoryStore()
+        # 14 diverse molecules; only a few (glycerol, glycol, water, urea) are very soluble.
+        library = [
+            "CCCCCCCCCCCCCCCC",
+            "c1ccccc1",
+            "CCCCCCCC",
+            "CCCCCCO",
+            "CCO",
+            "O",
+            "OCC(O)CO",
+            "NC(=O)N",
+            "CC(=O)O",
+            "Oc1ccccc1",
+            "CCOCC",
+            "ClCCl",
+            "CCCCCCCCCCCC",
+            "OCCO",
+        ]
+        problem = molecule_library_problem(library)
+
+        result = await optimize(problem, solubility_objective(store), n_initial=4, n_rounds=5)
+
+        true_best_value = max(
+            predict_solubility(SolubilityInput(smiles=s)).log_s_mol_per_l for s in library
+        )
+        assert len(result.history) < len(library)  # BO did not evaluate the whole library
+        assert result.best.value == pytest.approx(true_best_value)  # yet found the best
+
+    asyncio.run(_run())
 
 
 def test_durable_campaign_runs_end_to_end() -> None:
