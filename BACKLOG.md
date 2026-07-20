@@ -3,7 +3,23 @@
 Prioritized open action items. Top = next. Keep in sync with `docs/implementation-plan.md`
 (phase/step numbers) at session end.
 
-## Now — next capability phase (Phase 4 ELN ingestion, or Phase 5 memory)
+## Now — next capability phase (Phase 5 memory layers, or Phase 6 identity/RBAC)
+
+## Done — Phase 4: ELN ingestion (adapter pattern) — COMPLETE
+- [x] 4.1 Stable ORD-subset schema (`eln/ord.py`: `OrdReaction`/`Component`/`Role`) — ELN-agnostic;
+      `reaction_smiles()` for DRFP, role consistency validated.
+- [x] 4.2 Adapter contract (`eln/adapter.py`: `RawEntry` + `ElnAdapter` Protocol —
+      `fetch_new_entries`/`map_to_ord`). Only the contract is fixed (G6).
+- [x] 4.3 One concrete adapter (`eln/json_adapter.py`, JSON-export ELN): structured mapping +
+      deterministic free-text regex (temperature/time). No universal abstraction (D-018).
+- [x] 4.4 `eln-reaction-extraction` skill (judgment: structured-first, per-field LLM fallback,
+      validation gate) + `eln/validate.py` (RDKit parse + atom/mass balance) + `make eln-validate`
+      / `scripts/validate_ord.py`. LLM-per-field wiring deferred (D-018).
+- [x] 4.5 Durable ELN sync (`eln/sync.py` core + `workflows/eln_sync.py` activity/workflow on the
+      background queue): fetch → map → validate → **index reaction+compound fingerprints** (Phase 3)
+      + **PR-gated `reaction` note** (Phase 2). Reject-and-continue; idempotent. Registered on the
+      bg worker. Seed corpus in `eln/exports/`. Server test in CI; full chain tested in-memory.
+- [ ] CHECKMATE 4 (G1–G7 + deep review over Phase 3+4) — running.
 
 ## Done — Phase 3: fingerprint search (molecules + reactions) — COMPLETE
 - [x] 3.1 `mcp-molfp` capability: ECFP4 (Morgan r2, 2048-bit) via RDKit (`mcp_servers/molfp/

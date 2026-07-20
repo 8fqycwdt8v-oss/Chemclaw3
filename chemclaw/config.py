@@ -140,6 +140,12 @@ class Settings(BaseSettings):
     fingerprint_top_k: int = Field(default=10, ge=1)
     fingerprint_similarity_threshold: float = Field(default=0.3, ge=0.0, le=1.0)
 
+    # ELN ingestion (plan Phase 4). The one concrete adapter reads a JSON-export ELN from
+    # this directory; the sync activity's timeout bounds one batch of fetch+validate+index+
+    # PR-gate work. ELN-specific format lives only in the adapter, never in config (G6).
+    eln_export_dir: str = "eln/exports"
+    eln_sync_timeout_seconds: float = Field(default=300.0, gt=0)
+
 
 settings = Settings()
 """Process-wide configuration singleton. Import this, not the class."""

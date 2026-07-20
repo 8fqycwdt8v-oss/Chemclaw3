@@ -1,0 +1,14 @@
+{
+  "id": "eln-2026-002",
+  "timestamp": "2026-02-03T14:30:00Z",
+  "reactants": [
+    {"smiles": "OB(O)c1ccccc1", "role": "reactant", "mass_mg": 244},
+    {"smiles": "Brc1ccccc1", "role": "reactant", "mass_mg": 314},
+    {"smiles": "[Pd]", "role": "catalyst"}
+  ],
+  "products": [
+    {"smiles": "c1ccc(-c2ccccc2)cc1", "yield_percent": 78}
+  ],
+  "procedure": "Suzuki–Miyaura coupling of phenylboronic acid and bromobenzene, 90 C for 12 h in aqueous dioxane; biphenyl obtained in 78% yield.",
+  "operator": "chemist-b"
+}
