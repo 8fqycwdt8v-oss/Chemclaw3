@@ -5,6 +5,22 @@ Prioritized open action items. Top = next. Keep in sync with `docs/implementatio
 
 ## Now — Phase 6 identity/RBAC & hardening (auth integration; needs live Azure/Temporal)
 
+## Done — Whole-repo production-readiness review (post-5b; commit d51f0b5, D-021)
+- [x] 4 adversarial review agents over all packages; ~45 verified findings fixed with regression
+      tests (134 → 169 passing). Criticals: PR-gate submitter concurrency/checkout corruption
+      (lock + `note_repo_dir` config + slug-validated note ids + path containment + fetch before
+      `--force-with-lease`); ELN sync poison pill (one `ChemclawError` bad-data base, sync
+      catches it → reject-and-continue actually holds). Majors: temperature range mis-parse
+      (`60-80 °C` → -80), stoichiometry-unsound mass balance → element subsumption, per-file
+      fetch robustness, BoFire off-thread, pKa cache key engine-versioned, QM tool no longer
+      recomputes completed jobs, report publish got the bounded retry discipline
+      (`workflows/publish.py`), vacuous-green eval gate fails loudly. Cross-cutting: CLAUDE.md
+      status un-falsified, `.env.example` complete, CI runs eval+eln-validate, dependency hygiene.
+- [ ] Test-helper dedup pass (shared FakeSubmitter/temporal_env/_store_or_skip) — in flight;
+      follow-up commit.
+- [ ] Multi-process note-submit serialization (lock is per-process; per-submission worktrees or
+      a distributed lock) — revisit when >1 background worker replica exists.
+
 ## Done — Phase 5b: report / deep-research harness (no new store — D-020)
 - [x] 5b.1/5b.2 Source-agnostic harness core (`report/harness.py`) over the `SourceRetriever`
       contract + mandatory-citation `EvidenceChunk` (`report/evidence.py`).
