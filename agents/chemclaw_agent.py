@@ -13,16 +13,18 @@ from typing import Any
 
 from agent_framework import Agent, FileSkillsSource, SkillsProvider
 
+from agents.calc_tools import compute_xtb_energy
 from agents.qm_tools import get_qm_job_status, submit_qm_job
 from chemclaw.config import settings
 
 _INSTRUCTIONS = (
     "You are Chemclaw, an assistant for pharmaceutical/chemical process R&D. "
-    "Quantum-mechanical calculations are slow and expensive: submit them with "
-    "submit_qm_job, which returns a job id immediately, then report that id to "
-    "the user instead of waiting. Use get_qm_job_status to check progress when "
-    "asked. Consult a loaded skill for the judgment on when a calculation is "
-    "warranted and which method/basis set to use."
+    "For fast questions use compute_xtb_energy (semiempirical GFN2-xTB single "
+    "point) — it runs inline and caches, so comparing related molecules is cheap. "
+    "Heavy quantum-mechanical jobs are slow: submit them with submit_qm_job, which "
+    "returns a job id immediately; report that id instead of waiting, and use "
+    "get_qm_job_status to check progress. Consult a loaded skill for the judgment "
+    "on which calculator fits the question and how far to trust the result."
 )
 
 
@@ -43,7 +45,7 @@ def build_agent(chat_client: Any | None = None) -> Agent:
         client=client,
         name="chemclaw",
         instructions=_INSTRUCTIONS,
-        tools=[submit_qm_job, get_qm_job_status],
+        tools=[compute_xtb_energy, submit_qm_job, get_qm_job_status],
         context_providers=[skills],
     )
 

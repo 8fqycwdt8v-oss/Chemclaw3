@@ -11,7 +11,7 @@ def test_agent_advertises_qm_tools() -> None:
     """Both QM tools are registered on the agent under their function names."""
     agent = build_agent(chat_client=object())
     tool_names = {tool.name for tool in agent.default_options["tools"]}
-    assert {"submit_qm_job", "get_qm_job_status"} <= tool_names
+    assert {"compute_xtb_energy", "submit_qm_job", "get_qm_job_status"} <= tool_names
 
 
 def test_agent_has_a_skills_provider() -> None:

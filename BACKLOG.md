@@ -17,7 +17,8 @@ Prioritized open action items. Top = next. Keep in sync with `docs/implementatio
 - [ ] 1c.1 Calculator contract + registry — build when the 2nd calculator (solubility) lands (Rule of Three).
 - [ ] 1c.3 GNN solubility model (inference only; value + uncertainty) — **needs model choice** (see open Qs).
 - [ ] 1c.4 pKa/property model(s) (the user's "pKs" — interpreted as pKa; confirm) — **needs model choice**.
-- [ ] 1c.5 expose calculators to the agent as tools (MCP or direct) + selection skill 1c.6.
+- [x] 1c.5/1c.6 xTB exposed to the MAF agent as tool `compute_xtb_energy` + `calculation-selection` skill.
+- [ ] 1c.5b generalize to a calculator registry once the 2nd calculator lands (solubility/pKa).
 - [ ] 1c.7 optional graph note via PR-gate. CHECKMATE 1c.
 - Note: fast calcs run **without** a Temporal workflow (sub-second) — the store gives "never twice";
   durability (Temporal) is reserved for long jobs (BO campaigns 1d, later HPC).
