@@ -93,6 +93,7 @@ class JsonExportAdapter:
             time_h=_condition(payload, "time_h", _TIME_HOURS, procedure),
             yield_percent=_yield(payload),
             provenance=f"eln:{payload.get('operator', 'unknown')}",
+            project=payload.get("project"),
         )
 
 

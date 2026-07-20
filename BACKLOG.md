@@ -3,7 +3,26 @@
 Prioritized open action items. Top = next. Keep in sync with `docs/implementation-plan.md`
 (phase/step numbers) at session end.
 
-## Now — next capability phase (Phase 5 memory layers, or Phase 6 identity/RBAC)
+## Now — next capability phase (Phase 5b report harness, or Phase 6 identity/RBAC)
+
+## Done — Phase 5: memory layers (episodic + semantic, no new infra — D-019)
+- [x] 5.1/5.2/5.3 episodic: `memory/chains.py` (chain detection — product A = reactant B via the
+      canonical-SMILES compound identity, Phase 3) + `memory/campaign.py` (`campaign` note citing each
+      member reaction via wikilinks) + `memory/jobs.py::synthesize_campaigns` + Temporal workflow.
+      `campaign-narrative-synthesis` skill (judgment; every claim cites a member reaction).
+- [x] 5.4 semantic: `memory/playbook.py` (`find_playbook_candidates` — DRFP similarity across ≥2
+      projects; `playbook_note` with mandatory evidence refs) + `distill_playbooks` job + workflow.
+      `playbook-distillation` skill (transferable-only, process-chemist approval).
+- [x] 5.5 user interaction as a 4th source: `memory/interaction.py` (`interaction` note via the same
+      PR-gate). 5.6 retrieval separation: judgment in the playbook skill (evidenced vs analogy kept
+      visibly separate; experiment outranks transferred analogy).
+- [x] Jobs registered on the background worker; `project` field added to `OrdReaction`/adapter.
+- [x] CHECKMATE 5 (G1–G7 + no-new-infra check confirmed): 3 findings fixed — (F1, G4) a degenerate
+      reaction is skipped in `find_playbook_candidates` instead of aborting the whole distillation;
+      (F2) a cyclic chain is flagged `ordered=False` and the campaign note says so, not a fake causal
+      sequence; (F3) the merged-reaction-notes precondition for citations is documented (kg-validate
+      enforces it). Also stabilized a pre-existing flaky BO test by seeding BoFire (`bo_seed` config).
+      **Phase 5 complete.**
 
 ## Done — Phase 4: ELN ingestion (adapter pattern) — COMPLETE
 - [x] 4.1 Stable ORD-subset schema (`eln/ord.py`: `OrdReaction`/`Component`/`Role`) — ELN-agnostic;

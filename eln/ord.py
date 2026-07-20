@@ -50,6 +50,9 @@ class OrdReaction(BaseModel):
     time_h: float | None = Field(default=None, ge=0.0)
     yield_percent: float | None = Field(default=None, ge=0.0, le=100.0)
     provenance: str = Field(min_length=1)
+    # The project/campaign this experiment belongs to — the grouping key for the semantic
+    # memory layer (a playbook distils patterns that recur across >=2 projects, plan 5.4).
+    project: str | None = None
 
     @model_validator(mode="after")
     def _roles_are_consistent(self) -> "OrdReaction":

@@ -87,6 +87,9 @@ class Settings(BaseSettings):
     # Durable BO campaign (plan step 1d.4). A single round (BoFire propose + evaluate)
     # can be slow, so activities get a generous start-to-close budget.
     bo_activity_timeout_seconds: float = 300.0
+    # Seed for BoFire's random design + SOBO strategies, so a campaign is reproducible
+    # (deterministic seeding + proposals) rather than flaky run-to-run.
+    bo_seed: int = 42
 
     # MAF agent (plan step 1.5). `agent_model` is the orchestration model name
     # (ENV-overridable); the provider's API key is read by the chat client from
@@ -145,6 +148,12 @@ class Settings(BaseSettings):
     # PR-gate work. ELN-specific format lives only in the adapter, never in config (G6).
     eln_export_dir: str = "eln/exports"
     eln_sync_timeout_seconds: float = Field(default=300.0, gt=0)
+
+    # Memory layers (plan Phase 5). The semantic layer distils a playbook only from reactions
+    # whose DRFP similarity clears this floor and that recur across >=2 projects — higher than
+    # the search floor, since a playbook claims "same transformation", not just "related".
+    playbook_similarity_threshold: float = Field(default=0.5, ge=0.0, le=1.0)
+    memory_job_timeout_seconds: float = Field(default=300.0, gt=0)
 
 
 settings = Settings()

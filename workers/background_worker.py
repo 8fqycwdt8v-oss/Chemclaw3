@@ -23,10 +23,21 @@ from workflows.bo_campaign import BoCampaignWorkflow
 from workflows.bo_knowledge import write_campaign_node
 from workflows.eln_sync import ElnSyncWorkflow, sync_eln_entries
 from workflows.knowledge import write_knowledge_node
+from workflows.memory_jobs import (
+    CampaignSynthesisWorkflow,
+    PlaybookDistillationWorkflow,
+    distill_playbooks_activity,
+    synthesize_campaigns_activity,
+)
 
 # The workflows and activities this worker serves on the background-jobs queue. Module-level
 # so the registration is one list (and directly assertable in tests), not buried in main().
-BACKGROUND_WORKFLOWS: list[type] = [BoCampaignWorkflow, ElnSyncWorkflow]
+BACKGROUND_WORKFLOWS: list[type] = [
+    BoCampaignWorkflow,
+    ElnSyncWorkflow,
+    CampaignSynthesisWorkflow,
+    PlaybookDistillationWorkflow,
+]
 BACKGROUND_ACTIVITIES: Sequence[Callable[..., Any]] = [
     propose_initial,
     propose_next,
@@ -34,6 +45,8 @@ BACKGROUND_ACTIVITIES: Sequence[Callable[..., Any]] = [
     write_knowledge_node,
     write_campaign_node,
     sync_eln_entries,
+    synthesize_campaigns_activity,
+    distill_playbooks_activity,
 ]
 
 

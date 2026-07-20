@@ -9,8 +9,7 @@ signs off. Stores and submitter are injected, so the whole flow is testable in-m
 no database or git. Indexing is idempotent (id-keyed upserts), so re-ingesting is safe.
 """
 
-from rdkit import Chem
-
+from eln.chem import canonical_smiles
 from eln.note import note_from_ord_reaction
 from eln.ord import OrdReaction
 from eln.validate import validate_ord
@@ -22,12 +21,6 @@ from mcp_servers.rxnfp.search import record_for_reaction
 
 class IngestError(ValueError):
     """A reaction failed validation and was not ingested (carries the problems)."""
-
-
-def _canonical(smiles: str) -> str:
-    """Canonical SMILES — the stable per-compound index id, so duplicates collapse."""
-    mol = Chem.MolFromSmiles(smiles)
-    return Chem.MolToSmiles(mol) if mol is not None else smiles
 
 
 async def ingest_reaction(
@@ -46,7 +39,7 @@ async def ingest_reaction(
         raise IngestError(f"reaction {reaction.reaction_id!r} invalid: {'; '.join(problems)}")
 
     await reaction_store.add(record_for_reaction(reaction.reaction_id, reaction.reaction_smiles()))
-    for smiles in {_canonical(c.smiles) for c in reaction.compounds()}:
+    for smiles in {canonical_smiles(c.smiles) for c in reaction.compounds()}:
         await molecule_store.add(record_for(smiles, smiles))
 
     return await propose_note(note_from_ord_reaction(reaction), submitter)

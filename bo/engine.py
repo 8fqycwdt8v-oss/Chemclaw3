@@ -27,6 +27,7 @@ from bo.problem import (
     OptimizationProblem,
     ParamValue,
 )
+from chemclaw.config import settings
 
 
 def _to_domain(problem: OptimizationProblem) -> Domain:
@@ -81,7 +82,7 @@ def initial_candidates(problem: OptimizationProblem, n: int) -> list[Candidate]:
     Used to seed a campaign before any observations exist — a GP needs data before
     it can guide the search.
     """
-    strategy = strategies.map(RandomStrategy(domain=_to_domain(problem)))
+    strategy = strategies.map(RandomStrategy(domain=_to_domain(problem), seed=settings.bo_seed))
     return _frame_to_candidates(problem, strategy.ask(n))
 
 
@@ -96,6 +97,6 @@ def propose_candidates(
     """
     if not observations:
         raise ValueError("propose_candidates needs at least one observation; seed first")
-    strategy = strategies.map(SoboStrategy(domain=_to_domain(problem)))
+    strategy = strategies.map(SoboStrategy(domain=_to_domain(problem), seed=settings.bo_seed))
     strategy.tell(_observations_to_frame(problem, observations))
     return _frame_to_candidates(problem, strategy.ask(n))

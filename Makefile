@@ -12,7 +12,7 @@ lint:  ## Ruff lint + format check (no writes; use `uv run ruff format` to fix).
 	uv run ruff format --check .
 
 type:  ## Static type check, strict (all first-party packages).
-	uv run mypy chemclaw agents bo calc eln evals kg mcp_servers scripts workflows workers tests
+	uv run mypy chemclaw agents bo calc eln evals kg mcp_servers memory scripts workflows workers tests
 
 test:  ## Run the test suite.
 	uv run pytest
