@@ -27,3 +27,16 @@ def test_compute_xtb_energy_tool_runs_and_caches(monkeypatch: pytest.MonkeyPatch
         assert second.total_energy_hartree == first.total_energy_hartree
 
     asyncio.run(_run())
+
+
+def test_predict_solubility_tool_reports_uncertainty(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The solubility tool returns a prediction with a non-zero uncertainty."""
+    store = InMemoryStore()
+    monkeypatch.setattr(calc_tools, "default_store", lambda: store)
+
+    async def _run() -> None:
+        result = await calc_tools.predict_solubility("CCO")
+        assert result.model == "esol-delaney@2004"
+        assert result.uncertainty_log > 0
+
+    asyncio.run(_run())

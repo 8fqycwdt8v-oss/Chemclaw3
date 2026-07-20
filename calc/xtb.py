@@ -59,8 +59,7 @@ def run_xtb(job: XtbInput) -> XtbResult:
     if mol is None:
         raise ValueError(f"invalid SMILES: {job.smiles!r}")
     mol = Chem.AddHs(mol)
-    # RDKit's AllChem ships incomplete type stubs; the call is valid at runtime.
-    if AllChem.EmbedMolecule(mol, randomSeed=settings.xtb_embed_seed) != 0:  # type: ignore[attr-defined]
+    if AllChem.EmbedMolecule(mol, randomSeed=settings.xtb_embed_seed) != 0:
         raise ValueError(f"could not embed a 3D geometry for {job.smiles!r}")
 
     conformer = mol.GetConformer()

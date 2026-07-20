@@ -13,7 +13,7 @@ from typing import Any
 
 from agent_framework import Agent, FileSkillsSource, SkillsProvider
 
-from agents.calc_tools import compute_xtb_energy
+from agents.calc_tools import compute_xtb_energy, predict_solubility
 from agents.qm_tools import get_qm_job_status, submit_qm_job
 from chemclaw.config import settings
 
@@ -45,7 +45,7 @@ def build_agent(chat_client: Any | None = None) -> Agent:
         client=client,
         name="chemclaw",
         instructions=_INSTRUCTIONS,
-        tools=[compute_xtb_energy, submit_qm_job, get_qm_job_status],
+        tools=[compute_xtb_energy, predict_solubility, submit_qm_job, get_qm_job_status],
         context_providers=[skills],
     )
 

@@ -56,6 +56,14 @@ strict = true
 warn_unused_configs = true
 warn_redundant_casts = true
 
+# RDKit ships only partial type stubs (e.g. rdkit.Chem.AllChem attrs are dynamic),
+# which produces false attr-defined errors. Skip analysing it so its names are
+# treated as untyped rather than scattering per-call ignores across the codebase.
+[[tool.mypy.overrides]]
+module = ["rdkit.*"]
+follow_imports = "skip"
+follow_imports_for_stubs = true
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-ra"
