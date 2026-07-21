@@ -332,6 +332,13 @@ Goal of the phase: users authenticate via Entra OIDC; **every backend workflow i
 Entra** (required, authorizing input, reject-if-absent); the two non-Entra bridges (Temporal, HPC)
 carry identity as a claim; the generic LLM credential is the one documented exception.
 
+> **Status: offline-verifiable core DONE** (T1/T3/T5 + T2/T4/T6 with fake-endpoint tests). ADRs
+> D-042…D-046. Live edges (real tenant/broker) open. T1 front-door OIDC (`service/auth.py`); T3
+> `require_actor` reject-if-absent (`agents/authz.py`, wired into `submit_qm_job`); T5 one
+> authorization gate + ambient actor into audit; T2 workload federation (`agents/identity/workload.py`);
+> T4 OBO dormant (`agents/identity/obo.py`); T6 Temporal-mTLS (`chemclaw/temporal_client.py`) + HPC
+> bridge (`agents/identity/hpc_bridge.py`). Deferred: per-request role→skills scoping.
+
 ### F4-T1 — User auth at the front door (Entra OIDC)
 - **Touch:** ＋`service/auth.py` (JWT validation), ~`service/app.py` (auth dependency on all non-health
   routes).
@@ -423,6 +430,12 @@ carry identity as a claim; the generic LLM credential is the one documented exce
 Goal of the phase: turn the mock spine real — **only `workflows/activities.py` changes**, as its
 docstring promises. Replace `submit_to_hpc`/`poll_hpc_status` with a Nextflow launch+poll.
 
+> **Status: DONE (offline).** ADR **D-047** (+ D-A5a Tower REST). `workflows/hpc/nextflow.py`
+> (`launch_run`/`poll_run`/`fetch_artifacts`, fake-HTTP tested); activities dispatch on
+> `hpc_launch_interface` (mock kept for CI); `hpc_pipeline_version` in the cache key when set (T3);
+> worker registration unchanged (T4). Deferred: `QMJobWorkflow→CalculationWorkflow` rename (cosmetic),
+> real `cclib` parsing, live-cluster durability spike.
+
 ### F5-T1 — Launch-interface decision + adapter skeleton
 - **Goal:** pick the launch interface and put it behind one seam.
 - **Touch:** ＋`workflows/hpc/nextflow.py` (`launch_run`, `poll_run`, `fetch_artifacts`),
@@ -476,6 +489,13 @@ docstring promises. Replace `submit_to_hpc`/`poll_hpc_status` with a Nextflow la
 # Phase F6 — OpenShift deployment & delivery
 
 Goal of the phase: the stack runs in-cluster with OIDC, secrets, workers, and probes.
+
+> **Status: manifests DONE** (ADR **D-048**, D-A6/D-A6a). `deploy/`: one rootless multi-target image
+> + `entrypoint.sh`; Helm chart (ConfigMap/Secret, SA with federation, service/Route/HPA, both
+> workers, MCP, NetworkPolicy, pre-deploy migrate hook); `deploy.yml` CI (build + `helm template |
+> kubeconform`); `deploy/README.md`. Config `otel_endpoint`. Offline-verified: YAML parse +
+> brace-balance + `Settings` map. Live edges (CI/cluster): image build+push, `helm`/`kubeconform`
+> render, dry-run rollout.
 
 ### F6-T1 — Container images
 - **Touch:** ＋`deploy/Containerfile.service`, ＋`deploy/Containerfile.worker`,
@@ -541,6 +561,13 @@ Goal of the phase: unify the two half-contracts (`ElnAdapter` ingest + `SourceRe
 into one documented `DataSource` seam + a config-driven registry, proven by **re-hosting the existing
 ELN adapter unchanged**. First source = ELN; first *live* connector (later) = a **custom Snowflake
 source via an internal data pipeline, no vendor**.
+
+> **Status: DONE.** ADR **D-049**. `sources/base.py` (`DataSource` composes the existing
+> `ElnAdapter`+`SourceRetriever` halves; `SourceSpec` rejects neither-half), `sources/registry.py`
+> (`data_sources` config → `active_ingest_sources()`/`active_retrieve_sources()`). Re-hosted with no
+> behavior change: `gather_evidence` fans out over the registry; `eln_sync` ingests active sources;
+> **all existing ELN/research tests pass unchanged**. `test_datasource_seam.py`. Deferred: the live
+> custom Snowflake ELN connector (one registry entry + per-source pipeline cursor).
 
 ### F7-T1 — The unified `DataSource` contract
 - **Touch:** ＋`sources/base.py` (`DataSource` with two independent optional halves), ~`eln/adapter.py`
