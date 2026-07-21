@@ -5,6 +5,13 @@ Prioritized open action items. Top = next. Keep in sync with `docs/implementatio
 
 ## Now — Phase 6 identity/RBAC & hardening (auth integration; needs live Azure/Temporal)
 
+- [x] Testing CLI (`agents/cli.py`, `make chat` / `uv run chemclaw`): interactive REPL + `-m`
+      one-shot over the same `build_agent`. Identity is the Phase-6 seam — `resolve_identity`
+      returns `(actor, allowed_skills)`; `--admin` bypasses the (unimplemented) Entra auth
+      (all skills, `CHEMCLAW_CLI_ADMIN_ACTOR`), and the non-admin branch (Entra resolution)
+      raises until 6.1/6.2 land. When Entra auth is built, wire it as that branch and gate the
+      admin bypass off in hardened deployments. Tests: `test_cli.py`.
+
 ## Deep-review follow-ups (D-030)
 
 ### Done — robustness/correctness fixes (D-030)

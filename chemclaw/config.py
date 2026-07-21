@@ -175,6 +175,14 @@ class Settings(BaseSettings):
     agent_keep_last_tool_groups: int = Field(default=2, ge=0)
     agent_keep_last_conversation_groups: int = Field(default=12, ge=1)
 
+    # Local testing CLI (`agents.cli`). The CLI is a developer affordance for driving the agent
+    # from a terminal; the production ingress is Teams/Copilot with native Entra-ID SSO
+    # (architektur.md §7), not this. Because Entra auth is unimplemented (Phase 6), the CLI can
+    # only run in explicit `--admin` mode, which bypasses auth for testing and attributes the
+    # audit trail to this actor. It is a config value (not a hardcoded string) so a deployment
+    # can label its test runs — e.g. a machine name — rather than a generic "admin".
+    cli_admin_actor: str = "admin@localhost"
+
     # MAF Agent Harness (docs/harness-konzept.md, D-038). Off by default: the harness API is
     # experimental (agent-framework-core 1.11), so the classic `Agent` stays the tested
     # default and `harness_enabled` is the one switch to the plan/execute backbone. When

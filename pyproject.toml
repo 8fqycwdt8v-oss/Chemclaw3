@@ -38,6 +38,10 @@ dev = [
     "types-pyyaml>=6.0.12.20260518",
 ]
 
+[project.scripts]
+# Terminal front door for testing the agent (see agents/cli.py). `uv run chemclaw --admin`.
+chemclaw = "agents.cli:main"
+
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"

@@ -30,6 +30,22 @@ overridable as `CHEMCLAW_<FIELD>`); this runbook covers the four recurring admin
   `OTEL_EXPORTER_OTLP_ENDPOINT` at a collector. Requires the OpenTelemetry SDK + OTLP exporter
   extras installed; enabling without them raises a directive error.
 
+## Talk to the agent from a terminal (testing)
+
+The production ingress is Teams/Copilot with Entra-ID SSO (architektur.md §7). For local
+testing there is a CLI: `make chat` (or `uv run chemclaw --admin`). It needs `ANTHROPIC_API_KEY`
+in the environment — the chat client preflights it and fails with a clear message otherwise.
+
+- **Admin mode is required.** Entra auth is unimplemented (Phase 6), so the CLI runs only with
+  `--admin`: it bypasses auth, advertises every skill, and stamps the audit trail with
+  `CHEMCLAW_CLI_ADMIN_ACTOR` (default `admin@localhost`). Without `--admin` it refuses and exits
+  non-zero — "no authentication" stays a conscious choice, not a default.
+- **One-shot vs. REPL:** `uv run chemclaw --admin -m "which solvent next for …?"` asks one
+  question, prints the answer to stdout, and exits (scriptable); with no `-m` it is an
+  interactive chat (the thread accumulates; `exit`/Ctrl-D to quit).
+- **Attribute the run:** `--actor alice@lab` overrides the audit actor. `--audit-postgres`
+  persists the tool-audit trail to Postgres (default is log-only).
+
 ## (i) Add a skill
 
 Drop a `skills/<name>/SKILL.md` (front-matter schema + template in `skills/README.md`) and

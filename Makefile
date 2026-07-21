@@ -2,7 +2,7 @@
 # CLAUDE.md and CI both go through them, so behavior stays identical everywhere.
 # `uv run` executes inside the project venv without a manual activate step.
 
-.PHONY: install lint type test cov check db-migrate schedules-apply kg-validate eval eln-validate skill-validate up down
+.PHONY: install lint type test cov check chat db-migrate schedules-apply kg-validate eval eln-validate skill-validate up down
 
 install:  ## Sync the venv with runtime + dev dependencies.
 	uv sync
@@ -21,6 +21,9 @@ cov:  ## Run the test suite with coverage (first-party packages; report missing 
 	uv run pytest --cov --cov-report=term-missing
 
 check: lint type test  ## The full gate CLAUDE.md requires green before a step is "done".
+
+chat:  ## Chat with the agent from the terminal (admin/testing mode; needs ANTHROPIC_API_KEY).
+	uv run chemclaw --admin
 
 db-migrate:  ## Apply infra/sql migrations to the configured database.
 	uv run python -m calc.migrate
