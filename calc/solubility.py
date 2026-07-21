@@ -111,13 +111,14 @@ async def run_cached_solubility(
 ) -> tuple[SolubilityResult, bool]:
     """Return a solubility prediction for `job`, reusing the store on a repeat.
 
-    The key is versioned by model name+version, so swapping the model recomputes
-    rather than serving a prediction from the old one.
+    The key is versioned by model name+version *and* the reported RMSE, so swapping
+    the model or re-tuning `solubility_rmse_log` recomputes rather than serving a
+    prediction (or a stale uncertainty) from the old one.
     """
     active = model if model is not None else _DEFAULT_MODEL
     key = CalculationKey.build(
         calc_type=CALC_TYPE,
-        calc_version=f"{active.name}@{active.version}",
+        calc_version=f"{active.name}@{active.version}/u-{settings.solubility_rmse_log}",
         inputs={"smiles": job.smiles},
     )
     return await run_cached(store, key, lambda: predict_solubility(job, active), SolubilityResult)

@@ -38,6 +38,11 @@ class IngestSummary(BaseModel):
     so an entry stamped exactly at `next_cursor` may be re-fetched next run — harmless,
     because ingestion is idempotent (id-keyed upserts + idempotent note branch), and it
     guarantees a same-second entry exported after this run is never skipped.
+
+    The cursor advances past *rejected* entries too (a rejection is deterministic bad
+    data — re-fetching it would only re-reject it). Rejections are therefore reported
+    here and logged, not retried: correcting the source record upstream and re-ingesting
+    it is a deliberate manual/backlog action, not something the periodic sync retries.
     """
 
     ingested: list[str]

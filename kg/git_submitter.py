@@ -44,7 +44,13 @@ class GitNoteSubmitter:
         self._remote = remote if remote is not None else settings.git_remote
 
     async def _run(self, *args: str) -> tuple[int, str]:
-        """Run one git command in the repo; return (exit code, stderr) — no raise."""
+        """Run one git command in the repo; return (exit code, stderr) — no raise.
+
+        Bounded by `git_command_timeout_seconds`: a hung command (dead remote,
+        credential prompt) is killed and reported as a failure, so it can never
+        deadlock the process-wide submit lock or orphan a git child holding
+        `.git/index.lock`.
+        """
         process = await asyncio.create_subprocess_exec(
             "git",
             "-C",
@@ -53,7 +59,22 @@ class GitNoteSubmitter:
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
-        _, stderr = await process.communicate()
+        try:
+            _, stderr = await asyncio.wait_for(
+                process.communicate(), timeout=settings.git_command_timeout_seconds
+            )
+        except TimeoutError as exc:
+            process.kill()
+            await process.wait()
+            raise GitSubmitError(
+                f"git {' '.join(args)} timed out after {settings.git_command_timeout_seconds}s"
+            ) from exc
+        except asyncio.CancelledError:
+            # Kill the child so cancellation (e.g. Temporal activity timeout) never
+            # orphans a git process, then let the cancellation propagate untouched.
+            process.kill()
+            await process.wait()
+            raise
         return process.returncode or 0, stderr.decode().strip()
 
     async def _git(self, *args: str) -> None:

@@ -187,6 +187,41 @@ def test_submitter_refuses_path_escaping_the_checkout(tmp_path: Path) -> None:
     assert not (tmp_path / "evil.md").exists()
 
 
+def test_git_command_timeout_kills_the_child_and_raises(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A hung git command is killed after the timeout and reported as GitSubmitError.
+
+    Without the bound, `communicate()` would await forever under the process-wide submit
+    lock, deadlocking every other submission and orphaning the git child.
+    """
+    monkeypatch.setattr(settings, "git_command_timeout_seconds", 0.05)
+    killed = {"value": False}
+
+    class _HangingProcess:
+        returncode = None
+
+        async def communicate(self) -> tuple[bytes, bytes]:
+            await asyncio.sleep(10)  # never returns within the timeout
+            return b"", b""
+
+        def kill(self) -> None:
+            killed["value"] = True
+
+        async def wait(self) -> int:
+            return -9
+
+    async def _fake_exec(*_args: object, **_kwargs: object) -> _HangingProcess:
+        return _HangingProcess()
+
+    monkeypatch.setattr("kg.git_submitter.asyncio.create_subprocess_exec", _fake_exec)
+    submitter = GitNoteSubmitter(repo_dir=str(tmp_path), base_branch="main", remote="origin")
+
+    with pytest.raises(GitSubmitError, match="timed out"):
+        asyncio.run(submitter.submit(_note_submission("job-hang")))
+    assert killed["value"] is True
+
+
 def test_qm_workflow_publishes_to_graph(monkeypatch: pytest.MonkeyPatch) -> None:
     """With publish_to_graph, a completed QM job proposes a note on the bg queue."""
     fake = FakeSubmitter()

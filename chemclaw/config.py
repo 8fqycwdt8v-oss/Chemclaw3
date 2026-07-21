@@ -184,6 +184,16 @@ class Settings(BaseSettings):
     # own timeout so a persistent failure gives up instead of retrying forever.
     note_write_timeout_seconds: float = Field(default=120.0, gt=0)
     note_write_max_attempts: int = Field(default=3, ge=1)
+    # Wall-clock bound on a single git command in the PR-gate submitter. A hung
+    # fetch/push (dead remote, credential prompt) is killed after this, so it can
+    # never deadlock the process-wide submit lock; the failed activity then retries.
+    git_command_timeout_seconds: float = Field(default=60.0, gt=0)
+
+    # Bound on retries for ordinary activities under the shared bad-data retry policy
+    # (`workflows.publish.BAD_DATA_RETRY`). Bad data is non-retryable by type; this caps
+    # the *transient* retries so an unclassified deterministic failure (a bug, not a
+    # network blip) gives up instead of pinning a worker with unlimited retries.
+    activity_max_attempts: int = Field(default=5, ge=1)
 
     # Evaluation & metric layer (plan Phase 2b). A metric is a pure function; its
     # pass/fail threshold is config, never hardcoded (G3). The green-chemistry

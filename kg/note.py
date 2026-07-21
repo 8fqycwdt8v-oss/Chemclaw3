@@ -46,12 +46,21 @@ class Note(BaseModel):
     def _slug_only(cls, value: str) -> str:
         """Reject path/ref metacharacters — see the `_SLUG` rationale above.
 
-        `..` is refused explicitly (defense in depth): even a value the pattern
-        accepts, like `a..b`, is an invalid git ref component.
+        A few git ref rules the character class alone does not cover are refused
+        explicitly (defense in depth), because the slug becomes the `note/<id>`
+        branch in the PR-gate: `..` (an invalid ref component, e.g. `a..b`), a
+        trailing `.`, and a `.lock` suffix — git rejects all three, so an id that
+        passed the schema would otherwise only fail later at branch creation.
         """
-        if ".." in value or not _SLUG.fullmatch(value):
+        if (
+            ".." in value
+            or value.endswith(".")
+            or value.endswith(".lock")
+            or not _SLUG.fullmatch(value)
+        ):
             raise ValueError(
-                f"{value!r} is not a safe note slug (allowed: {_SLUG.pattern}, no '..')"
+                f"{value!r} is not a safe note slug (allowed: {_SLUG.pattern}; "
+                "no '..', trailing '.', or '.lock' suffix)"
             )
         return value
 

@@ -5,6 +5,32 @@ Prioritized open action items. Top = next. Keep in sync with `docs/implementatio
 
 ## Now — Phase 6 identity/RBAC & hardening (auth integration; needs live Azure/Temporal)
 
+## Deep-review follow-ups (D-030)
+
+### Done — robustness/correctness fixes (D-030)
+- [x] Bounded `BAD_DATA_RETRY` (`maximum_attempts=CHEMCLAW_ACTIVITY_MAX_ATTEMPTS`) so an
+      unclassified deterministic failure gives up instead of retrying forever; added
+      `ValidationError`/`OrdFormatError`/`EvalCaseError` to the non-retryable names; shared the
+      list with `note_publish_retry`. Test: `test_publish.py`.
+- [x] Slug rejects trailing `.` and `.lock` (git-invalid `note/<id>` refs). Test: `test_note.py`.
+- [x] Git subprocess timeout + kill (`CHEMCLAW_GIT_COMMAND_TIMEOUT_SECONDS`). Test:
+      `test_knowledge.py::test_git_command_timeout_kills_the_child_and_raises`.
+- [x] Solubility/pKa cache keys version on the reported uncertainty.
+- [x] `test_mcp_transport.py` skip narrowed to a missing toolchain (won't mask a CI regression).
+
+### Open — consciously deferred (see D-030 for rationale)
+- [ ] Fingerprint-definition versioning: store the `ecfp_radius`/`ecfp_bits` signature on each
+      `*_fingerprints` row + a search-time guard, so changing the definition and re-indexing
+      alongside old rows can't silently compare mismatched features. Latent; do it when a second
+      fingerprint definition is first introduced (one migration).
+- [ ] ELN reject re-drive: a rejected entry is reported+logged but not re-fetched. Add a
+      dead-letter/manual re-ingest path only if fixable-upstream rejections become common.
+- [ ] KISS cleanups for the next touch of those files: `report/harness.py::gather_report` and
+      `memory/interaction.py::note_from_confirmed_answer` (test-only callers today),
+      `calc/store.py::StoredResult.provenance` (written, never read), and the single-implementer
+      `SolubilityModel` seam + its dead `model=` param. Left in place as plan-anticipated future
+      wiring / public batch API rather than deleted blindly.
+
 ## Admin-experience audit (configurability / error-handling / logging)
 
 ### Done — P0 observability floor (D-026)

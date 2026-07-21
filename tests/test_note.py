@@ -78,6 +78,8 @@ def test_frontmatter_body_key_does_not_crash(tmp_path: Path) -> None:
         ".hidden",  # leading dot (dotfile / ref rules)
         "-flag",  # leading dash reads as a CLI flag
         "a b",  # whitespace
+        "reaction-x.",  # trailing dot: git rejects `note/reaction-x.` as a ref
+        "reaction-x.lock",  # `.lock` suffix: git reserves it, branch creation fails
     ],
 )
 def test_unsafe_id_and_type_rejected_at_model(bad: str) -> None:

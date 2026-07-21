@@ -111,14 +111,17 @@ def predict_pka(job: PkaInput) -> PkaResult:
 
 
 def _calc_version() -> str:
-    """Cache-key version tying pKa results to method, engine, solvent, and calibration.
+    """Cache-key version tying pKa results to method, engine, solvent, calibration, uncertainty.
 
     The engine build is included (see `calc.xtb_engine.engine_version`) so a tblite
-    upgrade recomputes, exactly as the xTB energy key does.
+    upgrade recomputes, exactly as the xTB energy key does. The reported `uncertainty`
+    is part of the stored result, so it is keyed too — otherwise re-tuning
+    `pka_uncertainty` would serve the old value from cache.
     """
     return (
         f"{settings.xtb_method}+tblite-{engine_version()}/alpb-{settings.pka_solvent}/"
-        f"cal-{settings.pka_calibration_slope}:{settings.pka_calibration_intercept}"
+        f"cal-{settings.pka_calibration_slope}:{settings.pka_calibration_intercept}/"
+        f"u-{settings.pka_uncertainty}"
     )
 
 

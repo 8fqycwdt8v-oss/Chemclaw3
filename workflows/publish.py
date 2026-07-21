@@ -26,26 +26,42 @@ with workflow.unsafe.imports_passed_through():
 
 # Temporal matches `non_retryable_error_types` by exact class name (not isinstance),
 # so every bad-data name that can cross an activity boundary is listed explicitly.
+# `ValidationError` (pydantic) subclasses `ValueError` but has its own class name, so
+# a model-build failure on corrupt data would otherwise be treated as retryable.
+_BAD_DATA_TYPES = [
+    "ValueError",
+    "ValidationError",
+    "ChemclawError",
+    "FingerprintError",
+    "ElnMappingError",
+    "ElnFormatError",
+    "OrdFormatError",
+    "IngestError",
+    "MetricError",
+    "PlaybookError",
+    "NoteError",
+    "EvalCaseError",
+]
+
+# Bad data is non-retryable by type; `maximum_attempts` bounds the *transient* retries
+# so an unclassified deterministic failure (e.g. a `KeyError`/`RuntimeError` bug, or a
+# git ref that can never be created) gives up instead of pinning a worker forever.
 BAD_DATA_RETRY = RetryPolicy(
-    non_retryable_error_types=[
-        "ValueError",
-        "ChemclawError",
-        "FingerprintError",
-        "ElnMappingError",
-        "ElnFormatError",
-        "IngestError",
-        "MetricError",
-        "PlaybookError",
-        "NoteError",
-    ]
+    maximum_attempts=settings.activity_max_attempts,
+    non_retryable_error_types=list(_BAD_DATA_TYPES),
 )
 
 
 def note_publish_retry() -> RetryPolicy:
-    """Bounded retries for a PR-gate note write (config `note_write_max_attempts`)."""
+    """Bounded retries for a PR-gate note write (config `note_write_max_attempts`).
+
+    Shares the bad-data type list so a bad note (`NoteError`, `ValidationError`)
+    fails fast instead of burning the transient-retry budget; only a genuinely
+    transient `GitSubmitError` (dead remote) is retried, up to the bound.
+    """
     return RetryPolicy(
         maximum_attempts=settings.note_write_max_attempts,
-        non_retryable_error_types=["ValueError"],
+        non_retryable_error_types=list(_BAD_DATA_TYPES),
     )
 
 

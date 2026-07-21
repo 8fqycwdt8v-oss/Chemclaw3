@@ -25,8 +25,12 @@ async def _discovered_tools(spec: McpServerSpec) -> set[str]:
     try:
         async with tool:
             return {f.name for f in tool.functions}
-    except Exception as exc:  # pragma: no cover - environment-dependent (no subprocess/RDKit)
-        pytest.skip(f"MCP server subprocess unavailable in this environment: {exc}")
+    except (FileNotFoundError, ImportError) as exc:  # pragma: no cover - toolchain absent
+        # Skip ONLY when the toolchain itself is missing (no python/git on PATH, or
+        # RDKit not importable). Any other failure — a server that starts but crashes,
+        # or advertises the wrong tools — must fail loudly: this is the one test guarding
+        # the `allowed_tools` boundary that keeps write/index tools off the agent (D-029).
+        pytest.skip(f"MCP server toolchain unavailable in this environment: {exc}")
 
 
 @pytest.mark.parametrize("spec", settings.mcp_servers, ids=lambda s: s.name)
