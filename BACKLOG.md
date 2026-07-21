@@ -23,12 +23,15 @@ Prioritized open action items. Top = next. Keep in sync with `docs/implementatio
       in `eln_sync.py` and `memory_jobs.py`.
 - [x] `skills_dir` → OS-path-separator list via the `skills_dirs` property (add a second skills
       directory with no code change) + SKILL.md front-matter schema/template in `skills/README.md`.
-- [ ] Centralize/​document the agent tool list — "add a capability = wrapper module + one line";
-      the `mcp_servers/` FastMCP servers are imported in-process, not attached over MCP (a
-      deliberate migration decision, see the MAF-analysis findings — MCP-client wiring is medium
-      effort and tension with KISS). `docs/runbook.md` (iv) documents the current procedure;
-      centralizing/​MCP-attaching the list is still open. Optional `make skill-validate` also open
-      (loader validates at startup today).
+- [x] MCP-attach the agent's fingerprint search (D-029): `build_agent` attaches config-driven
+      `MCPStdioTool` servers (`CHEMCLAW_MCP_SERVERS`), so structural search runs over MCP and
+      adding a capability is a config entry. `allowed_tools` keeps write/index tools off the
+      agent. Transport verified in-sandbox (`test_mcp_transport.py`). `docs/runbook.md` (iv)
+      rewritten for the MCP procedure.
+- [ ] Optional `make skill-validate` (the loader validates at startup today). Migrate the
+      remaining in-process agent tools (calculators/graph/BO) to MCP only if a real cross-process
+      or cross-language need appears — for local RDKit/BoFire functions in-process stays simpler
+      (KISS); not planned.
 
 ### Open — P2 polish
 - [x] `docs/runbook.md`: the four admin tasks (add skill / add-repoint DB / add-or-switch ELN

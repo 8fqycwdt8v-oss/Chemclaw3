@@ -17,6 +17,7 @@ from agent_framework import (
     CompactionProvider,
     FileSkillsSource,
     InMemoryHistoryProvider,
+    MCPStdioTool,
     SkillsProvider,
     SlidingWindowStrategy,
     TokenBudgetComposedStrategy,
@@ -29,12 +30,7 @@ from agents.calc_tools import compute_xtb_energy, predict_pka, predict_solubilit
 from agents.graph_tools import expand_note, find_notes, propose_knowledge_note
 from agents.qm_tools import get_qm_job_status, submit_qm_job
 from agents.research_tools import gather_evidence
-from agents.search_tools import (
-    find_similar_molecules,
-    find_similar_reactions,
-    find_substructure_matches,
-)
-from chemclaw.config import settings
+from chemclaw.config import McpServerSpec, settings
 
 _INSTRUCTIONS = (
     "You are Chemclaw, a research assistant for pharmaceutical/chemical process R&D. Your job "
@@ -46,9 +42,10 @@ _INSTRUCTIONS = (
     "graph — reactions, optimization campaigns, playbooks, reports — plus similar reactions "
     "when you pass a reaction SMILES); expand_note/find_notes drill into any cited note for "
     "the full step-by-step recipe, conditions, and outcomes. (2) For cross-learning by "
-    "structure, find_similar_reactions gathers past runs of a transformation, "
-    "find_similar_molecules/find_substructure_matches find analogous substrates or a "
-    "functional group (then find_notes on a hit's SMILES to reach the reactions using it). "
+    "structure, similar_reactions gathers past runs of a transformation (a hit's id is the "
+    "stem of its reaction-<id> note — expand_note it for the recipe), similar_molecules/"
+    "substructure_matches find analogous substrates or a functional group (then find_notes on "
+    "a hit's SMILES to reach the reactions using it). "
     "(3) For properties use compute_xtb_energy / predict_pka / predict_solubility (inline, "
     "cached); heavy QM goes through submit_qm_job (returns a job id — report it, poll with "
     "get_qm_job_status). (4) To answer 'which experiment/condition next', call "
@@ -71,13 +68,20 @@ _INSTRUCTIONS = (
 def build_agent(chat_client: Any | None = None) -> Agent:
     """Construct the Chemclaw agent with its tools and skills.
 
+    The structural-search capability is attached as MCP servers (`settings.mcp_servers`), which
+    MAF stores on `agent.mcp_tools`. Construction is lazy — no subprocess is spawned here — so
+    this stays a synchronous, resource-free constructor. The caller that actually *runs* the
+    agent owns the MCP lifecycle: enter each MCP tool's async context (or the agent's) before
+    `agent.run`, e.g. `async with *agent.mcp_tools: await agent.run(...)`, so the servers are
+    spawned for the turn and torn down after.
+
     Args:
         chat_client: A MAF chat client. Injected in tests; when omitted, the
             configured Anthropic client is built (needs an API key at run time,
             not here).
 
     Returns:
-        A ready-to-run `Agent`. No LLM call happens at construction.
+        A ready-to-run `Agent`. No LLM call and no subprocess happen at construction.
     """
     client = chat_client if chat_client is not None else _default_chat_client()
     skills = SkillsProvider(FileSkillsSource(settings.skills_dirs))
@@ -96,9 +100,9 @@ def build_agent(chat_client: Any | None = None) -> Agent:
             find_notes,
             expand_note,
             gather_evidence,
-            find_similar_reactions,
-            find_similar_molecules,
-            find_substructure_matches,
+            # Structural fingerprint search (similar_reactions/similar_molecules/
+            # substructure_matches) comes from the MCP capability servers, not in-process.
+            *_mcp_capability_tools(),
             suggest_next_experiment,
             propose_knowledge_note,
         ],
@@ -109,6 +113,29 @@ def build_agent(chat_client: Any | None = None) -> Agent:
         # One function middleware audits every tool call (name, args, outcome, latency) — the
         # single GxP audit trail over all tools, not per-tool logging.
         middleware=[audit_tool_calls],
+    )
+
+
+def _mcp_capability_tools() -> list[MCPStdioTool]:
+    """Build one `MCPStdioTool` per configured MCP capability server (unconnected).
+
+    These realise the plan's capability layer: the agent reaches the fingerprint search over
+    the MCP protocol instead of importing it in-process, so adding a capability is a
+    `settings.mcp_servers` entry, not a change here. `allowed_tools` keeps the agent to each
+    server's read/search tools; prompt loading is off (the servers advertise none). The tools
+    are returned unconnected — the run harness opens their contexts (see `build_agent`).
+    """
+    return [_mcp_tool(spec) for spec in settings.mcp_servers]
+
+
+def _mcp_tool(spec: McpServerSpec) -> MCPStdioTool:
+    """Construct one MCP stdio tool from its config spec."""
+    return MCPStdioTool(
+        name=spec.name,
+        command=spec.command,
+        args=spec.args,
+        allowed_tools=spec.allowed_tools,
+        load_prompts=False,
     )
 
 

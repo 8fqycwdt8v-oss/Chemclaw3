@@ -56,8 +56,20 @@ adapter). Validate an export with `make eln-validate`.
 
 ## (iv) Add a capability/tool the agent can call
 
-Today the agent's tools are a Python list in `agents/chemclaw_agent.py` (`build_agent`): a new
-capability is a thin wrapper module under `agents/` plus one line in that `tools=[...]` list.
-The standalone FastMCP servers in `mcp_servers/` are imported in-process, not attached over the
-MCP protocol — attaching them as MCP-client tools is a deliberate future migration (see
-`BACKLOG.md`), not required to add a capability now.
+The agent reaches the fingerprint search over the **MCP protocol**: each capability is a server
+listed in `CHEMCLAW_MCP_SERVERS` (default `mcp-molfp`, `mcp-rxnfp` in `chemclaw/config.py`), and
+`build_agent` attaches it as an `MCPStdioTool` subprocess. **Adding a capability is a config
+entry**, not agent code:
+
+1. Write (or reuse) a FastMCP server exposing the tools (see `mcp_servers/molfp/server.py`).
+2. Add `{name, command, args, allowed_tools}` to `CHEMCLAW_MCP_SERVERS` — set `allowed_tools`
+   to the read/search tools the agent may call (keep index/write tools off the chat agent;
+   those writes go through the PR-gate).
+3. Servers are launched from the repo root (`command`/`args`, e.g. `python -m ...`); ensure the
+   process's working directory is the checkout so `-m mcp_servers...` resolves.
+
+Some agent tools are still in-process plain functions (calculators, graph, BO) — those are a
+thin wrapper module under `agents/` plus one line in the `build_agent` `tools=[...]` list.
+Troubleshooting: a server that fails to start surfaces in the worker/agent logs; verify it runs
+standalone with `python -m mcp_servers.<name>.server` and that Postgres is reachable (tool
+*discovery* needs no DB, but *invoking* a search does).

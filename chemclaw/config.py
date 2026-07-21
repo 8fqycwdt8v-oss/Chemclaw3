@@ -17,9 +17,24 @@ the first real consumer lands.
 """
 
 import os
+import sys
 
-from pydantic import Field, model_validator
+from pydantic import BaseModel, Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+
+class McpServerSpec(BaseModel):
+    """Launch spec for one stdio MCP server the agent attaches as a capability (D-029).
+
+    `command` + `args` are how MAF's `MCPStdioTool` spawns the server as a subprocess;
+    `allowed_tools` restricts which of that server's tools the conversational agent may call
+    (the write/index tools are excluded — ingestion writes go through the PR-gate, not chat).
+    """
+
+    name: str
+    command: str
+    args: list[str]
+    allowed_tools: list[str] | None = None
 
 
 class Settings(BaseSettings):
@@ -122,6 +137,26 @@ class Settings(BaseSettings):
     # directory without code changes. Read it through the `skills_dirs` property, never raw.
     agent_model: str = "claude-sonnet-5"
     skills_dir: str = "skills"
+    # MCP capability servers the agent attaches over stdio (the plan's capability layer, D-029):
+    # the agent calls the fingerprint search over the MCP protocol rather than importing it
+    # in-process, so a capability is a running server, not agent code. Adding one is an entry
+    # here (ENV-overridable as JSON), never a change to `build_agent`. Each runs as its own
+    # subprocess launched from the repo root; `allowed_tools` keeps the agent to the read/search
+    # tools (index/write stays in the PR-gated ingestion path, off the conversational agent).
+    mcp_servers: list[McpServerSpec] = [
+        McpServerSpec(
+            name="mcp-molfp",
+            command=sys.executable,
+            args=["-m", "mcp_servers.molfp.server"],
+            allowed_tools=["similar_molecules", "substructure_matches"],
+        ),
+        McpServerSpec(
+            name="mcp-rxnfp",
+            command=sys.executable,
+            args=["-m", "mcp_servers.rxnfp.server"],
+            allowed_tools=["similar_reactions"],
+        ),
+    ]
     # Conversation context management (MAF compaction). The agent keeps a session thread and
     # composes tool calls that return large payloads (evidence sweeps, full ELN recipes), so a
     # long chat would grow unbounded. Compaction runs only when the included context exceeds

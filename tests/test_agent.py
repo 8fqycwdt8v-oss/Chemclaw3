@@ -50,6 +50,19 @@ def test_agent_audits_every_tool_call() -> None:
     assert audit_tool_calls in middleware
 
 
+def test_agent_attaches_fingerprint_search_as_mcp_servers() -> None:
+    """Structural search is reached over MCP (servers on `mcp_tools`), not in-process tools.
+
+    The in-process search wrappers are no longer registered as function tools; the agent talks
+    to the molfp/rxnfp capability servers over the MCP protocol instead (construction is lazy —
+    no subprocess is spawned here).
+    """
+    agent = build_agent(chat_client=object())
+    assert {t.name for t in agent.mcp_tools} == {"mcp-molfp", "mcp-rxnfp"}
+    function_tool_names = {f.name for f in agent.default_options["tools"]}
+    assert {"find_similar_reactions", "find_similar_molecules"} & function_tool_names == set()
+
+
 def test_compaction_reduces_context_over_budget() -> None:
     """The wired strategy trims a long thread to its token budget, keeping the newest turn."""
     tokenizer = CharacterEstimatorTokenizer()
