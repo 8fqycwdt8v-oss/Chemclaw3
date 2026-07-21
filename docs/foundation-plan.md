@@ -17,7 +17,8 @@ Confirmed deployment context — the whole plan is shaped by it:
 
 | Concern | Reality | Consequence for the plan |
 |---|---|---|
-| **Runtime platform** | **OpenShift** (Red Hat Kubernetes) | Containers, Deployments/Routes/Secrets; **not** Azure — `architektur.md` §6–§8 must be rewritten (F9). Identity is **OIDC**, not Entra-native. |
+| **Runtime platform** | **OpenShift** (Red Hat Kubernetes) | Containers, Deployments/Routes/Secrets. Only the *hosting* moves off Azure — see the identity row: Entra stays. `architektur.md` §6 (Azure hosting) is rewritten for OpenShift; **§7/§8 (Entra) are retained requirements** (F9). |
+| **Identity (mandatory, system-wide)** | **Azure Entra ID** for users **and every backend component** | User auth = OIDC with Entra as IdP; **all backend parts authenticate via Entra** (service-to-service), even though the cluster is OpenShift not Azure. This makes `architektur.md` §7 a live requirement, not aspirational — the challenge is Entra identity *on OpenShift* (workload identity federation), plus the §7 bridges where a component can't speak Entra natively (Temporal workers, HPC). See F4. |
 | **Heavy/long compute** | **HPC running Nextflow** pipelines | The mocked `submit_to_hpc` becomes a **Nextflow launch+poll** adapter (F5). D-010's "defer HPC until access exists" trigger is now **met**. |
 | **LLM** | **custom OpenLLM-like adapter** (self-hosted, OpenAI-compatible endpoint) | The agent's chat client must be **decoupled from Anthropic** and pointed at the internal endpoint (F0). Tool-calling reliability of the internal model is the #1 project risk. |
 
@@ -34,6 +35,12 @@ Confirmed deployment context — the whole plan is shaped by it:
   already promises — the workflow and agent never learn what a Nextflow launch looks like.
 - **The internal CA/TLS + tokens come from OpenShift secrets** through the one pydantic config.
 - **Durability stays in Temporal; identity is a claim, not transport** (unchanged from §7/§8).
+- **Entra everywhere (mandatory).** Every network call between components carries an Entra identity:
+  users authenticate to the front door via Entra OIDC, and each backend service (workers, MCP
+  servers, the internal-LLM adapter client, ELN/LIMS access) authenticates via Entra — on OpenShift
+  this is **Entra Workload Identity Federation** (federate the pod's service-account token to an
+  Entra app registration → short-lived Entra token, **no stored client secrets**), with the §7
+  **bridges** only where a component cannot validate an Entra JWT (Temporal service auth, HPC).
 
 ---
 
@@ -48,7 +55,10 @@ loop, plan/execute) depends on whether the internal model does MAF function-call
   anthropic, …}`, with `llm_base_url`, `llm_model`, `llm_api_key`/token, `llm_tls_ca_bundle`,
   `llm_timeout_seconds`, `llm_max_retries`. For an OpenLLM-style OpenAI-compatible server, use
   MAF's OpenAI-compatible chat client pointed at `llm_base_url`; keep Anthropic as a secondary
-  option for local dev. **No provider class imported outside the adapter.**
+  option for local dev. **No provider class imported outside the adapter.** The call to the
+  internal LLM endpoint is **Entra-authenticated** (an Entra-issued bearer token via workload
+  identity federation, not a static API key), since the endpoint is a backend component that must
+  authenticate via Entra (§0). The token acquisition lives in the adapter, refreshed on expiry.
 - **F0.2 Tool-calling capability spike (the H0 of this plan).** Before building on it, prove the
   internal model can (a) select and call MAF function tools, (b) drive the **harness todo tools**
   (`add/complete/list todo`) and the plan/execute mode transition, (c) return the structured
@@ -137,26 +147,47 @@ finished Nextflow/BO job must **wake the session** instead of forcing the user t
 
 ---
 
-## Phase F4 — Identity & RBAC on OpenShift (OIDC)
+## Phase F4 — Entra ID identity & RBAC, system-wide (mandatory)
 
-**Why:** the moment the harness can autonomously trigger expensive HPC/BO paths, "who asked" and
-"may they" become load-bearing (assessment §5.4; harness concept §6). §7/§8's *principles* survive;
-only the mechanism changes from Azure-native to **OIDC on OpenShift**.
+**Why:** identity via **Azure Entra ID** is a hard requirement — for **users and every backend
+component** — and it becomes load-bearing the moment the harness can autonomously trigger expensive
+HPC/BO paths ("who asked", "may they"). This phase makes `architektur.md` §7/§8 real, with one
+change from the original: the hosting is **OpenShift, not Azure-native**, so service identity comes
+from **Entra Workload Identity Federation** instead of Azure Managed Identity. The §7 maturity table
+maps directly onto the work below.
 
-- **F4.1 OIDC at the front door.** Authenticate via OpenShift OAuth / the corporate IdP over OIDC
-  (Entra-ID **federated via OIDC**, or Keycloak/RH-SSO — F4 ADR). Extract `oid`/`upn` + roles/groups
-  from the validated token.
-- **F4.2 Wire the existing seams.** Thread the real `actor` into the audit trail (`make_audit_
-  middleware`, D-034) and the durable `audit_events` sink; scope advertised skills by role
-  (`RoleFilteredSkillsSource`, D-035); **authorize expensive triggers** (Nextflow submit, BO
-  campaign) **before** the harness executes the todo — the single authorization point (§8).
-- **F4.3 Identity propagation.** Carry `oid`/`upn` as a **claim in the Temporal workflow payload**
-  (audit, not transport — §7.2) and as an OBO-style token to downstream ELN/LIMS calls so data
-  access is the chemist's, not a service principal's.
+- **F4.1 User auth at the front door (Entra OIDC).** The front-door service is an **Entra app
+  registration**; users sign in with Entra (M365 SSO). Validate the JWT against the tenant JWKS,
+  **check the audience** (confused-deputy risk, §7 — the service is both OAuth client and resource),
+  and extract `oid`/`upn` + app-roles/groups.
+- **F4.2 Backend service-to-service auth via Entra (workload identity federation).** Every backend
+  pod (front door, `hpc-worker`, `background-worker`, MCP servers) federates its **OpenShift
+  service-account token to an Entra app registration** → short-lived Entra tokens, **no stored
+  secrets**. Each component authenticates to every Entra-protected dependency (the internal-LLM
+  adapter endpoint, Graph, internal APIs) with its own Entra identity. Where a dependency isn't
+  Entra-native, use the §7 bridge (next two items).
+- **F4.3 Downstream data access as the user (OBO).** ELN/LIMS (Benchling) and any per-user resource
+  are called with an **On-Behalf-Of** Entra token so access is the chemist's, not a generic service
+  principal's — the data-governance requirement from §7.4.
+- **F4.4 The two non-Entra bridges (§7 — unchanged in principle).**
+  - **Temporal** has no native Entra token auth: workers/clients authenticate by **mTLS/API-key**;
+    the user's `oid`/`upn` rides as an **audit claim in the workflow payload** (identity, not
+    transport — §7.2), so "who launched this Nextflow job" stays auditable.
+  - **HPC/Nextflow** speaks no Entra: a thin **bridging service** maps the Entra identity → the HPC/
+    Nextflow service identity and **logs every mapping** — the single point that knows both worlds
+    (§7.3). (Seqera Platform can also do Entra SSO for *human* console access.)
+- **F4.5 Authorization at one point + wire the existing seams.** Thread the real `actor` into the
+  audit trail (`make_audit_middleware`, D-034) and the durable `audit_events` sink; scope advertised
+  skills by Entra app-role (`RoleFilteredSkillsSource`, D-035); **authorize expensive triggers**
+  (Nextflow submit, BO campaign) against the Entra role/group **before** the harness executes the
+  todo — the single fachliche authorization point (§8), not scattered across layers.
 
-> **CHECKMATE F4** (G1–G7 + security review): An unauthorized user cannot trigger an expensive path
-> even in autonomous execute mode; the audit trail shows the real `oid`; skills are role-filtered.
-> ADR: **D-A4 OIDC identity/RBAC on OpenShift** (supersedes the Azure-native parts of §7/§8).
+> **CHECKMATE F4** (G1–G7 + security review): Do **all** components present an Entra identity (no
+> anonymous or static-key backend call except the two documented bridges)? Can an unauthorized user
+> not trigger an expensive path even in autonomous execute mode? Does the audit trail show the real
+> `oid` end to end, including the Temporal payload claim? Is authorization at **one** point? ADR:
+> **D-A4 Entra ID identity/RBAC on OpenShift** (realizes §7/§8; Managed Identity → Workload Identity
+> Federation is the only substrate change).
 
 ---
 
@@ -205,8 +236,12 @@ exists") is now met. Everything is already shaped for this — only `workflows/a
   Migrations (`make db-migrate`, tracked ledger D-034) run as a pre-deploy Job.
 - **F6.5 Observability.** Flip on the **OTel toggle** (already built, D-027) → an in-cluster
   collector; ship logs/metrics/traces; dashboards for loop iterations, tool latency, job status.
-- **F6.6 Config/secrets discipline.** Every endpoint/token/CA/queue is one config value from
-  OpenShift env/secrets — no second source (unchanged rule).
+- **F6.6 Config/secrets + Entra workload identity.** Every endpoint/CA/queue is one config value
+  from OpenShift env/secrets — no second source. Crucially, **service credentials are Entra Workload
+  Identity Federation**, not long-lived secrets: each Deployment's service account is federated to an
+  Entra app registration, so pods mint short-lived Entra tokens at runtime (F4.2) and there are no
+  client secrets to rotate in-cluster. Temporal mTLS certs and the HPC-bridge credential are the two
+  exceptions, sourced from the secret store/Vault.
 
 > **CHECKMATE F6** (G1–G7): The full stack deploys to an OpenShift namespace; the front door is
 > reachable via a Route behind OIDC; workers connect to Temporal + the HPC launcher + the internal
@@ -264,9 +299,11 @@ link (calibrated uncertainty) and a known scaling limit (NetworkX-only retrieval
 
 Runs alongside every phase; closes the "docs describe a system that doesn't exist" gap.
 
-- **Rewrite `architektur.md` §6–§8** for the real substrate: OpenShift (not Azure), OIDC (not
-  Entra-native), Nextflow-on-HPC (not raw SLURM), internal OpenLLM-like adapter (not Anthropic/Azure
-  OpenAI). Keep the four-layer model and the §7/§8 *principles*; replace the mechanisms.
+- **Rewrite `architektur.md` §6** (hosting) for OpenShift instead of Azure AI Foundry/Container
+  Apps, Nextflow-on-HPC instead of raw SLURM, and the internal OpenLLM-like adapter instead of
+  Anthropic/Azure OpenAI. **Keep §7/§8 (Entra ID durchgängig) — they are the requirement**, adjusting
+  only the one mechanism that changes off Azure: **Managed Identity → Entra Workload Identity
+  Federation** for backend service auth (the Temporal-claim and HPC-bridge patterns are unchanged).
 - **ADR log:** D-A1…D-A9 above, plus finalize D-020 (harness backbone). Keep the terse-running-log
   discipline.
 - **Autonomy metrics in the eval layer (2b):** register **plan quality** (needed vs planned steps),
@@ -308,7 +345,10 @@ foundation, and analytical/retro/prediction *models* are explicitly later.
 
 1. **LLM endpoint shape** — is the OpenLLM-like adapter OpenAI-compatible (base_url + tool-calling)?
    Streaming supported? (Shapes F0.)
-2. **Identity provider** — Entra-ID federated via OIDC, or Keycloak/RH-SSO on OpenShift? (F4.)
+2. **Identity** — *resolved:* **Azure Entra ID**, mandatory for users and all backend components.
+   Open sub-question: backend service auth via **Entra Workload Identity Federation** on OpenShift
+   (recommended — no stored secrets) vs client-credentials with cert/secret? And which resources sit
+   behind the two §7 bridges (Temporal, HPC) in your tenant? (F4.)
 3. **Front-door surface** — thin built-in web chat (recommended) vs adopting an existing chat UI. (F2.)
 4. **Nextflow launch interface** — Seqera Platform API / SSH+CLI / internal REST launcher? (F5.)
 5. **Temporal** — self-hosted on OpenShift vs Temporal Cloud? Session store Postgres vs Redis? (F3/F6.)

@@ -119,12 +119,18 @@ building.
   the analytical half; if yes, the **canonical schema work is a foundation task**, not a later
   skill. Do **not** invent a homegrown analytical schema.
 
-### D-D. Deployment & identity target
-- `architektur.md` §6/§7/§8 is an Azure/Entra-ID design that the code does not implement and the
-  runtime does not match. Pick the real target (Claude-native cloud + an IdP? Azure? self-hosted?)
-  so that identity, RBAC, session storage, and the front door are designed against a real
-  substrate rather than an aspirational one. **Identity becomes load-bearing the moment autonomy
-  is real** (an agent that can trigger expensive paths must know *who* asked).
+### D-D. Deployment & identity target **(resolved)**
+- **Hosting:** **OpenShift**, with heavy compute via **Nextflow on HPC** and the LLM served by a
+  **custom OpenLLM-like adapter**. So `architektur.md` §6's *Azure hosting* (AI Foundry/Container
+  Apps) is what changes — to OpenShift.
+- **Identity:** **Azure Entra ID is mandatory and system-wide** — users *and* every backend
+  component authenticate via Entra. This means `architektur.md` **§7/§8 ("Entra ID durchgängig")
+  are a live requirement, not aspirational** — they were only unbuilt, not wrong. The single
+  substrate change: because the cluster is OpenShift not Azure, backend service identity uses
+  **Entra Workload Identity Federation** (federated SA tokens, no stored secrets) instead of Azure
+  Managed Identity; the §7 bridges (Temporal audit-claim, HPC identity bridge) are unchanged.
+- **Identity becomes load-bearing the moment autonomy is real** — an agent that can trigger
+  expensive paths must know *who* asked and *whether they may*. See the plan's Phase F4.
 
 ---
 
@@ -183,9 +189,11 @@ building.
 
 ## 7. OBSOLETE / over-built — reconsider or stop gold-plating
 
-- **The Azure/Entra/Copilot-Studio/HPC-bridge design** (`architektur.md` §6–§8) is, as written,
-  **aspirational and partly obsolete** relative to the Claude-native reality. Don't build Phase-6
-  Azure machinery until D-D actually chooses Azure.
+- **The Azure *hosting* framing** (`architektur.md` §6 — AI Foundry/Container Apps, Copilot Studio)
+  is obsolete relative to the real target (**OpenShift + HPC/Nextflow + internal LLM adapter**) and
+  should be rewritten. **§7/§8 (Entra ID) are NOT obsolete** — Entra identity is a mandatory,
+  retained requirement; only the service-auth mechanism changes (Managed Identity → Entra Workload
+  Identity Federation on OpenShift). Don't build Azure-*hosting* machinery, but do build Entra.
 - **Beware polishing Phase-6 seams before a front door exists.** Several recent commits added
   identity/audit/approval *seams* (role-filtered skills, durable approval hold, audit store) that
   **cannot be exercised because no session runtime calls them.** This is disciplined seam-work, but
@@ -238,8 +246,9 @@ from the current spine.
 
 1. **D-A** — *resolved:* keep MAF; deliver the experience via the MAF Agent Harness, with the
    classic-`Agent` fallback kept load-bearing against the harness's `[Experimental]` status.
-2. **D-D** — real deployment/identity substrate (Claude-native + an IdP? Azure? self-hosted?) —
-   the part of `architektur.md` §6–§8 that no longer matches the running system.
+2. **D-D** — *resolved:* hosting on **OpenShift** (HPC/Nextflow, internal OpenLLM-like adapter);
+   identity via **Azure Entra ID**, mandatory for users and all backend components (§7/§8 retained;
+   Managed Identity → Entra Workload Identity Federation is the only substrate change).
 3. **D-C** — is the analytical-development half in v1 scope? (Recommendation: yes — it's the
    whitespace; at minimum commit the data-standard choice now.)
 4. **Front-door surface** — web chat first? Slack? Both? (Recommendation: web chat for the
