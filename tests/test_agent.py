@@ -54,11 +54,21 @@ def test_agent_has_skills_history_and_compaction() -> None:
 
 
 def test_agent_audits_every_tool_call() -> None:
-    """A single GxP tool-audit middleware is attached (built per-conversation)."""
+    """With no tool gates (default), only the GxP tool-audit middleware is attached."""
     agent = build_agent(chat_client=object())
     middleware = agent.middleware
     assert middleware is not None
-    assert len(list(middleware)) == 1  # exactly the one audit middleware, over all tools
+    assert len(list(middleware)) == 1  # audit only; authz is opt-in via tool_role_gates
+
+
+def test_tool_gates_wire_the_authz_middleware(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Configuring a tool gate adds the authz middleware, with audit still outermost."""
+    monkeypatch.setattr(settings, "tool_role_gates", {"submit_qm_job": ["compute"]})
+    middleware = list(build_agent(chat_client=object()).middleware or [])
+    names = [getattr(m, "__name__", type(m).__name__) for m in middleware]
+    assert len(middleware) == 2
+    assert "audit" in names[0]  # audit first == outermost, so denials are audited
+    assert any("enforce_tool_roles" in n for n in names)
 
 
 def test_agent_attaches_fingerprint_search_as_mcp_servers() -> None:

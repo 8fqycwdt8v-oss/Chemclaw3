@@ -13,11 +13,17 @@ Prioritized open action items. Top = next. Keep in sync with `docs/implementatio
       Tests: `test_identity.py`, `test_skill_access.py` (gate hidden/shown by role). Full suite
       277 passed.
 
-### Open — part 2+: authorization enforcement & live-infra edges
-- [ ] **Decision needed:** where authz on expensive in-process tools (`submit_qm_job`, calc, BO)
-      is enforced — a policy middleware at the agent's tool boundary (works today) vs. moving
-      protected tools behind an Entra-authz'd MCP server (matches §8, bigger change).
-- [ ] 6.1 Entra JWT validation (JWKS) + OAuth-proxy + OBO to the ELN — needs a live tenant.
+### Done — part 2: tool authorization enforcement (option a, D-040)
+- [x] 6.1 (enforcement) `agents/authz.py`: `authorize` + `make_authz_middleware` — a MAF function
+      middleware over the in-process tool boundary (chosen over moving tools behind an MCP server).
+      Config `tool_role_gates` (tool → roles); ungated = anyone, gated = role required, anonymous
+      denied; denial raises `ToolNotAuthorizedError`. `build_agent` wires `[audit, authz]` (audit
+      outermost → denials audited); authz added only when gates configured (default unchanged).
+      Tests: `test_authz.py` + `test_agent.py::test_tool_gates_wire_the_authz_middleware`. 282 pass.
+
+### Open — part 3: live-infra edges (need a real tenant/cluster)
+- [ ] 6.1 Entra JWT validation (JWKS) + OAuth-proxy + OBO to the ELN — needs a live tenant; this
+      is what produces the `Principal` the parts above already consume.
 - [ ] 6.3 Temporal mTLS + propagate `principal.oid` into `requested_by`/audit; namespace-per-team.
 - [ ] 6.4 knowledge-graph ACL (repo-level first; RLS mirror stays deferred). 6.5 HPC identity bridge.
 

@@ -149,6 +149,12 @@ class Settings(BaseSettings):
     # holding one of its roles. ENV override is JSON, e.g.
     # CHEMCLAW_SKILL_ROLE_GATES='{"gxp-scope-guard": ["QA"]}'.
     skill_role_gates: dict[str, list[str]] = Field(default_factory=dict)
+    # Phase-6 tool authorization (plan step 6.1): map a tool name to the Entra app-roles allowed
+    # to call it. A tool not listed is ungated (any caller); a listed tool runs only for a caller
+    # holding one of its roles, else the call is denied and audited. Empty default = no
+    # enforcement (today's behavior) — the authz middleware is only wired when this is non-empty.
+    # ENV override is JSON, e.g. CHEMCLAW_TOOL_ROLE_GATES='{"submit_qm_job": ["compute"]}'.
+    tool_role_gates: dict[str, list[str]] = Field(default_factory=dict)
     # MCP capability servers the agent attaches over stdio (the plan's capability layer, D-029):
     # the agent calls the fingerprint search over the MCP protocol rather than importing it
     # in-process, so a capability is a running server, not agent code. Adding one is an entry

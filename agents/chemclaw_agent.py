@@ -43,6 +43,7 @@ from agent_framework import (
 )
 
 from agents.audit import AuditSink, make_audit_middleware
+from agents.authz import make_authz_middleware
 from agents.bo_tools import suggest_next_experiment
 from agents.calc_tools import compute_xtb_energy, predict_pka, predict_solubility
 from agents.graph_tools import expand_note, find_notes, propose_knowledge_note
@@ -144,6 +145,13 @@ def build_agent(
         actor=principal.actor if principal is not None else actor,
         sink=audit_sink,
     )
+    # Audit first so it is outermost and records even a denied attempt (§8, D-040); the authz
+    # gate is wired only when tools are actually gated, so the default path is unchanged.
+    middleware = [audit]
+    if settings.tool_role_gates:
+        middleware.append(
+            make_authz_middleware(principal=principal, gates=settings.tool_role_gates)
+        )
     tools = [
         compute_xtb_energy,
         predict_solubility,
@@ -174,7 +182,7 @@ def build_agent(
             # One function middleware audits every tool call (correlation id, actor, args,
             # outcome, latency) — the single GxP audit trail over all tools, not per-tool
             # logging.
-            middleware=[audit],
+            middleware=middleware,
         )
 
     return create_harness_agent(
@@ -195,7 +203,7 @@ def build_agent(
         # classic wiring above.
         disable_compaction=True,
         context_providers=[compaction],
-        middleware=[audit],
+        middleware=middleware,
         loop_should_continue=_loop_predicate(),
         loop_max_iterations=settings.harness_max_loop_iterations,
     )

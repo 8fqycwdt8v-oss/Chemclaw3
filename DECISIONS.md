@@ -726,3 +726,26 @@ decision — so *where* the enforcement point sits (a policy middleware at the i
 boundary vs. moving protected tools behind an authz'd MCP server) is an open architectural
 choice, left for a follow-up rather than pre-judged here. Token validation itself (JWKS/OBO)
 also waits for the live tenant. This increment adds identity + visibility, not gate-keeping.
+
+## D-040 — Phase 6, part 2: tool authorization at the in-process tool boundary (option a)
+`architektur.md` §8 centralizes authorization where the caller's token is present — the MCP
+server. But the expensive actions (`submit_qm_job`, calculators, BO) are **in-process agent
+tools**, not MCP tools (a deliberate KISS decision, D-029 moved only fingerprint search to MCP).
+Rather than move them behind an MCP server just to gate them (a large change), authorization is
+enforced by a MAF **function middleware** over the in-process tool boundary — the same seam the
+audit trail already uses (D-027). One policy over every tool (DRY), the "one place" §8 asks for,
+adapted to where the tools actually run.
+
+- `agents/authz.py`: `authorize(principal, tool, gates)` (pure) + `make_authz_middleware`. A tool
+  is gated by config (`settings.tool_role_gates`: tool → allowed roles). Ungated tools run for
+  anyone; a gated tool runs only for a caller holding one of its roles; an anonymous caller (no
+  principal, no roles) is denied. Denial raises `ToolNotAuthorizedError`.
+- `agents/chemclaw_agent.py`: `build_agent` wires `middleware=[audit, authz]` — audit **first =
+  outermost**, so a denied attempt is recorded in the GxP trail (outcome "error") before the
+  error returns to the model. The authz middleware is added **only when `tool_role_gates` is
+  non-empty**, so with no gates the default path is byte-for-byte unchanged (audit-only).
+
+Enforcement is opt-in by config, mirroring `skill_role_gates` (D-039): turning on a gate is an
+admin change, not code. What still needs live infra: validating the Entra JWT that produces the
+`Principal` in the first place (JWKS/OBO), Temporal mTLS, and the HPC bridge — those remain the
+infra-gated tail of Phase 6.
