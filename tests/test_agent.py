@@ -7,6 +7,7 @@ budget), not model behavior.
 
 import asyncio
 
+import pytest
 from agent_framework import CharacterEstimatorTokenizer, Message, SlidingWindowStrategy
 from agent_framework._compaction import (
     TokenBudgetComposedStrategy,
@@ -15,8 +16,15 @@ from agent_framework._compaction import (
     included_token_count,
 )
 
-from agents.audit import audit_tool_calls
-from agents.chemclaw_agent import _build_compaction, build_agent
+from agents.chemclaw_agent import _build_compaction, _default_chat_client, build_agent
+from chemclaw.config import settings
+
+
+def test_default_client_preflights_missing_api_key(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Building the default client without ANTHROPIC_API_KEY fails with a clear message."""
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    with pytest.raises(RuntimeError, match="ANTHROPIC_API_KEY"):
+        _default_chat_client()
 
 
 def test_agent_advertises_qm_tools() -> None:
@@ -43,11 +51,11 @@ def test_agent_has_skills_history_and_compaction() -> None:
 
 
 def test_agent_audits_every_tool_call() -> None:
-    """The GxP tool-audit middleware is attached to the agent."""
+    """A single GxP tool-audit middleware is attached (built per-conversation)."""
     agent = build_agent(chat_client=object())
     middleware = agent.middleware
     assert middleware is not None
-    assert audit_tool_calls in middleware
+    assert len(list(middleware)) == 1  # exactly the one audit middleware, over all tools
 
 
 def test_agent_attaches_fingerprint_search_as_mcp_servers() -> None:
@@ -61,6 +69,43 @@ def test_agent_attaches_fingerprint_search_as_mcp_servers() -> None:
     assert {t.name for t in agent.mcp_tools} == {"mcp-molfp", "mcp-rxnfp"}
     function_tool_names = {f.name for f in agent.default_options["tools"]}
     assert {"find_similar_reactions", "find_similar_molecules"} & function_tool_names == set()
+
+
+def test_instructions_only_name_available_tools() -> None:
+    """Every tool the instructions tell the model to call actually exists (no name drift).
+
+    Regression guard for the `find_similar_reactions` vs `similar_reactions` class of bug: the
+    agent's advertised surface is the registered function tools plus the allowed MCP tools, and
+    the instructions must not promise a tool outside that set.
+    """
+    agent = build_agent(chat_client=object())
+    available = {f.name for f in agent.default_options["tools"]}
+    for spec in settings.mcp_servers:
+        available |= set(spec.allowed_tools or [])
+
+    # The tool names the instructions direct the model to use.
+    referenced = {
+        "gather_evidence",
+        "expand_note",
+        "find_notes",
+        "similar_reactions",
+        "similar_molecules",
+        "substructure_matches",
+        "compute_xtb_energy",
+        "predict_pka",
+        "predict_solubility",
+        "submit_qm_job",
+        "get_qm_job_status",
+        "suggest_next_experiment",
+        "propose_knowledge_note",
+        "record_confirmed_answer",
+    }
+    missing = {name for name in referenced if name not in available}
+    assert missing == set(), f"instructions reference unavailable tools: {missing}"
+    # And each referenced name must actually appear in the instruction text.
+    from agents.chemclaw_agent import _INSTRUCTIONS
+
+    assert all(name in _INSTRUCTIONS for name in referenced)
 
 
 def test_compaction_reduces_context_over_budget() -> None:

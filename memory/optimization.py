@@ -91,4 +91,4 @@ def _excerpt(reaction: OrdReaction) -> str:
     if not reaction.procedure_text:
         return ""
     text = " ".join(reaction.procedure_text.split())
-    return text[: settings.report_excerpt_chars]
+    return text[: settings.note_excerpt_chars]

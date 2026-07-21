@@ -1,5 +1,8 @@
 """Seed scientific metrics (plan steps 2b.3, 2b.5 / 1d.6).
 
+(Plural `metrics` = the concrete scored functions, registered via `@metric` from the singular
+`evals.metric` module, which holds the interface and registry.)
+
 Deliberately few, per the plan: green-chemistry **E-factor** and **Process Mass
 Intensity** (mass-efficiency of a process), **prediction accuracy** against a held-out
 reference, and **BO regret** (optimization progress — the metric plan step 1d.6 asks

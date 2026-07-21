@@ -71,6 +71,9 @@ class InteractionApprovalWorkflow:
     def __init__(self) -> None:
         """Start with no decision recorded (button not yet clicked)."""
         self._approved: bool | None = None
+        # Set when the hold times out, so the `status` query can report `expired`
+        # after the workflow completes rather than reporting a stale `pending`.
+        self._expired: bool = False
 
     @workflow.run
     async def run(self, candidate: InteractionCandidate) -> ApprovalOutcome:
@@ -82,6 +85,7 @@ class InteractionApprovalWorkflow:
             )
         except TimeoutError:
             # Nobody clicked in time: drop the candidate rather than pin the workflow.
+            self._expired = True
             return ApprovalOutcome(status="expired")
         if not self._approved:
             return ApprovalOutcome(status="rejected")
@@ -101,7 +105,13 @@ class InteractionApprovalWorkflow:
 
     @workflow.query
     def status(self) -> str:
-        """Current state for a polling UI: `pending`, `approved`, or `rejected`."""
+        """Current state for a polling UI: `pending`, `approved`, `rejected`, or `expired`.
+
+        A UI that polls after the hold has timed out sees `expired` (the terminal
+        state), not a stale `pending` — the query mirrors every `ApprovalOutcome.status`.
+        """
+        if self._expired:
+            return "expired"
         if self._approved is None:
             return "pending"
         return "approved" if self._approved else "rejected"

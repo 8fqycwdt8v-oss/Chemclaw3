@@ -12,6 +12,7 @@ from pydantic import BaseModel, Field
 
 from calc.store import CalculationKey, ResultStore, run_cached
 from calc.xtb_engine import engine_version, geometry, gfn2_energy, parse_molecule
+from chemclaw.chem import require_canonical_smiles
 from chemclaw.config import settings
 
 CALC_TYPE = "xtb"
@@ -69,7 +70,7 @@ async def run_cached_xtb(store: ResultStore, job: XtbInput) -> tuple[XtbResult, 
     key = CalculationKey.build(
         calc_type=CALC_TYPE,
         calc_version=_calc_version(),
-        inputs={"smiles": job.smiles, "charge": job.charge},
+        inputs={"smiles": require_canonical_smiles(job.smiles), "charge": job.charge},
         params={"embed_seed": settings.xtb_embed_seed},
     )
     return await run_cached(store, key, lambda: run_xtb(job), XtbResult)

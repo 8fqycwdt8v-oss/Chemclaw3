@@ -15,6 +15,7 @@ evidenced fact from transferred analogy, and drafting new protocols — lives in
 `deep-research` skill, not here. This tool only gathers.
 """
 
+from agents.framing import frame_untrusted
 from chemclaw.config import settings
 from mcp_servers.fpstore import default_reaction_store
 from report.evidence import EvidenceChunk, SourceRetriever
@@ -74,4 +75,11 @@ async def gather_evidence(
         if key not in seen:
             seen.add(key)
             unique.append(chunk)
-    return unique[: settings.gather_evidence_max_chunks]
+    # Frame each chunk's content as retrieved data before it enters the model context, so a
+    # note body carrying adversarial text is read as evidence to cite, not an instruction.
+    return [
+        chunk.model_copy(
+            update={"content": frame_untrusted(chunk.content, note_id=chunk.source_note_id)}
+        )
+        for chunk in unique[: settings.gather_evidence_max_chunks]
+    ]

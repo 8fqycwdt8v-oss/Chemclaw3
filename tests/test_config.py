@@ -47,6 +47,17 @@ def test_skills_dirs_splits_the_path_list() -> None:
     assert trailing.skills_dirs == ["skills"]
 
 
+def test_absolute_knowledge_dir_is_rejected() -> None:
+    """An absolute `knowledge_dir` fails at startup (it would escape the note repo)."""
+    with pytest.raises(ValueError, match="knowledge_dir must be relative"):
+        Settings(_env_file=None, knowledge_dir="/etc/knowledge")  # type: ignore[call-arg]
+
+
+def test_relative_knowledge_dir_is_accepted() -> None:
+    """A relative `knowledge_dir` (the default kind) loads fine."""
+    assert Settings(_env_file=None, knowledge_dir="knowledge").knowledge_dir == "knowledge"  # type: ignore[call-arg]
+
+
 @pytest.fixture(autouse=True)
 def _clear_prefixed_env() -> Iterator[None]:
     """Isolate each test from any CHEMCLAW_* vars present in the ambient shell."""

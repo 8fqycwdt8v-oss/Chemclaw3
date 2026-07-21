@@ -74,10 +74,17 @@ def test_workflow_history_replays_deterministically() -> None:
     asyncio.run(_run())
 
 
-def test_prepare_input_rejects_blank_smiles() -> None:
-    """Whitespace-only SMILES fails fast at the first activity (gate G4)."""
-    with pytest.raises(ValueError, match="must not be blank"):
+def test_prepare_input_rejects_invalid_smiles() -> None:
+    """A blank or unparseable SMILES fails fast at the first activity (gate G4).
+
+    `prepare_input` now canonicalizes via RDKit, so both a whitespace-only value and a
+    structurally invalid one are rejected here (`InvalidSmilesError`, a `ValueError`)
+    rather than flowing through the mock into a stored result.
+    """
+    with pytest.raises(ValueError, match="invalid SMILES"):
         asyncio.run(prepare_input(QMJobInput(molecule_smiles="   ", method="HF", basis_set="X")))
+    with pytest.raises(ValueError, match="invalid SMILES"):
+        asyncio.run(prepare_input(QMJobInput(molecule_smiles="???", method="HF", basis_set="X")))
 
 
 def test_parse_qm_output_rejects_unparseable() -> None:

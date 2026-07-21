@@ -6,14 +6,14 @@ set, so re-running synthesis over the same evidence proposes the *same* note
 jobs derive their ids identically, so the derivation lives once (DRY).
 """
 
-import hashlib
+from chemclaw.ids import stable_hash
 
 
 def stable_id(prefix: str, member_ids: list[str]) -> str:
     """Return `<prefix>-<12 hex chars>` derived from the sorted member ids.
 
     Sorting makes the id independent of input order; the short SHA-256 digest is
-    stable across runs and processes (unlike `hash()`).
+    stable across runs and processes (unlike `hash()`). Uses the shared
+    `chemclaw.ids.stable_hash`, so memory ids share the system-wide hashing scheme.
     """
-    digest = hashlib.sha256("|".join(sorted(member_ids)).encode()).hexdigest()[:12]
-    return f"{prefix}-{digest}"
+    return f"{prefix}-{stable_hash(sorted(member_ids), chars=12)}"

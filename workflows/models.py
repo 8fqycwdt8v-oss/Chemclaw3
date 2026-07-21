@@ -6,9 +6,10 @@ activity boundary (handles and results passed between activities). One module so
 no shape is duplicated between the agent, the workflow, and the activities.
 """
 
-import hashlib
-
 from pydantic import BaseModel, Field
+
+from chemclaw.chem import require_canonical_smiles
+from chemclaw.ids import stable_hash
 
 
 class QMJobInput(BaseModel):
@@ -36,14 +37,25 @@ class QMJobInput(BaseModel):
 def qm_job_key(job: QMJobInput) -> str:
     """Stable identity of a QM calculation: molecule + method + basis only.
 
+    The SMILES is canonicalized first, so two spellings of the same molecule
+    (`"CCO"` / `"OCC"`) share one workflow id and one cache entry rather than
+    running the calculation twice (D-011). Raises `InvalidSmilesError` on an
+    unparseable structure, so a malformed request is rejected at the durable
+    boundary (G4) instead of flowing through the pipeline into a stored result.
+
     Deliberately excludes `requested_by` — the result of a calculation does not
     depend on who asked for it, so identical science shares one workflow id and
     one cache entry across users. Used for the workflow id (dedup), the mock
     scheduler handle, and the result cache key (plan step 1.10). One definition,
-    three callers.
+    three callers. Shares `chemclaw.ids.stable_hash` (SHA-256) with every other
+    identity key in the system.
     """
-    raw = f"{job.molecule_smiles.strip()}|{job.method}|{job.basis_set}"
-    return hashlib.sha1(raw.encode()).hexdigest()[:12]
+    payload = {
+        "smiles": require_canonical_smiles(job.molecule_smiles),
+        "method": job.method,
+        "basis_set": job.basis_set,
+    }
+    return stable_hash(payload)
 
 
 class HpcJobHandle(BaseModel):

@@ -30,6 +30,7 @@ dev = [
     "ruff>=0.6",
     "mypy>=1.11",
     "pytest>=8.3",
+    "pytest-cov>=5.0",
     "pre-commit>=3.8",
     "types-pyyaml>=6.0.12.20260518",
 ]
@@ -78,3 +79,16 @@ ignore_missing_imports = true
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-ra"
+
+# Coverage is opt-in via `make cov` (not the default `make test`, which stays fast and
+# dependency-light). Measures the first-party packages only; the offline-skipped Temporal/
+# Postgres paths are exercised in CI, so a coverage number is meaningful there. No hard
+# fail-under yet — set one once a CI run establishes the real baseline (BACKLOG P2).
+[tool.coverage.run]
+branch = true
+source = ["chemclaw", "agents", "bo", "calc", "eln", "evals", "kg", "mcp_servers", "memory", "report", "workflows", "workers", "scripts"]
+omit = ["*/__init__.py"]
+
+[tool.coverage.report]
+show_missing = true
+skip_covered = true

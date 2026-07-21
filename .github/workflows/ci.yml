@@ -54,3 +54,6 @@ jobs:
 
       - name: Validate ELN exports
         run: make eln-validate
+
+      - name: Validate skills
+        run: make skill-validate

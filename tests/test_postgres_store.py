@@ -8,19 +8,21 @@ version.
 
 import asyncio
 
-from calc.migrate import _statements
+from calc.migrate import migrate
 from calc.postgres_store import PostgresStore
 from calc.store import CalculationKey, StoredResult
 from tests.pg import migrated_db_or_skip
 
 
-def test_statements_split_ignores_comment_semicolons() -> None:
-    """Multi-statement SQL splits into individual commands, even with `;` in comments."""
-    sql = "-- a; comment with semicolon\nCREATE TABLE t (id int);\nCREATE INDEX i ON t (id);\n"
-    statements = _statements(sql)
-    assert len(statements) == 2
-    assert statements[0].startswith("CREATE TABLE")
-    assert statements[1].startswith("CREATE INDEX")
+def test_migrate_is_idempotent_and_tracked() -> None:
+    """A first migrate applies files; a second finds them tracked and applies none."""
+
+    async def _run() -> None:
+        await migrated_db_or_skip()  # first pass applies (or reuses an already-migrated db)
+        second = await migrate()  # everything now recorded in schema_migrations
+        assert second == []  # ledger short-circuits re-application
+
+    asyncio.run(_run())
 
 
 async def _store_or_skip() -> PostgresStore:

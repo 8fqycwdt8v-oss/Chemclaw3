@@ -18,8 +18,9 @@ from pydantic import BaseModel, Field, ValidationError, field_validator
 
 from chemclaw.errors import ChemclawError
 
-# [[target]] wikilinks in the body. Targets are note ids; `[[ ... ]]` only.
-_WIKILINK = re.compile(r"\[\[([^\[\]]+)\]\]")
+# [[target]] wikilinks in the body. Targets are note ids; `[[ ... ]]` only. Public because
+# the report layer strips the same markup from evidence excerpts — one pattern, no drift.
+WIKILINK = re.compile(r"\[\[([^\[\]]+)\]\]")
 
 # `id` and `type` become file-path segments (`knowledge/<type>/<id>.md`) and a git
 # branch (`note/<id>`) in the PR-gate, and ELN entry ids flow in from external JSON.
@@ -80,7 +81,7 @@ class Note(BaseModel):
         same target twice yields one edge.
         """
         ordered: dict[str, None] = {}
-        for match in _WIKILINK.findall(self.body):
+        for match in WIKILINK.findall(self.body):
             target = match.strip()
             if target:
                 ordered.setdefault(target, None)

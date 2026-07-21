@@ -2,9 +2,10 @@
 
 Proves the GxP audit trail: a successful tool call is logged at INFO with its name and
 arguments, a failing one is logged at WARNING and the exception propagates unchanged, and
-oversized arguments are truncated to the configured budget. The middleware only touches
-`context.function.name` and `context.arguments`, so a light stand-in context is enough — no
-live agent run or model call is needed.
+oversized arguments are truncated to the configured budget. It also proves the durable seam:
+the per-conversation factory stamps a correlation id and actor and hands each event to an
+injected sink, and a sink failure never breaks the tool call. A light stand-in context is
+enough — no live agent run or model call is needed.
 """
 
 import asyncio
@@ -16,15 +17,19 @@ from typing import cast
 import pytest
 from agent_framework import FunctionInvocationContext
 
-from agents.audit import audit_tool_calls
+from agents.audit import (
+    AuditEvent,
+    audit_tool_calls,
+    make_audit_middleware,
+)
 from chemclaw.config import settings
 
 
-def _ctx(name: str, arguments: object) -> FunctionInvocationContext:
+def _ctx(name: str, arguments: object, result: object = None) -> FunctionInvocationContext:
     """A minimal stand-in exposing only the fields the middleware reads."""
     return cast(
         FunctionInvocationContext,
-        SimpleNamespace(function=SimpleNamespace(name=name), arguments=arguments),
+        SimpleNamespace(function=SimpleNamespace(name=name), arguments=arguments, result=result),
     )
 
 
@@ -73,3 +78,69 @@ def test_audit_truncates_oversized_arguments(
         _drive(_ctx("gather_evidence", {"q": "x" * 500}), _ok)
     assert "…" in caplog.text  # truncation marker present
     assert "x" * 100 not in caplog.text  # the full payload never reaches the log
+
+
+class _RecordingSink:
+    """An `AuditSink` that keeps every event, to assert what the middleware emits."""
+
+    def __init__(self) -> None:
+        self.events: list[AuditEvent] = []
+
+    async def record(self, event: AuditEvent) -> None:
+        self.events.append(event)
+
+
+class _BrokenSink:
+    """An `AuditSink` that always fails, to prove a sink error never breaks the tool call."""
+
+    async def record(self, event: AuditEvent) -> None:
+        raise RuntimeError("audit store down")
+
+
+def _drive_mw(
+    mw: object, ctx: FunctionInvocationContext, call_next: Callable[[], Awaitable[None]]
+) -> None:
+    """Run an arbitrary middleware over a stand-in context to completion."""
+
+    async def _run() -> None:
+        await mw(ctx, call_next)  # type: ignore[operator]
+
+    asyncio.run(_run())
+
+
+def test_factory_stamps_correlation_id_actor_and_records_outcome() -> None:
+    """The per-conversation middleware records cid, actor, outcome, and the result effect."""
+    sink = _RecordingSink()
+    mw = make_audit_middleware(correlation_id="conv-1", actor="alice@corp", sink=sink)
+
+    async def _returns_ref() -> None:
+        return None
+
+    ctx = _ctx("propose_knowledge_note", {"type": "insight"}, result="pr://note/insight-1")
+    _drive_mw(mw, ctx, _returns_ref)
+
+    assert len(sink.events) == 1
+    event = sink.events[0]
+    assert event.correlation_id == "conv-1"
+    assert event.actor == "alice@corp"
+    assert event.tool == "propose_knowledge_note"
+    assert event.outcome == "ok"
+    assert "pr://note/insight-1" in event.detail  # the effect is captured
+
+
+def test_factory_records_failure_and_reraises() -> None:
+    """A failing tool records an `error` event and still propagates the exception."""
+    sink = _RecordingSink()
+    mw = make_audit_middleware(correlation_id="conv-2", actor="bob", sink=sink)
+    with pytest.raises(ValueError, match="boom"):
+        _drive_mw(mw, _ctx("compute_xtb_energy", {}), _boom)
+    assert sink.events[0].outcome == "error"
+    assert "boom" in sink.events[0].detail
+
+
+def test_sink_failure_does_not_break_the_tool_call(caplog: pytest.LogCaptureFixture) -> None:
+    """A broken audit sink is logged and swallowed — the tool call still succeeds."""
+    mw = make_audit_middleware(correlation_id="c", actor="a", sink=_BrokenSink())
+    with caplog.at_level(logging.WARNING):
+        _drive_mw(mw, _ctx("predict_pka", {"smiles": "CCO"}), _ok)  # must not raise
+    assert "audit sink failed" in caplog.text

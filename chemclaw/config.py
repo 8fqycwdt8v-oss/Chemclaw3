@@ -88,6 +88,11 @@ class Settings(BaseSettings):
     # Fail fast when the database is unreachable instead of hanging until the
     # enclosing activity's start-to-close timeout expires (libpq connect_timeout).
     pg_connect_timeout_seconds: int = Field(default=10, gt=0)
+    # Per-statement wall-clock bound for the store connections (libpq
+    # statement_timeout). A hung query is cancelled after this instead of consuming
+    # the whole enclosing activity's start-to-close budget. 0 disables it; migrations
+    # deliberately connect without a statement timeout (an index build may be slow).
+    pg_statement_timeout_seconds: float = Field(default=30.0, ge=0)
 
     # QM job timeouts and mock-HPC timing (plan steps 1.2–1.4). Times are in
     # seconds. The "mock_*" values only shape the simulated HPC job's duration
@@ -220,7 +225,11 @@ class Settings(BaseSettings):
     # credited (or blamed) for changes above measurement noise. One global scalar —
     # a comparison does not know which metric produced its scores, so set it to the
     # noisiest metric's floor (per-metric floors need a per-metric parameter first).
-    eval_ab_epsilon: float = 0.0
+    # The default is a small floating-point floor so runs differing only by rounding
+    # register as "no effect" (a 0.0 default made *every* non-exact-tie helped/hurt,
+    # defeating the band); raise it to the actual measurement noise of the metric a
+    # given case-set exercises.
+    eval_ab_epsilon: float = Field(default=1e-6, ge=0.0)
 
     # Fingerprint search (plan Phase 3, mcp-molfp). ECFP4 = Morgan radius 2, 2048 bits;
     # both are config so the fingerprint definition (and thus the stored column width)
@@ -252,6 +261,15 @@ class Settings(BaseSettings):
     # a code change. (The memory jobs read the union of all registered adapters instead.)
     eln_sync_adapter: str = "json"
 
+    # Temporal Schedules that drive the periodic background jobs (`scripts/schedules.py`,
+    # applied by `make schedules-apply`). Intervals in minutes: how often each workflow fires
+    # on the background queue. Schedules live in Temporal (durability there, not host cron).
+    # The ELN sync is self-cursoring (loads/stores its high-water mark in `sync_cursors`), so
+    # its Schedule passes no argument; the memory-synthesis jobs re-scan the whole corpus, so
+    # they run less often. Overridable so a deployment tunes cadence without code change.
+    eln_sync_schedule_minutes: float = Field(default=60.0, gt=0)
+    memory_synthesis_schedule_minutes: float = Field(default=1440.0, gt=0)
+
     # Memory layers (plan Phase 5). The semantic layer distils a playbook only from reactions
     # whose DRFP similarity clears this floor and that recur across >=2 projects — higher than
     # the search floor, since a playbook claims "same transformation", not just "related".
@@ -267,8 +285,10 @@ class Settings(BaseSettings):
     # development-report workflow — one section is one activity, so a long report resumes
     # section by section after a worker restart.
     report_section_timeout_seconds: float = Field(default=300.0, gt=0)
-    # How much of a source note's body a report carries as an evidence excerpt.
-    report_excerpt_chars: int = Field(default=240, gt=0)
+    # How much of a source note's body an excerpt carries — shared by the report harness's
+    # evidence excerpts and the memory layer's procedure excerpts (one note-excerpt budget,
+    # neutral name since both consume it), so the two cannot drift.
+    note_excerpt_chars: int = Field(default=240, gt=0)
     # Cap on how many evidence chunks `gather_evidence` hands the agent in one sweep, so a
     # broad question over a large corpus fills only as much context as it needs (the agent
     # narrows the query or drills in with expand_note when the sweep is truncated).
@@ -283,6 +303,22 @@ class Settings(BaseSettings):
         team-skills` the same way they set `PATH`, no JSON quoting.
         """
         return [d for d in self.skills_dir.split(os.pathsep) if d]
+
+    @model_validator(mode="after")
+    def _knowledge_dir_is_relative(self) -> "Settings":
+        """`knowledge_dir` must be relative to the note repo, never an absolute path.
+
+        The PR-gate builds a note path as `Path(note_repo_dir) / knowledge_dir / …`. An
+        absolute `knowledge_dir` would make `Path.__truediv__` discard `note_repo_dir`,
+        so the write would land outside the repo — the containment check then fails the
+        submit, confusingly. Reject it at startup where the message is clear instead.
+        """
+        if os.path.isabs(self.knowledge_dir):
+            raise ValueError(
+                f"knowledge_dir must be relative to note_repo_dir, "
+                f"got absolute {self.knowledge_dir!r}"
+            )
+        return self
 
     @model_validator(mode="after")
     def _poll_faster_than_heartbeat(self) -> "Settings":

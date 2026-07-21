@@ -23,7 +23,12 @@ from workflows.bo_activities import (
 )
 from workflows.bo_campaign import BoCampaignWorkflow
 from workflows.bo_knowledge import write_campaign_node
-from workflows.eln_sync import ElnSyncWorkflow, sync_eln_entries
+from workflows.eln_sync import (
+    ElnSyncWorkflow,
+    load_sync_cursor,
+    store_sync_cursor,
+    sync_eln_entries,
+)
 from workflows.interaction_approval import (
     InteractionApprovalWorkflow,
     propose_confirmed_answer_activity,
@@ -63,6 +68,8 @@ BACKGROUND_ACTIVITIES: Sequence[Callable[..., Any]] = [
     write_knowledge_node,
     write_campaign_node,
     sync_eln_entries,
+    load_sync_cursor,
+    store_sync_cursor,
     synthesize_campaigns_activity,
     distill_playbooks_activity,
     synthesize_optimization_campaigns_activity,

@@ -18,7 +18,12 @@ from chemclaw.config import settings
 from mcp_servers.fpstore import InMemoryFingerprintStore
 from tests.conftest import FakeSubmitter
 from tests.temporal_env import pydantic_client, start_env_or_skip
-from workflows.eln_sync import ElnSyncWorkflow, sync_eln_entries
+from workflows.eln_sync import (
+    ElnSyncWorkflow,
+    load_sync_cursor,
+    store_sync_cursor,
+    sync_eln_entries,
+)
 
 
 def test_eln_sync_workflow_ingests_seed_corpus(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -60,4 +65,8 @@ def test_background_worker_registers_eln_sync() -> None:
 
     assert ElnSyncWorkflow in BACKGROUND_WORKFLOWS
     assert sync_eln_entries in BACKGROUND_ACTIVITIES
+    # The self-cursoring activities must be registered too, or a scheduled (no-`since`) run
+    # would fail to load/store its high-water mark.
+    assert load_sync_cursor in BACKGROUND_ACTIVITIES
+    assert store_sync_cursor in BACKGROUND_ACTIVITIES
     assert settings.background_task_queue  # the queue the sync runs on

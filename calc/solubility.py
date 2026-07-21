@@ -12,6 +12,7 @@ from rdkit import Chem
 from rdkit.Chem import Crippen, Descriptors, rdMolDescriptors
 
 from calc.store import CalculationKey, ResultStore, run_cached
+from chemclaw.chem import require_canonical_smiles
 from chemclaw.config import settings
 
 CALC_TYPE = "solubility"
@@ -95,6 +96,6 @@ async def run_cached_solubility(
     key = CalculationKey.build(
         calc_type=CALC_TYPE,
         calc_version=f"{_MODEL.name}@{_MODEL.version}/u-{settings.solubility_rmse_log}",
-        inputs={"smiles": job.smiles},
+        inputs={"smiles": require_canonical_smiles(job.smiles)},
     )
     return await run_cached(store, key, lambda: predict_solubility(job), SolubilityResult)

@@ -11,12 +11,12 @@ declares each section's memory layer, so evidenced and analogical content stay s
 separated (5b.5).
 """
 
-import hashlib
 import re
 from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
+from chemclaw.ids import stable_hash
 from kg.note import Note
 from report.evidence import EvidenceChunk, SourceRetriever
 
@@ -76,7 +76,7 @@ def _report_id(title: str) -> str:
     exact title is appended so distinct titles that slug alike (case/punctuation) stay unique.
     """
     slug = re.sub(r"[^a-z0-9]+", "-", title.lower()).strip("-")
-    digest = hashlib.sha256(title.encode()).hexdigest()[:8]
+    digest = stable_hash(title, chars=8)
     return f"report-{slug}-{digest}" if slug else f"report-{digest}"
 
 

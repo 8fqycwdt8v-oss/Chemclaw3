@@ -66,17 +66,21 @@ def test_yes_proposes_reject_and_timeout_do_not(monkeypatch: pytest.MonkeyPatch)
                 no: ApprovalOutcome = await rejected.result()
 
                 # No click at all → the server skips the whole hold; it expires.
-                expired: ApprovalOutcome = await client.execute_workflow(
+                expired_handle = await client.start_workflow(
                     InteractionApprovalWorkflow.run,
                     _CANDIDATE,
                     id="approval-timeout",
                     task_queue="test-approval",
                 )
+                expired: ApprovalOutcome = await expired_handle.result()
+                # A UI polling after the hold times out must see `expired`, not `pending`.
+                expired_status = await expired_handle.query(InteractionApprovalWorkflow.status)
 
         assert yes.status == "approved"
         assert yes.reference == "pr://note/interaction-q-42"
         assert no.status == "rejected" and no.reference == ""
         assert expired.status == "expired" and expired.reference == ""
+        assert expired_status == "expired"
         # Only the Yes reached the PR-gate, citing its evidence.
         assert len(fake.submissions) == 1
         assert "reaction-eln-2026-002" in fake.submissions[0].content

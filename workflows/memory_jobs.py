@@ -6,12 +6,14 @@ the PR-gate. Temporal Schedules drive them periodically, like the ELN sync. No n
 infrastructure — only new note types produced by reusing existing pieces (Phase 5, G1).
 """
 
+import logging
 from datetime import UTC, datetime, timedelta
 
 from temporalio import activity, workflow
 
 with workflow.unsafe.imports_passed_through():
     from chemclaw.config import settings
+    from chemclaw.errors import ChemclawError
     from eln.ord import OrdReaction
     from eln.registry import all_eln_adapters
     from kg.git_submitter import default_submitter
@@ -22,6 +24,8 @@ with workflow.unsafe.imports_passed_through():
     )
 
 from workflows.publish import BAD_DATA_RETRY
+
+logger = logging.getLogger(__name__)
 
 
 async def _all_reactions() -> list[OrdReaction]:
@@ -38,8 +42,13 @@ async def _all_reactions() -> list[OrdReaction]:
         for raw in await adapter.fetch_new_entries(since):
             try:
                 reactions.append(adapter.map_to_ord(raw))
-            except ValueError:
-                continue  # a malformed entry is the sync's problem to report, not this job's
+            except ChemclawError as exc:
+                # A malformed entry is the sync's problem to report, not this job's — skip it
+                # and move on. Catch only ChemclawError (the bad-data contract), so an
+                # unexpected error surfaces instead of being silently dropped; log the skip
+                # so a corpus that quietly loses reactions is diagnosable.
+                logger.info("memory job skipped an unmappable ELN entry: %s", exc)
+                continue
     return reactions
 
 

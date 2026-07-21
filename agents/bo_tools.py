@@ -35,7 +35,7 @@ async def suggest_next_experiment(
     first). These are *proposals a human runs* — surface them, do not treat them as results.
 
     Build `problem` and `observations` from evidence you have gathered (e.g. past runs of the
-    transformation via find_similar_reactions / an optimization-campaign note), so the
+    transformation via similar_reactions / an optimization-campaign note), so the
     suggestion rests on real history. Mark each observation's `provenance` "measured" for lab
     data or "predicted" if it came from a model, keeping the campaign honest.
 

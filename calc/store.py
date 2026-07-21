@@ -9,29 +9,19 @@ interface with swappable backends (in-memory for tests, Postgres for real), and
 """
 
 import asyncio
-import hashlib
-import json
 import logging
 from collections.abc import Awaitable, Callable
 from typing import Any, Protocol, TypeVar, runtime_checkable
 
 from pydantic import BaseModel
 
+from chemclaw.ids import stable_hash
+
 logger = logging.getLogger(__name__)
 
 # A result payload is any JSON-serializable mapping. Calculators own their typed
 # models; the store persists the plain dict so it stays calculator-agnostic.
 ResultPayload = dict[str, Any]
-
-
-def _hash(obj: Any) -> str:
-    """Stable short hash of any JSON-serializable value (canonical form).
-
-    Sorted keys + tight separators make the hash independent of dict ordering and
-    whitespace, so semantically identical inputs collapse to the same key.
-    """
-    canonical = json.dumps(obj, sort_keys=True, separators=(",", ":"), default=str)
-    return hashlib.sha256(canonical.encode()).hexdigest()[:16]
 
 
 class CalculationKey(BaseModel):
@@ -59,8 +49,8 @@ class CalculationKey(BaseModel):
         return cls(
             calc_type=calc_type,
             calc_version=calc_version,
-            input_hash=_hash(inputs),
-            params_hash=_hash(params),
+            input_hash=stable_hash(inputs),
+            params_hash=stable_hash(params),
         )
 
     def as_str(self) -> str:

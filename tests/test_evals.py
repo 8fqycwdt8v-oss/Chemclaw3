@@ -93,6 +93,7 @@ def test_harness_runs_over_versioned_case_set_and_gates() -> None:
     """The harness scores the real case-set reproducibly and flags the failing case."""
     cases = load_eval_cases(settings.eval_case_dir)
     assert {c.id for c in cases} == {
+        "bo-regret-reizman",
         "green-esterification",
         "pharma-solvent-heavy",
         "solubility-benzene",
@@ -251,3 +252,17 @@ def test_tool_utility_respects_direction() -> None:
     summary = compare_tool_utility(tasks, higher_is_better=False)
     assert summary.helped == ["t"]
     assert summary.utilities[0].delta == pytest.approx(3.0)
+
+
+def test_sub_epsilon_delta_is_no_effect(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A delta within +/- epsilon lands in "no effect", not helped/hurt.
+
+    Guards the noise-floor band: with the old 0.0 default a delta this small was
+    wrongly credited as "helped"; a positive epsilon must absorb it.
+    """
+    monkeypatch.setattr(settings, "eval_ab_epsilon", 0.01)
+    tasks = [TaskScores(task_id="t", baseline=0.700, augmented=0.705)]  # delta 0.005 < 0.01
+    summary = compare_tool_utility(tasks, higher_is_better=True)
+    assert summary.no_effect == ["t"]
+    assert summary.helped == []
+    assert summary.hurt == []

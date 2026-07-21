@@ -8,21 +8,13 @@ runs it and submits, on the `background-jobs` queue. The PR-gate itself (`propos
 `default_submitter`) is reused, not duplicated — this module only adds the BO→note mapping.
 """
 
-import hashlib
-import json
-
 from temporalio import activity
 
 from bo.problem import CampaignResult
+from chemclaw.ids import stable_hash
 from kg.git_submitter import default_submitter
 from kg.note import Note
 from kg.pr_gate import propose_note
-
-
-def _params_hash(params: dict[str, object]) -> str:
-    """Short, order-independent hash of the recommended parameter set (stable note id)."""
-    canonical = json.dumps(params, sort_keys=True, separators=(",", ":"), default=str)
-    return hashlib.sha256(canonical.encode()).hexdigest()[:12]
 
 
 def note_from_campaign_result(objective_name: str, result: CampaignResult) -> Note:
@@ -44,7 +36,7 @@ def note_from_campaign_result(objective_name: str, result: CampaignResult) -> No
         f"- objective value: {best.value:.6g} ({best.provenance})\n"
     )
     return Note(
-        id=f"bo-{objective_name}-{_params_hash(dict(best.params))}",
+        id=f"bo-{objective_name}-{stable_hash(dict(best.params), chars=12)}",
         type="bo-candidate",
         created_by="agent",
         source=f"bo:{objective_name}",

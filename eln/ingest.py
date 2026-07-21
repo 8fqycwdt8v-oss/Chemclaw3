@@ -9,8 +9,8 @@ signs off. Stores and submitter are injected, so the whole flow is testable in-m
 no database or git. Indexing is idempotent (id-keyed upserts), so re-ingesting is safe.
 """
 
+from chemclaw.chem import canonical_smiles
 from chemclaw.errors import ChemclawError
-from eln.chem import canonical_smiles
 from eln.note import note_from_ord_reaction
 from eln.ord import OrdReaction
 from eln.validate import validate_ord

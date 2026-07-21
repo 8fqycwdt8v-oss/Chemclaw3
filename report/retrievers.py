@@ -8,26 +8,25 @@ emit carries the id of the note it came from, so the harness can cite it (5b.2).
 """
 
 import asyncio
-import re
 from pathlib import Path
 from typing import Any
 
 from chemclaw.config import settings
 from kg.graph import load_notes
+from kg.note import WIKILINK
 from mcp_servers.fpstore import FingerprintError, FingerprintStore
 from mcp_servers.rxnfp.search import find_similar_reactions
 from report.evidence import EvidenceChunk
 
-# `[[target]]` wikilinks (same pattern as `kg.note`, which keeps its private). An excerpt
-# must not carry a source note's links verbatim into the report body — that would add
-# unintended (possibly dangling) graph edges — so the brackets are stripped, keeping the
-# link target as plain text.
-_WIKILINK = re.compile(r"\[\[([^\[\]]+)\]\]")
-
 
 def _excerpt(body: str) -> str:
-    """A report-sized excerpt of a note body, with wikilink markup stripped."""
-    return _WIKILINK.sub(r"\1", body.strip())[: settings.report_excerpt_chars]
+    """A report-sized excerpt of a note body, with wikilink markup stripped.
+
+    An excerpt must not carry a source note's `[[links]]` verbatim into the report body —
+    that would add unintended (possibly dangling) graph edges — so the shared `kg.note.WIKILINK`
+    brackets are stripped, keeping the link target as plain text.
+    """
+    return WIKILINK.sub(r"\1", body.strip())[: settings.note_excerpt_chars]
 
 
 class GraphRetriever:

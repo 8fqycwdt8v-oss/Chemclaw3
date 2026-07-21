@@ -55,18 +55,21 @@ Prioritized open action items. Top = next. Keep in sync with `docs/implementatio
       adding a capability is a config entry. `allowed_tools` keeps write/index tools off the
       agent. Transport verified in-sandbox (`test_mcp_transport.py`). `docs/runbook.md` (iv)
       rewritten for the MCP procedure.
-- [ ] Optional `make skill-validate` (the loader validates at startup today). Migrate the
-      remaining in-process agent tools (calculators/graph/BO) to MCP only if a real cross-process
-      or cross-language need appears — for local RDKit/BoFire functions in-process stays simpler
-      (KISS); not planned.
+- [x] `make skill-validate` (D-037): `scripts/validate_skills.py` checks every SKILL.md's
+      frontmatter (name/description present, name matches directory) and gates in CI, like
+      kg-validate. Migrating the in-process agent tools (calculators/graph/BO) to MCP stays
+      unplanned — local RDKit/BoFire functions are simpler in-process (KISS).
 
 ### Open — P2 polish
 - [x] `docs/runbook.md`: the four admin tasks (add skill / add-repoint DB / add-or-switch ELN
       source / add capability), the log switch, the Temporal UI at :8080, DB-unreachable message.
-- [ ] Optional startup preflight for `ANTHROPIC_API_KEY` presence (fail clearly at boot, not on
-      the first agent turn).
-- [ ] Migration-status visibility (no applied-migrations record today; `CREATE ... IF NOT EXISTS`
-      is idempotent but leaves no trail of what ran).
+- [x] Startup preflight for `ANTHROPIC_API_KEY` presence (D-037): `_default_chat_client` fails
+      with a clear message at agent build, not on the first turn.
+- [x] Migration-status visibility (D-034): `schema_migrations` ledger records each applied file
+      by name + checksum; an edited applied file is flagged as drift.
+- [ ] Coverage threshold in CI (D-037): `pytest-cov` + `make cov` + `[tool.coverage]` config are
+      in place (no hard `--cov-fail-under` yet). Set a `--cov-fail-under` once a CI run
+      establishes the real baseline, then ratchet.
 
 ### MAF out-of-the-box features (analysis done)
 - [x] **Function middleware** (`@function_middleware`) — one DRY GxP tool-audit trail

@@ -32,6 +32,7 @@ _BAD_DATA_TYPES = [
     "ValueError",
     "ValidationError",
     "ChemclawError",
+    "InvalidSmilesError",
     "FingerprintError",
     "ElnMappingError",
     "ElnFormatError",

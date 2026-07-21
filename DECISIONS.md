@@ -509,3 +509,163 @@ start-workflow (surface candidate) → `decide` signal (click) → `ApprovalOutc
 the in-sandbox signal/query state machine + worker registration, and a server-backed test
 (CI; skips offline) proving Yes proposes exactly one PR while No and an unanswered (time-skipped)
 hold propose none.
+
+## D-033 — One canonical identity scheme: SHA-256 hashing + canonical SMILES in every key
+
+**Context.** In-depth review found the "compute once, never twice" guarantee (D-011) had a hole:
+the calculation cache keys (`calc.xtb`/`pka`/`solubility`) and the QM workflow-dedup id
+(`workflows.models.qm_job_key`) were built from the **raw** SMILES string, so `"CCO"` and `"OCC"`
+— the same molecule — produced different keys and recomputed. Separately, four near-identical
+canonical-JSON hash helpers had drifted: three used SHA-256 (at 12 or 16 hex chars) and
+`qm_job_key` used **SHA-1** (48 bits — the weakest identity in the system, yet load-bearing as
+workflow id, scheduler handle, and cache key at once).
+
+**Decision.** Two shared modules now own identity: `chemclaw.ids.stable_hash(payload, *, chars)`
+(the one canonical-JSON + SHA-256 helper, all four call sites ported) and `chemclaw.chem`
+(`canonical_smiles` moved here from `eln.chem` since the compute layer needs it too, plus a strict
+`require_canonical_smiles` that raises `InvalidSmilesError`). Every calculator cache key and
+`qm_job_key` canonicalizes the SMILES before hashing; `qm_job_key` moved to SHA-256 (16 hex / 64
+bits). `prepare_input` (the QM G4 boundary) now canonicalizes, so an invalid molecule is rejected
+at the durable boundary instead of flowing through the mock into a stored result. `InvalidSmilesError`
+was added to `publish._BAD_DATA_TYPES` (Temporal matches non-retryable types by exact class name).
+
+**Key-material change.** `qm_job_key` output changed (algorithm + canonicalization), so QM workflow
+ids and QM cache entries for pre-existing non-canonical inputs are a one-time miss — acceptable while
+the cache is young. The `calc` cache keys kept SHA-256[:16], so only genuinely non-canonical SMILES
+re-key; canonical inputs still hit existing rows. `eln.chem` was deleted (its two callers now import
+`chemclaw.chem`).
+
+**Result.** `tests/test_ids.py` proves equivalent SMILES share one key across all three calculators
+and `qm_job_key`, and that invalid SMILES are rejected. Lint/type/test green.
+
+## D-034 — Review hardening: migration ledger, durable audit trail, injection framing, stmt timeout
+
+**Context.** The in-depth review surfaced four hardening gaps in otherwise-green code.
+
+**Migration ledger (`calc.migrate`).** The old runner split files on `;` (fragile against a
+`DO $$ … $$` block or a semicolon in a string) and re-ran every statement each time, leaving no
+record of what applied. Now each file is sent whole (psycopg simple-query protocol) and tracked
+in `schema_migrations` (`infra/sql/000_…`) by filename + SHA-256; an already-applied file that
+changes is rejected as drift (`MigrationError`) rather than silently re-run. The runner reuses
+`chemclaw.db.connect` (redacted-DSN errors) instead of re-implementing the connect.
+
+**Durable GxP audit trail (`agents.audit` + `agents.audit_store`).** The middleware logged to
+stdlib only, with no identity, no correlation, no outcome, no durable store. It is now built
+per-conversation (`make_audit_middleware`) stamping a `correlation_id` and an `actor` (the Phase-6
+identity seam — `"unknown"` until Entra auth), capturing each call's outcome and a short effect
+summary (e.g. the PR ref a `propose_*` returned), and emitting to an optional `AuditSink`.
+`PostgresAuditSink` writes the append-only `audit_events` table (`infra/sql/006_…`); the default
+stays log-only (`NullAuditSink`), so no DB coupling is forced on lightweight runs. A sink failure
+is logged and swallowed — the audit store can never break a tool call. Args may hold user PII;
+the char budget bounds what is stored (noted in the field docs). A tamper-evident hash chain is
+left for Phase 6.
+
+**Indirect-prompt-injection framing (`agents.framing`).** `expand_note`/`gather_evidence` fed note
+bodies verbatim into context; ingested (non-agent-authored) notes bypass the PR-gate, so an
+adversarial body was a live vector. Retrieved content is now wrapped in a `<retrieved-note id=…>`
+envelope, paired with an agent instruction that envelope contents are evidence to cite, never
+commands. Cheap, centralized, marks the trust boundary; full content-provenance stays Phase 6.
+
+**Per-statement DB timeout.** `chemclaw.db.connect` gained an optional `statement_timeout_seconds`
+(libpq `statement_timeout`), applied by both stores from `settings.pg_statement_timeout_seconds`,
+so a hung query is cancelled rather than burning the whole enclosing activity budget; migrations
+opt out (an index build may run long).
+
+**Also:** an absolute `knowledge_dir` is rejected at startup (it would escape the note repo via
+`Path` join); the memory-job corpus reader catches only `ChemclawError` (not bare `ValueError`)
+and logs each skipped entry. The fingerprint bit-width "dual source of truth" was left as-is: a
+width change already fails loudly (SQL `bit(<configured>)` insert vs the column, plus the
+definition string), so a runtime assertion would be redundant defensive code.
+
+**Result.** New/updated tests: `test_ids`, `test_config` (absolute `knowledge_dir`), `test_evals`
+(A/B epsilon band, `bo_regret` case), `test_audit` (factory, sink, outcome, sink-failure),
+`test_framing`, `test_postgres_store` (idempotent tracked migrate). `make lint type` green;
+`make test` green (server/pg-backed cases skip offline, run in CI).
+
+## D-035 — Missing runnable seams: schedules, ELN cursor persistence, approval + skill-role seams
+
+**Context.** The review found subsystems that were built and worker-registered but could not
+actually run as designed, plus two Phase-6 seams worth landing early.
+
+**Temporal Schedules (`scripts/schedules.py`, `make schedules-apply`).** The ELN sync and the
+three memory-synthesis workflows documented themselves as Schedule-driven, but no
+`create_schedule` call existed anywhere — they were unrunnable on a cadence. `planned_schedules()`
+is the pure, testable list of what is maintained; `apply_schedules` creates each Schedule or
+updates it in place (idempotent). Intervals are config (`*_schedule_minutes`).
+
+**ELN sync cursor persistence (`eln.cursor`, `sync_cursors` table).** `ElnSyncWorkflow` required a
+mandatory `since` with no caller and nothing fed `next_cursor` back. It is now self-cursoring:
+started with no `since` (the scheduled case) it loads its high-water mark from `sync_cursors`,
+syncs, and stores the advanced value via two new activities (`load_sync_cursor`/`store_sync_cursor`,
+registered on the background worker). An explicit `since` (manual backfill) runs without touching
+the stored cursor. Durability stays in Temporal + Postgres, per the layer rules.
+
+**Approval starter/decider seam (`agents.interaction_tools`).** `InteractionApprovalWorkflow`
+(D-032) had no in-repo starter. `start_approval`/`decide_approval`/`approval_status` are the one
+working reference caller a chat UI hooks onto — mirroring the `qm_tools` client pattern, stable
+`approval-<interaction_id>` id (idempotent surface), clear errors on an unknown hold.
+
+**Phase-6 code-side seams.** `build_agent(actor=…)` threads an actor through the audit trail
+(D-034), and `build_agent(allowed_skills=…)` + `agents.skill_access.RoleFilteredSkillsSource`
+scope which skills the agent advertises — both default to today's behavior (`"unknown"` /
+all-skills-visible), so Phase 6 is a value change at the call site, not new surgery. MCP auth,
+Temporal mTLS, namespaces, and the HPC bridge remain true Phase-6 work (need live infra).
+
+**Result.** New tests: `test_schedules` (plan coverage + config intervals), `test_cursor`
+(pg-backed round-trip), `test_interaction_tools` (server-backed start/signal/query), plus
+worker-registration assertions and `test_skill_access` (filter/pass-through/fail-closed).
+`make lint type` green; `make test` green offline (server/pg cases run in CI).
+
+## D-036 — Review cleanup: dedupe, name-drift guard, neutral config names, doc refresh
+
+**Context.** The review's lower-severity cleanups, batched.
+
+- **Tool-name drift.** `bo_tools`' docstring told the model to call `find_similar_reactions`,
+  but the agent's actual MCP tool is `similar_reactions`. Fixed, and `test_agent` now asserts
+  every tool the instructions name is in the agent's advertised surface (registered function
+  tools + allowed MCP tools) — a regression guard against this class of bug.
+- **Duplicated `_WIKILINK`.** The identical regex in `kg.note` and `report.retrievers` is now
+  one public `kg.note.WIKILINK`, imported by the report layer.
+- **Scattered hashing.** `report.harness._report_id` used a bare `hashlib.sha256`; it now uses
+  the shared `chemclaw.ids.stable_hash` (report ids stay ref-safe and unique — the test checks
+  properties, not the exact digest).
+- **Neutral config name.** `report_excerpt_chars` → `note_excerpt_chars`: both the report
+  harness and the memory layer excerpt note bodies with it, so the name no longer implies the
+  budget is report-only (one knob, cannot drift).
+- **`search_tools`** is documented as the in-process example/test seam that is NOT registered on
+  the live agent (which uses the MCP capability servers); the two must stay in sync.
+- **Docs refresh.** `agents/__init__.py` and `agents/README.md` no longer claim the tools are all
+  MAF↔Temporal adapters or that the package is "empty until Phase 1"; the `evals.metric` (singular
+  interface/registry) vs `evals.metrics` (plural functions) split is called out in both headers.
+- **ESOL coefficients stay inline** (`calc.solubility`): the Delaney (2004) model is a fixed,
+  published closed form, so its five coefficients are a deliberate, documented exception to
+  "config, never magic numbers" (unlike the pKa calibration, which is tunable and lives in
+  config). Recorded here so it stops resurfacing in review.
+- The ADR convention (`DECISIONS.md` = terse running log, `docs/adr/` = long-form when a rationale
+  outgrows a paragraph) was already documented in `docs/adr/README.md` and is left as-is.
+
+## D-037 — Tooling gaps: coverage, unified mypy scope, worker tests, preflight, skill-validate
+
+**Context.** The review found tooling gaps that let regressions slip past the local gate.
+
+- **Coverage.** No coverage measurement existed. Added `pytest-cov` (dev dep), a `make cov`
+  target (kept out of the default `make test` so it stays fast/dependency-light), and
+  `[tool.coverage]` config over the first-party packages. No hard `--cov-fail-under` yet — it
+  can't be calibrated offline; set it from the first CI baseline (BACKLOG P2), then ratchet.
+- **Pre-commit vs CI mypy drift.** The pre-commit mypy hook checked a narrower package set than
+  the Makefile/CI, so a type regression in `eln/evals/mcp_servers/memory/report/scripts` passed
+  pre-commit and failed CI. The hook now invokes `make type` — one source of truth.
+- **Worker entrypoints.** `workers/*` had no direct tests. `test_workers` asserts both mains
+  import cleanly, register non-empty duplicate-free workflow/activity sets, and cover their
+  responsibilities (QM on hpc; ELN sync + cursor activities on background) — a wiring-drift guard.
+- **API-key preflight.** `_default_chat_client` now fails at agent build with a clear
+  "set ANTHROPIC_API_KEY" message instead of an opaque 401 on the first model call (injected
+  clients skip it).
+- **`make skill-validate`.** `scripts/validate_skills.py` validates every SKILL.md's frontmatter
+  (name/description present, `name` matches its directory) and gates in CI, mirroring
+  `kg-validate`/`eln-validate`, so a broken skill fails the build rather than vanishing from the
+  agent's skill surface.
+
+**Result.** New tests: `test_workers`, `test_validate_skills`, and an `_default_chat_client`
+preflight case in `test_agent`. `make lint type` green; `make test` green offline. CI gains a
+`make skill-validate` step.

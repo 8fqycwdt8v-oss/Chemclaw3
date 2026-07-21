@@ -48,8 +48,12 @@ class PostgresStore:
         Delegates to the shared `chemclaw.db.connect`, which applies the configured
         connect timeout and turns a raw psycopg failure into a "Postgres unreachable at
         <host>" `ConnectionError` (the bound belongs to the connect, not the activity).
+        Also applies the configured per-statement timeout so a hung query is cancelled
+        rather than pinning the enclosing activity for its whole budget.
         """
-        return await db.connect(self._dsn)
+        return await db.connect(
+            self._dsn, statement_timeout_seconds=settings.pg_statement_timeout_seconds
+        )
 
     async def get(self, key: CalculationKey) -> StoredResult | None:
         """Return the stored result for `key`, or None on a miss."""

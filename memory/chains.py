@@ -11,7 +11,7 @@ ordered so the narrative reads reactant→product. Pure and deterministic — no
 import networkx as nx
 from pydantic import BaseModel
 
-from eln.chem import canonical_smiles
+from chemclaw.chem import canonical_smiles
 from eln.ord import OrdReaction, Role
 
 

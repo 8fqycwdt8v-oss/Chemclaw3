@@ -2,7 +2,7 @@
 # CLAUDE.md and CI both go through them, so behavior stays identical everywhere.
 # `uv run` executes inside the project venv without a manual activate step.
 
-.PHONY: install lint type test check db-migrate kg-validate eval eln-validate up down
+.PHONY: install lint type test cov check db-migrate schedules-apply kg-validate eval eln-validate skill-validate up down
 
 install:  ## Sync the venv with runtime + dev dependencies.
 	uv sync
@@ -17,10 +17,16 @@ type:  ## Static type check, strict (all first-party packages).
 test:  ## Run the test suite.
 	uv run pytest
 
+cov:  ## Run the test suite with coverage (first-party packages; report missing lines).
+	uv run pytest --cov --cov-report=term-missing
+
 check: lint type test  ## The full gate CLAUDE.md requires green before a step is "done".
 
 db-migrate:  ## Apply infra/sql migrations to the configured database.
 	uv run python -m calc.migrate
+
+schedules-apply:  ## Create/update the Temporal Schedules for the periodic background jobs.
+	uv run python -m scripts.schedules
 
 kg-validate:  ## Validate the knowledge graph (schema, duplicate ids, broken links).
 	uv run python -m kg.validate
@@ -30,6 +36,9 @@ eval:  ## Score the versioned eval case-set and print the citable report (Phase 
 
 eln-validate:  ## Validate the ELN export's reactions (RDKit structure + mass balance).
 	uv run python -m eln.validate
+
+skill-validate:  ## Validate SKILL.md frontmatter (name/description present, name matches dir).
+	uv run python -m scripts.validate_skills
 
 up:  ## Start the local dev stack (Temporal dev server + Postgres/pgvector).
 	docker compose -f infra/docker-compose.yml up -d
