@@ -21,3 +21,10 @@ schema + link check). See the `Makefile` for the full list.
 
 Every environment value comes from `chemclaw/config.py` (see `.env.example`);
 there is no second config source.
+
+## Security
+
+Pre-**Phase 6**: there is **no authentication or authorization** yet (by design — see
+`docs/architektur.md` §7–§8). Safe for single-tenant / trusted-network / dev use; do **not**
+expose the agent to multiple or untrusted users before Phase 6. Full posture and deployment
+guidance in [`SECURITY.md`](SECURITY.md).

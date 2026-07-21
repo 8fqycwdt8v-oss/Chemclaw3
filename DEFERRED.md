@@ -6,6 +6,7 @@ revisit it. Default is "off-the-shelf, defer until measured".
 | Item | Why not now | Trigger to revisit |
 |---|---|---|
 | **HPC/DFT real integration** (SLURM, `submit_to_hpc`) | User deferred it; the mock spine proves the durable pattern and the early compute (xTB/GFN2 + ML predictors, Phase 1c) covers near-term needs locally | Heavy QM/DFT accuracy is genuinely required **and** HPC access is provisioned |
+| **Enforced authn/authz** (Entra token validation, per-call authorization) | Phase 6 work; identity/RBAC needs live Entra ID + Temporal infra to build and test. The seams exist (`actor`, `oid` claim, role-filtered skills) but nothing is enforced — see `SECURITY.md` | Before any multi-user or network-exposed deployment (a hard prerequisite, not optional) |
 | Postgres RLS mirror of the graph | Broad internal read access is fine for cross-project learning; a mirror adds a sync pipeline + a second source of truth | Real, combinatorial project-level confidentiality requirements |
 | `knowledge/` as its own Git repo | A subfolder is enough for v1 | Governance/confidentiality boundary requires repo split |
 | Second queue system (pg-boss) | Temporal already runs; a second task queue covers small jobs | — (decided against, see D-006) |

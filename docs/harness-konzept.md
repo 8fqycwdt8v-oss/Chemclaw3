@@ -5,6 +5,13 @@
 > Ergänzung zu [`architektur.md`](./architektur.md) §1, **keine** Revision der Vier-Schichten-
 > Trennung. Abschnittsverweise ohne Doku-Namen beziehen sich auf `architektur.md`.
 
+> ⚠️ **Sicherheitshinweis (Pre-Phase-6).** Es gibt noch **keine Authentifizierung/Autorisierung**
+> (Phase 6, `architektur.md` §7–§8). Der Harness fügt **keine** neue Angriffsfläche hinzu — die
+> generischen File-/Shell-/Web-Batterien sind bewusst aus (§6) — aber der `execute`-Autonomiemodus
+> **verstärkt** die Auswirkung der fehlenden Autorisierung, weil der Agent teure/durable
+> Tool-Aufrufe ohne menschlichen Zwischenschritt verkettet. Standard bleibt `plan_only`; nicht
+> multi-user/exponiert betreiben, bevor Phase 6 steht. Details: [`SECURITY.md`](../SECURITY.md).
+
 ---
 
 ## 0. Kernidee in einem Satz

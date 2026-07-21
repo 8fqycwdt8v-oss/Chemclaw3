@@ -23,6 +23,7 @@ Two backbones behind one factory (D-038):
   reasoning steps.
 """
 
+import logging
 import os
 import uuid
 from typing import Any
@@ -51,6 +52,8 @@ from agents.qm_tools import get_qm_job_status, submit_qm_job
 from agents.research_tools import gather_evidence
 from agents.skill_access import RoleFilteredSkillsSource
 from chemclaw.config import McpServerSpec, settings
+
+logger = logging.getLogger(__name__)
 
 _INSTRUCTIONS = (
     "You are Chemclaw, a research assistant for pharmaceutical/chemical process R&D. Your job "
@@ -169,6 +172,17 @@ def build_agent(
             # outcome, latency) — the single GxP audit trail over all tools, not per-tool
             # logging.
             middleware=[audit],
+        )
+
+    if settings.harness_autonomy == "execute":
+        # Operator signal (SECURITY.md): in execute mode the agent works through its todo
+        # list autonomously, chaining tool calls — including durable/expensive jobs — with no
+        # human turn between them. There is no authn/authz yet (Phase 6), so this must not be
+        # exposed to multiple/untrusted users. Bounded by harness_max_loop_iterations.
+        logger.warning(
+            "harness autonomy is 'execute': the agent will chain tool calls (incl. "
+            "durable/expensive jobs) autonomously without a human turn. No authn/authz is "
+            "enforced yet (Phase 6) — do not expose multi-user in this mode. See SECURITY.md."
         )
 
     return create_harness_agent(

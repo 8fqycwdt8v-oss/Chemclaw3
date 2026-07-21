@@ -7,6 +7,7 @@ construction in either backbone.
 """
 
 import asyncio
+import logging
 
 import pytest
 from agent_framework import CharacterEstimatorTokenizer, Message, SlidingWindowStrategy
@@ -224,3 +225,25 @@ def test_execute_autonomy_wires_a_bounded_loop(monkeypatch: pytest.MonkeyPatch) 
     loops = [m for m in middleware if type(m).__name__ == "AgentLoopMiddleware"]
     assert len(loops) == 1
     assert getattr(loops[0], "max_iterations", None) == 9
+
+
+def test_execute_autonomy_warns_about_missing_auth(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Building the agent in execute mode logs the no-authz operator warning (SECURITY.md)."""
+    monkeypatch.setattr(settings, "harness_enabled", True)
+    monkeypatch.setattr(settings, "harness_autonomy", "execute")
+    with caplog.at_level(logging.WARNING, logger="agents.chemclaw_agent"):
+        build_agent(chat_client=object())
+    assert any("SECURITY.md" in r.message for r in caplog.records)
+
+
+def test_plan_only_does_not_warn(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The interactive default (plan_only) is not flagged — no false alarm."""
+    monkeypatch.setattr(settings, "harness_enabled", True)
+    monkeypatch.setattr(settings, "harness_autonomy", "plan_only")
+    with caplog.at_level(logging.WARNING, logger="agents.chemclaw_agent"):
+        build_agent(chat_client=object())
+    assert not any("SECURITY.md" in r.message for r in caplog.records)
