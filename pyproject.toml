@@ -8,7 +8,10 @@ requires-python = ">=3.11"
 dependencies = [
     "agent-framework-anthropic>=1.0.0b260709",
     "agent-framework-core>=1.11.0",
-    "bofire[optimization]>=0.4.1",
+    # cheminfo pulls mordredcommunity, which bofire's feature models import
+    # unconditionally (bofire.data_models.features.feature -> mordred); without it a
+    # clean install fails to import bofire at all. optimization brings the BoTorch strategies.
+    "bofire[optimization,cheminfo]>=0.4.1",
     "drfp>=0.3.7",
     "mcp>=1.2.0",
     "networkx>=3.6.1",

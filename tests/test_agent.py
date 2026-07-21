@@ -1,8 +1,9 @@
-"""The agent wires its tools and skills correctly (plan step 1.5).
+"""The agent wires its tools and skills correctly (plan step 1.5; harness backbone: D-038).
 
 Built with an injected dummy client so no LLM credentials are needed — this
 proves the MAF wiring (tools advertised, skills discovered, context kept in
-budget), not model behavior.
+budget, backbone selected), not model behavior. No LLM call happens at
+construction in either backbone.
 """
 
 import asyncio
@@ -19,6 +20,17 @@ from agent_framework._compaction import (
 from agents.chemclaw_agent import _build_compaction, _default_chat_client, build_agent
 from chemclaw.config import settings
 
+_DOMAIN_TOOLS = {
+    "compute_xtb_energy",
+    "predict_solubility",
+    "predict_pka",
+    "submit_qm_job",
+    "get_qm_job_status",
+    "find_notes",
+    "expand_note",
+    "propose_knowledge_note",
+}
+
 
 def test_default_client_preflights_missing_api_key(monkeypatch: pytest.MonkeyPatch) -> None:
     """Building the default client without ANTHROPIC_API_KEY fails with a clear message."""
@@ -28,19 +40,10 @@ def test_default_client_preflights_missing_api_key(monkeypatch: pytest.MonkeyPat
 
 
 def test_agent_advertises_qm_tools() -> None:
-    """Both QM tools are registered on the agent under their function names."""
+    """All domain tools are registered on the agent under their function names."""
     agent = build_agent(chat_client=object())
     tool_names = {tool.name for tool in agent.default_options["tools"]}
-    assert {
-        "compute_xtb_energy",
-        "predict_solubility",
-        "predict_pka",
-        "submit_qm_job",
-        "get_qm_job_status",
-        "find_notes",
-        "expand_note",
-        "propose_knowledge_note",
-    } <= tool_names
+    assert _DOMAIN_TOOLS <= tool_names
 
 
 def test_agent_has_skills_history_and_compaction() -> None:
@@ -148,3 +151,76 @@ def test_compaction_is_a_noop_under_budget() -> None:
     kept = asyncio.run(apply_compaction(messages, strategy=strategy, tokenizer=tokenizer))
 
     assert len(kept) == 1
+
+
+def test_classic_is_the_default_backbone() -> None:
+    """With the harness off (default), the agent is plain: no todo/mode providers."""
+    provider_types = {type(p).__name__ for p in build_agent(chat_client=object()).context_providers}
+    assert "SkillsProvider" in provider_types
+    assert "TodoProvider" not in provider_types
+    assert "AgentModeProvider" not in provider_types
+
+
+def test_harness_adds_todo_and_mode_over_the_same_providers(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The harness backbone adds todo + plan/execute mode, keeping skills/history/compaction."""
+    monkeypatch.setattr(settings, "harness_enabled", True)
+    provider_types = {type(p).__name__ for p in build_agent(chat_client=object()).context_providers}
+    assert {
+        "TodoProvider",
+        "AgentModeProvider",
+        "SkillsProvider",
+        "InMemoryHistoryProvider",
+        "CompactionProvider",
+    } <= provider_types
+
+
+def test_harness_advertises_the_same_domain_tools(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Switching backbone does not change the agent's capability: same domain tools."""
+    monkeypatch.setattr(settings, "harness_enabled", True)
+    agent = build_agent(chat_client=object())
+    tool_names = {tool.name for tool in agent.default_options["tools"]}
+    assert _DOMAIN_TOOLS <= tool_names
+    # The MCP capability servers stay attached too — same surface as the classic backbone.
+    assert {t.name for t in agent.mcp_tools} == {spec.name for spec in settings.mcp_servers}
+
+
+def test_harness_keeps_the_audit_middleware(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The GxP tool-audit middleware survives the backbone switch (D-027 holds in both)."""
+    monkeypatch.setattr(settings, "harness_enabled", True)
+    middleware = build_agent(chat_client=object()).middleware or []
+    names = [getattr(m, "__name__", type(m).__name__) for m in middleware]
+    assert any("audit" in n for n in names)
+
+
+def test_harness_disables_generic_sandbox_batteries(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Governance (§6, G6): no generic file-memory/file-access provider is wired.
+
+    Chemclaw's capability is its explicit tools/skills, never a generic filesystem or
+    shell — so the harness's default file batteries must be off.
+    """
+    monkeypatch.setattr(settings, "harness_enabled", True)
+    provider_types = {type(p).__name__ for p in build_agent(chat_client=object()).context_providers}
+    assert "FileMemoryProvider" not in provider_types
+    assert "FileAccessProvider" not in provider_types
+    assert "BackgroundAgentsProvider" not in provider_types
+
+
+def test_plan_only_autonomy_has_no_completion_loop(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Plan-only autonomy stays interactive: no AgentLoopMiddleware is attached."""
+    monkeypatch.setattr(settings, "harness_enabled", True)
+    monkeypatch.setattr(settings, "harness_autonomy", "plan_only")
+    middleware = build_agent(chat_client=object()).middleware or []
+    assert "AgentLoopMiddleware" not in {type(m).__name__ for m in middleware}
+
+
+def test_execute_autonomy_wires_a_bounded_loop(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Execute autonomy attaches the loop, bounded by the configured iteration cap."""
+    monkeypatch.setattr(settings, "harness_enabled", True)
+    monkeypatch.setattr(settings, "harness_autonomy", "execute")
+    monkeypatch.setattr(settings, "harness_max_loop_iterations", 9)
+    middleware = build_agent(chat_client=object()).middleware or []
+    loops = [m for m in middleware if type(m).__name__ == "AgentLoopMiddleware"]
+    assert len(loops) == 1
+    assert getattr(loops[0], "max_iterations", None) == 9

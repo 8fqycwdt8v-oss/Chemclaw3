@@ -195,6 +195,11 @@ wheels = [
 ]
 
 [package.optional-dependencies]
+cheminfo = [
+    { name = "mordredcommunity" },
+    { name = "rdkit" },
+    { name = "scikit-learn" },
+]
 optimization = [
     { name = "botorch", extra = ["fully-bayesian"] },
     { name = "cloudpickle" },
@@ -361,7 +366,7 @@ source = { editable = "." }
 dependencies = [
     { name = "agent-framework-anthropic" },
     { name = "agent-framework-core" },
-    { name = "bofire", extra = ["optimization"] },
+    { name = "bofire", extra = ["cheminfo", "optimization"] },
     { name = "drfp" },
     { name = "mcp" },
     { name = "networkx" },
@@ -391,7 +396,7 @@ dev = [
 requires-dist = [
     { name = "agent-framework-anthropic", specifier = ">=1.0.0b260709" },
     { name = "agent-framework-core", specifier = ">=1.11.0" },
-    { name = "bofire", extras = ["optimization"], specifier = ">=0.4.1" },
+    { name = "bofire", extras = ["optimization", "cheminfo"], specifier = ">=0.4.1" },
     { name = "drfp", specifier = ">=0.3.7" },
     { name = "mcp", specifier = ">=1.2.0" },
     { name = "networkx", specifier = ">=3.6.1" },
@@ -1787,6 +1792,22 @@ wheels = [
     { url = "https://files.pythonhosted.org/packages/2f/90/c378337af1f44f8d4224a7d86b4b9ae6a326ffff77266bf1311af8db4e17/moocore-0.3.2-cp310-abi3-musllinux_1_2_x86_64.whl", hash = "sha256:9d8040d3b2c19ca27e24869efdfb94eb2f4e749283f95d4aa5ebdab7bd8d566c", size = 873696, upload-time = "2026-07-12T14:54:59.04Z" },
     { url = "https://files.pythonhosted.org/packages/3b/ab/f6370005946e36885ba431d93c45f369db3aa9178a44a88710473c7d981d/moocore-0.3.2-cp310-abi3-win_amd64.whl", hash = "sha256:aaed31c1a434a846502f922f86766205c3f9d43642fa73782b1b5a5136de0573", size = 517904, upload-time = "2026-07-12T14:55:00.725Z" },
     { url = "https://files.pythonhosted.org/packages/ec/cb/c25b8f0169ab4509c6de8bd90be7687bd40db86b0876f60db0977ecfd770/moocore-0.3.2-cp310-abi3-win_arm64.whl", hash = "sha256:347c3418d174f1d838ba3c82335329925629dc1f0cb81e8c08787feb7bf46d38", size = 507634, upload-time = "2026-07-12T14:55:02.008Z" },
+]
+
+[[package]]
+name = "mordredcommunity"
+version = "2.0.7"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "networkx" },
+    { name = "numpy" },
+    { name = "packaging" },
+    { name = "rdkit" },
+    { name = "six" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/9b/cb/953ff6385cd299dab12cbe7bbcd16dbcf778d14499a229b8e882c8b629d3/mordredcommunity-2.0.7.tar.gz", hash = "sha256:6719be351c5fd80461739a4e79acb4480f0c9fb1eb2f7a3ab576c9092e1d74a8", size = 130842, upload-time = "2026-01-22T15:05:10.826Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/2e/28/a5f6bf29558e8eaaac089aa3fcecfee2f8a44b7f4783cd86c5722f3c4530/mordredcommunity-2.0.7-py3-none-any.whl", hash = "sha256:36093d078df9c35419b26ca422a1c7f9ff3693b92ea5e43ea351de245f60020a", size = 176002, upload-time = "2026-01-22T15:05:09.538Z" },
 ]
 
 [[package]]

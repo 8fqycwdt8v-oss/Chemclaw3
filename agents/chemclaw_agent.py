@@ -1,4 +1,4 @@
-"""The Chemclaw MAF agent (plan step 1.5).
+"""The Chemclaw MAF agent (plan step 1.5; agent-harness backbone: docs/harness-konzept.md).
 
 `build_agent` wires the conversation agent: the tools, a `SkillsProvider` that discovers
 `SKILL.md` files under the configured skills directory (progressive disclosure — the model
@@ -7,6 +7,20 @@ in-memory session history so a chat accumulates a thread, and a `CompactionProvi
 keeps that thread within a token budget (see `_build_compaction`). The chat client is
 injectable so the wiring can be built and tested without live credentials; the default builds
 the configured Anthropic client, which reads its own API key from the environment at call time.
+
+Two backbones behind one factory (D-038):
+
+- **Classic** (`harness_enabled=False`, the tested default): a plain `Agent` — one
+  reasoning step per turn, no self-planning.
+- **Agent harness** (`harness_enabled=True`): `create_harness_agent` adds a self-managed
+  todo list (`TodoProvider`) and an explicit plan/execute mode (`AgentModeProvider`) over
+  the *same* tools, skills, history, compaction, and audit middleware, so open multi-step
+  requests are decomposed into a visible, checkable plan and worked through autonomously.
+  The generic file-memory / file-access / shell / web-search batteries the harness enables
+  by default are turned OFF here: Chemclaw's capability is its explicit tools and skills,
+  not a generic filesystem or shell (architektur.md §6, plan G6). Long/expensive work still
+  hands off fire-and-forget to Temporal (D-002) — the harness only sequences the short
+  reasoning steps.
 """
 
 import os
@@ -24,6 +38,8 @@ from agent_framework import (
     SlidingWindowStrategy,
     TokenBudgetComposedStrategy,
     ToolResultCompactionStrategy,
+    create_harness_agent,
+    todos_remaining,
 )
 
 from agents.audit import AuditSink, make_audit_middleware
@@ -90,6 +106,10 @@ def build_agent(
     `agent.run`, e.g. `async with *agent.mcp_tools: await agent.run(...)`, so the servers are
     spawned for the turn and torn down after.
 
+    `settings.harness_enabled` selects the backbone (D-038): classic `Agent` (default) or the
+    MAF agent harness (self-managed todo list + plan/execute mode). Both wire the same tools,
+    skills, history, compaction, and audit middleware.
+
     Args:
         chat_client: A MAF chat client. Injected in tests; when omitted, the
             configured Anthropic client is built (needs an API key at run time,
@@ -118,34 +138,74 @@ def build_agent(
         actor=actor,
         sink=audit_sink,
     )
-    return Agent(
+    tools = [
+        compute_xtb_energy,
+        predict_solubility,
+        predict_pka,
+        submit_qm_job,
+        get_qm_job_status,
+        find_notes,
+        expand_note,
+        gather_evidence,
+        # Structural fingerprint search (similar_reactions/similar_molecules/
+        # substructure_matches) comes from the MCP capability servers, not in-process.
+        *_mcp_capability_tools(),
+        suggest_next_experiment,
+        propose_knowledge_note,
+        record_confirmed_answer,
+    ]
+
+    if not settings.harness_enabled:
+        return Agent(
+            client=client,
+            name="chemclaw",
+            instructions=_INSTRUCTIONS,
+            tools=tools,
+            # Order matters: history loads/stores the thread, then compaction trims it — so
+            # compaction runs last and sees the full context (before the model) and the freshly
+            # stored history (after the run).
+            context_providers=[history, skills, compaction],
+            # One function middleware audits every tool call (correlation id, actor, args,
+            # outcome, latency) — the single GxP audit trail over all tools, not per-tool
+            # logging.
+            middleware=[audit],
+        )
+
+    return create_harness_agent(
         client=client,
         name="chemclaw",
-        instructions=_INSTRUCTIONS,
-        tools=[
-            compute_xtb_energy,
-            predict_solubility,
-            predict_pka,
-            submit_qm_job,
-            get_qm_job_status,
-            find_notes,
-            expand_note,
-            gather_evidence,
-            # Structural fingerprint search (similar_reactions/similar_molecules/
-            # substructure_matches) comes from the MCP capability servers, not in-process.
-            *_mcp_capability_tools(),
-            suggest_next_experiment,
-            propose_knowledge_note,
-            record_confirmed_answer,
-        ],
-        # Order matters: history loads/stores the thread, then compaction trims it — so
-        # compaction runs last and sees the full context (before the model) and the freshly
-        # stored history (after the run).
-        context_providers=[history, skills, compaction],
-        # One function middleware audits every tool call (correlation id, actor, args,
-        # outcome, latency) — the single GxP audit trail over all tools, not per-tool logging.
+        agent_instructions=_INSTRUCTIONS,
+        tools=tools,
+        skills_provider=skills,
+        history_provider=history,
+        # Chemclaw's capability is its explicit tools/skills, not a generic sandbox —
+        # keep only the todo + plan/execute providers; drop the file/shell/web batteries.
+        disable_file_memory=True,
+        disable_file_access=True,
+        disable_web_search=True,
+        # Reuse our own deterministic compaction (D-025) instead of the harness's LLM-free
+        # default being reconfigured: disabled here, then appended as an extra context
+        # provider, which keeps it *last* — after history and skills — exactly as in the
+        # classic wiring above.
+        disable_compaction=True,
+        context_providers=[compaction],
         middleware=[audit],
+        loop_should_continue=_loop_predicate(),
+        loop_max_iterations=settings.harness_max_loop_iterations,
     )
+
+
+def _loop_predicate() -> Any:
+    """Return the completion-loop predicate for the configured autonomy level, or None.
+
+    "execute" autonomy loops the agent through its open todos, but only while it is in
+    *execute* mode — so a plan is still made (and can be approved) in plan mode before any
+    autonomous work begins. "plan_only" returns None, so no loop middleware is added and
+    the agent stays interactive.
+    """
+    if settings.harness_autonomy == "execute":
+        return todos_remaining(looping_modes=["execute"])
+    return None
 
 
 def _mcp_capability_tools() -> list[MCPStdioTool]:

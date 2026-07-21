@@ -124,6 +124,30 @@ Prioritized open action items. Top = next. Keep in sync with `docs/implementatio
       (F4) `load_notes` resilient to a malformed note (no longer aborts retrieval); + docstring
       honesty on substring matching and the verify gate. **Phase 5b complete.**
 
+## Done — Agent-harness backbone core (MAF Agent Harness — D-038, docs/harness-konzept.md)
+- [x] H0 spike: verified `create_harness_agent` in the installed `agent-framework-core` 1.11
+      constructs with no LLM call; providers reduce to `TodoProvider`+`AgentModeProvider` when the
+      generic batteries are off; default modes are `plan`/`execute`; `todos_remaining(looping_modes=
+      ["execute"])` binds the loop to execute mode natively.
+- [x] H1/H2/H3(loop): `build_agent` wires the harness behind `harness_enabled` over the *same*
+      tools/skills, classic `Agent` fallback stays default; file-memory/file-access/shell/web
+      batteries disabled (§6, G6); `harness_autonomy` gates the loop (`plan_only` interactive /
+      `execute` looped-in-execute-mode), hard-capped by `harness_max_loop_iterations`. Config in
+      `chemclaw/config.py` + `.env.example`; 8 tests in `tests/test_agent.py` (backbone select,
+      provider set, same tools, batteries off, loop present/absent + bounded). `make lint type test`
+      green (133 passed, 15 offline-skipped).
+- [x] Evaluation: the agent harness does **not** replace Temporal or graph-based flows — Phase 5b's
+      report pipeline is a deterministic core + Temporal workflow, no MAF graph-workflow code exists;
+      complementary third backbone (see D-038, harness-konzept §11).
+- [x] Re-integrated onto the post-5b/D-037 main: harness branch now reuses main's history,
+      deterministic compaction (D-025, passed as last context provider), GxP audit middleware
+      (D-027), role-filtered skills, and MCP capability tools (D-029). ADR renumbered D-020→D-038
+      (D-020 was taken by the report harness on main).
+- [ ] **Follow-ups (open):** `awaiting`-state resume via the durable-approval seam (D-032/D-035) ·
+      plan/loop metrics for Phase 2b · plan-mode approval + finer autonomy behind RBAC (Phase 6,
+      authz in the MCP server) · agent-harness ↔ report-pipeline interplay (open research per
+      section vs. fixed synthesis flow).
+
 ## Done — Phase 5: memory layers (episodic + semantic, no new infra — D-019)
 - [x] 5.1/5.2/5.3 episodic: `memory/chains.py` (chain detection — product A = reactant B via the
       canonical-SMILES compound identity, Phase 3) + `memory/campaign.py` (`campaign` note citing each

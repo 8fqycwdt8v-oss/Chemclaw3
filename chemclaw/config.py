@@ -18,6 +18,7 @@ the first real consumer lands.
 
 import os
 import sys
+from typing import Literal
 
 from pydantic import BaseModel, Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -173,6 +174,23 @@ class Settings(BaseSettings):
     agent_context_token_budget: int = Field(default=100_000, ge=1)
     agent_keep_last_tool_groups: int = Field(default=2, ge=0)
     agent_keep_last_conversation_groups: int = Field(default=12, ge=1)
+
+    # MAF Agent Harness (docs/harness-konzept.md, D-038). Off by default: the harness API is
+    # experimental (agent-framework-core 1.11), so the classic `Agent` stays the tested
+    # default and `harness_enabled` is the one switch to the plan/execute backbone. When
+    # on, the agent gets a self-managed todo list (TodoProvider) + plan/execute mode
+    # (AgentModeProvider); the file-memory, file-access, shell, and web-search batteries
+    # that create_harness_agent adds by default are turned OFF — Chemclaw's capabilities
+    # are its explicit tools/skills, not a generic filesystem/shell (§6, G6).
+    harness_enabled: bool = False
+    # Autonomy gate. "plan_only": the agent plans/updates its todo list but never loops
+    # autonomously (interactive). "execute": the completion loop drives the agent through
+    # its todos, but only while it is in *execute* mode — so a plan is still made (and can
+    # be approved) in plan mode first (native plan→execute gate via `todos_remaining`).
+    harness_autonomy: Literal["plan_only", "execute"] = "plan_only"
+    # Hard cap on the execute-mode completion loop — the runaway-cost brake (§8). Only
+    # takes effect when harness_autonomy == "execute".
+    harness_max_loop_iterations: int = Field(default=15, ge=1)
 
     # Markdown knowledge graph (plan Phase 2). Directory of note files the indexer
     # reads; retrieval is graph traversal over their [[wikilinks]] (D-004).
