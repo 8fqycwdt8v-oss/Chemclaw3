@@ -117,8 +117,10 @@ building.
   future source (LIMS/MES/analytical/ELN) attaches as *one thin adapter + one registry entry* with
   zero core change. The repo already has both half-contracts (`ElnAdapter`, `SourceRetriever`) — the
   work is to unify and harden them (plan Phase F7). **The first source is ELN** (already present as
-  static-export adapters); the seam is validated by re-hosting that existing ELN adapter, and the
-  first *live* connector to land later is ELN (real API vs the static JSON exports).
+  static-export adapters); the seam is validated by re-hosting that existing ELN adapter. The first
+  *live* connector to land later is ELN too, and it is **custom — a Snowflake source read via an
+  internal data pipeline, not a commercial vendor/API**: the ELN data is landed into Snowflake
+  upstream, and Chemclaw's adapter reads it from Snowflake behind the same seam.
 - **Deferred behind the seam (not now):** concrete connectors and their standards — **AnIML/Allotrope**
   (analytical data), **SiLA2/LAP** (instruments), **Benchling API/MCP** (ELN) — and analytical
   *models* (retention prediction, peak deconvolution, spectral/impurity ID). Each is one adapter/tool

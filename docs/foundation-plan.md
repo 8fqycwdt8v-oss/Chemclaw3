@@ -309,8 +309,13 @@ half-contracts — this phase unifies and hardens them into one documented attac
   `eln/ord_adapter.py`) plus the durable sync + fingerprint index + PR-gated note path. So F7 is
   proved by **re-hosting the existing ELN adapter behind the generalized `DataSource` contract** —
   if the seam can carry the ELN adapter unchanged in behavior (same tests green), it is right. No new
-  connector is built now; the **live ELN connector** (real Benchling/instance API instead of the
-  static JSON exports) is the first adapter to land *later*, behind this seam.
+  connector is built now; the **live ELN connector** is the first adapter to land *later*, behind this
+  seam. That live connector is **custom** — a **Snowflake source read via an internal data pipeline,
+  not a commercial ELN vendor/API**: the ELN's data is landed into Snowflake upstream, and Chemclaw's
+  adapter reads from Snowflake (durable `background-jobs` sync with a cursor over the pipeline's
+  load-timestamp/row-version), normalizes to the note graph + ORD subset, and routes knowledge through
+  the PR-gate. Snowflake specifics (connector, warehouse, query, cursor column) live **only** in that
+  one adapter — nothing Snowflake-shaped leaks above the `DataSource` seam.
 
 > **CHECKMATE F7** (G1–G7): Does the **existing ELN adapter re-host behind the `DataSource` seam with
 > its behavior/tests unchanged** (the seam carries the real first source)? Could a second, different
@@ -409,5 +414,7 @@ reference adapter), and concrete sources (LIMS/MES/ELN/analytical) plus analytic
 5. **Temporal** — self-hosted on OpenShift vs Temporal Cloud? Session store Postgres vs Redis? (F3/F6.)
 6. **Data-source seam** — *resolved:* F7 is seam-only now (no concrete LIMS/MES/analytical source or
    schema yet), and the **first source is ELN**. Validate the seam by re-hosting the existing ELN
-   adapter; the live ELN connector (real API vs static JSON) is the first adapter to land later.
-   Open: which ELN product/API is the live target (Benchling? other), when it's built.
+   adapter. The live ELN connector is **resolved too**: a **custom Snowflake source read via an
+   internal data pipeline — no commercial vendor/API**. It lands later as the first adapter behind the
+   seam (durable Snowflake sync with a pipeline-cursor → note graph/ORD → PR-gate); Snowflake
+   specifics stay inside that adapter.
