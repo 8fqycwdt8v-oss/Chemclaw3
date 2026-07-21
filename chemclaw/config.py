@@ -143,6 +143,12 @@ class Settings(BaseSettings):
     # directory without code changes. Read it through the `skills_dirs` property, never raw.
     agent_model: str = "claude-sonnet-5"
     skills_dir: str = "skills"
+    # Phase-6 role scoping (plan step 6.2): map a skill name to the Entra app-roles allowed to
+    # see it. A skill not listed here is visible to everyone, so the default empty map keeps
+    # today's "all skills visible" behavior; a listed skill is advertised only to a caller
+    # holding one of its roles. ENV override is JSON, e.g.
+    # CHEMCLAW_SKILL_ROLE_GATES='{"gxp-scope-guard": ["QA"]}'.
+    skill_role_gates: dict[str, list[str]] = Field(default_factory=dict)
     # MCP capability servers the agent attaches over stdio (the plan's capability layer, D-029):
     # the agent calls the fingerprint search over the MCP protocol rather than importing it
     # in-process, so a capability is a running server, not agent code. Adding one is an entry

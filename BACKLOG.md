@@ -5,6 +5,22 @@ Prioritized open action items. Top = next. Keep in sync with `docs/implementatio
 
 ## Now — Phase 6 identity/RBAC & hardening (auth integration; needs live Azure/Temporal)
 
+### Done — part 1: identity + role-scoped skills (offline core, D-039)
+- [x] `chemclaw/identity.py::Principal` (frozen Entra `oid`/`upn`/roles/groups; `actor` = `oid`).
+- [x] 6.2 `agents/skill_access.py::RoleScopedSkillsSource` — config gates (`skill_role_gates`:
+      skill → roles); ungated = visible to all (default keeps today's behavior). `build_agent(
+      principal=…)` derives audit actor + skill scope; anonymous stays `"unknown"`/all-visible.
+      Tests: `test_identity.py`, `test_skill_access.py` (gate hidden/shown by role). Full suite
+      277 passed.
+
+### Open — part 2+: authorization enforcement & live-infra edges
+- [ ] **Decision needed:** where authz on expensive in-process tools (`submit_qm_job`, calc, BO)
+      is enforced — a policy middleware at the agent's tool boundary (works today) vs. moving
+      protected tools behind an Entra-authz'd MCP server (matches §8, bigger change).
+- [ ] 6.1 Entra JWT validation (JWKS) + OAuth-proxy + OBO to the ELN — needs a live tenant.
+- [ ] 6.3 Temporal mTLS + propagate `principal.oid` into `requested_by`/audit; namespace-per-team.
+- [ ] 6.4 knowledge-graph ACL (repo-level first; RLS mirror stays deferred). 6.5 HPC identity bridge.
+
 ## Deep-review follow-ups (D-030)
 
 ### Done — robustness/correctness fixes (D-030)

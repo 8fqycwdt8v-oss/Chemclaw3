@@ -49,8 +49,9 @@ from agents.graph_tools import expand_note, find_notes, propose_knowledge_note
 from agents.memory_tools import record_confirmed_answer
 from agents.qm_tools import get_qm_job_status, submit_qm_job
 from agents.research_tools import gather_evidence
-from agents.skill_access import RoleFilteredSkillsSource
+from agents.skill_access import RoleScopedSkillsSource
 from chemclaw.config import McpServerSpec, settings
+from chemclaw.identity import Principal
 
 _INSTRUCTIONS = (
     "You are Chemclaw, a research assistant for pharmaceutical/chemical process R&D. Your job "
@@ -92,10 +93,10 @@ _INSTRUCTIONS = (
 def build_agent(
     chat_client: Any | None = None,
     *,
+    principal: Principal | None = None,
     actor: str = "unknown",
     correlation_id: str | None = None,
     audit_sink: AuditSink | None = None,
-    allowed_skills: set[str] | None = None,
 ) -> Agent:
     """Construct the Chemclaw agent with its tools and skills.
 
@@ -114,28 +115,33 @@ def build_agent(
         chat_client: A MAF chat client. Injected in tests; when omitted, the
             configured Anthropic client is built (needs an API key at run time,
             not here).
-        actor: Who the audit trail attributes tool calls to — the Phase-6 identity
-            seam. Defaults to `"unknown"` until Entra auth populates it.
+        principal: The validated caller (Phase 6). When given, its `oid` becomes the audit
+            actor and its roles scope which skills are advertised (`settings.skill_role_gates`).
+            Omitted (anonymous / dev) keeps the audit actor `"unknown"` and, with no gates
+            configured, advertises every skill — today's behavior.
+        actor: Audit actor to record when no `principal` is supplied (a raw label, not a
+            verified identity). Ignored when `principal` is given (its `oid` wins).
         correlation_id: Ties this conversation's audit events together; a fresh UUID
             is generated when omitted, so each agent gets its own trail id.
         audit_sink: Durable destination for the audit trail. Omitted means log-only
             (the default `NullAuditSink`); pass a `PostgresAuditSink` for the GxP record.
-        allowed_skills: Names of the skills this caller may see — the Phase-6 role-scoping
-            seam. Omitted (the default) advertises every skill, preserving today's behavior;
-            Phase 6 resolves a user's Entra roles to this set.
 
     Returns:
         A ready-to-run `Agent`. No LLM call and no subprocess happen at construction.
     """
     client = chat_client if chat_client is not None else _default_chat_client()
     skills = SkillsProvider(
-        RoleFilteredSkillsSource(FileSkillsSource(settings.skills_dirs), allowed_skills)
+        RoleScopedSkillsSource(
+            FileSkillsSource(settings.skills_dirs), settings.skill_role_gates, principal
+        )
     )
     history = InMemoryHistoryProvider()
     compaction = _build_compaction(history.source_id)
     audit = make_audit_middleware(
         correlation_id=correlation_id if correlation_id is not None else uuid.uuid4().hex,
-        actor=actor,
+        # A verified principal's Entra oid is the accountable identity; fall back to the raw
+        # actor label only when anonymous (dev / pre-auth).
+        actor=principal.actor if principal is not None else actor,
         sink=audit_sink,
     )
     tools = [

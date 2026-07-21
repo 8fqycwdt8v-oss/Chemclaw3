@@ -1,42 +1,65 @@
-"""Role-aware skill visibility filters advertised skills (Phase-6 seam).
+"""Role-scoped skill visibility (Phase-6 RBAC, plan step 6.2).
 
-Proves the seam that Phase 6 turns into real RBAC: by default every skill is visible
-(today's behavior), and a supplied allowed-set restricts what the agent advertises — a value
-change at the call site, not a new mechanism.
+Proves the RBAC the seam became: with no gates every skill stays visible (today's behavior);
+a gated skill is hidden from an anonymous caller and from one lacking its role, and shown to a
+caller holding it. Ungated skills are always visible.
 """
 
 import asyncio
+from collections.abc import Mapping
 from typing import cast
 
 from agent_framework import FileSkillsSource, SkillsSourceContext
 from agent_framework._agents import SupportsAgentRun
 
-from agents.skill_access import RoleFilteredSkillsSource
+from agents.skill_access import RoleScopedSkillsSource
 from chemclaw.config import settings
+from chemclaw.identity import Principal
 
 
-def _skill_names(allowed: set[str] | None) -> set[str]:
-    """Names advertised by the file skills source under an allowed-set (or None = all)."""
-    source = RoleFilteredSkillsSource(FileSkillsSource(settings.skills_dirs), allowed)
+def _visible(
+    gates: Mapping[str, list[str]] | None = None, principal: Principal | None = None
+) -> set[str]:
+    """Names advertised by the real file source under the given gates and caller."""
+    source = RoleScopedSkillsSource(FileSkillsSource(settings.skills_dirs), gates, principal)
     # The file source ignores the context's agent; a cast keeps the stand-in strictly typed.
     context = SkillsSourceContext(agent=cast(SupportsAgentRun, None))
     skills = asyncio.run(source.get_skills(context))
     return {skill.frontmatter.name for skill in skills}
 
 
-def test_none_advertises_every_skill() -> None:
-    """The default (allowed=None) is unfiltered — all skills stay visible."""
-    unfiltered = _skill_names(None)
+def test_no_gates_advertises_every_skill() -> None:
+    """The default (no gates) is unfiltered — all skills stay visible for everyone."""
+    unfiltered = _visible()
     assert "deep-research" in unfiltered
     assert len(unfiltered) > 1
 
 
-def test_allowed_set_restricts_visible_skills() -> None:
-    """An allowed-set advertises only those skills, dropping the rest."""
-    visible = _skill_names({"deep-research"})
-    assert visible == {"deep-research"}
+def test_gated_skill_hidden_from_anonymous_caller() -> None:
+    """A gated skill is not advertised to an anonymous caller (no principal → no roles)."""
+    visible = _visible(gates={"deep-research": ["researcher"]}, principal=None)
+    assert "deep-research" not in visible
+    # Ungated skills are unaffected — only the gated one is withheld.
+    assert len(visible) >= 1
 
 
-def test_unknown_allowed_name_yields_nothing() -> None:
-    """An allowed-set naming no real skill advertises nothing (fail-closed, not open)."""
-    assert _skill_names({"no-such-skill"}) == set()
+def test_gated_skill_hidden_without_the_role() -> None:
+    """A caller lacking the gate's role does not see the gated skill."""
+    lab = Principal(oid="u1", roles=frozenset({"lab"}))
+    assert "deep-research" not in _visible(gates={"deep-research": ["researcher"]}, principal=lab)
+
+
+def test_gated_skill_shown_with_the_role() -> None:
+    """A caller holding one of the gate's roles sees the gated skill."""
+    researcher = Principal(oid="u2", roles=frozenset({"researcher"}))
+    assert "deep-research" in _visible(
+        gates={"deep-research": ["researcher"]}, principal=researcher
+    )
+
+
+def test_ungated_skills_stay_visible_under_gating() -> None:
+    """Gating one skill does not hide the others (only listed skills are restricted)."""
+    everyone = _visible()
+    gated = _visible(gates={"deep-research": ["researcher"]}, principal=None)
+    # Everything except the gated skill remains for an anonymous caller.
+    assert gated == everyone - {"deep-research"}

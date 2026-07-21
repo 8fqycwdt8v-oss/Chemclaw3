@@ -699,3 +699,30 @@ source-agnostic pure-function core + Temporal `report_workflow` — no MAF graph
 exists in the repo, so nothing is replaced in code. The three are complementary: Temporal =
 durable execution · graph workflow/deterministic pipeline = fixed flows · agent harness = open
 dynamic multi-step planning. See `docs/harness-konzept.md`.
+
+## D-039 — Phase 6, part 1: a `Principal` identity + role-scoped skills (offline core)
+Phase 6 (identity/RBAC) is mostly infra-gated — real Entra JWT validation, OAuth-proxy/OBO,
+Temporal mTLS, and the HPC bridge all need a live tenant/cluster to build and test (see
+`SECURITY.md`). This lands the part that is fully implementable and unit-testable **offline**,
+and that the rest hangs off: a validated caller identity and role-scoped skill visibility (plan
+step 6.2).
+
+- `chemclaw/identity.py`: `Principal` — a frozen model of the caller's Entra `oid`/`upn` +
+  app-roles/groups. `principal.actor` (the `oid`) is the stable id the GxP audit trail records.
+  Immutable so a downstream tool/middleware can't quietly change who it acts as.
+- `agents/skill_access.py`: the placeholder `RoleFilteredSkillsSource` (name-set filter) becomes
+  `RoleScopedSkillsSource` — a config-driven gate (`settings.skill_role_gates`: skill name →
+  allowed roles). Ungated skills stay visible to all (empty map = today's behavior); a gated
+  skill is hidden from an anonymous caller and from one lacking its role. One thin decorator
+  over any `SkillsSource` (DRY).
+- `agents/chemclaw_agent.py`: `build_agent(principal=…)` replaces the unused `allowed_skills`
+  seam. A verified principal's `oid` becomes the audit actor and its roles scope skills;
+  anonymous/dev (no principal) keeps `actor="unknown"` and every skill visible.
+
+**Deliberately NOT here (the next, infra-gated increment):** the *enforcement* of authorization
+on expensive actions (`submit_qm_job`, calculators, BO). `architektur.md` §8 says authz belongs
+in the MCP server, but those actions are in-process agent tools (not MCP) by an earlier KISS
+decision — so *where* the enforcement point sits (a policy middleware at the in-process tool
+boundary vs. moving protected tools behind an authz'd MCP server) is an open architectural
+choice, left for a follow-up rather than pre-judged here. Token validation itself (JWKS/OBO)
+also waits for the live tenant. This increment adds identity + visibility, not gate-keeping.
