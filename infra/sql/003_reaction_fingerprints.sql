@@ -8,10 +8,13 @@
 -- width requires a matching schema change (a deliberate, rare event).
 CREATE EXTENSION IF NOT EXISTS vector;
 
+-- `definition` records the DRFP parameters that produced `bits` (e.g. `drfp:b2048`); similarity
+-- search filters to one definition so a width change + re-index can't rank incomparable rows (004).
 CREATE TABLE IF NOT EXISTS reaction_fingerprints (
     id         TEXT        PRIMARY KEY,
     label      TEXT        NOT NULL,
     bits       bit(2048)   NOT NULL,
+    definition TEXT        NOT NULL,
     created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 

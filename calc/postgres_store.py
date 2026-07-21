@@ -10,9 +10,11 @@ The DSN comes from the one config source.
 import json
 
 import psycopg
+from psycopg.rows import TupleRow
 from psycopg.types.json import Jsonb
 
 from calc.store import CalculationKey, StoredResult
+from chemclaw import db
 from chemclaw.config import settings
 
 _UPSERT = """
@@ -40,9 +42,22 @@ class PostgresStore:
         """Use the given DSN, or the configured one by default."""
         self._dsn = dsn if dsn is not None else settings.postgres_dsn
 
+    async def _connect(self) -> psycopg.AsyncConnection[TupleRow]:
+        """Open a connection that fails fast, with a clear message, on an unreachable database.
+
+        Delegates to the shared `chemclaw.db.connect`, which applies the configured
+        connect timeout and turns a raw psycopg failure into a "Postgres unreachable at
+        <host>" `ConnectionError` (the bound belongs to the connect, not the activity).
+        Also applies the configured per-statement timeout so a hung query is cancelled
+        rather than pinning the enclosing activity for its whole budget.
+        """
+        return await db.connect(
+            self._dsn, statement_timeout_seconds=settings.pg_statement_timeout_seconds
+        )
+
     async def get(self, key: CalculationKey) -> StoredResult | None:
         """Return the stored result for `key`, or None on a miss."""
-        async with await psycopg.AsyncConnection.connect(self._dsn) as conn:
+        async with await self._connect() as conn:
             async with conn.cursor() as cur:
                 await cur.execute(_SELECT, (key.as_str(),))
                 row = await cur.fetchone()
@@ -56,7 +71,7 @@ class PostgresStore:
     async def put(self, stored: StoredResult) -> None:
         """Persist `stored`, overwriting any existing result for its key."""
         key = stored.key
-        async with await psycopg.AsyncConnection.connect(self._dsn) as conn:
+        async with await self._connect() as conn:
             async with conn.cursor() as cur:
                 await cur.execute(
                     _UPSERT,

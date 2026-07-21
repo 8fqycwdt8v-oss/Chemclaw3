@@ -14,10 +14,21 @@ from typing import Literal
 
 import frontmatter
 import yaml
-from pydantic import BaseModel, Field, ValidationError
+from pydantic import BaseModel, Field, ValidationError, field_validator
 
-# [[target]] wikilinks in the body. Targets are note ids; `[[ ... ]]` only.
-_WIKILINK = re.compile(r"\[\[([^\[\]]+)\]\]")
+from chemclaw.errors import ChemclawError
+
+# [[target]] wikilinks in the body. Targets are note ids; `[[ ... ]]` only. Public because
+# the report layer strips the same markup from evidence excerpts — one pattern, no drift.
+WIKILINK = re.compile(r"\[\[([^\[\]]+)\]\]")
+
+# `id` and `type` become file-path segments (`knowledge/<type>/<id>.md`) and a git
+# branch (`note/<id>`) in the PR-gate, and ELN entry ids flow in from external JSON.
+# Constraining them to a plain slug at the model is the traversal/ref-injection
+# barrier: no `/`, no leading `.`, nothing git or the filesystem could reinterpret.
+# `_` is included because BO note ids embed registry objective names (e.g.
+# `bo-reizman_suzuki-<sha>`).
+_SLUG = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")
 
 
 class Note(BaseModel):
@@ -30,6 +41,30 @@ class Note(BaseModel):
 
     id: str = Field(min_length=1)
     type: str = Field(min_length=1)
+
+    @field_validator("id", "type")
+    @classmethod
+    def _slug_only(cls, value: str) -> str:
+        """Reject path/ref metacharacters — see the `_SLUG` rationale above.
+
+        A few git ref rules the character class alone does not cover are refused
+        explicitly (defense in depth), because the slug becomes the `note/<id>`
+        branch in the PR-gate: `..` (an invalid ref component, e.g. `a..b`), a
+        trailing `.`, and a `.lock` suffix — git rejects all three, so an id that
+        passed the schema would otherwise only fail later at branch creation.
+        """
+        if (
+            ".." in value
+            or value.endswith(".")
+            or value.endswith(".lock")
+            or not _SLUG.fullmatch(value)
+        ):
+            raise ValueError(
+                f"{value!r} is not a safe note slug (allowed: {_SLUG.pattern}; "
+                "no '..', trailing '.', or '.lock' suffix)"
+            )
+        return value
+
     compound_smiles: str | None = None
     tags: list[str] = Field(default_factory=list)
     created_by: Literal["human", "agent"] = "human"
@@ -46,14 +81,14 @@ class Note(BaseModel):
         same target twice yields one edge.
         """
         ordered: dict[str, None] = {}
-        for match in _WIKILINK.findall(self.body):
+        for match in WIKILINK.findall(self.body):
             target = match.strip()
             if target:
                 ordered.setdefault(target, None)
         return list(ordered)
 
 
-class NoteError(ValueError):
+class NoteError(ChemclawError):
     """A note file could not be parsed or failed schema validation."""
 
 

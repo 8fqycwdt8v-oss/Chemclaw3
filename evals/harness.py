@@ -18,6 +18,7 @@ import yaml
 from pydantic import BaseModel, Field, ValidationError
 
 from chemclaw.config import settings
+from chemclaw.errors import ChemclawError
 from evals.metric import EvalCase, get_metric
 
 
@@ -43,7 +44,7 @@ class EvalReport(BaseModel):
         return [r for r in self.results if r.passed is False]
 
 
-class EvalCaseError(ValueError):
+class EvalCaseError(ChemclawError):
     """A case file could not be read or is not a valid eval case (G4)."""
 
 
@@ -80,11 +81,16 @@ def load_eval_cases(directory: str) -> list[EvalCase]:
 
     Each file's frontmatter carries `id`, `metrics`, `output`, and optional `reference`
     (the Markdown body is free-form rationale). A malformed file raises `EvalCaseError`
-    naming the path, so a broken case-set fails loudly, not silently (G4).
+    naming the path, so a broken case-set fails loudly, not silently (G4). A missing
+    directory or one with zero cases also raises: an empty case-set would score nothing
+    and let the quality gate pass vacuously.
     """
-    cases: list[EvalCase] = []
-    for path in sorted(Path(directory).glob("*.md")):
-        cases.append(_load_case(path))
+    root = Path(directory)
+    if not root.is_dir():
+        raise EvalCaseError(f"eval case directory {directory!r} does not exist")
+    cases = [_load_case(path) for path in sorted(root.glob("*.md"))]
+    if not cases:
+        raise EvalCaseError(f"no eval cases found in {directory!r} — empty case-set")
     return cases
 
 
@@ -129,7 +135,8 @@ def main() -> int:
     Run as `python -m evals.harness [case_dir] [version]`. This prints the report for
     humans; regression gating (which case must pass/fail) is pinned by the test suite,
     so a demonstration case that is expected to fail its gate does not fail the CLI.
-    Returns non-zero only when the case-set cannot be loaded (a broken case-set, G4).
+    Returns non-zero when the case-set cannot be loaded or scored (missing, empty, or
+    broken — G4), so a vacuous or unscorable run never exits green.
     """
     case_dir = sys.argv[1] if len(sys.argv) > 1 else settings.eval_case_dir
     version = sys.argv[2] if len(sys.argv) > 2 else "unversioned"

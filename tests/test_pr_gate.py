@@ -7,19 +7,9 @@ from pathlib import Path
 import pytest
 
 from kg.note import Note, parse_note
-from kg.pr_gate import NoteSubmission, propose_note
+from kg.pr_gate import propose_note
 from kg.render import render_note
-
-
-class _FakeSubmitter:
-    """Records submissions instead of touching git, and returns a stub PR ref."""
-
-    def __init__(self) -> None:
-        self.submissions: list[NoteSubmission] = []
-
-    async def submit(self, submission: NoteSubmission) -> str:
-        self.submissions.append(submission)
-        return f"pr://{submission.branch}"
+from tests.conftest import FakeSubmitter
 
 
 def test_render_round_trips(tmp_path: Path) -> None:
@@ -50,7 +40,7 @@ def test_gate_submits_agent_note() -> None:
         source="qm",
         body="Energy computed for [[compound-x]].",
     )
-    fake = _FakeSubmitter()
+    fake = FakeSubmitter()
     ref = asyncio.run(propose_note(note, fake, knowledge_dir="knowledge"))
 
     assert ref == "pr://note/job-123"
@@ -66,4 +56,4 @@ def test_gate_rejects_human_note() -> None:
     """Human-authored notes are committed directly, not gated (G6/D-005)."""
     note = Note(id="manual", type="compound")  # created_by defaults to human
     with pytest.raises(ValueError, match="agent-authored"):
-        asyncio.run(propose_note(note, _FakeSubmitter()))
+        asyncio.run(propose_note(note, FakeSubmitter()))

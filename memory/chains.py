@@ -11,12 +11,16 @@ ordered so the narrative reads reactant→product. Pure and deterministic — no
 import networkx as nx
 from pydantic import BaseModel
 
-from eln.chem import canonical_smiles
+from chemclaw.chem import canonical_smiles
 from eln.ord import OrdReaction, Role
 
 
 class ChainLink(BaseModel):
-    """One causal edge: `from_reaction`'s product is `to_reaction`'s reactant."""
+    """One causal handoff: `from_reaction`'s product is `to_reaction`'s reactant.
+
+    A reaction pair sharing several compounds yields one link per compound, so no
+    handoff evidence is lost.
+    """
 
     from_reaction: str
     to_reaction: str
@@ -50,23 +54,31 @@ def _reactant_inputs(reaction: OrdReaction) -> set[str]:
 def detect_chains(reactions: list[OrdReaction]) -> list[Chain]:
     """Return the reaction chains (>=2 linked reactions), each topologically ordered.
 
-    An edge A→B is drawn when a product of A is a reactant of B. Chains are the weakly
-    connected components of the resulting graph; singletons (unlinked reactions) are not
-    campaigns and are omitted. Results are sorted by first reaction id for determinism.
+    An edge A→B is drawn when a product of A is a reactant of B; when several compounds
+    are shared, the edge carries them all (one `ChainLink` each). Linking goes through a
+    compound → consuming-reactions index, so it is O(n·k) in reactions n and consumers
+    per compound k — not all-pairs O(n²). Chains are the weakly connected components of
+    the resulting graph; singletons (unlinked reactions) are not campaigns and are
+    omitted. Results are sorted by first reaction id for determinism.
     """
     graph: nx.DiGraph = nx.DiGraph()
     for reaction in reactions:
         graph.add_node(reaction.reaction_id)
     products = {r.reaction_id: _products(r) for r in reactions}
-    reactants = {r.reaction_id: _reactant_inputs(r) for r in reactions}
 
-    for producer in reactions:
-        for consumer in reactions:
-            if producer.reaction_id == consumer.reaction_id:
-                continue
-            shared = products[producer.reaction_id] & reactants[consumer.reaction_id]
-            for compound in shared:
-                graph.add_edge(producer.reaction_id, consumer.reaction_id, via=compound)
+    consumers: dict[str, list[str]] = {}  # compound → reactions consuming it as reactant
+    for reaction in reactions:
+        for compound in _reactant_inputs(reaction):
+            consumers.setdefault(compound, []).append(reaction.reaction_id)
+
+    for producer_id, produced in products.items():
+        for compound in sorted(produced):  # sorted → deterministic via ordering
+            for consumer_id in consumers.get(compound, []):
+                if consumer_id == producer_id:
+                    continue
+                if not graph.has_edge(producer_id, consumer_id):
+                    graph.add_edge(producer_id, consumer_id, via=[])
+                graph.edges[producer_id, consumer_id]["via"].append(compound)
 
     chains: list[Chain] = []
     for component in nx.weakly_connected_components(graph):
@@ -76,8 +88,9 @@ def detect_chains(reactions: list[OrdReaction]) -> list[Chain]:
         is_acyclic = nx.is_directed_acyclic_graph(subgraph)
         ordering = list(nx.topological_sort(subgraph)) if is_acyclic else sorted(subgraph.nodes())
         links = [
-            ChainLink(from_reaction=u, to_reaction=v, via_compound=data["via"])
+            ChainLink(from_reaction=u, to_reaction=v, via_compound=compound)
             for u, v, data in subgraph.edges(data=True)
+            for compound in data["via"]
         ]
         chains.append(Chain(reaction_ids=ordering, links=links, ordered=is_acyclic))
     chains.sort(key=lambda c: c.reaction_ids[0])

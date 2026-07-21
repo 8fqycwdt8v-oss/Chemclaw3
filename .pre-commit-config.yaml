@@ -15,7 +15,10 @@ repos:
         types: [python]
       - id: mypy
         name: mypy (strict)
-        entry: uv run mypy chemclaw agents bo calc kg workflows workers tests
+        # Invoke the Makefile target so the checked package set is the single source of
+        # truth shared with CI — a narrower hook list used to let a type regression in
+        # eln/evals/mcp_servers/memory/report/scripts pass pre-commit but fail CI.
+        entry: make type
         language: system
         types: [python]
         pass_filenames: false

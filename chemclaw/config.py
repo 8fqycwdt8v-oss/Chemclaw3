@@ -16,10 +16,26 @@ here — no speculative "for later" settings. New phases add their own fields wh
 the first real consumer lands.
 """
 
+import os
+import sys
 from typing import Literal
 
-from pydantic import Field
+from pydantic import BaseModel, Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+
+class McpServerSpec(BaseModel):
+    """Launch spec for one stdio MCP server the agent attaches as a capability (D-029).
+
+    `command` + `args` are how MAF's `MCPStdioTool` spawns the server as a subprocess;
+    `allowed_tools` restricts which of that server's tools the conversational agent may call
+    (the write/index tools are excluded — ingestion writes go through the PR-gate, not chat).
+    """
+
+    name: str
+    command: str
+    args: list[str]
+    allowed_tools: list[str] | None = None
 
 
 class Settings(BaseSettings):
@@ -37,9 +53,24 @@ class Settings(BaseSettings):
         extra="forbid",
     )
 
-    # Deployment context. Kept free-form (dev/ci/staging/prod) rather than an
-    # enum so ops can name environments without a code change.
-    app_env: str = "dev"
+    # Logging / observability. One config-driven switch for verbosity so an admin can raise
+    # it to DEBUG for troubleshooting without touching code; the format carries the timestamp,
+    # level, and logger name every diagnosis needs. Applied once per process by
+    # `chemclaw.logging.configure_logging`, called at each worker's entrypoint.
+    log_level: str = "INFO"
+    log_format: str = "%(asctime)s %(levelname)s %(name)s: %(message)s"
+    # GxP tool-audit trail (agents.audit): every agent tool call is logged once (name, args,
+    # outcome, latency) by one MAF function middleware. Arguments are truncated to this many
+    # characters so a large payload (a full optimization problem, an observation list) cannot
+    # flood the log; raise it when a fuller argument record is needed for an audit.
+    agent_audit_max_arg_chars: int = Field(default=200, ge=0)
+    # OpenTelemetry export (off by default). When enabled, `chemclaw.logging.configure_telemetry`
+    # calls MAF's `configure_otel_providers`, which reads the standard `OTEL_EXPORTER_OTLP_*`
+    # environment variables for the collector endpoint. Requires the OpenTelemetry SDK + OTLP
+    # exporter extras to be installed; `enable_sensitive_data` controls whether prompts/results
+    # are attached to spans (keep off unless a trusted collector needs them).
+    otel_enabled: bool = False
+    otel_include_sensitive_data: bool = False
 
     # Temporal — durable execution of long scientific jobs (plan Phase 1).
     # `address` is the frontend gRPC endpoint; `namespace` isolates a team's jobs.
@@ -55,20 +86,28 @@ class Settings(BaseSettings):
     # Postgres/pgvector — fingerprint store (Phase 3) and QM result cache
     # (plan step 1.10). One DSN for the whole app.
     postgres_dsn: str = "postgresql://chemclaw:chemclaw@localhost:5432/chemclaw"
+    # Fail fast when the database is unreachable instead of hanging until the
+    # enclosing activity's start-to-close timeout expires (libpq connect_timeout).
+    pg_connect_timeout_seconds: int = Field(default=10, gt=0)
+    # Per-statement wall-clock bound for the store connections (libpq
+    # statement_timeout). A hung query is cancelled after this instead of consuming
+    # the whole enclosing activity's start-to-close budget. 0 disables it; migrations
+    # deliberately connect without a statement timeout (an index build may be slow).
+    pg_statement_timeout_seconds: float = Field(default=30.0, ge=0)
 
     # QM job timeouts and mock-HPC timing (plan steps 1.2–1.4). Times are in
     # seconds. The "mock_*" values only shape the simulated HPC job's duration
     # so the durable path is observable; they vanish when a real backend lands.
-    qm_activity_timeout_seconds: float = 30.0
+    qm_activity_timeout_seconds: float = Field(default=30.0, gt=0)
     # Heartbeat timeout for the long-running poll: if a worker dies, Temporal
     # waits at most this long before retrying the activity on another worker.
-    qm_poll_heartbeat_timeout_seconds: float = 10.0
+    qm_poll_heartbeat_timeout_seconds: float = Field(default=10.0, gt=0)
     # How often the poll loop heartbeats / re-checks the (mock) scheduler. Must be
     # positive — a zero interval would make the poll loop never advance.
     hpc_poll_interval_seconds: float = Field(default=2.0, gt=0)
     # Simulated submission latency and total run time of the mock HPC job.
-    hpc_mock_submit_seconds: float = 1.0
-    hpc_mock_run_seconds: float = 6.0
+    hpc_mock_submit_seconds: float = Field(default=1.0, gt=0)
+    hpc_mock_run_seconds: float = Field(default=6.0, gt=0)
 
     # xTB semiempirical calculator (plan step 1c.2). Method is the GFN parametrization
     # (latest: GFN2-xTB). `xtb_embed_seed` fixes RDKit 3D embedding so results are
@@ -85,10 +124,13 @@ class Settings(BaseSettings):
     pka_calibration_slope: float = 0.28733
     pka_calibration_intercept: float = -29.3116
     pka_uncertainty: float = 1.6
+    # Reported log-S RMSE of the Reizman-descriptor solubility model (calc step 1c.3):
+    # model uncertainty attached to every prediction, config like `pka_uncertainty`.
+    solubility_rmse_log: float = 0.75
 
     # Durable BO campaign (plan step 1d.4). A single round (BoFire propose + evaluate)
     # can be slow, so activities get a generous start-to-close budget.
-    bo_activity_timeout_seconds: float = 300.0
+    bo_activity_timeout_seconds: float = Field(default=300.0, gt=0)
     # Seed for BoFire's random design + SOBO strategies, so a campaign is reproducible
     # (deterministic seeding + proposals) rather than flaky run-to-run.
     bo_seed: int = 42
@@ -96,11 +138,44 @@ class Settings(BaseSettings):
     # MAF agent (plan step 1.5). `agent_model` is the orchestration model name
     # (ENV-overridable); the provider's API key is read by the chat client from
     # its own env var (e.g. ANTHROPIC_API_KEY), not stored here. `skills_dir` is
-    # where the agent discovers SKILL.md files.
+    # where the agent discovers SKILL.md files — one or more directories, delimited by the
+    # OS path separator (like PATH), so an admin can add a second (e.g. team-private) skills
+    # directory without code changes. Read it through the `skills_dirs` property, never raw.
     agent_model: str = "claude-sonnet-5"
     skills_dir: str = "skills"
+    # MCP capability servers the agent attaches over stdio (the plan's capability layer, D-029):
+    # the agent calls the fingerprint search over the MCP protocol rather than importing it
+    # in-process, so a capability is a running server, not agent code. Adding one is an entry
+    # here (ENV-overridable as JSON), never a change to `build_agent`. Each runs as its own
+    # subprocess launched from the repo root; `allowed_tools` keeps the agent to the read/search
+    # tools (index/write stays in the PR-gated ingestion path, off the conversational agent).
+    mcp_servers: list[McpServerSpec] = [
+        McpServerSpec(
+            name="mcp-molfp",
+            command=sys.executable,
+            args=["-m", "mcp_servers.molfp.server"],
+            allowed_tools=["similar_molecules", "substructure_matches"],
+        ),
+        McpServerSpec(
+            name="mcp-rxnfp",
+            command=sys.executable,
+            args=["-m", "mcp_servers.rxnfp.server"],
+            allowed_tools=["similar_reactions"],
+        ),
+    ]
+    # Conversation context management (MAF compaction). The agent keeps a session thread and
+    # composes tool calls that return large payloads (evidence sweeps, full ELN recipes), so a
+    # long chat would grow unbounded. Compaction runs only when the included context exceeds
+    # `agent_context_token_budget` (measured with a char/4 estimator — no external tokenizer),
+    # then reclaims tokens cheapest-first: collapse stale tool-result dumps to a short trace
+    # (keeping the newest `agent_keep_last_tool_groups` verbatim), then drop older conversation
+    # turns beyond `agent_keep_last_conversation_groups`. System instructions/skills are always
+    # kept. No LLM summarizer — deterministic and credential-free.
+    agent_context_token_budget: int = Field(default=100_000, ge=1)
+    agent_keep_last_tool_groups: int = Field(default=2, ge=0)
+    agent_keep_last_conversation_groups: int = Field(default=12, ge=1)
 
-    # MAF Agent Harness (docs/harness-konzept.md). Off by default: the harness API is
+    # MAF Agent Harness (docs/harness-konzept.md, D-038). Off by default: the harness API is
     # experimental (agent-framework-core 1.11), so the classic `Agent` stays the tested
     # default and `harness_enabled` is the one switch to the plan/execute backbone. When
     # on, the agent gets a self-managed todo list (TodoProvider) + plan/execute mode
@@ -124,10 +199,31 @@ class Settings(BaseSettings):
     # branch on this remote before a human merges.
     note_base_branch: str = "main"
     git_remote: str = "origin"
+    # The checkout the GitNoteSubmitter mutates (`git checkout -B` switches its whole
+    # working tree). Point it at a dedicated clone of the knowledge repo in production;
+    # the "." default only suits a dev checkout with nothing else running in it.
+    note_repo_dir: str = "."
     # Publishing a QM result as a graph note is best-effort: bounded attempts + its
     # own timeout so a persistent failure gives up instead of retrying forever.
     note_write_timeout_seconds: float = Field(default=120.0, gt=0)
     note_write_max_attempts: int = Field(default=3, ge=1)
+    # Wall-clock bound on a single git command in the PR-gate submitter. A hung
+    # fetch/push (dead remote, credential prompt) is killed after this, so it can
+    # never deadlock the process-wide submit lock; the failed activity then retries.
+    git_command_timeout_seconds: float = Field(default=60.0, gt=0)
+
+    # Bound on retries for ordinary activities under the shared bad-data retry policy
+    # (`workflows.publish.BAD_DATA_RETRY`). Bad data is non-retryable by type; this caps
+    # the *transient* retries so an unclassified deterministic failure (a bug, not a
+    # network blip) gives up instead of pinning a worker with unlimited retries.
+    activity_max_attempts: int = Field(default=5, ge=1)
+
+    # How long a confirmed-answer note is held pending a human Yes/No before the
+    # hold expires unpublished (plan step 5.5, async approval seam). The button click
+    # is a Temporal signal into `InteractionApprovalWorkflow`; this bounds the wait so
+    # an unanswered prompt cannot pin a workflow forever. Default 7 days — generous for
+    # an out-of-band review, still finite.
+    interaction_approval_timeout_seconds: float = Field(default=604800.0, gt=0)
 
     # Evaluation & metric layer (plan Phase 2b). A metric is a pure function; its
     # pass/fail threshold is config, never hardcoded (G3). The green-chemistry
@@ -144,8 +240,14 @@ class Settings(BaseSettings):
     eval_prediction_tolerance: float = 1.0
     # Noise floor for the per-task tool-utility A/B (plan step 2b.4): a metric delta
     # within +/- this magnitude counts as "no effect", so tool augmentation is only
-    # credited (or blamed) for changes above measurement noise. Set per metric.
-    eval_ab_epsilon: float = 0.0
+    # credited (or blamed) for changes above measurement noise. One global scalar —
+    # a comparison does not know which metric produced its scores, so set it to the
+    # noisiest metric's floor (per-metric floors need a per-metric parameter first).
+    # The default is a small floating-point floor so runs differing only by rounding
+    # register as "no effect" (a 0.0 default made *every* non-exact-tie helped/hurt,
+    # defeating the band); raise it to the actual measurement noise of the metric a
+    # given case-set exercises.
+    eval_ab_epsilon: float = Field(default=1e-6, ge=0.0)
 
     # Fingerprint search (plan Phase 3, mcp-molfp). ECFP4 = Morgan radius 2, 2048 bits;
     # both are config so the fingerprint definition (and thus the stored column width)
@@ -167,12 +269,87 @@ class Settings(BaseSettings):
     # PR-gate work. ELN-specific format lives only in the adapter, never in config (G6).
     eln_export_dir: str = "eln/exports"
     eln_sync_timeout_seconds: float = Field(default=300.0, gt=0)
+    # A second concrete adapter reads native Open Reaction Database messages (human-readable
+    # ORD JSON) from this directory — the "structured recipe" path, alongside the free-text
+    # JSON export above. Same `ElnAdapter` contract, so both flow through the one sync loop.
+    ord_export_dir: str = "eln/exports/ord"
+    # Which registered ELN adapter the durable sync ingests from (a key of `eln.registry`'s
+    # `ELN_ADAPTERS`: "json" for the free-text export, "ord" for native ORD). The sync tracks
+    # one high-water cursor, so it runs a single source; switching source is this setting, not
+    # a code change. (The memory jobs read the union of all registered adapters instead.)
+    eln_sync_adapter: str = "json"
+
+    # Temporal Schedules that drive the periodic background jobs (`scripts/schedules.py`,
+    # applied by `make schedules-apply`). Intervals in minutes: how often each workflow fires
+    # on the background queue. Schedules live in Temporal (durability there, not host cron).
+    # The ELN sync is self-cursoring (loads/stores its high-water mark in `sync_cursors`), so
+    # its Schedule passes no argument; the memory-synthesis jobs re-scan the whole corpus, so
+    # they run less often. Overridable so a deployment tunes cadence without code change.
+    eln_sync_schedule_minutes: float = Field(default=60.0, gt=0)
+    memory_synthesis_schedule_minutes: float = Field(default=1440.0, gt=0)
 
     # Memory layers (plan Phase 5). The semantic layer distils a playbook only from reactions
     # whose DRFP similarity clears this floor and that recur across >=2 projects — higher than
     # the search floor, since a playbook claims "same transformation", not just "related".
     playbook_similarity_threshold: float = Field(default=0.5, ge=0.0, le=1.0)
+    # The episodic layer groups an *optimization campaign* — repeated runs of the **same
+    # transformation** (a screen varying conditions/reagents) — by DRFP similarity. Higher than
+    # the playbook floor: an optimization series is the same reaction re-run, not merely related
+    # chemistry, so the grouping must be tight to avoid merging distinct transformations.
+    optimization_similarity_threshold: float = Field(default=0.7, ge=0.0, le=1.0)
     memory_job_timeout_seconds: float = Field(default=300.0, gt=0)
+
+    # Report harness (plan Phase 5b). Per-section retrieval budget for the durable
+    # development-report workflow — one section is one activity, so a long report resumes
+    # section by section after a worker restart.
+    report_section_timeout_seconds: float = Field(default=300.0, gt=0)
+    # How much of a source note's body an excerpt carries — shared by the report harness's
+    # evidence excerpts and the memory layer's procedure excerpts (one note-excerpt budget,
+    # neutral name since both consume it), so the two cannot drift.
+    note_excerpt_chars: int = Field(default=240, gt=0)
+    # Cap on how many evidence chunks `gather_evidence` hands the agent in one sweep, so a
+    # broad question over a large corpus fills only as much context as it needs (the agent
+    # narrows the query or drills in with expand_note when the sweep is truncated).
+    gather_evidence_max_chunks: int = Field(default=40, ge=1)
+
+    @property
+    def skills_dirs(self) -> list[str]:
+        """The skills directories, split on the OS path separator (like PATH), empties dropped.
+
+        `FileSkillsSource` takes a list of directories; keeping the config a single delimited
+        string (rather than a JSON list) means an admin sets `CHEMCLAW_SKILLS_DIR=skills:/opt/
+        team-skills` the same way they set `PATH`, no JSON quoting.
+        """
+        return [d for d in self.skills_dir.split(os.pathsep) if d]
+
+    @model_validator(mode="after")
+    def _knowledge_dir_is_relative(self) -> "Settings":
+        """`knowledge_dir` must be relative to the note repo, never an absolute path.
+
+        The PR-gate builds a note path as `Path(note_repo_dir) / knowledge_dir / …`. An
+        absolute `knowledge_dir` would make `Path.__truediv__` discard `note_repo_dir`,
+        so the write would land outside the repo — the containment check then fails the
+        submit, confusingly. Reject it at startup where the message is clear instead.
+        """
+        if os.path.isabs(self.knowledge_dir):
+            raise ValueError(
+                f"knowledge_dir must be relative to note_repo_dir, "
+                f"got absolute {self.knowledge_dir!r}"
+            )
+        return self
+
+    @model_validator(mode="after")
+    def _poll_faster_than_heartbeat(self) -> "Settings":
+        """The poll loop must beat faster than Temporal's heartbeat timeout.
+
+        Otherwise every `poll_hpc_status` activity is declared dead between two
+        heartbeats and retried in a loop — a mis-set interval must fail at startup.
+        """
+        if self.hpc_poll_interval_seconds >= self.qm_poll_heartbeat_timeout_seconds:
+            raise ValueError(
+                "hpc_poll_interval_seconds must be smaller than qm_poll_heartbeat_timeout_seconds"
+            )
+        return self
 
 
 settings = Settings()

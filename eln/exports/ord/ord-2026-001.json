@@ -1,0 +1,63 @@
+{
+  "reaction_id": "ord-2026-001",
+  "identifiers": [
+    {"type": "REACTION_SMILES", "value": "CCO.CC(=O)O>>CCOC(C)=O"}
+  ],
+  "inputs": {
+    "ethanol": {
+      "addition_order": 1,
+      "components": [
+        {
+          "identifiers": [{"type": "SMILES", "value": "CCO"}],
+          "reaction_role": "REACTANT",
+          "amount": {"mass": {"value": 0.46, "units": "GRAM"}}
+        }
+      ]
+    },
+    "acetic_acid": {
+      "addition_order": 2,
+      "addition_time": {"value": 30, "units": "MINUTE"},
+      "components": [
+        {
+          "identifiers": [{"type": "SMILES", "value": "CC(=O)O"}],
+          "reaction_role": "REACTANT",
+          "amount": {"mass": {"value": 600, "units": "MILLIGRAM"}}
+        },
+        {
+          "identifiers": [{"type": "SMILES", "value": "OS(=O)(=O)O"}],
+          "reaction_role": "CATALYST",
+          "amount": {"moles": {"value": 0.1, "units": "MILLIMOLE"}}
+        }
+      ]
+    }
+  },
+  "conditions": {
+    "temperature": {"setpoint": {"value": 80, "units": "CELSIUS"}}
+  },
+  "workups": [
+    {"type": "TEMPERATURE", "details": "Cool to room temperature", "temperature": {"setpoint": {"value": 20, "units": "CELSIUS"}}},
+    {"type": "ADDITION", "details": "Quench with saturated NaHCO3", "input": {"components": [{"identifiers": [{"type": "SMILES", "value": "O"}], "reaction_role": "WORKUP"}]}},
+    {"type": "EXTRACTION", "details": "Extract into ethyl acetate", "keep_phase": "ORGANIC"},
+    {"type": "DISTILLATION", "details": "Distill to isolate ethyl acetate", "temperature": {"setpoint": {"value": 77, "units": "CELSIUS"}}}
+  ],
+  "outcomes": [
+    {
+      "products": [
+        {
+          "identifiers": [{"type": "SMILES", "value": "CCOC(C)=O"}],
+          "reaction_role": "PRODUCT",
+          "measurements": [{"type": "YIELD", "percentage": {"value": 85}}]
+        }
+      ]
+    }
+  ],
+  "notes": {
+    "procedure_details": "Charge ethanol to the reactor. Add acetic acid and a catalytic amount of sulfuric acid over 30 min. Heat to 80 C and hold for 3 h. Cool to room temperature, quench with saturated NaHCO3, extract into ethyl acetate, and distill to isolate the product in 85% yield."
+  },
+  "provenance": {
+    "record_created": {
+      "time": {"value": "2026-03-10T09:00:00Z"},
+      "person": {"name": "chemist-c"}
+    }
+  }
+}

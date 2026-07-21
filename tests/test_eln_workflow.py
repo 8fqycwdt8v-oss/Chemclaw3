@@ -15,26 +15,25 @@ from temporalio.worker import Worker
 
 import workflows.eln_sync as eln_sync
 from chemclaw.config import settings
-from kg.pr_gate import NoteSubmission
 from mcp_servers.fpstore import InMemoryFingerprintStore
+from tests.conftest import FakeSubmitter
 from tests.temporal_env import pydantic_client, start_env_or_skip
-from workflows.eln_sync import ElnSyncWorkflow, sync_eln_entries
+from workflows.eln_sync import (
+    ElnSyncWorkflow,
+    load_sync_cursor,
+    store_sync_cursor,
+    sync_eln_entries,
+)
 
 
 def test_eln_sync_workflow_ingests_seed_corpus(monkeypatch: pytest.MonkeyPatch) -> None:
     """The workflow ingests every seed ELN entry and reports them, durably."""
-    captured: list[NoteSubmission] = []
-
-    class _Fake:
-        async def submit(self, submission: NoteSubmission) -> str:
-            captured.append(submission)
-            return f"pr://{submission.branch}"
-
+    fake = FakeSubmitter()
     reaction_store = InMemoryFingerprintStore()
     molecule_store = InMemoryFingerprintStore()
     monkeypatch.setattr(eln_sync, "_reaction_store", lambda: reaction_store)
     monkeypatch.setattr(eln_sync, "_molecule_store", lambda: molecule_store)
-    monkeypatch.setattr(eln_sync, "default_submitter", lambda: _Fake())
+    monkeypatch.setattr(eln_sync, "default_submitter", lambda: fake)
 
     async def _run() -> None:
         async with await start_env_or_skip() as env:
@@ -54,7 +53,7 @@ def test_eln_sync_workflow_ingests_seed_corpus(monkeypatch: pytest.MonkeyPatch) 
         # The seed corpus (eln/exports) has two valid reactions.
         assert set(summary.ingested) == {"eln-2026-001", "eln-2026-002"}
         assert summary.rejected == []
-        assert len(captured) == 2  # both proposed a reaction note
+        assert len(fake.submissions) == 2  # both proposed a reaction note
         assert len(await reaction_store.all_records()) == 2
 
     asyncio.run(_run())
@@ -66,4 +65,8 @@ def test_background_worker_registers_eln_sync() -> None:
 
     assert ElnSyncWorkflow in BACKGROUND_WORKFLOWS
     assert sync_eln_entries in BACKGROUND_ACTIVITIES
+    # The self-cursoring activities must be registered too, or a scheduled (no-`since`) run
+    # would fail to load/store its high-water mark.
+    assert load_sync_cursor in BACKGROUND_ACTIVITIES
+    assert store_sync_cursor in BACKGROUND_ACTIVITIES
     assert settings.background_task_queue  # the queue the sync runs on

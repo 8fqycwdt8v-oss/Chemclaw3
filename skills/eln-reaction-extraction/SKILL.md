@@ -14,6 +14,17 @@ are deterministic code; this skill governs the one place discretion is needed �
 reaction *conditions and structures from free text* — and the discipline that keeps bad data
 out of the graph.
 
+## Two ingestion paths, one canonical schema
+
+- **Structured ORD** (`eln.ord_adapter`): native Open Reaction Database messages already carry
+  the recipe — ordered `inputs` (with `addition_order`/`addition_time`), `conditions`, and a
+  `workups[]` sequence — so the adapter maps them to **component-linked** steps deterministically.
+  Nothing here is a guess; trust the structure.
+- **Free text** (`eln.json_adapter`): a detailed procedure is segmented into ordered `steps`
+  and the prose is kept verbatim (`procedure_text`). Segmentation labels each step with a
+  coarse `StepKind` and reads per-step temperature/time by regex. It deliberately does **not**
+  link a SMILES to a free-text step — that is the one place judgment (below) is needed.
+
 ## Deterministic first, LLM only per field
 
 - **Prefer structured fields.** If the ELN records `temperature_c`, `time_h`, a component

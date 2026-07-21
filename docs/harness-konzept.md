@@ -266,9 +266,10 @@ Analog zum `implementation-plan.md`: kleine, einzeln abnehmbare Schritte, jeder 
   hält die Loop interaktiv. *Offen:* Live-Erprobung des Freigabe-Übergangs mit echtem Modell.
 - **H3 — Gebundene Execute-Loop mit `awaiting`-Muster. (Loop erledigt, `awaiting` offen)** Die
   Execute-Loop ist verdrahtet und hart begrenzt (`harness_max_loop_iterations`, getestet). Die
-  Drei-Zustands-Kopplung an den `notify_agent`-Callback (§4) ist **Folgearbeit** und hängt am
-  noch-Stub-Callback (Plan 1.7) — heute bleibt das Fire-and-Forget-Verhalten wie gehabt (der
-  Agent meldet die `job_id` und fährt fort), der durable Job liegt ohnehin sicher in Temporal.
+  Drei-Zustands-Kopplung (§4) ist **Folgearbeit** — der natürliche Anschluss ist inzwischen die
+  durable Approval-/Resume-Mechanik (D-032/D-035) statt eines Callback-Stubs. Heute bleibt das
+  Fire-and-Forget-Verhalten wie gehabt (der Agent meldet die `job_id` und fährt fort), der
+  durable Job liegt ohnehin sicher in Temporal.
 - **H4 — Autonomie hinter RBAC (mit/nach Phase 6). (offen)** Feinere Autonomiestufen + harte
   Auslöse-Autorisierung landen im MCP-Server (§6/§8), nicht im Agenten. *Abnahme:* unberechtigter
   Nutzer kann teure Pfade auch autonom nicht auslösen; `oid` im Trail vollständig.
@@ -282,22 +283,24 @@ Analog zum `implementation-plan.md`: kleine, einzeln abnehmbare Schritte, jeder 
 
 ## 11. Ersetzt der Harness die graph-basierten Ansätze? — Nein.
 
-Kurzantwort: **Der Harness ersetzt weder Temporal noch die (geplanten) MAF-Graph-Workflows —
-er ist ein dritter, komplementärer Baustein.** Wichtig für die Einordnung: Im Repo existiert
-**heute gar kein** MAF-Graph-Workflow-Code. Alles unter `workflows/` sind **Temporal**-Workflows
-(`qm_job`, `bo_campaign`, `eln_sync`, `memory_jobs`, …); der einzige geplante MAF-Graph-Workflow
-ist der `development-report` (Plan 5b.5) und ist noch nicht gebaut. Es wird also aktuell *nichts*
-im Code ersetzt.
+Kurzantwort: **Der Agent-Harness ersetzt weder Temporal noch die graph-/pipeline-basierten
+Abläufe — er ist ein dritter, komplementärer Baustein.** Wichtig für die Einordnung: Im Repo
+existiert **kein** MAF-Graph-Workflow-Code. Alles unter `workflows/` sind **Temporal**-Workflows
+(`qm_job`, `bo_campaign`, `eln_sync`, `memory_jobs`, `report_workflow`, …). Der Phase-5b-Report
+(„Report-Harness", D-020 — nicht zu verwechseln mit diesem *Agent*-Harness) wurde als
+quellen-agnostischer **Pure-Function-Kern + Temporal-Workflow** gebaut, nicht als MAF-Graph.
+Es wird also *nichts* im Code ersetzt.
 
-| Ansatz | Zweck | Verhältnis zum Harness |
+| Ansatz | Zweck | Verhältnis zum Agent-Harness |
 |---|---|---|
 | **Temporal-Workflows** (gebaut) | Durable, lang laufende, deterministisch wiederholbare Ausführung | **Bleibt.** Der Harness ist MAF-intern und *nicht* durable (D-002). Teure/lange Schritte gehen unverändert fire-and-forget an Temporal. Keine Überschneidung. |
-| **MAF-Graph-Workflows** (geplant, 5b.5) | *Feste*, vorverdrahtete, typisierte Kontrollflüsse; strukturell erzwungene Provenienz-Trennung pro Berichtsabschnitt | **Bleibt sinnvoll für feste Abläufe.** Der Graph garantiert reproduzierbare Struktur (GxP-relevant); der Harness plant *offene*, vorab unbekannte Schrittfolgen. Ein dynamischer Plan könnte einen simplen Graphen nachbilden, erzwingt die Sektions-/Provenienz-Struktur aber nur per Instruktion, nicht *strukturell* — schwächer für den Audit. |
+| **Report-Pipeline** (gebaut, 5b — D-020) | *Fester*, deterministischer Synthese-Fluss (decompose → retrieve → verify → cite) mit erzwungener Zitat-Treue | **Bleibt.** Die Pipeline garantiert reproduzierbare Struktur und Belegpflicht (GxP-relevant); der Harness plant *offene*, vorab unbekannte Schrittfolgen. Ein dynamischer Plan erzwingt die Provenienz-/Zitatstruktur nur per Instruktion, nicht *strukturell* — schwächer für den Audit. |
+| **MAF-Graph-Workflows** (nicht gebaut) | *Feste*, vorverdrahtete, typisierte Kontrollflüsse | Nie gebaut — die Rolle „fester Fluss" übernahm die Report-Pipeline. Bleibt eine Option, kein Bestand, der ersetzt werden könnte. |
 
-**Empfehlung (bestätigt aus §12 Q3):** Beim `development-report` den **Graph für die feste
-Berichts-/Provenienz-Struktur** behalten und den **Harness für die offene Recherche je Abschnitt**
-nutzen — sauber getrennt, nicht das eine durch das andere ersetzen. Für *offene* Mehrschritt-
-Anfragen (§5 (a)) ist der Harness der richtige Träger; dort gab es ohnehin nie einen Graphen.
+**Empfehlung:** Die **Pipeline für die feste Berichts-/Provenienz-Struktur** behalten und den
+**Agent-Harness für die offene Recherche** nutzen — sauber getrennt, nicht das eine durch das
+andere ersetzen. Für *offene* Mehrschritt-Anfragen (§5 (a)) ist der Harness der richtige Träger;
+dort gab es ohnehin nie einen Graphen.
 
 Fazit der drei Reasoning-/Ausführungs-Formen nebeneinander: **Temporal** = durable Ausführung ·
 **Graph-Workflow** = feste, deterministische Reasoning-Flüsse · **Harness** = offene, dynamische
@@ -305,7 +308,7 @@ Mehrschritt-Planung. Drei Verantwortlichkeiten, keine Verdrängung.
 
 ## 12. Auswirkung auf DECISIONS / DEFERRED
 
-- **ADR D-020 (gesetzt):** „MAF Agent Harness (TodoProvider + AgentModeProvider) als dritter
+- **ADR D-038 (gesetzt):** „MAF Agent Harness (TodoProvider + AgentModeProvider) als dritter
   Reasoning-Baustein für offene Mehrschritt-Anfragen; strikt MAF-intern, keine neue Durability,
   generische Batterien aus, Fallback auf klassische `Agent`-Konstruktion." — verfeinert D-002
   (Reasoning-Orchestrierung wird *dynamisch*), überstimmt es **nicht** (Durability-Grenze
@@ -315,21 +318,12 @@ Mehrschritt-Planung. Drei Verantwortlichkeiten, keine Verdrängung.
 
 ## 13. Offene Fragen (für den Backlog)
 
-1. `awaiting`-Muster (§4/H3): Kopplung an den `notify_agent`-Callback, sobald dieser nicht mehr
-   Stub ist (Plan 1.7). Wo lebt der MAF-Session-State (Redis vs. Postgres) und wie lang halten
-   pausierte Sessions? (*keine* harte Durability-Anforderung).
+1. `awaiting`-Muster (§4/H3): Kopplung an die inzwischen vorhandene durable Approval-/Resume-
+   Mechanik (D-032/D-035) statt des früheren Callback-Stubs. Wo lebt der MAF-Session-State
+   (Redis vs. Postgres) und wie lang halten pausierte Sessions? (*keine* harte
+   Durability-Anforderung).
 2. Plan-/Loop-Metriken für Schicht 2b (D-009): Plan-Qualität, „hat die Loop geholfen" (A/B),
    Runaway-Rate registrieren.
 3. Plan-Modus-Freigabe + feinere Autonomie hinter RBAC (Phase 6), Autorisierung im MCP-Server.
-4. Verhältnis Harness-Plan ↔ `development-report`-Graph-Workflow (5b.5) konkret ausbauen, sobald
-   der Report-Harness (Phase 5b) gebaut wird (siehe §11).
-
-## 12. Offene Fragen (für den Backlog)
-
-1. Wo lebt der MAF-Session-State konkret (Redis vs. Postgres) und wie lang halten pausierte
-   `awaiting`-Sessions? (berührt §4, aber *keine* harte Durability-Anforderung).
-2. Reicht der Python-`todos_remaining()`-Helfer, oder brauchen wir die .NET-`Loop`-Semantik
-   nachgebaut? (im H0-Spike klären).
-3. Verhältnis Harness-Plan ↔ `development-report`-Graph-Workflow (5b.5): plant der Harness den
-   Graphen, oder ruft der Graph den Harness pro Knoten? (Empfehlung: Graph für die *feste*
-   Berichtsstruktur, Harness für die *offene* Recherche je Abschnitt — sauber getrennt halten).
+4. Verhältnis Agent-Harness ↔ Report-Pipeline (5b, D-020) konkret ausbauen: offene Recherche je
+   Abschnitt durch den Harness, feste Synthese-/Zitatstruktur durch die Pipeline (siehe §11).

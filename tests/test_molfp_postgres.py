@@ -8,28 +8,25 @@ substructure search works over it via the shared, backend-agnostic search functi
 
 import asyncio
 
-import psycopg
 import pytest
 
-from calc.migrate import migrate
 from chemclaw.config import settings
 from mcp_servers.fpstore import PostgresFingerprintStore
+from mcp_servers.molfp.fingerprint import molecule_definition
 from mcp_servers.molfp.search import (
     find_similar_molecules,
     find_substructure_matches,
     record_for,
 )
+from tests.pg import migrated_db_or_skip
 
 
 async def _store_or_skip() -> PostgresFingerprintStore:
     """Return a migrated Postgres fingerprint store, or skip if no database is reachable."""
-    try:
-        conn = await psycopg.AsyncConnection.connect(settings.postgres_dsn)
-        await conn.close()
-    except psycopg.OperationalError as exc:  # pragma: no cover - env-dependent
-        pytest.skip(f"Postgres unavailable (offline sandbox): {exc}")
-    await migrate()
-    return PostgresFingerprintStore("molecule_fingerprints", settings.ecfp_bits)
+    await migrated_db_or_skip()
+    return PostgresFingerprintStore(
+        "molecule_fingerprints", settings.ecfp_bits, molecule_definition()
+    )
 
 
 def test_similarity_ranking_in_sql() -> None:

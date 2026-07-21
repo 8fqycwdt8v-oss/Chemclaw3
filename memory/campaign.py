@@ -10,17 +10,10 @@ transformation sequence and its evidence); the richer prose narrative is the
 `campaign-narrative-synthesis` skill's judgment (per plan 5.3), layered on top, not invented here.
 """
 
-import hashlib
-
 from eln.ord import OrdReaction
 from kg.note import Note
 from memory.chains import Chain
-
-
-def _campaign_id(reaction_ids: list[str]) -> str:
-    """Stable campaign id from its member reactions, so re-synthesis is idempotent."""
-    digest = hashlib.sha256("|".join(sorted(reaction_ids)).encode()).hexdigest()[:12]
-    return f"campaign-{digest}"
+from memory.ids import stable_id
 
 
 def campaign_note_from_chain(chain: Chain, reactions: dict[str, OrdReaction]) -> Note:
@@ -55,7 +48,7 @@ def campaign_note_from_chain(chain: Chain, reactions: dict[str, OrdReaction]) ->
         "Handoffs:\n" + "\n".join(handoffs) + "\n"
     )
     return Note(
-        id=_campaign_id(chain.reaction_ids),
+        id=stable_id("campaign", chain.reaction_ids),
         type="campaign",
         created_by="agent",
         source="memory:chain-detection",

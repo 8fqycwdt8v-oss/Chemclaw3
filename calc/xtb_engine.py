@@ -6,6 +6,8 @@ generation is deterministic via a caller-supplied seed; energies optionally use
 ALPB implicit solvation.
 """
 
+from importlib.metadata import version
+
 import numpy as np
 from rdkit import Chem
 from rdkit.Chem import AllChem
@@ -13,6 +15,18 @@ from tblite.interface import Calculator
 
 # tblite works in atomic units; RDKit geometries are in Angstrom.
 _ANGSTROM_TO_BOHR = 1.8897259886
+
+
+def engine_version() -> str:
+    """The installed tblite build, for embedding in calculation cache keys.
+
+    Every cache key of a calculator that runs this engine (xTB energy, pKa) must
+    include this so an engine upgrade — which can shift energies — is a cache
+    miss, not a silent stale hit (D-011). Adding it to the pKa key invalidated
+    pre-existing pKa entries; that is correct, as those were unversioned and did
+    not record the engine that produced them.
+    """
+    return version("tblite")
 
 
 def parse_molecule(smiles: str) -> Chem.Mol:

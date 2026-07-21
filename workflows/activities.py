@@ -14,6 +14,7 @@ import re
 
 from temporalio import activity
 
+from chemclaw.chem import require_canonical_smiles
 from chemclaw.config import settings
 from workflows.models import HpcJobHandle, QMJobInput, QMJobResult, qm_job_key
 
@@ -28,13 +29,14 @@ _CONVERGED_RE = re.compile(r"converged=(True|False)")
 async def prepare_input(job: QMJobInput) -> QMJobInput:
     """Validate and normalize the request before submission (plan step 1.2).
 
-    Trivial by design (first activity in the spine), but does real work: trims
-    the SMILES and rejects a whitespace-only value, so a malformed request fails
-    fast at the durable boundary rather than deep inside the mock (gate G4).
+    The first activity in the spine and the durable-boundary validation gate (G4):
+    it canonicalizes the SMILES via RDKit, which both rejects a structurally
+    invalid molecule (`InvalidSmilesError`, non-retryable bad data) and normalizes
+    equivalent spellings to one form — so a malformed request fails fast here rather
+    than flowing through the mock into a stored result, and the same molecule always
+    yields the same downstream workflow id / cache key (D-011).
     """
-    smiles = job.molecule_smiles.strip()
-    if not smiles:
-        raise ValueError("molecule_smiles must not be blank")
+    smiles = require_canonical_smiles(job.molecule_smiles)
     return job.model_copy(update={"molecule_smiles": smiles})
 
 

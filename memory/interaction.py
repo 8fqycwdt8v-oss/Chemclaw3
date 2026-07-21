@@ -7,6 +7,7 @@ later retrieval. Any source notes the answer drew on are cited as `[[...]]` back
 """
 
 from kg.note import Note
+from kg.pr_gate import NoteSubmitter, propose_note
 
 
 def note_from_confirmed_answer(
@@ -28,3 +29,24 @@ def note_from_confirmed_answer(
         source="memory:user-interaction",
         body=body,
     )
+
+
+async def propose_confirmed_answer(
+    interaction_id: str,
+    question: str,
+    answer: str,
+    evidence_note_ids: list[str] | None,
+    submitter: NoteSubmitter,
+) -> str:
+    """Build the confirmed-answer note and propose it through the PR-gate.
+
+    The single write path for a captured user answer, shared by the synchronous agent
+    tool (`agents.memory_tools.record_confirmed_answer`) and the durable async-approval
+    workflow (`workflows.interaction_approval`) — so both build the note and open the PR
+    identically (DRY, two real callers). `submitter` is injected so tests fake the PR.
+
+    Returns:
+        The submitter's reference for the opened PR.
+    """
+    note = note_from_confirmed_answer(interaction_id, question, answer, evidence_note_ids)
+    return await propose_note(note, submitter)

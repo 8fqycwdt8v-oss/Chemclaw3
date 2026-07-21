@@ -18,7 +18,7 @@ from bo.problem import (
     ParamValue,
     best_of,
     discrete_candidate_count,
-    distinct_candidate_count,
+    space_exhausted,
 )
 
 # Evaluate a candidate's parameters to its objective value.
@@ -65,7 +65,7 @@ async def optimize(
     for _ in range(n_rounds):
         # A purely discrete space can be exhausted: once too few distinct candidates
         # remain to propose a full batch, stop rather than crash inside BoFire.
-        if space is not None and distinct_candidate_count(history) + batch > space:
+        if space_exhausted(space, history, batch):
             break
         proposed = propose_candidates(problem, history, batch)
         history.extend(await _evaluate(proposed, evaluate, provenance))
