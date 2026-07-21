@@ -135,3 +135,30 @@ recurrence (`memory/playbook.py`, DRFP similarity across ≥2 projects) becomes 
 with mandatory evidence. No new store, table, or queue — only new note types + background jobs on
 the existing background-jobs queue. The LLM narrative/distillation prose stays in the two skills
 (judgment), layered on the deterministic, tested skeletons.
+
+## D-020 — MAF Agent Harness as an optional third reasoning backbone
+The reasoning layer (§1) had two building blocks — plain `Agent` and (planned) MAF graph
+workflows. The installed `agent-framework-core` 1.11 ships a third, the **Agent Harness**
+(`create_harness_agent`): a self-managed todo list (`TodoProvider`) + explicit plan/execute
+mode (`AgentModeProvider`) that lets the agent decompose an open, multi-step request into a
+visible, checkable plan and work through it autonomously. `build_agent` wires it behind
+`harness_enabled` (default off) over the **same** tools and skills; the classic `Agent`
+stays the tested default and the one-switch fallback (the harness API is `[Experimental]`).
+`harness_autonomy` gates the completion loop: `plan_only` stays interactive; `execute` loops
+the agent through its todos but **only in execute mode** (`todos_remaining(looping_modes=
+["execute"])`), so a plan is made — and can be approved — in plan mode first. The loop is hard-
+capped by `harness_max_loop_iterations`.
+
+This **refines D-002, it does not overturn it**: the harness is strictly MAF-internal and holds
+only lightweight conversation state (the todo list); it adds **no** new durability. Long/expensive
+work still hands off fire-and-forget to Temporal, which remains the only durable execution system.
+The generic file-memory/file-access/shell/web-search batteries `create_harness_agent` enables by
+default are turned **off** — Chemclaw's capability is its explicit tools/skills, not a generic
+filesystem or shell (§6, G6).
+
+**Does it replace the graph-based approaches? No.** It replaces neither Temporal (durability) nor
+MAF graph workflows (fixed, deterministic reasoning flows — e.g. the planned `development-report`,
+5b.5, whose per-section provenance separation is enforced *structurally*, which a dynamic plan
+can't guarantee). No MAF graph-workflow code exists yet, so nothing is replaced in code. The three
+are complementary: Temporal = durable execution · graph workflow = fixed deterministic flow ·
+harness = open dynamic multi-step planning. See `docs/harness-konzept.md`.

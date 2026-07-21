@@ -198,20 +198,37 @@ PR-Gate, das *nach* der Wissensproduktion greift (siehe §6).
 
 ## 8. Config & Leitplanken (keine Magic Numbers, G3)
 
-Alles über **eine** `pydantic-settings`-Quelle (`chemclaw/config.py`), ENV-überschreibbar:
+Alles über **eine** `pydantic-settings`-Quelle (`chemclaw/config.py`), ENV-überschreibbar.
+**Implementiert** sind bewusst nur die *tatsächlich konsumierten* Felder (config.py-Disziplin:
+keine „für später"-Settings):
 
-| Setting | Zweck | Default-Idee |
+| Setting | Zweck | Default |
 |---|---|---|
-| `harness_enabled` | Master-Schalter (Fallback: klassischer `Agent`) | `false` bis Spike grün |
-| `harness_max_todos` | Obergrenze Plan-Größe (Schutz vor entarteter Zerlegung) | z. B. 20 |
-| `harness_max_loop_iterations` | Runaway-Loop-Bremse (Kostenkontrolle) | z. B. 15 |
-| `harness_token_budget` | Kappung Tokenverbrauch pro autonomem Lauf | konservativ |
-| `plan_mode_required_for` | Tool-Namen, die Plan-Freigabe erzwingen | teure/durable Tools |
-| `autonomy_level` | `plan_only` \| `approve_then_execute` \| `full` | `approve_then_execute` |
+| `harness_enabled` | Master-Schalter (Fallback: klassischer `Agent`) | `false` |
+| `harness_autonomy` | `plan_only` (interaktiv) \| `execute` (Loop im Execute-Modus) | `plan_only` |
+| `harness_max_loop_iterations` | Runaway-Loop-Bremse; greift nur bei `execute` | `15` |
+
+**Bewusst (noch) nicht als Config verdrahtet** — jeweils mit Grund, statt spekulativem Feld:
+- *`max_todos`*: Der `TodoProvider` nimmt keine Obergrenze entgegen; eine künstliche Kappung
+  bräuchte einen eigenen Store-Wrapper (Rule of Three nicht erfüllt) → ausgelassen.
+- *`token_budget`*: Bindet an die Kompaktierungs-Strategie (braucht Tokenizer/Kontextfenster);
+  Kompaktierung ist hier bewusst aus (v1). Kommt, wenn ein realer Kostendruck es misst.
+- *`plan_mode_required_for` (harte Tool-Sperre)*: Die *fachliche Autorisierung* „darf dieser
+  Nutzer diesen teuren Pfad auslösen" gehört laut Architektur an **eine** Stelle — den
+  MCP-Server (§8) — nicht parallel in den Agenten. Bleibt Phase 6, wird hier nicht dupliziert.
 
 **Kill-Switch & Beobachtbarkeit:** `harness_enabled=false` fällt sofort auf das heutige
-Verhalten zurück (der `HarnessAgent` degradiert zum `Agent`). Loop-Iterationen, Plan-Größe und
-`awaiting`-Dauer werden als Metriken exponiert (Schicht 2b), damit Entarten sichtbar wird.
+Verhalten zurück (der Harness-Agent degradiert zur klassischen `Agent`-Konstruktion). Die
+`execute`-Loop ist zusätzlich durch `harness_max_loop_iterations` hart begrenzt
+(`AgentLoopMiddleware.max_iterations`). Loop-/Plan-Metriken für Schicht 2b sind Folgearbeit
+(Backlog).
+
+**Governance-Härtung (implementiert):** Der Harness aktiviert per Default generische
+File-Memory-, File-Access-, Shell- und Web-Search-Werkzeuge — diese sind in `build_agent`
+**abgeschaltet** (`disable_file_memory/…access/…web_search=True`, kein `shell_executor`, keine
+`background_agents`). Chemclaws Fähigkeit ist ihr *expliziter* Tool-/Skill-Satz, kein generischer
+Datei-/Shell-Zugriff (§6, G6). Übrig bleiben genau `TodoProvider` + `AgentModeProvider` über den
+bestehenden Tools/Skills.
 
 ## 9. Reifegrad & Risiken (Caveats, im Stil §15)
 
@@ -233,22 +250,28 @@ Verhalten zurück (der `HarnessAgent` degradiert zum `Agent`). Loop-Iterationen,
 Analog zum `implementation-plan.md`: kleine, einzeln abnehmbare Schritte, jeder mit CHECKMATE
 (G1–G7) und grünem `make lint type test`.
 
-- **H0 — Spike (Risiko zuerst).** `create_harness_agent` mit den *heutigen* Tools/Skills gegen
-  einen In-Memory-Chat-Client hochziehen; API-Stabilität, Session-State-Persistenz und die
-  Python-Loop (`todos_remaining()`) verifizieren. *Abnahme:* ein trivialer Zwei-Schritt-Plan
-  läuft durch; wenn die API zu unreif ist → hier stoppen, ADR „verworfen, Grund X".
-- **H1 — Planung sichtbar, Ausführung read-only.** Harness plant und zeigt die Todo-Liste, führt
-  aber nur **nebenwirkungsfreie** Tools aus (`find_notes`, `compute_xtb_energy` gecached).
-  *Abnahme:* Plan ist sichtbar/überprüfbar; keine teuren/schreibenden Schritte autonom.
-- **H2 — Plan-Modus mit menschlicher Freigabe.** `AgentModeProvider` verdrahten; teure Tools
-  (`plan_mode_required_for`) erfordern Bestätigung vor Execute. *Abnahme:* ohne Freigabe wird
-  `submit_qm_job` nicht ausgelöst.
-- **H3 — Gebundene Execute-Loop mit `awaiting`-Muster.** Die Drei-Zustands-Kopplung an den
-  `notify_agent`-Callback (§4). *Abnahme:* ein Plan mit einem Temporal-Job pausiert korrekt,
-  wird nach Callback fortgesetzt; Worker-Neustart während `awaiting` verliert den Job nicht.
-- **H4 — Autonomie hinter RBAC (mit/nach Phase 6).** `autonomy_level=full` nur für berechtigte
-  Rollen; Audit-Trail pro Todo-Aktion. *Abnahme:* unberechtigter Nutzer kann teure Pfade auch
-  autonom nicht auslösen; `oid` im Trail vollständig.
+- **H0 — Spike (Risiko zuerst). ✅ erledigt.** Verifiziert gegen die *installierte*
+  `agent-framework-core 1.11`: `create_harness_agent` konstruiert **ohne** LLM-Aufruf mit einem
+  Dummy-Client; die Provider sind bei abgeschalteten Batterien exakt `TodoProvider` +
+  `AgentModeProvider` (+ History); die Default-Modi heißen `plan`/`execute`; `todos_remaining(
+  looping_modes=["execute"])` bindet die Loop nativ an den Execute-Modus. API real und stabil
+  genug → weiter (kein „verworfen").
+- **H1 — Planung sichtbar (Backbone verdrahtet). ✅ erledigt.** `build_agent` baut hinter
+  `harness_enabled` den Harness-Agenten über *dieselben* Tools/Skills; Batterien abgeschaltet;
+  klassischer Fallback bleibt Default. Getestet (`tests/test_agent.py`): Backbone-Auswahl,
+  Provider-Set, gleiche Domain-Tools, keine File/Shell-Batterien. *Offen:* echte read-only-Sicht
+  (nebenwirkungsfreie Teilmenge) im Live-Chat beobachten.
+- **H2 — Plan-Modus mit menschlicher Freigabe. (teilweise)** `AgentModeProvider` ist aktiv
+  (`plan`→Freigabe→`execute` ist der Provider-Default-Fluss); `harness_autonomy=plan_only`
+  hält die Loop interaktiv. *Offen:* Live-Erprobung des Freigabe-Übergangs mit echtem Modell.
+- **H3 — Gebundene Execute-Loop mit `awaiting`-Muster. (Loop erledigt, `awaiting` offen)** Die
+  Execute-Loop ist verdrahtet und hart begrenzt (`harness_max_loop_iterations`, getestet). Die
+  Drei-Zustands-Kopplung an den `notify_agent`-Callback (§4) ist **Folgearbeit** und hängt am
+  noch-Stub-Callback (Plan 1.7) — heute bleibt das Fire-and-Forget-Verhalten wie gehabt (der
+  Agent meldet die `job_id` und fährt fort), der durable Job liegt ohnehin sicher in Temporal.
+- **H4 — Autonomie hinter RBAC (mit/nach Phase 6). (offen)** Feinere Autonomiestufen + harte
+  Auslöse-Autorisierung landen im MCP-Server (§6/§8), nicht im Agenten. *Abnahme:* unberechtigter
+  Nutzer kann teure Pfade auch autonom nicht auslösen; `oid` im Trail vollständig.
 
 > **CHECKMATE H** (G1–G7 + Autonomie-Spike): Ist der Harness **eine** gekapselte Erweiterung in
 > `build_agent` (kein Framework-Bau, G1)? Bleibt der teure/lange Pfad **ausschließlich** bei
@@ -257,16 +280,49 @@ Analog zum `implementation-plan.md`: kleine, einzeln abnehmbare Schritte, jeder 
 > (2b) mindestens einen Fall, in dem Plan/Execute real hilft — und einen, in dem es *nicht*
 > hilft (selektiver Einsatz, nicht universell)?
 
-## 11. Auswirkung auf DECISIONS / DEFERRED (Vorschlag, nicht vollzogen)
+## 11. Ersetzt der Harness die graph-basierten Ansätze? — Nein.
 
-- **Neuer ADR D-020 (vorgeschlagen):** „MAF Agent Harness (TodoProvider + AgentModeProvider) als
-  dritter Reasoning-Baustein für offene Mehrschritt-Anfragen; strikt MAF-intern, keine neue
-  Durability, Fallback auf klassischen `Agent`." — verfeinert D-002 (Reasoning-Orchestrierung
-  wird *dynamisch*), überstimmt es **nicht** (Durability-Grenze unverändert).
+Kurzantwort: **Der Harness ersetzt weder Temporal noch die (geplanten) MAF-Graph-Workflows —
+er ist ein dritter, komplementärer Baustein.** Wichtig für die Einordnung: Im Repo existiert
+**heute gar kein** MAF-Graph-Workflow-Code. Alles unter `workflows/` sind **Temporal**-Workflows
+(`qm_job`, `bo_campaign`, `eln_sync`, `memory_jobs`, …); der einzige geplante MAF-Graph-Workflow
+ist der `development-report` (Plan 5b.5) und ist noch nicht gebaut. Es wird also aktuell *nichts*
+im Code ersetzt.
+
+| Ansatz | Zweck | Verhältnis zum Harness |
+|---|---|---|
+| **Temporal-Workflows** (gebaut) | Durable, lang laufende, deterministisch wiederholbare Ausführung | **Bleibt.** Der Harness ist MAF-intern und *nicht* durable (D-002). Teure/lange Schritte gehen unverändert fire-and-forget an Temporal. Keine Überschneidung. |
+| **MAF-Graph-Workflows** (geplant, 5b.5) | *Feste*, vorverdrahtete, typisierte Kontrollflüsse; strukturell erzwungene Provenienz-Trennung pro Berichtsabschnitt | **Bleibt sinnvoll für feste Abläufe.** Der Graph garantiert reproduzierbare Struktur (GxP-relevant); der Harness plant *offene*, vorab unbekannte Schrittfolgen. Ein dynamischer Plan könnte einen simplen Graphen nachbilden, erzwingt die Sektions-/Provenienz-Struktur aber nur per Instruktion, nicht *strukturell* — schwächer für den Audit. |
+
+**Empfehlung (bestätigt aus §12 Q3):** Beim `development-report` den **Graph für die feste
+Berichts-/Provenienz-Struktur** behalten und den **Harness für die offene Recherche je Abschnitt**
+nutzen — sauber getrennt, nicht das eine durch das andere ersetzen. Für *offene* Mehrschritt-
+Anfragen (§5 (a)) ist der Harness der richtige Träger; dort gab es ohnehin nie einen Graphen.
+
+Fazit der drei Reasoning-/Ausführungs-Formen nebeneinander: **Temporal** = durable Ausführung ·
+**Graph-Workflow** = feste, deterministische Reasoning-Flüsse · **Harness** = offene, dynamische
+Mehrschritt-Planung. Drei Verantwortlichkeiten, keine Verdrängung.
+
+## 12. Auswirkung auf DECISIONS / DEFERRED
+
+- **ADR D-020 (gesetzt):** „MAF Agent Harness (TodoProvider + AgentModeProvider) als dritter
+  Reasoning-Baustein für offene Mehrschritt-Anfragen; strikt MAF-intern, keine neue Durability,
+  generische Batterien aus, Fallback auf klassische `Agent`-Konstruktion." — verfeinert D-002
+  (Reasoning-Orchestrierung wird *dynamisch*), überstimmt es **nicht** (Durability-Grenze
+  unverändert). Siehe `DECISIONS.md`.
 - **DEFERRED-Zeile „MAF Durable Extension for jobs"** bleibt gültig — der Harness ändert die
   Begründung nicht; §4 zeigt, dass wir sie weiterhin nicht brauchen.
-- **DEFERRED-Neueintrag (vorgeschlagen):** „Harness-Autonomie `full`" bis RBAC (Phase 6) steht —
-  Trigger: berechtigungsgeprüfte Auslösung teurer Pfade ist implementiert.
+
+## 13. Offene Fragen (für den Backlog)
+
+1. `awaiting`-Muster (§4/H3): Kopplung an den `notify_agent`-Callback, sobald dieser nicht mehr
+   Stub ist (Plan 1.7). Wo lebt der MAF-Session-State (Redis vs. Postgres) und wie lang halten
+   pausierte Sessions? (*keine* harte Durability-Anforderung).
+2. Plan-/Loop-Metriken für Schicht 2b (D-009): Plan-Qualität, „hat die Loop geholfen" (A/B),
+   Runaway-Rate registrieren.
+3. Plan-Modus-Freigabe + feinere Autonomie hinter RBAC (Phase 6), Autorisierung im MCP-Server.
+4. Verhältnis Harness-Plan ↔ `development-report`-Graph-Workflow (5b.5) konkret ausbauen, sobald
+   der Report-Harness (Phase 5b) gebaut wird (siehe §11).
 
 ## 12. Offene Fragen (für den Backlog)
 

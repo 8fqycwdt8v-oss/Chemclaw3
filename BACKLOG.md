@@ -5,6 +5,25 @@ Prioritized open action items. Top = next. Keep in sync with `docs/implementatio
 
 ## Now — next capability phase (Phase 5b report harness, or Phase 6 identity/RBAC)
 
+## Done — Harness backbone core (MAF Agent Harness — D-020, docs/harness-konzept.md)
+- [x] H0 spike: verified `create_harness_agent` in the installed `agent-framework-core` 1.11
+      constructs with no LLM call; providers reduce to `TodoProvider`+`AgentModeProvider` when the
+      generic batteries are off; default modes are `plan`/`execute`; `todos_remaining(looping_modes=
+      ["execute"])` binds the loop to execute mode natively.
+- [x] H1/H2/H3(loop): `build_agent` wires the harness behind `harness_enabled` over the *same*
+      tools/skills, classic `Agent` fallback stays default; file-memory/file-access/shell/web
+      batteries disabled (§6, G6); `harness_autonomy` gates the loop (`plan_only` interactive /
+      `execute` looped-in-execute-mode), hard-capped by `harness_max_loop_iterations`. Config in
+      `chemclaw/config.py` + `.env.example`; 8 tests in `tests/test_agent.py` (backbone select,
+      provider set, same tools, batteries off, loop present/absent + bounded). `make lint type test`
+      green (133 passed, 15 offline-skipped).
+- [x] Evaluation: harness does **not** replace Temporal or (planned) MAF graph workflows —
+      complementary third backbone (see D-020, harness-konzept §11).
+- [ ] **Follow-ups (open):** `awaiting`-state + `notify_agent`-callback resume (H3, tied to the
+      still-stub Plan 1.7 callback) · plan/loop metrics for Phase 2b · plan-mode approval + finer
+      autonomy behind RBAC (Phase 6, authz in the MCP server) · harness↔`development-report`
+      graph-workflow interplay when Phase 5b is built.
+
 ## Done — Phase 5: memory layers (episodic + semantic, no new infra — D-019)
 - [x] 5.1/5.2/5.3 episodic: `memory/chains.py` (chain detection — product A = reactant B via the
       canonical-SMILES compound identity, Phase 3) + `memory/campaign.py` (`campaign` note citing each
