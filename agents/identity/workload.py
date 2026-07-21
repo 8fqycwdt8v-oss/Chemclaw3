@@ -87,7 +87,7 @@ class WorkloadTokenProvider:
             "client_id": settings.entra_workload_client_id,
             "scope": scope,
             "client_assertion_type": _JWT_BEARER,
-            "client_assertion": _read_sa_token(),
+            "client_assertion": read_sa_token(),
         }
         async with httpx.AsyncClient(
             transport=self._transport, timeout=settings.entra_http_timeout_seconds
@@ -107,8 +107,11 @@ class WorkloadTokenProvider:
         return token
 
 
-def _read_sa_token() -> str:
-    """Read the projected ServiceAccount token, or raise a typed error if it is unreadable."""
+def read_sa_token() -> str:
+    """Read the projected ServiceAccount token, or raise a typed error if it is unreadable.
+
+    Shared with the OBO flow (F4-T4), which presents the same SA JWT as its `client_assertion`.
+    """
     try:
         return Path(settings.entra_sa_token_path).read_text(encoding="utf-8").strip()
     except OSError as exc:

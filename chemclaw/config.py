@@ -278,6 +278,11 @@ class Settings(BaseSettings):
     entra_sa_token_path: str = "/var/run/secrets/azure/tokens/azure-identity-token"
     entra_token_refresh_leeway_seconds: float = Field(default=300.0, gt=0)
     entra_http_timeout_seconds: float = Field(default=10.0, gt=0)
+    # On-Behalf-Of exchange (plan F4-T4): when a backend acts for a specific user against a
+    # user-scoped resource (ELN/LIMS), it swaps the user's token OBO for a downstream token so the
+    # resource sees the real user, not the service. Generic and dormant — off until a user-scoped
+    # source (the deferred custom Snowflake ELN connector) opts in by calling `exchange_obo`.
+    entra_obo_enabled: bool = False
 
     @property
     def entra_expensive_action_set(self) -> frozenset[str]:
