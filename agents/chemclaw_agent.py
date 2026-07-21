@@ -23,6 +23,7 @@ from agent_framework import (
     ToolResultCompactionStrategy,
 )
 
+from agents.audit import audit_tool_calls
 from agents.bo_tools import suggest_next_experiment
 from agents.calc_tools import compute_xtb_energy, predict_pka, predict_solubility
 from agents.graph_tools import expand_note, find_notes, propose_knowledge_note
@@ -105,6 +106,9 @@ def build_agent(chat_client: Any | None = None) -> Agent:
         # compaction runs last and sees the full context (before the model) and the freshly
         # stored history (after the run).
         context_providers=[history, skills, compaction],
+        # One function middleware audits every tool call (name, args, outcome, latency) — the
+        # single GxP audit trail over all tools, not per-tool logging.
+        middleware=[audit_tool_calls],
     )
 
 

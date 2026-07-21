@@ -25,3 +25,25 @@ def configure_logging() -> None:
         format=settings.log_format,
         force=True,
     )
+
+
+def configure_telemetry() -> None:
+    """Enable OpenTelemetry export if configured — a no-op by default.
+
+    Off unless `CHEMCLAW_OTEL_ENABLED=true`. When on, it calls MAF's `configure_otel_providers`
+    exactly once, which reads the standard `OTEL_EXPORTER_OTLP_*` environment variables for the
+    collector endpoint. That call needs the OpenTelemetry SDK + OTLP exporter extras installed;
+    if they are missing we re-raise with a clear message naming the missing dependency, so an
+    admin who flips the flag without the extras gets a directive error rather than a cryptic one.
+    Called once per process at each worker's entrypoint, after `configure_logging`.
+    """
+    if not settings.otel_enabled:
+        return
+    from agent_framework.observability import configure_otel_providers
+
+    try:
+        configure_otel_providers(enable_sensitive_data=settings.otel_include_sensitive_data)
+    except ImportError as exc:  # SDK/exporter extras not installed
+        raise RuntimeError(
+            "CHEMCLAW_OTEL_ENABLED=true but the OpenTelemetry SDK/OTLP exporter is not installed"
+        ) from exc

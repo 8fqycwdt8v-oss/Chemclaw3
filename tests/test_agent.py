@@ -15,6 +15,7 @@ from agent_framework._compaction import (
     included_token_count,
 )
 
+from agents.audit import audit_tool_calls
 from agents.chemclaw_agent import _build_compaction, build_agent
 
 
@@ -39,6 +40,14 @@ def test_agent_has_skills_history_and_compaction() -> None:
     agent = build_agent(chat_client=object())
     provider_types = {type(p).__name__ for p in agent.context_providers}
     assert {"SkillsProvider", "InMemoryHistoryProvider", "CompactionProvider"} <= provider_types
+
+
+def test_agent_audits_every_tool_call() -> None:
+    """The GxP tool-audit middleware is attached to the agent."""
+    agent = build_agent(chat_client=object())
+    middleware = agent.middleware
+    assert middleware is not None
+    assert audit_tool_calls in middleware
 
 
 def test_compaction_reduces_context_over_budget() -> None:

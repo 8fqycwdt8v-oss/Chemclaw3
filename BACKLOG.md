@@ -37,14 +37,18 @@ Prioritized open action items. Top = next. Keep in sync with `docs/implementatio
 - [ ] Migration-status visibility (no applied-migrations record today; `CREATE ... IF NOT EXISTS`
       is idempotent but leaves no trail of what ran).
 
-### MAF out-of-the-box features (analysis done; adopt deliberately, not yet implemented)
-- [ ] **Function middleware** (`@function_middleware`) — one DRY GxP tool-audit trail
-      (name/args/result/latency) + cheap input guardrails over all agent tools. Sits on the
-      logging floor above. Top pick.
-- [ ] **OpenTelemetry** (`configure_otel_providers` from `agent_framework.observability`) — auto
-      spans/metrics per agent-run and tool-call; one startup call + an endpoint/toggle in config.
+### MAF out-of-the-box features (analysis done)
+- [x] **Function middleware** (`@function_middleware`) — one DRY GxP tool-audit trail
+      (`agents/audit.py::audit_tool_calls`: name/args/outcome/latency, observe-only) over all
+      agent tools, on the logging floor. Attached via `Agent(..., middleware=[...])` (D-027).
+- [x] **OpenTelemetry** — opt-in `chemclaw.logging.configure_telemetry()` gated on
+      `CHEMCLAW_OTEL_ENABLED`; calls MAF's `configure_otel_providers` at each worker's entrypoint.
+      Ships as a config toggle (default off) because the OTel SDK/OTLP exporter extras are not
+      installed and are only useful with a collector — enabling it requires adding those extras
+      (D-027).
 - [ ] **Structured outputs** (`response_format` + `resp.value`) — force validated pydantic
-      payloads for agent proposals instead of parsing prose.
+      payloads for agent proposals instead of parsing prose. Deferred to the first call site that
+      needs a validated payload (changes call sites, not startup wiring).
 - Do-not-adopt / defer: Redis/mem0 history (durability belongs to Temporal, and neither extra is
       installed), the MAF `_harness` providers (duplicate the memory layer + background queue),
       the wholesale MAF eval harness (have `evals/`; cherry-pick only its tool-call checks). FIDES

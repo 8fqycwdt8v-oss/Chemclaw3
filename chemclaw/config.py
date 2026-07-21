@@ -41,6 +41,18 @@ class Settings(BaseSettings):
     # `chemclaw.logging.configure_logging`, called at each worker's entrypoint.
     log_level: str = "INFO"
     log_format: str = "%(asctime)s %(levelname)s %(name)s: %(message)s"
+    # GxP tool-audit trail (agents.audit): every agent tool call is logged once (name, args,
+    # outcome, latency) by one MAF function middleware. Arguments are truncated to this many
+    # characters so a large payload (a full optimization problem, an observation list) cannot
+    # flood the log; raise it when a fuller argument record is needed for an audit.
+    agent_audit_max_arg_chars: int = Field(default=200, ge=0)
+    # OpenTelemetry export (off by default). When enabled, `chemclaw.logging.configure_telemetry`
+    # calls MAF's `configure_otel_providers`, which reads the standard `OTEL_EXPORTER_OTLP_*`
+    # environment variables for the collector endpoint. Requires the OpenTelemetry SDK + OTLP
+    # exporter extras to be installed; `enable_sensitive_data` controls whether prompts/results
+    # are attached to spans (keep off unless a trusted collector needs them).
+    otel_enabled: bool = False
+    otel_include_sensitive_data: bool = False
 
     # Temporal — durable execution of long scientific jobs (plan Phase 1).
     # `address` is the frontend gRPC endpoint; `namespace` isolates a team's jobs.

@@ -10,7 +10,7 @@ import logging
 import pytest
 
 from chemclaw.config import settings
-from chemclaw.logging import configure_logging
+from chemclaw.logging import configure_logging, configure_telemetry
 
 
 def test_configure_logging_applies_configured_level(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -23,3 +23,9 @@ def test_configure_logging_applies_configured_level(monkeypatch: pytest.MonkeyPa
         assert root.level == logging.WARNING
     finally:
         root.setLevel(original)
+
+
+def test_configure_telemetry_is_a_noop_when_disabled(monkeypatch: pytest.MonkeyPatch) -> None:
+    """With OTel off (the default), telemetry setup does nothing and never raises."""
+    monkeypatch.setattr(settings, "otel_enabled", False)
+    configure_telemetry()  # must return cleanly without importing/wiring any exporter

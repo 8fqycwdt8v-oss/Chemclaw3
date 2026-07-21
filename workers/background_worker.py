@@ -14,7 +14,7 @@ from typing import Any
 from temporalio.worker import Worker
 
 from chemclaw.config import settings
-from chemclaw.logging import configure_logging
+from chemclaw.logging import configure_logging, configure_telemetry
 from chemclaw.temporal_client import connect
 from workflows.bo_activities import (
     evaluate_candidates,
@@ -69,6 +69,7 @@ BACKGROUND_ACTIVITIES: Sequence[Callable[..., Any]] = [
 async def main() -> None:
     """Connect and poll the background-jobs queue for BO campaigns, graph writes, ELN sync."""
     configure_logging()
+    configure_telemetry()
     client = await connect()
     worker = Worker(
         client,
