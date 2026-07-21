@@ -81,23 +81,23 @@ central:
 These are not tasks — they are choices that determine what the tasks even are. Make them before
 building.
 
-### D-A. Orchestrator/runtime: stay on MAF, or move to the Claude Agent SDK? **(the pivotal one)**
-- **The tension is real.** The code runs on **Anthropic Claude** (`agent-framework-anthropic`,
-  `claude-sonnet-5`), yet `architektur.md` justifies MAF largely by **Entra/Azure fit** — and
-  there is **no Azure, no Entra, no Azure OpenAI** anywhere in the code. D-013's original
-  rationale for MAF is therefore *partially void in the current reality.*
-- Research finding: MAF is the **least common** choice in the field; the center of gravity is
-  **LangGraph** and the **Claude Agent SDK**. Your own north star — "Claude Code / Cowork" — *is*
-  the Claude Agent SDK world. The harness you're now excited about is **MAF re-implementing, as
-  `[Experimental]` code, what the Claude Agent SDK ships natively** (todo/plan-execute loop,
-  subagents, hooks, compaction, memory, sandboxed permissions, a real front door).
-- **Recommendation:** treat this as an explicit, re-opened ADR. The agent layer is deliberately
-  thin (D-013), so a swap is bounded. Given the Claude backend + the "Claude-Code experience"
-  goal, the Claude Agent SDK is the path of least resistance to foundations 1/2/8/11/12 — it
-  *gives* you the harness, subagents, hooks, and a delivery surface instead of you maintaining an
-  experimental MAF re-build of them. If you keep MAF, write the honest ADR (why MAF over
-  Agent-SDK now that Azure/Entra is not the deployment) and accept owning the harness yourself.
-  **This decision gates the harness/branch decision below.**
+### D-A. MAF stays — deliver the Claude-Code-*like* experience natively on MAF **(resolved)**
+- **Decision (user):** keep MAF as the orchestrator (D-013 stands). The goal is *a Claude-Code-like
+  experience*, not Claude Code — built on MAF and tailored to pharma development. So the question is
+  not "which framework" but "how do we get foundations 1/2/8/11/12 *on MAF*."
+- **The MAF-native answer already exists in-repo:** the **MAF Agent Harness** (`TodoProvider` +
+  `AgentModeProvider` via `create_harness_agent`) is exactly MAF's plan→approve→execute loop with a
+  self-managed todo list — i.e. the Claude-Code-style engine, using MAF's own building blocks. This
+  *is* the right direction; it just needs to be matured and reconciled (D-B).
+- **The one real caveat to manage, not a reason to switch:** the harness is `[Experimental]` in
+  `agent-framework-core`. Mitigation is already designed (the harness concept's H0 spike + a
+  **fallback to the classic `Agent`** behind `harness_enabled`). Keep that fallback load-bearing so
+  MAF-harness API churn can never break the product. Owning a thin, well-isolated harness wrapper on
+  MAF is the accepted cost of the MAF choice.
+- **Note (scope-limited):** the part of `architektur.md` that is out of step with reality is **not**
+  MAF — it is the **Azure/Entra deployment assumption** (§6–§8), since the code runs on Anthropic
+  Claude with no Azure. That is D-D's concern (deployment/identity substrate), and it does not touch
+  the MAF orchestration decision.
 
 ### D-B. Adopt the plan/execute harness — and reconcile the divergent branches
 - Foundations #1/#2 (the autonomous loop + visible plan) are the *soul* of the Claude-Code
@@ -207,8 +207,9 @@ building.
 Ordered so each step unlocks the next; explicitly excludes new capability skills/tools per the
 brief.
 
-1. **Decide D-A (orchestrator/runtime) and D-D (deployment/identity target).** Everything else
-   forks on these. (Small, decisive; write the ADRs.)
+1. **Confirm the MAF harness as the backbone (D-A, resolved) and decide D-D (deployment/identity
+   target).** MAF stays; the remaining fork is the deployment/identity substrate. (Small, decisive;
+   write the D-D ADR.)
 2. **Stand up a real front door + run loop** — the chosen runtime actually builds and runs the
    agent behind a **chat surface a chemist can use**, with tool/MCP lifecycle handled. This alone
    moves foundations 1/3/12 from red to green.
@@ -235,9 +236,10 @@ from the current spine.
 
 ## 9. Open decisions to confirm (owner: user)
 
-1. **D-A** — MAF vs Claude Agent SDK (vs LangGraph). *Recommendation: seriously evaluate the Claude
-   Agent SDK given the Claude backend and the "Claude-Code experience" goal.*
-2. **D-D** — real deployment/identity substrate (Claude-native + IdP? Azure? self-hosted?).
+1. **D-A** — *resolved:* keep MAF; deliver the experience via the MAF Agent Harness, with the
+   classic-`Agent` fallback kept load-bearing against the harness's `[Experimental]` status.
+2. **D-D** — real deployment/identity substrate (Claude-native + an IdP? Azure? self-hosted?) —
+   the part of `architektur.md` §6–§8 that no longer matches the running system.
 3. **D-C** — is the analytical-development half in v1 scope? (Recommendation: yes — it's the
    whitespace; at minimum commit the data-standard choice now.)
 4. **Front-door surface** — web chat first? Slack? Both? (Recommendation: web chat for the
