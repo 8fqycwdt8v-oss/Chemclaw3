@@ -116,7 +116,9 @@ building.
   attachment seam**: one stable ingest+retrieve contract + a config-driven source registry, so any
   future source (LIMS/MES/analytical/ELN) attaches as *one thin adapter + one registry entry* with
   zero core change. The repo already has both half-contracts (`ElnAdapter`, `SourceRetriever`) — the
-  work is to unify and harden them (plan Phase F7).
+  work is to unify and harden them (plan Phase F7). **The first source is ELN** (already present as
+  static-export adapters); the seam is validated by re-hosting that existing ELN adapter, and the
+  first *live* connector to land later is ELN (real API vs the static JSON exports).
 - **Deferred behind the seam (not now):** concrete connectors and their standards — **AnIML/Allotrope**
   (analytical data), **SiLA2/LAP** (instruments), **Benchling API/MCP** (ELN) — and analytical
   *models* (retention prediction, peak deconvolution, spectral/impurity ID). Each is one adapter/tool

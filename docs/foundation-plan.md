@@ -304,12 +304,17 @@ half-contracts — this phase unifies and hardens them into one documented attac
   carries provenance (source id + native ref); a user-scoped source honors Entra/OBO (F4.3); the
   PR-gate stays the terminal gate for any *knowledge* a source proposes, while pure *serving* copies
   (search indices) are not gated (the D-018 split, generalized).
-- **F7.5 Prove the seam with a reference adapter only.** Ship **one in-memory/reference `DataSource`**
-  (used by tests and the credential-free demo) to prove attachment end-to-end — **not** a real LIMS/
-  MES/analytical connector. Real sources are later, one adapter each.
+- **F7.5 Validate the seam against the *existing* ELN adapter (the first source).** The first real
+  source will be **ELN**, and the repo already has ELN adapters (`eln/json_adapter.py`,
+  `eln/ord_adapter.py`) plus the durable sync + fingerprint index + PR-gated note path. So F7 is
+  proved by **re-hosting the existing ELN adapter behind the generalized `DataSource` contract** —
+  if the seam can carry the ELN adapter unchanged in behavior (same tests green), it is right. No new
+  connector is built now; the **live ELN connector** (real Benchling/instance API instead of the
+  static JSON exports) is the first adapter to land *later*, behind this seam.
 
-> **CHECKMATE F7** (G1–G7): Can a *hypothetical* new source be attached as **one adapter + one config
-> entry with zero core change** (demonstrated with the reference adapter)? Do ingest and retrieve
+> **CHECKMATE F7** (G1–G7): Does the **existing ELN adapter re-host behind the `DataSource` seam with
+> its behavior/tests unchanged** (the seam carries the real first source)? Could a second, different
+> source attach as **one adapter + one config entry with zero core change**? Do ingest and retrieve
 > stay independent, both source-agnostic (G6)? Does **no** source-specific type leak above the
 > adapter? Is the PR-gate/serving split preserved? ADR: **D-A7 generic data-source seam** (no concrete
 > sources, no analytical schema — deferred to when a real source is built).
@@ -402,6 +407,7 @@ reference adapter), and concrete sources (LIMS/MES/ELN/analytical) plus analytic
 3. **Front-door surface** — thin built-in web chat (recommended) vs adopting an existing chat UI. (F2.)
 4. **Nextflow launch interface** — Seqera Platform API / SSH+CLI / internal REST launcher? (F5.)
 5. **Temporal** — self-hosted on OpenShift vs Temporal Cloud? Session store Postgres vs Redis? (F3/F6.)
-6. **Data-source seam** — confirm F7 is *seam-only* now (agreed: no concrete LIMS/MES/analytical
-   source or schema yet). Which source is likely *first* to attach later (LIMS? MES? live ELN?), so
-   the seam is validated against a realistic shape — without building it now?
+6. **Data-source seam** — *resolved:* F7 is seam-only now (no concrete LIMS/MES/analytical source or
+   schema yet), and the **first source is ELN**. Validate the seam by re-hosting the existing ELN
+   adapter; the live ELN connector (real API vs static JSON) is the first adapter to land later.
+   Open: which ELN product/API is the live target (Benchling? other), when it's built.
