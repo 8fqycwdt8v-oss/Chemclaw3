@@ -18,18 +18,19 @@ Prioritized open action items. Top = next. Keep in sync with `docs/implementatio
 - [x] Solubility/pKa cache keys version on the reported uncertainty.
 - [x] `test_mcp_transport.py` skip narrowed to a missing toolchain (won't mask a CI regression).
 
-### Open — consciously deferred (see D-030 for rationale)
-- [ ] Fingerprint-definition versioning: store the `ecfp_radius`/`ecfp_bits` signature on each
-      `*_fingerprints` row + a search-time guard, so changing the definition and re-indexing
-      alongside old rows can't silently compare mismatched features. Latent; do it when a second
-      fingerprint definition is first introduced (one migration).
-- [ ] ELN reject re-drive: a rejected entry is reported+logged but not re-fetched. Add a
-      dead-letter/manual re-ingest path only if fixable-upstream rejections become common.
-- [ ] KISS cleanups for the next touch of those files: `report/harness.py::gather_report` and
-      `memory/interaction.py::note_from_confirmed_answer` (test-only callers today),
-      `calc/store.py::StoredResult.provenance` (written, never read), and the single-implementer
-      `SolubilityModel` seam + its dead `model=` param. Left in place as plan-anticipated future
-      wiring / public batch API rather than deleted blindly.
+### Done — deferred items worked off (D-031)
+- [x] Fingerprint-definition guard: each `*_fingerprints` row records its definition
+      (`ecfp:r{radius}:b{bits}` / `drfp:b{bits}`); similarity search filters to the store's
+      current definition so a changed radius/width + re-index can't rank incomparable bits.
+      Migration `004`; runbook (vi). Guard tested in-sandbox via the in-memory store.
+- [x] ELN reject re-drive: `RejectedEntry.created_at` + the WARNING log give the exact `since`
+      to re-run the (idempotent) sync from after fixing a source record. Runbook (v). No
+      automatic dead-letter by design (KISS).
+- [x] KISS cleanups: inlined the `SolubilityModel` seam (removed Protocol + dead `model=` param);
+      deleted `report.harness.gather_report` (tests assemble via `gather_section`); wired
+      `note_from_confirmed_answer` into the `record_confirmed_answer` agent tool (completes plan
+      5.5). Kept `StoredResult.provenance` as GxP audit metadata (docstring clarified — not read
+      into logic, but a legitimate audit column + the `measured` seam).
 
 ## Admin-experience audit (configurability / error-handling / logging)
 

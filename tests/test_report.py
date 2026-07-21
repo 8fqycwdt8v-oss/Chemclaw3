@@ -12,18 +12,25 @@ from typing import Any
 
 from mcp_servers.fpstore import InMemoryFingerprintStore
 from mcp_servers.rxnfp.search import record_for_reaction
-from report.evidence import EvidenceChunk
+from report.evidence import EvidenceChunk, SourceRetriever
 from report.harness import (
     Claim,
+    Report,
     ReportRequest,
     ReportSection,
-    gather_report,
+    gather_section,
     report_note,
     verify_claims,
 )
 from report.retrievers import FingerprintReactionRetriever, GraphRetriever
 
 _ESTER = "CCO.CC(=O)O>>CCOC(C)=O"
+
+
+async def _gather(request: ReportRequest, retrievers: list[SourceRetriever]) -> Report:
+    """Assemble a whole Report from per-section gathers (the workflow does this durably)."""
+    sections = [await gather_section(section, retrievers) for section in request.sections]
+    return Report(title=request.title, sections=sections)
 
 
 class _FakeRetriever:
@@ -54,7 +61,7 @@ def test_gather_marks_unsupported_section_instead_of_inventing() -> None:
             content="Yield rose to 85%.", source_note_id="reaction-a", retriever="fake"
         )
         retriever = _FakeRetriever("yield", [chunk])
-        report = await gather_report(
+        report = await _gather(
             _request(
                 ReportSection(heading="Yield", query="yield trend", memory_layer="episodic"),
                 ReportSection(heading="Toxicity", query="tox data", memory_layer="evidence"),
@@ -79,7 +86,7 @@ def test_report_note_cites_every_source() -> None:
             EvidenceChunk(content="A", source_note_id="reaction-a", retriever="fake"),
             EvidenceChunk(content="B", source_note_id="campaign-b", retriever="fake"),
         ]
-        report = await gather_report(
+        report = await _gather(
             _request(ReportSection(heading="S", query="k", memory_layer="episodic")),
             [_FakeRetriever("k", chunks)],
         )
@@ -95,7 +102,7 @@ def test_report_id_is_ref_safe_and_unique() -> None:
 
     async def _run() -> None:
         async def _note(title: str) -> str:
-            report = await gather_report(
+            report = await _gather(
                 ReportRequest(
                     title=title,
                     sections=[ReportSection(heading="S", query="q", memory_layer="episodic")],

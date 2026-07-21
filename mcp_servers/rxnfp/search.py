@@ -7,13 +7,16 @@ fingerprint, not a substructure screen — so this module exposes similarity onl
 """
 
 from mcp_servers.fpstore import FingerprintRecord, FingerprintStore, Match, find_matches
-from mcp_servers.rxnfp.fingerprint import drfp_bitstring
+from mcp_servers.rxnfp.fingerprint import drfp_bitstring, reaction_definition
 
 
 def record_for_reaction(record_id: str, reaction_smiles: str) -> FingerprintRecord:
-    """Build a `FingerprintRecord` (id + reaction-SMILES label + freshly computed DRFP)."""
+    """Build a `FingerprintRecord` (id + reaction-SMILES label + DRFP + its definition)."""
     return FingerprintRecord(
-        id=record_id, label=reaction_smiles, bits=drfp_bitstring(reaction_smiles)
+        id=record_id,
+        label=reaction_smiles,
+        bits=drfp_bitstring(reaction_smiles),
+        definition=reaction_definition(),
     )
 
 

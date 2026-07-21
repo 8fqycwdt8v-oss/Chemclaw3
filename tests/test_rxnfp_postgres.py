@@ -10,6 +10,7 @@ import pytest
 
 from chemclaw.config import settings
 from mcp_servers.fpstore import PostgresFingerprintStore
+from mcp_servers.rxnfp.fingerprint import reaction_definition
 from mcp_servers.rxnfp.search import find_similar_reactions, record_for_reaction
 from tests.pg import migrated_db_or_skip
 
@@ -21,7 +22,9 @@ _HALOGENATION = "c1ccccc1.BrBr>>Brc1ccccc1"
 async def _store_or_skip() -> PostgresFingerprintStore:
     """Return a migrated Postgres reaction store, or skip if no database is reachable."""
     await migrated_db_or_skip()
-    return PostgresFingerprintStore("reaction_fingerprints", settings.drfp_bits)
+    return PostgresFingerprintStore(
+        "reaction_fingerprints", settings.drfp_bits, reaction_definition()
+    )
 
 
 def test_reaction_similarity_ranking_in_sql() -> None:

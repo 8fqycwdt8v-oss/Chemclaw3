@@ -28,6 +28,7 @@ from agents.audit import audit_tool_calls
 from agents.bo_tools import suggest_next_experiment
 from agents.calc_tools import compute_xtb_energy, predict_pka, predict_solubility
 from agents.graph_tools import expand_note, find_notes, propose_knowledge_note
+from agents.memory_tools import record_confirmed_answer
 from agents.qm_tools import get_qm_job_status, submit_qm_job
 from agents.research_tools import gather_evidence
 from chemclaw.config import McpServerSpec, settings
@@ -59,7 +60,9 @@ _INSTRUCTIONS = (
     "transferred analogy; say plainly when the data is silent rather than inventing it. "
     "Anything new worth keeping — a distilled rule, a proposed protocol or set of conditions — "
     "goes through propose_knowledge_note, which opens a PR for human review; never assert "
-    "agent-written notes as established fact until merged. Load the deep-research skill for how "
+    "agent-written notes as established fact until merged. When the chemist explicitly confirms "
+    "or corrects an answer worth reusing, record_confirmed_answer captures it as an interaction "
+    "note through that same PR-gate. Load the deep-research skill for how "
     "to run this loop, and the calculation/search skills for which tool fits and how far to "
     "trust it."
 )
@@ -105,6 +108,7 @@ def build_agent(chat_client: Any | None = None) -> Agent:
             *_mcp_capability_tools(),
             suggest_next_experiment,
             propose_knowledge_note,
+            record_confirmed_answer,
         ],
         # Order matters: history loads/stores the thread, then compaction trims it — so
         # compaction runs last and sees the full context (before the model) and the freshly

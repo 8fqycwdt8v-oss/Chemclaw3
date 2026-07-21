@@ -73,3 +73,29 @@ thin wrapper module under `agents/` plus one line in the `build_agent` `tools=[.
 Troubleshooting: a server that fails to start surfaces in the worker/agent logs; verify it runs
 standalone with `python -m mcp_servers.<name>.server` and that Postgres is reachable (tool
 *discovery* needs no DB, but *invoking* a search does).
+
+## (v) Re-ingest a rejected ELN entry (after fixing the source record)
+
+The durable sync rejects an entry that fails validation (bad structure, mass-balance
+mismatch) and **advances past it** — a rejection is deterministic bad data, so re-fetching
+it unchanged would only re-reject it. Each rejection is reported in the run's
+`IngestSummary.rejected` (visible in the Temporal workflow result) and logged as a `WARNING`
+carrying the entry id, the reason, **and the entry's timestamp**.
+
+To re-ingest one after correcting its source record upstream: start the `ElnSyncWorkflow`
+with `since` set to just before that entry's timestamp (from the rejection log/summary). The
+sync re-fetches from there and re-ingests everything after it; ingestion is idempotent
+(id-keyed fingerprint upserts + a stable note branch), so the already-ingested entries in
+that window are harmless no-ops and only the corrected entry newly succeeds. There is no
+automatic re-drive by design (KISS) — re-ingestion is a deliberate, admin-triggered action.
+
+## (vi) Change a fingerprint definition (ECFP radius/bits or DRFP bits)
+
+`CHEMCLAW_ECFP_RADIUS`/`_ECFP_BITS`/`_DRFP_BITS` define the fingerprints. A **width** change
+(`*_BITS`) also needs a matching `bit(N)` schema change (`infra/sql/002,003`) or inserts fail
+loudly. Every fingerprint row records the *definition* it was indexed under, and similarity
+search returns only rows matching the store's current definition — so after any definition
+change, previously-indexed rows fall out of search (safe: no wrong scores, just missing hits)
+until you **re-index** them (re-run the ELN sync / re-add molecules). If search comes back
+empty after a config change, that is the tell: the index predates the new definition and needs
+rebuilding.

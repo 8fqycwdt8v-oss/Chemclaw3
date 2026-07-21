@@ -1,8 +1,9 @@
 """Source-agnostic report harness core (plan steps 5b.1, 5b.4, 5b.7).
 
 Pure orchestration over the `SourceRetriever` contract — it knows no concrete source (G6).
-`gather_report` fans each section's query out to every retriever and collects cited evidence;
-a section with no evidence is marked **unsupported**, never filled with invention. `verify_claims`
+`gather_section` fans a section's query out to every retriever and collects cited evidence
+(the durable unit of the report workflow); a section with no evidence is marked
+**unsupported**, never filled with invention. `verify_claims`
 is the adversarial gate (5b.4): a synthesized claim survives only if it cites evidence that was
 actually retrieved — an uncited or fabricated-citation claim (the "invented statistic") is
 dropped. `report_note` renders the draft as a PR-gated `report` note that cites every source and
@@ -96,12 +97,6 @@ async def gather_section(
     )
 
 
-async def gather_report(request: ReportRequest, retrievers: list[SourceRetriever]) -> Report:
-    """Gather every section of a report (the whole-report convenience over `gather_section`)."""
-    sections = [await gather_section(section, retrievers) for section in request.sections]
-    return Report(title=request.title, sections=sections)
-
-
 def verify_claims(
     claims: list[Claim], evidence: list[EvidenceChunk]
 ) -> tuple[list[Claim], list[Claim]]:
@@ -112,7 +107,7 @@ def verify_claims(
     fabricated statistic — is discarded, not softened.
 
     This is the gate the `development-report` skill runs over each prose claim it synthesizes
-    from the gathered evidence (5b.4): `gather_report` returns evidence chunks that are cited
+    from the gathered evidence (5b.4): `gather_section` returns evidence chunks that are cited
     by construction, but LLM-written *claims about* that evidence are only trustworthy once
     checked here, which is why the guard lives in code, tested, not left to the prose step.
     """

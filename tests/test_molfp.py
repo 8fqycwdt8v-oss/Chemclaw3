@@ -11,8 +11,13 @@ import asyncio
 import pytest
 
 from chemclaw.config import settings
-from mcp_servers.fpstore import FingerprintError, InMemoryFingerprintStore, tanimoto
-from mcp_servers.molfp.fingerprint import ecfp_bitstring
+from mcp_servers.fpstore import (
+    FingerprintError,
+    FingerprintRecord,
+    InMemoryFingerprintStore,
+    tanimoto,
+)
+from mcp_servers.molfp.fingerprint import ecfp_bitstring, molecule_definition
 from mcp_servers.molfp.search import (
     find_similar_molecules,
     find_substructure_matches,
@@ -77,6 +82,30 @@ def test_threshold_excludes_weak_matches() -> None:
         # Ethanol vs propanol ~0.56; a 0.9 threshold rejects it.
         assert await find_similar_molecules(store, "CCO", threshold=0.9) == []
         assert len(await find_similar_molecules(store, "CCO", threshold=0.5)) == 1
+
+    asyncio.run(_run())
+
+
+def test_similarity_excludes_other_fingerprint_definitions() -> None:
+    """A store bound to a definition ranks only records built under that same definition.
+
+    This is the durable store's cross-definition guard (a changed Morgan radius yields
+    equal-width but incomparable bits): a store pinned to the current definition must not
+    return a record indexed under a different one, even if its raw bits look similar.
+    """
+
+    async def _run() -> None:
+        store = InMemoryFingerprintStore(definition=molecule_definition())
+        await store.add(record_for("current", "CCO"))  # stamped with the current definition
+        # Same molecule, same width, but a different (stale) definition signature.
+        stale = FingerprintRecord(
+            id="stale", label="CCO", bits=ecfp_bitstring("CCO"), definition="ecfp:r9:b2048"
+        )
+        await store.add(stale)
+
+        hits = await find_similar_molecules(store, "CCO", threshold=0.1)
+        ids = [h.id for h in hits]
+        assert ids == ["current"]  # the stale-definition row is excluded, not ranked
 
     asyncio.run(_run())
 

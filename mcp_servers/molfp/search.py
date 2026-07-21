@@ -16,12 +16,14 @@ from mcp_servers.fpstore import (
     Match,
     find_matches,
 )
-from mcp_servers.molfp.fingerprint import ecfp_bitstring
+from mcp_servers.molfp.fingerprint import ecfp_bitstring, molecule_definition
 
 
 def record_for(record_id: str, smiles: str) -> FingerprintRecord:
-    """Build a `FingerprintRecord` (id + SMILES label + freshly computed ECFP4)."""
-    return FingerprintRecord(id=record_id, label=smiles, bits=ecfp_bitstring(smiles))
+    """Build a `FingerprintRecord` (id + SMILES label + ECFP4 + its definition signature)."""
+    return FingerprintRecord(
+        id=record_id, label=smiles, bits=ecfp_bitstring(smiles), definition=molecule_definition()
+    )
 
 
 async def find_similar_molecules(

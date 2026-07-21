@@ -71,9 +71,12 @@ class CalculationKey(BaseModel):
 class StoredResult(BaseModel):
     """A persisted calculation result plus its provenance.
 
-    `provenance` records how the value came to be — e.g. "computed" (this system
-    ran the calculator) vs. "measured" (an experimental value) — so downstream
-    consumers (BO, reports) can distinguish evidence from prediction.
+    `provenance` records how the value came to be. For this compute cache it is always
+    "computed" (the system ran the calculator) — retained as GxP audit metadata on every
+    persisted row, and the seam by which an externally *measured* value could be stored
+    under the same key with `provenance="measured"`. It is audit trail, not a control
+    signal: no code branches on it, so it is written and available to an auditor/query,
+    not read back into logic.
     """
 
     key: CalculationKey

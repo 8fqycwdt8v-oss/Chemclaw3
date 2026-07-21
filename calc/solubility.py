@@ -1,14 +1,11 @@
 """Aqueous solubility predictor (plan step 1c.3).
 
 Ships an open, reproducible **ESOL baseline** (Delaney 2004): a closed-form model
-over four RDKit descriptors, so predictions are real and license-free today. It
-sits behind a small `SolubilityModel` seam so a trained GNN can replace the
-baseline later without touching the store or the agent tool. Every prediction
-carries the model's reported uncertainty — a fast property estimate is never
-presented as exact.
+over four RDKit descriptors, so predictions are real and license-free today. Every
+prediction carries the model's reported uncertainty — a fast property estimate is
+never presented as exact. There is one model, so it is called directly; when a
+second (e.g. a trained GNN) exists, reintroduce a selection seam (Rule of Three).
 """
-
-from typing import Protocol
 
 from pydantic import BaseModel, Field
 from rdkit import Chem
@@ -39,21 +36,6 @@ class SolubilityResult(BaseModel):
     uncertainty_log: float
 
 
-class SolubilityModel(Protocol):
-    """A solubility model: name/version for the cache key, plus a prediction.
-
-    This is the seam a trained GNN implements to replace the baseline; the store
-    and agent tool depend only on this contract.
-    """
-
-    name: str
-    version: str
-
-    def predict(self, mol: Chem.Mol) -> tuple[float, float]:
-        """Return (log S in mol/L, uncertainty in log units) for a parsed molecule."""
-        ...
-
-
 class EsolBaseline:
     """Delaney (2004) ESOL model — a closed form over four RDKit descriptors.
 
@@ -79,46 +61,40 @@ class EsolBaseline:
         return log_s, settings.solubility_rmse_log
 
 
-# The default model. Swap this (or pass another) when a trained GNN is available.
-_DEFAULT_MODEL: SolubilityModel = EsolBaseline()
+# The single solubility model. Called directly (no selection seam until a second exists).
+_MODEL = EsolBaseline()
 
 
-def predict_solubility(
-    job: SolubilityInput, model: SolubilityModel | None = None
-) -> SolubilityResult:
+def predict_solubility(job: SolubilityInput) -> SolubilityResult:
     """Predict aqueous solubility for one molecule.
 
     Raises `ValueError` on an unparseable SMILES rather than returning a bogus
     number (gate G4).
     """
-    active = model if model is not None else _DEFAULT_MODEL
     mol = Chem.MolFromSmiles(job.smiles)
     if mol is None:
         raise ValueError(f"invalid SMILES: {job.smiles!r}")
-    log_s, uncertainty = active.predict(mol)
+    log_s, uncertainty = _MODEL.predict(mol)
     return SolubilityResult(
         smiles=job.smiles,
-        model=f"{active.name}@{active.version}",
+        model=f"{_MODEL.name}@{_MODEL.version}",
         log_s_mol_per_l=log_s,
         uncertainty_log=uncertainty,
     )
 
 
 async def run_cached_solubility(
-    store: ResultStore,
-    job: SolubilityInput,
-    model: SolubilityModel | None = None,
+    store: ResultStore, job: SolubilityInput
 ) -> tuple[SolubilityResult, bool]:
     """Return a solubility prediction for `job`, reusing the store on a repeat.
 
-    The key is versioned by model name+version *and* the reported RMSE, so swapping
-    the model or re-tuning `solubility_rmse_log` recomputes rather than serving a
-    prediction (or a stale uncertainty) from the old one.
+    The key is versioned by model name+version *and* the reported RMSE, so bumping the
+    model or re-tuning `solubility_rmse_log` recomputes rather than serving a prediction
+    (or a stale uncertainty) from the old one.
     """
-    active = model if model is not None else _DEFAULT_MODEL
     key = CalculationKey.build(
         calc_type=CALC_TYPE,
-        calc_version=f"{active.name}@{active.version}/u-{settings.solubility_rmse_log}",
+        calc_version=f"{_MODEL.name}@{_MODEL.version}/u-{settings.solubility_rmse_log}",
         inputs={"smiles": job.smiles},
     )
-    return await run_cached(store, key, lambda: predict_solubility(job, active), SolubilityResult)
+    return await run_cached(store, key, lambda: predict_solubility(job), SolubilityResult)

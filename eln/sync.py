@@ -24,10 +24,16 @@ logger = logging.getLogger(__name__)
 
 
 class RejectedEntry(BaseModel):
-    """An entry that could not be ingested, with the reason (for the sync report)."""
+    """An entry that could not be ingested, with the reason and its timestamp.
+
+    `created_at` is the entry's own ELN timestamp: it is the exact `since` an admin re-runs
+    the sync from to re-ingest this entry once its source record is corrected upstream (the
+    sync is re-runnable from any earlier cursor — ingestion is idempotent). See runbook (v).
+    """
 
     entry_id: str
     reason: str
+    created_at: datetime
 
 
 class IngestSummary(BaseModel):
@@ -72,7 +78,9 @@ async def sync_entries(
             # mapping error, a validation failure, and a fingerprint that cannot be
             # computed (e.g. a schema-valid but degenerate reaction). Enumerating
             # concrete types here once turned one bad entry into a batch abort.
-            rejected.append(RejectedEntry(entry_id=raw.entry_id, reason=str(exc)))
+            rejected.append(
+                RejectedEntry(entry_id=raw.entry_id, reason=str(exc), created_at=raw.created_at)
+            )
             continue
         ingested.append(raw.entry_id)
     # The summary is a return value the scheduler stores; also log the outcome so an admin
@@ -80,5 +88,10 @@ async def sync_entries(
     # gets a WARNING trail of exactly which entries were rejected and why.
     logger.info("eln sync: ingested=%d rejected=%d", len(ingested), len(rejected))
     for entry in rejected:
-        logger.warning("eln sync rejected entry %s: %s", entry.entry_id, entry.reason)
+        logger.warning(
+            "eln sync rejected entry %s (at %s): %s",
+            entry.entry_id,
+            entry.created_at.isoformat(),
+            entry.reason,
+        )
     return IngestSummary(ingested=ingested, rejected=rejected, next_cursor=cursor)

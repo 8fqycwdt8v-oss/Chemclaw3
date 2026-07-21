@@ -29,3 +29,12 @@ def drfp_bitstring(reaction_smiles: str) -> str:
     if "1" not in bits:
         raise FingerprintError(f"reaction produced an empty fingerprint: {reaction_smiles!r}")
     return bits
+
+
+def reaction_definition() -> str:
+    """The current DRFP definition signature (folded width) stored on each reaction row.
+
+    Recorded per row so the store never ranks DRFP bits folded to a different width against
+    each other — changing `drfp_bits` and re-indexing can't silently mix incomparable rows.
+    """
+    return f"drfp:b{settings.drfp_bits}"

@@ -41,11 +41,19 @@ def tanimoto(bits_a: str, bits_b: str) -> float:
 
 
 class FingerprintRecord(BaseModel):
-    """A stored entity: a stable id, its human label (SMILES/reaction SMILES), its bits."""
+    """A stored entity: a stable id, its human label (SMILES/reaction SMILES), its bits.
+
+    `definition` is the signature of the fingerprint parameters that produced `bits` (e.g.
+    `ecfp:r2:b2048`, `drfp:b2048`). Bits of equal width but different definition (a changed
+    Morgan radius) are the same length yet incomparable, which the width check cannot catch;
+    carrying the definition lets the durable store refuse to rank across definitions. Defaults
+    to empty for a record built without one (an ephemeral, single-definition index).
+    """
 
     id: str = Field(min_length=1)
     label: str = Field(min_length=1)
     bits: str = Field(min_length=1)
+    definition: str = ""
 
 
 class Match(BaseModel):
@@ -81,9 +89,16 @@ class InMemoryFingerprintStore:
     recall for large ones). Keyed by record id, so re-adding an id replaces it.
     """
 
-    def __init__(self) -> None:
-        """Start with an empty index."""
+    def __init__(self, definition: str | None = None) -> None:
+        """Start with an empty index.
+
+        If `definition` is set, similarity search returns only records built under that
+        same fingerprint definition — the durable store's cross-definition guard, made
+        testable without a database. Left `None` it ranks every record, which is correct
+        for an ephemeral index always populated in a single configuration (tests, demo).
+        """
         self._records: dict[str, FingerprintRecord] = {}
+        self._definition = definition
 
     async def add(self, record: FingerprintRecord) -> None:
         """Insert or replace a fingerprint by id."""
@@ -96,12 +111,14 @@ class InMemoryFingerprintStore:
     async def find_similar(self, query_bits: str, top_k: int, threshold: float) -> list[Match]:
         """Rank stored records by Tanimoto to `query_bits`, filtered and truncated.
 
-        Ties break by id so the ordering is deterministic and matches a Postgres
-        `ORDER BY similarity DESC, id`.
+        Records whose definition differs from this store's (when one is set) are excluded —
+        their equal-width bits are not comparable. Ties break by id so the ordering is
+        deterministic and matches a Postgres `ORDER BY similarity DESC, id`.
         """
         scored = [
             Match(id=r.id, label=r.label, similarity=tanimoto(query_bits, r.bits))
             for r in self._records.values()
+            if self._definition is None or r.definition == self._definition
         ]
         hits = [m for m in scored if m.similarity >= threshold]
         hits.sort(key=lambda m: (-m.similarity, m.id))
@@ -121,32 +138,41 @@ class PostgresFingerprintStore:
     A short-lived connection per call (KISS — the calc store's choice).
     """
 
-    def __init__(self, table: str, width: int, dsn: str | None = None) -> None:
-        """Bind to `table` with fingerprint `width`, on the given (or configured) DSN.
+    def __init__(self, table: str, width: int, definition: str, dsn: str | None = None) -> None:
+        """Bind to `table` with fingerprint `width` and `definition`, on the configured DSN.
 
         `table` and `width` come from trusted domain constants, never user input, so
         interpolating them into the SQL is safe; the identifier check below enforces
         that trust boundary against any future caller. If `width` disagrees with the
         table's `bit(N)` column, Postgres raises a bit-length error (a loud failure,
         not a silent pad).
+
+        `definition` is the current fingerprint-parameter signature (e.g. `ecfp:r2:b2048`).
+        Every row records the definition it was indexed under; similarity search filters to
+        this store's definition, so changing the definition and re-indexing alongside older
+        rows can never silently rank incomparable (same-width, different-radius) bits — the
+        stale rows simply fall out of search until they are re-indexed.
         """
         if not table.isidentifier():
             raise ValueError(f"table must be a plain SQL identifier, got {table!r}")
         self._table = table
+        self._definition = definition
         self._dsn = dsn if dsn is not None else settings.postgres_dsn
         self._upsert = (
-            f"INSERT INTO {table} (id, label, bits) "
-            f"VALUES (%(id)s, %(label)s, %(bits)s::bit({width})) "
-            f"ON CONFLICT (id) DO UPDATE SET label = EXCLUDED.label, bits = EXCLUDED.bits"
+            f"INSERT INTO {table} (id, label, bits, definition) "
+            f"VALUES (%(id)s, %(label)s, %(bits)s::bit({width}), %(definition)s) "
+            f"ON CONFLICT (id) DO UPDATE SET "
+            f"label = EXCLUDED.label, bits = EXCLUDED.bits, definition = EXCLUDED.definition"
         )
-        self._all = f"SELECT id, label, bits::text FROM {table}"
+        self._all = f"SELECT id, label, bits::text, definition FROM {table}"
         # `<%%>` is pgvector's Jaccard-distance operator (`%` doubled to escape psycopg).
-        # Threshold-filter first, then rank by distance and truncate — the in-memory
-        # backend's "threshold then top-k"; ties break by id.
+        # Threshold-filter first (and to this store's definition), then rank by distance and
+        # truncate — the in-memory backend's "threshold then top-k"; ties break by id.
         self._similar = (
             f"SELECT id, label, 1 - (bits <%%> %(q)s::bit({width})) AS similarity "
             f"FROM {table} "
-            f"WHERE 1 - (bits <%%> %(q)s::bit({width})) >= %(threshold)s "
+            f"WHERE definition = %(definition)s "
+            f"AND 1 - (bits <%%> %(q)s::bit({width})) >= %(threshold)s "
             f"ORDER BY bits <%%> %(q)s::bit({width}), id "
             f"LIMIT %(k)s"
         )
@@ -164,23 +190,39 @@ class PostgresFingerprintStore:
         """Insert or replace a fingerprint by id."""
         async with await self._connect() as conn:
             await conn.execute(
-                self._upsert, {"id": record.id, "label": record.label, "bits": record.bits}
+                self._upsert,
+                {
+                    "id": record.id,
+                    "label": record.label,
+                    "bits": record.bits,
+                    "definition": record.definition,
+                },
             )
             await conn.commit()
 
     async def all_records(self) -> list[FingerprintRecord]:
-        """Return every stored record (bits as a text bitstring)."""
+        """Return every stored record (bits as a text bitstring), regardless of definition.
+
+        Unfiltered on purpose: the only consumer is substructure search, which re-matches
+        the stored SMILES label with RDKit and never touches the bits, so a stale-definition
+        row is still a correct substructure hit.
+        """
         async with await self._connect() as conn:
             async with conn.cursor() as cur:
                 await cur.execute(self._all)
                 rows = await cur.fetchall()
-        return [FingerprintRecord(id=r[0], label=r[1], bits=r[2]) for r in rows]
+        return [FingerprintRecord(id=r[0], label=r[1], bits=r[2], definition=r[3]) for r in rows]
 
     async def find_similar(self, query_bits: str, top_k: int, threshold: float) -> list[Match]:
         """Return up to `top_k` records with Tanimoto >= `threshold`, most similar first."""
         async with await self._connect() as conn:
             async with conn.cursor() as cur:
-                params = {"q": query_bits, "threshold": threshold, "k": top_k}
+                params = {
+                    "q": query_bits,
+                    "threshold": threshold,
+                    "k": top_k,
+                    "definition": self._definition,
+                }
                 await cur.execute(self._similar, params)
                 rows = await cur.fetchall()
         return [Match(id=r[0], label=r[1], similarity=float(r[2])) for r in rows]
@@ -205,10 +247,18 @@ async def find_matches(
 
 
 def default_molecule_store() -> PostgresFingerprintStore:
-    """The production molecule (ECFP4) store — one place pairs table and bit width."""
-    return PostgresFingerprintStore("molecule_fingerprints", settings.ecfp_bits)
+    """The production molecule (ECFP4) store — one place pairs table, width, and definition."""
+    from mcp_servers.molfp.fingerprint import molecule_definition
+
+    return PostgresFingerprintStore(
+        "molecule_fingerprints", settings.ecfp_bits, molecule_definition()
+    )
 
 
 def default_reaction_store() -> PostgresFingerprintStore:
-    """The production reaction (DRFP) store — one place pairs table and bit width."""
-    return PostgresFingerprintStore("reaction_fingerprints", settings.drfp_bits)
+    """The production reaction (DRFP) store — one place pairs table, width, and definition."""
+    from mcp_servers.rxnfp.fingerprint import reaction_definition
+
+    return PostgresFingerprintStore(
+        "reaction_fingerprints", settings.drfp_bits, reaction_definition()
+    )

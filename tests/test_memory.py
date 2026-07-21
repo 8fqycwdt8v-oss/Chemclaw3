@@ -210,3 +210,20 @@ def test_interaction_note_captures_confirmed_answer() -> None:
     assert note.created_by == "agent"  # still PR-gated before it is trusted
     assert "confirmed" in note.body.lower()
     assert note.outgoing_links() == ["reaction-eln-2026-002"]
+
+
+def test_record_confirmed_answer_tool_uses_gate(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The agent tool routes a confirmed answer through the (fake) PR-gate (5.5 wiring)."""
+    from agents import memory_tools
+
+    fake = FakeSubmitter()
+    monkeypatch.setattr(memory_tools, "default_submitter", lambda: fake)
+    ref = asyncio.run(
+        memory_tools.record_confirmed_answer(
+            "q-42", "Best solvent?", "Aqueous dioxane at 90 C.", ["reaction-eln-2026-002"]
+        )
+    )
+    assert ref == "pr://note/interaction-q-42"
+    submitted = fake.submissions[0]
+    assert submitted.path.endswith("interaction/interaction-q-42.md")
+    assert "reaction-eln-2026-002" in submitted.content

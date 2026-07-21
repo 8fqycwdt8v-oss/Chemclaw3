@@ -12,6 +12,7 @@ import pytest
 
 from chemclaw.config import settings
 from mcp_servers.fpstore import PostgresFingerprintStore
+from mcp_servers.molfp.fingerprint import molecule_definition
 from mcp_servers.molfp.search import (
     find_similar_molecules,
     find_substructure_matches,
@@ -23,7 +24,9 @@ from tests.pg import migrated_db_or_skip
 async def _store_or_skip() -> PostgresFingerprintStore:
     """Return a migrated Postgres fingerprint store, or skip if no database is reachable."""
     await migrated_db_or_skip()
-    return PostgresFingerprintStore("molecule_fingerprints", settings.ecfp_bits)
+    return PostgresFingerprintStore(
+        "molecule_fingerprints", settings.ecfp_bits, molecule_definition()
+    )
 
 
 def test_similarity_ranking_in_sql() -> None:
