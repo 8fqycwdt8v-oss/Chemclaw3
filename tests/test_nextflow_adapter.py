@@ -87,6 +87,17 @@ def test_unknown_status_is_an_error(_launcher_env: None) -> None:
         asyncio.run(nextflow.poll_run(handle, transport=httpx.MockTransport(handler)))
 
 
+def test_unknown_status_is_non_terminal(_launcher_env: None) -> None:
+    """Tower's transient `UNKNOWN` keeps polling (RUNNING), it does not fail a maybe-fine run."""
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"workflow": {"status": "UNKNOWN"}})
+
+    handle = HpcJobHandle(scheduler_job_id="run-77")
+    state = asyncio.run(nextflow.poll_run(handle, transport=httpx.MockTransport(handler)))
+    assert state is nextflow.RunState.RUNNING  # non-terminal → the poll loop keeps going
+
+
 def test_launch_rejection_is_an_error(_launcher_env: None) -> None:
     """A non-200 on launch surfaces as a typed error, not a bad handle."""
 

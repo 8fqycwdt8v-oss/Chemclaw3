@@ -56,7 +56,7 @@ def require_actor() -> str:
     not call this — they run as the service by design, not on behalf of a person.
 
     Returns:
-        The authenticated user's Entra `oid`, or `settings.service_actor_id` when enforcement is off.
+        The authenticated user's Entra `oid`, or `settings.service_actor_id` when enforcement's off.
 
     Raises:
         AuthorizationError: When `entra_required` and there is no authenticated user in context.

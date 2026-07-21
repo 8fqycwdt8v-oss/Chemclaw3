@@ -47,16 +47,21 @@ class QMJobWorkflow:
             start_to_close_timeout=activity_timeout,
             retry_policy=BAD_DATA_RETRY,
         )
-        # The poll runs as long as the mock job; its own start-to-close budget
-        # covers the whole run, and the heartbeat timeout is what detects a dead
-        # worker (step 1.3).
+        # The poll's start-to-close budget must cover the *entire* run in one attempt —
+        # heartbeating resets only the heartbeat timeout, never start-to-close. The mock finishes in
+        # `hpc_mock_run_seconds`; a real Nextflow run takes far longer, so the two backends use
+        # different budgets (F5, review finding: a mock-derived 36s cap would kill every real run).
+        if settings.hpc_launch_interface == "nextflow":
+            poll_budget = settings.hpc_run_timeout_seconds
+            poll_heartbeat = settings.hpc_run_heartbeat_timeout_seconds
+        else:
+            poll_budget = settings.hpc_mock_run_seconds + settings.qm_activity_timeout_seconds
+            poll_heartbeat = settings.qm_poll_heartbeat_timeout_seconds
         raw_output = await workflow.execute_activity(
             poll_hpc_status,
             handle,
-            start_to_close_timeout=timedelta(
-                seconds=settings.hpc_mock_run_seconds + settings.qm_activity_timeout_seconds
-            ),
-            heartbeat_timeout=timedelta(seconds=settings.qm_poll_heartbeat_timeout_seconds),
+            start_to_close_timeout=timedelta(seconds=poll_budget),
+            heartbeat_timeout=timedelta(seconds=poll_heartbeat),
             retry_policy=BAD_DATA_RETRY,
         )
         result = await workflow.execute_activity(

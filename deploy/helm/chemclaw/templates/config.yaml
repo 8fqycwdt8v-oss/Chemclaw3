@@ -1,9 +1,17 @@
+{{- /* The ConfigMap, ServiceAccount and Secret are also pre-install/pre-upgrade hooks with a */ -}}
+{{- /* weight (-10) BELOW the migrate Job (-5): on a fresh install, hooks run before ordinary */ -}}
+{{- /* resources, so without this the migrate hook would start before its ConfigMap/SA exist */ -}}
+{{- /* (review finding). `before-hook-creation` refreshes them each run; they persist for the app. */ -}}
 apiVersion: v1
 kind: ConfigMap
 metadata:
   name: {{ include "chemclaw.name" . }}-config
   labels:
     {{- include "chemclaw.labels" . | nindent 4 }}
+  annotations:
+    "helm.sh/hook": pre-install,pre-upgrade
+    "helm.sh/hook-weight": "-10"
+    "helm.sh/hook-delete-policy": before-hook-creation
 data:
   {{- range $key, $value := .Values.config }}
   {{ $key }}: {{ $value | quote }}
@@ -16,6 +24,8 @@ metadata:
   labels:
     {{- include "chemclaw.labels" . | nindent 4 }}
   annotations:
+    "helm.sh/hook": pre-install,pre-upgrade
+    "helm.sh/hook-weight": "-10"
     {{- toYaml .Values.serviceAccount.annotations | nindent 4 }}
 {{- if .Values.secrets.create }}
 ---
@@ -25,6 +35,10 @@ metadata:
   name: {{ .Values.secrets.name }}
   labels:
     {{- include "chemclaw.labels" . | nindent 4 }}
+  annotations:
+    "helm.sh/hook": pre-install,pre-upgrade
+    "helm.sh/hook-weight": "-10"
+    "helm.sh/hook-delete-policy": before-hook-creation
 type: Opaque
 stringData:
   # Placeholder only — real values arrive via ExternalSecret/SealedSecret in a real cluster (F6-T6).

@@ -24,6 +24,9 @@ COPY bo ./bo
 COPY eln ./eln
 COPY calc ./calc
 COPY infra ./infra
+COPY kg ./kg
+COPY memory ./memory
+COPY sources ./sources
 COPY deploy/entrypoint.sh /usr/local/bin/chemclaw-entrypoint
 
 # Install into a project venv; --frozen fails if the lockfile drifted (reproducible builds).

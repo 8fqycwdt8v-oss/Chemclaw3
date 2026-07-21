@@ -30,6 +30,7 @@ spec:
           env:
             - name: CHEMCLAW_COMPONENT
               value: "mcp-{{ $name }}"
+            {{- include "chemclaw.env" $ | nindent 12 }}
           envFrom:
             {{- include "chemclaw.envFrom" $ | nindent 12 }}
           resources:

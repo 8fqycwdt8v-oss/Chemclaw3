@@ -130,6 +130,45 @@ def test_hpc_launch_interface_env_override(monkeypatch: pytest.MonkeyPatch) -> N
     assert Settings(_env_file=None).hpc_launch_interface == "nextflow"  # type: ignore[call-arg]
 
 
+def test_entra_required_needs_audience_and_issuer() -> None:
+    """Under enforcement, an empty audience (deny-all) or no tenant/issuer fails at startup."""
+    with pytest.raises(ValueError, match="entra_audience"):
+        Settings(_env_file=None, entra_required=True)  # type: ignore[call-arg]
+    with pytest.raises(ValueError, match="tenant_id or entra_issuer"):
+        Settings(_env_file=None, entra_required=True, entra_audience="api://x")  # type: ignore[call-arg]
+
+
+def test_entra_role_gate_must_be_configured_symmetrically() -> None:
+    """Declaring expensive actions without privileged roles (or vice versa) leaves the gate open."""
+    with pytest.raises(ValueError, match="must be set together"):
+        Settings(  # type: ignore[call-arg]
+            _env_file=None,
+            entra_required=True,
+            entra_audience="api://x",
+            entra_tenant_id="t",
+            entra_expensive_actions="submit_qm_job",  # roles missing → gate silently open
+        )
+
+
+def test_entra_required_full_config_is_accepted() -> None:
+    """A complete enforcement config (audience + issuer + paired roles/actions) constructs fine."""
+    settings = Settings(  # type: ignore[call-arg]
+        _env_file=None,
+        entra_required=True,
+        entra_audience="api://x",
+        entra_tenant_id="t",
+        entra_expensive_actions="submit_qm_job",
+        entra_privileged_roles="compute",
+    )
+    assert settings.entra_required is True
+
+
+def test_temporal_mtls_cert_and_key_must_pair() -> None:
+    """A Temporal client cert without its key (or vice versa) is a half-config, rejected early."""
+    with pytest.raises(ValueError, match="temporal_tls_cert and temporal_tls_key"):
+        Settings(_env_file=None, temporal_tls_cert="/c.pem")  # type: ignore[call-arg]
+
+
 def test_absolute_knowledge_dir_is_rejected() -> None:
     """An absolute `knowledge_dir` fails at startup (it would escape the note repo)."""
     with pytest.raises(ValueError, match="knowledge_dir must be relative"):

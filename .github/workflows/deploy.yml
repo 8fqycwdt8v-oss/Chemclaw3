@@ -19,9 +19,15 @@ jobs:
         run: docker build -f deploy/Containerfile -t chemclaw:ci .
       - name: Smoke each entrypoint as a non-root UID
         run: |
-          for c in service hpc-worker background-worker mcp-molfp mcp-rxnfp; do
-            docker run --rm --user 1001 -e CHEMCLAW_COMPONENT="$c" \
-              --entrypoint python chemclaw:ci -c "import service.app, workers.hpc_worker, workers.background_worker"
+          declare -A mod=(
+            [service]=service.app
+            [hpc-worker]=workers.hpc_worker
+            [background-worker]=workers.background_worker
+            [mcp-molfp]=mcp_servers.molfp.server
+            [mcp-rxnfp]=mcp_servers.rxnfp.server
+          )
+          for c in "${!mod[@]}"; do
+            docker run --rm --user 1001 --entrypoint python chemclaw:ci -c "import ${mod[$c]}"
           done
 
   chart:
@@ -48,7 +54,8 @@ jobs:
     environment: production
     steps:
       - uses: actions/checkout@v4
-      - name: Run database migrations (pre-deploy Job)
-        run: echo "oc apply -f deploy/migrate-job.yaml && oc wait --for=condition=complete job/chemclaw-migrate"
       - name: Push image + roll out
-        run: echo "docker push + helm upgrade --install chemclaw deploy/helm/chemclaw (requires cluster creds)"
+        # `helm upgrade --install` runs the pre-deploy migration hook (templates/migrate-job.yaml →
+        # `python -m calc.migrate`) to completion before the app Deployments roll out (requires
+        # cluster credentials, hence the guarded environment).
+        run: echo "docker push + helm upgrade --install chemclaw deploy/helm/chemclaw"

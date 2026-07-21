@@ -40,9 +40,20 @@ class AuthError(Exception):
     """A token could not be validated (bad signature, audience, issuer, or missing identity)."""
 
 
+# One JWKS client per endpoint, cached: `PyJWKClient` keeps its own key cache, so rebuilding it per
+# request would re-fetch the tenant JWKS on the hot path and amplify under a token flood (review
+# finding). Keyed by endpoint so a config change is still picked up.
+_jwks_clients: dict[str, PyJWKClient] = {}
+
+
 def _signing_key(token: str) -> Any:
     """Resolve the RSA signing key for `token` from the tenant JWKS (indirected for tests)."""
-    return PyJWKClient(settings.entra_jwks_endpoint).get_signing_key_from_jwt(token).key
+    endpoint = settings.entra_jwks_endpoint
+    client = _jwks_clients.get(endpoint)
+    if client is None:
+        client = PyJWKClient(endpoint)
+        _jwks_clients[endpoint] = client
+    return client.get_signing_key_from_jwt(token).key
 
 
 def validate_token(token: str) -> Principal:
@@ -59,6 +70,9 @@ def validate_token(token: str) -> Principal:
             algorithms=["RS256"],
             audience=settings.entra_audience,
             issuer=settings.entra_issuer_url,
+            # Require an expiry: PyJWT only checks `exp` when present, so reject a token that omits
+            # it (Entra always issues one; this closes the no-exp edge). (review finding)
+            options={"require": ["exp"]},
         )
     except jwt.InvalidTokenError as exc:  # signature/audience/issuer/expiry all funnel here
         raise AuthError(f"invalid token: {exc}") from exc

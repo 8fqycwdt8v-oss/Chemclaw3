@@ -31,17 +31,19 @@ class RunState(StrEnum):
     FAILED = "FAILED"
 
 
-# Launcher status strings that map onto our terminal/non-terminal states. Anything unknown is an
-# error, not a silent "still running", so a launcher change surfaces loudly rather than hanging.
+# Launcher status strings that map onto our terminal/non-terminal states. An *unrecognized* status
+# is an error (surfaces loudly, never hangs), but Tower's `UNKNOWN` is treated as non-terminal
+# (transient before a run resolves): failing a run that may still succeed is worse than polling on —
+# the run timeout bounds a genuinely stuck run either way (review finding).
 _STATE_BY_LAUNCHER_STATUS = {
     "SUBMITTED": RunState.SUBMITTED,
     "PENDING": RunState.SUBMITTED,
+    "UNKNOWN": RunState.RUNNING,
     "RUNNING": RunState.RUNNING,
     "SUCCEEDED": RunState.SUCCEEDED,
     "COMPLETED": RunState.SUCCEEDED,
     "FAILED": RunState.FAILED,
     "CANCELLED": RunState.FAILED,
-    "UNKNOWN": RunState.FAILED,
 }
 
 
@@ -55,7 +57,7 @@ async def _client(transport: httpx.AsyncBaseTransport | None) -> httpx.AsyncClie
     return httpx.AsyncClient(
         base_url=settings.hpc_api_base_url,
         headers=_auth_headers(),
-        timeout=settings.entra_http_timeout_seconds,
+        timeout=settings.hpc_http_timeout_seconds,
         transport=transport,
     )
 

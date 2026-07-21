@@ -26,4 +26,8 @@ spec:
           port: {{ .Values.networkPolicy.egressPorts.temporal }}
         - protocol: TCP
           port: {{ .Values.networkPolicy.egressPorts.https }}
+        - protocol: TCP
+          port: {{ .Values.networkPolicy.egressPorts.llm }}
+        - protocol: TCP
+          port: {{ .Values.networkPolicy.egressPorts.otel }}
 {{- end }}

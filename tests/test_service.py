@@ -99,6 +99,27 @@ def test_message_to_unknown_session_is_404() -> None:
         assert res.status_code == 404
 
 
+def test_a_session_is_owner_scoped() -> None:
+    """A user cannot post into or stream a session another user created (review finding)."""
+    from service.auth import Principal, require_principal
+
+    app = create_app(agent_factory=lambda: _FakeAgent())
+    alice = Principal(oid="alice", upn="alice@corp", roles=frozenset())
+    bob = Principal(oid="bob", upn="bob@corp", roles=frozenset())
+    client = TestClient(app)
+
+    app.dependency_overrides[require_principal] = lambda: alice
+    session_id = client.post("/sessions").json()["session_id"]
+
+    app.dependency_overrides[require_principal] = lambda: bob
+    assert client.post(f"/sessions/{session_id}/messages", json={"message": "x"}).status_code == 404
+    assert client.get(f"/sessions/{session_id}/events").status_code == 404  # not even existence
+
+    app.dependency_overrides[require_principal] = lambda: alice
+    ok = client.post(f"/sessions/{session_id}/messages", json={"message": "x"})
+    assert ok.status_code == 200  # the owner still gets in
+
+
 def test_job_pushback_streams_completed_events(monkeypatch) -> None:  # type: ignore[no-untyped-def]
     """The events endpoint streams a finished job's push-back to the session (F3-T3)."""
     import service.app as app_module

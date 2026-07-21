@@ -101,9 +101,13 @@ serviceAccount:
     azure.workload.identity/client-id: "00000000-0000-0000-0000-000000000000"
 
 # NetworkPolicy egress allow-list (F6-T2): the app talks only to these, nothing else leaves the pod.
+# Includes the internal LLM (8000) and OTLP collector (4317) — both plain HTTP on non-443 ports, so
+# they must be listed explicitly or the agent cannot reach its model / ship traces.
 networkPolicy:
   enabled: true
   egressPorts:
     postgres: 5432
     temporal: 7233
     https: 443
+    llm: 8000
+    otel: 4317

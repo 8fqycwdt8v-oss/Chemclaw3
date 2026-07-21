@@ -136,6 +136,16 @@ class Settings(BaseSettings):
     hpc_pipeline_name: str = ""
     hpc_pipeline_version: str = ""
     hpc_artifact_store_url: str = ""
+    # Real-run budgets for the `nextflow` poll (the mock uses `hpc_mock_run_seconds`). A real QM/DFT
+    # run takes far longer than the mock: `hpc_run_timeout_seconds` is the poll activity's
+    # single-attempt `start_to_close` cap (default 24h — heartbeating does NOT extend it, so it must
+    # cover the whole run); `hpc_run_heartbeat_timeout_seconds` is the poll's heartbeat timeout, set
+    # comfortably above one poll's HTTP round-trip + `hpc_poll_interval_seconds` so a slow launcher
+    # does not trip a false dead-worker timeout; `hpc_http_timeout_seconds` bounds each launcher or
+    # artifact HTTP call (a dedicated knob, not the Entra-token timeout).
+    hpc_run_timeout_seconds: float = Field(default=86400.0, gt=0)
+    hpc_run_heartbeat_timeout_seconds: float = Field(default=120.0, gt=0)
+    hpc_http_timeout_seconds: float = Field(default=30.0, gt=0)
     # The HPC/Nextflow identity bridge (plan F4-T6, §7.2): the other non-Entra bridge. HPC is not an
     # Entra relying party, so user jobs run under one service identity while the requesting Entra
     # `oid` is carried in the payload (F4-T3) and *every* oid→HPC-identity mapping is logged for the
@@ -527,6 +537,41 @@ class Settings(BaseSettings):
             raise ValueError(
                 "hpc_poll_interval_seconds must be smaller than qm_poll_heartbeat_timeout_seconds"
             )
+        return self
+
+    @model_validator(mode="after")
+    def _entra_enforcement_is_configured(self) -> "Settings":
+        """Under `entra_required`, fail fast on a half-configured identity setup (review finding).
+
+        Two footguns the front-door/authorization code cannot catch at request time:
+        - an empty `entra_audience` (or no tenant/issuer) makes every token rejected — a deny-all
+          availability outage that should surface at startup, not as mysterious 401s;
+        - declaring privileged roles *or* expensive actions but not the other leaves the role gate
+          silently open (an action with no expensive-set entry authorizes every user), so the two
+          must be set together — set neither to deliberately gate nothing.
+        """
+        if not self.entra_required:
+            return self
+        if not self.entra_audience:
+            raise ValueError("entra_audience must be set when entra_required")
+        if not (self.entra_tenant_id or self.entra_issuer):
+            raise ValueError("entra_tenant_id or entra_issuer must be set when entra_required")
+        if bool(self.entra_expensive_actions) != bool(self.entra_privileged_roles):
+            raise ValueError(
+                "entra_expensive_actions and entra_privileged_roles must be set together "
+                "(the role gate is silently open otherwise)"
+            )
+        return self
+
+    @model_validator(mode="after")
+    def _temporal_mtls_is_complete(self) -> "Settings":
+        """A Temporal client cert without its key (or vice versa) is a silent half-config.
+
+        mTLS needs both the client cert and its private key; a server-root CA alone (server-auth
+        only) is fine. Rejecting cert-xor-key at startup beats a confusing handshake failure later.
+        """
+        if bool(self.temporal_tls_cert) != bool(self.temporal_tls_key):
+            raise ValueError("temporal_tls_cert and temporal_tls_key must be set together")
         return self
 
 

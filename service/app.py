@@ -63,6 +63,17 @@ def create_app(agent_factory: Callable[[], Any] = build_agent) -> FastAPI:
     app.state.agent = None
     app.state.agent_factory = agent_factory
     app.state.sessions = {}
+    # session_id -> owner Entra oid, so a session can only be posted to / streamed by its creator
+    # (defense-in-depth beyond the unguessable uuid4 id; review finding). Off when identity is off.
+    app.state.session_owners = {}
+
+    def _owned_session(session_id: str, principal: Principal) -> Any:
+        """Return the session iff it exists and the caller owns it, else 404 (no existence leak)."""
+        session = app.state.sessions.get(session_id)
+        owner = app.state.session_owners.get(session_id)
+        if session is None or (owner is not None and owner != principal.oid):
+            raise HTTPException(status_code=404, detail="unknown session")
+        return session
 
     def _agent() -> Any:
         if app.state.agent is None:
@@ -87,6 +98,7 @@ def create_app(agent_factory: Callable[[], Any] = build_agent) -> FastAPI:
         """Start a new conversation session and return its id (requires an authenticated user)."""
         session_id = uuid.uuid4().hex
         app.state.sessions[session_id] = _agent().create_session(session_id=session_id)
+        app.state.session_owners[session_id] = principal.oid
         return SessionOut(session_id=session_id)
 
     @app.post("/sessions/{session_id}/messages")
@@ -96,9 +108,7 @@ def create_app(agent_factory: Callable[[], Any] = build_agent) -> FastAPI:
         principal: Principal = Depends(require_principal),
     ) -> EventSourceResponse:
         """Run one turn for the session and stream its events as SSE."""
-        session = app.state.sessions.get(session_id)
-        if session is None:
-            raise HTTPException(status_code=404, detail="unknown session")
+        session = _owned_session(session_id, principal)
 
         async def _events() -> AsyncIterator[dict[str, str]]:
             async for event in run_turn(
@@ -114,8 +124,7 @@ def create_app(agent_factory: Callable[[], Any] = build_agent) -> FastAPI:
         principal: Principal = Depends(require_principal),
     ) -> EventSourceResponse:
         """Stream async job push-back for the session (F3-T3): a finished job wakes the chat."""
-        if session_id not in app.state.sessions:
-            raise HTTPException(status_code=404, detail="unknown session")
+        _owned_session(session_id, principal)
 
         async def _events() -> AsyncIterator[dict[str, str]]:
             async for pushed in stream_new_events(session_id):
