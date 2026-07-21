@@ -245,7 +245,18 @@ lifecycle, runs a turn, streams — the missing caller the agent docstring descr
 Goal of the phase: sessions survive pod restarts (foundation #6), and a finished Nextflow/BO job
 **wakes the session** (the missing `notify_agent`/plan-1.7 callback) instead of polling.
 
-### F3-T1 — Postgres session/history store
+### F3-T1 — Postgres session/history store (DONE)
+- **Goal:** replace `InMemoryHistoryProvider` with a durable provider keyed by session, resumable.
+- **Landed:** `agents/session_store.py::PostgresHistoryProvider(HistoryProvider)` overrides only
+  `get_messages`/`save_messages` (like `InMemoryHistoryProvider`), persisting `Message.to_dict()` to
+  `session_messages` (`infra/sql/008_sessions.sql`) and reloading in `id` order via
+  `Message.from_dict()`; a fresh instance over the same DSN resumes the thread. `build_agent` selects
+  it via `_history_provider()` on `settings.session_store` (`memory` default / `postgres`). Config
+  `session_store` + `session_store_dsn` (falls back to `postgres_dsn`). Tests: `test_session_store.py`
+  (unit provider-selection + PG round-trip that skips offline), `test_config.py`.
+
+<details><summary>original ticket</summary>
+
 - **Goal:** replace `InMemoryHistoryProvider` (constructed at `agents/chemclaw_agent.py:114`) with a
   durable provider keyed by user+thread, resumable.
 - **Touch:** ＋`agents/session_store.py` (`PostgresHistoryProvider` implementing MAF's history-provider
@@ -260,6 +271,8 @@ Goal of the phase: sessions survive pod restarts (foundation #6), and a finished
   instance over the same dsn sees prior turns.
 - **Done when:** a session survives a fresh provider instance (proxy for pod restart).
 - **Deps:** F2-T1.
+
+</details>
 
 ### F3-T2 — Session-events channel (job → session)
 - **Goal:** a durable channel a completing workflow writes and the front door tails.

@@ -223,6 +223,16 @@ class Settings(BaseSettings):
     service_port: int = Field(default=8080, gt=0)
     service_cors_origins: str = ""
 
+    # Durable session store (plan Phase F3). The agent's conversation history must survive a pod
+    # restart, so a session is resumable. `memory` keeps the classic in-process provider (dev/test);
+    # `postgres` persists each turn's messages to `session_messages` keyed by session id, so a fresh
+    # process over the same DSN resumes the thread. **Session state is not Temporal job state** — it
+    # is the conversation layer (D-002), and compaction still runs on top. `session_store_dsn` lets
+    # the session store point at a different database than the calculation/fingerprint DSN; empty
+    # falls back to `postgres_dsn` (one database in the simple deployment).
+    session_store: Literal["memory", "postgres"] = "memory"
+    session_store_dsn: str = ""
+
     # Markdown knowledge graph (plan Phase 2). Directory of note files the indexer
     # reads; retrieval is graph traversal over their [[wikilinks]] (D-004).
     knowledge_dir: str = "knowledge"

@@ -53,9 +53,19 @@ MAF ships the harness natively (`create_harness_agent` + `TodoProvider`/`AgentMo
 - [ ] Deferred within F2: emit `PlanEvent` from harness todo state, and real `JobStartedEvent` when a
       tool starts a Temporal job (wired in F3 with job→session push-back). ADR **D-A2** (front door).
 
-### Next — F3 durable session + job→session push-back (docs/implementation-tickets.md F3-T1..T3)
-Replaces the in-memory session map with a Postgres store; a finished job wakes the session
-(`awaiting→completed`) instead of polling.
+### Phase F3 — Durable session + job→session push-back
+- [x] **F3-T1** Postgres session history: `agents/session_store.py::PostgresHistoryProvider`
+      (overrides get/save_messages, `Message.to_dict/from_dict` → `session_messages`), migration
+      `infra/sql/008_sessions.sql`, config `session_store`/`session_store_dsn`, `build_agent` selects
+      via `_history_provider()`. Tests: `test_session_store.py` (unit selection + PG round-trip that
+      skips offline), `test_config.py`.
+- [ ] **F3-T2** Session-events channel (job→session): `infra/sql/009_session_events.sql`,
+      `workflows/notify.py::record_session_event`, `service/session_events.py` tailer (LISTEN/NOTIFY
+      or poll).
+- [ ] **F3-T3** `awaiting→completed` end-to-end: `session_id` on job input; QM workflow emits a
+      completion event; runner flips the matching `awaiting` todo. (Live service-loop wiring proves
+      out only against live Postgres/Temporal — logic unit-tested offline.)
+- [ ] ADR **D-A3** (session + callback) — extend once T2/T3 land.
 
 ## Later — Phase 6 identity/RBAC & hardening (folded into F4; needs live Entra/Temporal)
 

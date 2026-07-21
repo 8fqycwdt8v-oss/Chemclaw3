@@ -21,6 +21,7 @@ from agent_framework import (
     ChatOptions,
     CompactionProvider,
     FileSkillsSource,
+    HistoryProvider,
     InMemoryHistoryProvider,
     MCPStdioTool,
     SkillsProvider,
@@ -120,7 +121,7 @@ def build_agent(
     skills = SkillsProvider(
         RoleFilteredSkillsSource(FileSkillsSource(settings.skills_dirs), allowed_skills)
     )
-    history = InMemoryHistoryProvider()
+    history = _history_provider()
     audit = make_audit_middleware(
         correlation_id=correlation_id if correlation_id is not None else uuid.uuid4().hex,
         actor=actor,
@@ -154,7 +155,7 @@ def build_agent(
 def _build_harness_agent(
     client: Any,
     skills: SkillsProvider,
-    history: InMemoryHistoryProvider,
+    history: HistoryProvider,
     audit: Any,
     options: ChatOptions,
 ) -> Agent:
@@ -197,6 +198,22 @@ def _build_harness_agent(
         loop_max_iterations=settings.harness_max_loop_iterations,
         middleware=[audit],
     )
+
+
+def _history_provider() -> HistoryProvider:
+    """The session-history provider selected by config (F3): durable Postgres or in-memory.
+
+    `session_store="postgres"` persists each session's turns so a conversation survives a pod
+    restart (the durability requirement); the default `memory` keeps the classic in-process provider
+    for dev and tests. Both satisfy the same `HistoryProvider` contract, so `build_agent` — and
+    compaction, which reads `history.source_id` — is identical on either path.
+    """
+    if settings.session_store == "postgres":
+        # Imported lazily so the in-memory/dev path never imports psycopg for a store it won't use.
+        from agents.session_store import PostgresHistoryProvider
+
+        return PostgresHistoryProvider()
+    return InMemoryHistoryProvider()
 
 
 def _capability_tools() -> list[Any]:

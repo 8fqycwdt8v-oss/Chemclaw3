@@ -77,6 +77,13 @@ def test_llm_base_url_overrides_via_env(monkeypatch: pytest.MonkeyPatch) -> None
     assert settings.llm_model == "internal-model"
 
 
+def test_session_store_defaults_to_memory() -> None:
+    """The durable session store is opt-in; the default keeps the in-process provider."""
+    settings = Settings(_env_file=None)  # type: ignore[call-arg]
+    assert settings.session_store == "memory"
+    assert settings.session_store_dsn == ""
+
+
 def test_service_defaults() -> None:
     """The front-door service binds a sane default port and no CORS origins (safe default)."""
     settings = Settings(_env_file=None)  # type: ignore[call-arg]
