@@ -90,6 +90,17 @@ def test_entra_defaults_and_derived_endpoints() -> None:
     assert override.entra_issuer_url == "https://x/v2"
 
 
+def test_entra_authorization_sets_parse() -> None:
+    """Expensive-action and privileged-role config parse from comma lists to sets."""
+    settings = Settings(  # type: ignore[call-arg]
+        _env_file=None,
+        entra_expensive_actions="submit_qm_job, start_bo_campaign",
+        entra_privileged_roles="compute,admin",
+    )
+    assert settings.entra_expensive_action_set == frozenset({"submit_qm_job", "start_bo_campaign"})
+    assert settings.entra_privileged_role_set == frozenset({"compute", "admin"})
+
+
 def test_session_store_defaults_to_memory() -> None:
     """The durable session store is opt-in; the default keeps the in-process provider."""
     settings = Settings(_env_file=None)  # type: ignore[call-arg]

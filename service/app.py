@@ -101,7 +101,9 @@ def create_app(agent_factory: Callable[[], Any] = build_agent) -> FastAPI:
             raise HTTPException(status_code=404, detail="unknown session")
 
         async def _events() -> AsyncIterator[dict[str, str]]:
-            async for event in run_turn(_agent(), session, body.message):
+            async for event in run_turn(
+                _agent(), session, body.message, actor=principal.oid, roles=principal.roles
+            ):
                 yield {"event": event.type, "data": event.model_dump_json()}
 
         return EventSourceResponse(_events())

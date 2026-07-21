@@ -253,6 +253,24 @@ class Settings(BaseSettings):
     entra_audience: str = ""
     entra_jwks_url: str = ""
     entra_issuer: str = ""
+    # Authorization for expensive triggers (plan F4-T5): the single fachliche gate. An action named
+    # in `entra_expensive_actions` (comma list, e.g. "submit_qm_job,start_bo_campaign") may run only
+    # for a user holding at least one role in `entra_privileged_roles` — so an autonomously-planned
+    # todo cannot launch a costly HPC/BO job outside the requesting user's entitlements. Enforced
+    # only when `entra_required` (a real deployment with real roles); in dev the gate is open. Both
+    # empty by default: nothing is privileged until a deployment declares it.
+    entra_expensive_actions: str = ""
+    entra_privileged_roles: str = ""
+
+    @property
+    def entra_expensive_action_set(self) -> frozenset[str]:
+        """The actions that require a privileged role (parsed comma list)."""
+        return frozenset(a.strip() for a in self.entra_expensive_actions.split(",") if a.strip())
+
+    @property
+    def entra_privileged_role_set(self) -> frozenset[str]:
+        """The roles that authorize an expensive action (parsed comma list)."""
+        return frozenset(r.strip() for r in self.entra_privileged_roles.split(",") if r.strip())
 
     # Markdown knowledge graph (plan Phase 2). Directory of note files the indexer
     # reads; retrieval is graph traversal over their [[wikilinks]] (D-004).

@@ -84,9 +84,15 @@ MAF ships the harness natively (`create_harness_agent` + `TodoProvider`/`AgentMo
       `test_auth.py` (local-RSA token validation, 401 gate, dev mode), `test_config.py`.
 - [ ] **F4-T3** Every backend workflow user-specific via Entra: `requested_by` = required Entra oid,
       reject-if-absent at the submit boundary (`require_actor`), across QM/BO/report/memory inputs.
-- [ ] **F4-T5** Authorize at one point + wire seams: `agents/authz.py::authorize_trigger` before
-      expensive triggers; real actor (`principal.oid`) into `make_audit_middleware`; roles →
-      `RoleFilteredSkillsSource`.
+- [x] **F4-T5** Authorize at one point + actor into audit: `agents/authz.py::authorize_trigger`
+      (config `entra_expensive_actions`/`entra_privileged_roles`) called by `submit_qm_job` before the
+      durable job; ambient identity via `agents/identity_context.py` (contextvar, stamped by the
+      runner from the `Principal`); `make_audit_middleware` records the ambient Entra oid over its
+      build-time default. Tests: `test_authz.py`, `test_audit.py`. Remaining in T5:
+      roles→`RoleFilteredSkillsSource` per request (needs per-user agent or an ambient skills filter).
+- [ ] **F4-T3** (partial done for QM): `submit_qm_job` now stamps `requested_by` = Entra oid. Still
+      to do: make `requested_by` a required Entra oid (reject-if-absent) across BO/report/memory
+      workflow inputs.
 - [ ] **F4-T2/T4/T6** (infra-gated): workload identity federation, OBO to ELN, Temporal mTLS + HPC
       identity bridge — need live Entra/tenant + Temporal.
 

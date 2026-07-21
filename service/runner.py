@@ -16,6 +16,7 @@ from typing import Any
 
 from agent_framework import AgentSession
 
+from agents.identity_context import reset_current_identity, set_current_identity
 from agents.session_context import reset_current_session_id, set_current_session_id
 from service.events import (
     AnswerEvent,
@@ -31,7 +32,14 @@ from service.events import (
 _ARG_PREVIEW_CHARS = 200
 
 
-async def run_turn(agent: Any, session: AgentSession, user_message: str) -> AsyncIterator[Event]:
+async def run_turn(
+    agent: Any,
+    session: AgentSession,
+    user_message: str,
+    *,
+    actor: str | None = None,
+    roles: frozenset[str] = frozenset(),
+) -> AsyncIterator[Event]:
     """Run one turn and yield its events (tokens, tool calls, approvals, then the answer).
 
     Args:
@@ -39,6 +47,9 @@ async def run_turn(agent: Any, session: AgentSession, user_message: str) -> Asyn
             drive it with a fake streaming agent and no live model.
         session: The caller's conversation session (per user+thread), so the turn resumes context.
         user_message: The chemist's message for this turn.
+        actor: The authenticated user's Entra oid (F4), made ambient so the audit trail, the
+            authorization gate, and job attribution see it. `None` off the authenticated path.
+        roles: The user's app roles, made ambient for the authorization gate.
 
     Yields:
         `service.events.Event` values in the order the model produced them, ending with an
@@ -48,6 +59,8 @@ async def run_turn(agent: Any, session: AgentSession, user_message: str) -> Asyn
     # Stamp the turn's session so a job-launching tool (submit_qm_job) records push-back to the
     # right session (F3-T3) — ambient, never a model-supplied argument. Reset on turn teardown.
     session_token = set_current_session_id(session.session_id)
+    # Stamp the authenticated identity (F4) so audit/authorization/attribution see the user.
+    identity_token = set_current_identity(actor, roles) if actor is not None else None
     try:
         async with AsyncExitStack() as stack:
             # Open each MCP capability server for the duration of the turn, then tear it down — the
@@ -70,6 +83,8 @@ async def run_turn(agent: Any, session: AgentSession, user_message: str) -> Asyn
         yield ErrorEvent(message=f"The turn could not be completed: {exc}")
     finally:
         reset_current_session_id(session_token)
+        if identity_token is not None:
+            reset_current_identity(identity_token)
 
 
 def _tool_calls_in(update: Any) -> list[tuple[str, str]]:
