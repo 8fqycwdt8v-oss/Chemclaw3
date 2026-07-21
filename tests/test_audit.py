@@ -108,6 +108,25 @@ def _drive_mw(
     asyncio.run(_run())
 
 
+def test_ambient_identity_overrides_the_static_actor() -> None:
+    """The turn's authenticated Entra user is the recorded actor, over the build default (F4)."""
+    from agents.identity_context import reset_current_identity, set_current_identity
+
+    sink = _RecordingSink()
+    mw = make_audit_middleware(correlation_id="conv-9", actor="unknown", sink=sink)
+
+    async def _ok_call() -> None:
+        return None
+
+    token = set_current_identity("u-entra-oid", frozenset({"compute"}))
+    try:
+        _drive_mw(mw, _ctx("find_notes", {"q": "x"}), _ok_call)
+    finally:
+        reset_current_identity(token)
+
+    assert sink.events[0].actor == "u-entra-oid"  # ambient user, not the "unknown" fallback
+
+
 def test_factory_stamps_correlation_id_actor_and_records_outcome() -> None:
     """The per-conversation middleware records cid, actor, outcome, and the result effect."""
     sink = _RecordingSink()

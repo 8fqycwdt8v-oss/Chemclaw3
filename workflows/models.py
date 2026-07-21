@@ -9,6 +9,7 @@ no shape is duplicated between the agent, the workflow, and the activities.
 from pydantic import BaseModel, Field
 
 from chemclaw.chem import require_canonical_smiles
+from chemclaw.config import settings
 from chemclaw.ids import stable_hash
 
 
@@ -20,9 +21,12 @@ class QMJobInput(BaseModel):
     not something to hardcode as an enum here.
 
     `requested_by` carries the caller's Entra ID object id (`oid`) for the audit
-    trail (plan step 1.9). It is a v1 placeholder — populated for real once auth
-    lands in Phase 6 — but present in the data model now so provenance flows all
-    the way to the knowledge-graph note without a later schema change.
+    trail (plan step 1.9). The submit tool populates it via `require_actor`
+    (F4-T3): under Entra it is the authenticated user and a run without one is
+    rejected before submission; in local dev it is the configured service
+    identity. The field keeps a safe default so tests and system-triggered runs
+    can construct the input without a tenant. Excluded from `qm_job_key`: the
+    science does not depend on who asked, so identical work dedupes across users.
     """
 
     molecule_smiles: str = Field(min_length=1)
@@ -32,6 +36,12 @@ class QMJobInput(BaseModel):
     # When true, the completed result is proposed as a PR-gated graph note (2.8).
     # Opt-in, so a calculation is only published to the graph when deliberately asked.
     publish_to_graph: bool = False
+    # The conversation session to notify on completion (plan F3-T3), stamped from the turn's
+    # ambient context (`agents.session_context`) at submit, never by the model. `None` off the
+    # front-door path (tests/CLI) — then the job simply records no push-back. Deliberately excluded
+    # from `qm_job_key`: identical science is still deduplicated across sessions (D-011), so a
+    # completion notifies the session that actually started the workflow.
+    session_id: str | None = None
 
 
 def qm_job_key(job: QMJobInput) -> str:
@@ -49,12 +59,19 @@ def qm_job_key(job: QMJobInput) -> str:
     scheduler handle, and the result cache key (plan step 1.10). One definition,
     three callers. Shares `chemclaw.ids.stable_hash` (SHA-256) with every other
     identity key in the system.
+
+    Includes the HPC pipeline version **only when one is configured** (plan F5-T3):
+    a real pipeline update changes the numbers, so it must be a cache *miss*, not a
+    stale hit (D-011/D-033). An empty version (the mock/dev default) leaves the key
+    byte-identical to before F5, so existing cached results and ids are unaffected.
     """
     payload = {
         "smiles": require_canonical_smiles(job.molecule_smiles),
         "method": job.method,
         "basis_set": job.basis_set,
     }
+    if settings.hpc_pipeline_version:
+        payload["pipeline_version"] = settings.hpc_pipeline_version
     return stable_hash(payload)
 
 

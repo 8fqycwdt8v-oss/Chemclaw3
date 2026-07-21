@@ -25,6 +25,7 @@ from typing import Protocol, runtime_checkable
 from agent_framework import FunctionInvocationContext, function_middleware
 from pydantic import BaseModel
 
+from agents.identity_context import get_current_actor
 from chemclaw.config import settings
 
 logger = logging.getLogger(__name__)
@@ -79,10 +80,11 @@ def make_audit_middleware(
 ) -> Callable[[FunctionInvocationContext, Callable[[], Awaitable[None]]], Awaitable[None]]:
     """Build the tool-audit middleware bound to one conversation's identity.
 
-    `correlation_id` ties every event to a single agent conversation; `actor` is who ran
-    it (Phase-6 seam). `sink` is the durable trail — omitted (or `NullAuditSink`) means
-    log-only. A sink failure is logged and swallowed: the audit store must never break a
-    tool call.
+    `correlation_id` ties every event to a single agent conversation; `actor` is the fallback
+    identity used when no authenticated user is ambient — the turn's real Entra user
+    (`agents.identity_context`) takes precedence per call (F4-T5). `sink` is the durable trail —
+    omitted (or `NullAuditSink`) means log-only. A sink failure is logged and swallowed: the audit
+    store must never break a tool call.
     """
     audit_sink: AuditSink = sink if sink is not None else NullAuditSink()
 
@@ -94,6 +96,9 @@ def make_audit_middleware(
         """Record one audit event per tool invocation (observe-only)."""
         name = context.function.name
         args = _truncate(context.arguments)
+        # The real actor is the turn's authenticated Entra user (F4-T5); fall back to the static
+        # `actor` bound at build time when there is none (tests, the non-service caller).
+        event_actor = get_current_actor() or actor
         start = time.perf_counter()
         try:
             await call_next()
@@ -104,7 +109,7 @@ def make_audit_middleware(
                 name,
                 elapsed_ms,
                 correlation_id,
-                actor,
+                event_actor,
                 exc,
                 args,
             )
@@ -112,7 +117,7 @@ def make_audit_middleware(
                 audit_sink,
                 AuditEvent(
                     correlation_id=correlation_id,
-                    actor=actor,
+                    actor=event_actor,
                     tool=name,
                     arguments=args,
                     outcome="error",
@@ -128,14 +133,14 @@ def make_audit_middleware(
             name,
             elapsed_ms,
             correlation_id,
-            actor,
+            event_actor,
             args,
         )
         await _emit(
             audit_sink,
             AuditEvent(
                 correlation_id=correlation_id,
-                actor=actor,
+                actor=event_actor,
                 tool=name,
                 arguments=args,
                 outcome="ok",

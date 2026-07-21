@@ -14,6 +14,8 @@ from temporalio.common import WorkflowIDReusePolicy
 from temporalio.exceptions import WorkflowAlreadyStartedError
 from temporalio.service import RPCError
 
+from agents.authz import authorize_trigger, require_actor
+from agents.session_context import get_current_session_id
 from chemclaw.config import settings
 from chemclaw.temporal_client import connect
 from workflows.models import QMJobInput, QMJobStatus, qm_job_key
@@ -38,7 +40,19 @@ async def submit_qm_job(molecule_smiles: str, method: str, basis_set: str) -> st
     Returns:
         The job id to poll for status and results.
     """
-    job = QMJobInput(molecule_smiles=molecule_smiles, method=method, basis_set=basis_set)
+    # Authorize the expensive HPC trigger against the turn's user before any durable work (F4-T5),
+    # so an autonomously-planned todo can't launch a job outside the user's entitlements.
+    authorize_trigger("submit_qm_job")
+    # Session (to notify on completion) and requested_by (the Entra actor) are ambient to the turn
+    # (F3-T3/F4-T3), not model-supplied args. `require_actor` enforces the core rule: under Entra
+    # this reject-if-absent guard refuses a job with no authenticated user before any durable work.
+    job = QMJobInput(
+        molecule_smiles=molecule_smiles,
+        method=method,
+        basis_set=basis_set,
+        requested_by=require_actor(),
+        session_id=get_current_session_id(),
+    )
     client = await connect()
     try:
         handle = await client.start_workflow(

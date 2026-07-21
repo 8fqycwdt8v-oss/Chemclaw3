@@ -5,14 +5,32 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## Project status
 
 Phases 0–5b of the plan are **implemented and CHECKMATE-reviewed**: toolchain + config,
-the MAF+Temporal spine (mock HPC), fast calculators (xTB/pKa/solubility) with the Postgres
+the MAF+Temporal spine, fast calculators (xTB/pKa/solubility) with the Postgres
 calculation cache, BoFire BO campaigns, the knowledge graph + PR-gate, the eval/metric
 layer, ECFP4/DRFP fingerprint search, ELN ingestion, the memory layers, and the report
-harness. Phase 6 (identity/RBAC/hardening) is open — it needs live Entra-ID/Temporal
-infrastructure. The design and staged build order remain the source of truth:
+harness.
 
-- `docs/architektur.md` — the four-layer architecture (the "big picture", numbered sections).
-- `docs/implementation-plan.md` — the step-by-step build order with quality gates.
+The **foundation build F0–F7** (the real target stack: OpenShift + HPC/Nextflow + an internal
+OpenAI-compatible LLM, Entra identity system-wide) is **implemented for everything verifiable
+offline**, each phase ADR'd (D-039…D-050) and green under `make lint type test`:
+
+- **F0** LLM provider seam (generic credential, not Entra) · **F1** MAF harness (plan/execute) ·
+  **F2** FastAPI+SSE front door · **F3** durable Postgres sessions + job→session push-back.
+- **F4** Entra identity/RBAC: front-door OIDC, one authorization gate, `require_actor` reject-if-absent
+  core rule, workload identity federation, OBO (dormant), Temporal-mTLS + HPC identity bridges.
+- **F5** real Nextflow (Seqera/Tower) launcher behind the QM activities (mock kept for CI).
+- **F6** OpenShift delivery: one rootless image, Helm chart, CI, three-secret model, Temporal self-hosted.
+- **F7** the generic `DataSource` seam (`sources/`) — ELN re-hosted unchanged; a new source is one
+  registry entry + one config token. First live connector (deferred): a custom Snowflake ELN source.
+
+**Live edges remain open** (need a real Entra tenant / Temporal broker / OpenShift cluster): real token
+validation, federation/OBO exchanges, live cluster durability + `helm`/`kubeconform` render. See
+`BACKLOG.md` for the exact list. The design and staged build order remain the source of truth:
+
+- `docs/architektur.md` — the four-layer architecture (§6 = the real OpenShift/Nextflow/internal-LLM
+  deployment; §7/§8 = Entra durchgängig).
+- `docs/implementation-plan.md` — the original build order; `docs/implementation-tickets.md` — the
+  F0–F9 ticket backlog with per-phase status.
 
 ## Architecture (the one thing to internalize)
 

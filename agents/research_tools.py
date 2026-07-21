@@ -19,15 +19,21 @@ from agents.framing import frame_untrusted
 from chemclaw.config import settings
 from mcp_servers.fpstore import default_reaction_store
 from report.evidence import EvidenceChunk, SourceRetriever
-from report.retrievers import FingerprintReactionRetriever, GraphRetriever
+from report.retrievers import FingerprintReactionRetriever
+from sources.registry import active_retrieve_sources
 
 # Test seam: swap the production reaction store for an in-memory one without a database.
 _reaction_store = default_reaction_store
 
 
 def _text_retrievers() -> list[SourceRetriever]:
-    """Sources keyed by a free-text query. Extend this list to add a data source (G6)."""
-    return [GraphRetriever()]
+    """The active retrieve halves from the data-source registry (plan F7).
+
+    Adding a text source is a registry entry + a config token now, not an edit here — the default
+    (`graph`) yields exactly the single `GraphRetriever` this returned before, so behavior is
+    unchanged until a deployment activates another source.
+    """
+    return list(active_retrieve_sources())
 
 
 async def gather_evidence(

@@ -32,3 +32,14 @@ revisit it. Default is "off-the-shelf, defer until measured".
 > Source for the last six rows: `docs/research-review.md` (external 2025/2026 gap analysis).
 > Two items were instead promoted to `BACKLOG.md` for a *now* decision — the evaluation/metrics
 > layer and the chemical/bio safety layer — because they are cross-cutting, not deferrable modules.
+
+## Foundation-review (F4–F7) accepted deferrals
+
+Post-implementation adversarial review of F4–F7 confirmed the core paths are correct; the fixed
+findings are recorded in D-051. These residuals were **consciously not fixed now**:
+
+| Deferred | Why not now | Trigger |
+|---|---|---|
+| Per-source pipeline cursor in the ELN sync | The durable sync carries one high-water cursor keyed by `eln_sync_adapter`; with the single default ingest source (`eln-json`) this is correct. With **two** active ingest sources whose newest entries differ, the shared `max()` cursor can skip the lagging source's entries (F7 review F-1/F-2). Fixing means per-source cursors + tying the cursor key to the *active ingest set*, not `eln_sync_adapter` | The first second ingest source lands — i.e. the custom Snowflake ELN connector, which the plan already scopes to bring its own pipeline cursor. Add a startup validator then, or key cursors per source |
+| Thundering-herd lock in `WorkloadTokenProvider` | On a cold/stale cache, N concurrent `get_service_token(scope)` all fire the exchange (correctness fine — never a stale token, just redundant calls) | Measurable duplicate token exchanges under real concurrency — add an `asyncio.Lock` per scope |
+| Generic ingest half still shaped like `ElnAdapter` | `IngestHalf = ElnAdapter` (verbatim re-host) means a future non-ELN ingest source must expose `fetch_new_entries`/`map_to_ord`. Acceptable while every ingest source is reaction-shaped (maps to the canonical ORD reaction) | A non-reaction ingest source appears — then generalize the ingest half's mapped type |

@@ -699,3 +699,368 @@ source-agnostic pure-function core + Temporal `report_workflow` — no MAF graph
 exists in the repo, so nothing is replaced in code. The three are complementary: Temporal =
 durable execution · graph workflow/deterministic pipeline = fixed flows · agent harness = open
 dynamic multi-step planning. See `docs/harness-konzept.md`.
+
+## D-039 — F0: config-selected LLM provider seam (foundation-plan D-A1)
+
+**Context.** The target deployment serves the LLM from an internal OpenAI-compatible ("OpenLLM-like")
+endpoint, not Anthropic. The agent must reach it by config, and the raw inference credential is
+**one generic API key, not per-user Entra** (the model call is not a user-scoped resource; identity
+scoping applies to *who* takes the turn / *which* workflow runs, handled in F4).
+
+- **One import site.** `agents/llm_provider.py::build_chat_client()` is the only place a chat-client
+  class is imported (mirrors the ELN adapter registry). `build_agent` calls it; the deleted
+  `_default_chat_client` is gone. `settings.llm_provider ∈ {openai_compatible, anthropic}`.
+- **openai_compatible** builds MAF `OpenAIChatClient(model=llm_model, async_client=AsyncOpenAI(...))`,
+  where the `AsyncOpenAI` carries `llm_base_url`, the generic `llm_api_key` (a non-empty placeholder
+  if the endpoint is keyless), `llm_timeout_seconds`, `llm_max_retries`, and a CA-pinned httpx client
+  when `llm_tls_ca_bundle` is set — so a firewalled internal endpoint with a private CA works from
+  config alone. **anthropic** keeps the pre-seam dev path (its own key preflight, `agent_model`).
+- **Default `anthropic`** so the config singleton is valid with no endpoint set; production sets
+  `CHEMCLAW_LLM_PROVIDER=openai_compatible` + base_url/model (validated at startup).
+- **Generation params** (`llm_temperature`/`llm_max_tokens`) thread onto `Agent(default_options=…)`.
+- New dep: `agent-framework-openai`. Tests: `test_llm_provider`, `test_config`, `test_agent`.
+- **Open (F0-T4):** the internal model's function-calling reliability is the project's #1 risk; a
+  spike verdict (`docs/spikes/f0-toolcalling.md`) is pending a live endpoint before building further.
+
+## D-040 — F1: MAF Agent Harness is the autonomous plan/execute backbone (foundation D-020)
+
+**Relation to D-038.** This re-integrates and supersedes the earlier harness-adoption decision
+(D-038): the same `create_harness_agent` wiring, now promoted from an *optional* backbone to the
+foundation's autonomous plan/execute path and refactored into `_build_harness_agent`/
+`_capability_tools`/`_history_provider` (F0 options + F3 durable sessions on both paths).
+
+**Context.** Foundations #1/#2 (an actually-run agentic loop + a visible plan/todo list) — the
+Claude-Code-like experience — were absent. MAF **ships** the harness (`create_harness_agent` +
+`TodoProvider`/`AgentModeProvider`/`todos_remaining`), so the decision is to *wire* it, not build it.
+
+- **Wiring, batteries off.** `build_agent` branches on `settings.harness_enabled`; `_build_harness_agent`
+  calls `create_harness_agent` over the **same** `_capability_tools()` (the full function+MCP set),
+  `RoleFilteredSkillsSource`, audit middleware, and a shared `_compaction_strategy()` (extracted so
+  classic and harness compaction cannot drift). MAF's generic batteries (file memory/access, web
+  search, shell) are **disabled** — capability is ours (MCP servers + tools), not the harness built-ins.
+- **Plan→approve→execute for free.** `AgentModeProvider` ships `plan`/`execute` modes ("present plan →
+  approval → `mode_set` execute"). `harness_autonomy=plan_only` (default, pharma-safe) starts in `plan`
+  and, because the loop predicate `todos_remaining(looping_modes=["execute"])` only continues in
+  execute mode, the agent produces a plan and stops for approval — the pre-execution GxP gate. `execute`
+  starts looping immediately, capped by `harness_max_loop_iterations` (runaway guard).
+- **Classic path is the load-bearing fallback** against the harness's `[Experimental]` API — off by
+  default; a test asserts it attaches no todo/mode providers.
+- The completion loop is *driven* by the run service (F2); this ADR covers the wiring, proven by
+  `test_agent` (todo/mode added, full toolset kept, audit kept, start-mode per autonomy).
+
+## D-041 — F2: front-door run service (foundation-plan D-A2)
+
+**Context.** The decisive gap: the agent was only ever *built* (in tests), never *run*. A chemist
+needs a browser surface, and someone has to own the MCP tool lifecycle the constructor leaves open.
+
+- **One ASGI service.** `service/app.py::create_app` (FastAPI) builds/holds one agent per process and
+  a per-session `AgentSession`; `service/runner.py::run_turn` opens the MCP contexts for the turn
+  (`AsyncExitStack` over `agent.mcp_tools` — the lifecycle the agent docstring delegates to its
+  caller), runs `agent.run(..., stream=True, session=…)`, and translates streamed updates into typed
+  events. When the harness is on, the *same* `agent.run` drives its completion loop — no separate
+  driver. The agent factory is injectable, so the whole HTTP surface is tested with a fake streaming
+  agent (no live model/MCP/creds).
+- **Typed turn contract.** `service/events.py` is a discriminated union on `type`
+  (plan/tool_call/token/job_started/approval_request/answer/error) serialized one-per-SSE-line, so
+  the web UI now and Slack/mobile later render one contract, not a bespoke stream each. Tool calls are
+  extracted **duck-typed** from update contents (MAF's function-call content class is not a stable
+  export), keeping the runner version-robust. A failed turn becomes one user-safe `ErrorEvent`, never
+  a mid-stream 500 or a leaked trace.
+- **Thin built-in web chat** (`service/static/`), not an adopted generic UI — full control over plan
+  display, tool trace, citations, and the approval affordances a generic chat UI can't render. The
+  messages endpoint is POST+SSE, so the page reads the response body as a stream (native `EventSource`
+  is GET-only). Config: `service_host`/`service_port`/`service_cors_origins` (empty CORS = safe
+  default). Deps: `fastapi`/`uvicorn`/`sse-starlette`.
+- **Deferred within F2:** emitting `PlanEvent` from harness todo state and a real `JobStartedEvent`
+  when a tool launches a Temporal job — both land with F3's durable session + job→session push-back.
+  Identity (Entra OIDC on every non-health route) is F4.
+
+## D-042 — F3: durable session + job→session push-back (foundation-plan D-A3)
+
+**Context.** Two gaps: a conversation died with the pod (in-memory history), and a finished job could
+not reach a waiting chat (the user had to poll). F3 closes both without moving durability out of
+Temporal (D-002) — session history and the push-back *notification* are their own layer.
+
+- **F3-T1 durable history.** `agents/session_store.py::PostgresHistoryProvider` overrides only
+  `get_messages`/`save_messages` (like `InMemoryHistoryProvider`), persisting `Message.to_dict()` to
+  `session_messages` (`infra/sql/008`) keyed by session id, reloaded in `id` order. `build_agent`
+  selects it via `_history_provider()` on `settings.session_store` (`memory` default | `postgres`);
+  a fresh instance over the same DSN resumes the thread. `session_store_dsn` falls back to
+  `postgres_dsn`.
+- **F3-T2 push-back channel.** `session_events` (`infra/sql/009`, partial index over unconsumed) is a
+  durable mailbox. `agents/session_events.py` is the writer (`record_session_event`), reader
+  (`fetch_unconsumed`/`mark_consumed`), and a `stream_new_events` tailer whose fetch/mark/poll are
+  dependency-injected so its consume-once loop is unit-tested with no DB. `workflows/notify.py` wraps
+  the write in a Temporal activity (`record_session_event_activity`, on the background queue) plus a
+  workflow-side `notify_session_best_effort` — same never-fail-the-science discipline as
+  `publish_note_best_effort`.
+- **F3-T3 wiring.** The turn's session is *ambient*, not a model argument: the runner stamps
+  `agents/session_context.py`'s contextvar around the turn, and `submit_qm_job` reads it into
+  `QMJobInput.session_id` (excluded from `qm_job_key`, so identical science still dedups across
+  sessions and the completion notifies the launching session). The QM workflow calls
+  `notify_session_best_effort` on completion; the front door exposes `GET /sessions/{id}/events` (SSE)
+  streaming `job_completed` as a `JobCompletedEvent`, so a finished job wakes the chat with no polling.
+- **Offline-tested with fakes** (contextvar, submit stamping, runner stamp/clear, tailer loop, events
+  endpoint, activity forwarding); the Postgres round-trips and the Temporal workflow-emit prove out
+  against live infra (they skip in the sandbox, joining the existing durable-layer skips).
+- **Deferred (needs the live harness loop):** flipping the harness `awaiting` todo on completion
+  (MAF TodoProvider store mutation) and emitting `PlanEvent`/live `JobStartedEvent`.
+
+## D-043 — F4: Entra ID identity & RBAC — front-door OIDC + one authorization gate (D-A4)
+
+**Context.** Identity via Entra is a hard requirement, and it becomes load-bearing the moment the
+harness can autonomously trigger expensive HPC/BO paths ("who asked", "may they"). F4 makes
+`architektur.md` §7/§8 real; the offline-verifiable core landed first, the tenant/federation edges are
+infra-gated.
+
+- **F4-T1 front-door OIDC.** `service/auth.py` validates every non-health request's Entra JWT —
+  RS256 against the tenant JWKS, **audience** checked (confused-deputy: the front door is client *and*
+  resource), issuer checked — into a `Principal(oid, upn, roles)`; `require_principal` is the FastAPI
+  guard (401 without a valid token). `entra_required` gates enforcement; off in local dev (a stand-in
+  principal), on everywhere real. JWKS/issuer derive from `entra_tenant_id`. Dep `pyjwt[crypto]`;
+  bugbear allows the `fastapi.Depends` idiom. Tested with locally-signed RSA tokens (no network).
+- **F4-T5 one authorization point + real actor.** `agents/authz.py::authorize_trigger(action)` is the
+  single gate: an action in `entra_expensive_actions` needs a user holding an `entra_privileged_roles`
+  role, else `AuthorizationError` — checked before the durable job starts, so an autonomously-planned
+  todo can't launch an expensive path outside the user's entitlements (open in dev). The turn's
+  identity is **ambient** (`agents/identity_context.py` contextvar, stamped by the runner from the
+  `Principal`, like the session id), so the audit middleware records the real Entra oid over its
+  build-time default, and `submit_qm_job` both authorizes and stamps `requested_by` = oid — all
+  without rebuilding the per-process agent. `requested_by` stays out of `qm_job_key` (D-011).
+- **Deferred / infra-gated:** workload identity federation (F4-T2), OBO to ELN (F4-T4), the Temporal
+  mTLS + HPC identity bridges (F4-T6) — need live Entra/tenant + Temporal. Also remaining: making
+  `requested_by` a *required* Entra oid across all workflow inputs, and per-request
+  role→`RoleFilteredSkillsSource` scoping (needs a per-user agent or an ambient skills filter).
+
+## D-044 — F4-T3: the core rule — user-triggered workflows are user-specific via `require_actor`
+
+**Context.** The mandate is "every backend workflow is user-specific via Entra (required,
+authorizing, reject-if-absent)." Taken literally that means a required `requested_by` oid on every
+workflow input. But two facts shape the honest implementation: (1) only two workflows have a **live
+agent-tool trigger** today — `submit_qm_job` and the interaction-approval — the BO campaign, report,
+and memory workflows have no user-facing trigger yet; (2) the memory-distillation and ELN-sync
+workflows take **no user input at all** — they are scheduled/background jobs, not launched by a
+person.
+
+**Decision.**
+- **One reusable guard.** `agents/authz.py::require_actor()` is the single place the rule flows
+  through: it returns the turn's ambient Entra oid, and under `entra_required` **rejects** a
+  user-triggered workflow with no authenticated user (`AuthorizationError`) *before* any durable
+  work — mirroring how `require_canonical_smiles` rejects bad data at the durable boundary. In dev
+  (no tenant) it returns the configured `service_actor_id` (replacing the old magic `"unknown"`).
+- **Wired into the one live user-trigger.** `submit_qm_job` now populates `requested_by =
+  require_actor()`, so the reject-if-absent rule is enforced there. `requested_by` stays out of
+  `qm_job_key` (D-011: cache identity is molecular, not per-user; two users share one cached compute).
+- **No speculative fields.** Adding a required `requested_by` to `CampaignSpec`/`ReportRequest` now —
+  with no caller to populate it — would be a dead "for-later" field, which CLAUDE.md forbids. Those
+  inputs adopt the same `require_actor()` guard when they gain live triggers (a later phase).
+- **System jobs are not user-specific by design.** Scheduled ELN-sync and memory-distillation run as
+  the service, not on behalf of a person; they never call `require_actor`. Attributing them to a user
+  would be wrong. The rule is precisely: every *user-triggered* backend workflow is user-specific.
+
+**Consequence.** The core rule is real and enforced at the only live trigger, via one reusable piece;
+the mechanism is ready for every future user-trigger; no dead code; the science-dedup cache is
+untouched. Tested offline: ambient-user attribution, dev fallback, and reject-if-absent (both the
+guard directly and through `submit_qm_job`, independent of the role gate).
+
+## D-045 — F4-T2: workload identity federation (a pod mints its own token, no secret at rest)
+
+**Context.** Backend components (front door, workers, MCP servers) must call Entra-protected
+resources as themselves. Storing a client secret per component is the anti-pattern §7/ADR D-A4 rules
+out. Entra Workload Identity Federation lets a pod present its projected ServiceAccount JWT as a
+`client_assertion` in the OAuth2 client-credentials grant — no secret ever at rest.
+
+**Decision.** `agents/identity/workload.py::WorkloadTokenProvider` performs that exchange and caches
+per scope until `entra_token_refresh_leeway_seconds` before expiry; the SA token is re-read from
+`entra_sa_token_path` on every exchange (it rotates). Transport and clock are constructor-injected so
+the exchange is exercised offline against an `httpx.MockTransport` with a hand-cranked clock. A
+process-wide `default_provider` + `get_service_token(scope)` convenience share one cache. Config:
+`entra_workload_federation_enabled` (off in dev), `entra_workload_client_id`, `entra_token_endpoint`,
+`entra_sa_token_path`, `entra_token_refresh_leeway_seconds`, `entra_http_timeout_seconds`.
+
+**Consequence.** Any backend component can obtain its own Entra token with no stored secret; the LLM
+generic credential remains the one documented exception (it does not use this path). Live tenant
+exchange is the only gated edge — the code + request construction + caching are proven offline.
+
+## D-046 — F4-T4: On-Behalf-Of exchange for user-scoped downstream (wired, dormant)
+
+**Context.** When a backend acts for a *specific user* against a user-scoped resource (ELN/LIMS), it
+must present the user's identity downstream, not its own service identity. OAuth2 OBO (RFC 7523)
+exchanges the user's token for a downstream-scoped one.
+
+**Decision.** `agents/identity/obo.py::exchange_obo(user_token, scope)` performs the OBO grant,
+authenticating to the token endpoint with the federated SA assertion (`read_sa_token`, shared with
+F4-T2 — one reader, two callers, no duplication). Transport injected for offline tests. Config
+`entra_obo_enabled` (off). It is deliberately **generic and dormant**: no user-scoped source exists
+yet (the first, a custom Snowflake ELN connector, is deferred behind the F7 seam), so nothing calls
+it — a source opts in later. This is the wired-but-unused seam the ticket asks for, not a dead stub:
+it is the single mechanism every user-scoped source will use.
+
+**Consequence.** OBO is available for any future user-scoped source; the exchange, the OBO assertion,
+and the federated client-assertion are proven offline; the live tenant exchange is the only gated edge.
+
+## D-047 — F4-T6: the two non-Entra transport bridges carry identity as a claim
+
+**Context.** §7.2 names two transports that are not Entra relying parties — Temporal and HPC/Nextflow.
+The rule is that identity rides *inside* the workflow payload (`requested_by`, D-044), never the
+transport; the transports themselves are secured and, for HPC, every identity mapping is logged.
+
+**Decision.**
+- **Temporal transport auth.** `chemclaw/temporal_client.py` now builds its `Client.connect` kwargs
+  in a pure `connect_options()`: mTLS (`temporal_tls_cert`/`_key`/`_ca` → `TLSConfig`, PEM paths read
+  to bytes) when set, and/or a Temporal Cloud `temporal_api_key`. Extracting the options makes
+  transport security assertable offline (constructed-args, no broker); dev stays plaintext when none
+  are set. Identity is *not* put on the transport — it is already in the payload.
+- **HPC identity bridge.** `agents/identity/hpc_bridge.py::map_to_hpc_identity(oid)` returns the one
+  shared `hpc_bridge_identity` a user's job runs under (HPC is not an Entra RP) and **logs every
+  oid→HPC-identity mapping** at INFO — the sole audit link from a cluster run back to the real user.
+  No `hpc_bridge_log_dsn` key was added: the audit trail already *is* structured logging, so a DSN
+  with no consumer would be a dead config knob.
+
+**Consequence.** Both bridges are ready and proven offline; the live broker/cluster wiring is the only
+gated edge. Together with D-043/D-044/D-045/D-046 this closes F4's offline-verifiable scope: front-door
+OIDC, one authorization gate, the reject-if-absent core rule, federation, OBO, and both bridges — the
+generic LLM key remaining the one documented exception.
+
+## D-048 — F5: real HPC execution via a Nextflow launcher behind the QM activities (D-A5, D-A5a)
+
+**Context.** The QM spine was mocked (a SLURM-style sleep). Its module docstring promised that
+making compute real would touch *only* `workflows/activities.py`. F5 keeps that promise.
+
+**Decision (D-A5a — launch interface).** The launcher is the **Seqera Platform / Tower REST API**:
+run status is a plain GET, which survives a durable heartbeat-poll cleanly (no long-lived SSH
+session to keep alive across worker restarts, unlike `nextflow` CLI over SSH; no bespoke internal
+launcher to build). `workflows/hpc/nextflow.py` is that adapter — `launch_run` / `poll_run` /
+`fetch_artifacts`, each taking an injectable httpx transport so the full launch→poll→fetch lifecycle
+is proven offline against a fake endpoint.
+
+**Decision (D-A5 — wiring).**
+- `hpc_launch_interface` selects the backend inside the two QM activities: `"mock"` (default, kept
+  for CI/local — no cluster) or `"nextflow"`. The activities are the *only* module changed; the
+  workflow, the worker registration, and the agent are untouched — the mock's original promise held.
+- The mock is retained verbatim behind the switch, so every existing durable test passes unchanged.
+- `fetch_artifacts` returns the same `energy=… converged=…` text shape, so `parse_qm_output` is
+  unchanged whether output came from the mock or a real run.
+- **F5-T3 cache versioning:** `qm_job_key` folds in `hpc_pipeline_version` **only when set** — a
+  pipeline bump becomes a cache miss (D-011/D-033), while the empty dev/mock version leaves keys
+  byte-identical to before F5 (no orphaned cache, no test churn).
+- **F5-T4 worker placement:** the `hpc-jobs` worker already registers the two activities by name;
+  the real launcher therefore runs on that worker with no topology change — network reachability to
+  the launcher is a deploy concern carried into F6.
+
+**Deferred (noted, not silently dropped).** The cosmetic `QMJobWorkflow→CalculationWorkflow` /
+`qm_job_key→calculation_key` rename (F5-T3, plan 1c.5): pure naming, high-churn across ids/tests, no
+behavior change — deferred to avoid risk with no functional gain. Real `cclib` parsing of genuine QM
+output replaces the regex parser once a real pipeline output format is fixed.
+
+**Consequence.** The real Nextflow path is code-complete and lifecycle-tested offline; the mock keeps
+CI cluster-free; a pipeline version is in the cache key. The only gated edge is a live cluster run.
+
+## D-049 — F6: OpenShift delivery — one image, one config source, three plain secrets (D-A6, D-A6a)
+
+**Context.** The stack must run in-cluster with OIDC, secrets, workers, and probes, without a second
+config system and without long-lived client secrets.
+
+**Decision.**
+- **One multi-target image** (`deploy/Containerfile`, UBI9, rootless UID 1001, arbitrary-UID safe):
+  service, both Temporal workers, and the MCP servers all ship the same bits; `deploy/entrypoint.sh`
+  dispatches on `CHEMCLAW_COMPONENT`. No secret baked in.
+- **One config source.** The Helm `values.yaml` `config:` block → a `ConfigMap` → `CHEMCLAW_*` env,
+  keys mirroring `Settings` exactly. `otel_endpoint` was added and bridged to the standard
+  `OTEL_EXPORTER_OTLP_ENDPOINT` in `chemclaw/logging.py` so the collector is one value like the rest.
+- **Three plain secrets only** (F6-T6): the generic LLM key (the one Entra exception), Temporal mTLS,
+  the HPC-bridge credential. Everything else is Workload Identity Federation (D-045) — the SA is
+  annotated, no client secret at rest.
+- **D-A6a — Temporal self-hosted in-cluster**, not Temporal Cloud: keeps the durable core inside the
+  same OIDC trust boundary and avoids egressing workflow payloads (which carry the Entra `oid`,
+  D-044) to a third party. Cloud remains a values-swap (`temporal_api_key` vs the mTLS trio).
+- **Migrations as a pre-deploy Helm hook** (`python -m calc.migrate`, D-034) that completes before any
+  app container starts. **NetworkPolicy** default-deny egress + allow-list (DNS/Postgres/Temporal/
+  HTTPS). Probes: `/readyz`+`/healthz` for the service; the Temporal poll is the workers' liveness.
+- **CI** (`deploy.yml`): build + non-root entrypoint smoke, `helm lint`, `helm template | kubeconform`;
+  guarded rollout on the default branch.
+
+**Consequence.** The full stack is described as deployable manifests with no second config source and
+no stored client secrets beyond the three documented. **Verified offline:** YAML parse, template
+brace-balance, `Settings` key mapping. `helm template`/`kubeconform`/the image build are CI-gated —
+inherent to a deploy phase (no helm/daemon in the sandbox), not a manifest gap.
+
+## D-050 — F7: the generic data-source seam (compose two half-contracts, don't merge them)
+
+**Context.** The system had two disjoint half-contracts — `ElnAdapter` (ingest: fetch + map to the
+canonical ORD reaction) and `SourceRetriever` (retrieve: evidence for a query) — with different
+methods and DTOs, and two selection styles (a config-string dict factory for ELN, a hardcoded
+`[GraphRetriever()]` list for retrieval). Attaching a new source (first live one: a custom Snowflake
+ELN connector) touched both places.
+
+**Decision.**
+- **One seam by composition, not merger** (`sources/base.py`). A `DataSource` names itself and
+  exposes an optional `ingest` half and an optional `retrieve` half, each being the *existing*
+  protocol verbatim (`IngestHalf = ElnAdapter`, `RetrieveHalf = SourceRetriever`). No new DTOs —
+  `RawEntry`/`OrdReaction`/`EvidenceChunk` are reused. `SourceSpec` (frozen) is the concrete impl and
+  rejects a source that provides neither half. The protocol members are read-only properties so a
+  frozen impl satisfies it.
+- **Config-driven registry** (`sources/registry.py`, `data_sources` config). `graph` is
+  retrieve-only (the knowledge graph); `eln-json`/`eln-ord` are ingest-only (the ELN adapters
+  re-hosted verbatim — the ELN is not *also* the graph retriever, so no double count).
+  `active_retrieve_sources()` / `active_ingest_sources()` select by config.
+- **Both consumers re-hosted with no behavior change** (F7-T3). `gather_evidence`'s
+  `_text_retrievers()` now returns `active_retrieve_sources()` — the default yields exactly the one
+  `GraphRetriever` as before. `eln_sync.sync_eln_entries` now ingests `active_ingest_sources()` and
+  merges per-source summaries — the single default source folds to the previous single-adapter
+  behavior. All existing ELN/research tests pass unchanged (the acceptance bar).
+- **Provenance already flows** (F7-T4): the mapped `OrdReaction` carries `provenance` + `reaction_id`
+  (native ref), and knowledge still enters via the terminal PR-gate while serving indices stay
+  ungated (D-018) — source-agnostically, because the seam changed only the *selection*, not the flow.
+
+**Deferred behind the seam (unchanged from the plan):** the live custom Snowflake ELN connector
+(durable `background-jobs` sync with a per-source *pipeline cursor* over Snowflake's load-timestamp) —
+lands as the first registered adapter. The current shared single cursor is adequate for one ingest
+source; per-source cursors arrive with that connector.
+
+**Consequence.** A second source is one registry entry + one config token, zero edits to the ingest
+loop or the evidence gatherer — proven by a fake retriever appearing in `gather_evidence` and a fake
+source's halves being selected, all offline.
+
+## D-051 — Foundation review (F4–F7): adversarial review + fixes
+
+Four parallel adversarial reviewers audited F4 (identity/security), F5 (HPC), F6 (deploy), and F7
+(seam) over the session's changes. The core paths were confirmed correct (reject-if-absent ordering,
+token cache math, OBO non-deputy, TLS None-handling, contextvar reset, audience/alg pinning, cache-key
+byte-identity, F7 default behavior preservation). The following real findings were **fixed**:
+
+**F5 (HIGH + hardening).**
+- The poll activity's `start_to_close_timeout` was `hpc_mock_run_seconds + qm_activity_timeout` (≈36s)
+  — a mock-derived cap that would kill *every* real Nextflow run. `qm_job.py` now branches on
+  `hpc_launch_interface`: the nextflow path uses `hpc_run_timeout_seconds` (24h) +
+  `hpc_run_heartbeat_timeout_seconds` (120s). New configs added.
+- Launcher/artifact HTTP now uses a dedicated `hpc_http_timeout_seconds` (not the Entra-token knob).
+- Tower `UNKNOWN` is treated as non-terminal (keep polling), not a hard `FAILED`.
+
+**F4 (misconfig + defense-in-depth).**
+- Startup validator: under `entra_required`, `entra_audience` and a tenant/issuer are mandatory (an
+  empty audience is a deny-all outage), and `entra_expensive_actions`/`entra_privileged_roles` must be
+  set together (declaring one without the other leaves the role gate silently open). A second
+  validator rejects a Temporal client cert without its key (half-mTLS).
+- `service/app.py` now binds a session to its creator's Entra `oid`; a non-owner gets 404 on
+  post/stream (no existence leak) — defense-in-depth beyond the unguessable uuid4.
+- `service/auth.py` caches the `PyJWKClient` per endpoint (was rebuilt per request → JWKS re-fetch on
+  the hot path) and requires the `exp` claim.
+
+**F6 (CRITICAL + HIGH + medium).**
+- `deploy/Containerfile` was missing `kg`, `memory`, `sources` (imported by the entrypoints) → pods
+  and the CI smoke import would `ModuleNotFoundError`. Added, and cross-checked against every
+  first-party import in the runtime packages.
+- NetworkPolicy egress omitted the internal LLM (8000) and OTLP collector (4317) ports → the agent
+  could not reach its model / ship traces. Added.
+- The MCP Deployment lacked `chemclaw.env`, so its pods had no `CHEMCLAW_POSTGRES_DSN` (fell back to
+  localhost). Added.
+- The pre-install migrate hook ran before the ConfigMap/ServiceAccount it needs; those are now
+  earlier-weighted (-10) pre-install hooks. `deploy.yml` smoke now imports the correct module per
+  component (MCP entrypoints were never checked), and the rollout uses `helm upgrade` (runs the hook)
+  instead of a nonexistent path.
+
+Accepted deferrals (single-ingest-source cursor, token-exchange lock, ELN-shaped ingest half) are
+recorded in `DEFERRED.md`. Tests added: session ownership (`test_service.py`), the enforcement/mTLS
+validators (`test_config.py`), and `UNKNOWN`-non-terminal (`test_nextflow_adapter.py`).
+

@@ -9,6 +9,7 @@ just do `logging.getLogger(__name__)` and log; they never configure logging them
 """
 
 import logging
+import os
 
 from chemclaw.config import settings
 
@@ -39,6 +40,10 @@ def configure_telemetry() -> None:
     """
     if not settings.otel_enabled:
         return
+    # Bridge our one config value to the standard OTLP env var MAF/OTel read (F6-T5), so the
+    # collector endpoint stays a single `CHEMCLAW_OTEL_ENDPOINT` like every other endpoint.
+    if settings.otel_endpoint:
+        os.environ.setdefault("OTEL_EXPORTER_OTLP_ENDPOINT", settings.otel_endpoint)
     from agent_framework.observability import configure_otel_providers
 
     try:

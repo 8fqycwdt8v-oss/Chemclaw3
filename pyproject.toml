@@ -8,23 +8,28 @@ requires-python = ">=3.11"
 dependencies = [
     "agent-framework-anthropic>=1.0.0b260709",
     "agent-framework-core>=1.11.0",
+    "agent-framework-openai>=1.0.0b260709",
     # cheminfo pulls mordredcommunity, which bofire's feature models import
     # unconditionally (bofire.data_models.features.feature -> mordred); without it a
     # clean install fails to import bofire at all. optimization brings the BoTorch strategies.
     "bofire[optimization,cheminfo]>=0.4.1",
     "drfp>=0.3.7",
+    "fastapi>=0.139.2",
     "mcp>=1.2.0",
     "networkx>=3.6.1",
     "numpy>=2.0",
     "pandas>=2.2",
     "psycopg[binary]>=3.2",
     "pydantic-settings>=2.5",
+    "pyjwt[crypto]>=2.8",
     "python-frontmatter>=1.3.0",
     "pyyaml>=6.0",
     "rdkit>=2026.3.4",
     "scikit-learn>=1.9.0",
+    "sse-starlette>=3.4.5",
     "tblite>=0.7.0",
     "temporalio[pydantic]>=1.30.0",
+    "uvicorn>=0.51.0",
 ]
 
 [dependency-groups]
@@ -58,6 +63,11 @@ ignore = ["D203", "D213"]
 
 [tool.ruff.lint.pydocstyle]
 convention = "google"
+
+[tool.ruff.lint.flake8-bugbear]
+# FastAPI's dependency-injection idiom puts `Depends(...)`/`Security(...)` in argument defaults; it is
+# evaluated once at startup and is the framework's documented pattern, so it is not the B008 footgun.
+extend-immutable-calls = ["fastapi.Depends", "fastapi.Security"]
 
 [tool.ruff.lint.per-file-ignores]
 # Tests document behavior in their names; module/function docstrings are not required there.

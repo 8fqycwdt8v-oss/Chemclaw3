@@ -108,23 +108,39 @@ building.
   problem: decide the backbone, then **rebase the harness idea onto current `main`** (or re-do it
   natively if D-A picks the Agent SDK). Do not let the two lines drift further.
 
-### D-C. Analytical development is in scope — commit to its data plane now
-- The vision says "chemical **and analytical** development colleagues," but the entire stack is
-  **synthesis/reaction-centric** (RDKit/xTB/ECFP4/ORD). There is **no analytical data model** —
-  no HPLC/UHPLC, chromatograms, NMR/MS/IR spectra, stability/impurity-profile data — and ORD does
-  not cover it. Research is unambiguous: this is the **more neglected half industry-wide and your
-  biggest whitespace**, but it needs its own standards (**AnIML** near-term, **Allotrope/AFO** as
-  the GxP target), instrument comms (**SiLA2 / the emerging LAP**), and analytical models
-  (retention prediction, peak deconvolution, spectral/impurity ID). Decide now whether v1 includes
-  the analytical half; if yes, the **canonical schema work is a foundation task**, not a later
-  skill. Do **not** invent a homegrown analytical schema.
+### D-C. Don't build sources yet — build the *generic attachment seam* **(scope set by user)**
+- The vision needs many future data sources — **LIMS, MES, analytical instruments, live ELN,
+  literature** — and the entire stack today is **synthesis/reaction-centric** (RDKit/xTB/ECFP4/ORD)
+  with **no analytical data** and only three static ELN samples. But per the brief, **build no
+  concrete source or analytics tool now.** The foundation task is instead the **generic data-source
+  attachment seam**: one stable ingest+retrieve contract + a config-driven source registry, so any
+  future source (LIMS/MES/analytical/ELN) attaches as *one thin adapter + one registry entry* with
+  zero core change. The repo already has both half-contracts (`ElnAdapter`, `SourceRetriever`) — the
+  work is to unify and harden them (plan Phase F7). **The first source is ELN** (already present as
+  static-export adapters); the seam is validated by re-hosting that existing ELN adapter. The first
+  *live* connector to land later is ELN too, and it is **custom — a Snowflake source read via an
+  internal data pipeline, not a commercial vendor/API**: the ELN data is landed into Snowflake
+  upstream, and Chemclaw's adapter reads it from Snowflake behind the same seam.
+- **Deferred behind the seam (not now):** concrete connectors and their standards — **AnIML/Allotrope**
+  (analytical data), **SiLA2/LAP** (instruments), **Benchling API/MCP** (ELN) — and analytical
+  *models* (retention prediction, peak deconvolution, spectral/impurity ID). Each is one adapter/tool
+  when that source is actually needed. **Do not invent a homegrown analytical schema; do not pick a
+  standard until a real source is built.**
 
-### D-D. Deployment & identity target
-- `architektur.md` §6/§7/§8 is an Azure/Entra-ID design that the code does not implement and the
-  runtime does not match. Pick the real target (Claude-native cloud + an IdP? Azure? self-hosted?)
-  so that identity, RBAC, session storage, and the front door are designed against a real
-  substrate rather than an aspirational one. **Identity becomes load-bearing the moment autonomy
-  is real** (an agent that can trigger expensive paths must know *who* asked).
+### D-D. Deployment & identity target **(resolved)**
+- **Hosting:** **OpenShift**, with heavy compute via **Nextflow on HPC** and the LLM served by a
+  **custom OpenLLM-like adapter**. So `architektur.md` §6's *Azure hosting* (AI Foundry/Container
+  Apps) is what changes — to OpenShift.
+- **Identity:** **Azure Entra ID is mandatory.** Users authenticate via Entra, and **every backend
+  *workflow* is user-specific via Entra** — the requesting user's Entra identity is required,
+  authorizing context on each durable run (a workflow with no Entra user is rejected). This makes
+  `architektur.md` **§7/§8 ("Entra ID durchgängig") a live requirement, not aspirational** — only
+  unbuilt, not wrong. Two carve-outs: **(a) raw LLM inference uses one generic API credential, not
+  Entra** (the model call is not a user-scoped resource); **(b)** because the cluster is OpenShift
+  not Azure, backend service identity uses **Entra Workload Identity Federation** (federated SA
+  tokens, no stored secrets) instead of Managed Identity, with the §7 Temporal/HPC bridges unchanged.
+- **Identity becomes load-bearing the moment autonomy is real** — an agent that can trigger
+  expensive paths must know *who* asked and *whether they may*. See the plan's Phase F4.
 
 ---
 
@@ -143,20 +159,19 @@ building.
    is the explicit prerequisite the harness concept's `awaiting` state depends on.
 4. **Identity / RBAC (Phase 6)** — no user identity, all skills to all users, `actor="unknown"`.
    Needed before autonomy can safely trigger expensive/irreversible paths.
-5. **Analytical-development data layer** — see D-C. Canonical schema (AnIML/Allotrope), an
-   analytical note taxonomy, and (later) analytical models. Foundation-level because everything
-   above it must speak this schema.
-6. **Live data connectivity** — today there are **three static ELN JSON samples** and no live
-   source. A daily-driver assistant needs a real connector (Benchling API/MCP is the realistic
-   target; it now ships its own MCP connectors) and, eventually, LIMS/instruments.
-7. **Calibrated uncertainty / applicability domain on every prediction** — partially present
+5. **Generic data-source attachment seam** — see D-C. *Not* concrete sources (no analytical/LIMS/MES/
+   live-ELN connectors now), but the **one stable ingest+retrieve contract + source registry** so any
+   future source attaches as a thin adapter with zero core change. Foundation-level because the seam
+   shape must be right before sources land. (Today: only three static ELN samples; the seam makes the
+   next source cheap.)
+6. **Calibrated uncertainty / applicability domain on every prediction** — partially present
    (solubility/pKa report an uncertainty) but **not systematic and not conformal**. Research flags
    this as the field's weakest link and a trust differentiator; adopt **conformal prediction** as
    the uniform contract for predictor outputs. (This is a foundation *contract*, cheap to
    standardize now, expensive to retrofit later.)
-8. **Subagents / fan-out** (foundation #8) — natural once the runtime exists; the deep-research
+7. **Subagents / fan-out** (foundation #8) — natural once the runtime exists; the deep-research
    harness already wants it. Deferrable, but design the runtime so it is possible.
-9. **A scalable retrieval index atop the git-KG** — NetworkX-in-memory is fine for correctness and
+8. **A scalable retrieval index atop the git-KG** — NetworkX-in-memory is fine for correctness and
    audit but does not scale to years of data or semantic recall. Add a **derived** vector/graph
    index (pgvector; or Graphiti-style time-bounded facts) as a *retrieval layer over* the git
    source of truth — not a replacement for it (consistent with D-004).
@@ -183,9 +198,11 @@ building.
 
 ## 7. OBSOLETE / over-built — reconsider or stop gold-plating
 
-- **The Azure/Entra/Copilot-Studio/HPC-bridge design** (`architektur.md` §6–§8) is, as written,
-  **aspirational and partly obsolete** relative to the Claude-native reality. Don't build Phase-6
-  Azure machinery until D-D actually chooses Azure.
+- **The Azure *hosting* framing** (`architektur.md` §6 — AI Foundry/Container Apps, Copilot Studio)
+  is obsolete relative to the real target (**OpenShift + HPC/Nextflow + internal LLM adapter**) and
+  should be rewritten. **§7/§8 (Entra ID) are NOT obsolete** — Entra identity is a mandatory,
+  retained requirement; only the service-auth mechanism changes (Managed Identity → Entra Workload
+  Identity Federation on OpenShift). Don't build Azure-*hosting* machinery, but do build Entra.
 - **Beware polishing Phase-6 seams before a front door exists.** Several recent commits added
   identity/audit/approval *seams* (role-filtered skills, durable approval hold, audit store) that
   **cannot be exercised because no session runtime calls them.** This is disciplined seam-work, but
@@ -217,14 +234,16 @@ brief.
    with the runaway cap. Foundations 2 (and the plan-approval gate).
 4. **Durable session store + job→session push-back** (missing §5.2/§5.3): sessions survive
    restarts; finished Temporal jobs wake the session. Closes the async-feels-alive loop.
-5. **Identity/RBAC minimum** (missing §5.4, gated by D-D): real `actor`, role-scoped skills, and
-   authorization *before* expensive triggers. Wire the existing seams.
-6. **Analytical data plane** (D-C): choose AnIML/Allotrope, define the analytical note taxonomy +
-   canonical schema, extend ingestion. (Schema first; models later.)
-7. **Uncertainty contract + derived retrieval index** (§5.7/§5.9): standardize calibrated
+5. **Identity: Entra everywhere** (D-D, §5.4): Entra OIDC at the front door; **every backend
+   workflow user-specific via Entra** (required, authorizing input, reject-if-absent); workload
+   identity federation for service auth; authorization *before* expensive triggers. Wire the seams.
+6. **Generic data-source attachment seam** (D-C): unify `ElnAdapter` + `SourceRetriever` into one
+   ingest+retrieve contract + a source registry, proved with a reference adapter. **No concrete
+   source/schema** — LIMS/MES/ELN/analytical attach later, one adapter each.
+7. **Uncertainty contract + derived retrieval index** (§5.6/§5.8): standardize calibrated
    uncertainty; add pgvector/Graphiti as a retrieval layer over the git-KG.
-8. *Only then* return to capability breadth (retrosynthesis via ASKCOS/AiZynth, Chemprop
-   predictors, analytical models, connectors) — as Skills/MCP over a solid foundation.
+8. *Only then* return to capability breadth (concrete sources, retrosynthesis via ASKCOS/AiZynth,
+   Chemprop predictors, analytical models) — as Skills/MCP/adapters over a solid foundation.
 
 **Definition of "foundation done":** a chemist opens a chat surface, authenticates as themselves,
 asks an open multi-step question, watches the agent post a plan, approves it, sees it execute with
@@ -238,8 +257,9 @@ from the current spine.
 
 1. **D-A** — *resolved:* keep MAF; deliver the experience via the MAF Agent Harness, with the
    classic-`Agent` fallback kept load-bearing against the harness's `[Experimental]` status.
-2. **D-D** — real deployment/identity substrate (Claude-native + an IdP? Azure? self-hosted?) —
-   the part of `architektur.md` §6–§8 that no longer matches the running system.
+2. **D-D** — *resolved:* hosting on **OpenShift** (HPC/Nextflow, internal OpenLLM-like adapter);
+   identity via **Azure Entra ID**, mandatory for users and all backend components (§7/§8 retained;
+   Managed Identity → Entra Workload Identity Federation is the only substrate change).
 3. **D-C** — is the analytical-development half in v1 scope? (Recommendation: yes — it's the
    whitespace; at minimum commit the data-standard choice now.)
 4. **Front-door surface** — web chat first? Slack? Both? (Recommendation: web chat for the

@@ -3,7 +3,131 @@
 Prioritized open action items. Top = next. Keep in sync with `docs/implementation-plan.md`
 (phase/step numbers) at session end.
 
-## Now — Phase 6 identity/RBAC & hardening (auth integration; needs live Azure/Temporal)
+## Now — Foundation build (docs/foundation-plan.md + docs/implementation-tickets.md)
+
+The target-stack foundation: MAF harness experience on OpenShift + HPC/Nextflow, internal
+OpenAI-compatible LLM (generic credential), Entra everywhere with every backend workflow
+user-specific, a generic data-source seam (first source ELN — a **custom Snowflake connector via
+an internal data pipeline, no vendor**). Full ticket breakdown: `docs/implementation-tickets.md`.
+
+### Phase F0 — LLM provider seam + tool-calling spike
+- [x] **F0-T1** LLM provider config block (`llm_provider`/`llm_base_url`/`llm_model`/`llm_api_key`/
+      `llm_tls_ca_bundle`/`llm_timeout_seconds`/`llm_max_retries`/`llm_temperature`/`llm_max_tokens`
+      + `_llm_provider_config` validator). Test: `test_config.py`.
+- [x] **F0-T2** Provider adapter `agents/llm_provider.py::build_chat_client` — the one place a client
+      class is imported; `openai_compatible` → MAF `OpenAIChatClient` over an `AsyncOpenAI`
+      (base_url + generic key + CA/timeout/retries), `anthropic` dev path retained. `build_agent`
+      rewired off `_default_chat_client`. Dep added: `agent-framework-openai`. Test:
+      `test_llm_provider.py`, `test_agent.py`.
+- [x] **F0-T3** Streaming + generation params: `Agent(default_options=ChatOptions(temperature,
+      max_tokens))` from config. Test: `test_agent.py::test_agent_applies_default_generation_options`.
+- [ ] **F0-T4** Tool-calling capability spike (the H0 risk) — `scripts/spike_toolcalling.py` +
+      `docs/spikes/f0-toolcalling.md` verdict. **Needs the live internal endpoint** (or a stand-in
+      OpenAI-compatible server); run before building on the harness.
+
+### Phase F1 — Harness backbone (autonomous plan/execute)
+MAF ships the harness natively (`create_harness_agent` + `TodoProvider`/`AgentModeProvider`/
+`todos_remaining`), so F1 is *wiring* it, not reimplementing providers.
+- [x] **F1-T1** Harness config (`harness_enabled`/`harness_autonomy`/`harness_max_loop_iterations`).
+      Test: `test_config.py`.
+- [x] **F1-T2** `build_agent` branch → `_build_harness_agent` wires `create_harness_agent` over the
+      full shared `_capability_tools()` + `RoleFilteredSkillsSource` + audit + shared
+      `_compaction_strategy()`, generic batteries off. Classic path is the fallback. Test:
+      `test_agent.py` (todo/mode providers added; full toolset kept; audit kept; classic has no
+      harness providers).
+- [x] **F1-T3** Plan→approve→execute: `AgentModeProvider(default_mode=plan|execute)` +
+      `todos_remaining(looping_modes=["execute"])` → plan_only stops for approval, execute loops
+      (capped). Test: `test_agent.py::test_harness_autonomy_sets_start_mode`.
+- [ ] ADR **D-020** finalized + **D-A1** (F0) — write in DECISIONS.md (F9 running-log).
+
+### Phase F2 — Front door + run service (the agent finally runs)
+- [x] **F2-T1** `service/app.py::create_app` (FastAPI) + `service/runner.py::run_turn` — builds/holds
+      one agent, per-session `AgentSession`, opens the MCP lifecycle once per turn (`AsyncExitStack`
+      over `agent.mcp_tools`), runs `agent.run(stream=True)`, streams events. Routes: `/healthz`,
+      `/readyz`, `POST /sessions`, `POST /sessions/{id}/messages` (SSE). Config: `service_host`/
+      `service_port`/`service_cors_origins`. Test: `test_service.py`.
+- [x] **F2-T2** Thin web chat surface `service/static/{index.html,app.js}` (vanilla + fetch-stream SSE;
+      renders plan/tool-trace/tokens/approval/answer). Served at `/`. Test: `test_service.py`.
+- [x] **F2-T3** Typed event contract `service/events.py` (discriminated union on `type`:
+      plan/tool_call/token/job_started/approval_request/answer/error). Test: `test_service_events.py`.
+- [ ] Deferred within F2: emit `PlanEvent` from harness todo state, and real `JobStartedEvent` when a
+      tool starts a Temporal job (wired in F3 with job→session push-back). ADR **D-A2** (front door).
+
+### Phase F3 — Durable session + job→session push-back
+- [x] **F3-T1** Postgres session history: `agents/session_store.py::PostgresHistoryProvider`
+      (overrides get/save_messages, `Message.to_dict/from_dict` → `session_messages`), migration
+      `infra/sql/008_sessions.sql`, config `session_store`/`session_store_dsn`, `build_agent` selects
+      via `_history_provider()`. Tests: `test_session_store.py` (unit selection + PG round-trip that
+      skips offline), `test_config.py`.
+- [x] **F3-T2** Session-events push-back channel: `infra/sql/009_session_events.sql`,
+      `agents/session_events.py` (`SessionEvent` + `record_session_event`/`fetch_unconsumed`/
+      `mark_consumed` + dependency-injected `stream_new_events` tailer), `workflows/notify.py`
+      (`record_session_event_activity` + `SessionEventInput`), config `session_event_poll_seconds`.
+      Tests: `test_session_events.py` (tailer loop + model + activity forwarding as unit; PG
+      round-trip skips offline).
+- [x] **F3-T3** job→session push-back wiring: ambient session id (`agents/session_context.py`
+      contextvar, stamped by the runner); `QMJobInput.session_id` (excluded from `qm_job_key`);
+      `submit_qm_job` stamps it; QM workflow calls `notify_session_best_effort` on completion (activity
+      on the background queue, registered on the worker); front-door `GET /sessions/{id}/events` SSE
+      streams `job_completed` push-back (`JobCompletedEvent`). Tests: `test_session_context.py`,
+      `test_service.py` (all offline with fakes); the workflow-emit + DB round-trip prove live.
+- [ ] Deferred within F3-T3: flipping the harness `awaiting` todo on completion (needs MAF
+      TodoProvider store mutation — best done when the harness loop runs live); `PlanEvent`/live
+      `JobStartedEvent` emission. ADR **D-042** written.
+
+### Phase F4 — Entra ID identity & RBAC (system-wide)
+- [x] **F4-T1** Front-door user auth (Entra OIDC): `service/auth.py` (`Principal`, `validate_token`
+      with RS256 + audience + issuer checks, `require_principal` FastAPI dep), config
+      `entra_required`/`entra_tenant_id`/`entra_client_id`/`entra_audience` + derived
+      `entra_jwks_endpoint`/`entra_issuer_url`; guards all non-health routes; dev stand-in when
+      `entra_required` is off. Dep `pyjwt[crypto]`; ruff allows `fastapi.Depends` (B008). Tests:
+      `test_auth.py` (local-RSA token validation, 401 gate, dev mode), `test_config.py`.
+- [x] **F4-T3** The core rule as one reusable guard: `agents/authz.py::require_actor()` returns the
+      turn's ambient Entra oid and, under `entra_required`, **rejects** a user-triggered workflow with
+      no user before any durable work (dev → `service_actor_id`). Wired into `submit_qm_job`
+      (`requested_by = require_actor()`); `requested_by` stays out of `qm_job_key` (D-011). BO/report
+      inputs adopt the same guard when they gain live triggers (no dead field now); scheduled
+      ELN-sync/memory jobs run as the service by design. ADR D-044. Tests: `test_authz.py`.
+- [x] **F4-T5** Authorize at one point + actor into audit: `agents/authz.py::authorize_trigger`
+      (config `entra_expensive_actions`/`entra_privileged_roles`) called by `submit_qm_job` before the
+      durable job; ambient identity via `agents/identity_context.py` (contextvar, stamped by the
+      runner from the `Principal`); `make_audit_middleware` records the ambient Entra oid over its
+      build-time default. Tests: `test_authz.py`, `test_audit.py`. Remaining in T5:
+      roles→`RoleFilteredSkillsSource` per request (needs per-user agent or an ambient skills filter).
+- [x] **F4-T2** Workload identity federation: `agents/identity/workload.py::WorkloadTokenProvider`
+      (SA-JWT→Entra client-credentials exchange, per-scope cache). ADR D-045. `test_workload_identity.py`.
+- [x] **F4-T4** OBO exchange: `agents/identity/obo.py::exchange_obo` (wired, dormant). ADR D-046.
+      `test_obo.py`.
+- [x] **F4-T6** Non-Entra bridges: `chemclaw/temporal_client.py::connect_options` (mTLS/api-key) +
+      `agents/identity/hpc_bridge.py::map_to_hpc_identity` (logs every mapping). ADR D-047.
+      `test_hpc_bridge.py`.
+- [ ] **F4 live edges** (need a real tenant/broker/cluster; code + fake-endpoint tests already green):
+      real Entra token validation against a live JWKS, real federation/OBO exchanges, live Temporal
+      mTLS handshake. Also open: per-request role→`RoleFilteredSkillsSource` scoping.
+- [x] **F5** Real HPC path behind the QM activities: `workflows/hpc/nextflow.py` (Tower REST adapter
+      `launch_run`/`poll_run`/`fetch_artifacts`, fake-HTTP tested), dispatched by `hpc_launch_interface`
+      (mock kept for CI). `hpc_pipeline_version` in the cache key when set (F5-T3). Worker unchanged
+      (F5-T4). ADR D-048. `test_nextflow_adapter.py`.
+- [ ] **F5 deferred**: `QMJobWorkflow→CalculationWorkflow` rename (cosmetic, high-churn); real `cclib`
+      parsing once a live QM output format is fixed; live-cluster durability spike (needs a cluster).
+- [x] **F6** OpenShift delivery: one rootless multi-target image (`deploy/Containerfile` +
+      `entrypoint.sh`), Helm chart (`deploy/helm/chemclaw/`: ConfigMap/Secret, SA with federation,
+      service/route/HPA, both workers, MCP, NetworkPolicy, pre-deploy migrate hook), `deploy.yml` CI
+      (build + `helm template | kubeconform`), `deploy/README.md`. Config `otel_endpoint`. ADR D-049
+      (D-A6/D-A6a: Temporal self-hosted). Offline-verified: YAML parse + brace-balance + Settings map.
+- [ ] **F6 live edges** (CI/cluster-gated): actual image build+push, `helm template`/`kubeconform`,
+      dry-run rollout to a dev namespace, OTel collector wiring, ExternalSecret wiring.
+- [x] **F7** Generic data-source seam: `sources/base.py` (`DataSource` composes the existing
+      `ElnAdapter`+`SourceRetriever` halves, `SourceSpec` rejects neither-half), `sources/registry.py`
+      (`data_sources` config → `active_ingest_sources()`/`active_retrieve_sources()`). Re-hosted with
+      no behavior change: `gather_evidence` fans out over the registry; `eln_sync` ingests active
+      sources. All existing ELN/research tests pass unchanged. ADR D-050. `test_datasource_seam.py`.
+- [ ] **F7 deferred (the first live connector)**: custom Snowflake ELN source — one registry entry
+      (ingest half over the internal data pipeline) + per-source pipeline cursor over Snowflake's
+      load-timestamp; Snowflake specifics stay inside that one adapter, nothing Snowflake-shaped above
+      the seam. Also: LIMS/MES/analytical/literature adapters.
+
+## Later — Phase 6 items now folded into F4 above (infra-gated pieces need live Entra/Temporal)
 
 ## Deep-review follow-ups (D-030)
 

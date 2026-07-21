@@ -1,0 +1,58 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "chemclaw.name" . }}-service
+  labels:
+    {{- include "chemclaw.labels" . | nindent 4 }}
+spec:
+  selector:
+    {{- include "chemclaw.selectorLabels" . | nindent 4 }}
+    app.kubernetes.io/component: service
+  ports:
+    - name: http
+      port: {{ .Values.service.port }}
+      targetPort: {{ .Values.service.port }}
+{{- if .Values.route.enabled }}
+---
+apiVersion: route.openshift.io/v1
+kind: Route
+metadata:
+  name: {{ include "chemclaw.name" . }}
+  labels:
+    {{- include "chemclaw.labels" . | nindent 4 }}
+spec:
+  {{- if .Values.route.host }}
+  host: {{ .Values.route.host }}
+  {{- end }}
+  to:
+    kind: Service
+    name: {{ include "chemclaw.name" . }}-service
+  port:
+    targetPort: http
+  tls:
+    termination: {{ .Values.route.tls.termination }}
+    insecureEdgeTerminationPolicy: {{ .Values.route.tls.insecureEdgeTerminationPolicy }}
+{{- end }}
+{{- if .Values.service.autoscaling.enabled }}
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: {{ include "chemclaw.name" . }}-service
+  labels:
+    {{- include "chemclaw.labels" . | nindent 4 }}
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: {{ include "chemclaw.name" . }}-service
+  minReplicas: {{ .Values.service.autoscaling.minReplicas }}
+  maxReplicas: {{ .Values.service.autoscaling.maxReplicas }}
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: {{ .Values.service.autoscaling.targetCPUUtilizationPercentage }}
+{{- end }}

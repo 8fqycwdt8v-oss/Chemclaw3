@@ -47,6 +47,128 @@ def test_skills_dirs_splits_the_path_list() -> None:
     assert trailing.skills_dirs == ["skills"]
 
 
+def test_llm_provider_defaults_to_anthropic() -> None:
+    """The default provider is the dev path, so the config singleton is valid with no endpoint."""
+    settings = Settings(_env_file=None)  # type: ignore[call-arg]
+    assert settings.llm_provider == "anthropic"
+    assert settings.llm_temperature == 0.0
+    assert settings.llm_max_tokens == 4096
+
+
+def test_openai_compatible_requires_endpoint_and_model() -> None:
+    """Selecting the internal provider without a base_url/model fails at startup, clearly."""
+    with pytest.raises(ValueError, match="llm_base_url"):
+        Settings(_env_file=None, llm_provider="openai_compatible")  # type: ignore[call-arg]
+    with pytest.raises(ValueError, match="llm_model"):
+        Settings(  # type: ignore[call-arg]
+            _env_file=None,
+            llm_provider="openai_compatible",
+            llm_base_url="https://llm.internal/v1",
+        )
+
+
+def test_llm_base_url_overrides_via_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The internal endpoint is a `CHEMCLAW_`-prefixed env var, like every other setting."""
+    monkeypatch.setenv("CHEMCLAW_LLM_PROVIDER", "openai_compatible")
+    monkeypatch.setenv("CHEMCLAW_LLM_BASE_URL", "https://llm.internal/v1")
+    monkeypatch.setenv("CHEMCLAW_LLM_MODEL", "internal-model")
+    settings = Settings(_env_file=None)  # type: ignore[call-arg]
+    assert settings.llm_base_url == "https://llm.internal/v1"
+    assert settings.llm_model == "internal-model"
+
+
+def test_entra_defaults_and_derived_endpoints() -> None:
+    """Entra is off by default; JWKS/issuer derive from the tenant unless explicitly overridden."""
+    settings = Settings(_env_file=None, entra_tenant_id="tid-1")  # type: ignore[call-arg]
+    assert settings.entra_required is False
+    assert settings.entra_jwks_endpoint.endswith("/tid-1/discovery/v2.0/keys")
+    assert settings.entra_issuer_url.endswith("/tid-1/v2.0")
+    override = Settings(
+        _env_file=None, entra_jwks_url="https://x/keys", entra_issuer="https://x/v2"
+    )  # type: ignore[call-arg]
+    assert override.entra_jwks_endpoint == "https://x/keys"
+    assert override.entra_issuer_url == "https://x/v2"
+
+
+def test_entra_authorization_sets_parse() -> None:
+    """Expensive-action and privileged-role config parse from comma lists to sets."""
+    settings = Settings(  # type: ignore[call-arg]
+        _env_file=None,
+        entra_expensive_actions="submit_qm_job, start_bo_campaign",
+        entra_privileged_roles="compute,admin",
+    )
+    assert settings.entra_expensive_action_set == frozenset({"submit_qm_job", "start_bo_campaign"})
+    assert settings.entra_privileged_role_set == frozenset({"compute", "admin"})
+
+
+def test_session_store_defaults_to_memory() -> None:
+    """The durable session store is opt-in; the default keeps the in-process provider."""
+    settings = Settings(_env_file=None)  # type: ignore[call-arg]
+    assert settings.session_store == "memory"
+    assert settings.session_store_dsn == ""
+
+
+def test_service_defaults() -> None:
+    """The front-door service binds a sane default port and no CORS origins (safe default)."""
+    settings = Settings(_env_file=None)  # type: ignore[call-arg]
+    assert settings.service_port == 8080
+    assert settings.service_cors_origins == ""
+
+
+def test_hpc_and_deploy_defaults() -> None:
+    """F5/F6 keep dev defaults: mock HPC backend, empty pipeline version, no OTLP endpoint."""
+    settings = Settings(_env_file=None)  # type: ignore[call-arg]
+    assert settings.hpc_launch_interface == "mock"
+    assert settings.hpc_pipeline_version == ""
+    assert settings.otel_endpoint == ""
+    assert settings.hpc_bridge_identity == "chemclaw-hpc"
+
+
+def test_hpc_launch_interface_env_override(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The real backend is selected by one `CHEMCLAW_`-prefixed env var, like every setting."""
+    monkeypatch.setenv("CHEMCLAW_HPC_LAUNCH_INTERFACE", "nextflow")
+    assert Settings(_env_file=None).hpc_launch_interface == "nextflow"  # type: ignore[call-arg]
+
+
+def test_entra_required_needs_audience_and_issuer() -> None:
+    """Under enforcement, an empty audience (deny-all) or no tenant/issuer fails at startup."""
+    with pytest.raises(ValueError, match="entra_audience"):
+        Settings(_env_file=None, entra_required=True)  # type: ignore[call-arg]
+    with pytest.raises(ValueError, match="tenant_id or entra_issuer"):
+        Settings(_env_file=None, entra_required=True, entra_audience="api://x")  # type: ignore[call-arg]
+
+
+def test_entra_role_gate_must_be_configured_symmetrically() -> None:
+    """Declaring expensive actions without privileged roles (or vice versa) leaves the gate open."""
+    with pytest.raises(ValueError, match="must be set together"):
+        Settings(  # type: ignore[call-arg]
+            _env_file=None,
+            entra_required=True,
+            entra_audience="api://x",
+            entra_tenant_id="t",
+            entra_expensive_actions="submit_qm_job",  # roles missing → gate silently open
+        )
+
+
+def test_entra_required_full_config_is_accepted() -> None:
+    """A complete enforcement config (audience + issuer + paired roles/actions) constructs fine."""
+    settings = Settings(  # type: ignore[call-arg]
+        _env_file=None,
+        entra_required=True,
+        entra_audience="api://x",
+        entra_tenant_id="t",
+        entra_expensive_actions="submit_qm_job",
+        entra_privileged_roles="compute",
+    )
+    assert settings.entra_required is True
+
+
+def test_temporal_mtls_cert_and_key_must_pair() -> None:
+    """A Temporal client cert without its key (or vice versa) is a half-config, rejected early."""
+    with pytest.raises(ValueError, match="temporal_tls_cert and temporal_tls_key"):
+        Settings(_env_file=None, temporal_tls_cert="/c.pem")  # type: ignore[call-arg]
+
+
 def test_absolute_knowledge_dir_is_rejected() -> None:
     """An absolute `knowledge_dir` fails at startup (it would escape the note repo)."""
     with pytest.raises(ValueError, match="knowledge_dir must be relative"):
