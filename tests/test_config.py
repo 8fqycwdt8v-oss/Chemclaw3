@@ -77,6 +77,19 @@ def test_llm_base_url_overrides_via_env(monkeypatch: pytest.MonkeyPatch) -> None
     assert settings.llm_model == "internal-model"
 
 
+def test_entra_defaults_and_derived_endpoints() -> None:
+    """Entra is off by default; JWKS/issuer derive from the tenant unless explicitly overridden."""
+    settings = Settings(_env_file=None, entra_tenant_id="tid-1")  # type: ignore[call-arg]
+    assert settings.entra_required is False
+    assert settings.entra_jwks_endpoint.endswith("/tid-1/discovery/v2.0/keys")
+    assert settings.entra_issuer_url.endswith("/tid-1/v2.0")
+    override = Settings(
+        _env_file=None, entra_jwks_url="https://x/keys", entra_issuer="https://x/v2"
+    )  # type: ignore[call-arg]
+    assert override.entra_jwks_endpoint == "https://x/keys"
+    assert override.entra_issuer_url == "https://x/v2"
+
+
 def test_session_store_defaults_to_memory() -> None:
     """The durable session store is opt-in; the default keeps the in-process provider."""
     settings = Settings(_env_file=None)  # type: ignore[call-arg]

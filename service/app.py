@@ -16,7 +16,7 @@ from collections.abc import AsyncIterator, Callable
 from pathlib import Path
 from typing import Any
 
-from fastapi import FastAPI, HTTPException
+from fastapi import Depends, FastAPI, HTTPException
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 from sse_starlette.sse import EventSourceResponse
@@ -25,6 +25,7 @@ from starlette.middleware.cors import CORSMiddleware
 from agents.chemclaw_agent import build_agent
 from agents.session_events import stream_new_events
 from chemclaw.config import settings
+from service.auth import Principal, require_principal
 from service.events import JobCompletedEvent
 from service.runner import run_turn
 
@@ -80,14 +81,20 @@ def create_app(agent_factory: Callable[[], Any] = build_agent) -> FastAPI:
         return {"status": "ready"}
 
     @app.post("/sessions")
-    async def create_session() -> SessionOut:
-        """Start a new conversation session and return its id."""
+    async def create_session(
+        principal: Principal = Depends(require_principal),
+    ) -> SessionOut:
+        """Start a new conversation session and return its id (requires an authenticated user)."""
         session_id = uuid.uuid4().hex
         app.state.sessions[session_id] = _agent().create_session(session_id=session_id)
         return SessionOut(session_id=session_id)
 
     @app.post("/sessions/{session_id}/messages")
-    async def post_message(session_id: str, body: MessageIn) -> EventSourceResponse:
+    async def post_message(
+        session_id: str,
+        body: MessageIn,
+        principal: Principal = Depends(require_principal),
+    ) -> EventSourceResponse:
         """Run one turn for the session and stream its events as SSE."""
         session = app.state.sessions.get(session_id)
         if session is None:
@@ -100,7 +107,10 @@ def create_app(agent_factory: Callable[[], Any] = build_agent) -> FastAPI:
         return EventSourceResponse(_events())
 
     @app.get("/sessions/{session_id}/events")
-    async def session_events(session_id: str) -> EventSourceResponse:
+    async def session_events(
+        session_id: str,
+        principal: Principal = Depends(require_principal),
+    ) -> EventSourceResponse:
         """Stream async job push-back for the session (F3-T3): a finished job wakes the chat."""
         if session_id not in app.state.sessions:
             raise HTTPException(status_code=404, detail="unknown session")

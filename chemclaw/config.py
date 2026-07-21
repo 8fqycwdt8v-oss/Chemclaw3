@@ -238,6 +238,22 @@ class Settings(BaseSettings):
     # LISTEN/NOTIFY-free fallback that is simple and correct; lower it for snappier wake-ups.
     session_event_poll_seconds: float = Field(default=2.0, gt=0)
 
+    # Azure Entra ID identity (plan Phase F4). User auth at the front door is OIDC with Entra as the
+    # IdP: the service is an Entra app registration, and every non-health request carries an Entra
+    # JWT that is validated against the tenant JWKS with the audience checked (the confused-deputy
+    # guard — the service is both OAuth client and resource). `oid`/`upn` + app-roles are extracted
+    # into a `Principal` that authorizes and attributes every backend action. `entra_required` gates
+    # enforcement: True in any real deployment (a missing/invalid token is 401); False only for
+    # local dev, where a stand-in principal runs the app without a tenant. `entra_jwks_url`/
+    # `entra_issuer` default empty and derive from `entra_tenant_id` when set (the standard v2.0
+    # endpoints), so a deployment sets just tenant + client (audience) + required.
+    entra_required: bool = False
+    entra_tenant_id: str = ""
+    entra_client_id: str = ""
+    entra_audience: str = ""
+    entra_jwks_url: str = ""
+    entra_issuer: str = ""
+
     # Markdown knowledge graph (plan Phase 2). Directory of note files the indexer
     # reads; retrieval is graph traversal over their [[wikilinks]] (D-004).
     knowledge_dir: str = "knowledge"
@@ -357,6 +373,20 @@ class Settings(BaseSettings):
     # broad question over a large corpus fills only as much context as it needs (the agent
     # narrows the query or drills in with expand_note when the sweep is truncated).
     gather_evidence_max_chunks: int = Field(default=40, ge=1)
+
+    @property
+    def entra_jwks_endpoint(self) -> str:
+        """The JWKS URL: explicit override, else the tenant's standard v2.0 keys endpoint."""
+        if self.entra_jwks_url:
+            return self.entra_jwks_url
+        return f"https://login.microsoftonline.com/{self.entra_tenant_id}/discovery/v2.0/keys"
+
+    @property
+    def entra_issuer_url(self) -> str:
+        """The token issuer: explicit override, else the tenant's standard v2.0 issuer."""
+        if self.entra_issuer:
+            return self.entra_issuer
+        return f"https://login.microsoftonline.com/{self.entra_tenant_id}/v2.0"
 
     @property
     def skills_dirs(self) -> list[str]:

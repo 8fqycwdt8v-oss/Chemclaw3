@@ -75,7 +75,22 @@ MAF ships the harness natively (`create_harness_agent` + `TodoProvider`/`AgentMo
       TodoProvider store mutation — best done when the harness loop runs live); `PlanEvent`/live
       `JobStartedEvent` emission. ADR **D-041** written.
 
-## Later — Phase 6 identity/RBAC & hardening (folded into F4; needs live Entra/Temporal)
+### Phase F4 — Entra ID identity & RBAC (system-wide)
+- [x] **F4-T1** Front-door user auth (Entra OIDC): `service/auth.py` (`Principal`, `validate_token`
+      with RS256 + audience + issuer checks, `require_principal` FastAPI dep), config
+      `entra_required`/`entra_tenant_id`/`entra_client_id`/`entra_audience` + derived
+      `entra_jwks_endpoint`/`entra_issuer_url`; guards all non-health routes; dev stand-in when
+      `entra_required` is off. Dep `pyjwt[crypto]`; ruff allows `fastapi.Depends` (B008). Tests:
+      `test_auth.py` (local-RSA token validation, 401 gate, dev mode), `test_config.py`.
+- [ ] **F4-T3** Every backend workflow user-specific via Entra: `requested_by` = required Entra oid,
+      reject-if-absent at the submit boundary (`require_actor`), across QM/BO/report/memory inputs.
+- [ ] **F4-T5** Authorize at one point + wire seams: `agents/authz.py::authorize_trigger` before
+      expensive triggers; real actor (`principal.oid`) into `make_audit_middleware`; roles →
+      `RoleFilteredSkillsSource`.
+- [ ] **F4-T2/T4/T6** (infra-gated): workload identity federation, OBO to ELN, Temporal mTLS + HPC
+      identity bridge — need live Entra/tenant + Temporal.
+
+## Later — Phase 6 items now folded into F4 above (infra-gated pieces need live Entra/Temporal)
 
 ## Deep-review follow-ups (D-030)
 
