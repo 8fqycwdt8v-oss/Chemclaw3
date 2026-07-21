@@ -47,6 +47,36 @@ def test_skills_dirs_splits_the_path_list() -> None:
     assert trailing.skills_dirs == ["skills"]
 
 
+def test_llm_provider_defaults_to_anthropic() -> None:
+    """The default provider is the dev path, so the config singleton is valid with no endpoint."""
+    settings = Settings(_env_file=None)  # type: ignore[call-arg]
+    assert settings.llm_provider == "anthropic"
+    assert settings.llm_temperature == 0.0
+    assert settings.llm_max_tokens == 4096
+
+
+def test_openai_compatible_requires_endpoint_and_model() -> None:
+    """Selecting the internal provider without a base_url/model fails at startup, clearly."""
+    with pytest.raises(ValueError, match="llm_base_url"):
+        Settings(_env_file=None, llm_provider="openai_compatible")  # type: ignore[call-arg]
+    with pytest.raises(ValueError, match="llm_model"):
+        Settings(  # type: ignore[call-arg]
+            _env_file=None,
+            llm_provider="openai_compatible",
+            llm_base_url="https://llm.internal/v1",
+        )
+
+
+def test_llm_base_url_overrides_via_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The internal endpoint is a `CHEMCLAW_`-prefixed env var, like every other setting."""
+    monkeypatch.setenv("CHEMCLAW_LLM_PROVIDER", "openai_compatible")
+    monkeypatch.setenv("CHEMCLAW_LLM_BASE_URL", "https://llm.internal/v1")
+    monkeypatch.setenv("CHEMCLAW_LLM_MODEL", "internal-model")
+    settings = Settings(_env_file=None)  # type: ignore[call-arg]
+    assert settings.llm_base_url == "https://llm.internal/v1"
+    assert settings.llm_model == "internal-model"
+
+
 def test_absolute_knowledge_dir_is_rejected() -> None:
     """An absolute `knowledge_dir` fails at startup (it would escape the note repo)."""
     with pytest.raises(ValueError, match="knowledge_dir must be relative"):

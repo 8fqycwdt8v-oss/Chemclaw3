@@ -7,7 +7,6 @@ budget), not model behavior.
 
 import asyncio
 
-import pytest
 from agent_framework import CharacterEstimatorTokenizer, Message, SlidingWindowStrategy
 from agent_framework._compaction import (
     TokenBudgetComposedStrategy,
@@ -16,15 +15,15 @@ from agent_framework._compaction import (
     included_token_count,
 )
 
-from agents.chemclaw_agent import _build_compaction, _default_chat_client, build_agent
+from agents.chemclaw_agent import _build_compaction, build_agent
 from chemclaw.config import settings
 
 
-def test_default_client_preflights_missing_api_key(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Building the default client without ANTHROPIC_API_KEY fails with a clear message."""
-    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
-    with pytest.raises(RuntimeError, match="ANTHROPIC_API_KEY"):
-        _default_chat_client()
+def test_agent_applies_default_generation_options() -> None:
+    """Config-driven temperature/max-tokens are threaded onto the agent's default options (F0.3)."""
+    agent = build_agent(chat_client=object())
+    assert agent.default_options["temperature"] == settings.llm_temperature
+    assert agent.default_options["max_tokens"] == settings.llm_max_tokens
 
 
 def test_agent_advertises_qm_tools() -> None:

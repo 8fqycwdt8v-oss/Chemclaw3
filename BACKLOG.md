@@ -3,7 +3,31 @@
 Prioritized open action items. Top = next. Keep in sync with `docs/implementation-plan.md`
 (phase/step numbers) at session end.
 
-## Now — Phase 6 identity/RBAC & hardening (auth integration; needs live Azure/Temporal)
+## Now — Foundation build (docs/foundation-plan.md + docs/implementation-tickets.md)
+
+The target-stack foundation: MAF harness experience on OpenShift + HPC/Nextflow, internal
+OpenAI-compatible LLM (generic credential), Entra everywhere with every backend workflow
+user-specific, a generic data-source seam (first source ELN — a **custom Snowflake connector via
+an internal data pipeline, no vendor**). Full ticket breakdown: `docs/implementation-tickets.md`.
+
+### Phase F0 — LLM provider seam + tool-calling spike
+- [x] **F0-T1** LLM provider config block (`llm_provider`/`llm_base_url`/`llm_model`/`llm_api_key`/
+      `llm_tls_ca_bundle`/`llm_timeout_seconds`/`llm_max_retries`/`llm_temperature`/`llm_max_tokens`
+      + `_llm_provider_config` validator). Test: `test_config.py`.
+- [x] **F0-T2** Provider adapter `agents/llm_provider.py::build_chat_client` — the one place a client
+      class is imported; `openai_compatible` → MAF `OpenAIChatClient` over an `AsyncOpenAI`
+      (base_url + generic key + CA/timeout/retries), `anthropic` dev path retained. `build_agent`
+      rewired off `_default_chat_client`. Dep added: `agent-framework-openai`. Test:
+      `test_llm_provider.py`, `test_agent.py`.
+- [x] **F0-T3** Streaming + generation params: `Agent(default_options=ChatOptions(temperature,
+      max_tokens))` from config. Test: `test_agent.py::test_agent_applies_default_generation_options`.
+- [ ] **F0-T4** Tool-calling capability spike (the H0 risk) — `scripts/spike_toolcalling.py` +
+      `docs/spikes/f0-toolcalling.md` verdict. **Needs the live internal endpoint** (or a stand-in
+      OpenAI-compatible server); run before building on the harness.
+
+### Next — F1 harness backbone (see docs/implementation-tickets.md F1-T1..T4)
+
+## Later — Phase 6 identity/RBAC & hardening (folded into F4; needs live Entra/Temporal)
 
 ## Deep-review follow-ups (D-030)
 

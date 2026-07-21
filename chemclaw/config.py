@@ -18,6 +18,7 @@ the first real consumer lands.
 
 import os
 import sys
+from typing import Literal
 
 from pydantic import BaseModel, Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -133,6 +134,28 @@ class Settings(BaseSettings):
     # Seed for BoFire's random design + SOBO strategies, so a campaign is reproducible
     # (deterministic seeding + proposals) rather than flaky run-to-run.
     bo_seed: int = 42
+
+    # LLM provider seam (plan Phase F0). The agent's chat client is selected by config, so the
+    # deployment can point the agent at the internal OpenAI-compatible ("OpenLLM-like") endpoint
+    # without any code change, keeping Anthropic as a local-dev path. `openai_compatible` reaches
+    # the endpoint with **one generic API credential** (`llm_api_key`) — deliberately *not* per-user
+    # Entra: the raw inference call is not a user-scoped resource (see docs/foundation-plan.md §0).
+    # `llm_base_url`/`llm_model` are required for `openai_compatible` (validated below); the TLS CA
+    # bundle, timeout, and retry budget shape the transport so an internal endpoint with a private
+    # CA works from config alone. `llm_temperature`/`llm_max_tokens` are the default generation
+    # params threaded into the agent (F0.3). The default provider is `anthropic` so a fresh checkout
+    # config singleton is valid with no endpoint set; production sets `CHEMCLAW_LLM_PROVIDER=
+    # openai_compatible` + the base_url/model. No provider client class is imported outside
+    # `agents/llm_provider.py`.
+    llm_provider: Literal["openai_compatible", "anthropic"] = "anthropic"
+    llm_base_url: str = ""
+    llm_model: str = ""
+    llm_api_key: str = ""
+    llm_tls_ca_bundle: str = ""
+    llm_timeout_seconds: float = Field(default=60.0, gt=0)
+    llm_max_retries: int = Field(default=3, ge=0)
+    llm_temperature: float = Field(default=0.0, ge=0)
+    llm_max_tokens: int = Field(default=4096, gt=0)
 
     # MAF agent (plan step 1.5). `agent_model` is the orchestration model name
     # (ENV-overridable); the provider's API key is read by the chat client from
@@ -318,6 +341,23 @@ class Settings(BaseSettings):
                 f"knowledge_dir must be relative to note_repo_dir, "
                 f"got absolute {self.knowledge_dir!r}"
             )
+        return self
+
+    @model_validator(mode="after")
+    def _llm_provider_config(self) -> "Settings":
+        """`openai_compatible` needs an endpoint and a model, or the client cannot be built.
+
+        Checked at startup so a half-configured provider fails here with a clear message rather
+        than as an opaque connection/404 error on the first model call. The `anthropic` dev path
+        needs neither (it reads its key/model elsewhere), so the check is provider-scoped.
+        """
+        if self.llm_provider == "openai_compatible":
+            required = (("llm_base_url", self.llm_base_url), ("llm_model", self.llm_model))
+            missing = [name for name, value in required if not value]
+            if missing:
+                raise ValueError(
+                    f"llm_provider='openai_compatible' requires {', '.join(missing)} to be set"
+                )
         return self
 
     @model_validator(mode="after")

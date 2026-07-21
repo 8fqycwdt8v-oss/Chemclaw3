@@ -8,6 +8,7 @@ requires-python = ">=3.11"
 dependencies = [
     "agent-framework-anthropic>=1.0.0b260709",
     "agent-framework-core>=1.11.0",
+    "agent-framework-openai>=1.0.0b260709",
     "bofire[optimization]>=0.4.1",
     "drfp>=0.3.7",
     "mcp>=1.2.0",

@@ -5,17 +5,19 @@
 sees skill names/descriptions and loads a skill body only when it needs the judgment), an
 in-memory session history so a chat accumulates a thread, and a `CompactionProvider` that
 keeps that thread within a token budget (see `_build_compaction`). The chat client is
-injectable so the wiring can be built and tested without live credentials; the default builds
-the configured Anthropic client, which reads its own API key from the environment at call time.
+injectable so the wiring can be built and tested without live credentials; the default is the
+config-selected provider (`agents.llm_provider.build_chat_client` — the internal OpenAI-compatible
+endpoint or the Anthropic dev path), so which LLM the agent talks to is a config change, not a code
+edit here.
 """
 
-import os
 import uuid
 from typing import Any
 
 from agent_framework import (
     Agent,
     CharacterEstimatorTokenizer,
+    ChatOptions,
     CompactionProvider,
     FileSkillsSource,
     InMemoryHistoryProvider,
@@ -30,6 +32,7 @@ from agents.audit import AuditSink, make_audit_middleware
 from agents.bo_tools import suggest_next_experiment
 from agents.calc_tools import compute_xtb_energy, predict_pka, predict_solubility
 from agents.graph_tools import expand_note, find_notes, propose_knowledge_note
+from agents.llm_provider import build_chat_client
 from agents.memory_tools import record_confirmed_answer
 from agents.qm_tools import get_qm_job_status, submit_qm_job
 from agents.research_tools import gather_evidence
@@ -92,8 +95,8 @@ def build_agent(
 
     Args:
         chat_client: A MAF chat client. Injected in tests; when omitted, the
-            configured Anthropic client is built (needs an API key at run time,
-            not here).
+            config-selected provider client is built via `build_chat_client`
+            (needs its credential at run time, not here).
         actor: Who the audit trail attributes tool calls to — the Phase-6 identity
             seam. Defaults to `"unknown"` until Entra auth populates it.
         correlation_id: Ties this conversation's audit events together; a fresh UUID
@@ -107,7 +110,7 @@ def build_agent(
     Returns:
         A ready-to-run `Agent`. No LLM call and no subprocess happen at construction.
     """
-    client = chat_client if chat_client is not None else _default_chat_client()
+    client = chat_client if chat_client is not None else build_chat_client()
     skills = SkillsProvider(
         RoleFilteredSkillsSource(FileSkillsSource(settings.skills_dirs), allowed_skills)
     )
@@ -122,6 +125,12 @@ def build_agent(
         client=client,
         name="chemclaw",
         instructions=_INSTRUCTIONS,
+        # Default generation params from config (F0.3), applied to every turn unless a run overrides
+        # them — so temperature/length are a deployment setting, not a per-call literal.
+        default_options=ChatOptions(
+            temperature=settings.llm_temperature,
+            max_tokens=settings.llm_max_tokens,
+        ),
         tools=[
             compute_xtb_energy,
             predict_solubility,
@@ -205,20 +214,3 @@ def _build_compaction(history_source_id: str) -> CompactionProvider:
         tokenizer=tokenizer,
         history_source_id=history_source_id,
     )
-
-
-def _default_chat_client() -> Any:
-    """Build the configured chat client (imported lazily to keep the provider optional).
-
-    Preflights the provider API key so a missing credential fails here with a clear message
-    ("set ANTHROPIC_API_KEY") rather than surfacing as an opaque 401 on the first model call.
-    Only runs on the default path — an injected client (tests) skips it entirely.
-    """
-    if not os.environ.get("ANTHROPIC_API_KEY"):
-        raise RuntimeError(
-            "ANTHROPIC_API_KEY is not set — the Chemclaw agent's chat client needs it. "
-            "Export it, or pass an explicit chat_client to build_agent (as the tests do)."
-        )
-    from agent_framework.anthropic import AnthropicClient
-
-    return AnthropicClient(model=settings.agent_model)
