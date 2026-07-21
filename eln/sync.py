@@ -9,28 +9,46 @@ this whole flow is tested in-memory; `workflows.eln_sync` wraps it as a Temporal
 with production stores, adapter, and submitter.
 """
 
+import logging
 from datetime import datetime
 
 from pydantic import BaseModel
 
-from eln.adapter import ElnAdapter, ElnMappingError
-from eln.ingest import IngestError, ingest_reaction
+from chemclaw.errors import ChemclawError
+from eln.adapter import ElnAdapter
+from eln.ingest import ingest_reaction
 from kg.pr_gate import NoteSubmitter
 from mcp_servers.fpstore import FingerprintStore
 
+logger = logging.getLogger(__name__)
+
 
 class RejectedEntry(BaseModel):
-    """An entry that could not be ingested, with the reason (for the sync report)."""
+    """An entry that could not be ingested, with the reason and its timestamp.
+
+    `created_at` is the entry's own ELN timestamp: it is the exact `since` an admin re-runs
+    the sync from to re-ingest this entry once its source record is corrected upstream (the
+    sync is re-runnable from any earlier cursor — ingestion is idempotent). See runbook (v).
+    """
 
     entry_id: str
     reason: str
+    created_at: datetime
 
 
 class IngestSummary(BaseModel):
     """The outcome of one sync run: what was ingested, what was rejected, the next cursor.
 
     `next_cursor` is the newest entry timestamp seen, which the scheduler persists and
-    passes as `since` next run so each entry is processed once.
+    passes as `since` next run. Fetching is inclusive at the cursor (see `ElnAdapter`),
+    so an entry stamped exactly at `next_cursor` may be re-fetched next run — harmless,
+    because ingestion is idempotent (id-keyed upserts + idempotent note branch), and it
+    guarantees a same-second entry exported after this run is never skipped.
+
+    The cursor advances past *rejected* entries too (a rejection is deterministic bad
+    data — re-fetching it would only re-reject it). Rejections are therefore reported
+    here and logged, not retried: correcting the source record upstream and re-ingesting
+    it is a deliberate manual/backlog action, not something the periodic sync retries.
     """
 
     ingested: list[str]
@@ -55,10 +73,25 @@ async def sync_entries(
         try:
             reaction = adapter.map_to_ord(raw)
             await ingest_reaction(reaction, reaction_store, molecule_store, submitter)
-        except (IngestError, ElnMappingError) as exc:
-            # ElnMappingError covers *any* adapter's mapping failure (bad shape, unknown
-            # role, schema violation); IngestError covers a reaction that fails validation.
-            rejected.append(RejectedEntry(entry_id=raw.entry_id, reason=str(exc)))
+        except ChemclawError as exc:
+            # The shared bad-data base covers *any* per-entry failure: an adapter's
+            # mapping error, a validation failure, and a fingerprint that cannot be
+            # computed (e.g. a schema-valid but degenerate reaction). Enumerating
+            # concrete types here once turned one bad entry into a batch abort.
+            rejected.append(
+                RejectedEntry(entry_id=raw.entry_id, reason=str(exc), created_at=raw.created_at)
+            )
             continue
         ingested.append(raw.entry_id)
+    # The summary is a return value the scheduler stores; also log the outcome so an admin
+    # running this under a Temporal Schedule sees it without opening the workflow result, and
+    # gets a WARNING trail of exactly which entries were rejected and why.
+    logger.info("eln sync: ingested=%d rejected=%d", len(ingested), len(rejected))
+    for entry in rejected:
+        logger.warning(
+            "eln sync rejected entry %s (at %s): %s",
+            entry.entry_id,
+            entry.created_at.isoformat(),
+            entry.reason,
+        )
     return IngestSummary(ingested=ingested, rejected=rejected, next_cursor=cursor)

@@ -9,26 +9,19 @@ interface with swappable backends (in-memory for tests, Postgres for real), and
 """
 
 import asyncio
-import hashlib
-import json
+import logging
 from collections.abc import Awaitable, Callable
 from typing import Any, Protocol, TypeVar, runtime_checkable
 
 from pydantic import BaseModel
 
+from chemclaw.ids import stable_hash
+
+logger = logging.getLogger(__name__)
+
 # A result payload is any JSON-serializable mapping. Calculators own their typed
 # models; the store persists the plain dict so it stays calculator-agnostic.
 ResultPayload = dict[str, Any]
-
-
-def _hash(obj: Any) -> str:
-    """Stable short hash of any JSON-serializable value (canonical form).
-
-    Sorted keys + tight separators make the hash independent of dict ordering and
-    whitespace, so semantically identical inputs collapse to the same key.
-    """
-    canonical = json.dumps(obj, sort_keys=True, separators=(",", ":"), default=str)
-    return hashlib.sha256(canonical.encode()).hexdigest()[:16]
 
 
 class CalculationKey(BaseModel):
@@ -56,8 +49,8 @@ class CalculationKey(BaseModel):
         return cls(
             calc_type=calc_type,
             calc_version=calc_version,
-            input_hash=_hash(inputs),
-            params_hash=_hash(params),
+            input_hash=stable_hash(inputs),
+            params_hash=stable_hash(params),
         )
 
     def as_str(self) -> str:
@@ -68,9 +61,12 @@ class CalculationKey(BaseModel):
 class StoredResult(BaseModel):
     """A persisted calculation result plus its provenance.
 
-    `provenance` records how the value came to be — e.g. "computed" (this system
-    ran the calculator) vs. "measured" (an experimental value) — so downstream
-    consumers (BO, reports) can distinguish evidence from prediction.
+    `provenance` records how the value came to be. For this compute cache it is always
+    "computed" (the system ran the calculator) — retained as GxP audit metadata on every
+    persisted row, and the seam by which an externally *measured* value could be stored
+    under the same key with `provenance="measured"`. It is audit trail, not a control
+    signal: no code branches on it, so it is written and available to an auditor/query,
+    not read back into logic.
     """
 
     key: CalculationKey
@@ -115,7 +111,6 @@ async def cached_compute(
     store: ResultStore,
     key: CalculationKey,
     compute: Callable[[], Awaitable[ResultPayload]],
-    provenance: str = "computed",
 ) -> tuple[ResultPayload, bool]:
     """Return a result for `key`, computing and persisting it only on a miss.
 
@@ -127,7 +122,6 @@ async def cached_compute(
         store: The backend to read from and write to.
         key: The versioned identity of this calculation.
         compute: Zero-arg coroutine that produces the result on a miss.
-        provenance: How the result is obtained; stored with it.
 
     Returns:
         `(result, was_cached)` — `was_cached` is True on a store hit, so callers
@@ -135,9 +129,13 @@ async def cached_compute(
     """
     hit = await store.get(key)
     if hit is not None:
+        # DEBUG, not INFO: on the hot path (every calculator call), but it is the one place
+        # that answers the recurring troubleshooting question "why did this recompute?".
+        logger.debug("calc cache hit: %s", key.as_str())
         return hit.result, True
+    logger.debug("calc cache miss, computing: %s", key.as_str())
     result = await compute()
-    await store.put(StoredResult(key=key, result=result, provenance=provenance))
+    await store.put(StoredResult(key=key, result=result))
     return result, False
 
 
@@ -158,7 +156,9 @@ async def run_cached(
     model. This captures it once (DRY, Rule of Three across xTB/solubility/pKa): the
     blocking `compute` is offloaded so the event loop stays free, its result is stored
     as a plain dict (the store stays calculator-agnostic), and the dict is validated
-    back into `result_type` on both hit and miss.
+    back into `result_type` on both hit and miss. Two *concurrent* misses on the same
+    key both compute and last-writer-wins on the upsert — benign duplicate work for
+    deterministic calculators; per-key in-flight dedup is deliberately not built.
 
     Args:
         store: The backend to read from and write to.

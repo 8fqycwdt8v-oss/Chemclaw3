@@ -47,3 +47,13 @@ jobs:
 
       - name: Validate knowledge graph
         run: make kg-validate
+
+      # The scientific quality gates: metric case-set + ELN export validation.
+      - name: Run eval case-set
+        run: make eval
+
+      - name: Validate ELN exports
+        run: make eln-validate
+
+      - name: Validate skills
+        run: make skill-validate

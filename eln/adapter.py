@@ -12,10 +12,11 @@ from typing import Any, Protocol, runtime_checkable
 
 from pydantic import BaseModel, Field
 
+from chemclaw.errors import ChemclawError
 from eln.ord import OrdReaction
 
 
-class ElnMappingError(ValueError):
+class ElnMappingError(ChemclawError):
     """An adapter could not map a raw entry to a canonical reaction (G4).
 
     Defined at the contract level (not in a concrete adapter) so the sync's
@@ -41,7 +42,13 @@ class ElnAdapter(Protocol):
     """Fetch new ELN entries and map them to the canonical schema. One per ELN source."""
 
     async def fetch_new_entries(self, since: datetime) -> list[RawEntry]:
-        """Return entries created strictly after `since` (the sync's high-water cursor)."""
+        """Return entries created at or after `since` (the sync's high-water cursor).
+
+        Inclusive on purpose: the cursor is the newest timestamp already seen, and an
+        entry stamped in that same second but exported after the run would be skipped
+        forever under strictly-after semantics. Re-fetching the boundary entry is safe
+        because ingestion is idempotent (id-keyed upserts + idempotent note branch).
+        """
         ...
 
     def map_to_ord(self, raw: RawEntry) -> OrdReaction:

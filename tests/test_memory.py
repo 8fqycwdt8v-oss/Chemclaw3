@@ -11,7 +11,6 @@ import asyncio
 import pytest
 
 from eln.ord import Component, OrdReaction, Role
-from kg.pr_gate import NoteSubmission
 from memory.campaign import campaign_note_from_chain
 from memory.chains import detect_chains
 from memory.interaction import note_from_confirmed_answer
@@ -21,17 +20,7 @@ from memory.playbook import (
     find_playbook_candidates,
     playbook_note,
 )
-
-
-class _FakeSubmitter:
-    """Captures proposed notes instead of pushing a git branch."""
-
-    def __init__(self) -> None:
-        self.notes: list[NoteSubmission] = []
-
-    async def submit(self, submission: NoteSubmission) -> str:
-        self.notes.append(submission)
-        return f"pr://{submission.branch}"
+from tests.conftest import FakeSubmitter
 
 
 def _reaction(
@@ -81,6 +70,25 @@ def test_reagent_match_does_not_chain() -> None:
         provenance="test",
     )
     assert detect_chains([a, b]) == []  # water is a's product but only b's solvent
+
+
+def test_two_shared_compounds_produce_two_links() -> None:
+    """A pair sharing two product→reactant compounds yields one link per compound.
+
+    Regression: a single edge attribute used to be overwritten per compound, silently
+    dropping all but the last handoff from the campaign's evidence.
+    """
+    a = _reaction("a", ["CCO"], ["CC=O", "O"])  # two products, both consumed by b
+    b = _reaction("b", ["CC=O", "O"], ["CC(O)O"])
+    chains = detect_chains([a, b])
+    assert len(chains) == 1
+    links = chains[0].links
+    assert len(links) == 2
+    assert all(link.from_reaction == "a" and link.to_reaction == "b" for link in links)
+    assert {link.via_compound for link in links} == {"CC=O", "O"}
+    # The campaign note renders one handoff line per shared compound.
+    note = campaign_note_from_chain(chains[0], {"a": a, "b": b})
+    assert note.body.count("product of a → reactant of b") == 2
 
 
 def test_cycle_is_flagged_not_a_false_sequence() -> None:
@@ -155,11 +163,12 @@ def test_degenerate_reaction_does_not_abort_distillation() -> None:
 
 def test_playbook_note_requires_evidence() -> None:
     """A playbook with citations builds; one without is rejected (Belegverweise verpflichtend)."""
-    note = playbook_note("esterification", "Fischer esterification recurs.", ["x", "y"])
+    note = playbook_note("playbook-ester", "Fischer esterification recurs.", ["x", "y"])
     assert note.type == "playbook"
+    assert note.id == "playbook-ester"  # the full note id is passed in, not re-prefixed
     assert note.outgoing_links() == ["reaction-x", "reaction-y"]  # mandatory evidence
     with pytest.raises(PlaybookError, match="no evidence"):
-        playbook_note("empty", "no evidence here", [])
+        playbook_note("playbook-empty", "no evidence here", [])
 
 
 # --- jobs (5.3/5.4 wiring) ------------------------------------------------------------
@@ -169,21 +178,21 @@ def test_synthesize_campaigns_proposes_notes_via_pr_gate() -> None:
     """The campaign job proposes one PR-gated campaign note per detected chain."""
     a = _reaction("a", ["CCO"], ["CC=O"], project="proj-x")
     b = _reaction("b", ["CC=O"], ["CC(O)O"], project="proj-x")
-    sub = _FakeSubmitter()
+    sub = FakeSubmitter()
     refs = asyncio.run(synthesize_campaigns([a, b], sub))
     assert len(refs) == 1
-    assert sub.notes[0].path.startswith("knowledge/campaign/campaign-")
+    assert sub.submissions[0].path.startswith("knowledge/campaign/campaign-")
 
 
 def test_distill_playbooks_proposes_evidence_backed_notes() -> None:
     """The playbook job proposes a cross-project playbook note citing its evidence."""
     ester_x = _reaction("x", ["CCO", "CC(=O)O"], ["CCOC(C)=O"], project="proj-x")
     ester_y = _reaction("y", ["CCCO", "CC(=O)O"], ["CCCOC(C)=O"], project="proj-y")
-    sub = _FakeSubmitter()
+    sub = FakeSubmitter()
     refs = asyncio.run(distill_playbooks([ester_x, ester_y], sub))
     assert len(refs) == 1
-    assert sub.notes[0].path.startswith("knowledge/playbook/playbook-")
-    assert "proj-x" in sub.notes[0].content and "proj-y" in sub.notes[0].content
+    assert sub.submissions[0].path.startswith("knowledge/playbook/playbook-")
+    assert "proj-x" in sub.submissions[0].content and "proj-y" in sub.submissions[0].content
 
 
 # --- user interaction (5.5) -----------------------------------------------------------
@@ -201,3 +210,20 @@ def test_interaction_note_captures_confirmed_answer() -> None:
     assert note.created_by == "agent"  # still PR-gated before it is trusted
     assert "confirmed" in note.body.lower()
     assert note.outgoing_links() == ["reaction-eln-2026-002"]
+
+
+def test_record_confirmed_answer_tool_uses_gate(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The agent tool routes a confirmed answer through the (fake) PR-gate (5.5 wiring)."""
+    from agents import memory_tools
+
+    fake = FakeSubmitter()
+    monkeypatch.setattr(memory_tools, "default_submitter", lambda: fake)
+    ref = asyncio.run(
+        memory_tools.record_confirmed_answer(
+            "q-42", "Best solvent?", "Aqueous dioxane at 90 C.", ["reaction-eln-2026-002"]
+        )
+    )
+    assert ref == "pr://note/interaction-q-42"
+    submitted = fake.submissions[0]
+    assert submitted.path.endswith("interaction/interaction-q-42.md")
+    assert "reaction-eln-2026-002" in submitted.content

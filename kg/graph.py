@@ -10,14 +10,23 @@ from pathlib import Path
 
 import networkx as nx
 
-from kg.note import Note, read_note
+from kg.note import Note, NoteError, read_note
 
 
 def load_notes(notes_dir: Path) -> list[Note]:
-    """Parse every note under `notes_dir` (recursively), skipping non-note files."""
+    """Parse every note under `notes_dir` (recursively), skipping non-note and invalid files.
+
+    A malformed note (bad YAML or a schema violation) is skipped, not raised: graph building
+    and evidence retrieval must not be blocked by one bad file. Reporting those failures is
+    `kg.validate`'s job (it reads notes with its own error-collecting loop), so the two do not
+    conflict — the indexer stays resilient, the validator stays strict.
+    """
     notes = []
     for path in sorted(notes_dir.rglob("*.md")):
-        note = read_note(path)
+        try:
+            note = read_note(path)
+        except NoteError:
+            continue
         if note is not None:
             notes.append(note)
     return notes

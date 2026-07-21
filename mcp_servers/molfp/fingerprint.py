@@ -39,3 +39,13 @@ def ecfp_bitstring(smiles: str) -> str:
     """
     fp = _generator(settings.ecfp_radius, settings.ecfp_bits).GetFingerprint(_parse(smiles))
     return str(fp.ToBitString())
+
+
+def molecule_definition() -> str:
+    """The current ECFP definition signature (radius + width) stored on each molecule row.
+
+    Two ECFP fingerprints of equal width but different radius are the same length yet
+    incomparable, so the store records this signature per row and refuses to rank across
+    signatures — changing `ecfp_radius`/`ecfp_bits` and re-indexing can't silently mix them.
+    """
+    return f"ecfp:r{settings.ecfp_radius}:b{settings.ecfp_bits}"

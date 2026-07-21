@@ -6,28 +6,49 @@ the PR-gate. Temporal Schedules drive them periodically, like the ELN sync. No n
 infrastructure — only new note types produced by reusing existing pieces (Phase 5, G1).
 """
 
+import logging
 from datetime import UTC, datetime, timedelta
 
 from temporalio import activity, workflow
 
 with workflow.unsafe.imports_passed_through():
     from chemclaw.config import settings
-    from eln.json_adapter import JsonExportAdapter
+    from chemclaw.errors import ChemclawError
     from eln.ord import OrdReaction
+    from eln.registry import all_eln_adapters
     from kg.git_submitter import default_submitter
-    from memory.jobs import distill_playbooks, synthesize_campaigns
+    from memory.jobs import (
+        distill_playbooks,
+        synthesize_campaigns,
+        synthesize_optimization_campaigns,
+    )
+
+from workflows.publish import BAD_DATA_RETRY
+
+logger = logging.getLogger(__name__)
 
 
 async def _all_reactions() -> list[OrdReaction]:
-    """Read and map every ELN reaction (the memory jobs reason over the full corpus)."""
-    adapter = JsonExportAdapter()
-    raws = await adapter.fetch_new_entries(datetime.min.replace(tzinfo=UTC))
+    """Read and map every reaction from every ELN source (the corpus the memory jobs reason over).
+
+    Both ingestion adapters — free-text and native ORD — feed the same canonical schema, so
+    the memory layers reason over the union without knowing either source's shape. Adding a
+    future source is one more adapter here, not a change to any memory job (the "keep
+    integrations dumb, put the reasoning above them" line).
+    """
+    since = datetime.min.replace(tzinfo=UTC)
     reactions: list[OrdReaction] = []
-    for raw in raws:
-        try:
-            reactions.append(adapter.map_to_ord(raw))
-        except ValueError:
-            continue  # a malformed entry is the sync's problem to report, not this job's
+    for adapter in all_eln_adapters():
+        for raw in await adapter.fetch_new_entries(since):
+            try:
+                reactions.append(adapter.map_to_ord(raw))
+            except ChemclawError as exc:
+                # A malformed entry is the sync's problem to report, not this job's — skip it
+                # and move on. Catch only ChemclawError (the bad-data contract), so an
+                # unexpected error surfaces instead of being silently dropped; log the skip
+                # so a corpus that quietly loses reactions is diagnosable.
+                logger.info("memory job skipped an unmappable ELN entry: %s", exc)
+                continue
     return reactions
 
 
@@ -43,6 +64,12 @@ async def distill_playbooks_activity() -> list[str]:
     return await distill_playbooks(await _all_reactions(), default_submitter())
 
 
+@activity.defn
+async def synthesize_optimization_campaigns_activity() -> list[str]:
+    """Group same-transformation runs across the corpus and PR-gate an optimization note each."""
+    return await synthesize_optimization_campaigns(await _all_reactions(), default_submitter())
+
+
 @workflow.defn
 class CampaignSynthesisWorkflow:
     """Run episodic campaign synthesis durably; return the proposed note references."""
@@ -53,6 +80,7 @@ class CampaignSynthesisWorkflow:
         return await workflow.execute_activity(
             synthesize_campaigns_activity,
             start_to_close_timeout=timedelta(seconds=settings.memory_job_timeout_seconds),
+            retry_policy=BAD_DATA_RETRY,
         )
 
 
@@ -66,4 +94,19 @@ class PlaybookDistillationWorkflow:
         return await workflow.execute_activity(
             distill_playbooks_activity,
             start_to_close_timeout=timedelta(seconds=settings.memory_job_timeout_seconds),
+            retry_policy=BAD_DATA_RETRY,
+        )
+
+
+@workflow.defn
+class OptimizationCampaignWorkflow:
+    """Run episodic optimization-campaign grouping durably; return the proposed note references."""
+
+    @workflow.run
+    async def run(self) -> list[str]:
+        """Invoke the optimization-campaign synthesis activity."""
+        return await workflow.execute_activity(
+            synthesize_optimization_campaigns_activity,
+            start_to_close_timeout=timedelta(seconds=settings.memory_job_timeout_seconds),
+            retry_policy=BAD_DATA_RETRY,
         )

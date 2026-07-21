@@ -28,10 +28,20 @@ class NoteSubmission(BaseModel):
 
 
 class NoteSubmitter(Protocol):
-    """Submits a note as a reviewable PR and returns a reference (e.g. the PR URL)."""
+    """Submits a note as a reviewable PR and returns a reference (e.g. the PR URL).
+
+    Contract nuance: when the note is byte-identical to what the base branch
+    already contains, an implementation may return the reference *without*
+    creating anything new — there is nothing to review, so re-proposing an
+    unchanged note is an idempotent no-op, not an error.
+    """
 
     async def submit(self, submission: NoteSubmission) -> str:
-        """Create the branch + PR for `submission`; return a human-visible reference."""
+        """Create the branch + PR for `submission`; return a human-visible reference.
+
+        For an unchanged note this may be the branch name without a fresh push
+        (see the class docstring).
+        """
         ...
 
 
@@ -51,7 +61,9 @@ async def propose_note(
         knowledge_dir: Override the configured notes directory.
 
     Returns:
-        The submitter's reference for the opened PR.
+        The submitter's reference for the opened PR. The branch is always named
+        `note/<id>`, so the reference stays stable across re-proposals — including
+        the unchanged-note case where the submitter skips the push.
     """
     if note.created_by != "agent":
         raise ValueError("PR-gate is for agent-authored notes; human notes commit directly")

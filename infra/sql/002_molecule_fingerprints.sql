@@ -9,10 +9,14 @@ CREATE EXTENSION IF NOT EXISTS vector;
 
 -- `label` is the human structure string (here a SMILES); the column is named neutrally
 -- because the molecule and reaction fingerprint tables share one generic store.
+-- `definition` records the fingerprint parameters that produced `bits` (e.g. `ecfp:r2:b2048`).
+-- Equal-width bits of a different Morgan radius are incomparable; similarity search filters to
+-- one definition so a radius change + re-index can't silently rank incomparable rows (004).
 CREATE TABLE IF NOT EXISTS molecule_fingerprints (
     id         TEXT        PRIMARY KEY,
     label      TEXT        NOT NULL,
     bits       bit(2048)   NOT NULL,
+    definition TEXT        NOT NULL,
     created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 

@@ -7,12 +7,11 @@ in `fingerprint`/`search` and the generic `fpstore`. Run as
 
 from mcp.server.fastmcp import FastMCP
 
-from chemclaw.config import settings
-from mcp_servers.fpstore import FingerprintStore, Match, PostgresFingerprintStore
+from mcp_servers.fpstore import FingerprintStore, Match, default_reaction_store
 from mcp_servers.rxnfp.search import find_similar_reactions, record_for_reaction
 
 server = FastMCP("mcp-rxnfp")
-_store: FingerprintStore = PostgresFingerprintStore("reaction_fingerprints", settings.drfp_bits)
+_store: FingerprintStore = default_reaction_store()
 
 
 @server.tool()

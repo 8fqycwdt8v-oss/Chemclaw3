@@ -3,7 +3,126 @@
 Prioritized open action items. Top = next. Keep in sync with `docs/implementation-plan.md`
 (phase/step numbers) at session end.
 
-## Now — next capability phase (Phase 5b report harness, or Phase 6 identity/RBAC)
+## Now — Phase 6 identity/RBAC & hardening (auth integration; needs live Azure/Temporal)
+
+## Deep-review follow-ups (D-030)
+
+### Done — robustness/correctness fixes (D-030)
+- [x] Bounded `BAD_DATA_RETRY` (`maximum_attempts=CHEMCLAW_ACTIVITY_MAX_ATTEMPTS`) so an
+      unclassified deterministic failure gives up instead of retrying forever; added
+      `ValidationError`/`OrdFormatError`/`EvalCaseError` to the non-retryable names; shared the
+      list with `note_publish_retry`. Test: `test_publish.py`.
+- [x] Slug rejects trailing `.` and `.lock` (git-invalid `note/<id>` refs). Test: `test_note.py`.
+- [x] Git subprocess timeout + kill (`CHEMCLAW_GIT_COMMAND_TIMEOUT_SECONDS`). Test:
+      `test_knowledge.py::test_git_command_timeout_kills_the_child_and_raises`.
+- [x] Solubility/pKa cache keys version on the reported uncertainty.
+- [x] `test_mcp_transport.py` skip narrowed to a missing toolchain (won't mask a CI regression).
+
+### Done — deferred items worked off (D-031)
+- [x] Fingerprint-definition guard: each `*_fingerprints` row records its definition
+      (`ecfp:r{radius}:b{bits}` / `drfp:b{bits}`); similarity search filters to the store's
+      current definition so a changed radius/width + re-index can't rank incomparable bits.
+      Migration `004`; runbook (vi). Guard tested in-sandbox via the in-memory store.
+- [x] ELN reject re-drive: `RejectedEntry.created_at` + the WARNING log give the exact `since`
+      to re-run the (idempotent) sync from after fixing a source record. Runbook (v). No
+      automatic dead-letter by design (KISS).
+- [x] KISS cleanups: inlined the `SolubilityModel` seam (removed Protocol + dead `model=` param);
+      deleted `report.harness.gather_report` (tests assemble via `gather_section`); wired
+      `note_from_confirmed_answer` into the `record_confirmed_answer` agent tool (completes plan
+      5.5). Kept `StoredResult.provenance` as GxP audit metadata (docstring clarified — not read
+      into logic, but a legitimate audit column + the `measured` seam).
+
+## Admin-experience audit (configurability / error-handling / logging)
+
+### Done — P0 observability floor (D-026)
+- [x] Config-driven logging: `chemclaw/logging.py::configure_logging()` + `CHEMCLAW_LOG_LEVEL`/
+      `_LOG_FORMAT`, called at both workers' entrypoints. Worker startup logs (address/namespace/
+      queue/registered workflows). ELN sync logs `ingested/rejected` + a WARNING per rejection;
+      both adapters log skipped broken files. Shared `chemclaw/db.py::connect` → `ConnectionError`
+      "Postgres unreachable at <host>" with the DSN password redacted (not a retry-blocking
+      `ChemclawError`). Tests: `test_logging.py`, `test_db.py`, ELN caplog assertions.
+
+### Done — P1 pluggability & docs (D-028)
+- [x] Cache hit-vs-compute log at the `calc/store.py` decision point (DEBUG) — the "why did this
+      recompute?" trail, behind the D-026 log-level switch.
+- [x] ELN adapter registry (`eln/registry.py`): `CHEMCLAW_ELN_SYNC_ADAPTER` selects the durable
+      sync's source; memory jobs read `all_eln_adapters()`. Replaced the hardcoded adapter classes
+      in `eln_sync.py` and `memory_jobs.py`.
+- [x] `skills_dir` → OS-path-separator list via the `skills_dirs` property (add a second skills
+      directory with no code change) + SKILL.md front-matter schema/template in `skills/README.md`.
+- [x] MCP-attach the agent's fingerprint search (D-029): `build_agent` attaches config-driven
+      `MCPStdioTool` servers (`CHEMCLAW_MCP_SERVERS`), so structural search runs over MCP and
+      adding a capability is a config entry. `allowed_tools` keeps write/index tools off the
+      agent. Transport verified in-sandbox (`test_mcp_transport.py`). `docs/runbook.md` (iv)
+      rewritten for the MCP procedure.
+- [x] `make skill-validate` (D-037): `scripts/validate_skills.py` checks every SKILL.md's
+      frontmatter (name/description present, name matches directory) and gates in CI, like
+      kg-validate. Migrating the in-process agent tools (calculators/graph/BO) to MCP stays
+      unplanned — local RDKit/BoFire functions are simpler in-process (KISS).
+
+### Open — P2 polish
+- [x] `docs/runbook.md`: the four admin tasks (add skill / add-repoint DB / add-or-switch ELN
+      source / add capability), the log switch, the Temporal UI at :8080, DB-unreachable message.
+- [x] Startup preflight for `ANTHROPIC_API_KEY` presence (D-037): `_default_chat_client` fails
+      with a clear message at agent build, not on the first turn.
+- [x] Migration-status visibility (D-034): `schema_migrations` ledger records each applied file
+      by name + checksum; an edited applied file is flagged as drift.
+- [ ] Coverage threshold in CI (D-037): `pytest-cov` + `make cov` + `[tool.coverage]` config are
+      in place (no hard `--cov-fail-under` yet). Set a `--cov-fail-under` once a CI run
+      establishes the real baseline, then ratchet.
+
+### MAF out-of-the-box features (analysis done)
+- [x] **Function middleware** (`@function_middleware`) — one DRY GxP tool-audit trail
+      (`agents/audit.py::audit_tool_calls`: name/args/outcome/latency, observe-only) over all
+      agent tools, on the logging floor. Attached via `Agent(..., middleware=[...])` (D-027).
+- [x] **OpenTelemetry** — opt-in `chemclaw.logging.configure_telemetry()` gated on
+      `CHEMCLAW_OTEL_ENABLED`; calls MAF's `configure_otel_providers` at each worker's entrypoint.
+      Ships as a config toggle (default off) because the OTel SDK/OTLP exporter extras are not
+      installed and are only useful with a collector — enabling it requires adding those extras
+      (D-027).
+- [ ] **Structured outputs** (`response_format` + `resp.value`) — force validated pydantic
+      payloads for agent proposals instead of parsing prose. Deferred to the first call site that
+      needs a validated payload (changes call sites, not startup wiring).
+- Do-not-adopt / defer: Redis/mem0 history (durability belongs to Temporal, and neither extra is
+      installed), the MAF `_harness` providers (duplicate the memory layer + background queue),
+      the wholesale MAF eval harness (have `evals/`; cherry-pick only its tool-call checks). FIDES
+      security layer is `@experimental` → a DEFERRED candidate for untrusted ELN/literature text.
+
+
+## Done — Whole-repo production-readiness review (post-5b; commit d51f0b5, D-021)
+- [x] 4 adversarial review agents over all packages; ~45 verified findings fixed with regression
+      tests (134 → 169 passing). Criticals: PR-gate submitter concurrency/checkout corruption
+      (lock + `note_repo_dir` config + slug-validated note ids + path containment + fetch before
+      `--force-with-lease`); ELN sync poison pill (one `ChemclawError` bad-data base, sync
+      catches it → reject-and-continue actually holds). Majors: temperature range mis-parse
+      (`60-80 °C` → -80), stoichiometry-unsound mass balance → element subsumption, per-file
+      fetch robustness, BoFire off-thread, pKa cache key engine-versioned, QM tool no longer
+      recomputes completed jobs, report publish got the bounded retry discipline
+      (`workflows/publish.py`), vacuous-green eval gate fails loudly. Cross-cutting: CLAUDE.md
+      status un-falsified, `.env.example` complete, CI runs eval+eln-validate, dependency hygiene.
+- [x] Test-helper dedup pass: one `FakeSubmitter` in conftest (replaced ~10 local fakes),
+      QM tests use `tests/temporal_env.py` (inline copies + cross-test private imports gone),
+      shared `tests/pg.py` Postgres bootstrap, redundant `fast_mock` fixtures deleted.
+- [ ] Multi-process note-submit serialization (lock is per-process; per-submission worktrees or
+      a distributed lock) — revisit when >1 background worker replica exists.
+
+## Done — Phase 5b: report / deep-research harness (no new store — D-020)
+- [x] 5b.1/5b.2 Source-agnostic harness core (`report/harness.py`) over the `SourceRetriever`
+      contract + mandatory-citation `EvidenceChunk` (`report/evidence.py`).
+- [x] 5b.3 Two concrete retrievers (`report/retrievers.py`): `GraphRetriever` (Phase 2) +
+      `FingerprintReactionRetriever` (Phase 3) — thin adapters, no new store.
+- [x] 5b.4 Adversarial verify (`verify_claims`): a claim survives only if it cites retrieved
+      evidence; uncited/fabricated claims discarded. Unsupported sections marked, not invented.
+- [x] 5b.5/5b.6 Durable `DevelopmentReportWorkflow` (per-section activities = resumable long runs),
+      each section declares its memory layer (structural provenance separation). Registered on bg worker.
+- [x] 5b.7 Draft is a PR-gated `report` note citing every source. `development-report` skill (judgment:
+      decompose, write only what evidence supports, keep evidenced vs analogy apart).
+- [x] CHECKMATE 5b (G1–G7 + citation fidelity): core correct (verify_claims guards the `all([])`
+      trap; every chunk cited), no new store. 4 fixes — (F1/F2) report id is now ref-safe + unique
+      (slug + title hash) instead of a raw slug that broke git branches and collided across titles;
+      (F3) fingerprint-retriever citation honesty documented (PR-gate catches a pending-note link);
+      (F4) `load_notes` resilient to a malformed note (no longer aborts retrieval); + docstring
+      honesty on substring matching and the verify gate. **Phase 5b complete.**
 
 ## Done — Phase 5: memory layers (episodic + semantic, no new infra — D-019)
 - [x] 5.1/5.2/5.3 episodic: `memory/chains.py` (chain detection — product A = reactant B via the
@@ -14,8 +133,9 @@ Prioritized open action items. Top = next. Keep in sync with `docs/implementatio
       projects; `playbook_note` with mandatory evidence refs) + `distill_playbooks` job + workflow.
       `playbook-distillation` skill (transferable-only, process-chemist approval).
 - [x] 5.5 user interaction as a 4th source: `memory/interaction.py` (`interaction` note via the same
-      PR-gate). 5.6 retrieval separation: judgment in the playbook skill (evidenced vs analogy kept
-      visibly separate; experiment outranks transferred analogy).
+      PR-gate); reachable via the `record_confirmed_answer` agent tool (synchronous) and the durable
+      `InteractionApprovalWorkflow` (async Yes/No hold — D-032). 5.6 retrieval separation: judgment in
+      the playbook skill (evidenced vs analogy kept visibly separate; experiment outranks analogy).
 - [x] Jobs registered on the background worker; `project` field added to `OrdReaction`/adapter.
 - [x] CHECKMATE 5 (G1–G7 + no-new-infra check confirmed): 3 findings fixed — (F1, G4) a degenerate
       reaction is skipped in `find_playbook_candidates` instead of aborting the whole distillation;

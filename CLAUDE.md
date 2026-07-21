@@ -4,8 +4,12 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project status
 
-Greenfield. Only documentation exists so far — no application code, no build tooling yet.
-The design and the staged build order are the source of truth; read them before proposing work:
+Phases 0–5b of the plan are **implemented and CHECKMATE-reviewed**: toolchain + config,
+the MAF+Temporal spine (mock HPC), fast calculators (xTB/pKa/solubility) with the Postgres
+calculation cache, BoFire BO campaigns, the knowledge graph + PR-gate, the eval/metric
+layer, ECFP4/DRFP fingerprint search, ELN ingestion, the memory layers, and the report
+harness. Phase 6 (identity/RBAC/hardening) is open — it needs live Entra-ID/Temporal
+infrastructure. The design and staged build order remain the source of truth:
 
 - `docs/architektur.md` — the four-layer architecture (the "big picture", numbered sections).
 - `docs/implementation-plan.md` — the step-by-step build order with quality gates.

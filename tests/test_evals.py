@@ -6,13 +6,20 @@ renders a citable report, and the tool-utility A/B surfaces at least one task wh
 tooling does *not* help (the selective-steering evidence, F8/F9).
 """
 
+import math
+import sys
+from pathlib import Path
+
 import pytest
+from pydantic import ValidationError
 
 from chemclaw.config import settings
+from chemclaw.errors import ChemclawError
 from evals.ab import TaskScores, compare_tool_utility
 from evals.harness import (
     EvalCaseError,
     load_eval_cases,
+    main,
     render_report,
     run_eval,
 )
@@ -86,6 +93,7 @@ def test_harness_runs_over_versioned_case_set_and_gates() -> None:
     """The harness scores the real case-set reproducibly and flags the failing case."""
     cases = load_eval_cases(settings.eval_case_dir)
     assert {c.id for c in cases} == {
+        "bo-regret-reizman",
         "green-esterification",
         "pharma-solvent-heavy",
         "solubility-benzene",
@@ -108,19 +116,95 @@ def test_report_is_citable() -> None:
     assert "**FAIL**" in text  # the failing gated case is visible
 
 
-def test_load_rejects_malformed_case(tmp_path) -> None:  # type: ignore[no-untyped-def]
+def test_load_rejects_malformed_case(tmp_path: Path) -> None:
     """A case file missing required fields fails loudly with its path (G4)."""
     (tmp_path / "bad.md").write_text("---\nid: x\n---\nno metrics\n", encoding="utf-8")
     with pytest.raises(EvalCaseError, match="invalid eval case"):
         load_eval_cases(str(tmp_path))
 
 
-def test_load_rejects_misspelled_key(tmp_path) -> None:  # type: ignore[no-untyped-def]
+def test_load_rejects_misspelled_key(tmp_path: Path) -> None:
     """An unknown top-level key is rejected, not silently dropped (G4)."""
     text = "---\nid: x\nmetrics: [e_factor]\noutputt: {}\n---\ntypo in `output`\n"
     (tmp_path / "typo.md").write_text(text, encoding="utf-8")
     with pytest.raises(EvalCaseError, match="invalid eval case"):
         load_eval_cases(str(tmp_path))
+
+
+def test_missing_case_dir_raises(tmp_path: Path) -> None:
+    """A missing case directory raises, not a vacuously green empty report (G4)."""
+    with pytest.raises(EvalCaseError, match="does not exist"):
+        load_eval_cases(str(tmp_path / "nope"))
+
+
+def test_empty_case_dir_raises(tmp_path: Path) -> None:
+    """A directory with zero cases raises — an empty case-set gates nothing (G4)."""
+    with pytest.raises(EvalCaseError, match="empty case-set"):
+        load_eval_cases(str(tmp_path))
+
+
+def test_cli_exits_nonzero_on_unloadable_case_set(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The CLI is red when the case-set cannot be loaded (mistyped directory)."""
+    monkeypatch.setattr(sys, "argv", ["evals.harness", str(tmp_path / "missing")])
+    assert main() == 1
+
+
+def test_cli_reports_failing_gate_but_exits_zero(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A failing gated metric is reported, not an exit code — gating is the tests' job.
+
+    The versioned case-set deliberately contains a gate-failing demonstration case
+    (pharma-solvent-heavy), so the CLI must render its FAIL loudly while exiting 0;
+    which cases must pass/fail is pinned by this suite, and only an unloadable or
+    unscorable case-set exits non-zero.
+    """
+    monkeypatch.setattr(sys, "argv", ["evals.harness", settings.eval_case_dir, "v1"])
+    assert main() == 0
+    assert "**FAIL**" in capsys.readouterr().out  # the report still shows the red gate
+
+
+def test_eval_errors_are_chemclaw_errors() -> None:
+    """Both eval error types share the one bad-data base (reject-and-continue)."""
+    assert issubclass(MetricError, ChemclawError)
+    assert issubclass(EvalCaseError, ChemclawError)
+
+
+def test_bo_regret_requires_direction() -> None:
+    """A missing direction is an error, not a silent maximize (sign-flip, G4)."""
+    case = EvalCase(
+        id="c", metrics=["bo_regret"], output={"best_value": 1.0}, reference={"optimum": 2.0}
+    )
+    with pytest.raises(MetricError, match="direction"):
+        get_metric("bo_regret")(case)
+
+
+def test_boolean_is_not_a_number() -> None:
+    """YAML parses `yes` as True; scoring it as 1.0 would be silently wrong (G4)."""
+    case = EvalCase(
+        id="c", metrics=["prediction_error"], output={"predicted": True}, reference={"actual": 1.0}
+    )
+    with pytest.raises(MetricError, match="must be a number"):
+        get_metric("prediction_error")(case)
+
+
+def test_zero_input_mass_entry_is_allowed() -> None:
+    """An unused feed (0 kg) is a valid entry; only the product mass must be > 0."""
+    case = EvalCase(
+        id="c", metrics=["pmi"], output={"input_masses_kg": [0, 20], "product_mass_kg": 10}
+    )
+    assert get_metric("pmi")(case).value == pytest.approx(2.0)
+
+
+def test_task_scores_reject_non_finite() -> None:
+    """A NaN/inf score is rejected at the model, not silently 'no effect' (G4)."""
+    for bad in (math.nan, math.inf, -math.inf):
+        with pytest.raises(ValidationError):
+            TaskScores(task_id="t", baseline=bad, augmented=1.0)
+        with pytest.raises(ValidationError):
+            TaskScores(task_id="t", baseline=1.0, augmented=bad)
 
 
 def test_unknown_metric_names_the_case() -> None:
@@ -168,3 +252,17 @@ def test_tool_utility_respects_direction() -> None:
     summary = compare_tool_utility(tasks, higher_is_better=False)
     assert summary.helped == ["t"]
     assert summary.utilities[0].delta == pytest.approx(3.0)
+
+
+def test_sub_epsilon_delta_is_no_effect(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A delta within +/- epsilon lands in "no effect", not helped/hurt.
+
+    Guards the noise-floor band: with the old 0.0 default a delta this small was
+    wrongly credited as "helped"; a positive epsilon must absorb it.
+    """
+    monkeypatch.setattr(settings, "eval_ab_epsilon", 0.01)
+    tasks = [TaskScores(task_id="t", baseline=0.700, augmented=0.705)]  # delta 0.005 < 0.01
+    summary = compare_tool_utility(tasks, higher_is_better=True)
+    assert summary.no_effect == ["t"]
+    assert summary.helped == []
+    assert summary.hurt == []

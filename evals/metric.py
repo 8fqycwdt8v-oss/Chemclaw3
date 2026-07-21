@@ -1,5 +1,8 @@
 """Metric interface + registry — the evaluation layer's core (plan step 2b.1).
 
+(Singular `metric` = the interface and `@metric` registry. The concrete scored metrics live
+in the sibling `evals.metrics` — plural. Import the registry from here, the functions there.)
+
 Why this layer exists: the Checkmates gate *code* quality, but scientific *output*
 quality needs its own measurable gate (docs/research-review.md F7-F9). A metric is a
 **pure function** from an evaluation case to a `MetricResult` — value plus provenance
@@ -15,6 +18,8 @@ from collections.abc import Callable
 from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
+
+from chemclaw.errors import ChemclawError
 
 
 class MetricResult(BaseModel):
@@ -54,7 +59,7 @@ class EvalCase(BaseModel):
     reference: dict[str, Any] | None = None
 
 
-class MetricError(ValueError):
+class MetricError(ChemclawError):
     """A metric could not be computed for a case (missing/invalid inputs, G4)."""
 
 

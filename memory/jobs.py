@@ -9,12 +9,12 @@ reactions from the ELN adapter. The factual note bodies are built here; the rich
 distilled rule is the corresponding skill's judgment, layered on top.
 """
 
-import hashlib
-
 from eln.ord import OrdReaction
 from kg.pr_gate import NoteSubmitter, propose_note
 from memory.campaign import campaign_note_from_chain
 from memory.chains import detect_chains
+from memory.ids import stable_id
+from memory.optimization import find_optimization_campaigns, optimization_campaign_note
 from memory.playbook import PlaybookCandidate, find_playbook_candidates, playbook_note
 
 
@@ -33,7 +33,7 @@ async def distill_playbooks(reactions: list[OrdReaction], submitter: NoteSubmitt
     refs: list[str] = []
     for candidate in find_playbook_candidates(reactions):
         note = playbook_note(
-            _playbook_id(candidate.reaction_ids),
+            stable_id("playbook", candidate.reaction_ids),
             _summary(candidate, by_id),
             candidate.reaction_ids,
         )
@@ -41,9 +41,18 @@ async def distill_playbooks(reactions: list[OrdReaction], submitter: NoteSubmitt
     return refs
 
 
-def _playbook_id(reaction_ids: list[str]) -> str:
-    """Stable playbook id from its evidence, so re-distillation is idempotent."""
-    return hashlib.sha256("|".join(sorted(reaction_ids)).encode()).hexdigest()[:12]
+async def synthesize_optimization_campaigns(
+    reactions: list[OrdReaction], submitter: NoteSubmitter
+) -> list[str]:
+    """Group same-transformation runs and propose an `optimization-campaign` note for each."""
+    by_id = {r.reaction_id: r for r in reactions}
+    refs: list[str] = []
+    for campaign in find_optimization_campaigns(reactions):
+        note = optimization_campaign_note(
+            stable_id("optimization", campaign.reaction_ids), campaign, by_id
+        )
+        refs.append(await propose_note(note, submitter))
+    return refs
 
 
 def _summary(candidate: PlaybookCandidate, reactions: dict[str, OrdReaction]) -> str:

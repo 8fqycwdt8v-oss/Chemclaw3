@@ -12,6 +12,7 @@ from pathlib import Path
 
 from pydantic import BaseModel, Field
 
+from agents.framing import frame_untrusted
 from chemclaw.config import settings
 from kg.git_submitter import default_submitter
 from kg.graph import build_graph, neighborhood
@@ -86,7 +87,10 @@ async def expand_note(note_id: str, hops: int = 1) -> NoteView:
         for nid in sorted(neighborhood(graph, note_id, hops=hops))
         if graph.nodes[nid].get("note") is not None
     ]
-    return NoteView(note=_ref(note), body=note.body, neighbors=neighbors)
+    # The body is note content (possibly ingested, not agent-authored): frame it as data.
+    return NoteView(
+        note=_ref(note), body=frame_untrusted(note.body, note_id=note.id), neighbors=neighbors
+    )
 
 
 async def propose_knowledge_note(
