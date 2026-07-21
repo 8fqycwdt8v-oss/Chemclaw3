@@ -232,6 +232,11 @@ class Settings(BaseSettings):
     # falls back to `postgres_dsn` (one database in the simple deployment).
     session_store: Literal["memory", "postgres"] = "memory"
     session_store_dsn: str = ""
+    # Job→session push-back (plan F3-T2/T3): a finished Temporal job writes a `session_events` row;
+    # the front door tails the table and wakes the owning session (appending the result, flipping
+    # the `awaiting` todo) instead of the user polling. This is the tailer's poll interval — a
+    # LISTEN/NOTIFY-free fallback that is simple and correct; lower it for snappier wake-ups.
+    session_event_poll_seconds: float = Field(default=2.0, gt=0)
 
     # Markdown knowledge graph (plan Phase 2). Directory of note files the indexer
     # reads; retrieval is graph traversal over their [[wikilinks]] (D-004).

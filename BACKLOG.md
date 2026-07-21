@@ -59,13 +59,18 @@ MAF ships the harness natively (`create_harness_agent` + `TodoProvider`/`AgentMo
       `infra/sql/008_sessions.sql`, config `session_store`/`session_store_dsn`, `build_agent` selects
       via `_history_provider()`. Tests: `test_session_store.py` (unit selection + PG round-trip that
       skips offline), `test_config.py`.
-- [ ] **F3-T2** Session-events channel (job→session): `infra/sql/009_session_events.sql`,
-      `workflows/notify.py::record_session_event`, `service/session_events.py` tailer (LISTEN/NOTIFY
-      or poll).
-- [ ] **F3-T3** `awaiting→completed` end-to-end: `session_id` on job input; QM workflow emits a
-      completion event; runner flips the matching `awaiting` todo. (Live service-loop wiring proves
-      out only against live Postgres/Temporal — logic unit-tested offline.)
-- [ ] ADR **D-A3** (session + callback) — extend once T2/T3 land.
+- [x] **F3-T2** Session-events push-back channel: `infra/sql/009_session_events.sql`,
+      `agents/session_events.py` (`SessionEvent` + `record_session_event`/`fetch_unconsumed`/
+      `mark_consumed` + dependency-injected `stream_new_events` tailer), `workflows/notify.py`
+      (`record_session_event_activity` + `SessionEventInput`), config `session_event_poll_seconds`.
+      Tests: `test_session_events.py` (tailer loop + model + activity forwarding as unit; PG
+      round-trip skips offline).
+- [ ] **F3-T3** `awaiting→completed` end-to-end wiring (infra-gated — needs live Postgres+Temporal):
+      `session_id` on job input propagated from the turn; QM workflow schedules
+      `record_session_event_activity` on completion; register it on the hpc worker; service runs
+      `stream_new_events` per session, appends the result, flips the matching `awaiting` todo. Also
+      unlocks F2's deferred `PlanEvent`/`JobStartedEvent`. Logic unit-tested; end-to-end proves live.
+- [ ] ADR **D-A3** (session + callback) — extend once T3 lands.
 
 ## Later — Phase 6 identity/RBAC & hardening (folded into F4; needs live Entra/Temporal)
 
