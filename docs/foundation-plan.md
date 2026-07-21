@@ -10,6 +10,12 @@
 > **Goal restated (user):** a Claude-Code-*like experience* — an autonomous, tool-using,
 > plan/execute assistant — **built on MAF** and **tailored to pharmaceutical process &
 > analytical development**. Not a Claude Code clone; the MAF Agent Harness is the engine.
+>
+> **Scope guardrail (user brief):** foundation only. This plan adds **no new capability Skills/MCP
+> tools and no concrete data sources or analytics tools** (no LIMS/MES/ELN/analytical connectors, no
+> analytical/retro/prediction models). It *does* build the **generic seams** those attach to later —
+> above all the data-source attachment seam (F7) — so adding a source or tool afterwards is a thin
+> adapter, not a core change.
 
 ## 0. Target-environment model (the substrate this plan builds for)
 
@@ -267,29 +273,52 @@ exists") is now met. Everything is already shaped for this — only `workflows/a
 
 ---
 
-## Phase F7 — Analytical-development data plane (the pharma-tailored half)
+## Phase F7 — Generic data-source attachment seam (framework only, **no concrete sources**)
 
-**Why:** the vision explicitly includes **analytical** development, which ORD/RDKit do not cover —
-the industry whitespace and your differentiator (assessment §D-C). This is a **foundation** (a
-canonical schema everything above must speak), distinct from later analytical *models*.
+**Why:** the vision needs many future data sources — **LIMS, MES, analytical instruments, live ELN,
+literature** — but per the brief we build **no concrete source or analytics tool now**. Instead we
+make attaching one later trivial: a **stable, source-agnostic plug-in seam** so a new source is *one
+thin adapter + one registry entry*, with zero core change and no source-specifics leaking upward.
+This is foundation work (the seam), not capability work (the sources). The repo already has the two
+half-contracts — this phase unifies and hardens them into one documented attachment point.
 
-- **F7.1 Standard choice (ADR).** **AnIML** (ASTM, XML, strong GxP audit trail) near-term;
-  **Allotrope (ADF/AFO)** as the GxP target if pharma QA standardizes on it. Do **not** invent a
-  homegrown analytical schema.
-- **F7.2 Canonical analytical schema + note taxonomy.** New note types (`method`, `analytical-run`,
-  `chromatogram`/`peak-table`, `spectrum`, `impurity`, `stability-point`) modeled on the chosen
-  standard's core, reusing the pragmatic-subset discipline of `eln/ord.py` (D-018). ORD stays for
-  reactions; analytical sits **alongside**, linked by wikilinks.
-- **F7.3 One concrete ingestion adapter** (not a universal abstraction — D-018): a real analytical
-  source (Benchling/LIMS export, or an instrument's AnIML export) → validated notes → PR-gate.
-- **F7.4 Cross-links.** Wire analytical results into the KG: `impurity ↔ reaction ↔ campaign`, so
-  "where did this impurity come from / did we purge it" is a graph traversal (impurity fate/purge is
-  un-productized by competitors — a niche win).
+- **F7.1 One generic external-source contract.** Consolidate the existing **`ElnAdapter`**
+  (ingestion: `fetch_new_entries(since) → RawEntry[]`, `map_to_*`) and the **`SourceRetriever`**
+  (retrieval: `retrieve(query, filters) → EvidenceChunk[]` with mandatory citation) into one clearly
+  documented **`DataSource`** seam with two independent halves — *ingest* (pull → normalize →
+  PR-gated knowledge note and/or deterministic serving copy) and *retrieve* (query → cited chunks).
+  A source may implement either or both. **Only the contract is fixed; never the shape** (D-018/D-023
+  discipline preserved).
+- **F7.2 Config-driven source registry.** Generalize the ELN adapter registry (D-028) into a
+  **data-source registry**: a new source is a registry entry selected by config
+  (`CHEMCLAW_DATA_SOURCES`), never a code change in the core. Ingestion sources reuse the durable
+  `background-jobs` sync + cursor machinery (D-035); retrieval sources are auto-discovered by the
+  research/report harness (`gather_evidence` already fans out over `SourceRetriever`s — adding one is
+  one list entry, D-023).
+- **F7.3 Canonical target stays generic; source schemas come *with* the source.** The mapping target
+  remains the existing note graph (arbitrary `type`) + the ORD subset for reactions. We **do not**
+  invent an analytical/LIMS/MES schema now — each source brings its own canonical mapping *when it is
+  actually built* (e.g. AnIML/Allotrope for analytical, a LIMS result schema for LIMS), added behind
+  the seam without touching the core. The seam does not presuppose any of them.
+- **F7.4 Identity, provenance, access flow through the seam generically.** Every ingested record
+  carries provenance (source id + native ref); a user-scoped source honors Entra/OBO (F4.3); the
+  PR-gate stays the terminal gate for any *knowledge* a source proposes, while pure *serving* copies
+  (search indices) are not gated (the D-018 split, generalized).
+- **F7.5 Prove the seam with a reference adapter only.** Ship **one in-memory/reference `DataSource`**
+  (used by tests and the credential-free demo) to prove attachment end-to-end — **not** a real LIMS/
+  MES/analytical connector. Real sources are later, one adapter each.
 
-> **CHECKMATE F7** (G1–G7): An analytical dataset ingests as validated, linked, citeable notes;
-> ELN/instrument specifics live **only** in the adapter; a reaction's impurity profile is reachable
-> by traversal. ADR: **D-A7 analytical data standard + taxonomy**. (Analytical *models* — retention
-> prediction, peak deconvolution, spectral ID — are later capability work, not this phase.)
+> **CHECKMATE F7** (G1–G7): Can a *hypothetical* new source be attached as **one adapter + one config
+> entry with zero core change** (demonstrated with the reference adapter)? Do ingest and retrieve
+> stay independent, both source-agnostic (G6)? Does **no** source-specific type leak above the
+> adapter? Is the PR-gate/serving split preserved? ADR: **D-A7 generic data-source seam** (no concrete
+> sources, no analytical schema — deferred to when a real source is built).
+
+> **Deferred behind this seam (not now):** concrete **LIMS / MES / analytical-instrument / live-ELN /
+> literature** adapters and their standards (**AnIML/Allotrope** for analytical data, **SiLA2/LAP**
+> for instruments, **Benchling API/MCP** for ELN) — each becomes one adapter + registry entry when
+> that source is actually needed. Analytical *models* (retention prediction, peak deconvolution,
+> spectral ID) are later capability work, unrelated to this seam.
 
 ---
 
@@ -337,14 +366,16 @@ F0 (LLM adapter+spike) ─┬─> F1 (harness) ─┬─> F2 (front door) ─> F
                         │                 │
                         └─────────────────┴─> F6 (OpenShift deploy) ── enables in-cluster test of F2–F5
 F5 (Nextflow HPC) depends on F0 (config pattern) + F6 (worker placement); independent of F1–F4
-F7 (analytical) / F8 (trust+retrieval) depend only on the spine — schedule after F2 (a usable door) exists
+F7 (generic source seam) / F8 (trust+retrieval) depend only on the spine — schedule after F2 exists
 F9 runs continuously
 ```
 
 **Critical path to a usable assistant:** F0 → F1 → F2 → F3 → (F4 for multi-user) → F6 to run it in
-OpenShift. F5 makes heavy compute real; F7/F8 make it pharma-complete and trustworthy. Per the
-brief, **no new capability Skills/MCP tools** are in this plan — F7's schema is data-plane
-foundation, and analytical/retro/prediction *models* are explicitly later.
+OpenShift. F5 makes heavy compute real; F7 makes future sources trivially attachable; F8 makes
+predictions trustworthy. Per the brief, this plan adds **no new capability Skills/MCP tools and no
+concrete data sources or analytics tools** — F7 is the *generic attachment seam only* (proved with a
+reference adapter), and concrete sources (LIMS/MES/ELN/analytical) plus analytical/retro/prediction
+*models* are explicitly later, one adapter/tool at a time behind the seam.
 
 ## Top risks (watch actively)
 
@@ -356,8 +387,9 @@ foundation, and analytical/retro/prediction *models* are explicitly later.
    pick early, keep it in one module.
 4. **OpenShift SCC / egress** — non-root images and explicit NetworkPolicies to HPC + internal LLM
    are easy to get wrong; bake into F6 from the start.
-5. **Analytical scope creep** — commit the *standard* now (F7.1) but keep v1 to one adapter + core
-   note types; models later.
+5. **Data-source scope creep** — F7 is the *seam*, not a source. Resist adding a real LIMS/MES/
+   analytical connector or schema now; ship only the generic contract + registry + one reference
+   adapter. Concrete sources come later, one adapter each.
 
 ## Decisions to confirm before F-phases start
 
@@ -370,4 +402,6 @@ foundation, and analytical/retro/prediction *models* are explicitly later.
 3. **Front-door surface** — thin built-in web chat (recommended) vs adopting an existing chat UI. (F2.)
 4. **Nextflow launch interface** — Seqera Platform API / SSH+CLI / internal REST launcher? (F5.)
 5. **Temporal** — self-hosted on OpenShift vs Temporal Cloud? Session store Postgres vs Redis? (F3/F6.)
-6. **Analytical half in v1** — yes/no, and AnIML-first vs Allotrope-first? (F7.)
+6. **Data-source seam** — confirm F7 is *seam-only* now (agreed: no concrete LIMS/MES/analytical
+   source or schema yet). Which source is likely *first* to attach later (LIMS? MES? live ELN?), so
+   the seam is validated against a realistic shape — without building it now?
