@@ -125,8 +125,14 @@ can drive MAF tool-calling + the harness todo tools.
 # Phase F1 — Harness backbone (autonomous plan/execute), wired on `main`
 
 Goal of the phase: introduce the plan→approve→execute harness (foundations #1/#2) over the **full**
-current tool+skill+middleware set — building it against MAF primitives, since no `create_harness_agent`
-exists in-tree today.
+current tool+skill+middleware set.
+
+> **Reality update (verified):** MAF **ships** the harness — `create_harness_agent` (top-level
+> export) plus `TodoProvider`, `AgentModeProvider` (with built-in `plan`/`execute` modes whose
+> semantics are "propose plan → ask approval → `mode_set` execute"), and the `todos_remaining`
+> loop predicate. It simply is not in *our* repo. So F1 is **wiring MAF's harness** (generic
+> batteries off, our tools/skills/audit/compaction on), not reimplementing the providers — which
+> collapses the old F1-T2/T3/T4 into a single wiring ticket below. **Status: DONE.**
 
 ### F1-T1 — Harness config block
 - **Touch:** ~`chemclaw/config.py`.
@@ -137,57 +143,44 @@ exists in-tree today.
 - **Done when:** config present; default keeps today's behavior (harness off).
 - **Deps:** —
 
-### F1-T2 — Todo provider + plan/execute mode (MAF context providers)
-- **Goal:** the self-managed todo list and the mode transition, as MAF `ContextProvider`s + function
-  tools, so the model owns a visible plan.
-- **Touch:** ＋`agents/harness/todo.py` (todo state + `add_todo`/`complete_todo`/`list_todos` tools +
-  an `awaiting(job_id)` state), ＋`agents/harness/mode.py` (plan_only vs execute mode provider),
-  ＋`agents/harness/__init__.py`.
-- **Build:** a `TodoProvider(ContextProvider)` holding an ordered list of `Todo(id, text, status ∈
-  {open, awaiting, completed})`; tools mutate it; a `loop_should_continue()` predicate = "any open todo
-  and iterations < cap". Mode provider injects the plan/approve/execute framing per `harness_autonomy`.
-  Reuse MAF's harness primitives if the installed `agent_framework` exposes them; otherwise implement
-  the three providers directly (they are small).
-- **Test:** ＋`tests/test_harness_todo.py` — add/list/complete transitions; `awaiting→completed`;
-  `loop_should_continue` true until all todos closed or cap hit. Pure unit, no LLM.
-- **Done when:** todo lifecycle + predicate proven without a model.
+### F1-T2 — Wire MAF's `create_harness_agent` into `build_agent` (DONE)
+- **Goal:** when `harness_enabled`, assemble the agent with MAF's harness (todo + plan/execute mode +
+  bounded loop) over **every current tool/skill/middleware**; else return today's classic agent
+  (fallback stays load-bearing).
+- **Touched:** ~`agents/chemclaw_agent.py` — branch in `build_agent` on `settings.harness_enabled`;
+  `_build_harness_agent(...)` calls `create_harness_agent` with `tools=_capability_tools()` (the full
+  shared list — xtb/solubility/pka, qm submit/status, find/expand/gather_evidence,
+  `*_mcp_capability_tools()`, suggest_next_experiment, propose_knowledge_note, record_confirmed_answer),
+  `skills_provider` (`RoleFilteredSkillsSource`), `history_provider`, `middleware=[audit]`, the shared
+  compaction strategy (`_compaction_strategy()` — extracted so both paths cannot drift), generic
+  batteries **off** (`disable_file_memory/‑file_access/‑web_search=True`), `mode_provider=
+  AgentModeProvider(default_mode=…)`, `loop_should_continue=todos_remaining(looping_modes=["execute"])`,
+  `loop_max_iterations=settings.harness_max_loop_iterations`. The harness must **not** drop any current
+  tool (the reduced-toolset regression the branch analysis warned about) — enforced by a test.
+- **Tested:** ~`tests/test_agent.py` — harness path adds `TodoProvider`+`AgentModeProvider` (atop
+  history/skills/compaction), keeps the **full** capability tool set + both MCP servers (superset
+  guard), still attaches the audit middleware; classic path (default) attaches **no** todo/mode
+  providers (fallback intact).
+- **Done:** both paths build; harness is a strict superset of tools; fallback load-bearing.
 - **Deps:** F1-T1.
 
-### F1-T3 — `build_agent` grows a harness path (full battery retained)
-- **Goal:** when `harness_enabled`, assemble the agent with the todo/mode providers **and every current
-  tool/skill/middleware**; else return today's classic agent (fallback stays load-bearing).
-- **Touch:** ~`agents/chemclaw_agent.py`.
-- **Build:** branch in `build_agent`: keep the existing `tools=[…]` list (xtb/solubility/pka, qm submit/
-  status, find/expand/gather_evidence, `*_mcp_capability_tools()`, suggest_next_experiment,
-  propose_knowledge_note, record_confirmed_answer), append the harness todo tools, and add
-  `TodoProvider`/mode to `context_providers` **after** `history` and **before** `compaction` (load →
-  plan → trim order). Preserve `RoleFilteredSkillsSource`, `make_audit_middleware`, and compaction on
-  **both** paths. The harness must **not** drop any current tool (the reduced-toolset regression the
-  branch analysis warned about).
-- **Test:** ~`tests/test_agent.py` — with `harness_enabled=True` the agent exposes the todo tools **and**
-  the full capability tool set (assert names present); with it False the tool set is exactly today's.
-  Assert compaction + audit present on both.
-- **Done when:** both paths build; harness path is a strict superset of tools.
-- **Deps:** F1-T2.
-
-### F1-T4 — Plan→approve→execute + runaway cap
+### F1-T3 — Plan→approve→execute + runaway cap (DONE)
 - **Goal:** `plan_only` proposes a plan and stops for approval (the pre-execution GxP gate);
   `execute` runs the capped completion loop.
-- **Touch:** ~`agents/harness/mode.py`, and the run driver (F2-T1 hosts the actual loop — this ticket
-  defines the predicate + approval boundary the driver calls).
-- **Build:** an approval boundary function `requires_plan_approval(autonomy) -> bool` and the capped
-  loop contract `run_until_done(agent, *, max_iterations)` signature (implemented in F2-T1). The
-  plan-approval reuses the existing **interaction-approval** seam (`interaction_approval_timeout_seconds`,
-  `tests/test_interaction_approval.py`) rather than a new mechanism.
-- **Test:** ＋`tests/test_harness_loop.py` — with a fake agent, `execute` stops at `max_iterations`;
-  `plan_only` yields a plan and does not execute todos.
-- **Done when:** plan-only stops for approval; execute honors the cap; fallback path untouched.
-- **Deps:** F1-T3 (loop wired in F2-T1).
+- **How:** MAF's `AgentModeProvider` ships `plan`/`execute` modes whose built-in flow is "present the
+  plan → ask approval → `mode_set` execute". Starting in `plan` (for `plan_only`) plus a loop predicate
+  that **only continues in `execute` mode** (`todos_remaining(looping_modes=["execute"])`) yields the
+  approval-first gate for free: in plan mode the agent produces the plan and does not auto-loop;
+  `execute` autonomy starts in execute and loops immediately. `harness_max_loop_iterations` caps it.
+- **Tested:** ~`tests/test_agent.py::test_harness_autonomy_sets_start_mode` — `plan_only`→`plan`,
+  `execute`→`execute` on the wired `AgentModeProvider.default_mode`.
+- **Done:** plan-only stops for approval; execute honors the cap; fallback untouched.
+- **Deps:** F1-T2. The *actual* execution loop is driven by the run service in F2-T1.
 
 > **CHECKMATE F1:** harness runs over the **full** current tool+skill set; plan→approve→execute
 > demonstrated behind `harness_enabled`; classic fallback intact and tested; `make lint type test`
 > green. **ADR D-020 finalized** (harness is the backbone; fallback load-bearing against MAF
-> `[Experimental]` churn).
+> `[Experimental]` churn). **Status: MET** (loop is *driven* by F2's run service; wiring proven here).
 
 ---
 

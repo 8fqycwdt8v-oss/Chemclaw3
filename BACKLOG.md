@@ -25,7 +25,23 @@ an internal data pipeline, no vendor**). Full ticket breakdown: `docs/implementa
       `docs/spikes/f0-toolcalling.md` verdict. **Needs the live internal endpoint** (or a stand-in
       OpenAI-compatible server); run before building on the harness.
 
-### Next — F1 harness backbone (see docs/implementation-tickets.md F1-T1..T4)
+### Phase F1 — Harness backbone (autonomous plan/execute)
+MAF ships the harness natively (`create_harness_agent` + `TodoProvider`/`AgentModeProvider`/
+`todos_remaining`), so F1 is *wiring* it, not reimplementing providers.
+- [x] **F1-T1** Harness config (`harness_enabled`/`harness_autonomy`/`harness_max_loop_iterations`).
+      Test: `test_config.py`.
+- [x] **F1-T2** `build_agent` branch → `_build_harness_agent` wires `create_harness_agent` over the
+      full shared `_capability_tools()` + `RoleFilteredSkillsSource` + audit + shared
+      `_compaction_strategy()`, generic batteries off. Classic path is the fallback. Test:
+      `test_agent.py` (todo/mode providers added; full toolset kept; audit kept; classic has no
+      harness providers).
+- [x] **F1-T3** Plan→approve→execute: `AgentModeProvider(default_mode=plan|execute)` +
+      `todos_remaining(looping_modes=["execute"])` → plan_only stops for approval, execute loops
+      (capped). Test: `test_agent.py::test_harness_autonomy_sets_start_mode`.
+- [ ] ADR **D-020** finalized + **D-A1** (F0) — write in DECISIONS.md (F9 running-log).
+
+### Next — F2 front door + run service (see docs/implementation-tickets.md F2-T1..T3)
+The harness *loop* is driven by the run service (opens MCP lifecycle, runs turns, streams).
 
 ## Later — Phase 6 identity/RBAC & hardening (folded into F4; needs live Entra/Temporal)
 

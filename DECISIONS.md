@@ -669,3 +669,46 @@ worker-registration assertions and `test_skill_access` (filter/pass-through/fail
 **Result.** New tests: `test_workers`, `test_validate_skills`, and an `_default_chat_client`
 preflight case in `test_agent`. `make lint type` green; `make test` green offline. CI gains a
 `make skill-validate` step.
+
+## D-038 — F0: config-selected LLM provider seam (foundation-plan D-A1)
+
+**Context.** The target deployment serves the LLM from an internal OpenAI-compatible ("OpenLLM-like")
+endpoint, not Anthropic. The agent must reach it by config, and the raw inference credential is
+**one generic API key, not per-user Entra** (the model call is not a user-scoped resource; identity
+scoping applies to *who* takes the turn / *which* workflow runs, handled in F4).
+
+- **One import site.** `agents/llm_provider.py::build_chat_client()` is the only place a chat-client
+  class is imported (mirrors the ELN adapter registry). `build_agent` calls it; the deleted
+  `_default_chat_client` is gone. `settings.llm_provider ∈ {openai_compatible, anthropic}`.
+- **openai_compatible** builds MAF `OpenAIChatClient(model=llm_model, async_client=AsyncOpenAI(...))`,
+  where the `AsyncOpenAI` carries `llm_base_url`, the generic `llm_api_key` (a non-empty placeholder
+  if the endpoint is keyless), `llm_timeout_seconds`, `llm_max_retries`, and a CA-pinned httpx client
+  when `llm_tls_ca_bundle` is set — so a firewalled internal endpoint with a private CA works from
+  config alone. **anthropic** keeps the pre-seam dev path (its own key preflight, `agent_model`).
+- **Default `anthropic`** so the config singleton is valid with no endpoint set; production sets
+  `CHEMCLAW_LLM_PROVIDER=openai_compatible` + base_url/model (validated at startup).
+- **Generation params** (`llm_temperature`/`llm_max_tokens`) thread onto `Agent(default_options=…)`.
+- New dep: `agent-framework-openai`. Tests: `test_llm_provider`, `test_config`, `test_agent`.
+- **Open (F0-T4):** the internal model's function-calling reliability is the project's #1 risk; a
+  spike verdict (`docs/spikes/f0-toolcalling.md`) is pending a live endpoint before building further.
+
+## D-039 — F1: MAF Agent Harness is the autonomous plan/execute backbone (foundation D-020)
+
+**Context.** Foundations #1/#2 (an actually-run agentic loop + a visible plan/todo list) — the
+Claude-Code-like experience — were absent. MAF **ships** the harness (`create_harness_agent` +
+`TodoProvider`/`AgentModeProvider`/`todos_remaining`), so the decision is to *wire* it, not build it.
+
+- **Wiring, batteries off.** `build_agent` branches on `settings.harness_enabled`; `_build_harness_agent`
+  calls `create_harness_agent` over the **same** `_capability_tools()` (the full function+MCP set),
+  `RoleFilteredSkillsSource`, audit middleware, and a shared `_compaction_strategy()` (extracted so
+  classic and harness compaction cannot drift). MAF's generic batteries (file memory/access, web
+  search, shell) are **disabled** — capability is ours (MCP servers + tools), not the harness built-ins.
+- **Plan→approve→execute for free.** `AgentModeProvider` ships `plan`/`execute` modes ("present plan →
+  approval → `mode_set` execute"). `harness_autonomy=plan_only` (default, pharma-safe) starts in `plan`
+  and, because the loop predicate `todos_remaining(looping_modes=["execute"])` only continues in
+  execute mode, the agent produces a plan and stops for approval — the pre-execution GxP gate. `execute`
+  starts looping immediately, capped by `harness_max_loop_iterations` (runaway guard).
+- **Classic path is the load-bearing fallback** against the harness's `[Experimental]` API — off by
+  default; a test asserts it attaches no todo/mode providers.
+- The completion loop is *driven* by the run service (F2); this ADR covers the wiring, proven by
+  `test_agent` (todo/mode added, full toolset kept, audit kept, start-mode per autonomy).

@@ -197,6 +197,21 @@ class Settings(BaseSettings):
     agent_keep_last_tool_groups: int = Field(default=2, ge=0)
     agent_keep_last_conversation_groups: int = Field(default=12, ge=1)
 
+    # MAF Agent Harness (plan Phase F1) — the autonomous plan/execute backbone (the Claude-Code-like
+    # experience). When `harness_enabled`, `build_agent` wires MAF's `create_harness_agent` (todo
+    # list + plan/execute mode + a bounded completion loop) over the *same* tools/skills/audit/
+    # compaction as the classic agent, with MAF's generic batteries (file memory/access, web search,
+    # shell) OFF — capability comes from our MCP servers and tools, not the harness's built-ins. Off
+    # by default so today's classic single-turn agent stays the safe fallback against the harness's
+    # `[Experimental]` API. `harness_autonomy` picks the starting mode: `plan_only` (default, the
+    # pharma-safe one) starts in plan mode and presents a plan for human approval before any
+    # execution — the pre-execution GxP gate — and only loops once approval switches it to execute;
+    # `execute` starts looping through the todo list immediately. `harness_max_loop_iterations` caps
+    # the loop so a stuck plan aborts instead of spinning (the runaway guard).
+    harness_enabled: bool = False
+    harness_autonomy: Literal["plan_only", "execute"] = "plan_only"
+    harness_max_loop_iterations: int = Field(default=25, ge=1)
+
     # Markdown knowledge graph (plan Phase 2). Directory of note files the indexer
     # reads; retrieval is graph traversal over their [[wikilinks]] (D-004).
     knowledge_dir: str = "knowledge"
