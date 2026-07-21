@@ -97,3 +97,41 @@ def test_message_to_unknown_session_is_404() -> None:
     with _client(_FakeAgent()) as client:
         res = client.post("/sessions/nope/messages", json={"message": "hi"})
         assert res.status_code == 404
+
+
+def test_job_pushback_streams_completed_events(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    """The events endpoint streams a finished job's push-back to the session (F3-T3)."""
+    import service.app as app_module
+    from agents.session_events import SessionEvent
+
+    async def _fake_stream(session_id: str) -> object:
+        yield SessionEvent(
+            session_id=session_id,
+            kind="job_completed",
+            payload={"job_id": "qm-1", "converged": True},
+        )
+
+    monkeypatch.setattr(app_module, "stream_new_events", _fake_stream)
+
+    with _client(_FakeAgent()) as client:
+        session_id = client.post("/sessions").json()["session_id"]
+        events = []
+        with client.stream("GET", f"/sessions/{session_id}/events") as res:
+            assert res.status_code == 200
+            for line in res.iter_lines():
+                if line.startswith("data:"):
+                    events.append(json.loads(line[len("data:") :].strip()))
+
+    assert events == [
+        {
+            "type": "job_completed",
+            "job_id": "qm-1",
+            "summary": {"job_id": "qm-1", "converged": True},
+        }
+    ]
+
+
+def test_pushback_for_unknown_session_is_404() -> None:
+    """Subscribing to push-back for a session that never existed is a clean 404."""
+    with _client(_FakeAgent()) as client:
+        assert client.get("/sessions/nope/events").status_code == 404

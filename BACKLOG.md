@@ -65,12 +65,15 @@ MAF ships the harness natively (`create_harness_agent` + `TodoProvider`/`AgentMo
       (`record_session_event_activity` + `SessionEventInput`), config `session_event_poll_seconds`.
       Tests: `test_session_events.py` (tailer loop + model + activity forwarding as unit; PG
       round-trip skips offline).
-- [ ] **F3-T3** `awaiting→completed` end-to-end wiring (infra-gated — needs live Postgres+Temporal):
-      `session_id` on job input propagated from the turn; QM workflow schedules
-      `record_session_event_activity` on completion; register it on the hpc worker; service runs
-      `stream_new_events` per session, appends the result, flips the matching `awaiting` todo. Also
-      unlocks F2's deferred `PlanEvent`/`JobStartedEvent`. Logic unit-tested; end-to-end proves live.
-- [ ] ADR **D-A3** (session + callback) — extend once T3 lands.
+- [x] **F3-T3** job→session push-back wiring: ambient session id (`agents/session_context.py`
+      contextvar, stamped by the runner); `QMJobInput.session_id` (excluded from `qm_job_key`);
+      `submit_qm_job` stamps it; QM workflow calls `notify_session_best_effort` on completion (activity
+      on the background queue, registered on the worker); front-door `GET /sessions/{id}/events` SSE
+      streams `job_completed` push-back (`JobCompletedEvent`). Tests: `test_session_context.py`,
+      `test_service.py` (all offline with fakes); the workflow-emit + DB round-trip prove live.
+- [ ] Deferred within F3-T3: flipping the harness `awaiting` todo on completion (needs MAF
+      TodoProvider store mutation — best done when the harness loop runs live); `PlanEvent`/live
+      `JobStartedEvent` emission. ADR **D-041** written.
 
 ## Later — Phase 6 identity/RBAC & hardening (folded into F4; needs live Entra/Temporal)
 

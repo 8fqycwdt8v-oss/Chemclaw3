@@ -24,6 +24,7 @@ with workflow.unsafe.imports_passed_through():
     )
     from workflows.knowledge import write_knowledge_node
     from workflows.models import QMJobInput, QMJobResult
+    from workflows.notify import notify_session_best_effort
 
 from workflows.publish import BAD_DATA_RETRY, publish_note_best_effort
 
@@ -72,5 +73,19 @@ class QMJobWorkflow:
         if job.publish_to_graph:
             await publish_note_best_effort(
                 write_knowledge_node, [result], label=result.molecule_smiles
+            )
+
+        # Wake the launching session (F3-T3): a durable push-back event so the chemist sees the
+        # result without polling. Best-effort — a failed notification never fails the cached result.
+        if job.session_id:
+            await notify_session_best_effort(
+                job.session_id,
+                "job_completed",
+                {
+                    "job_id": workflow.info().workflow_id,
+                    "molecule_smiles": result.molecule_smiles,
+                    "total_energy_hartree": result.total_energy_hartree,
+                    "converged": result.converged,
+                },
             )
         return result

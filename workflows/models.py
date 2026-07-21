@@ -32,6 +32,12 @@ class QMJobInput(BaseModel):
     # When true, the completed result is proposed as a PR-gated graph note (2.8).
     # Opt-in, so a calculation is only published to the graph when deliberately asked.
     publish_to_graph: bool = False
+    # The conversation session to notify on completion (plan F3-T3), stamped from the turn's
+    # ambient context (`agents.session_context`) at submit, never by the model. `None` off the
+    # front-door path (tests/CLI) — then the job simply records no push-back. Deliberately excluded
+    # from `qm_job_key`: identical science is still deduplicated across sessions (D-011), so a
+    # completion notifies the session that actually started the workflow.
+    session_id: str | None = None
 
 
 def qm_job_key(job: QMJobInput) -> str:

@@ -16,6 +16,7 @@ from typing import Any
 
 from agent_framework import AgentSession
 
+from agents.session_context import reset_current_session_id, set_current_session_id
 from service.events import (
     AnswerEvent,
     ApprovalRequestEvent,
@@ -44,6 +45,9 @@ async def run_turn(agent: Any, session: AgentSession, user_message: str) -> Asyn
         `AnswerEvent` on success or an `ErrorEvent` on failure.
     """
     answer_parts: list[str] = []
+    # Stamp the turn's session so a job-launching tool (submit_qm_job) records push-back to the
+    # right session (F3-T3) — ambient, never a model-supplied argument. Reset on turn teardown.
+    session_token = set_current_session_id(session.session_id)
     try:
         async with AsyncExitStack() as stack:
             # Open each MCP capability server for the duration of the turn, then tear it down — the
@@ -64,6 +68,8 @@ async def run_turn(agent: Any, session: AgentSession, user_message: str) -> Asyn
     except Exception as exc:
         # One turn's failure becomes one user-safe event, never a 500 mid-stream or a leaked trace.
         yield ErrorEvent(message=f"The turn could not be completed: {exc}")
+    finally:
+        reset_current_session_id(session_token)
 
 
 def _tool_calls_in(update: Any) -> list[tuple[str, str]]:

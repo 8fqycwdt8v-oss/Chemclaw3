@@ -274,6 +274,14 @@ Goal of the phase: sessions survive pod restarts (foundation #6), and a finished
 
 </details>
 
+### F3-T2 — Session-events channel (job → session) — DONE
+`infra/sql/009_session_events.sql` + `agents/session_events.py` (`SessionEvent`, `record_session_event`,
+`fetch_unconsumed`/`mark_consumed`, injectable `stream_new_events` tailer) + `workflows/notify.py`
+(`record_session_event_activity` on the background queue, `notify_session_best_effort`) + config
+`session_event_poll_seconds`. Tailer/model/activity unit-tested; PG round-trip skips offline.
+
+<details><summary>original ticket</summary>
+
 ### F3-T2 — Session-events channel (job → session)
 - **Goal:** a durable channel a completing workflow writes and the front door tails.
 - **Touch:** ＋`infra/sql/003_session_events.sql` (`session_events(session_id, kind, payload,
@@ -285,6 +293,17 @@ Goal of the phase: sessions survive pod restarts (foundation #6), and a finished
   consumed rows are marked.
 - **Done when:** an event written by an activity reaches the service without polling the job.
 - **Deps:** F3-T1.
+
+</details>
+
+### F3-T3 — job→session push-back wiring — DONE
+Ambient session id (`agents/session_context.py` contextvar, stamped by the runner) → `submit_qm_job`
+→ `QMJobInput.session_id` (excluded from `qm_job_key`) → QM workflow `notify_session_best_effort` on
+completion (activity registered on the background worker) → front-door `GET /sessions/{id}/events`
+SSE streams `JobCompletedEvent`. Offline-tested with fakes; the workflow-emit + DB round-trip prove
+live. Deferred: harness `awaiting`-todo flip (MAF store mutation) + `PlanEvent`/live `JobStartedEvent`.
+
+<details><summary>original ticket</summary>
 
 ### F3-T3 — `awaiting → completed` end-to-end
 - **Goal:** a todo that launched a job is `awaiting(job_id)`; the callback completes it and the harness
@@ -298,6 +317,8 @@ Goal of the phase: sessions survive pod restarts (foundation #6), and a finished
 - **Done when:** a long job's result appears in the session on completion; `awaiting→completed` shown;
   no busy-wait.
 - **Deps:** F3-T2, F1-T2.
+
+</details>
 
 > **CHECKMATE F3:** a session survives a front-door restart and resumes; a long job's result appears
 > in-session on completion with no polling; `awaiting→completed` visible; durability stays in Temporal.

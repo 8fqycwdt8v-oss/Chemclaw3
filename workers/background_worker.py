@@ -42,6 +42,7 @@ from workflows.memory_jobs import (
     synthesize_campaigns_activity,
     synthesize_optimization_campaigns_activity,
 )
+from workflows.notify import record_session_event_activity
 from workflows.report_workflow import (
     DevelopmentReportWorkflow,
     propose_report,
@@ -76,6 +77,7 @@ BACKGROUND_ACTIVITIES: Sequence[Callable[..., Any]] = [
     retrieve_section,
     propose_report,
     propose_confirmed_answer_activity,
+    record_session_event_activity,
 ]
 
 

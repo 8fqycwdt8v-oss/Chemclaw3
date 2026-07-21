@@ -14,6 +14,7 @@ from temporalio.common import WorkflowIDReusePolicy
 from temporalio.exceptions import WorkflowAlreadyStartedError
 from temporalio.service import RPCError
 
+from agents.session_context import get_current_session_id
 from chemclaw.config import settings
 from chemclaw.temporal_client import connect
 from workflows.models import QMJobInput, QMJobStatus, qm_job_key
@@ -38,7 +39,13 @@ async def submit_qm_job(molecule_smiles: str, method: str, basis_set: str) -> st
     Returns:
         The job id to poll for status and results.
     """
-    job = QMJobInput(molecule_smiles=molecule_smiles, method=method, basis_set=basis_set)
+    # The session to notify on completion is ambient to the turn (F3-T3), not a model-supplied arg.
+    job = QMJobInput(
+        molecule_smiles=molecule_smiles,
+        method=method,
+        basis_set=basis_set,
+        session_id=get_current_session_id(),
+    )
     client = await connect()
     try:
         handle = await client.start_workflow(

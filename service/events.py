@@ -41,6 +41,14 @@ class JobStartedEvent(BaseModel):
     job_id: str
 
 
+class JobCompletedEvent(BaseModel):
+    """An async job finished and pushed its result back to the session (F3-T3, no polling)."""
+
+    type: Literal["job_completed"] = "job_completed"
+    job_id: str
+    summary: dict[str, object] = {}
+
+
 class ApprovalRequestEvent(BaseModel):
     """The turn is waiting on a human decision (plan approval or an interaction approval)."""
 
@@ -69,6 +77,7 @@ Event = (
     | ToolCallEvent
     | TokenEvent
     | JobStartedEvent
+    | JobCompletedEvent
     | ApprovalRequestEvent
     | AnswerEvent
     | ErrorEvent

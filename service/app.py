@@ -23,7 +23,9 @@ from sse_starlette.sse import EventSourceResponse
 from starlette.middleware.cors import CORSMiddleware
 
 from agents.chemclaw_agent import build_agent
+from agents.session_events import stream_new_events
 from chemclaw.config import settings
+from service.events import JobCompletedEvent
 from service.runner import run_turn
 
 _STATIC_DIR = Path(__file__).parent / "static"
@@ -94,6 +96,22 @@ def create_app(agent_factory: Callable[[], Any] = build_agent) -> FastAPI:
         async def _events() -> AsyncIterator[dict[str, str]]:
             async for event in run_turn(_agent(), session, body.message):
                 yield {"event": event.type, "data": event.model_dump_json()}
+
+        return EventSourceResponse(_events())
+
+    @app.get("/sessions/{session_id}/events")
+    async def session_events(session_id: str) -> EventSourceResponse:
+        """Stream async job push-back for the session (F3-T3): a finished job wakes the chat."""
+        if session_id not in app.state.sessions:
+            raise HTTPException(status_code=404, detail="unknown session")
+
+        async def _events() -> AsyncIterator[dict[str, str]]:
+            async for pushed in stream_new_events(session_id):
+                if pushed.kind == "job_completed":
+                    event = JobCompletedEvent(
+                        job_id=str(pushed.payload.get("job_id", "")), summary=pushed.payload
+                    )
+                    yield {"event": event.type, "data": event.model_dump_json()}
 
         return EventSourceResponse(_events())
 
