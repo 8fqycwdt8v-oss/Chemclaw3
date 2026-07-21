@@ -40,8 +40,22 @@ MAF ships the harness natively (`create_harness_agent` + `TodoProvider`/`AgentMo
       (capped). Test: `test_agent.py::test_harness_autonomy_sets_start_mode`.
 - [ ] ADR **D-020** finalized + **D-A1** (F0) — write in DECISIONS.md (F9 running-log).
 
-### Next — F2 front door + run service (see docs/implementation-tickets.md F2-T1..T3)
-The harness *loop* is driven by the run service (opens MCP lifecycle, runs turns, streams).
+### Phase F2 — Front door + run service (the agent finally runs)
+- [x] **F2-T1** `service/app.py::create_app` (FastAPI) + `service/runner.py::run_turn` — builds/holds
+      one agent, per-session `AgentSession`, opens the MCP lifecycle once per turn (`AsyncExitStack`
+      over `agent.mcp_tools`), runs `agent.run(stream=True)`, streams events. Routes: `/healthz`,
+      `/readyz`, `POST /sessions`, `POST /sessions/{id}/messages` (SSE). Config: `service_host`/
+      `service_port`/`service_cors_origins`. Test: `test_service.py`.
+- [x] **F2-T2** Thin web chat surface `service/static/{index.html,app.js}` (vanilla + fetch-stream SSE;
+      renders plan/tool-trace/tokens/approval/answer). Served at `/`. Test: `test_service.py`.
+- [x] **F2-T3** Typed event contract `service/events.py` (discriminated union on `type`:
+      plan/tool_call/token/job_started/approval_request/answer/error). Test: `test_service_events.py`.
+- [ ] Deferred within F2: emit `PlanEvent` from harness todo state, and real `JobStartedEvent` when a
+      tool starts a Temporal job (wired in F3 with job→session push-back). ADR **D-A2** (front door).
+
+### Next — F3 durable session + job→session push-back (docs/implementation-tickets.md F3-T1..T3)
+Replaces the in-memory session map with a Postgres store; a finished job wakes the session
+(`awaiting→completed`) instead of polling.
 
 ## Later — Phase 6 identity/RBAC & hardening (folded into F4; needs live Entra/Temporal)
 

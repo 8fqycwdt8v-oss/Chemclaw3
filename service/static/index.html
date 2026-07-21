@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Chemclaw</title>
+    <style>
+      :root { color-scheme: light dark; --gap: 12px; }
+      * { box-sizing: border-box; }
+      body { font-family: system-ui, sans-serif; margin: 0; height: 100vh; display: flex;
+             flex-direction: column; }
+      header { padding: var(--gap); border-bottom: 1px solid #8884; font-weight: 600; }
+      #transcript { flex: 1; overflow-y: auto; padding: var(--gap); display: flex;
+                    flex-direction: column; gap: var(--gap); }
+      .msg { max-width: 70ch; padding: 8px 12px; border-radius: 10px; white-space: pre-wrap;
+             overflow-wrap: anywhere; }
+      .user { align-self: flex-end; background: #3b82f633; }
+      .assistant { align-self: flex-start; background: #8881; }
+      .trace { align-self: flex-start; font-size: 0.8em; opacity: 0.7; font-family: monospace; }
+      .error { align-self: flex-start; color: #ef4444; }
+      form { display: flex; gap: var(--gap); padding: var(--gap); border-top: 1px solid #8884; }
+      #input { flex: 1; padding: 10px; border-radius: 8px; border: 1px solid #8886;
+               background: transparent; color: inherit; }
+      button { padding: 10px 16px; border-radius: 8px; border: 0; background: #3b82f6;
+               color: white; cursor: pointer; }
+      button:disabled { opacity: 0.5; cursor: default; }
+    </style>
+  </head>
+  <body>
+    <header>Chemclaw — process &amp; analytical development assistant</header>
+    <div id="transcript"></div>
+    <form id="composer">
+      <input id="input" autocomplete="off" placeholder="Ask about a reaction, property, or plan…" />
+      <button id="send" type="submit">Send</button>
+    </form>
+    <script src="/app.js"></script>
+  </body>
+</html>

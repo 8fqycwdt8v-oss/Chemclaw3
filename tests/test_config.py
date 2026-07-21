@@ -77,6 +77,13 @@ def test_llm_base_url_overrides_via_env(monkeypatch: pytest.MonkeyPatch) -> None
     assert settings.llm_model == "internal-model"
 
 
+def test_service_defaults() -> None:
+    """The front-door service binds a sane default port and no CORS origins (safe default)."""
+    settings = Settings(_env_file=None)  # type: ignore[call-arg]
+    assert settings.service_port == 8080
+    assert settings.service_cors_origins == ""
+
+
 def test_absolute_knowledge_dir_is_rejected() -> None:
     """An absolute `knowledge_dir` fails at startup (it would escape the note repo)."""
     with pytest.raises(ValueError, match="knowledge_dir must be relative"):

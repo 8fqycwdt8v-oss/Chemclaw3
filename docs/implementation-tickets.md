@@ -187,7 +187,8 @@ current tool+skill+middleware set.
 # Phase F2 — Front door + run harness (make the agent actually run)
 
 Goal of the phase: a browser chat surface + the ASGI service that builds the agent, opens the MCP
-lifecycle, runs a turn, streams — the missing caller the agent docstring describes.
+lifecycle, runs a turn, streams — the missing caller the agent docstring describes. **Status: DONE**
+(`service/` package; deps `fastapi`/`uvicorn`/`sse-starlette`; tests `test_service*.py`).
 
 ### F2-T1 — Run-loop service (ASGI)
 - **Goal:** one FastAPI app that owns session→agent→MCP lifecycle→turn→stream, and hosts the harness

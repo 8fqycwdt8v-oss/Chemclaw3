@@ -212,6 +212,17 @@ class Settings(BaseSettings):
     harness_autonomy: Literal["plan_only", "execute"] = "plan_only"
     harness_max_loop_iterations: int = Field(default=25, ge=1)
 
+    # Front-door run service (plan Phase F2) — the ASGI service that actually *runs* the agent for a
+    # chemist: it builds the agent, opens the MCP tool lifecycle for the turn, streams the response,
+    # and serves the browser chat surface. `service_host`/`service_port` bind the server (the
+    # OpenShift Route front-ends it, F6). `service_cors_origins` is a comma-separated allow-list for
+    # browser origins that may call the API (empty = none, the safe default; a same-origin embedded
+    # UI needs none). These are the only front-door knobs; identity/OIDC is layered on in F4.
+    # Binds all interfaces inside the container; the OpenShift Route + NetworkPolicy gate ingress.
+    service_host: str = "0.0.0.0"
+    service_port: int = Field(default=8080, gt=0)
+    service_cors_origins: str = ""
+
     # Markdown knowledge graph (plan Phase 2). Directory of note files the indexer
     # reads; retrieval is graph traversal over their [[wikilinks]] (D-004).
     knowledge_dir: str = "knowledge"
