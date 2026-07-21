@@ -7,8 +7,7 @@ becomes trusted knowledge, D-005) — the fourth memory source, on the one share
 """
 
 from kg.git_submitter import default_submitter
-from kg.pr_gate import propose_note
-from memory.interaction import note_from_confirmed_answer
+from memory.interaction import propose_confirmed_answer
 
 
 async def record_confirmed_answer(
@@ -32,5 +31,6 @@ async def record_confirmed_answer(
     Returns:
         The submitted PR reference.
     """
-    note = note_from_confirmed_answer(interaction_id, question, answer, evidence_note_ids)
-    return await propose_note(note, default_submitter())
+    return await propose_confirmed_answer(
+        interaction_id, question, answer, evidence_note_ids, default_submitter()
+    )

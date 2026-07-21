@@ -24,6 +24,10 @@ from workflows.bo_activities import (
 from workflows.bo_campaign import BoCampaignWorkflow
 from workflows.bo_knowledge import write_campaign_node
 from workflows.eln_sync import ElnSyncWorkflow, sync_eln_entries
+from workflows.interaction_approval import (
+    InteractionApprovalWorkflow,
+    propose_confirmed_answer_activity,
+)
 from workflows.knowledge import write_knowledge_node
 from workflows.memory_jobs import (
     CampaignSynthesisWorkflow,
@@ -50,6 +54,7 @@ BACKGROUND_WORKFLOWS: list[type] = [
     PlaybookDistillationWorkflow,
     OptimizationCampaignWorkflow,
     DevelopmentReportWorkflow,
+    InteractionApprovalWorkflow,
 ]
 BACKGROUND_ACTIVITIES: Sequence[Callable[..., Any]] = [
     propose_initial,
@@ -63,6 +68,7 @@ BACKGROUND_ACTIVITIES: Sequence[Callable[..., Any]] = [
     synthesize_optimization_campaigns_activity,
     retrieve_section,
     propose_report,
+    propose_confirmed_answer_activity,
 ]
 
 

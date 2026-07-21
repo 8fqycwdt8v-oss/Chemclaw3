@@ -195,6 +195,13 @@ class Settings(BaseSettings):
     # network blip) gives up instead of pinning a worker with unlimited retries.
     activity_max_attempts: int = Field(default=5, ge=1)
 
+    # How long a confirmed-answer note is held pending a human Yes/No before the
+    # hold expires unpublished (plan step 5.5, async approval seam). The button click
+    # is a Temporal signal into `InteractionApprovalWorkflow`; this bounds the wait so
+    # an unanswered prompt cannot pin a workflow forever. Default 7 days — generous for
+    # an out-of-band review, still finite.
+    interaction_approval_timeout_seconds: float = Field(default=604800.0, gt=0)
+
     # Evaluation & metric layer (plan Phase 2b). A metric is a pure function; its
     # pass/fail threshold is config, never hardcoded (G3). The green-chemistry
     # limits are dimensionless (kg waste or input per kg product) and process-

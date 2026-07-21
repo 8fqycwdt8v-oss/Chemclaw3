@@ -130,8 +130,9 @@ Prioritized open action items. Top = next. Keep in sync with `docs/implementatio
       projects; `playbook_note` with mandatory evidence refs) + `distill_playbooks` job + workflow.
       `playbook-distillation` skill (transferable-only, process-chemist approval).
 - [x] 5.5 user interaction as a 4th source: `memory/interaction.py` (`interaction` note via the same
-      PR-gate). 5.6 retrieval separation: judgment in the playbook skill (evidenced vs analogy kept
-      visibly separate; experiment outranks transferred analogy).
+      PR-gate); reachable via the `record_confirmed_answer` agent tool (synchronous) and the durable
+      `InteractionApprovalWorkflow` (async Yes/No hold — D-032). 5.6 retrieval separation: judgment in
+      the playbook skill (evidenced vs analogy kept visibly separate; experiment outranks analogy).
 - [x] Jobs registered on the background worker; `project` field added to `OrdReaction`/adapter.
 - [x] CHECKMATE 5 (G1–G7 + no-new-infra check confirmed): 3 findings fixed — (F1, G4) a degenerate
       reaction is skipped in `find_playbook_candidates` instead of aborting the whole distillation;
