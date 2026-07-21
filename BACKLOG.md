@@ -82,19 +82,20 @@ MAF ships the harness natively (`create_harness_agent` + `TodoProvider`/`AgentMo
       `entra_jwks_endpoint`/`entra_issuer_url`; guards all non-health routes; dev stand-in when
       `entra_required` is off. Dep `pyjwt[crypto]`; ruff allows `fastapi.Depends` (B008). Tests:
       `test_auth.py` (local-RSA token validation, 401 gate, dev mode), `test_config.py`.
-- [ ] **F4-T3** Every backend workflow user-specific via Entra: `requested_by` = required Entra oid,
-      reject-if-absent at the submit boundary (`require_actor`), across QM/BO/report/memory inputs.
+- [x] **F4-T3** The core rule as one reusable guard: `agents/authz.py::require_actor()` returns the
+      turn's ambient Entra oid and, under `entra_required`, **rejects** a user-triggered workflow with
+      no user before any durable work (dev → `service_actor_id`). Wired into `submit_qm_job`
+      (`requested_by = require_actor()`); `requested_by` stays out of `qm_job_key` (D-011). BO/report
+      inputs adopt the same guard when they gain live triggers (no dead field now); scheduled
+      ELN-sync/memory jobs run as the service by design. ADR D-043. Tests: `test_authz.py`.
 - [x] **F4-T5** Authorize at one point + actor into audit: `agents/authz.py::authorize_trigger`
       (config `entra_expensive_actions`/`entra_privileged_roles`) called by `submit_qm_job` before the
       durable job; ambient identity via `agents/identity_context.py` (contextvar, stamped by the
       runner from the `Principal`); `make_audit_middleware` records the ambient Entra oid over its
       build-time default. Tests: `test_authz.py`, `test_audit.py`. Remaining in T5:
       roles→`RoleFilteredSkillsSource` per request (needs per-user agent or an ambient skills filter).
-- [ ] **F4-T3** (partial done for QM): `submit_qm_job` now stamps `requested_by` = Entra oid. Still
-      to do: make `requested_by` a required Entra oid (reject-if-absent) across BO/report/memory
-      workflow inputs.
-- [ ] **F4-T2/T4/T6** (infra-gated): workload identity federation, OBO to ELN, Temporal mTLS + HPC
-      identity bridge — need live Entra/tenant + Temporal.
+- [ ] **F4-T2/T4/T6** (code + fake-endpoint tests offline; live tenant/broker gated): workload
+      identity federation, OBO to ELN, Temporal mTLS + HPC identity bridge.
 
 ## Later — Phase 6 items now folded into F4 above (infra-gated pieces need live Entra/Temporal)
 

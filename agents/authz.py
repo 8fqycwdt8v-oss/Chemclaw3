@@ -39,3 +39,31 @@ def authorize_trigger(action: str) -> None:
         raise AuthorizationError(f"{action} requires an authenticated user")
     if not (get_current_roles() & settings.entra_privileged_role_set):
         raise AuthorizationError(f"user {actor} lacks a privileged role for {action}")
+
+
+def require_actor() -> str:
+    """Return the turn's Entra actor for a user-triggered workflow, or raise if absent.
+
+    Plan F4-T3 — the core rule: every *user-triggered* backend workflow is user-specific via
+    Entra, so the requesting user's `oid` is a required, authorizing input. When `entra_required`
+    (a real deployment), a trigger with no authenticated user is rejected here — reject-if-absent —
+    before any durable work starts, mirroring how `require_canonical_smiles` rejects bad data at
+    the durable boundary. This is the one reusable place that rule flows through: a job-launching
+    tool calls it to populate `requested_by`.
+
+    In local dev (no tenant) there is no authenticated user, so the configured `service_actor_id`
+    stands in. System-triggered jobs (scheduled ELN sync, memory distillation) have no user and do
+    not call this — they run as the service by design, not on behalf of a person.
+
+    Returns:
+        The authenticated user's Entra `oid`, or `settings.service_actor_id` when enforcement is off.
+
+    Raises:
+        AuthorizationError: When `entra_required` and there is no authenticated user in context.
+    """
+    actor = get_current_actor()
+    if actor is not None:
+        return actor
+    if settings.entra_required:
+        raise AuthorizationError("a user-triggered workflow requires an authenticated user")
+    return settings.service_actor_id

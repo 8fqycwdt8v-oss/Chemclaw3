@@ -261,6 +261,11 @@ class Settings(BaseSettings):
     # empty by default: nothing is privileged until a deployment declares it.
     entra_expensive_actions: str = ""
     entra_privileged_roles: str = ""
+    # The identity a *user-triggered* workflow records when there is no authenticated user
+    # (plan F4-T3). Only reachable in local dev (`entra_required=False`, no tenant) and for
+    # system-triggered jobs; under enforcement `require_actor` rejects an absent user instead
+    # of falling back. Config, not the old magic `"unknown"` literal.
+    service_actor_id: str = "service-account"
 
     @property
     def entra_expensive_action_set(self) -> frozenset[str]:

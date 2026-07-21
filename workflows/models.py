@@ -20,9 +20,12 @@ class QMJobInput(BaseModel):
     not something to hardcode as an enum here.
 
     `requested_by` carries the caller's Entra ID object id (`oid`) for the audit
-    trail (plan step 1.9). It is a v1 placeholder — populated for real once auth
-    lands in Phase 6 — but present in the data model now so provenance flows all
-    the way to the knowledge-graph note without a later schema change.
+    trail (plan step 1.9). The submit tool populates it via `require_actor`
+    (F4-T3): under Entra it is the authenticated user and a run without one is
+    rejected before submission; in local dev it is the configured service
+    identity. The field keeps a safe default so tests and system-triggered runs
+    can construct the input without a tenant. Excluded from `qm_job_key`: the
+    science does not depend on who asked, so identical work dedupes across users.
     """
 
     molecule_smiles: str = Field(min_length=1)

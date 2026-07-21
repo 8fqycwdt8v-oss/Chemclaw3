@@ -10,7 +10,7 @@ import asyncio
 import pytest
 
 import agents.qm_tools as qm_tools
-from agents.authz import AuthorizationError, authorize_trigger
+from agents.authz import AuthorizationError, authorize_trigger, require_actor
 from agents.identity_context import reset_current_identity, set_current_identity
 from chemclaw.config import settings
 
@@ -61,6 +61,30 @@ def test_no_user_is_forbidden(monkeypatch: pytest.MonkeyPatch) -> None:
         authorize_trigger("submit_qm_job")
 
 
+def test_require_actor_returns_the_ambient_user(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The authenticated user's oid is returned for attribution on a user-triggered workflow."""
+    monkeypatch.setattr(settings, "entra_required", True)
+    token = set_current_identity("u-oid", frozenset({"compute"}))
+    try:
+        assert require_actor() == "u-oid"
+    finally:
+        reset_current_identity(token)
+
+
+def test_require_actor_falls_back_to_service_identity(monkeypatch: pytest.MonkeyPatch) -> None:
+    """With enforcement off and no user, the configured service identity stands in (no reject)."""
+    monkeypatch.setattr(settings, "entra_required", False)
+    monkeypatch.setattr(settings, "service_actor_id", "svc-1")
+    assert require_actor() == "svc-1"
+
+
+def test_require_actor_rejects_absent_user(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The core rule: under Entra, a user-triggered workflow with no user is rejected."""
+    monkeypatch.setattr(settings, "entra_required", True)
+    with pytest.raises(AuthorizationError):
+        require_actor()
+
+
 class _FakeHandle:
     def __init__(self, workflow_id: str) -> None:
         self.id = workflow_id
@@ -102,6 +126,19 @@ def test_submit_qm_job_stamps_requested_by(monkeypatch: pytest.MonkeyPatch) -> N
     finally:
         reset_current_identity(token)
     assert client.started and client.started[0].requested_by == "u-4"
+
+
+def test_submit_qm_job_rejects_absent_user_even_when_authorized(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Reject-if-absent is independent of the role gate: no user → no job, even if unguarded."""
+    monkeypatch.setattr(settings, "entra_required", True)
+    monkeypatch.setattr(settings, "entra_expensive_actions", "")  # authorize_trigger is a no-op
+    client = _CapturingClient()
+    monkeypatch.setattr(qm_tools, "connect", lambda: _ready(client))
+    with pytest.raises(AuthorizationError):
+        asyncio.run(qm_tools.submit_qm_job("CCO", "B3LYP", "def2-SVP"))
+    assert client.started == []  # require_actor refused before Temporal
 
 
 async def _ready(client: _CapturingClient) -> _CapturingClient:
