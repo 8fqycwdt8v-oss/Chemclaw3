@@ -18,7 +18,7 @@ Confirmed deployment context — the whole plan is shaped by it:
 | Concern | Reality | Consequence for the plan |
 |---|---|---|
 | **Runtime platform** | **OpenShift** (Red Hat Kubernetes) | Containers, Deployments/Routes/Secrets. Only the *hosting* moves off Azure — see the identity row: Entra stays. `architektur.md` §6 (Azure hosting) is rewritten for OpenShift; **§7/§8 (Entra) are retained requirements** (F9). |
-| **Identity (mandatory, system-wide)** | **Azure Entra ID** for users **and every backend component** | User auth = OIDC with Entra as IdP; **all backend parts authenticate via Entra** (service-to-service), even though the cluster is OpenShift not Azure. This makes `architektur.md` §7 a live requirement, not aspirational — the challenge is Entra identity *on OpenShift* (workload identity federation), plus the §7 bridges where a component can't speak Entra natively (Temporal workers, HPC). See F4. |
+| **Identity (mandatory)** | **Azure Entra ID** for users; **every backend workflow is user-specific via Entra** | User auth = OIDC with Entra as IdP. The authenticated user's Entra identity is **required, authorizing context on every backend workflow** (Temporal jobs, syncs, reports) — a run is always attributable to and authorized for a specific Entra user. This makes `architektur.md` §7 a live requirement. **Exception:** raw LLM inference uses one generic API credential, not Entra (see invariants). Entra identity *on OpenShift* uses workload identity federation, plus the §7 bridges where a component can't speak Entra natively (Temporal, HPC). See F4. |
 | **Heavy/long compute** | **HPC running Nextflow** pipelines | The mocked `submit_to_hpc` becomes a **Nextflow launch+poll** adapter (F5). D-010's "defer HPC until access exists" trigger is now **met**. |
 | **LLM** | **custom OpenLLM-like adapter** (self-hosted, OpenAI-compatible endpoint) | The agent's chat client must be **decoupled from Anthropic** and pointed at the internal endpoint (F0). Tool-calling reliability of the internal model is the #1 project risk. |
 
@@ -35,12 +35,19 @@ Confirmed deployment context — the whole plan is shaped by it:
   already promises — the workflow and agent never learn what a Nextflow launch looks like.
 - **The internal CA/TLS + tokens come from OpenShift secrets** through the one pydantic config.
 - **Durability stays in Temporal; identity is a claim, not transport** (unchanged from §7/§8).
-- **Entra everywhere (mandatory).** Every network call between components carries an Entra identity:
-  users authenticate to the front door via Entra OIDC, and each backend service (workers, MCP
-  servers, the internal-LLM adapter client, ELN/LIMS access) authenticates via Entra — on OpenShift
-  this is **Entra Workload Identity Federation** (federate the pod's service-account token to an
-  Entra app registration → short-lived Entra token, **no stored client secrets**), with the §7
-  **bridges** only where a component cannot validate an Entra JWT (Temporal service auth, HPC).
+- **User identity is Entra, and every backend *workflow* is user-specific via Entra.** Users
+  authenticate to the front door via Entra OIDC; the authenticated user's Entra identity
+  (`oid`/`upn` + roles) is **mandatory context on every backend workflow** — it authorizes the run
+  (may this user trigger this path?) and attributes it (who launched this Nextflow/BO job), not just
+  as audit but as a required input. A workflow with no Entra user is rejected. See F4.
+- **LLM calls are the one Entra exception.** The internal OpenLLM-like endpoint is reached with a
+  **single generic API credential** (a config secret), **not** per-user Entra and not workload
+  identity — the model call is not a user-scoped resource access. Everything *around* the call
+  (which user's turn, which authorized todo) is still Entra-scoped; only the raw inference credential
+  is generic.
+- **Other backend→backend calls** (ELN/LIMS, internal APIs) carry Entra: OBO for user-scoped data,
+  workload identity for service-scoped resources, with the §7 **bridges** only where a component
+  cannot validate an Entra JWT (Temporal service auth, HPC).
 
 ---
 
@@ -55,10 +62,11 @@ loop, plan/execute) depends on whether the internal model does MAF function-call
   anthropic, …}`, with `llm_base_url`, `llm_model`, `llm_api_key`/token, `llm_tls_ca_bundle`,
   `llm_timeout_seconds`, `llm_max_retries`. For an OpenLLM-style OpenAI-compatible server, use
   MAF's OpenAI-compatible chat client pointed at `llm_base_url`; keep Anthropic as a secondary
-  option for local dev. **No provider class imported outside the adapter.** The call to the
-  internal LLM endpoint is **Entra-authenticated** (an Entra-issued bearer token via workload
-  identity federation, not a static API key), since the endpoint is a backend component that must
-  authenticate via Entra (§0). The token acquisition lives in the adapter, refreshed on expiry.
+  option for local dev. **No provider class imported outside the adapter.** The internal LLM endpoint
+  is reached with a **single generic API credential** (`llm_api_key`, a config secret) — **not**
+  Entra and not workload identity (the model call is not a user-scoped resource; §0). Entra scoping
+  applies to *who* is taking the turn and *which authorized todo* runs, handled in F4, not to the
+  raw inference credential.
 - **F0.2 Tool-calling capability spike (the H0 of this plan).** Before building on it, prove the
   internal model can (a) select and call MAF function tools, (b) drive the **harness todo tools**
   (`add/complete/list todo`) and the plan/execute mode transition, (c) return the structured
@@ -169,23 +177,32 @@ maps directly onto the work below.
 - **F4.3 Downstream data access as the user (OBO).** ELN/LIMS (Benchling) and any per-user resource
   are called with an **On-Behalf-Of** Entra token so access is the chemist's, not a generic service
   principal's — the data-governance requirement from §7.4.
-- **F4.4 The two non-Entra bridges (§7 — unchanged in principle).**
+- **F4.4 Every backend workflow is user-specific via Entra (mandatory).** The authenticated user's
+  Entra `oid`/`upn` (+ roles) is a **required field on every workflow input** (`QMJobInput` already
+  carries `requested_by` — make it the Entra `oid`, non-optional, and add it to the BO/ELN/report/
+  memory workflow inputs). The worker **authorizes the run against that identity** (F4.5) and
+  **rejects a workflow with no Entra user** — no anonymous background execution. This is stronger
+  than audit: it is an access-control precondition on the durable path, so an autonomously-planned
+  todo can't launch an expensive job outside the requesting user's entitlements.
+- **F4.5 The two non-Entra bridges (§7 — unchanged in principle).**
   - **Temporal** has no native Entra token auth: workers/clients authenticate by **mTLS/API-key**;
-    the user's `oid`/`upn` rides as an **audit claim in the workflow payload** (identity, not
-    transport — §7.2), so "who launched this Nextflow job" stays auditable.
+    the user's Entra identity rides **inside the workflow payload** (F4.4) — identity as data, not
+    transport (§7.2) — so both authorization and "who launched this Nextflow job" hold on the
+    durable path.
   - **HPC/Nextflow** speaks no Entra: a thin **bridging service** maps the Entra identity → the HPC/
     Nextflow service identity and **logs every mapping** — the single point that knows both worlds
     (§7.3). (Seqera Platform can also do Entra SSO for *human* console access.)
-- **F4.5 Authorization at one point + wire the existing seams.** Thread the real `actor` into the
+- **F4.6 Authorization at one point + wire the existing seams.** Thread the real `actor` into the
   audit trail (`make_audit_middleware`, D-034) and the durable `audit_events` sink; scope advertised
   skills by Entra app-role (`RoleFilteredSkillsSource`, D-035); **authorize expensive triggers**
   (Nextflow submit, BO campaign) against the Entra role/group **before** the harness executes the
   todo — the single fachliche authorization point (§8), not scattered across layers.
 
-> **CHECKMATE F4** (G1–G7 + security review): Do **all** components present an Entra identity (no
-> anonymous or static-key backend call except the two documented bridges)? Can an unauthorized user
-> not trigger an expensive path even in autonomous execute mode? Does the audit trail show the real
-> `oid` end to end, including the Temporal payload claim? Is authorization at **one** point? ADR:
+> **CHECKMATE F4** (G1–G7 + security review): Is **every backend workflow user-specific via Entra**
+> (a run with no Entra user is rejected, authorized against that identity)? Can an unauthorized user
+> not trigger an expensive path even in autonomous execute mode? Does the identity show end to end,
+> including the Temporal payload? Is authorization at **one** point? (The generic LLM API credential
+> is the one documented Entra exception, plus the Temporal/HPC transport bridges.) ADR:
 > **D-A4 Entra ID identity/RBAC on OpenShift** (realizes §7/§8; Managed Identity → Workload Identity
 > Federation is the only substrate change).
 
@@ -240,8 +257,9 @@ exists") is now met. Everything is already shaped for this — only `workflows/a
   from OpenShift env/secrets — no second source. Crucially, **service credentials are Entra Workload
   Identity Federation**, not long-lived secrets: each Deployment's service account is federated to an
   Entra app registration, so pods mint short-lived Entra tokens at runtime (F4.2) and there are no
-  client secrets to rotate in-cluster. Temporal mTLS certs and the HPC-bridge credential are the two
-  exceptions, sourced from the secret store/Vault.
+  client secrets to rotate in-cluster. Three credentials are **plain secrets** (Vault/secret store),
+  not workload identity: the **generic LLM API key** (§0/F0.1), the Temporal mTLS certs, and the
+  HPC-bridge credential.
 
 > **CHECKMATE F6** (G1–G7): The full stack deploys to an OpenShift namespace; the front door is
 > reachable via a Route behind OIDC; workers connect to Temporal + the HPC launcher + the internal

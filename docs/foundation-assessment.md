@@ -123,12 +123,14 @@ building.
 - **Hosting:** **OpenShift**, with heavy compute via **Nextflow on HPC** and the LLM served by a
   **custom OpenLLM-like adapter**. So `architektur.md` §6's *Azure hosting* (AI Foundry/Container
   Apps) is what changes — to OpenShift.
-- **Identity:** **Azure Entra ID is mandatory and system-wide** — users *and* every backend
-  component authenticate via Entra. This means `architektur.md` **§7/§8 ("Entra ID durchgängig")
-  are a live requirement, not aspirational** — they were only unbuilt, not wrong. The single
-  substrate change: because the cluster is OpenShift not Azure, backend service identity uses
-  **Entra Workload Identity Federation** (federated SA tokens, no stored secrets) instead of Azure
-  Managed Identity; the §7 bridges (Temporal audit-claim, HPC identity bridge) are unchanged.
+- **Identity:** **Azure Entra ID is mandatory.** Users authenticate via Entra, and **every backend
+  *workflow* is user-specific via Entra** — the requesting user's Entra identity is required,
+  authorizing context on each durable run (a workflow with no Entra user is rejected). This makes
+  `architektur.md` **§7/§8 ("Entra ID durchgängig") a live requirement, not aspirational** — only
+  unbuilt, not wrong. Two carve-outs: **(a) raw LLM inference uses one generic API credential, not
+  Entra** (the model call is not a user-scoped resource); **(b)** because the cluster is OpenShift
+  not Azure, backend service identity uses **Entra Workload Identity Federation** (federated SA
+  tokens, no stored secrets) instead of Managed Identity, with the §7 Temporal/HPC bridges unchanged.
 - **Identity becomes load-bearing the moment autonomy is real** — an agent that can trigger
   expensive paths must know *who* asked and *whether they may*. See the plan's Phase F4.
 
