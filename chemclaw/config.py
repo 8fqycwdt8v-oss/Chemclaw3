@@ -266,6 +266,18 @@ class Settings(BaseSettings):
     # system-triggered jobs; under enforcement `require_actor` rejects an absent user instead
     # of falling back. Config, not the old magic `"unknown"` literal.
     service_actor_id: str = "service-account"
+    # Workload identity federation (plan F4-T2): a backend pod mints its *own* short-lived Entra
+    # token by exchanging its projected ServiceAccount JWT (at `entra_sa_token_path`) via the OAuth2
+    # client-credentials grant with a `client_assertion` — no client secret ever at rest. Disabled
+    # by default (local dev has no tenant). The generic LLM credential is the documented exception
+    # and does NOT use this path. `entra_token_refresh_leeway_seconds` refreshes a cached token
+    # before it actually expires; `entra_http_timeout_seconds` bounds the token/OBO HTTP calls.
+    entra_workload_federation_enabled: bool = False
+    entra_workload_client_id: str = ""
+    entra_token_endpoint: str = ""
+    entra_sa_token_path: str = "/var/run/secrets/azure/tokens/azure-identity-token"
+    entra_token_refresh_leeway_seconds: float = Field(default=300.0, gt=0)
+    entra_http_timeout_seconds: float = Field(default=10.0, gt=0)
 
     @property
     def entra_expensive_action_set(self) -> frozenset[str]:
