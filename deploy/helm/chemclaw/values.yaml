@@ -1,0 +1,109 @@
+# Chemclaw Helm values (plan F6). Every endpoint / CA / queue / model name is one value here that
+# becomes one CHEMCLAW_-prefixed env var on the pods — the single pydantic Settings is the only
+# config source in-cluster (no second config system). Secrets are referenced, never inlined.
+
+image:
+  repository: image-registry.openshift-image-registry.svc:5000/chemclaw/chemclaw
+  tag: "0.1.0"
+  pullPolicy: IfNotPresent
+
+# The front-door OIDC Route (F6-T2). host empty = let OpenShift assign one.
+route:
+  enabled: true
+  host: ""
+  tls:
+    termination: edge
+    insecureEdgeTerminationPolicy: Redirect
+
+service:
+  port: 8080
+  replicas: 2
+  # Horizontal autoscaling for the stateless front door only (workers scale by queue, not HPA).
+  autoscaling:
+    enabled: true
+    minReplicas: 2
+    maxReplicas: 6
+    targetCPUUtilizationPercentage: 70
+
+workers:
+  hpc:
+    replicas: 2 # few, heavy (D-006)
+  background:
+    replicas: 1 # light: sync / re-index / reports
+
+mcp:
+  molfp:
+    enabled: true
+    replicas: 1
+  rxnfp:
+    enabled: true
+    replicas: 1
+
+resources:
+  service:
+    requests: { cpu: "250m", memory: "512Mi" }
+    limits: { cpu: "1", memory: "1Gi" }
+  worker:
+    requests: { cpu: "500m", memory: "1Gi" }
+    limits: { cpu: "2", memory: "4Gi" }
+  mcp:
+    requests: { cpu: "100m", memory: "256Mi" }
+    limits: { cpu: "500m", memory: "512Mi" }
+
+# Non-secret config → ConfigMap → CHEMCLAW_* env. Keys mirror chemclaw/config.Settings exactly.
+config:
+  CHEMCLAW_LLM_PROVIDER: "openai_compatible"
+  CHEMCLAW_LLM_BASE_URL: "http://internal-llm.llm.svc:8000/v1"
+  CHEMCLAW_LLM_MODEL: "gpt-oss"
+  CHEMCLAW_HARNESS_ENABLED: "true"
+  CHEMCLAW_HARNESS_AUTONOMY: "plan_only"
+  CHEMCLAW_SESSION_STORE: "postgres"
+  CHEMCLAW_TEMPORAL_ADDRESS: "chemclaw-temporal-frontend.temporal.svc:7233"
+  CHEMCLAW_TEMPORAL_NAMESPACE: "chemclaw"
+  CHEMCLAW_HPC_LAUNCH_INTERFACE: "nextflow"
+  CHEMCLAW_HPC_API_BASE_URL: "https://tower.internal/api"
+  CHEMCLAW_HPC_PIPELINE_NAME: "chemclaw-qm"
+  CHEMCLAW_HPC_PIPELINE_VERSION: "1.0.0"
+  CHEMCLAW_HPC_ARTIFACT_STORE_URL: "https://artifacts.internal/chemclaw"
+  CHEMCLAW_HPC_BRIDGE_IDENTITY: "chemclaw-hpc"
+  # Entra identity is mandatory system-wide (the one exception is the generic LLM credential).
+  CHEMCLAW_ENTRA_REQUIRED: "true"
+  CHEMCLAW_ENTRA_TENANT_ID: "00000000-0000-0000-0000-000000000000"
+  CHEMCLAW_ENTRA_CLIENT_ID: "00000000-0000-0000-0000-000000000000"
+  CHEMCLAW_ENTRA_AUDIENCE: "api://chemclaw"
+  CHEMCLAW_ENTRA_WORKLOAD_FEDERATION_ENABLED: "true"
+  CHEMCLAW_ENTRA_WORKLOAD_CLIENT_ID: "00000000-0000-0000-0000-000000000000"
+  CHEMCLAW_ENTRA_TOKEN_ENDPOINT: "https://login.microsoftonline.com/TENANT/oauth2/v2.0/token"
+  CHEMCLAW_OTEL_ENABLED: "true"
+  CHEMCLAW_OTEL_ENDPOINT: "http://otel-collector.observability.svc:4317"
+
+# Secret refs (F6-T6): the THREE documented plain secrets only — the generic LLM key, Temporal mTLS,
+# and the HPC-bridge credential. Everything else is federation (no client secret at rest). Populate
+# via an ExternalSecret/SealedSecret; the chart only names them.
+secrets:
+  # Name of a pre-existing Secret with these keys, or let the chart template a placeholder.
+  create: false
+  name: "chemclaw-secrets"
+  keys:
+    llmApiKey: "CHEMCLAW_LLM_API_KEY"
+    hpcApiToken: "CHEMCLAW_HPC_API_TOKEN"
+    postgresDsn: "CHEMCLAW_POSTGRES_DSN"
+  # Temporal mTLS is mounted as files; the env points at the mount paths.
+  temporalTls:
+    secretName: "chemclaw-temporal-tls"
+    mountPath: "/etc/temporal/tls"
+
+# Workload Identity Federation: the ServiceAccount is annotated so the pod's projected SA token can
+# be exchanged for an Entra token (F4-T2). No client secret is stored.
+serviceAccount:
+  name: "chemclaw"
+  annotations:
+    azure.workload.identity/client-id: "00000000-0000-0000-0000-000000000000"
+
+# NetworkPolicy egress allow-list (F6-T2): the app talks only to these, nothing else leaves the pod.
+networkPolicy:
+  enabled: true
+  egressPorts:
+    postgres: 5432
+    temporal: 7233
+    https: 443

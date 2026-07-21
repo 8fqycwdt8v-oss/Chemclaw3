@@ -115,6 +115,21 @@ def test_service_defaults() -> None:
     assert settings.service_cors_origins == ""
 
 
+def test_hpc_and_deploy_defaults() -> None:
+    """F5/F6 keep dev defaults: mock HPC backend, empty pipeline version, no OTLP endpoint."""
+    settings = Settings(_env_file=None)  # type: ignore[call-arg]
+    assert settings.hpc_launch_interface == "mock"
+    assert settings.hpc_pipeline_version == ""
+    assert settings.otel_endpoint == ""
+    assert settings.hpc_bridge_identity == "chemclaw-hpc"
+
+
+def test_hpc_launch_interface_env_override(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The real backend is selected by one `CHEMCLAW_`-prefixed env var, like every setting."""
+    monkeypatch.setenv("CHEMCLAW_HPC_LAUNCH_INTERFACE", "nextflow")
+    assert Settings(_env_file=None).hpc_launch_interface == "nextflow"  # type: ignore[call-arg]
+
+
 def test_absolute_knowledge_dir_is_rejected() -> None:
     """An absolute `knowledge_dir` fails at startup (it would escape the note repo)."""
     with pytest.raises(ValueError, match="knowledge_dir must be relative"):

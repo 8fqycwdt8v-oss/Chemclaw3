@@ -1,0 +1,39 @@
+{{- /* The MCP capability servers. Each is stdio-launched by the agent process today, so in-cluster */ -}}
+{{- /* they run as sidecar-style Deployments only if a networked transport is enabled; kept behind a */ -}}
+{{- /* flag so a stdio-only deployment does not create idle pods. */ -}}
+{{- range $name, $cfg := .Values.mcp }}
+{{- if $cfg.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "chemclaw.name" $ }}-mcp-{{ $name }}
+  labels:
+    {{- include "chemclaw.labels" $ | nindent 4 }}
+    app.kubernetes.io/component: mcp-{{ $name }}
+spec:
+  replicas: {{ $cfg.replicas }}
+  selector:
+    matchLabels:
+      {{- include "chemclaw.selectorLabels" $ | nindent 6 }}
+      app.kubernetes.io/component: mcp-{{ $name }}
+  template:
+    metadata:
+      labels:
+        {{- include "chemclaw.selectorLabels" $ | nindent 8 }}
+        app.kubernetes.io/component: mcp-{{ $name }}
+    spec:
+      serviceAccountName: {{ $.Values.serviceAccount.name }}
+      containers:
+        - name: mcp-{{ $name }}
+          image: "{{ $.Values.image.repository }}:{{ $.Values.image.tag }}"
+          imagePullPolicy: {{ $.Values.image.pullPolicy }}
+          env:
+            - name: CHEMCLAW_COMPONENT
+              value: "mcp-{{ $name }}"
+          envFrom:
+            {{- include "chemclaw.envFrom" $ | nindent 12 }}
+          resources:
+            {{- toYaml $.Values.resources.mcp | nindent 12 }}
+---
+{{- end }}
+{{- end }}

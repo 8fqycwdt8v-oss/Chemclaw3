@@ -1,0 +1,16 @@
+# Keep the build context lean and secret-free (plan F6-T1).
+.git
+.github
+**/__pycache__
+**/*.pyc
+.venv
+.pytest_cache
+.mypy_cache
+.ruff_cache
+tests
+docs
+*.md
+!README.md
+.env
+*.pem
+*.key

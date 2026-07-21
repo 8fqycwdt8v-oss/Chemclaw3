@@ -71,6 +71,10 @@ class Settings(BaseSettings):
     # are attached to spans (keep off unless a trusted collector needs them).
     otel_enabled: bool = False
     otel_include_sensitive_data: bool = False
+    # The OTLP collector endpoint (plan F6-T5). Exported as `OTEL_EXPORTER_OTLP_ENDPOINT` for MAF's
+    # `configure_otel_providers` when set; empty in dev (no collector). Config, so the in-cluster
+    # collector address is one value like every other endpoint.
+    otel_endpoint: str = ""
 
     # Temporal — durable execution of long scientific jobs (plan Phase 1).
     # `address` is the frontend gRPC endpoint; `namespace` isolates a team's jobs.

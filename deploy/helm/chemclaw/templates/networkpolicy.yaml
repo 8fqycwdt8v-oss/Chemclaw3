@@ -1,0 +1,29 @@
+{{- if .Values.networkPolicy.enabled }}
+{{- /* Default-deny egress with an allow-list: pods reach only Postgres, Temporal, and HTTPS */ -}}
+{{- /* (internal LLM + HPC launcher + Entra). DNS is allowed so those names resolve. */ -}}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "chemclaw.name" . }}-egress
+  labels:
+    {{- include "chemclaw.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "chemclaw.selectorLabels" . | nindent 6 }}
+  policyTypes:
+    - Egress
+  egress:
+    - to: []
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+        - protocol: TCP
+          port: {{ .Values.networkPolicy.egressPorts.postgres }}
+        - protocol: TCP
+          port: {{ .Values.networkPolicy.egressPorts.temporal }}
+        - protocol: TCP
+          port: {{ .Values.networkPolicy.egressPorts.https }}
+{{- end }}

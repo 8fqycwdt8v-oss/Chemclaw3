@@ -1,0 +1,9 @@
+apiVersion: v2
+name: chemclaw
+description: >-
+  Chemclaw on OpenShift (plan F6): the front-door service behind an OIDC Route, the two Temporal
+  workers (hpc-jobs, background-jobs), and the MCP capability servers — all from one image, all
+  configured from a single ConfigMap/Secret that maps onto the app's one pydantic Settings.
+type: application
+version: 0.1.0
+appVersion: "0.1.0"

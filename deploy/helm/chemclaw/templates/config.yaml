@@ -1,0 +1,34 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "chemclaw.name" . }}-config
+  labels:
+    {{- include "chemclaw.labels" . | nindent 4 }}
+data:
+  {{- range $key, $value := .Values.config }}
+  {{ $key }}: {{ $value | quote }}
+  {{- end }}
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ .Values.serviceAccount.name }}
+  labels:
+    {{- include "chemclaw.labels" . | nindent 4 }}
+  annotations:
+    {{- toYaml .Values.serviceAccount.annotations | nindent 4 }}
+{{- if .Values.secrets.create }}
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: {{ .Values.secrets.name }}
+  labels:
+    {{- include "chemclaw.labels" . | nindent 4 }}
+type: Opaque
+stringData:
+  # Placeholder only — real values arrive via ExternalSecret/SealedSecret in a real cluster (F6-T6).
+  {{- range $configKey, $secretEnv := .Values.secrets.keys }}
+  {{ $secretEnv }}: "CHANGE-ME"
+  {{- end }}
+{{- end }}

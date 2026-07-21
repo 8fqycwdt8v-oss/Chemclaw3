@@ -110,6 +110,13 @@ MAF ships the harness natively (`create_harness_agent` + `TodoProvider`/`AgentMo
       (F5-T4). ADR D-047. `test_nextflow_adapter.py`.
 - [ ] **F5 deferred**: `QMJobWorkflow→CalculationWorkflow` rename (cosmetic, high-churn); real `cclib`
       parsing once a live QM output format is fixed; live-cluster durability spike (needs a cluster).
+- [x] **F6** OpenShift delivery: one rootless multi-target image (`deploy/Containerfile` +
+      `entrypoint.sh`), Helm chart (`deploy/helm/chemclaw/`: ConfigMap/Secret, SA with federation,
+      service/route/HPA, both workers, MCP, NetworkPolicy, pre-deploy migrate hook), `deploy.yml` CI
+      (build + `helm template | kubeconform`), `deploy/README.md`. Config `otel_endpoint`. ADR D-048
+      (D-A6/D-A6a: Temporal self-hosted). Offline-verified: YAML parse + brace-balance + Settings map.
+- [ ] **F6 live edges** (CI/cluster-gated): actual image build+push, `helm template`/`kubeconform`,
+      dry-run rollout to a dev namespace, OTel collector wiring, ExternalSecret wiring.
 
 ## Later — Phase 6 items now folded into F4 above (infra-gated pieces need live Entra/Temporal)
 

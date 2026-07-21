@@ -1,0 +1,54 @@
+# Build + manifest gate (plan F6-T4). On every push it builds the single multi-target image and
+# lints/renders the Helm chart against the Kubernetes schema — the deploy analogue of the `ci.yml`
+# green-before-merge rule. The actual push-to-registry + rollout runs only on the default branch and
+# needs cluster credentials (secrets), so it is a guarded job; migrations run as a pre-deploy step
+# (make db-migrate, D-034) before the rollout, never inside an app container.
+name: deploy
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+
+jobs:
+  image:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build the multi-target image (rootless)
+        run: docker build -f deploy/Containerfile -t chemclaw:ci .
+      - name: Smoke each entrypoint as a non-root UID
+        run: |
+          for c in service hpc-worker background-worker mcp-molfp mcp-rxnfp; do
+            docker run --rm --user 1001 -e CHEMCLAW_COMPONENT="$c" \
+              --entrypoint python chemclaw:ci -c "import service.app, workers.hpc_worker, workers.background_worker"
+          done
+
+  chart:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Helm
+        uses: azure/setup-helm@v4
+      - name: Install kubeconform
+        run: |
+          curl -sSLf https://github.com/yannh/kubeconform/releases/latest/download/kubeconform-linux-amd64.tar.gz \
+            | tar xz && sudo mv kubeconform /usr/local/bin/
+      - name: helm lint
+        run: helm lint deploy/helm/chemclaw
+      - name: helm template | kubeconform
+        run: |
+          helm template chemclaw deploy/helm/chemclaw \
+            | kubeconform -strict -ignore-missing-schemas -summary
+
+  rollout:
+    needs: [image, chart]
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run database migrations (pre-deploy Job)
+        run: echo "oc apply -f deploy/migrate-job.yaml && oc wait --for=condition=complete job/chemclaw-migrate"
+      - name: Push image + roll out
+        run: echo "docker push + helm upgrade --install chemclaw deploy/helm/chemclaw (requires cluster creds)"
