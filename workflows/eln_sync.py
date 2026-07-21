@@ -18,10 +18,10 @@ from temporalio import activity, workflow
 with workflow.unsafe.imports_passed_through():
     from chemclaw.config import settings
     from eln.cursor import load_cursor, store_cursor
-    from eln.registry import make_eln_adapter
-    from eln.sync import IngestSummary, sync_entries
+    from eln.sync import IngestSummary, RejectedEntry, sync_entries
     from kg.git_submitter import default_submitter
     from mcp_servers.fpstore import default_molecule_store, default_reaction_store
+    from sources.registry import active_ingest_sources
 
 from workflows.publish import BAD_DATA_RETRY
 
@@ -30,13 +30,35 @@ _reaction_store = default_reaction_store
 _molecule_store = default_molecule_store
 
 
+def _merge(summaries: list[IngestSummary], since: datetime) -> IngestSummary:
+    """Fold per-source summaries into one: all ids/rejections, the furthest cursor.
+
+    A single active ingest source (the default) folds to itself, so behavior is unchanged; multiple
+    sources share the one high-water cursor the workflow tracks (per-source pipeline cursors are the
+    live Snowflake connector's job, deferred behind this seam). With no active ingest source the
+    cursor holds at `since` (nothing was read, so nothing advances).
+    """
+    ingested: list[str] = []
+    rejected: list[RejectedEntry] = []
+    cursor = since
+    for summary in summaries:
+        ingested.extend(summary.ingested)
+        rejected.extend(summary.rejected)
+        cursor = max(cursor, summary.next_cursor)
+    return IngestSummary(ingested=ingested, rejected=rejected, next_cursor=cursor)
+
+
 @activity.defn
 async def sync_eln_entries(since: datetime) -> IngestSummary:
-    """Ingest every ELN entry newer than `since`; return the summary + next cursor."""
-    adapter = make_eln_adapter(settings.eln_sync_adapter)
-    return await sync_entries(
-        adapter, _reaction_store(), _molecule_store(), default_submitter(), since
-    )
+    """Ingest every entry newer than `since` from each active ingest source; merge the summaries."""
+    reaction_store = _reaction_store()
+    molecule_store = _molecule_store()
+    submitter = default_submitter()
+    summaries = [
+        await sync_entries(adapter, reaction_store, molecule_store, submitter, since)
+        for adapter in active_ingest_sources()
+    ]
+    return _merge(summaries, since)
 
 
 @activity.defn

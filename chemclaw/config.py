@@ -413,6 +413,18 @@ class Settings(BaseSettings):
     # one high-water cursor, so it runs a single source; switching source is this setting, not
     # a code change. (The memory jobs read the union of all registered adapters instead.)
     eln_sync_adapter: str = "json"
+    # The active data sources on the generic seam (plan F7): a comma list of `sources.registry`
+    # keys. `graph` is the knowledge-graph retriever (retrieve-only); `eln-json`/`eln-ord` re-host
+    # the ELN adapters (ingest-only). `active_retrieve_sources()` feeds `gather_evidence`, so the
+    # default keeps today's exactly-one-graph-retriever behavior; `active_ingest_sources()` feeds
+    # the ELN sync, defaulting to the JSON adapter as before. Adding a source (first live one: a
+    # custom Snowflake ELN connector) is one registry entry + adding its key here — zero core edits.
+    data_sources: str = "graph,eln-json"
+
+    @property
+    def data_source_list(self) -> list[str]:
+        """The active data-source keys, parsed from the comma list (order kept, blanks dropped)."""
+        return [s.strip() for s in self.data_sources.split(",") if s.strip()]
 
     # Temporal Schedules that drive the periodic background jobs (`scripts/schedules.py`,
     # applied by `make schedules-apply`). Intervals in minutes: how often each workflow fires

@@ -117,6 +117,15 @@ MAF ships the harness natively (`create_harness_agent` + `TodoProvider`/`AgentMo
       (D-A6/D-A6a: Temporal self-hosted). Offline-verified: YAML parse + brace-balance + Settings map.
 - [ ] **F6 live edges** (CI/cluster-gated): actual image build+push, `helm template`/`kubeconform`,
       dry-run rollout to a dev namespace, OTel collector wiring, ExternalSecret wiring.
+- [x] **F7** Generic data-source seam: `sources/base.py` (`DataSource` composes the existing
+      `ElnAdapter`+`SourceRetriever` halves, `SourceSpec` rejects neither-half), `sources/registry.py`
+      (`data_sources` config → `active_ingest_sources()`/`active_retrieve_sources()`). Re-hosted with
+      no behavior change: `gather_evidence` fans out over the registry; `eln_sync` ingests active
+      sources. All existing ELN/research tests pass unchanged. ADR D-049. `test_datasource_seam.py`.
+- [ ] **F7 deferred (the first live connector)**: custom Snowflake ELN source — one registry entry
+      (ingest half over the internal data pipeline) + per-source pipeline cursor over Snowflake's
+      load-timestamp; Snowflake specifics stay inside that one adapter, nothing Snowflake-shaped above
+      the seam. Also: LIMS/MES/analytical/literature adapters.
 
 ## Later — Phase 6 items now folded into F4 above (infra-gated pieces need live Entra/Temporal)
 
