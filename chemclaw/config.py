@@ -117,6 +117,21 @@ class Settings(BaseSettings):
     # Simulated submission latency and total run time of the mock HPC job.
     hpc_mock_submit_seconds: float = Field(default=1.0, gt=0)
     hpc_mock_run_seconds: float = Field(default=6.0, gt=0)
+    # The real HPC execution path (plan F5): `hpc_launch_interface` selects the backend the QM
+    # activities dispatch to — `"mock"` (default, the simulated SLURM spine kept for CI/local, needs
+    # no cluster) or `"nextflow"` (the Seqera Platform/Tower REST launcher, ADR D-A5a). The
+    # `hpc_api_*` values address and authenticate that launcher (the token arrives via the HPC
+    # bridge / a mounted secret, F4-T6); `hpc_pipeline_name`/`_version` name the pipeline to run;
+    # `hpc_artifact_store_url` is where a finished run's QM output blob is fetched from. All empty
+    # in dev. `hpc_pipeline_version` also enters the calculation cache key *when set*, so a pipeline
+    # bump is a cache miss not a stale hit (D-011/D-033) — while an empty version leaves the mock's
+    # keys byte-identical to before F5.
+    hpc_launch_interface: Literal["mock", "nextflow"] = "mock"
+    hpc_api_base_url: str = ""
+    hpc_api_token: str = ""
+    hpc_pipeline_name: str = ""
+    hpc_pipeline_version: str = ""
+    hpc_artifact_store_url: str = ""
     # The HPC/Nextflow identity bridge (plan F4-T6, §7.2): the other non-Entra bridge. HPC is not an
     # Entra relying party, so user jobs run under one service identity while the requesting Entra
     # `oid` is carried in the payload (F4-T3) and *every* oid→HPC-identity mapping is logged for the

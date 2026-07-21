@@ -104,6 +104,12 @@ MAF ships the harness natively (`create_harness_agent` + `TodoProvider`/`AgentMo
 - [ ] **F4 live edges** (need a real tenant/broker/cluster; code + fake-endpoint tests already green):
       real Entra token validation against a live JWKS, real federation/OBO exchanges, live Temporal
       mTLS handshake. Also open: per-request role→`RoleFilteredSkillsSource` scoping.
+- [x] **F5** Real HPC path behind the QM activities: `workflows/hpc/nextflow.py` (Tower REST adapter
+      `launch_run`/`poll_run`/`fetch_artifacts`, fake-HTTP tested), dispatched by `hpc_launch_interface`
+      (mock kept for CI). `hpc_pipeline_version` in the cache key when set (F5-T3). Worker unchanged
+      (F5-T4). ADR D-047. `test_nextflow_adapter.py`.
+- [ ] **F5 deferred**: `QMJobWorkflow→CalculationWorkflow` rename (cosmetic, high-churn); real `cclib`
+      parsing once a live QM output format is fixed; live-cluster durability spike (needs a cluster).
 
 ## Later — Phase 6 items now folded into F4 above (infra-gated pieces need live Entra/Temporal)
 

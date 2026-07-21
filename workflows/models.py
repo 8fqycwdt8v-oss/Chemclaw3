@@ -9,6 +9,7 @@ no shape is duplicated between the agent, the workflow, and the activities.
 from pydantic import BaseModel, Field
 
 from chemclaw.chem import require_canonical_smiles
+from chemclaw.config import settings
 from chemclaw.ids import stable_hash
 
 
@@ -58,12 +59,19 @@ def qm_job_key(job: QMJobInput) -> str:
     scheduler handle, and the result cache key (plan step 1.10). One definition,
     three callers. Shares `chemclaw.ids.stable_hash` (SHA-256) with every other
     identity key in the system.
+
+    Includes the HPC pipeline version **only when one is configured** (plan F5-T3):
+    a real pipeline update changes the numbers, so it must be a cache *miss*, not a
+    stale hit (D-011/D-033). An empty version (the mock/dev default) leaves the key
+    byte-identical to before F5, so existing cached results and ids are unaffected.
     """
     payload = {
         "smiles": require_canonical_smiles(job.molecule_smiles),
         "method": job.method,
         "basis_set": job.basis_set,
     }
+    if settings.hpc_pipeline_version:
+        payload["pipeline_version"] = settings.hpc_pipeline_version
     return stable_hash(payload)
 
 
