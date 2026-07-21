@@ -94,8 +94,16 @@ MAF ships the harness natively (`create_harness_agent` + `TodoProvider`/`AgentMo
       runner from the `Principal`); `make_audit_middleware` records the ambient Entra oid over its
       build-time default. Tests: `test_authz.py`, `test_audit.py`. Remaining in T5:
       roles→`RoleFilteredSkillsSource` per request (needs per-user agent or an ambient skills filter).
-- [ ] **F4-T2/T4/T6** (code + fake-endpoint tests offline; live tenant/broker gated): workload
-      identity federation, OBO to ELN, Temporal mTLS + HPC identity bridge.
+- [x] **F4-T2** Workload identity federation: `agents/identity/workload.py::WorkloadTokenProvider`
+      (SA-JWT→Entra client-credentials exchange, per-scope cache). ADR D-044. `test_workload_identity.py`.
+- [x] **F4-T4** OBO exchange: `agents/identity/obo.py::exchange_obo` (wired, dormant). ADR D-045.
+      `test_obo.py`.
+- [x] **F4-T6** Non-Entra bridges: `chemclaw/temporal_client.py::connect_options` (mTLS/api-key) +
+      `agents/identity/hpc_bridge.py::map_to_hpc_identity` (logs every mapping). ADR D-046.
+      `test_hpc_bridge.py`.
+- [ ] **F4 live edges** (need a real tenant/broker/cluster; code + fake-endpoint tests already green):
+      real Entra token validation against a live JWKS, real federation/OBO exchanges, live Temporal
+      mTLS handshake. Also open: per-request role→`RoleFilteredSkillsSource` scoping.
 
 ## Later — Phase 6 items now folded into F4 above (infra-gated pieces need live Entra/Temporal)
 

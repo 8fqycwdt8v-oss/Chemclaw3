@@ -76,6 +76,15 @@ class Settings(BaseSettings):
     # `address` is the frontend gRPC endpoint; `namespace` isolates a team's jobs.
     temporal_address: str = "localhost:7233"
     temporal_namespace: str = "default"
+    # Securing the Temporal transport (plan F4-T6, §7.2): one of the two non-Entra bridges. Identity
+    # rides *inside* the workflow payload (`requested_by`, F4-T3), never the transport — so the
+    # transport is authenticated with mTLS (client cert/key + server-root CA, paths to PEM files) or
+    # a Temporal Cloud API key, not with a user token. All empty in local dev (a plaintext dev
+    # broker); a deployment sets the mTLS trio or the API key.
+    temporal_tls_cert: str = ""
+    temporal_tls_key: str = ""
+    temporal_tls_ca: str = ""
+    temporal_api_key: str = ""
 
     # The two task queues from the architecture: heavy HPC jobs vs. light
     # background jobs (sync/re-index/reports). Names are config so a deployment
@@ -108,6 +117,11 @@ class Settings(BaseSettings):
     # Simulated submission latency and total run time of the mock HPC job.
     hpc_mock_submit_seconds: float = Field(default=1.0, gt=0)
     hpc_mock_run_seconds: float = Field(default=6.0, gt=0)
+    # The HPC/Nextflow identity bridge (plan F4-T6, §7.2): the other non-Entra bridge. HPC is not an
+    # Entra relying party, so user jobs run under one service identity while the requesting Entra
+    # `oid` is carried in the payload (F4-T3) and *every* oid→HPC-identity mapping is logged for the
+    # audit trail. This is the shared service identity jobs run as.
+    hpc_bridge_identity: str = "chemclaw-hpc"
 
     # xTB semiempirical calculator (plan step 1c.2). Method is the GFN parametrization
     # (latest: GFN2-xTB). `xtb_embed_seed` fixes RDKit 3D embedding so results are
