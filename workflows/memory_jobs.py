@@ -12,10 +12,8 @@ from temporalio import activity, workflow
 
 with workflow.unsafe.imports_passed_through():
     from chemclaw.config import settings
-    from eln.adapter import ElnAdapter
-    from eln.json_adapter import JsonExportAdapter
     from eln.ord import OrdReaction
-    from eln.ord_adapter import OrdJsonAdapter
+    from eln.registry import all_eln_adapters
     from kg.git_submitter import default_submitter
     from memory.jobs import (
         distill_playbooks,
@@ -35,9 +33,8 @@ async def _all_reactions() -> list[OrdReaction]:
     integrations dumb, put the reasoning above them" line).
     """
     since = datetime.min.replace(tzinfo=UTC)
-    adapters: list[ElnAdapter] = [JsonExportAdapter(), OrdJsonAdapter()]
     reactions: list[OrdReaction] = []
-    for adapter in adapters:
+    for adapter in all_eln_adapters():
         for raw in await adapter.fetch_new_entries(since):
             try:
                 reactions.append(adapter.map_to_ord(raw))

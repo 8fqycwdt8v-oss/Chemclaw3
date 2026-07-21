@@ -6,7 +6,9 @@ and recomputes.
 """
 
 import asyncio
+import logging
 
+import pytest
 from pydantic import BaseModel
 
 from calc.store import (
@@ -126,3 +128,29 @@ def test_store_get_returns_none_on_miss() -> None:
         assert got.result == {"energy": 1}
 
     asyncio.run(_run())
+
+
+def test_cache_logs_hit_and_miss(caplog: pytest.LogCaptureFixture) -> None:
+    """At DEBUG the store logs miss-then-compute and a later hit — the "why recompute?" trail."""
+
+    async def _run() -> None:
+        store = InMemoryStore()
+
+        async def compute() -> dict[str, int]:
+            return {"energy": 7}
+
+        key = CalculationKey.build("xtb", "gfn2", inputs={"smiles": "CCO"})
+        await cached_compute(store, key, compute)  # miss
+        await cached_compute(store, key, compute)  # hit
+
+    with caplog.at_level(logging.DEBUG, logger="calc.store"):
+        asyncio.run(_run())
+
+    assert "calc cache miss, computing" in caplog.text
+    assert "calc cache hit" in caplog.text
+    assert key_str_present(caplog.text)
+
+
+def key_str_present(text: str) -> bool:
+    """The flat calculation key appears in the log so a specific recompute is identifiable."""
+    return "xtb@gfn2" in text

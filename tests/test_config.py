@@ -34,6 +34,19 @@ def test_unknown_field_is_rejected() -> None:
         Settings(_env_file=None, unknown_setting="x")  # type: ignore[call-arg]
 
 
+def test_skills_dirs_splits_the_path_list() -> None:
+    """`skills_dirs` splits `skills_dir` on the OS path separator (like PATH), dropping empties."""
+    single = Settings(_env_file=None)  # type: ignore[call-arg]
+    assert single.skills_dirs == ["skills"]  # the default is one directory
+
+    multi = Settings(_env_file=None, skills_dir=os.pathsep.join(["skills", "/opt/team"]))  # type: ignore[call-arg]
+    assert multi.skills_dirs == ["skills", "/opt/team"]
+
+    # A trailing separator (an easy admin typo) yields no empty entry.
+    trailing = Settings(_env_file=None, skills_dir="skills" + os.pathsep)  # type: ignore[call-arg]
+    assert trailing.skills_dirs == ["skills"]
+
+
 @pytest.fixture(autouse=True)
 def _clear_prefixed_env() -> Iterator[None]:
     """Isolate each test from any CHEMCLAW_* vars present in the ambient shell."""

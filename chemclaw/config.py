@@ -16,6 +16,8 @@ here — no speculative "for later" settings. New phases add their own fields wh
 the first real consumer lands.
 """
 
+import os
+
 from pydantic import Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -115,7 +117,9 @@ class Settings(BaseSettings):
     # MAF agent (plan step 1.5). `agent_model` is the orchestration model name
     # (ENV-overridable); the provider's API key is read by the chat client from
     # its own env var (e.g. ANTHROPIC_API_KEY), not stored here. `skills_dir` is
-    # where the agent discovers SKILL.md files.
+    # where the agent discovers SKILL.md files — one or more directories, delimited by the
+    # OS path separator (like PATH), so an admin can add a second (e.g. team-private) skills
+    # directory without code changes. Read it through the `skills_dirs` property, never raw.
     agent_model: str = "claude-sonnet-5"
     skills_dir: str = "skills"
     # Conversation context management (MAF compaction). The agent keeps a session thread and
@@ -190,6 +194,11 @@ class Settings(BaseSettings):
     # ORD JSON) from this directory — the "structured recipe" path, alongside the free-text
     # JSON export above. Same `ElnAdapter` contract, so both flow through the one sync loop.
     ord_export_dir: str = "eln/exports/ord"
+    # Which registered ELN adapter the durable sync ingests from (a key of `eln.registry`'s
+    # `ELN_ADAPTERS`: "json" for the free-text export, "ord" for native ORD). The sync tracks
+    # one high-water cursor, so it runs a single source; switching source is this setting, not
+    # a code change. (The memory jobs read the union of all registered adapters instead.)
+    eln_sync_adapter: str = "json"
 
     # Memory layers (plan Phase 5). The semantic layer distils a playbook only from reactions
     # whose DRFP similarity clears this floor and that recur across >=2 projects — higher than
@@ -212,6 +221,16 @@ class Settings(BaseSettings):
     # broad question over a large corpus fills only as much context as it needs (the agent
     # narrows the query or drills in with expand_note when the sweep is truncated).
     gather_evidence_max_chunks: int = Field(default=40, ge=1)
+
+    @property
+    def skills_dirs(self) -> list[str]:
+        """The skills directories, split on the OS path separator (like PATH), empties dropped.
+
+        `FileSkillsSource` takes a list of directories; keeping the config a single delimited
+        string (rather than a JSON list) means an admin sets `CHEMCLAW_SKILLS_DIR=skills:/opt/
+        team-skills` the same way they set `PATH`, no JSON quoting.
+        """
+        return [d for d in self.skills_dir.split(os.pathsep) if d]
 
     @model_validator(mode="after")
     def _poll_faster_than_heartbeat(self) -> "Settings":

@@ -11,10 +11,13 @@ interface with swappable backends (in-memory for tests, Postgres for real), and
 import asyncio
 import hashlib
 import json
+import logging
 from collections.abc import Awaitable, Callable
 from typing import Any, Protocol, TypeVar, runtime_checkable
 
 from pydantic import BaseModel
+
+logger = logging.getLogger(__name__)
 
 # A result payload is any JSON-serializable mapping. Calculators own their typed
 # models; the store persists the plain dict so it stays calculator-agnostic.
@@ -133,7 +136,11 @@ async def cached_compute(
     """
     hit = await store.get(key)
     if hit is not None:
+        # DEBUG, not INFO: on the hot path (every calculator call), but it is the one place
+        # that answers the recurring troubleshooting question "why did this recompute?".
+        logger.debug("calc cache hit: %s", key.as_str())
         return hit.result, True
+    logger.debug("calc cache miss, computing: %s", key.as_str())
     result = await compute()
     await store.put(StoredResult(key=key, result=result))
     return result, False

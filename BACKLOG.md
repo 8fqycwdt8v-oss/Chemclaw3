@@ -15,23 +15,24 @@ Prioritized open action items. Top = next. Keep in sync with `docs/implementatio
       "Postgres unreachable at <host>" with the DSN password redacted (not a retry-blocking
       `ChemclawError`). Tests: `test_logging.py`, `test_db.py`, ELN caplog assertions.
 
-### Open — P1 pluggability & docs (from the audit; not yet done)
-- [ ] Cache hit-vs-compute log at the `calc/store.py` decision point (DEBUG) — answers the
-      recurring "why did this recompute?" (depends on the logging floor, now in place).
-- [ ] `settings.eln_adapter` selector so `workflows/eln_sync.py` isn't hardcoded to
-      `JsonExportAdapter()` (two adapters already exist — JSON + ORD — proving the need).
-- [ ] `skills_dir` → `list[str]` to match `FileSkillsSource`'s signature (lets an admin add a
-      second, e.g. team-private, skills directory) + a SKILL.md front-matter template/doc in
-      `skills/README.md` (+ optional `make skill-validate`, mirroring `make kg-validate`).
+### Done — P1 pluggability & docs (D-028)
+- [x] Cache hit-vs-compute log at the `calc/store.py` decision point (DEBUG) — the "why did this
+      recompute?" trail, behind the D-026 log-level switch.
+- [x] ELN adapter registry (`eln/registry.py`): `CHEMCLAW_ELN_SYNC_ADAPTER` selects the durable
+      sync's source; memory jobs read `all_eln_adapters()`. Replaced the hardcoded adapter classes
+      in `eln_sync.py` and `memory_jobs.py`.
+- [x] `skills_dir` → OS-path-separator list via the `skills_dirs` property (add a second skills
+      directory with no code change) + SKILL.md front-matter schema/template in `skills/README.md`.
 - [ ] Centralize/​document the agent tool list — "add a capability = wrapper module + one line";
       the `mcp_servers/` FastMCP servers are imported in-process, not attached over MCP (a
       deliberate migration decision, see the MAF-analysis findings — MCP-client wiring is medium
-      effort and tension with KISS).
+      effort and tension with KISS). `docs/runbook.md` (iv) documents the current procedure;
+      centralizing/​MCP-attaching the list is still open. Optional `make skill-validate` also open
+      (loader validates at startup today).
 
 ### Open — P2 polish
-- [ ] `docs/runbook.md` (or a README "Operations" section): the four admin tasks (add skill /
-      add-repoint DB / add capability / troubleshoot a stuck job), the Temporal UI at :8080, and
-      `make db-migrate` re-run safety.
+- [x] `docs/runbook.md`: the four admin tasks (add skill / add-repoint DB / add-or-switch ELN
+      source / add capability), the log switch, the Temporal UI at :8080, DB-unreachable message.
 - [ ] Optional startup preflight for `ANTHROPIC_API_KEY` presence (fail clearly at boot, not on
       the first agent turn).
 - [ ] Migration-status visibility (no applied-migrations record today; `CREATE ... IF NOT EXISTS`

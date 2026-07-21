@@ -14,7 +14,7 @@ from temporalio import activity, workflow
 
 with workflow.unsafe.imports_passed_through():
     from chemclaw.config import settings
-    from eln.json_adapter import JsonExportAdapter
+    from eln.registry import make_eln_adapter
     from eln.sync import IngestSummary, sync_entries
     from kg.git_submitter import default_submitter
     from mcp_servers.fpstore import default_molecule_store, default_reaction_store
@@ -29,8 +29,9 @@ _molecule_store = default_molecule_store
 @activity.defn
 async def sync_eln_entries(since: datetime) -> IngestSummary:
     """Ingest every ELN entry newer than `since`; return the summary + next cursor."""
+    adapter = make_eln_adapter(settings.eln_sync_adapter)
     return await sync_entries(
-        JsonExportAdapter(), _reaction_store(), _molecule_store(), default_submitter(), since
+        adapter, _reaction_store(), _molecule_store(), default_submitter(), since
     )
 
 

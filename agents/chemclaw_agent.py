@@ -80,7 +80,7 @@ def build_agent(chat_client: Any | None = None) -> Agent:
         A ready-to-run `Agent`. No LLM call happens at construction.
     """
     client = chat_client if chat_client is not None else _default_chat_client()
-    skills = SkillsProvider(FileSkillsSource([settings.skills_dir]))
+    skills = SkillsProvider(FileSkillsSource(settings.skills_dirs))
     history = InMemoryHistoryProvider()
     compaction = _build_compaction(history.source_id)
     return Agent(

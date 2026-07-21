@@ -19,6 +19,8 @@ from eln.ingest import IngestError, ingest_reaction
 from eln.json_adapter import ElnFormatError, JsonExportAdapter
 from eln.note import note_from_ord_reaction
 from eln.ord import Component, OrdReaction, Role
+from eln.ord_adapter import OrdJsonAdapter
+from eln.registry import all_eln_adapters, make_eln_adapter
 from eln.sync import sync_entries
 from eln.validate import validate_ord
 from mcp_servers.fpstore import InMemoryFingerprintStore
@@ -491,3 +493,20 @@ def test_sync_rejects_degenerate_reaction_without_aborting_batch() -> None:
         assert summary.next_cursor == datetime(2026, 2, 1, tzinfo=UTC)  # cursor advanced
 
     asyncio.run(_run())
+
+
+# --- adapter registry -----------------------------------------------------------------
+
+
+def test_registry_selects_adapter_by_name() -> None:
+    """The config name maps to the right adapter; an unknown name fails with the valid ones."""
+    assert isinstance(make_eln_adapter("json"), JsonExportAdapter)
+    assert isinstance(make_eln_adapter("ord"), OrdJsonAdapter)
+    with pytest.raises(ValueError, match="unknown ELN adapter 'nope'; valid names: json, ord"):
+        make_eln_adapter("nope")
+
+
+def test_all_adapters_covers_every_registered_source() -> None:
+    """The corpus readers get every registered adapter (both ingestion paths)."""
+    kinds = {type(a) for a in all_eln_adapters()}
+    assert kinds == {JsonExportAdapter, OrdJsonAdapter}
