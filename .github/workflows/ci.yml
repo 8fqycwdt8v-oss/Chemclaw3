@@ -42,8 +42,8 @@ jobs:
       - name: Apply database migrations
         run: make db-migrate
 
-      - name: Lint + type + test
-        run: make check
+      - name: Lint + type + test (with coverage gate)
+        run: make lint type cov
 
       - name: Validate knowledge graph
         run: make kg-validate

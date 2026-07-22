@@ -26,6 +26,16 @@ from workflows.eln_sync import (
 )
 
 
+def test_sync_rejects_multiple_ingest_sources(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Two active ingest sources fail fast — the shared cursor tracks only one (DEFERRED guard)."""
+    from chemclaw.errors import ChemclawError
+
+    # Two ingest sources active: the single shared high-water cursor would skip the lagging one.
+    monkeypatch.setattr(settings, "data_sources", "graph,eln-json,eln-ord")
+    with pytest.raises(ChemclawError, match="one shared high-water cursor"):
+        asyncio.run(sync_eln_entries(datetime.min.replace(tzinfo=UTC)))
+
+
 def test_eln_sync_workflow_ingests_seed_corpus(monkeypatch: pytest.MonkeyPatch) -> None:
     """The workflow ingests every seed ELN entry and reports them, durably."""
     fake = FakeSubmitter()

@@ -38,7 +38,8 @@ MAF ships the harness natively (`create_harness_agent` + `TodoProvider`/`AgentMo
 - [x] **F1-T3** Plan→approve→execute: `AgentModeProvider(default_mode=plan|execute)` +
       `todos_remaining(looping_modes=["execute"])` → plan_only stops for approval, execute loops
       (capped). Test: `test_agent.py::test_harness_autonomy_sets_start_mode`.
-- [ ] ADR **D-020** finalized + **D-A1** (F0) — write in DECISIONS.md (F9 running-log).
+- [x] ADR **D-020** finalized + **D-A1** (F0) — written in DECISIONS.md (D-020, and D-039 = foundation
+      D-A1, D-040 = foundation D-020). Checkbox was stale; confirmed present.
 
 ### Phase F2 — Front door + run service (the agent finally runs)
 - [x] **F2-T1** `service/app.py::create_app` (FastAPI) + `service/runner.py::run_turn` — builds/holds
@@ -205,9 +206,9 @@ MAF ships the harness natively (`create_harness_agent` + `TodoProvider`/`AgentMo
       with a clear message at agent build, not on the first turn.
 - [x] Migration-status visibility (D-034): `schema_migrations` ledger records each applied file
       by name + checksum; an edited applied file is flagged as drift.
-- [ ] Coverage threshold in CI (D-037): `pytest-cov` + `make cov` + `[tool.coverage]` config are
-      in place (no hard `--cov-fail-under` yet). Set a `--cov-fail-under` once a CI run
-      establishes the real baseline, then ratchet.
+- [x] Coverage threshold in CI (D-037): `[tool.coverage.report] fail_under = 80` and CI runs
+      `make lint type cov` as its gate. Floor set safely below the measured offline baseline (86%,
+      Postgres/Temporal skipped; CI runs those and is higher). Ratchet upward as coverage climbs.
 
 ### MAF out-of-the-box features (analysis done)
 - [x] **Function middleware** (`@function_middleware`) — one DRY GxP tool-audit trail

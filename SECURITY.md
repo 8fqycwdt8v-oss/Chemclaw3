@@ -38,6 +38,31 @@ pre-Phase-6 "no auth" world. For the design rationale see `docs/architektur.md` 
   Entra tokens via **workload identity federation** (`agents/identity/workload.py`) — no client
   secret at rest.
 
+## Data handling & logging (PII in the audit trail)
+
+The GxP audit trail records **who ran what**: alongside the actor's Entra `oid`, it stores each tool
+call's *arguments*, which are user free text (a chemist's message, a confirmed-answer payload) and so
+may contain PII or confidential chemistry. This is intentional — GxP requires an attributable "who
+did what to which inputs" record — but it has data-handling consequences:
+
+- **Bounded, not omitted.** `agent_audit_max_arg_chars` (default 200) caps how much of each argument
+  is stored, so a record cannot balloon, but the excerpt is still real user content.
+- **Two sinks.** The stdlib log is always written; the append-only Postgres `audit_events` sink is
+  optional. A deployment's **log retention, access control, and PII policy must cover both** — the
+  audit trail is subject to the same data-protection rules as any store of user content.
+- **Client-facing surfaces do not leak it.** Turn errors return a generic, session-keyed message
+  (the detail is logged server-side only), token-validation failures return a generic 401, and
+  upstream response bodies are bounded before they reach a log — so the trail is the *deliberate*
+  place user content is retained, not an accidental one.
+
+## Front-door hardening
+
+The browser-facing run service sets `Content-Security-Policy`, `X-Content-Type-Options: nosniff`,
+`X-Frame-Options: DENY`, and HSTS (config-gated by `service_security_headers`, default on); bounds
+each chat message (`service_max_message_chars`) and the live-session cache
+(`service_max_live_sessions`); and warns loudly at startup if it runs unauthenticated
+(`entra_required=false`) on a non-loopback bind. See `docs/audit/` for the audit that added these.
+
 ## The enforcement switch
 
 `entra_required` gates enforcement centrally:

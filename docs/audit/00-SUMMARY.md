@@ -1,13 +1,14 @@
 # 00 — Forensic Audit Summary & Findings Report
 
 **Repo:** `/home/user/Chemclaw3` · **Branch:** `claude/codebase-audit-hardening-69v233` · **Date:** 2026-07-22
-**Status:** Phases 0–11 complete (discovery → report → sign-off → execution → handover). All
-approved backlog items are implemented, tested, and committed; the full gate is green (369 passed,
-0 failed). See `08-execution-plan.md`, `REFACTOR_LOG.md`, and `09-handover.md`. This file is the
-original findings report, kept as the record (finding rows annotated where execution changed them).
+**Status:** Phases 0–11 complete (discovery → report → sign-off → execution → handover), merged in
+PR #9. All approved backlog items are implemented, tested, and committed; the gate was green (369
+passed, 0 failed). See `REFACTOR_LOG.md` (finding → commit) and `09-handover.md` (what changed +
+conventions). This file is the durable findings record (rows annotated where execution changed them).
 
-Detailed evidence lives in the per-phase reports: `01-inventory`, `02-baseline`, `03-consistency`,
-`04-security`, `05-correctness`, `06-duplication`, `07-architecture`.
+> The eight interim per-phase working reports (`01`–`08`) were consolidated into this summary and
+> removed once the audit completed and merged; their full per-finding detail remains in git history
+> and in the commit trail referenced by `REFACTOR_LOG.md`.
 
 ---
 
@@ -99,9 +100,10 @@ Severity: **Crit / High / Med / Low / Info**. Effort: **S** (<1h), **M** (a few 
 | SEC-9 | Security / secrets | Info | Dev-default DSN `chemclaw:chemclaw@localhost` in `config.py`/`.env.example`; all real secret fields default empty. No live secrets in tree. | None (documented dev default). | — |
 | DUP-4 | Dead code | Info | `exchange_obo()` has no non-test caller — **intentionally dormant** (gated by `entra_obo_enabled=False`, documented, tested). | None. | — |
 
-Also flagged in `01-inventory`: the agent-harness feature was integrated **twice** (early D-020 concept
-+ F1 re-integration) and reconciled by hand — a prime spot to spot-check for residual dead paths
-during execution (no concrete dead code confirmed yet; noted as an audit-during-refactor watch item).
+Harness watch item (was Open Question #5): the inventory flagged the "harness" as possibly integrated
+twice. **Resolved post-execution:** there is exactly one *agent*-harness path (`build_agent` → a single
+`_build_harness_agent`); `report/harness.py` (D-020) is an unrelated *report*-synthesis harness. Two
+different features share the name — no duplicate/dead path, no deletion needed.
 
 ---
 
@@ -184,5 +186,7 @@ Per the guardrails, these are high-risk-by-default even where they look safe:
 - Every change will be a **small atomic commit** referencing its finding ID, with `make lint type test`
   re-run and logged in `REFACTOR_LOG.md`.
 
-**→ Awaiting sign-off. On approval I will write `08-execution-plan.md` (Phase 9) and begin incremental
-execution (Phase 10), starting with the low-risk block (items 1–5) and pausing at each ⚠ decision.**
+**→ Signed off and executed.** All items were implemented in waves (see `REFACTOR_LOG.md`), the two
+gated decisions resolved as recorded (DUP-1 → honor `data_sources`, D-053; SEC-2 → warn-only), and
+the whole set merged in PR #9. A follow-up pass (2026-07-22) added the ELN multi-ingest cursor guard,
+the CI coverage gate, and closed the informational items — see `09-handover.md`.

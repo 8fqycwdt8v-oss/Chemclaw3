@@ -40,6 +40,41 @@ findings are recorded in D-051. These residuals were **consciously not fixed now
 
 | Deferred | Why not now | Trigger |
 |---|---|---|
-| Per-source pipeline cursor in the ELN sync | The durable sync carries one high-water cursor keyed by `eln_sync_adapter`; with the single default ingest source (`eln-json`) this is correct. With **two** active ingest sources whose newest entries differ, the shared `max()` cursor can skip the lagging source's entries (F7 review F-1/F-2). Fixing means per-source cursors + tying the cursor key to the *active ingest set*, not `eln_sync_adapter` | The first second ingest source lands — i.e. the custom Snowflake ELN connector, which the plan already scopes to bring its own pipeline cursor. Add a startup validator then, or key cursors per source |
+| Per-source pipeline cursor in the ELN sync | The durable sync carries one high-water cursor keyed by `eln_sync_adapter`; with the single default ingest source (`eln-json`) this is correct. With **two** active ingest sources whose newest entries differ, the shared `max()` cursor can skip the lagging source's entries (F7 review F-1/F-2). Fixing means per-source cursors + tying the cursor key to the *active ingest set*, not `eln_sync_adapter`. **Interim guard added (2026-07-22):** `sync_eln_entries` now fails fast + non-retryably when >1 ingest source is active, so the silent-skip is impossible until per-source cursors land. | The first second ingest source lands — i.e. the custom Snowflake ELN connector, which the plan already scopes to bring its own pipeline cursor. Lift the guard and key cursors per source then |
 | Thundering-herd lock in `WorkloadTokenProvider` | On a cold/stale cache, N concurrent `get_service_token(scope)` all fire the exchange (correctness fine — never a stale token, just redundant calls) | Measurable duplicate token exchanges under real concurrency — add an `asyncio.Lock` per scope |
 | Generic ingest half still shaped like `ElnAdapter` | `IngestHalf = ElnAdapter` (verbatim re-host) means a future non-ELN ingest source must expose `fetch_new_entries`/`map_to_ord`. Acceptable while every ingest source is reaction-shaped (maps to the canonical ORD reaction) | A non-reaction ingest source appears — then generalize the ingest half's mapped type |
+
+## Critical re-review (2026-07-22)
+
+Every deferred item above was re-examined against current reality, asking "does the trigger hold
+*now*?" rather than assuming the deferral still stands. Verdict: **all remain correctly deferred
+except one**, which got an interim guard.
+
+**Acted on now — Per-source ELN cursor.** The full per-source-cursor fix stays deferred (no second
+real feed), but the F7/DUP-1 config seam made the *unsafe* two-ingest-source setup reachable by
+config, where the one shared cursor silently skips entries. Added the fail-fast guard this item's own
+"add a startup validator then" note called for (see the row above). This converts a silent data-loss
+into a loud, non-retryable failure — cheap insurance, no scope creep into the full fix.
+
+**Confirmed still-deferred (trigger genuinely unmet).** Nothing else crossed its threshold:
+
+- *Need real infrastructure we don't have:* HPC/DFT real integration, Postgres RLS graph mirror,
+  `knowledge/` as its own repo, the Snowflake ELN connector — all gated on a real cluster / tenant /
+  confidentiality boundary that does not exist in this environment.
+- *Need a scale we haven't reached:* sub-quadratic playbook clustering (O(n²) is fine below ~10⁴
+  reactions), per-key in-flight calc-store dedup (only worth it when duplicate *expensive* HPC runs
+  are a measured cost — still mock), the `WorkloadTokenProvider` thundering-herd lock (no real
+  concurrent token exchanges to measure).
+- *Need a capability/source that isn't in scope for v1:* universal ELN abstraction (only a 3rd real
+  ELN triggers it — we have 2 adapters), external literature/patent retrievers (Phase 5b core is
+  done, but this is a net-new source needing an API decision, not a latent gap), the tabular
+  foundation model, retrosynthesis/reaction prediction, lab automation/SiLA2, process flowsheet
+  synthesis, multimodal analytical data, domain foundation models, per-step species linking, durable
+  deep-research workflow, compound notes — each waits on a concrete user need, not on us.
+- *Deliberately declined / superseded:* LLM summarization of compacted history (the deterministic
+  collapse D-025 suffices and an untrusted summarizer is an injection risk), MAF Durable Extension for
+  jobs (Temporal owns durability), the second queue system (decided against, D-006), the generic
+  ingest-half reshape (every ingest source is still reaction-shaped).
+
+No other item warranted implementing now. The deferrals are conscious and their triggers are the
+right ones; this review changed one thing (the cursor guard) and left the rest as designed.
