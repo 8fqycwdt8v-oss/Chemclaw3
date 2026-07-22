@@ -63,6 +63,15 @@ def test_parity_defaults_are_backward_compatible() -> None:
     assert settings.tool_authz_default == "allow"  # every tool callable by default
 
 
+def test_hybrid_retrieval_defaults_are_backward_compatible() -> None:
+    """F10-A retrieval defaults keep today's behavior: hash embedder, graph (flat) mode."""
+    settings = Settings(_env_file=None)  # type: ignore[call-arg]
+    assert settings.embedding_provider == "hash"
+    assert settings.retrieval_mode == "graph"  # flat union, not hybrid fusion, by default
+    assert settings.embedding_dim == 1536  # matches note_index.embedding vector(1536)
+    assert "vector" not in settings.data_source_list  # new retrievers off until opted in
+
+
 def test_parity_json_env_overrides(monkeypatch: pytest.MonkeyPatch) -> None:
     """The dict-typed F10 knobs parse their JSON env overrides."""
     monkeypatch.setenv("CHEMCLAW_MODEL_ROUTES", '{"verifier": "small"}')

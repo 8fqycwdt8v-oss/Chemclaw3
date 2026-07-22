@@ -513,6 +513,28 @@ class Settings(BaseSettings):
     optimization_similarity_threshold: float = Field(default=0.7, ge=0.0, le=1.0)
     memory_job_timeout_seconds: float = Field(default=300.0, gt=0)
 
+    # Hybrid retrieval (plan F10-A). Dense-embedding and lexical (Postgres FTS) retrievers
+    # complement the graph/fingerprint search as *entry points* into graph traversal (D-004: the
+    # git-markdown graph stays the source of truth, embeddings are a derived index). They attach
+    # through the F7 data-source registry (`data_sources`), so the enable switch is registry
+    # membership, not a second boolean. `embedding_provider` selects how a note/query is embedded:
+    # `hash` is a deterministic, offline, dependency-free feature-hash (dev/CI only — token-overlap
+    # similarity, NOT neural-semantic); `openai_compatible` calls the internal endpoint's
+    # `/embeddings` route (`embedding_model`), reusing the LLM base_url/credential/TLS transport.
+    # `embedding_dim` must match both the model's output width and the `note_index.embedding`
+    # column (`vector(N)` in infra/sql/010) — changing it is a new migration, like the fingerprint
+    # bit width. `retrieval_top_k` bounds each new retriever's hits. `retrieval_mode` picks how
+    # `gather_evidence` combines sources: `graph` (default) keeps today's flat union + dedup;
+    # `hybrid` fuses the per-source rankings by Reciprocal Rank Fusion (`retrieval_fusion_k` is the
+    # RRF constant) so a note surfaced by any single source rises, then graph expansion
+    # (expand_note) remains the reasoning path.
+    embedding_provider: Literal["hash", "openai_compatible"] = "hash"
+    embedding_model: str = ""
+    embedding_dim: int = Field(default=1536, gt=0)
+    retrieval_top_k: int = Field(default=8, gt=0)
+    retrieval_mode: Literal["graph", "hybrid"] = "graph"
+    retrieval_fusion_k: int = Field(default=60, gt=0)
+
     # Report harness (plan Phase 5b). Per-section retrieval budget for the durable
     # development-report workflow — one section is one activity, so a long report resumes
     # section by section after a worker restart.

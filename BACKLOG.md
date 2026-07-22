@@ -22,10 +22,21 @@ tickets + disposition table: `docs/parity-plan.md`.
       tamper/deletion detection; PG round-trip skips offline).
 - [x] **F10-G2** bi-temporal note validation: `kg/note.py` rejects `valid_to < valid_from` (fields
       already existed); surfaced by the parser + `kg-validate`. Test: `test_note.py`.
-- [ ] **F10-A** hybrid retrieval (executes/extends F8-T2) · **F10-B** answer verification +
-      confidence routing · **F10-D** Temporal child-workflow orchestration · **F10-F** P/R/F1 +
-      drift metrics — remaining F10 tickets. OCR/vision, vendor connectors, GAMP-5 artifacts stay
-      gate-until-trigger.
+- [x] **F10-A** hybrid retrieval (executes/extends F8-T2): embedding provider seam
+      (`agents/embedding_provider.py`, `hash` offline / `openai_compatible` prod); derived
+      `note_index` (`infra/sql/010`, `report/vector_index.py` — `NoteIndex` with in-memory +
+      pgvector/FTS backends, `reindex_notes` + `make reindex`); `VectorRetriever` + `LexicalRetriever`
+      attached via the F7 registry (`vector`/`lexical` keys — registry membership is the enable
+      switch, D-018); RRF fusion (`report/hybrid.py`) under `retrieval_mode="hybrid"` in
+      `gather_evidence`, graph flat-union default unchanged. Graph traversal stays the reasoning path
+      (D-004). Config: `embedding_*`, `retrieval_top_k`/`_mode`/`_fusion_k`. Tests:
+      `test_embedding_provider`, `test_vector_index`, `test_hybrid_retrieval`, `test_config`.
+      Deferred (follow-up): a scheduled `background-jobs` reindex activity (today `make reindex` /
+      the CLI populates the index); the enable-flag booleans were intentionally folded into registry
+      membership rather than added.
+- [ ] **F10-B** answer verification + confidence routing · **F10-D** Temporal child-workflow
+      orchestration · **F10-F** P/R/F1 + drift metrics — remaining F10 tickets. OCR/vision, vendor
+      connectors, GAMP-5 artifacts stay gate-until-trigger.
 
 ## Now — Foundation build (docs/foundation-plan.md + docs/implementation-tickets.md)
 
