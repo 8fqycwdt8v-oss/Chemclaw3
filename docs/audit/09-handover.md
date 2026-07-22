@@ -1,8 +1,8 @@
 # 09 — Handover (Phase 11)
 
 Execution of the approved backlog is complete. This is the before/after and what future
-contributors should know. Per-item detail is in `REFACTOR_LOG.md`; rationale in `00-SUMMARY.md`
-and `08-execution-plan.md`.
+contributors should know. Per-item detail is in `REFACTOR_LOG.md`; findings and rationale in
+`00-SUMMARY.md`.
 
 ## Baseline diff (before → after)
 
@@ -88,3 +88,25 @@ structural fixes below. No dependency CVEs introduced.
   edges are wired.
 - The **agent-harness double-integration** watch item surfaced no residual dead code while working
   nearby; no deletion was needed. If a second harness path is later found, confirm supersession first.
+
+## Follow-up pass (2026-07-22, post-merge)
+
+After PR #9 merged, a second pass closed the remaining open points and critically re-reviewed the
+deferrals:
+
+- **ELN multi-ingest cursor guard** — `sync_eln_entries` now fails fast + non-retryably when more
+  than one ingest source is active, since the sync tracks one shared high-water cursor (a second
+  source would silently skip the lagging one). This is the interim validator `DEFERRED.md` names;
+  the full per-source-cursor fix stays deferred until a second real feed lands.
+- **CI coverage gate** — `[tool.coverage.report] fail_under = 80` and CI runs `make lint type cov`.
+  The floor sits safely below the measured offline baseline (86%, with Postgres/Temporal skipped; CI
+  runs those and is higher). Ratchet upward over time.
+- **Informational closures** — SEC-8 (audit-trail PII/retention) documented in `SECURITY.md`; INV-2
+  (the SQL `005` numbering gap) documented in `infra/sql/006_audit_events.sql`; the harness
+  double-integration question (Open Q #5) resolved as a false alarm (two different "harness" features).
+- **Critical deferred-items re-review** — every `DEFERRED.md` item re-checked against current
+  reality; all remain correctly deferred except the cursor guard above. See the "Critical re-review"
+  section in `DEFERRED.md`.
+- **Doc cleanup** — the eight interim per-phase audit reports were consolidated into `00-SUMMARY.md`
+  and removed (detail preserved in git history); the durable audit record is now `00-SUMMARY.md`,
+  `REFACTOR_LOG.md`, and this file.
