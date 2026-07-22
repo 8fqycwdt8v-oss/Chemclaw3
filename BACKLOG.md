@@ -37,23 +37,27 @@ tickets + disposition table: `docs/parity-plan.md`.
 - [x] **F10-B** answer verification + confidence routing: `agents/verifier.py` — `verify_answer`
       scores citation faithfulness, LLM-as-judge (structured output on the routed `verifier` model,
       F10-E) when `verifier_enabled`, else the deterministic `verify_claims` gate (DRY, offline).
-      `verify_turn_answer` resolves an answer's `[[wikilink]]` citations to the notes it cites; the
-      runner stamps `AnswerEvent.confidence` + `unsupported_claims` so a low-confidence answer routes
-      to the existing D-032 human hold. Default-off = today's plain answer. Config:
-      `verifier_enabled`, `verifier_confidence_threshold`. Tests: `test_verifier`, `test_runner`,
-      `test_config`. (Durable report workflow verifies at citation level — no prose there; the
-      conversational path gets the LLM faithfulness score.)
+      `verify_turn_answer` resolves an answer's `[[wikilink]]` citations (shared `kg.note.cited_ids`)
+      to the notes it cites; the runner stamps `AnswerEvent.confidence` + `unsupported_claims` and
+      sets `review_required` when `confidence < verifier_confidence_threshold` (the routing signal a
+      surface/future hold keys off — the durable D-032 hold is deferred, DEFERRED.md). Default-off =
+      today's plain answer. Config: `verifier_enabled`, `verifier_confidence_threshold`. Tests:
+      `test_verifier`, `test_runner`, `test_config`. (F10-B3 — LLM faithfulness of *report* prose —
+      deferred: the durable report path has no in-workflow prose to judge, only citations, which
+      `verify_claims` already gates. See DEFERRED.md.)
 - [x] **F10-F** quality metrics — P/R/F1 + drift: `evals/metrics.py` adds `precision`/`recall`/`f1`
       (pure `precision_recall_f1` over predicted vs `expected_note_ids`; report/drift metrics, no
       per-case gate); `evals/retrieval.py` scores a live retriever's P/R/F1 (`run_retrieval_eval`,
       reuses `run_eval`); `evals/baseline.py` (`aggregate_metrics`/`detect_drift`, committed
       `evals/baseline.json`) + `workflows/eval_drift.py` (`EvalDriftWorkflow` on background-jobs,
-      alerts via the notify seam) + a `scripts/schedules.py` opt-in Schedule. Config:
-      `eval_drift_enabled`/`_schedule_minutes`/`_epsilon`, `eval_baseline_path`. Committed pinned
-      case `retrieval-precision-recall.md`. Tests: `test_metrics_classification`, `test_retrieval_eval`,
-      `test_eval_drift` (incl. a baseline-matches-case-set guard), `test_schedules`, `test_config`.
-      (Live retrieval cases are deployment-local — the shipped graph is empty — so only the pinned
-      metric-regression case is committed; the driver scores a deployment's own retriever+corpus.)
+      alerts via the *must-deliver* notify seam so a dropped alert fails the run). `detect_drift`
+      uses a *relative* band (`_epsilon` × baseline) so one knob fits metrics of different scales;
+      `DriftAlert.vanished` distinguishes an absent metric from a 0.0 score. Config:
+      `eval_drift_enabled`/`_schedule_minutes`/`_epsilon`/`_timeout_seconds`, `eval_baseline_path`.
+      Committed pinned case `retrieval-precision-recall.md`. Tests: `test_metrics_classification`,
+      `test_retrieval_eval`, `test_eval_drift` (incl. a baseline-matches-case-set guard),
+      `test_schedules`, `test_config`. (Over the deterministic committed case-set the scheduled job
+      is a deployment-consistency tripwire; live-retriever drift is deployment-local — DEFERRED.md.)
 - [x] **F10-D** sub-agent orchestration via Temporal child workflows: `workflows/orchestrator.py`
       `fan_out(child, inputs)` runs N sub-tasks as bounded-parallel child workflows with per-child
       retry + D-030 isolation (a poison child is dropped, siblings unaffected; results in input
@@ -62,7 +66,10 @@ tickets + disposition table: `docs/parity-plan.md`.
       published by a shared `PublishNoteWorkflow` child). Config `orchestrator_max_parallel_children`.
       Tests: `test_orchestrator` (`_batches` offline + a Temporal-env fan-out isolation test),
       `test_memory` (builder is behavior-preserving), `test_report_workflow`/`test_workers`
-      registration. Conversational multi-agent mesh stays gated (single agent + skills is KISS).
+      registration. A failed report section degrades to a visible `retrieval_failed` marker in the
+      draft (not silently dropped, GxP); `fan_out` re-raises `CancelledError` and carries no
+      redundant child-level retry. Conversational multi-agent mesh stays gated (single agent + skills
+      is KISS).
 - [ ] Gate-until-trigger (documented, not built): OCR/vision ingestion, vendor connectors
       (Veeva/SAP/LIMS), GAMP-5 validation artifacts, conversational multi-agent mesh — each with its
       trigger recorded in `docs/parity-plan.md`.

@@ -79,6 +79,8 @@ async def fan_out(
     limit = (
         max_parallel if max_parallel is not None else settings.orchestrator_max_parallel_children
     )
+    if limit < 1:
+        raise ValueError(f"max_parallel must be >= 1, got {limit}")
     parent_id = workflow.info().workflow_id
     indexed = list(enumerate(inputs))
     results: list[Any] = []
@@ -101,6 +103,10 @@ async def fan_out(
             return_exceptions=True,
         )
         for (index, _payload), outcome in zip(batch, settled, strict=True):
+            if isinstance(outcome, asyncio.CancelledError):
+                # Cancellation is control flow, not a failed child: propagate it (a dropped-and-
+                # logged child would silently swallow the cancellation intent).
+                raise outcome
             if isinstance(outcome, BaseException):
                 workflow.logger.warning(
                     "fan-out child %s-%s-%d failed and was dropped: %s",

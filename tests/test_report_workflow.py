@@ -36,6 +36,15 @@ class _FakeRetriever:
         return []
 
 
+class _FailingRetriever:
+    name = "boom"
+
+    async def retrieve(self, query: str, filters: dict) -> list[EvidenceChunk]:  # type: ignore[type-arg]
+        from chemclaw.errors import ChemclawError
+
+        raise ChemclawError("retriever exploded")  # non-retryable → activity fails fast
+
+
 def test_report_workflow_drafts_and_pr_gates(monkeypatch: pytest.MonkeyPatch) -> None:
     """The workflow retrieves each section durably and proposes one cited report note."""
     fake = FakeSubmitter()
@@ -68,6 +77,40 @@ def test_report_workflow_drafts_and_pr_gates(monkeypatch: pytest.MonkeyPatch) ->
         body = fake.submissions[0].content
         assert "[[reaction-a]]" in body  # the supported section cites its source
         assert "No supporting data found" in body  # the safety section is marked, not invented
+
+    asyncio.run(_run())
+
+
+def test_failed_section_is_marked_not_dropped(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A section whose retrieval errors is shown as failed in the draft, never silently missing."""
+    fake = FakeSubmitter()
+    monkeypatch.setattr(report_workflow, "default_retrievers", lambda: [_FailingRetriever()])
+    monkeypatch.setattr(report_workflow, "default_submitter", lambda: fake)
+
+    async def _run() -> None:
+        request = ReportRequest(
+            title="Widget development",
+            sections=[
+                ReportSection(heading="Yield", query="yield trend", memory_layer="episodic"),
+            ],
+        )
+        async with await start_env_or_skip() as env:
+            client: Client = pydantic_client(env)
+            async with Worker(
+                client,
+                task_queue=settings.background_task_queue,
+                workflows=[DevelopmentReportWorkflow, ReportSectionWorkflow],
+                activities=[retrieve_section, propose_report],
+            ):
+                await client.execute_workflow(
+                    DevelopmentReportWorkflow.run,
+                    request,
+                    id="report-fail-test",
+                    task_queue=settings.background_task_queue,
+                )
+        body = fake.submissions[0].content
+        assert "## Yield" in body  # the section still appears (not dropped)
+        assert "Retrieval failed" in body  # and is explicitly marked incomplete
 
     asyncio.run(_run())
 

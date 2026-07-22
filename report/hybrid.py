@@ -4,9 +4,9 @@
 reaction fingerprints). In `graph` retrieval mode it unions their hits flatly; in `hybrid` mode it
 fuses their *rankings* so a note that any one source ranks highly rises overall, without one
 verbose source drowning the others. Reciprocal Rank Fusion is the standard, tuning-free way to do
-that: a note's score is the sum over sources of `1 / (k + rank)`, where `rank` is its position in
-that source's list — position matters, absolute scores (which are not comparable across a cosine
-similarity, a `ts_rank`, and a substring hit) do not.
+that: a note's score is the sum over sources of `1 / (k + rank)`, where `rank` is its 1-based
+position in that source's list — position matters, absolute scores (which are not comparable across
+a cosine similarity, a `ts_rank`, and a substring hit) do not.
 
 Fusion is over the source *note*, keyed by `source_note_id` (a note is the unit of evidence), so a
 note surfaced by two sources outranks one surfaced by a single source. The representative chunk kept
@@ -38,7 +38,7 @@ def reciprocal_rank_fusion(
     representative: dict[str, EvidenceChunk] = {}
     for chunks in ranked_lists:
         seen_in_list: set[str] = set()
-        for rank, chunk in enumerate(chunks):
+        for rank, chunk in enumerate(chunks, start=1):  # 1-based: canonical RRF, top rank = 1/(k+1)
             note_id = chunk.source_note_id
             representative.setdefault(note_id, chunk)
             if note_id in seen_in_list:

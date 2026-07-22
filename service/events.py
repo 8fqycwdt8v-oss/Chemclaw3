@@ -61,15 +61,18 @@ class AnswerEvent(BaseModel):
 
     When answer verification is enabled (plan F10-B), `confidence` carries the verifier's aggregate
     citation-faithfulness score in [0, 1] and `unsupported_claims` lists the claim texts the
-    evidence did not support, so a thin UI can render a review affordance on a low-confidence answer
-    and route it to the existing human hold. Both stay `None`/empty on the verifier-off path, so the
-    event is byte-for-byte today's answer unless verification is switched on.
+    evidence did not support. `review_required` is the routing signal: it is `True` exactly when
+    `confidence < verifier_confidence_threshold`, so a thin UI shows a review affordance (and a
+    future durable hold, D-032, keys off the same flag) only on a genuinely low-confidence answer.
+    All three stay `None`/`False`/empty on the verifier-off path, so the event is byte-for-byte
+    today's answer unless verification is switched on.
     """
 
     type: Literal["answer"] = "answer"
     text: str
     confidence: float | None = None
     unsupported_claims: list[str] = []
+    review_required: bool = False
 
 
 class ErrorEvent(BaseModel):

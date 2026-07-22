@@ -2,10 +2,12 @@
 
 A committed baseline (`evals/baseline.json`) records the aggregate value of each metric over the
 versioned case-set at a known-good point. `detect_drift` re-aggregates a fresh run and flags any
-metric that moved further than a noise band (`eval_drift_epsilon`) from that baseline — the same
-"changes within noise are not signal" idea as the A/B epsilon (D-A14), applied over time instead of
-across tool variants. All logic here is pure and file-based (no Temporal, no network), so it is
-fully unit-tested; `workflows/eval_drift.py` is the thin durable wrapper that schedules it.
+metric that moved further than a *relative* noise band (`eval_drift_epsilon`, a fraction of the
+baseline value) from that baseline. Relative, not absolute, because the metrics live on
+heterogeneous scales (an `f1` in [0, 1] next to an `e_factor` near 35): one absolute band would be
+loose for the bounded metrics and hair-trigger for the large ones. All logic here is pure and
+file-based (no Temporal, no network), so it is fully unit-tested; `workflows/eval_drift.py` is the
+thin durable wrapper that schedules it.
 """
 
 from pathlib import Path
@@ -24,12 +26,19 @@ class Baseline(BaseModel):
 
 
 class DriftAlert(BaseModel):
-    """One metric that drifted beyond the noise band from baseline (what an operator must see)."""
+    """One metric that drifted beyond the noise band from baseline (what an operator must see).
+
+    `vanished` distinguishes the two ways a metric drifts: it scored a different value (`vanished`
+    False, `current_value` is the new score), or it disappeared from the run entirely because its
+    case was removed (`vanished` True, `current_value` is 0.0 as a placeholder). An operator must
+    not read a vanished metric as "it scored 0.0".
+    """
 
     metric: str
     baseline_value: float
     current_value: float
     delta: float
+    vanished: bool = False
 
 
 def aggregate_metrics(report: EvalReport) -> dict[str, float]:
@@ -47,12 +56,15 @@ def aggregate_metrics(report: EvalReport) -> dict[str, float]:
 
 
 def detect_drift(baseline: Baseline, current: dict[str, float], epsilon: float) -> list[DriftAlert]:
-    """Flag every baseline metric whose current aggregate moved more than `epsilon` (absolute).
+    """Flag every baseline metric whose current aggregate moved more than a relative `epsilon`.
 
-    Only metrics present in the baseline are checked — a newly added metric has no known-good point
-    to regress against yet (adding it to the baseline is a deliberate commit). A metric that
-    vanished from the current run (its case removed) is flagged as drift: dropping a scored metric
-    is exactly the regression this guards against, so its absence counts as a full-value move.
+    The band is `epsilon * abs(baseline_value)` — a fraction of the baseline, so the same `epsilon`
+    means the same *proportional* sensitivity across metrics on different scales. For a baseline of
+    exactly 0 (no proportion to take) the band falls back to the absolute `epsilon`, so a move off
+    zero past `epsilon` is caught. Only metrics in the baseline are checked — a newly added metric
+    has no known-good point to regress against yet (adding it to the baseline is deliberate). A
+    metric that vanished from the current run (its case removed) is flagged: dropping a scored
+    metric is exactly the regression this guards against.
     """
     alerts: list[DriftAlert] = []
     for metric, baseline_value in sorted(baseline.metrics.items()):
@@ -64,11 +76,13 @@ def detect_drift(baseline: Baseline, current: dict[str, float], epsilon: float) 
                     baseline_value=baseline_value,
                     current_value=0.0,
                     delta=-baseline_value,
+                    vanished=True,
                 )
             )
             continue
         delta = current_value - baseline_value
-        if abs(delta) > epsilon:
+        band = epsilon * abs(baseline_value) if baseline_value else epsilon
+        if abs(delta) > band:
             alerts.append(
                 DriftAlert(
                     metric=metric,

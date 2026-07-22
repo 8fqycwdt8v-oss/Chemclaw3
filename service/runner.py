@@ -105,10 +105,11 @@ async def _answer_event(answer: str) -> AnswerEvent:
     """Assemble the turn's final `AnswerEvent`, scoring it when verification is enabled (F10-B).
 
     When `verifier_enabled`, the assembled answer is checked for citation faithfulness against the
-    notes it cites and the aggregate confidence + any unsupported claims are stamped on the event,
-    so a low-confidence answer surfaces a review affordance and routes to the existing human hold
-    (D-032) rather than returned as authoritative. When disabled (the default) this is today's plain
-    answer. A verifier failure must never sink the turn — it degrades to the unscored answer.
+    notes it cites, the aggregate confidence + any unsupported claims are stamped on the event, and
+    `review_required` is set when `confidence < verifier_confidence_threshold` — the routing signal
+    a surface (or a future D-032 hold) uses to flag a low-confidence answer for review rather than
+    presenting it as authoritative. When disabled (the default) this is today's plain answer. A
+    verifier failure must never sink the turn — it degrades to the unscored answer.
     """
     if not settings.verifier_enabled:
         return AnswerEvent(text=answer)
@@ -121,6 +122,7 @@ async def _answer_event(answer: str) -> AnswerEvent:
         text=answer,
         confidence=result.confidence,
         unsupported_claims=[claim.text for claim in result.unsupported],
+        review_required=result.confidence < settings.verifier_confidence_threshold,
     )
 
 

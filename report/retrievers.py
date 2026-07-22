@@ -18,7 +18,7 @@ from kg.note import WIKILINK, Note
 from mcp_servers.fpstore import FingerprintError, FingerprintStore
 from mcp_servers.rxnfp.search import find_similar_reactions
 from report.evidence import EvidenceChunk
-from report.vector_index import IndexHit, NoteIndex
+from report.vector_index import IndexHit, NoteIndex, note_text
 
 
 def _excerpt(body: str) -> str:
@@ -62,7 +62,9 @@ class GraphRetriever:
                 continue
             if want_tag is not None and want_tag not in note.tags:
                 continue
-            haystack = f"{note.id} {' '.join(note.tags)} {note.body}".lower()
+            # Same haystack the dense/lexical index build from (`note_text`), so all three entry
+            # points agree on what "the note's content" is and cannot drift.
+            haystack = note_text(note).lower()
             if needle in haystack:
                 chunks.append(
                     EvidenceChunk(

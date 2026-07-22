@@ -68,6 +68,14 @@ def test_check_chain_flags_a_deleted_row() -> None:
     assert any("broken link" in p for p in problems)
 
 
+def test_check_chain_flags_a_deleted_prefix() -> None:
+    """Dropping the leading rows leaves a self-consistent chain the genesis anchor still catches."""
+    rows = _linked([_event("a"), _event("b"), _event("c")])
+    # Remove rows 1-2: row 3 now leads but its prev_hash points at the deleted row 2 (non-empty).
+    problems = check_chain([rows[2]])
+    assert any("genesis" in p for p in problems)
+
+
 def test_check_chain_skips_a_legacy_pre_chain_prefix() -> None:
     """Rows written before the migration (empty row_hash) are skipped until the chain begins."""
     legacy = ChainRow(id=1, prev_hash="", row_hash="", event=_event("old"))

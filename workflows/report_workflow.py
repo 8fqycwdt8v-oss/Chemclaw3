@@ -11,6 +11,7 @@ the factory is module-level so tests swap it.
 from datetime import timedelta
 
 from temporalio import activity, workflow
+from temporalio.exceptions import ActivityError
 
 with workflow.unsafe.imports_passed_through():
     from chemclaw.config import settings
@@ -54,20 +55,31 @@ class ReportSectionWorkflow:
     """Retrieve one report section durably — the fan-out unit of a report (plan F10-D2).
 
     Each section is its own child workflow so a long report resumes section by section after a
-    worker restart and a single failing section is isolated (dropped by the fan-out) rather than
-    failing the whole report. The section's evidence logic is unchanged — this only owns its
-    durability boundary.
+    worker restart. A section whose retrieval exhausts its retries does not fail (and so is not
+    silently dropped) the report: the child degrades to a placeholder section marked
+    `retrieval_failed`, so the assembled draft shows the gap explicitly for the chemist at the
+    PR-gate. The activity carries the single retry boundary (`BAD_DATA_RETRY`); the fan-out does not
+    layer a second child-level retry on top.
     """
 
     @workflow.run
     async def run(self, section: ReportSection) -> SynthesizedSection:
-        """Run the section-retrieval activity with the shared timeout + bad-data retry."""
-        return await workflow.execute_activity(
-            retrieve_section,
-            section,
-            start_to_close_timeout=timedelta(seconds=settings.report_section_timeout_seconds),
-            retry_policy=BAD_DATA_RETRY,
-        )
+        """Retrieve the section; on activity failure, return a visible `retrieval_failed` marker."""
+        try:
+            return await workflow.execute_activity(
+                retrieve_section,
+                section,
+                start_to_close_timeout=timedelta(seconds=settings.report_section_timeout_seconds),
+                retry_policy=BAD_DATA_RETRY,
+            )
+        except ActivityError:
+            workflow.logger.warning("report section %r retrieval failed; marked", section.heading)
+            return SynthesizedSection(
+                heading=section.heading,
+                memory_layer=section.memory_layer,
+                evidence=[],
+                retrieval_failed=True,
+            )
 
 
 @workflow.defn
@@ -78,15 +90,15 @@ class DevelopmentReportWorkflow:
     async def run(self, request: ReportRequest) -> str:
         """Fan each section out to a child workflow, then propose the assembled draft note.
 
-        Sections are retrieved as independent child workflows (bounded parallelism, per-child
-        retry); a section that fails after its retries is dropped (D-030), the rest still form the
-        report in request order.
+        Sections are retrieved as independent child workflows (bounded parallelism). Each child owns
+        its own retry (the activity's `BAD_DATA_RETRY`) and degrades a failed section to a visible
+        `retrieval_failed` marker, so every requested section appears in the draft in request order:
+        a failure is shown, never silently missing (F10-D2). No child-level retry is layered here.
         """
         sections = await fan_out(
             ReportSectionWorkflow,
             request.sections,
             id_prefix="section",
-            retry_policy=BAD_DATA_RETRY,
         )
         report = Report(title=request.title, sections=sections)
         # The note reference *is* this workflow's result, so the publish is not

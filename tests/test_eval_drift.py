@@ -49,11 +49,25 @@ def test_aggregate_metrics_means_over_cases() -> None:
 
 
 def test_detect_drift_flags_only_moves_past_epsilon() -> None:
-    """A move larger than epsilon alerts; one within the band is silent."""
+    """A move larger than the (relative) band alerts; one within it is silent."""
     baseline = Baseline(case_set_version="v", metrics={"f1": 0.80, "recall": 0.60})
     alerts = detect_drift(baseline, {"f1": 0.60, "recall": 0.62}, epsilon=0.05)
-    assert [a.metric for a in alerts] == ["f1"]  # recall moved 0.02 (< 0.05), not flagged
+    # f1 moved 0.20 (band 0.05×0.80=0.04); recall moved 0.02 (band 0.05×0.60=0.03), not flagged.
+    assert [a.metric for a in alerts] == ["f1"]
     assert alerts[0].delta == pytest.approx(-0.20)
+    assert alerts[0].vanished is False  # a scored move, not an absence
+
+
+def test_detect_drift_band_is_relative_to_scale() -> None:
+    """The same epsilon is a proportional band, so a big-magnitude metric tolerates a bigger move.
+
+    A 1.0 absolute move is drift for an [0, 1] metric but noise for one near 35 — the exact failure
+    a single absolute epsilon caused. Relative-to-baseline makes one knob correct for both scales.
+    """
+    baseline = Baseline(case_set_version="v", metrics={"f1": 0.60, "e_factor": 35.0})
+    # +1.0 on each: f1 far past its 0.03 band (flagged); e_factor within its 1.75 band (silent).
+    alerts = detect_drift(baseline, {"f1": 1.60, "e_factor": 36.0}, epsilon=0.05)
+    assert [a.metric for a in alerts] == ["f1"]
 
 
 def test_detect_drift_flags_a_vanished_metric() -> None:
@@ -62,6 +76,7 @@ def test_detect_drift_flags_a_vanished_metric() -> None:
     alerts = detect_drift(baseline, {}, epsilon=0.05)
     assert [a.metric for a in alerts] == ["f1"]
     assert alerts[0].current_value == 0.0
+    assert alerts[0].vanished is True  # absent, not "scored 0.0"
 
 
 def test_baseline_round_trips(tmp_path: Path) -> None:

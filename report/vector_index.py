@@ -148,10 +148,18 @@ class PostgresNoteIndex:
             "ON CONFLICT (note_id) DO UPDATE SET "
             "embedding = EXCLUDED.embedding, lexeme = EXCLUDED.lexeme, updated_at = now()"
         )
+        # The `> 0` floor mirrors the InMemory reference (`score > 0.0`): a zero/near-zero or
+        # negatively-correlated note is not a hit. Without it pgvector returns the top-k nearest
+        # unconditionally, so a small corpus would surface unrelated notes as cited evidence — a
+        # ranking the tests never see. (A zero query vector is short-circuited in `search_dense`
+        # before the query, so `<=>` never produces a NaN distance to order by.)
         self._dense = (
             f"SELECT note_id, 1 - (embedding <=> %(q)s::vector({width})) AS score "
             "FROM note_index WHERE embedding IS NOT NULL "
-            f"ORDER BY embedding <=> %(q)s::vector({width}) LIMIT %(k)s"
+            f"AND 1 - (embedding <=> %(q)s::vector({width})) > 0 "
+            # `note_id` secondary sort mirrors the InMemory reference's (-score, note_id) tie-break,
+            # so equal-similarity notes order deterministically and identically across backends.
+            f"ORDER BY embedding <=> %(q)s::vector({width}), note_id LIMIT %(k)s"
         )
         self._lexical = (
             "SELECT note_id, ts_rank(lexeme, query) AS score "
@@ -182,7 +190,12 @@ class PostgresNoteIndex:
             await conn.commit()
 
     async def search_dense(self, query_embedding: list[float], top_k: int) -> list[IndexHit]:
-        """Rank notes by cosine similarity to `query_embedding` (pgvector HNSW)."""
+        """Rank notes by cosine similarity to `query_embedding` (pgvector HNSW), positive only."""
+        # A zero query vector (a token-less/symbol-only query under the hash embedder) has cosine 0
+        # to everything — no hit, exactly as the InMemory reference returns. Short-circuit so we
+        # never hand pgvector a zero vector (whose `<=>` distance is NaN) to order by.
+        if not any(query_embedding):
+            return []
         async with await self._connect() as conn:
             async with conn.cursor() as cur:
                 await cur.execute(self._dense, {"q": _vector_literal(query_embedding), "k": top_k})

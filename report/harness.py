@@ -42,16 +42,23 @@ class ReportRequest(BaseModel):
 
 
 class SynthesizedSection(BaseModel):
-    """A section after retrieval: its cited evidence, and whether any was found."""
+    """A section after retrieval: its cited evidence, and whether retrieval succeeded.
+
+    `retrieval_failed` distinguishes "retrieval errored (this section is incomplete)" from the
+    ordinary "retrieval ran and found nothing" — a distinction a chemist signing the report at the
+    PR-gate must see, since a durable report must never let a failed section masquerade as a
+    genuinely empty one (F10-D2). It stays False on every success path.
+    """
 
     heading: str
     memory_layer: str
     evidence: list[EvidenceChunk]
+    retrieval_failed: bool = False
 
     @property
     def supported(self) -> bool:
-        """True iff at least one evidence chunk backs this section."""
-        return bool(self.evidence)
+        """True iff retrieval succeeded and at least one evidence chunk backs this section."""
+        return not self.retrieval_failed and bool(self.evidence)
 
 
 class Report(BaseModel):
@@ -132,6 +139,11 @@ def report_note(report: Report) -> Note:
     lines = [f"# {report.title}\n"]
     for section in report.sections:
         lines.append(f"## {section.heading} [layer: {section.memory_layer}]\n")
+        if section.retrieval_failed:
+            # A failed section is flagged distinctly from an empty one: the gap is visible to the
+            # reviewer (and re-runnable), never silently absent from the draft (F10-D2).
+            lines.append("_Retrieval failed for this section; incomplete — re-run required._\n")
+            continue
         if not section.supported:
             lines.append("_No supporting data found; section left unsupported._\n")
             continue

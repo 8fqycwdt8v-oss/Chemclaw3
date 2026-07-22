@@ -22,6 +22,23 @@ from chemclaw.errors import ChemclawError
 # the report layer strips the same markup from evidence excerpts — one pattern, no drift.
 WIKILINK = re.compile(r"\[\[([^\[\]]+)\]\]")
 
+
+def cited_ids(text: str) -> list[str]:
+    """Extract the note ids a body of text cites via `[[wikilinks]]`, stripped and deduped.
+
+    The one extraction every citation reader shares (`Note.outgoing_links`, the answer verifier):
+    each target is stripped (a padded `[[ id ]]` resolves to `id`, matching the slug schema) and
+    empties are dropped, preserving first-seen order so a repeated citation yields one id. Kept here
+    beside `WIKILINK` so the pattern and its normalization have exactly one home and cannot drift.
+    """
+    ordered: dict[str, None] = {}
+    for match in WIKILINK.findall(text):
+        target = match.strip()
+        if target:
+            ordered.setdefault(target, None)
+    return list(ordered)
+
+
 # `id` and `type` become file-path segments (`knowledge/<type>/<id>.md`) and a git
 # branch (`note/<id>`) in the PR-gate, and ELN entry ids flow in from external JSON.
 # Constraining them to a plain slug at the model is the traversal/ref-injection
@@ -76,7 +93,7 @@ class Note(BaseModel):
 
     @model_validator(mode="after")
     def _valid_interval(self) -> "Note":
-        """A bi-temporal note's validity window must not end before it starts (plan F10-G1/G2).
+        """A bi-temporal note's validity window must not end before it starts (plan F10-G2).
 
         `valid_from`/`valid_to` answer "what did we know at time T"; a `valid_to` earlier than
         `valid_from` is a nonsensical window that would silently break any time-scoped query, so
@@ -97,12 +114,7 @@ class Note(BaseModel):
         Deduplicated, preserving first-seen order, so a note that references the
         same target twice yields one edge.
         """
-        ordered: dict[str, None] = {}
-        for match in WIKILINK.findall(self.body):
-            target = match.strip()
-            if target:
-                ordered.setdefault(target, None)
-        return list(ordered)
+        return cited_ids(self.body)
 
 
 class NoteError(ChemclawError):

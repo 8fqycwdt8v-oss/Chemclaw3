@@ -458,12 +458,17 @@ class Settings(BaseSettings):
     # given case-set exercises.
     eval_ab_epsilon: float = Field(default=1e-6, ge=0.0)
     # Eval drift detection (plan F10-F2). A `background-jobs` workflow re-runs the committed
-    # case-set on a cadence and alerts when an aggregate metric moves further than
-    # `eval_drift_epsilon` from the Git-committed baseline (`evals/baseline.json`) — the noise band
-    # (mirrors `eval_ab_epsilon`). Off by default; enabling it adds the Schedule (D-035).
+    # case-set on a cadence and alerts when an aggregate metric moves further than a *relative* band
+    # (`eval_drift_epsilon` × the baseline value) from the Git-committed baseline
+    # (`evals/baseline.json`). Relative, so one knob is scale-appropriate across metrics of
+    # different magnitudes (an `f1` in [0, 1] vs an `e_factor` near 35); 0.05 = a 5% proportional
+    # move. Off by default; enabling it adds the Schedule (D-035).
     eval_drift_enabled: bool = False
     eval_drift_schedule_minutes: int = Field(default=1440, ge=1)
     eval_drift_epsilon: float = Field(default=0.05, ge=0)
+    # The drift-check activity's own timeout (not borrowed from the memory job's): five pinned cases
+    # score in well under this, but a dedicated knob keeps the two jobs' timeouts independent.
+    eval_drift_timeout_seconds: float = Field(default=300.0, gt=0)
     eval_baseline_path: str = "evals/baseline.json"
 
     # Fingerprint search (plan Phase 3, mcp-molfp). ECFP4 = Morgan radius 2, 2048 bits;

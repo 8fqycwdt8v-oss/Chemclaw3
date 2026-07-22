@@ -4,8 +4,10 @@
 -- Each appended row carries `prev_hash` (the previous row's `row_hash`) and `row_hash`
 -- (a SHA-256 over prev_hash + this row's audited fields, computed by
 -- agents.audit_store.chain_hash). Because every row commits the hash of the one before it,
--- altering or deleting any historical row breaks the chain from that point on — detectable by
--- `python -m scripts.verify_audit_chain` (`make audit-verify`) without trusting the store.
+-- modifying, reordering, or interior-deleting a row — or deleting the leading (genesis) rows —
+-- breaks the chain, detectable by `python -m scripts.verify_audit_chain` (`make audit-verify`)
+-- without trusting the store. Deleting the trailing rows (tip truncation) is the one alteration the
+-- chain alone cannot catch (it needs an external count anchor — see that module's known-limit note).
 --
 -- Both columns default to '' so rows written before this migration (there are none in a fresh
 -- deployment, but a running one may have some) remain valid; the verifier treats a leading run of

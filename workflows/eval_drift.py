@@ -1,12 +1,17 @@
 """Durable eval-drift workflow (plan F10-F2) on the background queue.
 
 Re-runs the committed eval case-set on a cadence, aggregates each metric, and compares it to the
-Git-committed baseline; any metric that moved beyond the noise band is pushed to a system channel so
-an operator sees a silent quality regression instead of it going unnoticed. The scoring work — run
-+ aggregate + compare — is pure and lives in `evals.baseline` (fully unit-tested); this file is only
-the Temporal shell: one activity does the file I/O, the workflow fans the alerts to the push-back
-channel via the existing `notify` seam. Durability of the *schedule* lives in Temporal (D-035), not
-host cron.
+Git-committed baseline; any metric that moved beyond the relative noise band is pushed to a system
+channel so an operator sees a regression instead of it going unnoticed.
+
+Scope note (honesty about what this catches): the committed case-set is deterministic, so over it
+this is a *deployment-consistency tripwire* — it fires only if the deployed baseline, code, and
+cases were committed inconsistently (the same condition the CI guard catches at merge). Real
+runtime *quality* drift needs a non-deterministic eval (retrieval P/R/F1 over the deployment's own
+live graph), which is deployment-local and deferred — see DEFERRED.md. The scoring work — run +
+aggregate + compare — is pure and lives in `evals.baseline` (fully unit-tested); this file is only
+the Temporal shell: one activity does the file I/O, the workflow delivers each alert via the
+`notify` seam. Durability of the *schedule* lives in Temporal (D-035), not host cron.
 """
 
 from datetime import timedelta
@@ -23,7 +28,7 @@ with workflow.unsafe.imports_passed_through():
     )
     from evals.harness import load_eval_cases, run_eval
 
-from workflows.notify import notify_session_best_effort
+from workflows.notify import notify_session
 from workflows.publish import BAD_DATA_RETRY
 
 # The well-known system push-back channel a drift alert lands on (a `session_events` "session" an
@@ -47,16 +52,21 @@ async def check_eval_drift() -> list[DriftAlert]:
 
 @workflow.defn
 class EvalDriftWorkflow:
-    """Run a drift check and push one alert per drifted metric to the system channel."""
+    """Run a drift check and deliver one alert per drifted metric to the system channel."""
 
     @workflow.run
     async def run(self) -> int:
-        """Check for drift; notify each alert best-effort. Returns the number of alerts raised."""
+        """Check for drift; deliver each alert (must-deliver). Returns the number of alerts raised.
+
+        The alert is this workflow's only operator-facing output, so delivery is *not* best-effort:
+        a failed `session_events` write fails the workflow (visible as a failed run) rather than
+        silently dropping a regression alert.
+        """
         alerts = await workflow.execute_activity(
             check_eval_drift,
-            start_to_close_timeout=timedelta(seconds=settings.memory_job_timeout_seconds),
+            start_to_close_timeout=timedelta(seconds=settings.eval_drift_timeout_seconds),
             retry_policy=BAD_DATA_RETRY,
         )
         for alert in alerts:
-            await notify_session_best_effort(DRIFT_ALERT_CHANNEL, "eval_drift", alert.model_dump())
+            await notify_session(DRIFT_ALERT_CHANNEL, "eval_drift", alert.model_dump())
         return len(alerts)

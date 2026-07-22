@@ -56,13 +56,15 @@ def test_answer_is_unscored_when_verification_is_off(monkeypatch: pytest.MonkeyP
     answer = _answer(_run_turn())
     assert answer.text == "Yield was 90% [[reaction-a]]."
     assert answer.confidence is None and answer.unsupported_claims == []
+    assert answer.review_required is False  # unscored answers are never flagged for review
 
 
 def test_low_confidence_answer_is_flagged(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Verifier on: a low-confidence verdict stamps confidence + the unsupported claim texts."""
+    """Verifier on: a sub-threshold verdict stamps confidence, unsupported claims, review flag."""
     from chemclaw.config import settings
 
     monkeypatch.setattr(settings, "verifier_enabled", True)
+    monkeypatch.setattr(settings, "verifier_confidence_threshold", 0.7)
 
     async def _fake_verify(answer: str, **_: Any) -> VerificationResult:
         return VerificationResult(
@@ -73,6 +75,39 @@ def test_low_confidence_answer_is_flagged(monkeypatch: pytest.MonkeyPatch) -> No
     answer = _answer(_run_turn())
     assert answer.confidence == 0.2
     assert answer.unsupported_claims == ["Yield was 90%"]
+    assert answer.review_required is True  # 0.2 < 0.7 threshold
+
+
+def test_high_confidence_answer_is_not_flagged(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Verifier on: a verdict at/above the threshold is scored but not routed to review."""
+    from chemclaw.config import settings
+
+    monkeypatch.setattr(settings, "verifier_enabled", True)
+    monkeypatch.setattr(settings, "verifier_confidence_threshold", 0.7)
+
+    async def _fake_verify(answer: str, **_: Any) -> VerificationResult:
+        return VerificationResult(claims=[], confidence=1.0)
+
+    monkeypatch.setattr(runner, "verify_turn_answer", _fake_verify)
+    answer = _answer(_run_turn())
+    assert answer.confidence == 1.0
+    assert answer.review_required is False  # 1.0 >= 0.7 threshold
+
+
+def test_confidence_exactly_at_threshold_is_not_flagged(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Verifier on: confidence == threshold is acceptable (strictly-less rule), so not flagged."""
+    from chemclaw.config import settings
+
+    monkeypatch.setattr(settings, "verifier_enabled", True)
+    monkeypatch.setattr(settings, "verifier_confidence_threshold", 0.7)
+
+    async def _fake_verify(answer: str, **_: Any) -> VerificationResult:
+        return VerificationResult(claims=[], confidence=0.7)
+
+    monkeypatch.setattr(runner, "verify_turn_answer", _fake_verify)
+    answer = _answer(_run_turn())
+    assert answer.confidence == 0.7
+    assert answer.review_required is False  # meeting the threshold is acceptable, not sub-threshold
 
 
 def test_verifier_failure_degrades_to_plain_answer(monkeypatch: pytest.MonkeyPatch) -> None:

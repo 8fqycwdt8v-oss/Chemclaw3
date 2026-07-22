@@ -78,3 +78,15 @@ into a loud, non-retryable failure — cheap insurance, no scope creep into the 
 
 No other item warranted implementing now. The deferrals are conscious and their triggers are the
 right ones; this review changed one thing (the cursor guard) and left the rest as designed.
+
+## F10 review-cycle accepted deferrals (2026-07-22)
+
+The post-F10 adversarial review (five agent teams over the new features + the whole codebase) fixed
+the confirmed defects in-branch (recorded in D-060); these three residuals were **consciously not
+built now**, each because it needs a live edge this offline environment does not have:
+
+| Deferred | Why not now | Trigger to revisit |
+|---|---|---|
+| **F10-B3 — LLM faithfulness check of drafted report sections** | The conversational verifier (B2) scores a chat turn's cited prose. The *durable* report path assembles evidence per section and renders it via a template — there is no free-form synthesized prose in the workflow to LLM-judge, only citations (already gated by `verify_claims`). Wiring an LLM judge in would require the report skill's prose-drafting step to run inside the durable workflow, which it does not. | The report workflow gains an in-workflow LLM prose-synthesis step — then route that prose through `verify_answer` exactly as the chat runner does |
+| **Live-retriever drift eval (retrieval P/R/F1 over the deployment graph)** | `evals.retrieval.run_retrieval_eval` scores a live retriever against labelled cases, but the shipped knowledge graph is empty (deployment-populated) and the labelled retrieval cases are deployment-local (a committed case would be dead/misleading here). So the scheduled drift job scores the deterministic committed case-set — a *deployment-consistency tripwire*, not a runtime quality monitor (documented in `workflows/eval_drift.py`). | A deployment with a populated graph + local labelled retrieval cases exists — then point the drift activity at `run_retrieval_eval` over that graph for genuine runtime drift |
+| **Audit-chain tip-truncation anchor** | The hash chain now catches modification, reordering, interior deletion, and prefix (genesis) truncation. Detecting *trailing* deletion (tip truncation) needs an external append-count/max-id anchor recorded out-of-band (a second store), since the remaining rows still link cleanly. | A regulator/GxP audit requires provable completeness of the tail — then add an out-of-band monotonic append-count anchor (e.g. a signed high-water row-count) and verify it |

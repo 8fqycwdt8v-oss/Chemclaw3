@@ -13,8 +13,9 @@ scores a conversational answer's *faithfulness* to its evidence and returns an a
   `[[wikilink]]` citations must all resolve to retrieved evidence — so there is no network and the
   off-path behavior is exactly the report gate the repo already trusts (DRY, one citation check).
 
-Confidence *routing* (low-confidence answers → human review) lives in `service/runner.py`; this
-module only scores. Durability of any resulting hold stays in Temporal (the existing D-032 seam).
+Confidence *routing* (stamping a low-confidence answer so a surface can flag it for review) lives in
+`service/runner.py`; this module only scores. The durable human hold (D-032) is deferred — see
+DEFERRED.md — so today a low-confidence answer is marked, not blocked.
 """
 
 import asyncio
@@ -25,7 +26,7 @@ from pydantic import BaseModel, Field
 
 from chemclaw.config import settings
 from kg.graph import load_notes
-from kg.note import WIKILINK
+from kg.note import cited_ids
 from report.evidence import EvidenceChunk
 from report.harness import Claim, verify_claims
 
@@ -60,7 +61,7 @@ def _deterministic_result(answer: str, evidence: list[EvidenceChunk]) -> Verific
     trivially clean — the deterministic path only catches *fabricated* citations; the LLM path
     catches unfaithful prose. Confidence is 1.0 when supported, 0.0 otherwise (one binary claim).
     """
-    citations = list(dict.fromkeys(WIKILINK.findall(answer)))
+    citations = cited_ids(answer)
     body = answer.strip()
     if not body:
         return VerificationResult(claims=[], confidence=1.0)
@@ -71,8 +72,12 @@ def _deterministic_result(answer: str, evidence: list[EvidenceChunk]) -> Verific
         return VerificationResult(claims=[ClaimCheck(text=body, supported=True)], confidence=1.0)
     supported, _discarded = verify_claims([Claim(text=body, citations=citations)], evidence)
     is_ok = bool(supported)
+    # On a miss, name the citation that actually failed to resolve (the fabricated one), not
+    # citations[0] — which may be a valid citation when only a later one is unretrieved.
+    retrieved = {chunk.source_note_id for chunk in evidence}
+    offending = next((c for c in citations if c not in retrieved), citations[0])
     return VerificationResult(
-        claims=[ClaimCheck(text=body, supported=is_ok, cited_note_id=citations[0])],
+        claims=[ClaimCheck(text=body, supported=is_ok, cited_note_id=offending)],
         confidence=1.0 if is_ok else 0.0,
     )
 
@@ -82,7 +87,11 @@ def _verifier_prompt(answer: str, evidence: list[EvidenceChunk]) -> str:
 
     Each chunk is wrapped in an `<evidence note="…">` envelope so the model reads note bodies as
     material to check, not as instructions to follow (the same trust-boundary marking the retrieval
-    tools apply). The instruction names the exact structured output required.
+    tools apply). The instruction names the exact structured output required. This is framing
+    discipline, not a hard boundary: a note body is not escaped, so it is adequate for the internal
+    graph (the current, trusted evidence source), not for untrusted external text — when a source
+    carrying such text lands (the deferred literature/Snowflake connectors), the envelope must move
+    to escaped or randomized delimiters.
     """
     blocks = "\n".join(
         f'<evidence note="{chunk.source_note_id}">\n{chunk.content}\n</evidence>'
@@ -138,7 +147,7 @@ async def gather_cited_evidence(
     that does not resolve is simply absent from the evidence — so the deterministic gate marks the
     answer unsupported (a fabricated citation), which is the intended signal.
     """
-    citations = list(dict.fromkeys(WIKILINK.findall(answer)))
+    citations = cited_ids(answer)
     if not citations:
         return []
     directory = Path(notes_dir if notes_dir is not None else settings.knowledge_dir)

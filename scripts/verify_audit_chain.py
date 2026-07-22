@@ -1,12 +1,22 @@
 """Verify the tamper-evident hash chain over the GxP audit trail (plan F10-G1).
 
-Walks `audit_events` in insertion order and checks two invariants per row:
+Walks `audit_events` in insertion order and checks three invariants:
 1. `row_hash == chain_hash(prev_hash, event)` — the row's own audited fields are intact;
-2. `prev_hash` equals the previous chained row's `row_hash` — no row was deleted or reordered.
+2. `prev_hash` equals the previous chained row's `row_hash` — no interior row was deleted or
+   reordered;
+3. the first chained row's `prev_hash` is empty — the genesis anchor. Without it, deleting a
+   *leading* run of rows would leave a still-self-consistent chain (the new first row's link check
+   is otherwise skipped), so this catches prefix truncation.
 
-Either failure means the append-only trail was altered after the fact. Run as
+Any failure means the append-only trail was altered after the fact. Run as
 `python -m scripts.verify_audit_chain` (`make audit-verify`); it prints each problem and exits
 non-zero if the chain is broken, so it can gate a compliance check in CI or an audit.
+
+Known limit: deleting a *trailing* run of rows (tip truncation) cannot be detected from the chain
+alone — the remaining rows still link cleanly and nothing records how many rows there should be.
+Catching that needs an external append-count/max-id anchor recorded out-of-band; it is deferred
+(see DEFERRED.md). The chain detects modification, reordering, interior deletion, and prefix
+truncation.
 
 The pure `check_chain` is separated from the database fetch so the invariants are unit-testable
 offline over synthetic rows. Rows written before the chain migration (empty `row_hash`) are treated
@@ -36,15 +46,25 @@ def check_chain(rows: Iterable[ChainRow]) -> list[str]:
     """Return human-readable chain problems in `rows` (empty if the chain is intact).
 
     `rows` must be in ascending insertion order. A leading run of rows with an empty `row_hash`
-    (written before the chain migration) is skipped; verification begins at the first chained row
-    and every row after it must both hash correctly and link to its predecessor.
+    (written before the chain migration) is skipped; verification begins at the first chained row,
+    whose `prev_hash` must be empty (the genesis anchor — a non-empty one means a leading run was
+    deleted). Every row after it must both hash correctly and link to its predecessor.
     """
     problems: list[str] = []
     expected_prev: str | None = None
     for row in rows:
         if not row.row_hash and expected_prev is None:
             continue  # pre-chain legacy row, before the chain begins
-        if expected_prev is not None and row.prev_hash != expected_prev:
+        if expected_prev is None:
+            # The genesis row: the writer sets its prev_hash to "" (no tip to chain to). A non-empty
+            # value means the true first row(s) were removed — prefix truncation the per-row link
+            # check below cannot see, because there is no predecessor to compare this row against.
+            if row.prev_hash != "":
+                problems.append(
+                    f"audit row {row.id}: broken genesis — the first chained row links to a "
+                    "missing predecessor (a leading row was deleted)"
+                )
+        elif row.prev_hash != expected_prev:
             problems.append(
                 f"audit row {row.id}: broken link — prev_hash does not match the previous row "
                 "(a row was deleted, inserted, or reordered)"
