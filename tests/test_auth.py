@@ -5,6 +5,7 @@ redirected to that key — so signature, audience, issuer, and claim extraction 
 without a tenant or network. The HTTP tests prove the 401 gate and the dev-mode stand-in.
 """
 
+import logging
 import time
 from typing import Any
 
@@ -116,3 +117,28 @@ def test_healthz_never_requires_auth(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(settings, "entra_required", True)
     with TestClient(create_app(agent_factory=_FakeAgent)) as client:
         assert client.get("/healthz").status_code == 200
+
+
+@pytest.mark.parametrize(
+    ("entra_required", "host", "should_warn"),
+    [
+        (False, "0.0.0.0", True),  # unauthenticated + exposed → warn (SEC-2)
+        (False, "127.0.0.1", False),  # unauthenticated but loopback-only → safe, no warn
+        (False, "localhost", False),  # loopback alias → no warn
+        (True, "0.0.0.0", False),  # authenticated → no warn even when exposed
+    ],
+)
+def test_warns_when_unauthenticated_and_exposed(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    entra_required: bool,
+    host: str,
+    should_warn: bool,
+) -> None:
+    """The startup warning fires only for the unauthenticated, non-loopback bind (SEC-2)."""
+    monkeypatch.setattr(settings, "entra_required", entra_required)
+    monkeypatch.setattr(settings, "service_host", host)
+    with caplog.at_level(logging.WARNING, logger="service.app"):
+        create_app(agent_factory=_FakeAgent)
+    warned = any("authorization gates OPEN" in r.message for r in caplog.records)
+    assert warned is should_warn

@@ -11,6 +11,7 @@ Routes: `GET /healthz` (liveness), `GET /readyz` (readiness), `POST /sessions` (
 static chat UI at `/`. Identity (Entra OIDC on every non-health route) is layered on in F4.
 """
 
+import logging
 import uuid
 from collections.abc import AsyncIterator, Callable
 from pathlib import Path
@@ -32,7 +33,13 @@ from service.auth import Principal, require_principal
 from service.events import JobCompletedEvent
 from service.runner import run_turn
 
+logger = logging.getLogger(__name__)
+
 _STATIC_DIR = Path(__file__).parent / "static"
+
+# Loopback interfaces: binding here keeps the unauthenticated dev mode reachable only from the local
+# host, so it is not a network-exposed footgun. Anything else (notably the "0.0.0.0" default) is.
+_LOOPBACK_HOSTS = frozenset({"127.0.0.1", "localhost", "::1"})
 
 
 class MessageIn(BaseModel):
@@ -58,6 +65,7 @@ def create_app(agent_factory: Callable[[], Any] = build_agent) -> FastAPI:
     Returns:
         A configured `FastAPI` application.
     """
+    _warn_if_unauthenticated_and_exposed()
     app = FastAPI(title="Chemclaw", docs_url=None, redoc_url=None)
     _add_security_headers(app)
     _add_cors(app)
@@ -154,6 +162,26 @@ _CONTENT_SECURITY_POLICY = (
     "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; "
     "connect-src 'self'; img-src 'self' data:; base-uri 'none'; frame-ancestors 'none'"
 )
+
+
+def _warn_if_unauthenticated_and_exposed() -> None:
+    """Warn loudly when the app runs unauthenticated (`entra_required` off) on a non-loopback bind.
+
+    With `entra_required` False every request is the shared dev principal and all authorization
+    gates are open (SEC-2) — intended for local dev only. Binding that mode to a non-loopback
+    interface (the `service_host="0.0.0.0"` default) exposes it to the network, so surface it at
+    startup rather than leaving the whole deployment's safety to one env var defaulting the
+    insecure way. Per the sign-off this warns and still boots; a deployment sets
+    `CHEMCLAW_ENTRA_REQUIRED=true`.
+    """
+    if settings.entra_required or settings.service_host in _LOOPBACK_HOSTS:
+        return
+    logger.warning(
+        "SECURITY: entra_required is False but the service binds a non-loopback interface (%r) — "
+        "every request runs as the shared dev principal with all authorization gates OPEN. Set "
+        "CHEMCLAW_ENTRA_REQUIRED=true for any shared/exposed deployment.",
+        settings.service_host,
+    )
 
 
 def _add_security_headers(app: FastAPI) -> None:
