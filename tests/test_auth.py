@@ -99,6 +99,10 @@ def test_route_requires_token_when_entra_required(
         ok = client.post("/sessions", headers={"Authorization": f"Bearer {token}"})
         assert ok.status_code == 200
         assert ok.json()["session_id"]
+        # SEC-7: a rejected token returns a generic 401 detail, not the validation reason.
+        bad = client.post("/sessions", headers={"Authorization": "Bearer not.a.jwt"})
+        assert bad.status_code == 401
+        assert bad.json()["detail"] == "invalid or expired token"
 
 
 def test_dev_mode_allows_no_token() -> None:
