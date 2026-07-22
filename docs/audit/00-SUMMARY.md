@@ -1,7 +1,10 @@
 # 00 — Forensic Audit Summary & Findings Report
 
 **Repo:** `/home/user/Chemclaw3` · **Branch:** `claude/codebase-audit-hardening-69v233` · **Date:** 2026-07-22
-**Status:** Phases 0–8 complete (discovery → report). **Awaiting human sign-off before any code change (Phase 9/10).**
+**Status:** Phases 0–11 complete (discovery → report → sign-off → execution → handover). All
+approved backlog items are implemented, tested, and committed; the full gate is green (369 passed,
+0 failed). See `08-execution-plan.md`, `REFACTOR_LOG.md`, and `09-handover.md`. This file is the
+original findings report, kept as the record (finding rows annotated where execution changed them).
 
 Detailed evidence lives in the per-phase reports: `01-inventory`, `02-baseline`, `03-consistency`,
 `04-security`, `05-correctness`, `06-duplication`, `07-architecture`.
