@@ -557,6 +557,11 @@ class Settings(BaseSettings):
     # development-report workflow — one section is one activity, so a long report resumes
     # section by section after a worker restart.
     report_section_timeout_seconds: float = Field(default=300.0, gt=0)
+    # Sub-agent orchestration (plan F10-D). A fan-out job (report sections, memory-synthesis groups)
+    # runs its independent sub-tasks as child workflows; this bounds how many run at once so a large
+    # report/corpus does not spawn hundreds of children simultaneously. Per-child retry + durability
+    # come from each child's own retry policy; the bound is on concurrency only.
+    orchestrator_max_parallel_children: int = Field(default=8, ge=1)
     # How much of a source note's body an excerpt carries — shared by the report harness's
     # evidence excerpts and the memory layer's procedure excerpts (one note-excerpt budget,
     # neutral name since both consume it), so the two cannot drift.

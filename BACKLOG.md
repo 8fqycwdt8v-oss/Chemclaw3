@@ -54,8 +54,18 @@ tickets + disposition table: `docs/parity-plan.md`.
       `test_eval_drift` (incl. a baseline-matches-case-set guard), `test_schedules`, `test_config`.
       (Live retrieval cases are deployment-local — the shipped graph is empty — so only the pinned
       metric-regression case is committed; the driver scores a deployment's own retriever+corpus.)
-- [ ] **F10-D** Temporal child-workflow orchestration — the last F10 ticket. OCR/vision, vendor
-      connectors, GAMP-5 artifacts stay gate-until-trigger.
+- [x] **F10-D** sub-agent orchestration via Temporal child workflows: `workflows/orchestrator.py`
+      `fan_out(child, inputs)` runs N sub-tasks as bounded-parallel child workflows with per-child
+      retry + D-030 isolation (a poison child is dropped, siblings unaffected; results in input
+      order). Adopted by two real callers (Rule of Three): the report workflow (`ReportSectionWorkflow`
+      per section) and the memory jobs (pure `build_*_notes` extracted in `memory/jobs.py`, each note
+      published by a shared `PublishNoteWorkflow` child). Config `orchestrator_max_parallel_children`.
+      Tests: `test_orchestrator` (`_batches` offline + a Temporal-env fan-out isolation test),
+      `test_memory` (builder is behavior-preserving), `test_report_workflow`/`test_workers`
+      registration. Conversational multi-agent mesh stays gated (single agent + skills is KISS).
+- [ ] Gate-until-trigger (documented, not built): OCR/vision ingestion, vendor connectors
+      (Veeva/SAP/LIMS), GAMP-5 validation artifacts, conversational multi-agent mesh — each with its
+      trigger recorded in `docs/parity-plan.md`.
 
 ## Now — Foundation build (docs/foundation-plan.md + docs/implementation-tickets.md)
 

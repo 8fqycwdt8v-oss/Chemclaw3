@@ -65,6 +65,7 @@ def test_parity_defaults_are_backward_compatible() -> None:
     assert settings.verifier_confidence_threshold == 0.7
     assert settings.eval_drift_enabled is False  # no scheduled drift job until opted in
     assert settings.eval_drift_epsilon == 0.05
+    assert settings.orchestrator_max_parallel_children == 8  # bounded child fan-out
 
 
 def test_hybrid_retrieval_defaults_are_backward_compatible() -> None:

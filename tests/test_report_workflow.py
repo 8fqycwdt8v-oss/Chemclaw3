@@ -19,6 +19,7 @@ from tests.conftest import FakeSubmitter
 from tests.temporal_env import pydantic_client, start_env_or_skip
 from workflows.report_workflow import (
     DevelopmentReportWorkflow,
+    ReportSectionWorkflow,
     propose_report,
     retrieve_section,
 )
@@ -54,7 +55,7 @@ def test_report_workflow_drafts_and_pr_gates(monkeypatch: pytest.MonkeyPatch) ->
             async with Worker(
                 client,
                 task_queue=settings.background_task_queue,
-                workflows=[DevelopmentReportWorkflow],
+                workflows=[DevelopmentReportWorkflow, ReportSectionWorkflow],
                 activities=[retrieve_section, propose_report],
             ):
                 ref = await client.execute_workflow(
@@ -76,5 +77,6 @@ def test_background_worker_registers_report_workflow() -> None:
     from workers.background_worker import BACKGROUND_ACTIVITIES, BACKGROUND_WORKFLOWS
 
     assert DevelopmentReportWorkflow in BACKGROUND_WORKFLOWS
+    assert ReportSectionWorkflow in BACKGROUND_WORKFLOWS  # the fan-out child must be registered too
     assert retrieve_section in BACKGROUND_ACTIVITIES
     assert propose_report in BACKGROUND_ACTIVITIES

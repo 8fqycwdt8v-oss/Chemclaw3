@@ -28,6 +28,7 @@ with workflow.unsafe.imports_passed_through():
     )
     from report.retrievers import FingerprintReactionRetriever, GraphRetriever
 
+from workflows.orchestrator import fan_out
 from workflows.publish import BAD_DATA_RETRY, publish_note
 
 
@@ -49,22 +50,44 @@ async def propose_report(report: Report) -> str:
 
 
 @workflow.defn
+class ReportSectionWorkflow:
+    """Retrieve one report section durably — the fan-out unit of a report (plan F10-D2).
+
+    Each section is its own child workflow so a long report resumes section by section after a
+    worker restart and a single failing section is isolated (dropped by the fan-out) rather than
+    failing the whole report. The section's evidence logic is unchanged — this only owns its
+    durability boundary.
+    """
+
+    @workflow.run
+    async def run(self, section: ReportSection) -> SynthesizedSection:
+        """Run the section-retrieval activity with the shared timeout + bad-data retry."""
+        return await workflow.execute_activity(
+            retrieve_section,
+            section,
+            start_to_close_timeout=timedelta(seconds=settings.report_section_timeout_seconds),
+            retry_policy=BAD_DATA_RETRY,
+        )
+
+
+@workflow.defn
 class DevelopmentReportWorkflow:
-    """Draft a development report durably, one section at a time, then PR-gate it."""
+    """Draft a report durably, fanning sections out to child workflows, then PR-gate the draft."""
 
     @workflow.run
     async def run(self, request: ReportRequest) -> str:
-        """Retrieve every section (each a durable activity), then propose the draft note."""
-        timeout = timedelta(seconds=settings.report_section_timeout_seconds)
-        sections = [
-            await workflow.execute_activity(
-                retrieve_section,
-                section,
-                start_to_close_timeout=timeout,
-                retry_policy=BAD_DATA_RETRY,
-            )
-            for section in request.sections
-        ]
+        """Fan each section out to a child workflow, then propose the assembled draft note.
+
+        Sections are retrieved as independent child workflows (bounded parallelism, per-child
+        retry); a section that fails after its retries is dropped (D-030), the rest still form the
+        report in request order.
+        """
+        sections = await fan_out(
+            ReportSectionWorkflow,
+            request.sections,
+            id_prefix="section",
+            retry_policy=BAD_DATA_RETRY,
+        )
         report = Report(title=request.title, sections=sections)
         # The note reference *is* this workflow's result, so the publish is not
         # best-effort — but it shares the bounded-attempts discipline (G4).

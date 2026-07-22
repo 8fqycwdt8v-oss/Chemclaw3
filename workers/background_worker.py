@@ -39,13 +39,16 @@ from workflows.memory_jobs import (
     CampaignSynthesisWorkflow,
     OptimizationCampaignWorkflow,
     PlaybookDistillationWorkflow,
-    distill_playbooks_activity,
-    synthesize_campaigns_activity,
-    synthesize_optimization_campaigns_activity,
+    PublishNoteWorkflow,
+    build_campaign_notes_activity,
+    build_optimization_notes_activity,
+    build_playbook_notes_activity,
+    publish_memory_note_activity,
 )
 from workflows.notify import record_session_event_activity
 from workflows.report_workflow import (
     DevelopmentReportWorkflow,
+    ReportSectionWorkflow,
     propose_report,
     retrieve_section,
 )
@@ -60,7 +63,9 @@ BACKGROUND_WORKFLOWS: list[type] = [
     CampaignSynthesisWorkflow,
     PlaybookDistillationWorkflow,
     OptimizationCampaignWorkflow,
+    PublishNoteWorkflow,
     DevelopmentReportWorkflow,
+    ReportSectionWorkflow,
     InteractionApprovalWorkflow,
     EvalDriftWorkflow,
 ]
@@ -73,9 +78,10 @@ BACKGROUND_ACTIVITIES: Sequence[Callable[..., Any]] = [
     sync_eln_entries,
     load_sync_cursor,
     store_sync_cursor,
-    synthesize_campaigns_activity,
-    distill_playbooks_activity,
-    synthesize_optimization_campaigns_activity,
+    build_campaign_notes_activity,
+    build_playbook_notes_activity,
+    build_optimization_notes_activity,
+    publish_memory_note_activity,
     retrieve_section,
     propose_report,
     propose_confirmed_answer_activity,
