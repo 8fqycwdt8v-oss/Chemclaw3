@@ -55,6 +55,25 @@ def test_llm_provider_defaults_to_anthropic() -> None:
     assert settings.llm_max_tokens == 4096
 
 
+def test_parity_defaults_are_backward_compatible() -> None:
+    """F10 additions default to today's behavior: no model routing, allow-all tool authz."""
+    settings = Settings(_env_file=None)  # type: ignore[call-arg]
+    assert settings.model_routes == {}  # single-model behavior
+    assert settings.tool_role_gates == {}  # nothing gated
+    assert settings.tool_authz_default == "allow"  # every tool callable by default
+
+
+def test_parity_json_env_overrides(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The dict-typed F10 knobs parse their JSON env overrides."""
+    monkeypatch.setenv("CHEMCLAW_MODEL_ROUTES", '{"verifier": "small"}')
+    monkeypatch.setenv("CHEMCLAW_TOOL_ROLE_GATES", '{"submit_qm_job": ["chemist"]}')
+    monkeypatch.setenv("CHEMCLAW_TOOL_AUTHZ_DEFAULT", "deny")
+    settings = Settings(_env_file=None)  # type: ignore[call-arg]
+    assert settings.model_routes == {"verifier": "small"}
+    assert settings.tool_role_gates == {"submit_qm_job": ["chemist"]}
+    assert settings.tool_authz_default == "deny"
+
+
 def test_openai_compatible_requires_endpoint_and_model() -> None:
     """Selecting the internal provider without a base_url/model fails at startup, clearly."""
     with pytest.raises(ValueError, match="llm_base_url"):

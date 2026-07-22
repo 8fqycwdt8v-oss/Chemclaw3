@@ -5,12 +5,27 @@ Prioritized open action items. Top = next. Keep in sync with `docs/implementatio
 
 ## Next — Platform-parity hardening (docs/parity-plan.md, Phase F10)
 
-Closes the platform-capability deltas found against a commercial pharma-agent platform: hybrid
-retrieval (F10-A, executes/extends F8-T2), answer verification + confidence routing (F10-B),
-per-tool authorization (F10-C), Temporal child-workflow orchestration (F10-D), per-task model
-routing (F10-E), P/R/F1 + drift metrics (F10-F), audit hash-chain + bi-temporal notes (F10-G).
-OCR/vision, vendor connectors, and GAMP-5 artifacts are gated-until-trigger. Full tickets +
-disposition table: `docs/parity-plan.md`.
+Closes the platform-capability deltas found against a commercial pharma-agent platform. Full
+tickets + disposition table: `docs/parity-plan.md`.
+
+- [x] **F10-E** per-task model routing: `build_chat_client(task)` consults `model_routes`
+      (task→model) in the one provider seam; empty map = today's single model. Test:
+      `test_llm_provider.py`, `test_config.py`.
+- [x] **F10-C** per-tool authorization: `agents/authz.py::authorize_tool` (`tool_role_gates` +
+      `tool_authz_default`) enforced by one middleware `agents/tool_authz.py::enforce_tool_authz`,
+      wired into `build_agent` after audit; default-allow, active only under `entra_required`. The
+      coarse expensive-trigger gate now shares `_has_required_role` (DRY). Tests:
+      `test_tool_authz.py`, `test_agent.py`, `test_config.py`.
+- [x] **F10-G1** tamper-evident audit hash-chain: migration `011_audit_hash_chain.sql`
+      (`prev_hash`/`row_hash`), `audit_store.chain_hash` + advisory-lock-serialized chained insert,
+      `scripts/verify_audit_chain.py` + `make audit-verify`. Tests: `test_audit_chain.py` (offline
+      tamper/deletion detection; PG round-trip skips offline).
+- [x] **F10-G2** bi-temporal note validation: `kg/note.py` rejects `valid_to < valid_from` (fields
+      already existed); surfaced by the parser + `kg-validate`. Test: `test_note.py`.
+- [ ] **F10-A** hybrid retrieval (executes/extends F8-T2) · **F10-B** answer verification +
+      confidence routing · **F10-D** Temporal child-workflow orchestration · **F10-F** P/R/F1 +
+      drift metrics — remaining F10 tickets. OCR/vision, vendor connectors, GAMP-5 artifacts stay
+      gate-until-trigger.
 
 ## Now — Foundation build (docs/foundation-plan.md + docs/implementation-tickets.md)
 

@@ -23,8 +23,14 @@ from chemclaw.config import settings
 _KEYLESS_PLACEHOLDER = "not-required"
 
 
-def build_chat_client() -> Any:
+def build_chat_client(task: str = "agent") -> Any:
     """Build the configured MAF chat client (provider selected by `settings.llm_provider`).
+
+    Args:
+        task: The routing key for per-task model selection (plan F10-E). When
+            `settings.model_routes` names a model for this task, that model is used; otherwise the
+            provider's default model (`llm_model`/`agent_model`) is used. The default `"agent"`
+            reproduces the single-model behavior, so existing callers need no change.
 
     Returns:
         A MAF chat client ready to hand to `Agent(client=...)`. No network call happens here —
@@ -35,17 +41,19 @@ def build_chat_client() -> Any:
             message naming exactly what to set (so a misconfiguration fails clearly at build time,
             not as an opaque 401/404 on the first model call).
     """
+    model = settings.model_routes.get(task)
     if settings.llm_provider == "openai_compatible":
-        return _openai_compatible_client()
-    return _anthropic_client()
+        return _openai_compatible_client(model)
+    return _anthropic_client(model)
 
 
-def _openai_compatible_client() -> Any:
+def _openai_compatible_client(model: str | None = None) -> Any:
     """Point MAF's OpenAI client at the internal endpoint (base_url + generic credential).
 
     Transport (private-CA TLS via `llm_tls_ca_bundle`, `llm_timeout_seconds`, `llm_max_retries`) is
     carried by an `AsyncOpenAI` we construct explicitly, since MAF's client constructor does not
-    expose those — the model call must survive a slow or self-signed internal endpoint.
+    expose those — the model call must survive a slow or self-signed internal endpoint. `model`
+    overrides the default endpoint model for per-task routing (F10-E); None keeps `llm_model`.
     """
     from agent_framework.openai import OpenAIChatClient
     from openai import AsyncOpenAI
@@ -57,7 +65,7 @@ def _openai_compatible_client() -> Any:
         max_retries=settings.llm_max_retries,
         http_client=_tls_http_client(),
     )
-    return OpenAIChatClient(model=settings.llm_model, async_client=async_client)
+    return OpenAIChatClient(model=model or settings.llm_model, async_client=async_client)
 
 
 def _tls_http_client() -> Any | None:
@@ -73,12 +81,13 @@ def _tls_http_client() -> Any | None:
     return httpx.AsyncClient(verify=settings.llm_tls_ca_bundle)
 
 
-def _anthropic_client() -> Any:
+def _anthropic_client(model: str | None = None) -> Any:
     """Build the Anthropic dev-path client (unchanged behavior from the pre-seam default).
 
     Preflights the key so a missing credential fails here with a clear message rather than an opaque
     401 on the first call. `agent_model` (not `llm_model`) names the Anthropic model, keeping the
-    two providers' model settings independent.
+    two providers' model settings independent; `model` overrides it for per-task routing (F10-E),
+    None keeps `agent_model`.
     """
     import os
 
@@ -90,4 +99,4 @@ def _anthropic_client() -> Any:
         )
     from agent_framework.anthropic import AnthropicClient
 
-    return AnthropicClient(model=settings.agent_model)
+    return AnthropicClient(model=model or settings.agent_model)

@@ -14,7 +14,7 @@ from typing import Literal
 
 import frontmatter
 import yaml
-from pydantic import BaseModel, Field, ValidationError, field_validator
+from pydantic import BaseModel, Field, ValidationError, field_validator, model_validator
 
 from chemclaw.errors import ChemclawError
 
@@ -73,6 +73,23 @@ class Note(BaseModel):
     valid_from: date | None = None
     valid_to: date | None = None
     body: str = ""
+
+    @model_validator(mode="after")
+    def _valid_interval(self) -> "Note":
+        """A bi-temporal note's validity window must not end before it starts (plan F10-G1/G2).
+
+        `valid_from`/`valid_to` answer "what did we know at time T"; a `valid_to` earlier than
+        `valid_from` is a nonsensical window that would silently break any time-scoped query, so
+        it is rejected here at the schema boundary (surfaced by the parser and `kg-validate`).
+        Either bound may be absent (open-ended); the check applies only when both are set.
+        """
+        if (
+            self.valid_from is not None
+            and self.valid_to is not None
+            and self.valid_to < self.valid_from
+        ):
+            raise ValueError(f"valid_to {self.valid_to} is before valid_from {self.valid_from}")
+        return self
 
     def outgoing_links(self) -> list[str]:
         """The ids this note links to, from `[[wikilinks]]` in its body.

@@ -199,6 +199,15 @@ class Settings(BaseSettings):
     llm_max_retries: int = Field(default=3, ge=0)
     llm_temperature: float = Field(default=0.0, ge=0)
     llm_max_tokens: int = Field(default=4096, gt=0)
+    # Per-task model routing (plan F10-E). Maps a task name to the model id to use for it, so a
+    # cheap model can run high-throughput/secondary steps (verification, classification) while the
+    # frontier model drives the main reasoning turn — without a second provider or a second import
+    # site (`build_chat_client(task)` stays the one place a client is built). Model ids are for the
+    # *active* provider (an `openai_compatible` model name, or an Anthropic one); a task with no
+    # entry falls back to the provider's default (`llm_model`/`agent_model`), so an empty map (the
+    # default) is exactly today's single-model behavior. ENV override is JSON, e.g.
+    # CHEMCLAW_MODEL_ROUTES='{"verifier": "internal-small", "agent": "internal-large"}'.
+    model_routes: dict[str, str] = Field(default_factory=dict)
 
     # MAF agent (plan step 1.5). `agent_model` is the orchestration model name
     # (ENV-overridable); the provider's API key is read by the chat client from
@@ -335,6 +344,16 @@ class Settings(BaseSettings):
     # empty by default: nothing is privileged until a deployment declares it.
     entra_expensive_actions: str = ""
     entra_privileged_roles: str = ""
+    # Per-tool authorization (plan F10-C): generalizes the single expensive-trigger gate to *every*
+    # tool invocation via one middleware. `tool_role_gates` maps a tool name to the Entra app-roles
+    # allowed to call it; a tool with no entry falls back to `tool_authz_default` — `"allow"` (the
+    # safe default = today's behavior, every tool callable) or `"deny"` (allowlist mode: only listed
+    # tools are callable, by a role-holder). Enforced only when `entra_required` (dev gate is open).
+    # ENV override for the gates is JSON, e.g. CHEMCLAW_TOOL_ROLE_GATES='{"submit_qm_job":
+    # ["process-chemist"]}'. Note: `deny` with an empty `tool_role_gates` blocks *all* tools — a
+    # deliberate lockdown, not a footgun to stumble into.
+    tool_role_gates: dict[str, list[str]] = Field(default_factory=dict)
+    tool_authz_default: Literal["allow", "deny"] = "allow"
     # The identity a *user-triggered* workflow records when there is no authenticated user
     # (plan F4-T3). Only reachable in local dev (`entra_required=False`, no tenant) and for
     # system-triggered jobs; under enforcement `require_actor` rejects an absent user instead
