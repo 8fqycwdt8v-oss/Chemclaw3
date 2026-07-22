@@ -10,6 +10,7 @@ Errors are turned into a single `ErrorEvent` with a user-safe message rather tha
 stack trace to the browser — a failed turn must not take down the stream or leak internals.
 """
 
+import logging
 from collections.abc import AsyncIterator
 from contextlib import AsyncExitStack
 from typing import Any
@@ -26,6 +27,8 @@ from service.events import (
     TokenEvent,
     ToolCallEvent,
 )
+
+logger = logging.getLogger(__name__)
 
 # How many characters of a tool call's arguments the trace event carries — enough to see *what* was
 # called without streaming a whole evidence payload to the UI (mirrors the audit trail truncation).
@@ -78,9 +81,18 @@ async def run_turn(
                 for request in getattr(update, "user_input_requests", None) or []:
                     yield ApprovalRequestEvent(prompt=_approval_prompt(request))
         yield AnswerEvent(text="".join(answer_parts))
-    except Exception as exc:
+    except Exception:
         # One turn's failure becomes one user-safe event, never a 500 mid-stream or a leaked trace.
-        yield ErrorEvent(message=f"The turn could not be completed: {exc}")
+        # The exception detail (DB hosts, SMILES, workflow ids, driver errors) stays server-side in
+        # the log; the client gets a generic message keyed by the session id it already knows, so an
+        # operator can correlate the report to the logged stack trace without leaking internals.
+        logger.exception("turn failed for session %s", session.session_id)
+        yield ErrorEvent(
+            message=(
+                "The turn could not be completed due to an internal error "
+                f"(session {session.session_id})."
+            )
+        )
     finally:
         reset_current_session_id(session_token)
         if identity_token is not None:
