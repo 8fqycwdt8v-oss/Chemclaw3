@@ -129,6 +129,13 @@ MAF ships the harness natively (`create_harness_agent` + `TodoProvider`/`AgentMo
 
 ## Later — Phase 6 items now folded into F4 above (infra-gated pieces need live Entra/Temporal)
 
+### Done — role-scoped skill visibility (D-052)
+- [x] `RoleScopedSkillsSource` + `settings.skill_role_gates` gate advertised skills by the turn's
+      ambient Entra roles, replacing F4's dead `allowed_skills` placeholder. Salvaged (the one
+      superior, non-redundant piece) from the parallel `phase6-authz` branch; its duplicate
+      `Principal` and second tool-authz path were dropped as already covered better by F4.
+      `test_skill_access.py`.
+
 ## Deep-review follow-ups (D-030)
 
 ### Done — robustness/correctness fixes (D-030)

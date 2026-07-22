@@ -208,6 +208,12 @@ class Settings(BaseSettings):
     # directory without code changes. Read it through the `skills_dirs` property, never raw.
     agent_model: str = "claude-sonnet-5"
     skills_dir: str = "skills"
+    # Role-scoped skill visibility (plan step 6.2): map a skill name to the Entra app-roles allowed
+    # to see it. A skill not listed is ungated (advertised to everyone); a listed skill is hidden
+    # from a caller (the turn's ambient identity) holding none of its roles. Empty default = every
+    # skill visible (today's behavior). ENV override is JSON, e.g.
+    # CHEMCLAW_SKILL_ROLE_GATES='{"deep-research": ["process-chemist"]}'.
+    skill_role_gates: dict[str, list[str]] = Field(default_factory=dict)
     # MCP capability servers the agent attaches over stdio (the plan's capability layer, D-029):
     # the agent calls the fingerprint search over the MCP protocol rather than importing it
     # in-process, so a capability is a running server, not agent code. Adding one is an entry

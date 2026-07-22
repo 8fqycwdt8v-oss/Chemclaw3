@@ -43,7 +43,7 @@ from agents.llm_provider import build_chat_client
 from agents.memory_tools import record_confirmed_answer
 from agents.qm_tools import get_qm_job_status, submit_qm_job
 from agents.research_tools import gather_evidence
-from agents.skill_access import RoleFilteredSkillsSource
+from agents.skill_access import RoleScopedSkillsSource
 from chemclaw.config import McpServerSpec, settings
 
 _INSTRUCTIONS = (
@@ -89,7 +89,6 @@ def build_agent(
     actor: str = "unknown",
     correlation_id: str | None = None,
     audit_sink: AuditSink | None = None,
-    allowed_skills: set[str] | None = None,
 ) -> Agent:
     """Construct the Chemclaw agent with its tools and skills.
 
@@ -110,16 +109,15 @@ def build_agent(
             is generated when omitted, so each agent gets its own trail id.
         audit_sink: Durable destination for the audit trail. Omitted means log-only
             (the default `NullAuditSink`); pass a `PostgresAuditSink` for the GxP record.
-        allowed_skills: Names of the skills this caller may see — the Phase-6 role-scoping
-            seam. Omitted (the default) advertises every skill, preserving today's behavior;
-            Phase 6 resolves a user's Entra roles to this set.
 
     Returns:
         A ready-to-run `Agent`. No LLM call and no subprocess happen at construction.
     """
     client = chat_client if chat_client is not None else build_chat_client()
+    # Advertised skills are role-scoped by `settings.skill_role_gates` against the turn's ambient
+    # identity (`agents.identity_context`); an empty gate map (the default) shows every skill.
     skills = SkillsProvider(
-        RoleFilteredSkillsSource(FileSkillsSource(settings.skills_dirs), allowed_skills)
+        RoleScopedSkillsSource(FileSkillsSource(settings.skills_dirs), settings.skill_role_gates)
     )
     history = _history_provider()
     audit = make_audit_middleware(
