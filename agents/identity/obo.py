@@ -14,6 +14,7 @@ import httpx
 
 from agents.identity.workload import read_sa_token
 from chemclaw.config import settings
+from chemclaw.http import error_detail
 
 # The OBO grant and the federated client-assertion type (RFC 7523 / Entra).
 _OBO_GRANT = "urn:ietf:params:oauth:grant-type:jwt-bearer"
@@ -56,7 +57,7 @@ async def exchange_obo(
     ) as client:
         response = await client.post(settings.entra_token_endpoint, data=data)
     if response.status_code != httpx.codes.OK:
-        raise OboExchangeError(f"obo exchange failed: {response.status_code} {response.text}")
+        raise OboExchangeError(f"obo exchange failed: {error_detail(response)}")
     access_token = response.json().get("access_token")
     if not access_token:
         raise OboExchangeError("obo endpoint returned no access_token")

@@ -15,6 +15,7 @@ from enum import StrEnum
 import httpx
 
 from chemclaw.config import settings
+from chemclaw.http import error_detail
 from workflows.models import HpcJobHandle, QMJobInput
 
 
@@ -82,7 +83,7 @@ async def launch_run(
     async with await _client(transport) as client:
         response = await client.post("/workflow/launch", json=payload)
     if response.status_code != httpx.codes.OK:
-        raise NextflowError(f"launch failed: {response.status_code} {response.text}")
+        raise NextflowError(f"launch failed: {error_detail(response)}")
     run_id = response.json().get("workflowId")
     if not run_id:
         raise NextflowError("launcher returned no workflowId")
@@ -100,7 +101,7 @@ async def poll_run(
     async with await _client(transport) as client:
         response = await client.get(f"/workflow/{handle.scheduler_job_id}")
     if response.status_code != httpx.codes.OK:
-        raise NextflowError(f"poll failed: {response.status_code} {response.text}")
+        raise NextflowError(f"poll failed: {error_detail(response)}")
     status = str(response.json().get("workflow", {}).get("status", "")).upper()
     state = _STATE_BY_LAUNCHER_STATUS.get(status)
     if state is None:
@@ -123,5 +124,5 @@ async def fetch_artifacts(
     async with await _client(transport) as client:
         response = await client.get(url)
     if response.status_code != httpx.codes.OK:
-        raise NextflowError(f"artifact fetch failed: {response.status_code} {response.text}")
+        raise NextflowError(f"artifact fetch failed: {error_detail(response)}")
     return response.text
