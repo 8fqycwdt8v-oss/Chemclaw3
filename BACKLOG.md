@@ -30,16 +30,14 @@ Entra token and threading it through the rest of the stack. Split by what can be
 what needs live infra:
 
 **Offline-doable now (test against a synthetic RSA keypair / self-issued JWT — no tenant):**
-- [ ] 6.1 `chemclaw/auth.py`: `TokenValidator` that validates an Entra JWT and returns a
-      `Principal` — signature via JWKS, plus `aud`/`iss`/`exp` checks and `roles`/`groups` claim
-      extraction. Add the JWT lib (`pyjwt[crypto]` or `joserfc`) as a dep. Unit-test the whole
-      decision with a locally-generated keypair (valid token → Principal; bad sig / wrong aud /
-      expired → rejected). Leaves only the *live JWKS URL + tenant/client ids* as config to wire.
+- [x] 6.1 `chemclaw/auth.py::TokenValidator` (D-041): validates an Entra JWT (RS256 via a
+      pluggable key resolver; `aud`/`iss`/`exp`) and maps `oid`/`upn`/`roles`/`groups` → `Principal`;
+      `TokenValidationError` on any failure or missing `oid`. `for_entra(...)` wires the live
+      `PyJWKClient`. Dep `pyjwt[crypto]`; config `entra_tenant_id`/`entra_audience`/`entra_jwks_url`.
+      Tests: `test_auth.py` (valid → Principal; bad sig / wrong aud / expired / no-oid → rejected).
 - [ ] Propagate the caller into the durable path: set `QMJobInput.requested_by = principal.oid`
       at the `submit_qm_job` tool (the workflow field already exists) so the audit `oid` reaches
-      Temporal. Testable offline.
-- [ ] Config for the above: `entra_tenant_id`, `entra_client_id`/`audience`, `entra_jwks_url`
-      (defaults empty; validation is only active when configured, mirroring the gates).
+      Temporal. Testable offline — not yet done.
 
 **Needs a live tenant / cluster (implement behind the interfaces above, mark as infra-gated):**
 - [ ] 6.1 MCP-server auth (FastMCP `AzureProvider`/`BearerAuthProvider`), OAuth-proxy pattern

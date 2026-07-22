@@ -155,6 +155,15 @@ class Settings(BaseSettings):
     # enforcement (today's behavior) — the authz middleware is only wired when this is non-empty.
     # ENV override is JSON, e.g. CHEMCLAW_TOOL_ROLE_GATES='{"submit_qm_job": ["compute"]}'.
     tool_role_gates: dict[str, list[str]] = Field(default_factory=dict)
+    # Entra ID token validation (plan step 6.1) — the inputs to `chemclaw.auth.TokenValidator.
+    # for_entra`, which turns a caller's JWT into a `Principal`. `entra_tenant_id` fixes the
+    # expected issuer + the JWKS (signing-key) endpoint; `entra_audience` is the `aud` a token
+    # must carry (this API's app-id/URI). `entra_jwks_url` overrides the derived endpoint (e.g.
+    # a sovereign cloud). Empty defaults = no live validation wired yet; the validator is built
+    # only where a front door authenticates a request (see SECURITY.md).
+    entra_tenant_id: str = ""
+    entra_audience: str = ""
+    entra_jwks_url: str = ""
     # MCP capability servers the agent attaches over stdio (the plan's capability layer, D-029):
     # the agent calls the fingerprint search over the MCP protocol rather than importing it
     # in-process, so a capability is a running server, not agent code. Adding one is an entry

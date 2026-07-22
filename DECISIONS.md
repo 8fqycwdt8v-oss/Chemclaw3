@@ -749,3 +749,19 @@ Enforcement is opt-in by config, mirroring `skill_role_gates` (D-039): turning o
 admin change, not code. What still needs live infra: validating the Entra JWT that produces the
 `Principal` in the first place (JWKS/OBO), Temporal mTLS, and the HPC bridge — those remain the
 infra-gated tail of Phase 6.
+
+## D-041 — Phase 6, part 3 (offline slice): Entra token validation → Principal
+The identity that parts 1–2 consume (D-039/D-040) is *produced* by validating the caller's Entra
+JWT. The validation logic is standard and testable offline; only the signing-key source (the
+tenant JWKS endpoint) is live. So `chemclaw/auth.py::TokenValidator` takes a pluggable key
+resolver: `validate(token)` verifies the RS256 signature, `aud`, `iss`, and `exp`, then maps the
+Entra claims (`oid`, `preferred_username`/`upn`, `roles`, `groups`) to a `Principal`; a token
+failing any check — or lacking `oid` — raises `TokenValidationError`. `TokenValidator.for_entra(
+tenant_id, audience)` wires the live `PyJWKClient` (the network edge); tests inject a static
+public key and exercise the whole decision with a synthetic RSA keypair (valid → Principal; bad
+signature / wrong audience / expired / no-oid → rejected).
+
+Dependency added: `pyjwt[crypto]`. Config: `entra_tenant_id`/`entra_audience`/`entra_jwks_url`
+(empty defaults — the live validator is built only where a front door authenticates a request).
+Still infra-gated (the true tail of Phase 6): calling `for_entra` from a real entrypoint, the MCP
+OAuth-proxy/OBO flow, Temporal mTLS, and the HPC bridge — none buildable without a tenant/cluster.
