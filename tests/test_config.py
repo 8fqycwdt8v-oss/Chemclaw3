@@ -63,6 +63,8 @@ def test_parity_defaults_are_backward_compatible() -> None:
     assert settings.tool_authz_default == "allow"  # every tool callable by default
     assert settings.verifier_enabled is False  # deterministic citation gate, no LLM judge
     assert settings.verifier_confidence_threshold == 0.7
+    assert settings.eval_drift_enabled is False  # no scheduled drift job until opted in
+    assert settings.eval_drift_epsilon == 0.05
 
 
 def test_hybrid_retrieval_defaults_are_backward_compatible() -> None:

@@ -29,6 +29,7 @@ from workflows.eln_sync import (
     store_sync_cursor,
     sync_eln_entries,
 )
+from workflows.eval_drift import EvalDriftWorkflow, check_eval_drift
 from workflows.interaction_approval import (
     InteractionApprovalWorkflow,
     propose_confirmed_answer_activity,
@@ -61,6 +62,7 @@ BACKGROUND_WORKFLOWS: list[type] = [
     OptimizationCampaignWorkflow,
     DevelopmentReportWorkflow,
     InteractionApprovalWorkflow,
+    EvalDriftWorkflow,
 ]
 BACKGROUND_ACTIVITIES: Sequence[Callable[..., Any]] = [
     propose_initial,
@@ -78,6 +80,7 @@ BACKGROUND_ACTIVITIES: Sequence[Callable[..., Any]] = [
     propose_report,
     propose_confirmed_answer_activity,
     record_session_event_activity,
+    check_eval_drift,
 ]
 
 

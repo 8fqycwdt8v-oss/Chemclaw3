@@ -167,6 +167,112 @@ def bo_regret(case: EvalCase) -> MetricResult:
     )
 
 
+def _id_set(raw: Any, field: str) -> set[str]:
+    """Coerce a list of note ids into a set of strings, else a `MetricError` naming it (G4).
+
+    A missing key is an empty set (a retriever that returned nothing, or a case expecting nothing),
+    which is a meaningful score — not an error. A non-list value *is* an error: a bare string would
+    silently become a set of characters and score nonsense.
+    """
+    if raw is None:
+        return set()
+    if not isinstance(raw, (list, tuple)):
+        raise MetricError(f"{field} must be a list of note ids, got {raw!r}")
+    return {str(x) for x in raw}
+
+
+def _classification(case: EvalCase) -> tuple[set[str], set[str]]:
+    """The (predicted, expected) id sets a classification metric scores (F10-F1).
+
+    Predicted ids come from `output.predicted_note_ids` (what the retriever/extractor returned);
+    expected ids from `reference.expected_note_ids` (the ground truth). A case with no reference
+    cannot be scored for precision/recall/F1 — the ground truth is the whole point (G4).
+    """
+    if case.reference is None:
+        raise MetricError("classification metrics need a reference with `expected_note_ids`")
+    predicted = _id_set(case.output.get("predicted_note_ids"), "output.predicted_note_ids")
+    expected = _id_set(case.reference.get("expected_note_ids"), "reference.expected_note_ids")
+    return predicted, expected
+
+
+def precision_recall_f1(predicted: set[str], expected: set[str]) -> tuple[float, float, float]:
+    """Return (precision, recall, F1) for a predicted vs expected id set (the shared computation).
+
+    Conventions for the degenerate cases (so the score is defined, never a divide-by-zero): with no
+    predictions, precision is 1.0 iff nothing was expected (a correct empty answer) else 0.0; with
+    nothing expected, recall is 1.0 (there was nothing to miss); F1 is 0.0 when precision+recall is
+    0. Pure and set-based, so it is reused by all three metrics and directly unit-tested.
+    """
+    true_positives = len(predicted & expected)
+    if predicted:
+        precision = true_positives / len(predicted)
+    else:
+        precision = 1.0 if not expected else 0.0
+    recall = true_positives / len(expected) if expected else 1.0
+    f1 = 0.0 if precision + recall == 0 else 2 * precision * recall / (precision + recall)
+    return precision, recall, f1
+
+
+@metric("precision")
+def precision(case: EvalCase) -> MetricResult:
+    """Retrieval/extraction precision: fraction of predicted note ids that were expected (F10-F1).
+
+    A report/drift metric (no config gate): it measures how noisy a retriever's hits are. Reads
+    `output.predicted_note_ids` vs `reference.expected_note_ids`.
+    """
+    predicted, expected = _classification(case)
+    value, _recall, _f1 = precision_recall_f1(predicted, expected)
+    return MetricResult(
+        metric="precision",
+        value=value,
+        unit=None,
+        passed=None,
+        provenance=(
+            f"precision = |predicted ∩ expected| {len(predicted & expected)} / "
+            f"|predicted| {len(predicted)}"
+        ),
+    )
+
+
+@metric("recall")
+def recall(case: EvalCase) -> MetricResult:
+    """Retrieval/extraction recall: fraction of expected note ids that were predicted (F10-F1).
+
+    A report/drift metric (no config gate): it measures how much of the ground truth a retriever
+    finds. Reads `output.predicted_note_ids` vs `reference.expected_note_ids`.
+    """
+    predicted, expected = _classification(case)
+    _precision, value, _f1 = precision_recall_f1(predicted, expected)
+    return MetricResult(
+        metric="recall",
+        value=value,
+        unit=None,
+        passed=None,
+        provenance=(
+            f"recall = |predicted ∩ expected| {len(predicted & expected)} / "
+            f"|expected| {len(expected)}"
+        ),
+    )
+
+
+@metric("f1")
+def f1(case: EvalCase) -> MetricResult:
+    """Retrieval/extraction F1: the harmonic mean of precision and recall (F10-F1).
+
+    A report/drift metric (no config gate) — the single number that balances noise against
+    coverage. Reads `output.predicted_note_ids` vs `reference.expected_note_ids`.
+    """
+    predicted, expected = _classification(case)
+    p, r, value = precision_recall_f1(predicted, expected)
+    return MetricResult(
+        metric="f1",
+        value=value,
+        unit=None,
+        passed=None,
+        provenance=f"F1 = harmonic_mean(precision {p:.4g}, recall {r:.4g})",
+    )
+
+
 def _scalar(raw: Any, field: str) -> float:
     """Coerce a required numeric field, else a `MetricError` naming it (G4).
 

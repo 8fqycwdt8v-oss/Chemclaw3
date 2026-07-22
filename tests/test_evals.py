@@ -97,6 +97,7 @@ def test_harness_runs_over_versioned_case_set_and_gates() -> None:
         "green-esterification",
         "pharma-solvent-heavy",
         "solubility-benzene",
+        "retrieval-precision-recall",
     }
     report = run_eval(cases, case_set_version="v1")
     failed_ids = {r.case_id for r in report.failed()}

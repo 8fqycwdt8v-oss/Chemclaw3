@@ -43,8 +43,19 @@ tickets + disposition table: `docs/parity-plan.md`.
       `verifier_enabled`, `verifier_confidence_threshold`. Tests: `test_verifier`, `test_runner`,
       `test_config`. (Durable report workflow verifies at citation level — no prose there; the
       conversational path gets the LLM faithfulness score.)
-- [ ] **F10-D** Temporal child-workflow orchestration · **F10-F** P/R/F1 + drift metrics — remaining
-      F10 tickets. OCR/vision, vendor connectors, GAMP-5 artifacts stay gate-until-trigger.
+- [x] **F10-F** quality metrics — P/R/F1 + drift: `evals/metrics.py` adds `precision`/`recall`/`f1`
+      (pure `precision_recall_f1` over predicted vs `expected_note_ids`; report/drift metrics, no
+      per-case gate); `evals/retrieval.py` scores a live retriever's P/R/F1 (`run_retrieval_eval`,
+      reuses `run_eval`); `evals/baseline.py` (`aggregate_metrics`/`detect_drift`, committed
+      `evals/baseline.json`) + `workflows/eval_drift.py` (`EvalDriftWorkflow` on background-jobs,
+      alerts via the notify seam) + a `scripts/schedules.py` opt-in Schedule. Config:
+      `eval_drift_enabled`/`_schedule_minutes`/`_epsilon`, `eval_baseline_path`. Committed pinned
+      case `retrieval-precision-recall.md`. Tests: `test_metrics_classification`, `test_retrieval_eval`,
+      `test_eval_drift` (incl. a baseline-matches-case-set guard), `test_schedules`, `test_config`.
+      (Live retrieval cases are deployment-local — the shipped graph is empty — so only the pinned
+      metric-regression case is committed; the driver scores a deployment's own retriever+corpus.)
+- [ ] **F10-D** Temporal child-workflow orchestration — the last F10 ticket. OCR/vision, vendor
+      connectors, GAMP-5 artifacts stay gate-until-trigger.
 
 ## Now — Foundation build (docs/foundation-plan.md + docs/implementation-tickets.md)
 

@@ -457,6 +457,14 @@ class Settings(BaseSettings):
     # defeating the band); raise it to the actual measurement noise of the metric a
     # given case-set exercises.
     eval_ab_epsilon: float = Field(default=1e-6, ge=0.0)
+    # Eval drift detection (plan F10-F2). A `background-jobs` workflow re-runs the committed
+    # case-set on a cadence and alerts when an aggregate metric moves further than
+    # `eval_drift_epsilon` from the Git-committed baseline (`evals/baseline.json`) — the noise band
+    # (mirrors `eval_ab_epsilon`). Off by default; enabling it adds the Schedule (D-035).
+    eval_drift_enabled: bool = False
+    eval_drift_schedule_minutes: int = Field(default=1440, ge=1)
+    eval_drift_epsilon: float = Field(default=0.05, ge=0)
+    eval_baseline_path: str = "evals/baseline.json"
 
     # Fingerprint search (plan Phase 3, mcp-molfp). ECFP4 = Morgan radius 2, 2048 bits;
     # both are config so the fingerprint definition (and thus the stored column width)
