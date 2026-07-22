@@ -246,6 +246,15 @@ class Settings(BaseSettings):
     agent_keep_last_tool_groups: int = Field(default=2, ge=0)
     agent_keep_last_conversation_groups: int = Field(default=12, ge=1)
 
+    # Local testing CLI (`agents.cli`). The CLI is a developer affordance for driving the agent
+    # from a terminal; the production ingress is Teams/Copilot with native Entra-ID SSO
+    # (architektur.md §7), not this. Because Entra enforcement defaults off in dev
+    # (`entra_required=False`), the CLI can only run in explicit `--admin` mode, which bypasses
+    # auth for testing and attributes the audit trail to this actor. It is a config value (not a
+    # hardcoded string) so a deployment can label its test runs — e.g. a machine name — rather
+    # than a generic "admin".
+    cli_admin_actor: str = "admin@localhost"
+
     # MAF Agent Harness (plan Phase F1) — the autonomous plan/execute backbone (the Claude-Code-like
     # experience). When `harness_enabled`, `build_agent` wires MAF's `create_harness_agent` (todo
     # list + plan/execute mode + a bounded completion loop) over the *same* tools/skills/audit/
