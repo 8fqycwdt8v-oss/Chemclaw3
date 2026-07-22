@@ -64,11 +64,16 @@ def test_healthz_is_ok() -> None:
 
 
 def test_static_chat_page_is_served() -> None:
-    """The browser chat surface is served at the root."""
+    """The browser chat surface is served at the root, with security headers, and still loads."""
     with _client(_FakeAgent()) as client:
         res = client.get("/")
         assert res.status_code == 200
-        assert "Chemclaw" in res.text
+        assert "Chemclaw" in res.text  # SEC-5: the CSP does not break the inline-styled UI
+        # SEC-5: the browser security headers are present on the response.
+        assert res.headers["X-Content-Type-Options"] == "nosniff"
+        assert res.headers["X-Frame-Options"] == "DENY"
+        assert "frame-ancestors 'none'" in res.headers["Content-Security-Policy"]
+        assert "Strict-Transport-Security" in res.headers
 
 
 def test_message_stream_runs_a_turn_and_opens_mcp_once() -> None:

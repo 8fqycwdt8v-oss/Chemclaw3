@@ -20,7 +20,10 @@ from fastapi import Depends, FastAPI, HTTPException
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 from sse_starlette.sse import EventSourceResponse
+from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.middleware.cors import CORSMiddleware
+from starlette.requests import Request
+from starlette.responses import Response
 
 from agents.chemclaw_agent import build_agent
 from agents.session_events import stream_new_events
@@ -56,6 +59,7 @@ def create_app(agent_factory: Callable[[], Any] = build_agent) -> FastAPI:
         A configured `FastAPI` application.
     """
     app = FastAPI(title="Chemclaw", docs_url=None, redoc_url=None)
+    _add_security_headers(app)
     _add_cors(app)
     # One agent per process, built lazily on first use so importing the app needs no credentials;
     # per-session threads keep conversations apart. F3 replaces the in-memory session map with a
@@ -140,6 +144,39 @@ def create_app(agent_factory: Callable[[], Any] = build_agent) -> FastAPI:
         app.mount("/", StaticFiles(directory=str(_STATIC_DIR), html=True), name="static")
 
     return app
+
+
+# CSP for the self-served chat UI (SEC-5): everything is same-origin except the one inline <style>
+# block in index.html (so style-src needs 'unsafe-inline') and data: images; app.js is external
+# (script-src 'self') and the SSE stream is same-origin (connect-src 'self'). base-uri and
+# frame-ancestors are locked down to blunt injection and clickjacking.
+_CONTENT_SECURITY_POLICY = (
+    "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; "
+    "connect-src 'self'; img-src 'self' data:; base-uri 'none'; frame-ancestors 'none'"
+)
+
+
+def _add_security_headers(app: FastAPI) -> None:
+    """Add the browser security headers to every response, when `service_security_headers` is on.
+
+    Off only when a deployment fronts its own header policy at the ingress/Route; on by default so
+    the app is safe standalone. The headers are static, so a lightweight middleware sets them on
+    every response (including static files and errors) without touching the route handlers.
+    """
+    if not settings.service_security_headers:
+        return
+
+    async def _set_headers(request: Request, call_next: Callable[[Request], Any]) -> Response:
+        response: Response = await call_next(request)
+        response.headers.setdefault("Content-Security-Policy", _CONTENT_SECURITY_POLICY)
+        response.headers.setdefault("X-Content-Type-Options", "nosniff")
+        response.headers.setdefault("X-Frame-Options", "DENY")
+        response.headers.setdefault(
+            "Strict-Transport-Security", "max-age=63072000; includeSubDomains"
+        )
+        return response
+
+    app.add_middleware(BaseHTTPMiddleware, dispatch=_set_headers)
 
 
 def _add_cors(app: FastAPI) -> None:

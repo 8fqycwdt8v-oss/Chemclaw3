@@ -280,6 +280,12 @@ class Settings(BaseSettings):
     service_host: str = "0.0.0.0"
     service_port: int = Field(default=8080, gt=0)
     service_cors_origins: str = ""
+    # Response security headers on the browser surface (SEC-5). When on (the safe default), every
+    # response carries a Content-Security-Policy scoped to the self-served chat UI (self + one
+    # inline <style> block + data: images), X-Content-Type-Options: nosniff, X-Frame-Options: DENY,
+    # and Strict-Transport-Security. Off is only for a deployment fronting its own header policy at
+    # the ingress/Route. HSTS is inert over plain-HTTP dev, so leaving this on locally is harmless.
+    service_security_headers: bool = True
 
     # Durable session store (plan Phase F3). The agent's conversation history must survive a pod
     # restart, so a session is resumable. `memory` keeps the classic in-process provider (dev/test);
