@@ -149,8 +149,8 @@ class JsonExportAdapter:
     def _build(self, raw: RawEntry) -> OrdReaction:
         """Do the actual field mapping (structured fields win; prose fills the gaps)."""
         payload = raw.payload
-        inputs = [_component(item, Role.REACTANT) for item in _list(payload, "reactants")]
-        outcomes = [_component(item, Role.PRODUCT) for item in _list(payload, "products")]
+        inputs = [_component(item, Role.REACTANT) for item in _require_list(payload, "reactants")]
+        outcomes = [_component(item, Role.PRODUCT) for item in _require_list(payload, "products")]
         procedure = str(payload.get("procedure", ""))
         return OrdReaction(
             reaction_id=raw.entry_id,
@@ -209,7 +209,7 @@ def _search(pattern: re.Pattern[str], text: str) -> float | None:
     return float(match.group(1)) if match else None
 
 
-def _list(payload: dict[str, Any], key: str) -> list[Any]:
+def _require_list(payload: dict[str, Any], key: str) -> list[Any]:
     """Return a required list field, raising `ElnFormatError` if it is missing/empty."""
     value = payload.get(key)
     if not isinstance(value, list) or not value:
@@ -256,7 +256,7 @@ def _yield(payload: dict[str, Any]) -> float | None:
     `_build` already guarantees `products` is a non-empty list, but not that its items
     are objects — a bare string here must be a mapping error, not an AttributeError.
     """
-    first = _list(payload, "products")[0]
+    first = _require_list(payload, "products")[0]
     if not isinstance(first, dict):
         raise ElnFormatError(f"product is not an object: {first!r}")
     value = first.get("yield_percent")
