@@ -1,14 +1,18 @@
 # 00 — Forensic Audit Summary & Findings Report
 
 **Repo:** `/home/user/Chemclaw3` · **Branch:** `claude/codebase-audit-hardening-69v233` · **Date:** 2026-07-22
-**Status:** Phases 0–11 complete (discovery → report → sign-off → execution → handover), merged in
-PR #9. All approved backlog items are implemented, tested, and committed; the gate was green (369
-passed, 0 failed). See `REFACTOR_LOG.md` (finding → commit) and `09-handover.md` (what changed +
+**Status:** Existing-code audit (Phases 0–7, 11–13) complete and merged in PR #9 — all approved
+backlog items implemented, tested, committed; gate green (370 passed, 0 failed). The two
+**completeness gap-analyses** (Phase 8 agentic engine, Phase 9 knowledge management) were **missing
+from that pass and are now added** as `08-agentic-engine-gaps.md` + `09-knowledge-management-gaps.md`,
+with the consolidated **missing-feature gaps table below**. Those are **proposals awaiting sign-off**,
+not executed changes. See `REFACTOR_LOG.md` (finding → commit) and `11-handover.md` (what changed +
 conventions). This file is the durable findings record (rows annotated where execution changed them).
 
-> The eight interim per-phase working reports (`01`–`08`) were consolidated into this summary and
-> removed once the audit completed and merged; their full per-finding detail remains in git history
-> and in the commit trail referenced by `REFACTOR_LOG.md`.
+> The interim per-phase working reports (existing-code Phases 1–7) were consolidated into this summary
+> and removed once the audit completed and merged; their full per-finding detail remains in git
+> history and in the commit trail referenced by `REFACTOR_LOG.md`. The Phase 8/9 completeness reports
+> are kept as standalone files because their findings are an unexecuted proposal backlog.
 
 ---
 
@@ -107,6 +111,84 @@ different features share the name — no duplicate/dead path, no deletion needed
 
 ---
 
+## Missing-feature gaps table (Phases 8–9) — PROPOSALS, not executed
+
+This is the **separate** completeness/gap-analysis backlog: absences and partial implementations, not
+defects in existing behavior. Unlike the Track-A table above, **none of these are built** — each is a
+Track-B proposal needing its own signed-off design note before implementation (per the guardrails,
+there is no existing behavior to fall back on if a new feature is wrong). Full per-capability evidence
+and the Present/Partial/Absent verdicts are in `08-agentic-engine-gaps.md` (AG-*) and
+`09-knowledge-management-gaps.md` (KM-*). Gap severity: **Crit / High / Med / Low / None**; N/A and
+"deferred-by-design" (ADR-backed) are called out rather than flagged as gaps.
+
+**Agentic engine (Phase 8).** No Critical/High gaps — the core loop, Temporal durability, side-effect
+idempotency, short/long-term memory separation, and the "AI proposes, human signs off" knowledge PR-gate
+are all present and correctly placed. Remaining gaps are about *operating safely at scale* and
+*defending change over time*.
+
+| ID | Area | Gap Sev | Current State | What's Missing | Why It Matters For This System | Eff |
+|----|------|---------|---------------|----------------|-------------------------------|-----|
+| AG-14 | Prompt/skill version provenance | Med | Prompt/SKILL files versioned in Git; audit trail logs every tool call | The prompt/skill/config **revision in effect** is never stamped on the audit record | A past agent result can't be tied to the version that produced it — direct hit on GxP reproducibility | S |
+| AG-13 | Agent-behavior eval harness | Med | `evals/` scores chemistry (e-factor/PMI/regret) + tool-utility A/B | Automated regression suite for prompt/skill **behavior** (tool selection, citation) | A prose-file edit can silently regress agent behavior with only manual spot-checks as a gate | L |
+| AG-11 | Cost/token tracking | Med | None (one flat internal LLM credential, no external bill) | Per-run/user/task token accounting; runaway-conversation detection | Shared internal endpoint has finite capacity; consumption is unmeasured and can't feed the A/B | M |
+| AG-15 | Concurrency / admission control | Med | Session-map LRU, msg-size cap, per-run loop cap; SDK 429-retry | Per-user/global in-flight **turn** concurrency limit + admission control | Unbounded parallel turns can saturate the one internal LLM endpoint; retry amplifies load under saturation | M |
+| AG-8 | Pre-execution job-approval gate | Med | Knowledge PR-gate always enforced in code; job/plan gate config-gated (Entra + harness) | HITL job approval on the **default classic/dev path** | Autonomous job launch is un-gated unless Entra+harness both on; the knowledge-write GxP line *is* hard-enforced | M |
+| AG-10 | Step-by-step run replay | Med | Append-only tool-audit + live SSE + opt-in OTel | Reasoning/plan capture + full payloads for full replay | "Who did what" is strong; debugging *why* a turn failed/chose a tool is thin | M |
+| AG-6 | In-loop error recovery | Med | Tool errors audited+raised; whole turn → one `ErrorEvent`; SDK retries model 429/5xx | Distinct tool/model/timeout/malformed handling; in-turn tool retry/degrade | A transient tool blip aborts the whole turn (no data-loss — durable jobs retry in Temporal) | M |
+| AG-12 | Model routing & fallback | Low | Single config-selected endpoint + SDK retry/backoff | Fallback endpoint/model; task-based routing | Single-endpoint by design; retry covers transient, but no failover on a hard endpoint outage | M |
+| AG-7 | Final-output schema validation | Low | Tool **args** pydantic-typed+clamped; downstream `kg-validate` + PR-gate | Schema validation of the **final** agent output (structured outputs deferred) | Persisted output is validated + human-signed; only advisory prose is unvalidated | M |
+| AG-2 | Tool/skill version field | Low | Typed tools + dynamic MCP config + FS skill discovery; frontmatter CI-gated | Explicit tool/skill **version** field | Registration/discovery already consistent; missing version bites as provenance (feeds AG-14), not discovery | S |
+| AG-1/3/4/5 | Loop · durability · idempotency · memory | None | Real MAF single-agent loop; Temporal durable jobs; deterministic ids; bounded session + Git graph | — | Core mechanics present and correctly placed | — |
+| AG-9 | Multi-agent coordination | N/A | Single agent per process (D-002) | — (deliberately single-agent) | Not a gap — coordination surface doesn't exist by design | — |
+
+**Knowledge management (Phase 9).** Ingestion, structural consistency, and provenance/citation are
+genuine passes (uniform schema, `kg-validate` CI gate, PR-gate-idempotent ingest). The one **High** is
+the absence of any retrieval evaluation — the system's core value is surfacing the right evidence, yet
+nothing measures whether it does.
+
+| ID | Area | Gap Sev | Current State | What's Missing | Why It Matters For This System | Eff |
+|----|------|---------|---------------|----------------|-------------------------------|-----|
+| KM-13 | Retrieval evaluation | **High** | `evals/` scores only scientific output (e-factor/PMI/regret/prediction) | Gold query→expected-source set + a registered **retrieval** metric | Retrieval quality is anecdotal and ungated; any regression is invisible. A small corpus is the ideal moment to build the gold set | M |
+| KM-5 | Ranking / rerank + truncation | Med | Structural search ranked (Tanimoto); text hits returned in disk order then blind-capped | Relevance scoring for text; **rank-before-truncate**; wire the unused `Note.confidence` | A broad sweep can truncate away the most relevant note with no signal; `confidence` is defined but read nowhere | M |
+| KM-4 | Query understanding | Med | Literal substring match; understanding delegated to the LLM skill | Stemming/synonym/expansion/intent — or a test proving the LLM covers it (see KM-13) | Chemistry synonyms/inflections silently miss at the lexical layer (`ester`⊂`polyester`); invisible to non-agent callers | M |
+| KM-7 | Freshness / staleness enforcement | Med | Graph always re-read live; fp index & `valid_to` not invalidated/enforced | Re-index fingerprints on note mutation; enforce `valid_to` at read | Superseded/expired reaction conditions can be served as current fact | M |
+| KM-8 | Conflict handling | Med | Both disagreeing notes returned, no flag | Recency/authority/agreement signal on conflicting notes | Contradictory conditions surface with no signal — silent until a wrong answer appears | M |
+| KM-12 | Negative feedback loop | Med | Positive correction only (interaction notes) | In-band "flag bad retrieval / demote wrong entry" signal | A wrong note persists until someone hand-edits Git; no closed correction loop | M |
+| KM-14 | Scale of graph retrieval | Med | Full-graph rebuild from disk per query (O(N)); O(n²) clustering (separately deferred) | Persistent/cached graph index invalidated on merge | Paid per **interactive query**, so Q&A latency degrades at 10×–100× sooner than the deferred clustering — worth pulling forward | M |
+| KM-11 | Analytical multi-modal | Med (deferred) | Reactions/molecules/tables first-class; spectra/chromatograms dropped | Spectra/chromatogram/image ingestion & linking | Structured chemistry is retrievable; raw analytical proof is an **ADR-backed deferral** (`DEFERRED.md:23`), not a live gap | L |
+| KM-6 | Provenance surfaced at read | Low | Strong citation; rich provenance (author/date/confidence) not surfaced in `NoteRef` | Carry source/author/date/confidence into `NoteRef`/chunks | Trace-to-origin is met; weighing sources currently needs a second lookup | S |
+| KM-9 | Access control on retrieval | Low (deferred) | Absent — **ADR-backed deferral** (`DEFERRED.md:9`) | Per-caller doc/project scoping (RLS mirror) | Only bites once confidential + open projects share one graph; the confidentiality boundary doesn't yet exist | L |
+| KM-10 | Deduplication | Low | Exact/id dedup only | Near-duplicate detection | Right amount for a Git-curated corpus; adding near-dup detection now would be over-engineering | — |
+| KM-1/2/3 | Ingestion · structure · retrieval wiring | None | Repeatable adapter→validate→index→PR-gate; one schema + CI gate; substring anchor + graph traversal both live | — | Backbone is met; the "naive scan while a real index rots unused" failure mode explicitly does **not** apply (D-004) | — |
+
+---
+
+## Top 5 missing-feature gaps to prioritize (rationale)
+
+Sequenced by value-over-effort and by the guardrail that foundational/provenance pieces come before
+pieces that build on them. Each still needs a signed-off design note before any code.
+
+1. **AG-14 — stamp prompt/skill/config version onto the audit record** (S). Cheapest high-value fix and
+   the most GxP-load-bearing: without it, no past result is reproducible to the version that produced it.
+   Foundational for AG-2 and AG-13.
+2. **KM-13 — build a retrieval gold set + register a retrieval metric** (M). The single highest-value KM
+   gap: the platform's purpose is surfacing the right evidence, and nothing currently measures it. Doing
+   it now, while the corpus is small, is far cheaper than later.
+3. **KM-5 — rank-before-truncate + wire `Note.confidence`** (M). Directly protects answer quality: today
+   the most relevant note can be silently dropped by a blind cap. Pairs naturally with KM-13's metric.
+4. **AG-11 + AG-15 — token accounting + turn admission control** (M together). Operating-safety pair for
+   the shared single internal LLM endpoint: measure consumption, then shed load instead of amplifying it
+   via retry under saturation.
+5. **KM-7 / KM-8 / KM-12 — staleness enforcement, conflict signal, negative-feedback** (M cluster). The
+   "serve superseded or conflicting facts with no signal, and no way to correct them in-band" cluster —
+   the GxP-correctness tail of the KB. Scope as one design note; they share the read-path touchpoints.
+
+(AG-8 job-gate, AG-10 replay, AG-6 in-loop recovery, AG-13 behavior evals, and KM-4 query understanding
+follow. KM-9 access-control and KM-11 analytical multi-modal stay deferred-by-design until their ADR
+triggers fire.)
+
+---
+
 ## Top 10 to fix first (rationale)
 
 Ordered by value-over-effort and blast-radius safety. The first block is one-line/low-risk wins;
@@ -189,4 +271,4 @@ Per the guardrails, these are high-risk-by-default even where they look safe:
 **→ Signed off and executed.** All items were implemented in waves (see `REFACTOR_LOG.md`), the two
 gated decisions resolved as recorded (DUP-1 → honor `data_sources`, D-053; SEC-2 → warn-only), and
 the whole set merged in PR #9. A follow-up pass (2026-07-22) added the ELN multi-ingest cursor guard,
-the CI coverage gate, and closed the informational items — see `09-handover.md`.
+the CI coverage gate, and closed the informational items — see `11-handover.md`.
