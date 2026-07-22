@@ -1,3 +1,6 @@
+-- (Numbering note: there is no 005 migration — it never existed, a renumber artifact. The runner
+-- discovers migrations by filename glob, so the gap is harmless; do not backfill a 005.)
+--
 -- GxP tool-audit trail (agents.audit). One append-only row per agent tool call:
 -- who ran what (actor), in which conversation (correlation_id), with which arguments,
 -- the outcome and a short effect summary (e.g. the PR ref a propose_* tool returned),
