@@ -48,3 +48,11 @@ plan→approve→execute harness. Entra identity is enforced when
 Route behind OIDC, the two Temporal workers, MCP servers, workload identity
 federation, and the three plain secrets). The build order and per-phase status
 live in `docs/implementation-tickets.md`.
+
+## Security
+
+`SECURITY.md` describes the enforced posture (Entra OIDC at the front door, the
+`require_actor` reject-if-absent rule, the single `authorize_trigger` gate, role-scoped
+skills, the GxP audit trail and PR-gate), the `entra_required` enforcement switch, and the
+live-infrastructure edges still open. Run shared/exposed deployments only with
+`entra_required=true`.
