@@ -157,7 +157,22 @@ async def _emit(sink: AuditSink, event: AuditEvent) -> None:
     try:
         await sink.record(event)
     except Exception as exc:  # a broken audit store must not fail a tool call
-        logger.warning("audit sink failed to record %s: %s", event.tool, exc)
+        # Swallow-and-continue keeps availability, but a lost GxP audit record must be ALERTABLE,
+        # not a generic warning (SEC-3): log at ERROR with a stable `audit_sink_failure` marker and
+        # the trail identifiers, so monitoring can fire on the marker and name the affected trail.
+        logger.error(
+            "audit_sink_failure: sink failed to record tool %s (correlation_id=%s actor=%s): %s",
+            event.tool,
+            event.correlation_id,
+            event.actor,
+            exc,
+            extra={
+                "event": "audit_sink_failure",
+                "tool": event.tool,
+                "correlation_id": event.correlation_id,
+                "actor": event.actor,
+            },
+        )
 
 
 # The default, log-only middleware for the credential-free path (and the direct unit tests):
