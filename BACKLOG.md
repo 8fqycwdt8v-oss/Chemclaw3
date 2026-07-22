@@ -3,6 +3,15 @@
 Prioritized open action items. Top = next. Keep in sync with `docs/implementation-plan.md`
 (phase/step numbers) at session end.
 
+## Next — Platform-parity hardening (docs/parity-plan.md, Phase F10)
+
+Closes the platform-capability deltas found against a commercial pharma-agent platform: hybrid
+retrieval (F10-A, executes/extends F8-T2), answer verification + confidence routing (F10-B),
+per-tool authorization (F10-C), Temporal child-workflow orchestration (F10-D), per-task model
+routing (F10-E), P/R/F1 + drift metrics (F10-F), audit hash-chain + bi-temporal notes (F10-G).
+OCR/vision, vendor connectors, and GAMP-5 artifacts are gated-until-trigger. Full tickets +
+disposition table: `docs/parity-plan.md`.
+
 ## Now — Foundation build (docs/foundation-plan.md + docs/implementation-tickets.md)
 
 The target-stack foundation: MAF harness experience on OpenShift + HPC/Nextflow, internal
