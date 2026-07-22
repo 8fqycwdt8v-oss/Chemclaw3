@@ -1123,3 +1123,134 @@ never disagree again.
 that the memory corpus tracks `data_sources` (adding `eln-ord` expands it; a retrieve-only config
 yields an empty corpus); the removed `eln/registry.py` tests are covered by
 `tests/test_datasource_seam.py`.
+
+## D-054 — F10-E/B: per-task model routing + answer verification & confidence routing (D-A11)
+
+**Context.** A capability comparison against a commercial pharma-agent *platform* (IntuitionLabs)
+found Chemclaw at or ahead on the durability/identity/audit spine, with deltas in retrieval breadth,
+output verification, fine-grained authz, orchestration topology, and metrics polish. Phase F10
+(`docs/parity-plan.md`) closes the ones that add value now and records triggers for the deferred
+ones. Two of those deltas: no per-task model selection, and no verifier/confidence on the answer
+path (only the report's deterministic citation gate).
+
+**Decision.**
+- **F10-E:** `build_chat_client(task="agent")` consults `settings.model_routes` (JSON task→model),
+  falling back to the provider default. Still the single import site for a chat client — a task is a
+  per-model choice on the one internal endpoint, not a second provider.
+- **F10-B:** `agents/verifier.py::verify_answer(answer, evidence)` scores citation faithfulness and
+  returns a `VerificationResult` (per-claim `ClaimCheck` + aggregate `confidence`). When
+  `verifier_enabled`, an LLM-as-judge runs on the cheap routed `"verifier"` model via structured
+  output; otherwise the deterministic report gate (`report.harness.verify_claims`) is the offline
+  fallback (DRY, one citation check). `verify_turn_answer` resolves an answer's `[[wikilinks]]` to
+  the notes it cites — the conversational scoring input. The runner stamps `AnswerEvent.confidence`
+  + `unsupported_claims`; a low-confidence answer surfaces a review affordance and routes to the
+  existing D-032 hold. No new gate primitive; a verifier failure degrades to the unscored answer.
+
+**Consequence.** Default-off: `model_routes={}` and `verifier_enabled=False` reproduce today's
+single-model, unscored-answer behavior exactly. The durable report workflow verifies at citation
+level (it has no synthesized prose); the conversational path gets the LLM faithfulness score.
+
+**Result.** `make lint type test` green. Tests: `test_llm_provider`, `test_verifier`, `test_runner`,
+`test_config`.
+
+## D-055 — F10-C: per-tool authorization middleware (supersedes D-044 scope, D-A12)
+
+**Context.** `authorize_trigger` guarded only the expensive `submit_qm_job` trigger (F4-T5). Tool-use
+governance at *every* invocation was a platform delta.
+
+**Decision.** `agents/tool_authz.py::enforce_tool_authz` is a MAF `@function_middleware` (same shape
+as the audit middleware) that calls `agents/authz.py::authorize_tool(tool)` before each tool runs,
+gating on `settings.tool_role_gates` (JSON tool→roles) with `tool_authz_default` (`allow`|`deny`).
+`authorize_tool` and `authorize_trigger` share one `_has_required_role` predicate (DRY). Enforcement
+is active only under `entra_required`; the expensive-trigger call stays as defense-in-depth.
+
+**Consequence.** Default `allow` + empty gates = zero behavior change; a deployment opts into an
+allowlist by config. Authorization is now uniform per tool call, superseding D-044's trigger-only
+scope.
+
+**Result.** `make lint type test` green. Tests: `test_tool_authz`, `test_agent` (two middlewares),
+`test_config`.
+
+## D-056 — F10-G: audit hash-chain + bi-temporal note fields (D-A15)
+
+**Context.** D-034 left the audit hash-chain "for Phase 6"; `architektur.md` §10.4 proposed
+bi-temporal note fields but never schematized them. Both are low-complexity, GxP-relevant.
+
+**Decision.**
+- **F10-G1:** `011_audit_hash_chain.sql` adds `prev_hash`/`row_hash` to `audit_events`.
+  `PostgresAuditSink.record` computes `row_hash = chain_hash(prev_hash, event)` (reusing
+  `chemclaw.ids.stable_hash`, one hashing scheme — D-033) under a transaction advisory lock so
+  concurrent appends cannot fork the chain. `scripts/verify_audit_chain.py` (`make audit-verify`)
+  walks the rows and reports the first broken link; legacy empty-hash rows are skipped.
+- **F10-G2:** `kg/note.py` gains optional `valid_from`/`valid_to` with a validator rejecting
+  `valid_to < valid_from`; retrievers may filter on them later (no premature consumer).
+
+**Consequence.** Tampering with any audited row is detectable; notes can record what was known and
+when it was valid. The `NullAuditSink` default is unaffected.
+
+**Result.** `make lint type test` green. Tests: `test_audit_chain`, `test_note`, `test_kg_validate`.
+
+## D-057 — F10-A: hybrid retrieval — dense + lexical entry points, RRF fusion (D-A10)
+
+**Context.** Retrieval was graph traversal + binary structural fingerprints: no dense-semantic and no
+lexical rank, so a note sharing neither a substring nor a wikilink with the query was unreachable.
+This executes and extends the planned-but-unbuilt F8-T2.
+
+**Decision.** `agents/embedding_provider.py` is the one embedding seam (`hash` offline / internal
+`openai_compatible`). `report/vector_index.py` (`010_note_index.sql`) is a derived, rebuildable
+pgvector + `tsvector` index over notes with in-memory + Postgres backends. `VectorRetriever` +
+`LexicalRetriever` join `gather_evidence` via the F7 source registry (`vector`/`lexical` keys —
+registry membership is the enable switch, D-018). `report/hybrid.py::reciprocal_rank_fusion` fuses
+the per-source rankings under `retrieval_mode="hybrid"`; graph expansion stays the reasoning path
+(D-004 intact — the new retrievers are *entry points* into the graph, never a replacement).
+
+**Consequence.** Default `retrieval_mode="graph"` + `hash` embedder + `vector`/`lexical` not in
+`data_sources` = today's flat union, unchanged. Git-markdown stays the source of truth; the index is
+derived. A scheduled reindex activity is a documented follow-up (today `make reindex`/CLI populate).
+
+**Result.** `make lint type test` green. Tests: `test_embedding_provider`, `test_vector_index`,
+`test_hybrid_retrieval`, `test_config`.
+
+## D-058 — F10-F: classification metrics (P/R/F1) + eval drift detection (D-A14)
+
+**Context.** The eval harness scored green-chemistry/prediction metrics with absolute-error
+tolerances; it had no precision/recall/F1 and no drift detection.
+
+**Decision.** `evals/metrics.py` adds `precision`/`recall`/`f1` over `output.predicted_note_ids`
+vs `reference.expected_note_ids`, sharing one pure `precision_recall_f1` (report/drift metrics, no
+per-case gate). `evals/retrieval.py::run_retrieval_eval` scores a *live* `SourceRetriever` over
+query→expected cases (reusing `run_eval`) — how F10-A retrieval gets a measured number.
+`evals/baseline.py` (`aggregate_metrics`/`detect_drift`, committed `evals/baseline.json`) +
+`workflows/eval_drift.py::EvalDriftWorkflow` (background-jobs, alerts via the notify seam) re-run the
+case-set on an opt-in Schedule and flag any metric that moved past `eval_drift_epsilon`.
+
+**Consequence.** Retrieval/extraction quality is measurable as P/R/F1 on versioned cases; a silent
+regression trips a scheduled alert. Live retrieval cases are deployment-local (the shipped graph is
+empty), so only a pinned metric-regression case is committed. Drift is off by default.
+
+**Result.** `make lint type test` green. Tests: `test_metrics_classification`, `test_retrieval_eval`,
+`test_eval_drift` (incl. a baseline-matches-case-set guard), `test_schedules`, `test_config`.
+
+## D-059 — F10-D: sub-agent orchestration via Temporal child workflows (D-A13)
+
+**Context.** Report-section retrieval and memory synthesis each fanned a task into independent steps
+but ran them in one monolithic activity, so a single poison item failed the whole batch and there was
+no per-step durability. A generic child-workflow fan-out was justified by these *two* real callers
+(Rule of Three), not speculatively.
+
+**Decision.** `workflows/orchestrator.py::fan_out(child, inputs, *, id_prefix, ...)` runs each input
+as a child workflow with bounded concurrency (fixed-size batches — deterministic under replay),
+per-child retry, and D-030 isolation (a child that exhausts its retries is logged and dropped, its
+siblings unaffected, successful results in input order). Adopted by `ReportSectionWorkflow` (one per
+section) and — after extracting the pure `build_*_notes` in `memory/jobs.py` — a shared
+`PublishNoteWorkflow` (one per memory note). Orchestration stays a Temporal-layer concern; MAF remains
+the single conversational agent. The conversational multi-agent mesh stays gated (trigger recorded).
+
+**Consequence.** Report + memory synthesis now run as exactly-once child workflows with per-child
+retry and worker-restart durability. Section/group logic is unchanged (still PR-gated, still cited);
+only the execution topology gained parallelism + isolation. Config
+`orchestrator_max_parallel_children` (default 8).
+
+**Result.** `make lint type test` green (the Temporal-env fan-out test runs in CI, skips offline).
+Tests: `test_orchestrator`, `test_memory` (builder behavior-preserving), `test_report_workflow` /
+`test_workers` registration, `test_config`.
