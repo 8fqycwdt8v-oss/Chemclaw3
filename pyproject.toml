@@ -15,6 +15,10 @@ dependencies = [
     "bofire[optimization,cheminfo]>=0.4.1",
     "drfp>=0.3.7",
     "fastapi>=0.139.2",
+    # HTTP client for the Entra token/OBO exchanges, the LLM provider seam, and the Nextflow
+    # launcher. Declared explicitly: four first-party modules import it directly, so it is a
+    # direct dependency, not merely transitive (via fastapi/mcp/agent-framework).
+    "httpx>=0.28",
     "mcp>=1.2.0",
     "networkx>=3.6.1",
     "numpy>=2.0",
