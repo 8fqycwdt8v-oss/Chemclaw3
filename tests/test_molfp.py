@@ -10,11 +10,13 @@ import asyncio
 
 import pytest
 
+from chemclaw import db
 from chemclaw.config import settings
 from mcp_servers.fpstore import (
     FingerprintError,
     FingerprintRecord,
     InMemoryFingerprintStore,
+    PostgresFingerprintStore,
     tanimoto,
 )
 from mcp_servers.molfp.fingerprint import ecfp_bitstring, molecule_definition
@@ -140,3 +142,28 @@ def test_substructure_bad_query_raises() -> None:
             await find_substructure_matches(InMemoryFingerprintStore(), "%%%")
 
     asyncio.run(_run())
+
+
+def test_postgres_store_applies_the_configured_statement_timeout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The Postgres backend must bound its (slow HNSW) queries like every other store (COR-5/CON-2).
+
+    A regression pin for the fpstore-only omission: `_connect` must forward
+    `pg_statement_timeout_seconds` to the shared `db.connect`, so a long similarity scan is
+    cancelled rather than pinning its worker. Verified offline by capturing the connect call.
+    """
+    captured: dict[str, object] = {}
+
+    async def _fake_connect(dsn: str, **kwargs: object) -> object:
+        captured["dsn"] = dsn
+        captured.update(kwargs)
+        return object()
+
+    monkeypatch.setattr(db, "connect", _fake_connect)
+    store = PostgresFingerprintStore(
+        "molecule_fingerprints", settings.ecfp_bits, molecule_definition()
+    )
+    asyncio.run(store._connect())
+
+    assert captured["statement_timeout_seconds"] == settings.pg_statement_timeout_seconds
