@@ -64,6 +64,11 @@ class Settings(BaseSettings):
     # characters so a large payload (a full optimization problem, an observation list) cannot
     # flood the log; raise it when a fuller argument record is needed for an audit.
     agent_audit_max_arg_chars: int = Field(default=200, ge=0)
+    # The deployment's code/prompt/skill revision stamped onto every audit record (AG-14): the
+    # Git SHA or image digest the running pod was built from, so a past agent result ties to the
+    # exact version that produced it (GxP reproducibility). The deployment sets it (the F6 image
+    # build injects the digest); "unknown" until then, a value change, not a schema change.
+    deployment_revision: str = "unknown"
     # OpenTelemetry export (off by default). When enabled, `chemclaw.logging.configure_telemetry`
     # calls MAF's `configure_otel_providers`, which reads the standard `OTEL_EXPORTER_OTLP_*`
     # environment variables for the collector endpoint. Requires the OpenTelemetry SDK + OTLP
@@ -306,6 +311,14 @@ class Settings(BaseSettings):
     # history survives in the session store, only the in-process handle is dropped. Sized generously
     # for concurrent chemists; raise it for a busier front door.
     service_max_live_sessions: int = Field(default=1000, gt=0)
+    # Admission control on concurrent agent turns (AG-15). Each turn holds one permit for its whole
+    # streamed run, so at most this many turns hit the shared internal LLM endpoint at once; a turn
+    # that cannot get a permit within the admission timeout is shed with 503 (retry) rather than
+    # piling onto a saturated endpoint. Tune to the endpoint's real throughput budget — the default
+    # is deliberately conservative. Health and push-back streams are not gated (they are not
+    # LLM-bound).
+    service_max_concurrent_turns: int = Field(default=8, gt=0)
+    service_turn_admission_timeout_seconds: float = Field(default=5.0, gt=0)
     # Job→session push-back (plan F3-T2/T3): a finished Temporal job writes a `session_events` row;
     # the front door tails the table and wakes the owning session (appending the result, flipping
     # the `awaiting` todo) instead of the user polling. This is the tailer's poll interval — a
@@ -505,6 +518,16 @@ class Settings(BaseSettings):
     # broad question over a large corpus fills only as much context as it needs (the agent
     # narrows the query or drills in with expand_note when the sweep is truncated).
     gather_evidence_max_chunks: int = Field(default=40, ge=1)
+    # Rank-before-truncate for the evidence sweep (KM-5): when `gather_evidence` exceeds its cap it
+    # keeps the highest-scored chunks, not an arbitrary disk-order slice. Graph hits score by note
+    # `confidence` (this default when a note has none), structural hits by their similarity — so a
+    # broad sweep drops the least-supported evidence first, not whatever parsed last.
+    retrieval_default_confidence: float = Field(default=0.5, ge=0.0, le=1.0)
+    # Cache the parsed knowledge graph so interactive retrieval does not re-read + re-parse the
+    # whole `knowledge_dir` on every query (KM-14). The cache is keyed by a cheap stat fingerprint
+    # of the note tree (path + mtime + size), so any add/edit/delete of a note busts it — retrieval
+    # stays always-live. Off makes every call re-parse (the pre-cache behavior); leave on in prod.
+    graph_cache_enabled: bool = True
 
     @property
     def entra_jwks_endpoint(self) -> str:

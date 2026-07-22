@@ -89,3 +89,26 @@ def test_sweep_is_capped_to_the_budget(tmp_path: Path, monkeypatch: pytest.Monke
     chunks = asyncio.run(gather_evidence("yield"))
 
     assert len(chunks) == 3
+
+
+def test_sweep_ranks_by_confidence_before_truncating(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A truncated sweep keeps the most-confident notes, not an arbitrary disk slice (KM-5)."""
+    # Three notes all match "yield"; only confidence distinguishes them. Filenames sort
+    # high<low<mid, so an *unranked* cap-2 would keep {high, low}; ranking must keep {high, mid}.
+    (tmp_path / "high.md").write_text(
+        "---\nid: reaction-high\ntype: reaction\nconfidence: 0.9\n---\nyield.\n", encoding="utf-8"
+    )
+    (tmp_path / "low.md").write_text(
+        "---\nid: reaction-low\ntype: reaction\nconfidence: 0.1\n---\nyield.\n", encoding="utf-8"
+    )
+    (tmp_path / "mid.md").write_text(
+        "---\nid: reaction-mid\ntype: reaction\nconfidence: 0.5\n---\nyield.\n", encoding="utf-8"
+    )
+    monkeypatch.setattr(settings, "knowledge_dir", str(tmp_path))
+    monkeypatch.setattr(settings, "gather_evidence_max_chunks", 2)
+
+    chunks = asyncio.run(gather_evidence("yield"))
+
+    assert {c.source_note_id for c in chunks} == {"reaction-high", "reaction-mid"}

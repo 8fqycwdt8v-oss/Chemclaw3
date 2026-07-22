@@ -127,6 +127,20 @@ def test_ambient_identity_overrides_the_static_actor() -> None:
     assert sink.events[0].actor == "u-entra-oid"  # ambient user, not the "unknown" fallback
 
 
+def test_audit_stamps_the_deployment_revision(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Every recorded event carries the process's deployment revision (AG-14, GxP provenance)."""
+    monkeypatch.setattr(settings, "deployment_revision", "sha-abc123")
+    sink = _RecordingSink()
+    mw = make_audit_middleware(correlation_id="conv-r", actor="a", sink=sink)
+
+    async def _ok_call() -> None:
+        return None
+
+    _drive_mw(mw, _ctx("find_notes", {"q": "x"}), _ok_call)
+
+    assert sink.events[0].revision == "sha-abc123"
+
+
 def test_factory_stamps_correlation_id_actor_and_records_outcome() -> None:
     """The per-conversation middleware records cid, actor, outcome, and the result effect."""
     sink = _RecordingSink()

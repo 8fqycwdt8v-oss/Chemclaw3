@@ -20,6 +20,11 @@ class EvidenceChunk(BaseModel):
     source_note_id: str = Field(min_length=1)
     # How the chunk was found (which retriever) — provenance for the report footer.
     retriever: str = Field(min_length=1)
+    # A relevance/support score in [0, 1], higher = keep first when a sweep must truncate (KM-5).
+    # Each retriever sets it in its own terms — graph hits by the note's `confidence`, structural
+    # hits by similarity — so it orders within a sweep; it is a ranking heuristic, not a calibrated
+    # cross-source probability. Default 0.0 (an unscored chunk sorts last).
+    score: float = Field(default=0.0, ge=0.0, le=1.0)
 
 
 @runtime_checkable

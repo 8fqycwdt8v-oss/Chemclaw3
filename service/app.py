@@ -11,6 +11,7 @@ Routes: `GET /healthz` (liveness), `GET /readyz` (readiness), `POST /sessions` (
 static chat UI at `/`. Identity (Entra OIDC on every non-health route) is layered on in F4.
 """
 
+import asyncio
 import logging
 import uuid
 from collections import OrderedDict
@@ -122,6 +123,11 @@ def create_app(agent_factory: Callable[[], Any] = build_agent) -> FastAPI:
     # posted to / streamed by its creator (defense-in-depth beyond the unguessable uuid4 id). The
     # bound keeps the map from growing for the pod's lifetime (COR-3).
     app.state.live_sessions = _LiveSessions(settings.service_max_live_sessions)
+    # Admission control on concurrent turns (AG-15): a bounded permit set caps how many turns hit
+    # the shared LLM endpoint at once. A permit is held for a turn's whole streamed run; a turn that
+    # cannot get one within the admission timeout is shed with 503. Built here so it binds to the
+    # app's event loop on first await.
+    app.state.turn_semaphore = asyncio.Semaphore(settings.service_max_concurrent_turns)
 
     def _owned_session(session_id: str, principal: Principal) -> Any:
         """Return the session iff it exists and the caller owns it, else 404 (no existence leak)."""
@@ -166,14 +172,33 @@ def create_app(agent_factory: Callable[[], Any] = build_agent) -> FastAPI:
         body: MessageIn,
         principal: Principal = Depends(require_principal),
     ) -> EventSourceResponse:
-        """Run one turn for the session and stream its events as SSE."""
+        """Run one turn for the session and stream its events as SSE.
+
+        Admission-controlled (AG-15): the turn takes one of the process's turn permits for its
+        whole streamed run, and is shed with 503 if none frees within the admission timeout — so a
+        burst of concurrent turns cannot pile onto the shared internal LLM endpoint.
+        """
         session = _owned_session(session_id, principal)
+        semaphore = app.state.turn_semaphore
+        try:
+            await asyncio.wait_for(
+                semaphore.acquire(), timeout=settings.service_turn_admission_timeout_seconds
+            )
+        except TimeoutError as exc:
+            raise HTTPException(
+                status_code=503, detail="server at capacity; retry shortly"
+            ) from exc
 
         async def _events() -> AsyncIterator[dict[str, str]]:
-            async for event in run_turn(
-                _agent(), session, body.message, actor=principal.oid, roles=principal.roles
-            ):
-                yield {"event": event.type, "data": event.model_dump_json()}
+            # Release the permit when the stream ends — normal completion, error, or client
+            # disconnect (the generator is closed, running this finally) — so it is never leaked.
+            try:
+                async for event in run_turn(
+                    _agent(), session, body.message, actor=principal.oid, roles=principal.roles
+                ):
+                    yield {"event": event.type, "data": event.model_dump_json()}
+            finally:
+                semaphore.release()
 
         return EventSourceResponse(_events())
 

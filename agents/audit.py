@@ -41,6 +41,10 @@ class AuditEvent(BaseModel):
     outcome: str  # "ok" | "error"
     detail: str = ""  # result summary on success, exception text on failure
     latency_ms: float
+    # The deployment revision (Git SHA / image digest) in effect for this call (AG-14): ties a past
+    # result to the exact prompt/skill/config version that produced it. "unknown" until a deployment
+    # sets `deployment_revision`.
+    revision: str = "unknown"
 
 
 @runtime_checkable
@@ -87,6 +91,9 @@ def make_audit_middleware(
     store must never break a tool call.
     """
     audit_sink: AuditSink = sink if sink is not None else NullAuditSink()
+    # The revision in effect for this process, captured once at build time (AG-14) — every event
+    # this middleware records carries it, so a result ties to the exact version that produced it.
+    revision = settings.deployment_revision
 
     @function_middleware
     async def audit_tool_calls(
@@ -123,6 +130,7 @@ def make_audit_middleware(
                     outcome="error",
                     detail=_truncate(exc),
                     latency_ms=elapsed_ms,
+                    revision=revision,
                 ),
             )
             raise
@@ -146,6 +154,7 @@ def make_audit_middleware(
                 outcome="ok",
                 detail=detail,
                 latency_ms=elapsed_ms,
+                revision=revision,
             ),
         )
 

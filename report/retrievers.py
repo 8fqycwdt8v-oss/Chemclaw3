@@ -68,11 +68,20 @@ class GraphRetriever:
                 continue
             haystack = f"{note.id} {' '.join(note.tags)} {note.body}".lower()
             if needle in haystack:
+                # Score a matched note by its own confidence (KM-5): every returned note already
+                # matched the query, so among candidates the more-trusted note survives truncation
+                # first. A note with no confidence takes the configured neutral default.
+                score = (
+                    note.confidence
+                    if note.confidence is not None
+                    else settings.retrieval_default_confidence
+                )
                 chunks.append(
                     EvidenceChunk(
                         content=_excerpt(note.body) or note.id,
                         source_note_id=note.id,
                         retriever=self.name,
+                        score=score,
                     )
                 )
         return chunks
@@ -108,6 +117,9 @@ class FingerprintReactionRetriever:
                 content=f"Similar reaction {match.label} (Tanimoto {match.similarity:.2f})",
                 source_note_id=f"reaction-{match.id}",
                 retriever=self.name,
+                # Structural hits score by their Tanimoto similarity — a closer precedent survives
+                # truncation first (KM-5). Clamped to [0, 1] to stay a valid chunk score.
+                score=min(max(match.similarity, 0.0), 1.0),
             )
             for match in matches
         ]

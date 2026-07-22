@@ -85,3 +85,21 @@ contracts:
 
 No other item warranted implementing now. The deferrals are conscious and their triggers are the
 right ones; this review changed one thing (the cursor guard) and left the rest as designed.
+
+## Engine gap-doc follow-ups (2026-07-22)
+
+The two engine gap analyses (`docs/audit/08-agentic-engine-gaps.md`,
+`09-knowledge-management-gaps.md`) surfaced a cluster of non-`None`, non-deferred gaps. The
+closable ones were implemented across three passes: KM-6/KM-7 provenance+freshness (D-055), the
+KM-13 retrieval gold-set (D-056), and then **KM-5, AG-14, AG-15, and the retrieval half of KM-14
+(D-057)**. Each of those four made a defensible default decision (documented in D-057) rather than
+staying blocked. **One remains deferred**, and it is genuinely infra-gated:
+
+| Item | Why not now | Trigger to revisit |
+|---|---|---|
+| **AG-13** — agent-behavior / prompt / skill regression eval | A faithful agent-behavior eval must run the agent against a real LLM to observe tool-selection and citation; the target internal OpenAI-compatible endpoint is not reachable offline, and a mock LLM would only test the mock, not behavior. **Genuinely infra-gated** (unlike KM-13, which scores the deterministic retrieval path and *was* done in D-056). | The live internal LLM endpoint is reachable from CI or a test harness — then add a behavior suite (tool-selection + citation assertions over representative prompts), reusing the `evals/` case-set + `@metric` seam |
+
+Two narrower sub-gaps also remain, each with its own existing deferral: the **O(n²) playbook
+clustering** half of KM-14 (see the row in the main table above — sub-quadratic clustering at ~10⁴
+reactions) and **per-user** turn fairness within AG-15 (the global cap is in; per-user quotas wait on
+a real multi-tenant need). Neither is a latent bug.
