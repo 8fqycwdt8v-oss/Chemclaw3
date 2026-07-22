@@ -12,7 +12,7 @@ import logging
 
 from chemclaw.config import settings
 
-_logger = logging.getLogger("chemclaw.hpc_bridge")
+_logger = logging.getLogger(__name__)
 
 
 def map_to_hpc_identity(entra_oid: str) -> str:
