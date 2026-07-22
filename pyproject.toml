@@ -123,8 +123,8 @@ addopts = "-ra"
 
 # Coverage is opt-in via `make cov` (not the default `make test`, which stays fast and
 # dependency-light). Measures the first-party packages only; the offline-skipped Temporal/
-# Postgres paths are exercised in CI, so a coverage number is meaningful there. No hard
-# fail-under yet — set one once a CI run establishes the real baseline (BACKLOG P2).
+# Postgres paths are exercised in CI, so the CI number is the real one and is >= the offline
+# number (running more tests only covers more). CI runs `make cov` as a gate (BACKLOG P2).
 [tool.coverage.run]
 branch = true
 source = ["agents", "bo", "calc", "chemclaw", "eln", "evals", "kg", "mcp_servers", "memory", "report", "scripts", "service", "sources", "workers", "workflows"]
@@ -133,3 +133,7 @@ omit = ["*/__init__.py"]
 [tool.coverage.report]
 show_missing = true
 skip_covered = true
+# Regression floor, set safely below the measured offline baseline (86% with the Postgres/Temporal
+# tests skipped; CI runs those and is higher still). Ratchet upward as coverage climbs; never lower
+# it to make a red build pass — add the missing test instead.
+fail_under = 80
