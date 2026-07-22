@@ -7,9 +7,9 @@ troubleshoot an agent turn. Rather than sprinkle logging into each of the ~13 to
 tool uniformly — the audit trail is a single reusable piece (DRY), like the PR-gate.
 
 It is observe-only: it never alters the arguments or the result. Each call records the
-correlation id (which conversation), the actor (who — a Phase-6 seam, `"unknown"` until
-Entra identity lands), the tool name, its truncated arguments, the outcome and a short
-effect summary (e.g. the PR ref a `propose_*` tool returned), and the wall-clock latency.
+correlation id (which conversation), the actor (who — a Phase-6 seam, the configured
+`service_actor_id` until Entra identity lands), the tool name, its truncated arguments, the
+outcome and a short effect summary (e.g. the PR ref a `propose_*` tool returned), and the latency.
 Records go to the stdlib log always, and additionally to a durable `AuditSink` when one is
 supplied (the Postgres append-only trail) — the log is the floor, the sink is the GxP record.
 
@@ -163,4 +163,4 @@ async def _emit(sink: AuditSink, event: AuditEvent) -> None:
 # The default, log-only middleware for the credential-free path (and the direct unit tests):
 # no conversation id, no identity, no durable sink. `build_agent` builds a per-conversation
 # middleware with a real correlation id (and an optional durable sink) instead.
-audit_tool_calls = make_audit_middleware(correlation_id="-", actor="unknown")
+audit_tool_calls = make_audit_middleware(correlation_id="-", actor=settings.service_actor_id)
