@@ -17,6 +17,7 @@ from temporalio import activity, workflow
 
 with workflow.unsafe.imports_passed_through():
     from chemclaw.config import settings
+    from chemclaw.errors import ChemclawError
     from eln.cursor import load_cursor, store_cursor
     from eln.sync import IngestSummary, RejectedEntry, sync_entries
     from kg.git_submitter import default_submitter
@@ -31,12 +32,12 @@ _molecule_store = default_molecule_store
 
 
 def _merge(summaries: list[IngestSummary], since: datetime) -> IngestSummary:
-    """Fold per-source summaries into one: all ids/rejections, the furthest cursor.
+    """Fold the (0 or 1) source summary into one: its ids/rejections and its next cursor.
 
-    A single active ingest source (the default) folds to itself, so behavior is unchanged; multiple
-    sources share the one high-water cursor the workflow tracks (per-source pipeline cursors are the
-    live Snowflake connector's job, deferred behind this seam). With no active ingest source the
-    cursor holds at `since` (nothing was read, so nothing advances).
+    `sync_eln_entries` enforces at most one active ingest source (the shared high-water cursor can
+    only track one — see the guard there), so this folds a single summary to itself. With no active
+    ingest source the cursor holds at `since` (nothing was read, so nothing advances). The fold is
+    written as a general reduction so it stays correct if per-source cursors later lift that guard.
     """
     ingested: list[str] = []
     rejected: list[RejectedEntry] = []
@@ -51,12 +52,27 @@ def _merge(summaries: list[IngestSummary], since: datetime) -> IngestSummary:
 @activity.defn
 async def sync_eln_entries(since: datetime) -> IngestSummary:
     """Ingest every entry newer than `since` from each active ingest source; merge the summaries."""
+    adapters = active_ingest_sources()
+    # Interim safety valve for the deferred per-source cursor (DEFERRED.md). The workflow tracks ONE
+    # shared high-water cursor, so two ingest sources whose newest entries differ would let the
+    # furthest cursor skip the lagging source's entries — a silent data loss. Until per-source
+    # cursors land (the first second real source, e.g. the Snowflake connector), fail fast and
+    # non-retryably on a multi-ingest config instead of dropping data. (Memory synthesis reads the
+    # same sources with no cursor, so it is unaffected — this guard is the sync's alone.)
+    if len(adapters) > 1:
+        names = ", ".join(sorted(a.__class__.__name__ for a in adapters))
+        raise ChemclawError(
+            f"the ELN sync tracks one shared high-water cursor but {len(adapters)} ingest sources "
+            f"are active ({names}); a multi-source sync would skip the lagging source's entries. "
+            "Configure exactly one ingest source in CHEMCLAW_DATA_SOURCES until per-source cursors "
+            "land (DEFERRED.md)."
+        )
     reaction_store = _reaction_store()
     molecule_store = _molecule_store()
     submitter = default_submitter()
     summaries = [
         await sync_entries(adapter, reaction_store, molecule_store, submitter, since)
-        for adapter in active_ingest_sources()
+        for adapter in adapters
     ]
     return _merge(summaries, since)
 
