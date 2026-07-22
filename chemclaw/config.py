@@ -428,6 +428,13 @@ class Settings(BaseSettings):
     # defeating the band); raise it to the actual measurement noise of the metric a
     # given case-set exercises.
     eval_ab_epsilon: float = Field(default=1e-6, ge=0.0)
+    # Retrieval-quality gate (audit KM-13). A gold query→expected-source set scores
+    # `GraphRetriever` over this fixed corpus fixture (a small versioned set of notes, NOT the
+    # live `knowledge_dir`, so the score is reproducible). `retrieval_recall_min` is the floor
+    # the "did we surface the expected evidence?" recall metric gates against — the seam that
+    # catches a substring-filter or evidence-cap change quietly dropping recall.
+    eval_retrieval_corpus_dir: str = "evals/retrieval_corpus"
+    retrieval_recall_min: float = Field(default=0.75, ge=0.0, le=1.0)
 
     # Fingerprint search (plan Phase 3, mcp-molfp). ECFP4 = Morgan radius 2, 2048 bits;
     # both are config so the fingerprint definition (and thus the stored column width)

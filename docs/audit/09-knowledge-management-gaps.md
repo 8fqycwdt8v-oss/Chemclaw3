@@ -191,14 +191,14 @@ Chemclaw3 keeps knowledge in four shapes, deliberately without a vector store (D
 | KM-10 | Deduplication | Partial: exact/id dedup only | Near-duplicate detection | Right amount for a Git-curated corpus; over-eng to add now | Low | — |
 | KM-11 | Multi-modal / structured | Partial: reactions/molecules/tables first-class; analytical dropped (`DEFERRED.md:23`) | Spectra/chromatogram/image ingestion & linking | Structured chemistry retrievable; raw analytical proof deferred | Medium | L |
 | KM-12 | Feedback loop | Partial: positive correction (interaction notes) only | In-band "flag bad retrieval / demote wrong entry" signal | Wrong notes persist until manual Git edit; no closed loop | Medium | M |
-| KM-13 | Retrieval evaluation | Absent (only scientific-output metrics exist) | Gold query→expected-source set + a registered retrieval metric | Retrieval regressions are invisible and ungated | High | M |
+| KM-13 | Retrieval evaluation | **Addressed (D-056):** starter gold query→expected-source set (`evals/cases/retrieval-*.md`) over a fixed corpus + registered `retrieval_recall`/`retrieval_precision` metrics | Grow the gold set as the corpus grows; wire an agent-run (query-reformulation) eval | Retrieval regressions now move a pinned number instead of going unnoticed | High | M |
 | KM-14 | Scale behavior | Partial: full-graph rebuild per query (O(N)), O(n²) clustering; both deferred with triggers | Persistent/cached graph index invalidated on merge | Per-query re-parse makes interactive Q&A slow at 10× | Medium | M |
 
 ---
 
 ## Executive summary — the five most important knowledge-management gaps
 
-- **No retrieval evaluation (KM-13, High).** The system's core promise is "surface the right evidence", yet only scientific-output metrics exist (`evals/metrics.py`) — there is no query→expected-source gold set and no retrieval metric. Retrieval quality is anecdotal and ungated, so any regression (a filter change, a cap tweak, a synonym miss) is invisible. Cheapest high-value fix, and a small corpus is the ideal time to build the gold set.
+- **No retrieval evaluation (KM-13, High).** ~~The system's core promise is "surface the right evidence", yet only scientific-output metrics exist~~ **Addressed (D-056):** a starter gold query→expected-source set (`evals/cases/retrieval-*.md`) now scores `retrieval_recall` (gated) + `retrieval_precision` (diagnostic) over a fixed corpus fixture (`evals/retrieval_corpus/`), and the test suite pins each number — a filter/cap regression now moves a pinned value instead of going invisible. The set deliberately includes one query whose relevant note the literal substring filter cannot reach, which measures the KM-4 lexical limitation rather than hiding it. Follow-ups: grow the gold set with the corpus, and add an agent-run eval that exercises the LLM's query reformulation.
 
 - **Unranked, blind-truncated text retrieval (KM-5, Medium).** Structural search ranks by Tanimoto, but graph/text hits come back in disk order and `gather_evidence` caps at a fixed budget with no relevance sort (`research_tools.py:70-91`) — the most relevant note can be truncated away. The `Note.confidence` field that would help is designed but never read.
 
