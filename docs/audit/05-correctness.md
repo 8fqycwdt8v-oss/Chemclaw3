@@ -15,24 +15,26 @@ counted as bugs.
 
 ## 1. Error propagation
 
-### 1.1 [Medium] Nextflow `response.json()` mis-classified as non-retryable bad data
-`workflows/hpc/nextflow.py:86` (`launch_run`) and `:104` (`poll_run`) call `response.json()` after
-checking only the HTTP status code. `httpx`'s `response.json()` raises `json.JSONDecodeError`, which
-**subclasses `ValueError`**. The QM workflow runs these activities under `BAD_DATA_RETRY`
-(`workflows/qm_job.py:47,48,65`), whose `non_retryable_error_types` lists `"ValueError"`
-(`workflows/publish.py:32`). Temporal matches by exact class name, and `JSONDecodeError`'s MRO name
-that Temporal sees is a `ValueError` — so a launcher that returns **HTTP 200 with a non-JSON body**
-(a reverse proxy error page, a truncated/gzip-mangled response, a transient gateway hiccup) makes
-the whole QM job fail **permanently** instead of retrying a transient glitch.
+### 1.1 [FALSE POSITIVE — corrected during execution] Nextflow `response.json()` retryability
+**Original claim (WRONG):** `response.json()` raises `json.JSONDecodeError` (a `ValueError` subclass),
+so `BAD_DATA_RETRY` (which lists `"ValueError"`) would treat it as non-retryable and permanently kill
+the durable QM job.
 
-- Failure scenario: Tower/Seqera behind a proxy returns `200` + an HTML maintenance page for one
-  poll → `poll_run` raises `JSONDecodeError(ValueError)` → activity fails non-retryably → the
-  chemist's durable QM job dies even though the run itself is healthy.
-- Contrast: genuine transport faults (`httpx.ConnectError`, `httpx.TimeoutException`) are
-  `httpx.HTTPError`, correctly **not** in the bad-data list, so those retry. Only the JSON-parse
-  path is mis-bucketed.
-- Fix direction: wrap `.json()` and re-raise as `NextflowError` (a `RuntimeError`, retryable), the
-  same way `drfp_bitstring` normalizes third-party exceptions (`mcp_servers/rxnfp/fingerprint.py:26`).
+**Correction (verified against the Temporal SDK + Rust core during Phase 10):** Temporal does **not**
+match by MRO/isinstance — it matches the failure `type` string by **exact, case-insensitive
+equality**. For a generic raised exception the Python SDK sets
+`failure.type = exception.__class__.__name__` (`temporalio/converter/_failure_converter.py:113`), and
+the core compares that string to each pattern (`sdk-core/.../retry_logic.rs:102-108`,
+`err_type_str.to_lowercase() == pat.to_lowercase()`). So Temporal sees `"JSONDecodeError"`, which does
+**not** equal `"ValueError"` → the error is **retryable** (bounded by `activity_max_attempts`), which
+is the desired behavior for a transient 200-but-bad-body. This is exactly why `publish.py` had to add
+`"ValidationError"` to the list explicitly (its own comment documents the exact-name behavior): a
+`ValueError` subclass with its own class name is otherwise retryable.
+
+**Conclusion:** no bug, no code change. The existing behavior (retry a transient malformed body, give
+up after the bounded attempts) is correct. Item **A4 was dropped** from the execution plan. (The
+separate non-idempotency concern — finding 3.1 — is *more* relevant precisely because the launch is
+retryable; it is handled on its own merits.)
 
 ### 1.2 [Low] `run_turn` echoes the raw exception text to the browser
 `service/runner.py:81-83` catches `except Exception` and yields

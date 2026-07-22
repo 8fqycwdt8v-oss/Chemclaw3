@@ -47,11 +47,14 @@ a path has no direct test, a characterization test is written **first**.
 - **Rollback:** revert the one-line change.
 - **Risk:** low; strictly adds a bound.
 
-### A4 · COR-1 — Nextflow JSON-decode retryability
-- **Change:** `workflows/hpc/nextflow.py` `launch_run`/`poll_run` — wrap `response.json()` and raise a **retryable** error (a plain `ConnectionError`/dedicated retryable type, not a `ValueError`) on `JSONDecodeError`, so `BAD_DATA_RETRY` retries a transient bad body instead of failing permanently.
-- **Test (new):** unit test with a fake transport returning HTTP 200 + non-JSON body; assert the raised type is one `BAD_DATA_RETRY` treats as retryable. (`nextflow` is pure-httpx-transport injectable — testable offline.)
-- **Rollback:** revert; test reverts.
-- **Risk:** low; only reclassifies an error path.
+### A4 · COR-1 — Nextflow JSON-decode retryability — **DROPPED (verified false positive)**
+During execution this was verified against the Temporal SDK + Rust core: `non_retryable_error_types`
+is matched by **exact case-insensitive string equality** on the failure `type`
+(`sdk-core/.../retry_logic.rs:104`), and a generic exception's type is
+`exception.__class__.__name__` (`temporalio/converter/_failure_converter.py:113`). So Temporal sees
+`"JSONDecodeError"`, not `"ValueError"` → the error is **already retryable**, which is the desired
+behavior. `publish.py`'s own comment documents this exact-name behavior (it's why `"ValidationError"`
+is listed explicitly). No bug, no change. See `05-correctness.md §1.1` for the full correction.
 
 ### A5 · CON-1 — unify the `"unknown"` actor sentinel
 - **Change:** replace literal `"unknown"` defaults with `settings.service_actor_id` in `workflows/models.py:35`, `agents/chemclaw_agent.py:89`, `agents/audit.py:166` (and fix the two docstring mentions). Note: `workflows/models.py` is inside a Temporal workflow import closure — read the config value at the activity/caller boundary, not inside a `@workflow.defn`, to preserve determinism (verify against the Phase-7 determinism rule).

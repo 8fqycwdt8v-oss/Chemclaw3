@@ -76,7 +76,7 @@ Severity: **Crit / High / Med / Low / Info**. Effort: **S** (<1h), **M** (a few 
 | SEC-5 | Security / headers | Low | No HSTS/CSP/X-Frame-Options/X-Content-Type-Options; app serves an HTML chat UI. | Add a security-headers middleware (CSP at minimum). | S |
 | SEC-6 | Security / logs | Low | Upstream `response.text` echoed into exceptions in `nextflow.py`, `identity/workload.py`, `identity/obo.py`. Server-side only. | Truncate/omit body; keep status + reason. | S |
 | SEC-7 | Security / logs | Low | `service/auth.py` returns JWT validation failure reason in the 401 `detail`. | Generic 401 in production. | S |
-| COR-1 | Correctness / resilience | Med | `nextflow.py:86,104` `response.json()` raises `JSONDecodeError` (a `ValueError`) → `BAD_DATA_RETRY` marks it non-retryable → a transient bad 200 body permanently kills the durable QM job. | Catch decode error, raise a retryable error type. | S |
+| ~~COR-1~~ | Correctness / resilience | ~~Med~~ **FALSE POSITIVE** | Claimed `nextflow.py` `response.json()` `JSONDecodeError` is non-retryable and kills the durable QM job. **Verified wrong during execution:** Temporal matches `non_retryable_error_types` by exact class-name string (`retry_logic.rs`), and the failure type is `exception.__class__.__name__` = `"JSONDecodeError"` ≠ `"ValueError"`, so it is already **retryable**. No change. | Dropped (A4). | — |
 | COR-2 | Correctness / idempotency | Med | `nextflow.launch_run` POSTs with no idempotency key; Temporal at-least-once retry double-submits an expensive HPC run. (Dormant: `hpc_launch_interface` defaults `mock`.) | Send an idempotency key derived from the QM cache key. ⚠ may defer to live-edge. | M |
 | COR-3 | Correctness / resource | Med | `service/app.py` `sessions`/`session_owners` dicts never evicted → unbounded per-pod memory growth. | Bound with an LRU/TTL, or move lookup to the session store. | M |
 | COR-4 | Correctness / concurrency | Med | `agents/session_events.py` push-back mailbox does `SELECT unconsumed` then `UPDATE consumed` without `FOR UPDATE SKIP LOCKED`; concurrent tailers double-deliver. (Mitigated: single-tailer + session-to-pod pinning.) | Add `FOR UPDATE SKIP LOCKED` (or claim-then-read). | M |
@@ -112,8 +112,8 @@ the ⚠ items are gated on Open Questions and should not start until answered.
    intends this behavior.
 3. **COR-5/CON-2 — fpstore statement timeout** (S). One-arg fix; corroborated by two agents; brings the
    one outlier store in line.
-4. **COR-1 — Nextflow JSON decode retryability** (S). Prevents a transient blip from permanently killing
-   a durable QM job.
+4. ~~**COR-1 — Nextflow JSON decode retryability**~~ — **dropped during execution: verified false
+   positive** (JSONDecodeError is already retryable under Temporal's exact-name matching).
 5. **CON-1 — unify the `"unknown"` actor sentinel on `service_actor_id`** (S). Removes an identity-
    attribution inconsistency the config already claims is gone.
 6. **ARC-1 — fix wheel packaging** (S, ⚠ contract). Latent but ships-broken on the first non-editable
