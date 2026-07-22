@@ -439,10 +439,13 @@ class Settings(BaseSettings):
     # ORD JSON) from this directory — the "structured recipe" path, alongside the free-text
     # JSON export above. Same `ElnAdapter` contract, so both flow through the one sync loop.
     ord_export_dir: str = "eln/exports/ord"
-    # Which registered ELN adapter the durable sync ingests from (a key of `eln.registry`'s
-    # `ELN_ADAPTERS`: "json" for the free-text export, "ord" for native ORD). The sync tracks
-    # one high-water cursor, so it runs a single source; switching source is this setting, not
-    # a code change. (The memory jobs read the union of all registered adapters instead.)
+    # The key the durable ELN sync stores its single high-water cursor under (`sync_cursors`). The
+    # sync ingests whichever sources `data_sources` marks active (`active_ingest_sources()`), but
+    # tracks one shared cursor keyed by this label (per-source cursors are deferred, see
+    # DEFERRED.md). It is a cursor label only — no longer an adapter selector — so renaming it
+    # re-keys the cursor; leave it unless you intend a cursor reset. (Both the sync and the memory
+    # jobs now read the same config-driven `active_ingest_sources()`, so the two corpora can never
+    # disagree — DUP-1.)
     eln_sync_adapter: str = "json"
     # The active data sources on the generic seam (plan F7): a comma list of `sources.registry`
     # keys. `graph` is the knowledge-graph retriever (retrieve-only); `eln-json`/`eln-ord` re-host
