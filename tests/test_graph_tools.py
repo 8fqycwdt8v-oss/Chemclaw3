@@ -57,6 +57,55 @@ def test_expand_note_clamps_hops(tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     assert {n.id for n in huge.neighbors} == {n.id for n in at_max.neighbors}
 
 
+def test_find_notes_surfaces_provenance(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A NoteRef carries provenance (author/source/confidence) so the agent can weigh it (KM-6)."""
+    (tmp_path / "p.md").write_text(
+        "---\nid: reaction-p\ntype: reaction\ncreated_by: agent\nsource: eln-7\n"
+        "confidence: 0.8\n---\nA [[compound-a]] prep.\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(settings, "knowledge_dir", str(tmp_path))
+    (ref,) = asyncio.run(find_notes("prep"))
+    assert ref.created_by == "agent"
+    assert ref.source == "eln-7"
+    assert ref.confidence == 0.8
+
+
+def test_find_notes_excludes_expired(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """An expired note (valid_to in the past) is not surfaced as current evidence (KM-7)."""
+    (tmp_path / "old.md").write_text(
+        "---\nid: reaction-old\ntype: reaction\nvalid_to: 2000-01-01\ntags: [reflux]\n---\nOld.\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "new.md").write_text(
+        "---\nid: reaction-new\ntype: reaction\ntags: [reflux]\n---\nCurrent.\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(settings, "knowledge_dir", str(tmp_path))
+    refs = asyncio.run(find_notes("reflux"))
+    assert {r.id for r in refs} == {"reaction-new"}  # the expired note is dropped
+
+
+def test_expand_note_drops_expired_neighbor(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The anchor is returned by explicit id, but an expired neighbor is filtered out (KM-7)."""
+    (tmp_path / "a.md").write_text(
+        "---\nid: compound-a\ntype: compound\n---\nMakes [[reaction-old]] and [[reaction-r]].\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "old.md").write_text(
+        "---\nid: reaction-old\ntype: reaction\nvalid_to: 2000-01-01\n---\nExpired.\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "r.md").write_text(
+        "---\nid: reaction-r\ntype: reaction\n---\nCurrent.\n", encoding="utf-8"
+    )
+    monkeypatch.setattr(settings, "knowledge_dir", str(tmp_path))
+    view = asyncio.run(expand_note("compound-a", hops=1))
+    assert [n.id for n in view.neighbors] == ["reaction-r"]  # expired neighbor excluded
+
+
 def test_propose_knowledge_note_uses_gate(monkeypatch: pytest.MonkeyPatch) -> None:
     """The write tool proposes an agent note through the (fake) PR-gate."""
     fake = FakeSubmitter()

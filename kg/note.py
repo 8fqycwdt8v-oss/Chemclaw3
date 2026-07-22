@@ -87,6 +87,21 @@ class Note(BaseModel):
                 ordered.setdefault(target, None)
         return list(ordered)
 
+    def is_current(self, as_of: date) -> bool:
+        """Whether the note is inside its validity window on `as_of` (bounds inclusive).
+
+        `valid_from`/`valid_to` time-scope a note; either may be absent (open-ended). Discovery
+        retrieval excludes non-current notes so a not-yet-valid or superseded/expired entry is not
+        served as *current* evidence (GxP freshness — audit KM-7). The note is never deleted: it
+        stays in Git and is still reachable by explicit id, it is only dropped from current-evidence
+        sweeps.
+        """
+        if self.valid_from is not None and as_of < self.valid_from:
+            return False
+        if self.valid_to is not None and as_of > self.valid_to:
+            return False
+        return True
+
 
 class NoteError(ChemclawError):
     """A note file could not be parsed or failed schema validation."""

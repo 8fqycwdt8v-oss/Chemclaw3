@@ -40,8 +40,8 @@ findings are recorded in D-051. These residuals were **consciously not fixed now
 
 | Deferred | Why not now | Trigger |
 |---|---|---|
-| Per-source pipeline cursor in the ELN sync | The durable sync carries one high-water cursor keyed by `eln_sync_adapter`; with the single default ingest source (`eln-json`) this is correct. With **two** active ingest sources whose newest entries differ, the shared `max()` cursor can skip the lagging source's entries (F7 review F-1/F-2). Fixing means per-source cursors + tying the cursor key to the *active ingest set*, not `eln_sync_adapter`. **Interim guard added (2026-07-22):** `sync_eln_entries` now fails fast + non-retryably when >1 ingest source is active, so the silent-skip is impossible until per-source cursors land. | The first second ingest source lands — i.e. the custom Snowflake ELN connector, which the plan already scopes to bring its own pipeline cursor. Lift the guard and key cursors per source then |
-| Thundering-herd lock in `WorkloadTokenProvider` | On a cold/stale cache, N concurrent `get_service_token(scope)` all fire the exchange (correctness fine — never a stale token, just redundant calls) | Measurable duplicate token exchanges under real concurrency — add an `asyncio.Lock` per scope |
+| ~~Per-source pipeline cursor in the ELN sync~~ | **Done (D-054, 2026-07-22):** the sync now keys one high-water cursor per active ingest source (registry name), iterating every source; the interim fail-fast guard is removed and multi-ingest is safe. Both existing adapters are datetime-cursored (`ElnAdapter` contract), so this is a faithful generalization, not a guess. `eln_sync_adapter` config field deleted (was the dead single-cursor label — audit DUP-2). | — (a future non-datetime cursor source generalizes the `ElnAdapter` contract itself) |
+| ~~Thundering-herd lock in `WorkloadTokenProvider`~~ | **Done (D-054, 2026-07-22):** a per-scope `asyncio.Lock` with a double-checked cache re-read collapses N concurrent cold/stale callers onto one exchange; different scopes never block. | — |
 | Generic ingest half still shaped like `ElnAdapter` | `IngestHalf = ElnAdapter` (verbatim re-host) means a future non-ELN ingest source must expose `fetch_new_entries`/`map_to_ord`. Acceptable while every ingest source is reaction-shaped (maps to the canonical ORD reaction) | A non-reaction ingest source appears — then generalize the ingest half's mapped type |
 
 ## Critical re-review (2026-07-22)
@@ -50,11 +50,18 @@ Every deferred item above was re-examined against current reality, asking "does 
 *now*?" rather than assuming the deferral still stands. Verdict: **all remain correctly deferred
 except one**, which got an interim guard.
 
-**Acted on now — Per-source ELN cursor.** The full per-source-cursor fix stays deferred (no second
-real feed), but the F7/DUP-1 config seam made the *unsafe* two-ingest-source setup reachable by
-config, where the one shared cursor silently skips entries. Added the fail-fast guard this item's own
-"add a startup validator then" note called for (see the row above). This converts a silent data-loss
-into a loud, non-retryable failure — cheap insurance, no scope creep into the full fix.
+**Implemented (D-054, superseding the interim guard).** A follow-up "close all found gaps" pass then
+did the *full* fixes for the two items that turned out to be closable offline against the existing
+contracts:
+
+- **Per-source ELN cursor.** First shipped as an interim fail-fast guard, then replaced by real
+  per-source cursors: the sync iterates every active ingest source and keys one cursor per source
+  (the `sync_cursors` table already keyed by name). Both current adapters are datetime-cursored
+  (that *is* the `ElnAdapter` contract), so this is the faithful generalization of today's contract,
+  not a guess about the not-yet-existing Snowflake source. The `eln_sync_adapter` dead field is gone
+  (audit DUP-2). Multi-ingest is now first-class.
+- **`WorkloadTokenProvider` thundering-herd lock.** A per-scope `asyncio.Lock` + double-checked cache
+  now collapses concurrent cold-cache callers onto one exchange — cheap, correct, offline-testable.
 
 **Confirmed still-deferred (trigger genuinely unmet).** Nothing else crossed its threshold:
 
@@ -63,8 +70,8 @@ into a loud, non-retryable failure — cheap insurance, no scope creep into the 
   confidentiality boundary that does not exist in this environment.
 - *Need a scale we haven't reached:* sub-quadratic playbook clustering (O(n²) is fine below ~10⁴
   reactions), per-key in-flight calc-store dedup (only worth it when duplicate *expensive* HPC runs
-  are a measured cost — still mock), the `WorkloadTokenProvider` thundering-herd lock (no real
-  concurrent token exchanges to measure).
+  are a measured cost — still mock). (The `WorkloadTokenProvider` thundering-herd lock was in this
+  bucket but is now implemented — the lock is cheap enough to add before the scale arrives — D-054.)
 - *Need a capability/source that isn't in scope for v1:* universal ELN abstraction (only a 3rd real
   ELN triggers it — we have 2 adapters), external literature/patent retrievers (Phase 5b core is
   done, but this is a net-new source needing an API decision, not a latent gap), the tabular

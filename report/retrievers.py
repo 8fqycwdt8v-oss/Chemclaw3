@@ -8,6 +8,7 @@ emit carries the id of the note it came from, so the harness can cite it (5b.2).
 """
 
 import asyncio
+from datetime import date
 from pathlib import Path
 from typing import Any
 
@@ -52,10 +53,15 @@ class GraphRetriever:
         needle = query.lower()
         want_type = filters.get("type")
         want_tag = filters.get("tag")
+        today = date.today()
         chunks: list[EvidenceChunk] = []
         # load_notes is a synchronous full disk parse — offload it so the event loop
         # (the report worker) is not blocked (same pattern as agents/graph_tools.py).
         for note in await asyncio.to_thread(load_notes, self._dir):
+            # A report cites current evidence only: skip a not-yet-valid or expired note so it
+            # cannot be quoted as current guidance (KM-7). It remains in Git, just not cited here.
+            if not note.is_current(today):
+                continue
             if want_type is not None and note.type != want_type:
                 continue
             if want_tag is not None and want_tag not in note.tags:

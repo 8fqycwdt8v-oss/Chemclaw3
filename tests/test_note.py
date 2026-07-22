@@ -1,5 +1,6 @@
 """Behavioral tests for the note schema and parser (plan steps 2.1, 2.2)."""
 
+from datetime import date
 from pathlib import Path
 
 import pytest
@@ -7,6 +8,19 @@ from pydantic import ValidationError
 
 from chemclaw.errors import ChemclawError
 from kg.note import Note, NoteError, parse_note, read_note
+
+
+def test_is_current_honors_validity_window() -> None:
+    """`is_current` treats `valid_from`/`valid_to` as inclusive bounds; absent bounds are open."""
+    as_of = date(2026, 6, 1)
+    assert Note(id="n", type="reaction").is_current(as_of)  # no bounds → always current
+    # Expired: as_of past valid_to (and the boundary day itself is still current).
+    assert not Note(id="n", type="reaction", valid_to=date(2026, 5, 31)).is_current(as_of)
+    assert Note(id="n", type="reaction", valid_to=date(2026, 6, 1)).is_current(as_of)
+    # Not yet valid: as_of before valid_from (boundary inclusive).
+    assert not Note(id="n", type="reaction", valid_from=date(2026, 6, 2)).is_current(as_of)
+    assert Note(id="n", type="reaction", valid_from=date(2026, 6, 1)).is_current(as_of)
+
 
 _VALID = """---
 id: compound-aspirin

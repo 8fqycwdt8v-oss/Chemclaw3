@@ -94,6 +94,20 @@ def test_refreshes_once_stale(_federation_env: None) -> None:
     assert len(captured) == 2
 
 
+def test_concurrent_misses_do_one_exchange(_federation_env: None) -> None:
+    """N concurrent cold-cache callers for one scope collapse onto a single exchange (D-054)."""
+    captured: list[httpx.Request] = []
+    provider = WorkloadTokenProvider(transport=_counting_transport(captured), clock=_Clock())
+
+    async def _race() -> list[str]:
+        return await asyncio.gather(*(provider.get_service_token("s") for _ in range(10)))
+
+    tokens = asyncio.run(_race())
+
+    assert tokens == ["access-1"] * 10  # everyone got the one minted token
+    assert len(captured) == 1  # not a thundering herd of 10 exchanges
+
+
 def test_disabled_federation_raises(monkeypatch: pytest.MonkeyPatch) -> None:
     """With federation off there is no token path — a typed error, not a silent None."""
     monkeypatch.setattr(settings, "entra_workload_federation_enabled", False)

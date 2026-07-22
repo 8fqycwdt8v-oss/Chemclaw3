@@ -11,6 +11,7 @@ The generic LLM credential (`agents/llm_provider.py`) is the one documented exce
 go through here.
 """
 
+import asyncio
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -58,6 +59,17 @@ class WorkloadTokenProvider:
         self._transport = transport
         self._clock = clock
         self._cache: dict[str, _CachedToken] = {}
+        # One lock per scope so concurrent cold/stale callers for the same scope collapse onto a
+        # single exchange instead of a thundering herd (D-054); different scopes never block.
+        self._locks: dict[str, asyncio.Lock] = {}
+
+    def _fresh(self, scope: str, now: float) -> str | None:
+        """Return the cached token for `scope` if still valid at `now`, else `None`."""
+        cached = self._cache.get(scope)
+        leeway = settings.entra_token_refresh_leeway_seconds
+        if cached is not None and now < cached.expires_at - leeway:
+            return cached.value
+        return None
 
     async def get_service_token(self, scope: str) -> str:
         """Return a valid Entra access token for `scope`, minting one if the cache is cold/stale.
@@ -74,12 +86,18 @@ class WorkloadTokenProvider:
         """
         if not settings.entra_workload_federation_enabled:
             raise WorkloadIdentityError("workload identity federation is disabled")
-        now = self._clock()
-        cached = self._cache.get(scope)
-        leeway = settings.entra_token_refresh_leeway_seconds
-        if cached is not None and now < cached.expires_at - leeway:
-            return cached.value
-        return await self._exchange(scope, now)
+        fresh = self._fresh(scope, self._clock())
+        if fresh is not None:
+            return fresh
+        # Serialize the miss per scope, then re-check under the lock: whoever waited now finds the
+        # token the first caller just minted, so N concurrent misses do one exchange, not N.
+        lock = self._locks.setdefault(scope, asyncio.Lock())
+        async with lock:
+            now = self._clock()
+            fresh = self._fresh(scope, now)
+            if fresh is not None:
+                return fresh
+            return await self._exchange(scope, now)
 
     async def _exchange(self, scope: str, now: float) -> str:
         """Perform the client-credentials exchange and cache the result against `now`."""

@@ -48,6 +48,15 @@ def active_ingest_sources() -> list[IngestHalf]:
     return [source.ingest for source in _active_sources() if source.ingest is not None]
 
 
+def active_ingest_source_names() -> list[str]:
+    """The registry names of the active sources that have an ingest half (config order kept).
+
+    The durable ELN sync iterates these and keys one high-water cursor per name, so two ingest
+    sources advance independently — neither's furthest cursor can skip the other's lagging entries.
+    """
+    return [source.name for source in _active_sources() if source.ingest is not None]
+
+
 def active_retrieve_sources() -> list[RetrieveHalf]:
     """The retrieve halves of the active sources, for `gather_evidence` to fan out over."""
     return [source.retrieve for source in _active_sources() if source.retrieve is not None]

@@ -1123,3 +1123,93 @@ never disagree again.
 that the memory corpus tracks `data_sources` (adding `eln-ord` expands it; a retrieve-only config
 yields an empty corpus); the removed `eln/registry.py` tests are covered by
 `tests/test_datasource_seam.py`.
+
+## D-054 — Per-source ELN cursors + a per-scope token lock (close the two F-review deferrals)
+
+**Context.** Two consciously-deferred items from the F4–F7 review (D-051) were re-examined under a
+"close all found gaps" pass and found genuinely implementable offline against the *existing*
+contracts — no live infrastructure, no speculative abstraction:
+
+1. **Shared ELN cursor (F7 review F-1/F-2).** The durable sync tracked one high-water cursor
+   (keyed by the now-dead `eln_sync_adapter` label) while F7/DUP-1 made a *multi*-ingest-source
+   config reachable. Two sources whose newest entries differ would let the furthest `max()` cursor
+   skip the lagging source's entries — silent data loss. D-053 shipped an interim fail-fast guard
+   (>1 ingest source → non-retryable error); this ADR removes the guard and does the real fix.
+2. **Thundering-herd token exchange.** On a cold/stale cache, N concurrent
+   `WorkloadTokenProvider.get_service_token(scope)` callers each fired the federation exchange —
+   correct (never a stale token) but wastefully redundant.
+
+The deferral reasoning for (1) was "wait for the second real source (Snowflake), which brings its
+own pipeline cursor." Re-checked: **both** current ingest adapters are datetime-cursored because the
+`ElnAdapter` contract *is* `fetch_new_entries(since: datetime)`. Per-source datetime cursors is
+therefore the faithful generalization of the contract that exists today, not a guess about a source
+that doesn't. A future non-datetime cursor source would generalize the `ElnAdapter` contract itself,
+at which point the cursor storage generalizes with it. So the gap is closable now.
+
+**Decision.**
+- `sources/registry.py` gains `active_ingest_source_names()` (registry names of active sources with
+  an ingest half). `ElnSyncWorkflow` iterates those names: for each source it loads that source's own
+  cursor (scheduled runs), syncs it via `sync_eln_entries(source, since)`, and stores the advanced
+  cursor per source. The `sync_cursors` table already keys by source name — no schema change. A
+  manual backfill (explicit `since`) runs every source from that point and touches no stored cursor.
+- The interim multi-ingest guard is removed; multiple ingest sources are now first-class.
+- `settings.eln_sync_adapter` is **deleted** (audit DUP-2): it was only the single shared-cursor
+  label, which no longer exists. `.env.example` and the runbook (iii) are updated to the
+  `data_sources` reality.
+- `WorkloadTokenProvider` gains a per-scope `asyncio.Lock`; `get_service_token` re-checks the cache
+  under the lock (double-checked), so N concurrent misses on one scope do a single exchange while
+  distinct scopes never block each other.
+
+**Consequence (contract note — dev-stage, no live cluster yet).** The sync's stored-cursor keying
+changes from one `eln_sync_adapter` label to per-source registry names; on a live system the first
+scheduled run after the change re-ingests each source from its epoch once (harmless — ingestion is
+idempotent, id-keyed upserts + idempotent note branches). Removing `eln_sync_adapter` is a config
+surface change: a deployment that set `CHEMCLAW_ELN_SYNC_ADAPTER` must drop it (`extra="forbid"`).
+Both are acceptable now because the F-layer live edges are still open (no in-flight workflows, no
+real deployment).
+
+**Result.** `make lint type test` green; `mypy --strict` clean. `tests/test_eln_workflow.py` adds
+offline unit tests (named-source activity, `active_ingest_source_names`, the summary fold) and a
+server-backed test proving each active ingest source gets its own stored cursor;
+`tests/test_workload_identity.py` adds a concurrency test asserting 10 concurrent misses do exactly
+one exchange.
+
+## D-055 — GxP freshness + read-time provenance in graph retrieval (audit KM-6, KM-7)
+
+**Context.** The knowledge-management gap analysis (`docs/audit/09-knowledge-management-gaps.md`)
+found two read-path gaps that are cheap, offline, and central to the GxP posture — no infra, no
+schema migration, no curated artifact, no chosen threshold:
+
+- **KM-7 (freshness).** `Note.valid_from`/`valid_to` existed but were **never checked at read**, so a
+  not-yet-valid or expired note served as current fact with no signal — sharp for a GxP base that
+  must not present superseded conditions as current.
+- **KM-6 (provenance at read).** `NoteRef` (the agent-facing view from `find_notes`/`expand_note`)
+  exposed only `id/type/smiles/tags`, so the agent could not weigh a source by author/origin/
+  confidence/validity without a second lookup, even though the note carried all of it.
+
+**Decision.**
+- `Note.is_current(as_of)` encodes the validity window (inclusive bounds; either bound optional).
+  The three discovery/evidence sweeps — `find_notes`, `expand_note`'s neighbor list, and
+  `GraphRetriever.retrieve` (the report path) — now exclude non-current notes as of `date.today()`.
+  **Explicit by-id expansion still returns the anchor** even if expired (an explicit lookup, not a
+  discovery sweep); only discovered/neighbor/report evidence is freshness-filtered. Nothing is
+  deleted — the note stays in Git and reachable by id, it is only dropped from *current-evidence*
+  results.
+- `NoteRef` carries `created_by`, `source`, `confidence`, `valid_from`, `valid_to` (all defaulted so
+  a bare reference is still constructible); `_ref` fills them from the note. This also wires the
+  previously-unread `confidence` field into the agent's view (part of KM-5's concern) without
+  building a cross-source ranker.
+
+**Consequence (behavior change, flagged).** Retrieval results change: an expired or not-yet-valid
+note no longer appears in `find_notes`, in `expand_note` neighbors, or in report evidence. This is
+intended GxP behavior (don't serve superseded facts as current). The chosen policy is *exclude
+silently from current-evidence sweeps* (the note is still in Git and by-id reachable) rather than
+*include-with-a-flag*; if a surfaced-but-flagged behavior is later wanted, `is_current` is the single
+seam to branch on.
+
+**Result.** `make lint type test` green; `mypy --strict` clean. Tests: `test_note.py` (window
+semantics incl. inclusive boundaries), `test_graph_tools.py` (provenance surfaced; expired excluded
+from `find_notes` and from `expand_note` neighbors while the anchor is kept), `test_report.py`
+(`GraphRetriever` skips expired). The remaining gap-doc items are either deferred-by-design/
+infra-gated or carry a design decision (a gold-set, a ranking function, a concurrency limit, an audit
+schema migration) and are left for an explicit follow-up rather than guessed.
