@@ -61,6 +61,8 @@ def test_parity_defaults_are_backward_compatible() -> None:
     assert settings.model_routes == {}  # single-model behavior
     assert settings.tool_role_gates == {}  # nothing gated
     assert settings.tool_authz_default == "allow"  # every tool callable by default
+    assert settings.verifier_enabled is False  # deterministic citation gate, no LLM judge
+    assert settings.verifier_confidence_threshold == 0.7
 
 
 def test_hybrid_retrieval_defaults_are_backward_compatible() -> None:

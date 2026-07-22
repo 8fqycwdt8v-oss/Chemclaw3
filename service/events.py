@@ -57,10 +57,19 @@ class ApprovalRequestEvent(BaseModel):
 
 
 class AnswerEvent(BaseModel):
-    """The turn's final assembled answer (the complete text, after the token stream)."""
+    """The turn's final assembled answer (the complete text, after the token stream).
+
+    When answer verification is enabled (plan F10-B), `confidence` carries the verifier's aggregate
+    citation-faithfulness score in [0, 1] and `unsupported_claims` lists the claim texts the
+    evidence did not support, so a thin UI can render a review affordance on a low-confidence answer
+    and route it to the existing human hold. Both stay `None`/empty on the verifier-off path, so the
+    event is byte-for-byte today's answer unless verification is switched on.
+    """
 
     type: Literal["answer"] = "answer"
     text: str
+    confidence: float | None = None
+    unsupported_claims: list[str] = []
 
 
 class ErrorEvent(BaseModel):

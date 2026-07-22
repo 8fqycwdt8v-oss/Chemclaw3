@@ -208,6 +208,16 @@ class Settings(BaseSettings):
     # default) is exactly today's single-model behavior. ENV override is JSON, e.g.
     # CHEMCLAW_MODEL_ROUTES='{"verifier": "internal-small", "agent": "internal-large"}'.
     model_routes: dict[str, str] = Field(default_factory=dict)
+    # Answer verification & confidence routing (plan F10-B). When `verifier_enabled`, a drafted
+    # answer is checked for citation faithfulness by an LLM-as-judge on the cheap routed model
+    # (task `"verifier"`, F10-E): each factual claim is scored against the evidence it cites, and an
+    # aggregate `confidence` in [0,1] is returned. An answer scoring below
+    # `verifier_confidence_threshold` is flagged for human review (the confidence + the unsupported
+    # claims ride on the turn's `AnswerEvent`), reusing the existing D-032 hold — no new gate. When
+    # disabled (the default), the verifier falls back to the deterministic report citation check
+    # (`report.harness.verify_claims`) so there is no network dependency and no behavior change.
+    verifier_enabled: bool = False
+    verifier_confidence_threshold: float = Field(default=0.7, ge=0, le=1)
 
     # MAF agent (plan step 1.5). `agent_model` is the orchestration model name
     # (ENV-overridable); the provider's API key is read by the chat client from

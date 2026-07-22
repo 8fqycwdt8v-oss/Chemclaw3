@@ -34,9 +34,17 @@ tickets + disposition table: `docs/parity-plan.md`.
       Deferred (follow-up): a scheduled `background-jobs` reindex activity (today `make reindex` /
       the CLI populates the index); the enable-flag booleans were intentionally folded into registry
       membership rather than added.
-- [ ] **F10-B** answer verification + confidence routing · **F10-D** Temporal child-workflow
-      orchestration · **F10-F** P/R/F1 + drift metrics — remaining F10 tickets. OCR/vision, vendor
-      connectors, GAMP-5 artifacts stay gate-until-trigger.
+- [x] **F10-B** answer verification + confidence routing: `agents/verifier.py` — `verify_answer`
+      scores citation faithfulness, LLM-as-judge (structured output on the routed `verifier` model,
+      F10-E) when `verifier_enabled`, else the deterministic `verify_claims` gate (DRY, offline).
+      `verify_turn_answer` resolves an answer's `[[wikilink]]` citations to the notes it cites; the
+      runner stamps `AnswerEvent.confidence` + `unsupported_claims` so a low-confidence answer routes
+      to the existing D-032 human hold. Default-off = today's plain answer. Config:
+      `verifier_enabled`, `verifier_confidence_threshold`. Tests: `test_verifier`, `test_runner`,
+      `test_config`. (Durable report workflow verifies at citation level — no prose there; the
+      conversational path gets the LLM faithfulness score.)
+- [ ] **F10-D** Temporal child-workflow orchestration · **F10-F** P/R/F1 + drift metrics — remaining
+      F10 tickets. OCR/vision, vendor connectors, GAMP-5 artifacts stay gate-until-trigger.
 
 ## Now — Foundation build (docs/foundation-plan.md + docs/implementation-tickets.md)
 
