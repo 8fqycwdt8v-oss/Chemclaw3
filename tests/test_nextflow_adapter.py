@@ -76,6 +76,22 @@ def test_full_lifecycle(_launcher_env: None) -> None:
     assert '"CCO"' in body and '"qm-pipeline"' in body and '"1.4.0"' in body
 
 
+def test_launch_sends_deterministic_idempotency_key(_launcher_env: None) -> None:
+    """The launch POST carries an Idempotency-Key = the QM job key, stable on retry (COR-2)."""
+    launcher = _FakeLauncher()
+    transport = httpx.MockTransport(launcher.handler)
+    job = _job()
+
+    async def _launch_twice() -> None:
+        await nextflow.launch_run(job, transport=transport)
+        await nextflow.launch_run(job, transport=transport)  # a retry of the same job
+
+    asyncio.run(_launch_twice())
+    keys = [r.headers["Idempotency-Key"] for r in launcher.launched]
+    assert keys[0] == qm_job_key(job)  # derived from the job's stable identity
+    assert keys[0] == keys[1]  # a retry of the same job reuses the key, so the launcher can dedupe
+
+
 def test_unknown_status_is_an_error(_launcher_env: None) -> None:
     """An unrecognized launcher status raises, rather than looping forever as 'still running'."""
 
