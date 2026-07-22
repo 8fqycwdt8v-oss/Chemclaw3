@@ -21,11 +21,40 @@ Prioritized open action items. Top = next. Keep in sync with `docs/implementatio
       outermost → denials audited); authz added only when gates configured (default unchanged).
       Tests: `test_authz.py` + `test_agent.py::test_tool_gates_wire_the_authz_middleware`. 282 pass.
 
-### Open — part 3: live-infra edges (need a real tenant/cluster)
-- [ ] 6.1 Entra JWT validation (JWKS) + OAuth-proxy + OBO to the ELN — needs a live tenant; this
-      is what produces the `Principal` the parts above already consume.
-- [ ] 6.3 Temporal mTLS + propagate `principal.oid` into `requested_by`/audit; namespace-per-team.
-- [ ] 6.4 knowledge-graph ACL (repo-level first; RLS mirror stays deferred). 6.5 HPC identity bridge.
+### Open — part 3: produce & propagate the identity (the remaining Phase-6 to-dos)
+
+Parts 1–2 (D-039/D-040) built everything that *consumes* a `Principal` — role-scoped skills and
+tool authorization — and left every gate opt-in by config, so nothing is enforced until an admin
+sets `skill_role_gates`/`tool_role_gates`. What is left is *producing* a `Principal` from a real
+Entra token and threading it through the rest of the stack. Split by what can be done here vs.
+what needs live infra:
+
+**Offline-doable now (test against a synthetic RSA keypair / self-issued JWT — no tenant):**
+- [ ] 6.1 `chemclaw/auth.py`: `TokenValidator` that validates an Entra JWT and returns a
+      `Principal` — signature via JWKS, plus `aud`/`iss`/`exp` checks and `roles`/`groups` claim
+      extraction. Add the JWT lib (`pyjwt[crypto]` or `joserfc`) as a dep. Unit-test the whole
+      decision with a locally-generated keypair (valid token → Principal; bad sig / wrong aud /
+      expired → rejected). Leaves only the *live JWKS URL + tenant/client ids* as config to wire.
+- [ ] Propagate the caller into the durable path: set `QMJobInput.requested_by = principal.oid`
+      at the `submit_qm_job` tool (the workflow field already exists) so the audit `oid` reaches
+      Temporal. Testable offline.
+- [ ] Config for the above: `entra_tenant_id`, `entra_client_id`/`audience`, `entra_jwks_url`
+      (defaults empty; validation is only active when configured, mirroring the gates).
+
+**Needs a live tenant / cluster (implement behind the interfaces above, mark as infra-gated):**
+- [ ] 6.1 MCP-server auth (FastMCP `AzureProvider`/`BearerAuthProvider`), OAuth-proxy pattern
+      (Azure ≠ DCR), and OBO flow to the ELN with the caller's token. Confused-deputy checks.
+- [ ] 6.3 Temporal service auth: mTLS certs (Key Vault) for worker/client; namespace-per-team;
+      HPC quotas/QOS. (`oid` is carried as an audit claim, not transport auth — see architektur §7.)
+- [ ] 6.4 Knowledge-graph ACL: start broad repo-level read; RLS mirror only on a real
+      confidentiality need (stays DEFERRED). 6.5 HPC identity-bridge service (Entra ↔ HPC account).
+- [ ] CHECKMATE 6 (plan): a user without role X cannot see skill X or trigger tool X, and the
+      audit trail shows the triggering `oid`; then a full security review over the whole system.
+
+> The end-to-end wiring (who constructs the `Principal` and calls `build_agent(principal=…)`)
+> lands with whatever front door is added (Copilot Studio / Teams / an HTTP entrypoint). Until
+> then the agent stays library-only and anonymous by default — see `SECURITY.md` for the
+> deployment constraint that follows.
 
 ## Deep-review follow-ups (D-030)
 
