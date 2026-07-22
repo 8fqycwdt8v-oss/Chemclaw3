@@ -14,7 +14,7 @@ from pathlib import Path
 
 import pytest
 
-from eln.adapter import RawEntry
+from eln.adapter import RawEntry, parse_iso_utc
 from eln.ingest import IngestError, ingest_reaction
 from eln.json_adapter import ElnFormatError, JsonExportAdapter
 from eln.note import note_from_ord_reaction
@@ -57,6 +57,19 @@ def test_reaction_smiles_and_role_validation() -> None:
             outcomes=[Component(smiles="CCO", role=Role.PRODUCT)],
             provenance="p",
         )
+
+
+def test_parse_iso_utc_normalizes_to_tz_aware_utc() -> None:
+    """The shared timestamp helper (CON-3) reads Z, offsets, and naive strings as tz-aware UTC."""
+    # Trailing 'Z' → UTC.
+    assert parse_iso_utc("2026-01-02T03:04:05Z") == datetime(2026, 1, 2, 3, 4, 5, tzinfo=UTC)
+    # Explicit offset is honored (and remains offset-aware).
+    assert parse_iso_utc("2026-01-02T03:04:05+02:00").utcoffset() is not None
+    # Naive (no offset) is read as UTC, never left naive.
+    assert parse_iso_utc("2026-01-02T03:04:05").tzinfo is UTC
+    # An unparseable string raises ValueError for the caller to wrap in its format error.
+    with pytest.raises(ValueError):
+        parse_iso_utc("not-a-timestamp")
 
 
 # --- validator ------------------------------------------------------------------------

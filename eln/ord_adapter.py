@@ -18,14 +18,14 @@ source: this and the free-text adapter share only the `ElnAdapter` contract, not
 import json
 import logging
 from collections.abc import Iterable
-from datetime import UTC, datetime
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
 from pydantic import ValidationError
 
 from chemclaw.config import settings
-from eln.adapter import ElnMappingError, RawEntry
+from eln.adapter import ElnMappingError, RawEntry, parse_iso_utc
 from eln.ord import Component, OrdReaction, ReactionStep, Role, StepKind
 
 logger = logging.getLogger(__name__)
@@ -342,10 +342,9 @@ def _created_at(payload: dict[str, Any]) -> datetime:
     if not isinstance(value, str):
         raise OrdFormatError("ORD reaction missing 'provenance.record_created.time'")
     try:
-        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        return parse_iso_utc(value)
     except ValueError as exc:
         raise OrdFormatError(f"bad record_created time {value!r}: {exc}") from exc
-    return parsed if parsed.tzinfo is not None else parsed.replace(tzinfo=UTC)
 
 
 def _addition_order(pair: tuple[dict[str, Any], list[Component]]) -> tuple[int, str]:

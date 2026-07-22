@@ -7,13 +7,26 @@ identical no matter which ELN is wired. There is no universal ELN abstraction â€
 per source (DEFERRED.md: generalize only from a third source).
 """
 
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Any, Protocol, runtime_checkable
 
 from pydantic import BaseModel, Field
 
 from chemclaw.errors import ChemclawError
 from eln.ord import OrdReaction
+
+
+def parse_iso_utc(value: str) -> datetime:
+    """Parse an ISO-8601 timestamp (accepting a trailing 'Z') as a tz-aware UTC datetime.
+
+    A naive timestamp (no UTC offset) is read as UTC: exports that omit the offset are common,
+    UTC is the least-surprising reading, and a naive datetime would later raise `TypeError` when
+    compared against the sync's offset-aware cursor. Raises `ValueError` on an unparseable string;
+    callers wrap that in their layer-specific format error with the source path/context (DRY: both
+    the free-text and ORD adapters share this exact rule).
+    """
+    parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    return parsed if parsed.tzinfo is not None else parsed.replace(tzinfo=UTC)
 
 
 class ElnMappingError(ChemclawError):

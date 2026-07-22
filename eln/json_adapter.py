@@ -26,14 +26,14 @@ Expected entry shape (this ELN's format — known only here):
 import json
 import logging
 import re
-from datetime import UTC, datetime
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
 from pydantic import ValidationError
 
 from chemclaw.config import settings
-from eln.adapter import ElnMappingError, RawEntry
+from eln.adapter import ElnMappingError, RawEntry, parse_iso_utc
 from eln.ord import Component, OrdReaction, ReactionStep, Role, StepKind
 
 logger = logging.getLogger(__name__)
@@ -273,7 +273,6 @@ def _parse_timestamp(value: Any, path: Path) -> datetime:
     if not isinstance(value, str):
         raise ElnFormatError(f"{path.name}: missing 'timestamp'")
     try:
-        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        return parse_iso_utc(value)
     except ValueError as exc:
         raise ElnFormatError(f"{path.name}: bad timestamp {value!r}: {exc}") from exc
-    return parsed if parsed.tzinfo is not None else parsed.replace(tzinfo=UTC)
