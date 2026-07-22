@@ -13,6 +13,7 @@ static chat UI at `/`. Identity (Entra OIDC on every non-health route) is layere
 
 import logging
 import uuid
+from collections import OrderedDict
 from collections.abc import AsyncIterator, Callable
 from pathlib import Path
 from typing import Any
@@ -40,6 +41,37 @@ _STATIC_DIR = Path(__file__).parent / "static"
 # Loopback interfaces: binding here keeps the unauthenticated dev mode reachable only from the local
 # host, so it is not a network-exposed footgun. Anything else (notably the "0.0.0.0" default) is.
 _LOOPBACK_HOSTS = frozenset({"127.0.0.1", "localhost", "::1"})
+
+
+class _LiveSessions:
+    """A bounded, LRU cache of the front door's live in-process sessions with their owner (COR-3).
+
+    The service keeps the live `AgentSession` object per session id; without a bound this map grows
+    for the pod's whole lifetime (a memory leak). This caps it and evicts the least-recently-used
+    entry when full — an evicted session's durable history still lives in the session store, only
+    the live in-process handle is dropped, so the worst case under memory pressure is a client
+    starting a new session. Session and owner are stored together so the two can never drift.
+    """
+
+    def __init__(self, capacity: int) -> None:
+        """Create a registry holding at most `capacity` live sessions."""
+        self._capacity = capacity
+        self._entries: OrderedDict[str, tuple[Any, str | None]] = OrderedDict()
+
+    def add(self, session_id: str, session: Any, owner: str | None) -> None:
+        """Register a live session (most-recently-used), evicting the oldest past capacity."""
+        self._entries[session_id] = (session, owner)
+        self._entries.move_to_end(session_id)
+        while len(self._entries) > self._capacity:
+            self._entries.popitem(last=False)
+
+    def get(self, session_id: str) -> tuple[Any, str | None] | None:
+        """Return the `(session, owner)` for `session_id` (marking it recently used), or None."""
+        entry = self._entries.get(session_id)
+        if entry is None:
+            return None
+        self._entries.move_to_end(session_id)
+        return entry
 
 
 class MessageIn(BaseModel):
@@ -74,16 +106,18 @@ def create_app(agent_factory: Callable[[], Any] = build_agent) -> FastAPI:
     # durable store and wires job→session push-back.
     app.state.agent = None
     app.state.agent_factory = agent_factory
-    app.state.sessions = {}
-    # session_id -> owner Entra oid, so a session can only be posted to / streamed by its creator
-    # (defense-in-depth beyond the unguessable uuid4 id; review finding). Off when identity is off.
-    app.state.session_owners = {}
+    # Bounded LRU of live sessions, each carrying its owner Entra oid so a session can only be
+    # posted to / streamed by its creator (defense-in-depth beyond the unguessable uuid4 id). The
+    # bound keeps the map from growing for the pod's lifetime (COR-3).
+    app.state.live_sessions = _LiveSessions(settings.service_max_live_sessions)
 
     def _owned_session(session_id: str, principal: Principal) -> Any:
         """Return the session iff it exists and the caller owns it, else 404 (no existence leak)."""
-        session = app.state.sessions.get(session_id)
-        owner = app.state.session_owners.get(session_id)
-        if session is None or (owner is not None and owner != principal.oid):
+        entry = app.state.live_sessions.get(session_id)
+        if entry is None:
+            raise HTTPException(status_code=404, detail="unknown session")
+        session, owner = entry
+        if owner is not None and owner != principal.oid:
             raise HTTPException(status_code=404, detail="unknown session")
         return session
 
@@ -109,8 +143,9 @@ def create_app(agent_factory: Callable[[], Any] = build_agent) -> FastAPI:
     ) -> SessionOut:
         """Start a new conversation session and return its id (requires an authenticated user)."""
         session_id = uuid.uuid4().hex
-        app.state.sessions[session_id] = _agent().create_session(session_id=session_id)
-        app.state.session_owners[session_id] = principal.oid
+        app.state.live_sessions.add(
+            session_id, _agent().create_session(session_id=session_id), principal.oid
+        )
         return SessionOut(session_id=session_id)
 
     @app.post("/sessions/{session_id}/messages")
