@@ -30,7 +30,13 @@ def _dir_fingerprint(notes_dir: Path) -> _Fingerprint:
     """Stat every note file under `notes_dir`; return the (path, mtime_ns, size) fingerprint."""
     entries: set[tuple[str, int, int]] = set()
     for path in notes_dir.rglob("*.md"):
-        stat = path.stat()
+        try:
+            stat = path.stat()
+        except OSError:
+            # A note removed between listing and stat (e.g. a `git pull` rewriting the tree
+            # under a live query): treat it as absent. It simply drops out of the fingerprint,
+            # which correctly busts the cache on the next stable read — never a crashed query.
+            continue
         entries.add((str(path), stat.st_mtime_ns, stat.st_size))
     return frozenset(entries)
 
@@ -58,7 +64,8 @@ def load_notes(notes_dir: Path) -> list[Note]:
 
     The result is cached per directory behind a stat fingerprint (KM-14), so interactive retrieval
     does not re-parse the whole tree on every query; any change to a note busts the cache, so a read
-    is never stale. A shallow copy is returned so a caller cannot mutate the cached list.
+    is never stale. A shallow copy is returned so a caller cannot mutate the cached list, and `Note`
+    is frozen, so the shared note instances cannot be mutated either.
     """
     if not settings.graph_cache_enabled:
         return _parse_notes(notes_dir)

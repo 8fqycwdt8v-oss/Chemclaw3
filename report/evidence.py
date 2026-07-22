@@ -23,8 +23,10 @@ class EvidenceChunk(BaseModel):
     # A relevance/support score in [0, 1], higher = keep first when a sweep must truncate (KM-5).
     # Each retriever sets it in its own terms — graph hits by the note's `confidence`, structural
     # hits by similarity — so it orders within a sweep; it is a ranking heuristic, not a calibrated
-    # cross-source probability. Default 0.0 (an unscored chunk sorts last).
-    score: float = Field(default=0.0, ge=0.0, le=1.0)
+    # cross-source probability. Defaults to a neutral 0.5: every current retriever sets it
+    # explicitly, so this only governs a future retriever that forgets to — and neutral keeps such
+    # a chunk in the middle of the ranking rather than silently pinning it last (and truncated).
+    score: float = Field(default=0.5, ge=0.0, le=1.0)
 
 
 @runtime_checkable

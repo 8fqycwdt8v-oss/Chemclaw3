@@ -1298,9 +1298,30 @@ sort). Retrieval reads may be served from the graph cache (busted on any note ch
 The front door can now answer **503** on the messages route under load. Migration `010` must be
 applied (`make db-migrate`); it is idempotent.
 
+**Post-implementation review hardening.** An independent diff review found no live bug but five
+latent/robustness items; four were fixed here, one consciously kept:
+- *Graph cache — stat on a vanished file.* `_dir_fingerprint` now wraps `path.stat()` in
+  `except OSError: continue`, so a note deleted between `rglob` and `stat` (a `git pull` under a live
+  query) drops out of the fingerprint and busts the cache on the next read, instead of crashing the
+  query — the resilience `_parse_notes` already had.
+- *Graph cache — shared mutable notes.* `Note` is now `frozen=True`. The cache hands the same
+  instances to every reader; immutability makes that sharing provably safe (no reader can corrupt a
+  cached note), and no code mutated a note in place, so freezing is behavior-preserving.
+- *Evidence score default.* `EvidenceChunk.score` defaults to a neutral **0.5** (was 0.0). Every
+  current retriever sets it explicitly; the default only governs a future retriever that forgets to,
+  and neutral keeps such a chunk mid-ranking instead of silently pinning it last-and-truncated.
+- *Admission-permit release is now tested.* A test runs three sequential turns against a single
+  permit and asserts all succeed and the permit returns — guarding the `finally: release()` whose
+  regression would silently collapse capacity.
+- *Kept as-is:* the permit is acquired in the handler (not inside the SSE generator) so a shed turn
+  can return a clean **503** before the response starts — moving the acquire into the generator, as
+  one suggested, would break that. The only leak path (response created but never iterated) needs an
+  exotic failure between endpoint return and `response.__call__` under sse-starlette; accepted.
+
 **Result.** `make lint type cov` green; `mypy --strict` clean. Tests: `test_research_tools.py`
 (rank-before-truncate keeps the confident notes), `test_report.py` (`GraphRetriever` scores by
-confidence), `test_graph.py` (cache reuse + fingerprint-bust + disable), `test_audit.py` (revision
-stamped), `test_service.py` (503 at zero capacity). New config: `retrieval_default_confidence`,
+confidence), `test_graph.py` (cache reuse + fingerprint-bust + disable + vanished-file tolerance),
+`test_note.py` (note is immutable), `test_audit.py` (revision stamped), `test_service.py` (503 at
+zero capacity + permit released across sequential turns). New config: `retrieval_default_confidence`,
 `graph_cache_enabled`, `deployment_revision`, `service_max_concurrent_turns`,
 `service_turn_admission_timeout_seconds`; new migration `infra/sql/010_audit_revision.sql`.

@@ -22,6 +22,13 @@ def test_is_current_honors_validity_window() -> None:
     assert Note(id="n", type="reaction", valid_from=date(2026, 6, 1)).is_current(as_of)
 
 
+def test_note_is_immutable() -> None:
+    """A note is a frozen value object — the graph cache shares instances, so mutation must fail."""
+    note = Note(id="n", type="reaction")
+    with pytest.raises(ValidationError):
+        note.confidence = 0.5
+
+
 _VALID = """---
 id: compound-aspirin
 type: compound

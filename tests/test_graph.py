@@ -77,6 +77,15 @@ def test_load_notes_cache_off_always_reparses(
     assert parses["count"] == 2
 
 
+def test_dir_fingerprint_tolerates_a_vanished_file(tmp_path: Path) -> None:
+    """A note that cannot be stat'd (e.g. deleted mid-query) is skipped, not a crashed load."""
+    (tmp_path / "a.md").write_text(_note("a", []), encoding="utf-8")
+    dangling = tmp_path / "gone.md"
+    dangling.symlink_to(tmp_path / "does-not-exist.md")  # rglob lists it; stat() raises
+    fingerprint = graph._dir_fingerprint(tmp_path)
+    assert [entry[0] for entry in fingerprint] == [str(tmp_path / "a.md")]
+
+
 def test_neighborhood_expands_both_directions(tmp_path: Path) -> None:
     """1-hop from c finds its direct neighbors; 2-hop reaches the whole component."""
     graph = build_graph(_make_graph_dir(tmp_path))

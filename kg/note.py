@@ -14,7 +14,7 @@ from typing import Literal
 
 import frontmatter
 import yaml
-from pydantic import BaseModel, Field, ValidationError, field_validator
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 
 from chemclaw.errors import ChemclawError
 
@@ -37,7 +37,13 @@ class Note(BaseModel):
     `created_by` is the GxP provenance line: `agent`-authored notes must pass the
     PR-gate before merge (D-005). `confidence` (0–1) and `valid_from`/`valid_to`
     let a later query weigh and time-scope evidence.
+
+    Frozen: a note is an immutable value object. The graph indexer caches parsed notes and
+    hands the same instances to every reader (KM-14); immutability makes that sharing safe —
+    no caller can mutate a cached note and corrupt it for the next query.
     """
+
+    model_config = ConfigDict(frozen=True)
 
     id: str = Field(min_length=1)
     type: str = Field(min_length=1)
