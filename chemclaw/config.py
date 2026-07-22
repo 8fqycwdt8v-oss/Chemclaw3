@@ -280,6 +280,10 @@ class Settings(BaseSettings):
     service_host: str = "0.0.0.0"
     service_port: int = Field(default=8080, gt=0)
     service_cors_origins: str = ""
+    # Max characters accepted in one chat message at the front door (SEC-4). Bounds the request body
+    # at the trust boundary so an oversized POST is a clean 422, not an unbounded allocation.
+    # Generous for a real message (~25k tokens); raise it for a workflow that posts more.
+    service_max_message_chars: int = Field(default=100_000, gt=0)
     # Response security headers on the browser surface (SEC-5). When on (the safe default), every
     # response carries a Content-Security-Policy scoped to the self-served chat UI (self + one
     # inline <style> block + data: images), X-Content-Type-Options: nosniff, X-Frame-Options: DENY,
@@ -367,6 +371,10 @@ class Settings(BaseSettings):
     # Markdown knowledge graph (plan Phase 2). Directory of note files the indexer
     # reads; retrieval is graph traversal over their [[wikilinks]] (D-004).
     knowledge_dir: str = "knowledge"
+    # Upper bound on `expand_note`'s link-expansion depth (SEC-4). The tool takes `hops` from the
+    # model; an unbounded value would traverse the whole graph. 1–2 is typical; clamp to this so a
+    # large value is bounded rather than rejected.
+    graph_max_hops: int = Field(default=3, ge=1)
     # PR-gate git settings (plan steps 2.7, 2.8): agent notes branch off this base
     # branch on this remote before a human merges.
     note_base_branch: str = "main"

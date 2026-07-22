@@ -82,6 +82,9 @@ async def expand_note(note_id: str, hops: int = 1) -> NoteView:
     if note_id not in graph or graph.nodes[note_id].get("note") is None:
         raise ValueError(f"no note with id {note_id!r}")
     note = graph.nodes[note_id]["note"]
+    # `hops` comes from the model; clamp it to [0, graph_max_hops] so a large value is bounded
+    # rather than traversing the whole graph (SEC-4).
+    hops = min(max(hops, 0), settings.graph_max_hops)
     neighbors = [
         _ref(graph.nodes[nid]["note"])
         for nid in sorted(neighborhood(graph, note_id, hops=hops))

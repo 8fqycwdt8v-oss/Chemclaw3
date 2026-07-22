@@ -20,7 +20,7 @@ from typing import Any
 
 from fastapi import Depends, FastAPI, HTTPException
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel
+from pydantic import BaseModel, field_validator
 from sse_starlette.sse import EventSourceResponse
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.middleware.cors import CORSMiddleware
@@ -78,6 +78,18 @@ class MessageIn(BaseModel):
     """One turn's user message posted to the messages endpoint."""
 
     message: str
+
+    @field_validator("message")
+    @classmethod
+    def _bounded(cls, value: str) -> str:
+        """Reject a message past the configured cap (SEC-4) — a clean 422, not an unbounded read.
+
+        Read from `settings` at validation time (not as a frozen `Field(max_length=…)`) so the cap
+        is genuinely config-driven and adjustable per deployment.
+        """
+        if len(value) > settings.service_max_message_chars:
+            raise ValueError(f"message exceeds the {settings.service_max_message_chars}-char limit")
+        return value
 
 
 class SessionOut(BaseModel):

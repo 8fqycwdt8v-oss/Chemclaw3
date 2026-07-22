@@ -104,6 +104,17 @@ def test_message_to_unknown_session_is_404() -> None:
         assert res.status_code == 404
 
 
+def test_oversized_message_is_rejected(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    """A message past the configured cap is a clean 422, not an unbounded read (SEC-4)."""
+    from chemclaw.config import settings
+
+    monkeypatch.setattr(settings, "service_max_message_chars", 10)
+    with _client(_FakeAgent()) as client:
+        session_id = client.post("/sessions").json()["session_id"]
+        res = client.post(f"/sessions/{session_id}/messages", json={"message": "x" * 11})
+        assert res.status_code == 422
+
+
 def test_a_session_is_owner_scoped() -> None:
     """A user cannot post into or stream a session another user created (review finding)."""
     from service.auth import Principal, require_principal
