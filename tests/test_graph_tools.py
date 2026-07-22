@@ -46,6 +46,17 @@ def test_expand_unknown_note_raises(tmp_path: Path, monkeypatch: pytest.MonkeyPa
         asyncio.run(expand_note("ghost"))
 
 
+def test_expand_note_clamps_hops(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A huge `hops` is clamped to the configured max, not traversed unbounded (SEC-4)."""
+    _seed(tmp_path)
+    monkeypatch.setattr(settings, "knowledge_dir", str(tmp_path))
+    monkeypatch.setattr(settings, "graph_max_hops", 2)
+    # An absurd hop count returns the same bounded neighborhood as the max, never errors or hangs.
+    huge = asyncio.run(expand_note("compound-a", hops=10_000))
+    at_max = asyncio.run(expand_note("compound-a", hops=2))
+    assert {n.id for n in huge.neighbors} == {n.id for n in at_max.neighbors}
+
+
 def test_propose_knowledge_note_uses_gate(monkeypatch: pytest.MonkeyPatch) -> None:
     """The write tool proposes an agent note through the (fake) PR-gate."""
     fake = FakeSubmitter()

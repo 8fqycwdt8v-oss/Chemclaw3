@@ -15,6 +15,10 @@ dependencies = [
     "bofire[optimization,cheminfo]>=0.4.1",
     "drfp>=0.3.7",
     "fastapi>=0.139.2",
+    # HTTP client for the Entra token/OBO exchanges, the LLM provider seam, and the Nextflow
+    # launcher. Declared explicitly: four first-party modules import it directly, so it is a
+    # direct dependency, not merely transitive (via fastapi/mcp/agent-framework).
+    "httpx>=0.28",
     "mcp>=1.2.0",
     "networkx>=3.6.1",
     "numpy>=2.0",
@@ -52,7 +56,27 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
-packages = ["chemclaw"]
+# Every first-party top-level package, not just `chemclaw`: the console entry point is
+# `agents.cli:main` and the feature code lives across these siblings, so a non-editable
+# `pip install` of the wheel must ship all of them or the `chemclaw` command and its imports
+# break (audit ARC-1). Keep this list in sync with `[tool.coverage.run] source` below.
+packages = [
+    "agents",
+    "bo",
+    "calc",
+    "chemclaw",
+    "eln",
+    "evals",
+    "kg",
+    "mcp_servers",
+    "memory",
+    "report",
+    "scripts",
+    "service",
+    "sources",
+    "workers",
+    "workflows",
+]
 
 [tool.ruff]
 target-version = "py311"
@@ -103,7 +127,7 @@ addopts = "-ra"
 # fail-under yet — set one once a CI run establishes the real baseline (BACKLOG P2).
 [tool.coverage.run]
 branch = true
-source = ["chemclaw", "agents", "bo", "calc", "eln", "evals", "kg", "mcp_servers", "memory", "report", "workflows", "workers", "scripts"]
+source = ["agents", "bo", "calc", "chemclaw", "eln", "evals", "kg", "mcp_servers", "memory", "report", "scripts", "service", "sources", "workers", "workflows"]
 omit = ["*/__init__.py"]
 
 [tool.coverage.report]

@@ -5,6 +5,7 @@ redirected to that key — so signature, audience, issuer, and claim extraction 
 without a tenant or network. The HTTP tests prove the 401 gate and the dev-mode stand-in.
 """
 
+import logging
 import time
 from typing import Any
 
@@ -99,6 +100,10 @@ def test_route_requires_token_when_entra_required(
         ok = client.post("/sessions", headers={"Authorization": f"Bearer {token}"})
         assert ok.status_code == 200
         assert ok.json()["session_id"]
+        # SEC-7: a rejected token returns a generic 401 detail, not the validation reason.
+        bad = client.post("/sessions", headers={"Authorization": "Bearer not.a.jwt"})
+        assert bad.status_code == 401
+        assert bad.json()["detail"] == "invalid or expired token"
 
 
 def test_dev_mode_allows_no_token() -> None:
@@ -112,3 +117,28 @@ def test_healthz_never_requires_auth(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(settings, "entra_required", True)
     with TestClient(create_app(agent_factory=_FakeAgent)) as client:
         assert client.get("/healthz").status_code == 200
+
+
+@pytest.mark.parametrize(
+    ("entra_required", "host", "should_warn"),
+    [
+        (False, "0.0.0.0", True),  # unauthenticated + exposed → warn (SEC-2)
+        (False, "127.0.0.1", False),  # unauthenticated but loopback-only → safe, no warn
+        (False, "localhost", False),  # loopback alias → no warn
+        (True, "0.0.0.0", False),  # authenticated → no warn even when exposed
+    ],
+)
+def test_warns_when_unauthenticated_and_exposed(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    entra_required: bool,
+    host: str,
+    should_warn: bool,
+) -> None:
+    """The startup warning fires only for the unauthenticated, non-loopback bind (SEC-2)."""
+    monkeypatch.setattr(settings, "entra_required", entra_required)
+    monkeypatch.setattr(settings, "service_host", host)
+    with caplog.at_level(logging.WARNING, logger="service.app"):
+        create_app(agent_factory=_FakeAgent)
+    warned = any("authorization gates OPEN" in r.message for r in caplog.records)
+    assert warned is should_warn

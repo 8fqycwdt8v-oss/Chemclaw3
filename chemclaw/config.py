@@ -280,6 +280,16 @@ class Settings(BaseSettings):
     service_host: str = "0.0.0.0"
     service_port: int = Field(default=8080, gt=0)
     service_cors_origins: str = ""
+    # Max characters accepted in one chat message at the front door (SEC-4). Bounds the request body
+    # at the trust boundary so an oversized POST is a clean 422, not an unbounded allocation.
+    # Generous for a real message (~25k tokens); raise it for a workflow that posts more.
+    service_max_message_chars: int = Field(default=100_000, gt=0)
+    # Response security headers on the browser surface (SEC-5). When on (the safe default), every
+    # response carries a Content-Security-Policy scoped to the self-served chat UI (self + one
+    # inline <style> block + data: images), X-Content-Type-Options: nosniff, X-Frame-Options: DENY,
+    # and Strict-Transport-Security. Off is only for a deployment fronting its own header policy at
+    # the ingress/Route. HSTS is inert over plain-HTTP dev, so leaving this on locally is harmless.
+    service_security_headers: bool = True
 
     # Durable session store (plan Phase F3). The agent's conversation history must survive a pod
     # restart, so a session is resumable. `memory` keeps the classic in-process provider (dev/test);
@@ -290,6 +300,12 @@ class Settings(BaseSettings):
     # falls back to `postgres_dsn` (one database in the simple deployment).
     session_store: Literal["memory", "postgres"] = "memory"
     session_store_dsn: str = ""
+    # Cap on the front door's in-process live-session cache (COR-3). The service holds the live
+    # AgentSession object per session id; without a bound this map grows for the pod's whole
+    # lifetime. When the cap is exceeded the least-recently-used session is evicted — its durable
+    # history survives in the session store, only the in-process handle is dropped. Sized generously
+    # for concurrent chemists; raise it for a busier front door.
+    service_max_live_sessions: int = Field(default=1000, gt=0)
     # Job→session push-back (plan F3-T2/T3): a finished Temporal job writes a `session_events` row;
     # the front door tails the table and wakes the owning session (appending the result, flipping
     # the `awaiting` todo) instead of the user polling. This is the tailer's poll interval — a
@@ -355,6 +371,10 @@ class Settings(BaseSettings):
     # Markdown knowledge graph (plan Phase 2). Directory of note files the indexer
     # reads; retrieval is graph traversal over their [[wikilinks]] (D-004).
     knowledge_dir: str = "knowledge"
+    # Upper bound on `expand_note`'s link-expansion depth (SEC-4). The tool takes `hops` from the
+    # model; an unbounded value would traverse the whole graph. 1–2 is typical; clamp to this so a
+    # large value is bounded rather than rejected.
+    graph_max_hops: int = Field(default=3, ge=1)
     # PR-gate git settings (plan steps 2.7, 2.8): agent notes branch off this base
     # branch on this remote before a human merges.
     note_base_branch: str = "main"
@@ -433,10 +453,13 @@ class Settings(BaseSettings):
     # ORD JSON) from this directory — the "structured recipe" path, alongside the free-text
     # JSON export above. Same `ElnAdapter` contract, so both flow through the one sync loop.
     ord_export_dir: str = "eln/exports/ord"
-    # Which registered ELN adapter the durable sync ingests from (a key of `eln.registry`'s
-    # `ELN_ADAPTERS`: "json" for the free-text export, "ord" for native ORD). The sync tracks
-    # one high-water cursor, so it runs a single source; switching source is this setting, not
-    # a code change. (The memory jobs read the union of all registered adapters instead.)
+    # The key the durable ELN sync stores its single high-water cursor under (`sync_cursors`). The
+    # sync ingests whichever sources `data_sources` marks active (`active_ingest_sources()`), but
+    # tracks one shared cursor keyed by this label (per-source cursors are deferred, see
+    # DEFERRED.md). It is a cursor label only — no longer an adapter selector — so renaming it
+    # re-keys the cursor; leave it unless you intend a cursor reset. (Both the sync and the memory
+    # jobs now read the same config-driven `active_ingest_sources()`, so the two corpora can never
+    # disagree — DUP-1.)
     eln_sync_adapter: str = "json"
     # The active data sources on the generic seam (plan F7): a comma list of `sources.registry`
     # keys. `graph` is the knowledge-graph retriever (retrieve-only); `eln-json`/`eln-ord` re-host

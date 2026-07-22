@@ -1,9 +1,10 @@
 """Durable memory-synthesis jobs (plan steps 5.3, 5.4) on the background queue.
 
 Thin Temporal wrappers over `memory.jobs`: each activity reads the full reaction set from the
-ELN adapter (the reaction source — no new store) and proposes campaign / playbook notes via
-the PR-gate. Temporal Schedules drive them periodically, like the ELN sync. No new
-infrastructure — only new note types produced by reusing existing pieces (Phase 5, G1).
+configured active ingest sources (`sources.registry`, the same set the ELN sync ingests — no new
+store) and proposes campaign / playbook notes via the PR-gate. Temporal Schedules drive them
+periodically, like the ELN sync. No new infrastructure — only new note types produced by reusing
+existing pieces (Phase 5, G1).
 """
 
 import logging
@@ -15,13 +16,13 @@ with workflow.unsafe.imports_passed_through():
     from chemclaw.config import settings
     from chemclaw.errors import ChemclawError
     from eln.ord import OrdReaction
-    from eln.registry import all_eln_adapters
     from kg.git_submitter import default_submitter
     from memory.jobs import (
         distill_playbooks,
         synthesize_campaigns,
         synthesize_optimization_campaigns,
     )
+    from sources.registry import active_ingest_sources
 
 from workflows.publish import BAD_DATA_RETRY
 
@@ -29,16 +30,18 @@ logger = logging.getLogger(__name__)
 
 
 async def _all_reactions() -> list[OrdReaction]:
-    """Read and map every reaction from every ELN source (the corpus the memory jobs reason over).
+    """Read and map every reaction from the *configured active* ingest sources (the memory corpus).
 
-    Both ingestion adapters — free-text and native ORD — feed the same canonical schema, so
-    the memory layers reason over the union without knowing either source's shape. Adding a
-    future source is one more adapter here, not a change to any memory job (the "keep
-    integrations dumb, put the reasoning above them" line).
+    Reads the ingest halves of `settings.data_sources` (via `sources.registry`), the same source
+    set the durable ELN sync ingests — so toggling `CHEMCLAW_DATA_SOURCES` changes what memory
+    reasons over, and the two subsystems can never disagree on which sources exist (DUP-1). Every
+    ingest half feeds the same canonical schema, so the memory layers reason over the union without
+    knowing any source's shape. Adding a future source is one registry entry + one config token,
+    not a change here (the "keep integrations dumb, put the reasoning above them" line).
     """
     since = datetime.min.replace(tzinfo=UTC)
     reactions: list[OrdReaction] = []
-    for adapter in all_eln_adapters():
+    for adapter in active_ingest_sources():
         for raw in await adapter.fetch_new_entries(since):
             try:
                 reactions.append(adapter.map_to_ord(raw))

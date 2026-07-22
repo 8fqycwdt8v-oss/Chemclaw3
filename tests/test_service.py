@@ -11,7 +11,7 @@ import json
 from agent_framework import AgentSession
 from fastapi.testclient import TestClient
 
-from service.app import create_app
+from service.app import _LiveSessions, create_app
 
 
 class _SpyMcpTool:
@@ -64,11 +64,16 @@ def test_healthz_is_ok() -> None:
 
 
 def test_static_chat_page_is_served() -> None:
-    """The browser chat surface is served at the root."""
+    """The browser chat surface is served at the root, with security headers, and still loads."""
     with _client(_FakeAgent()) as client:
         res = client.get("/")
         assert res.status_code == 200
-        assert "Chemclaw" in res.text
+        assert "Chemclaw" in res.text  # SEC-5: the CSP does not break the inline-styled UI
+        # SEC-5: the browser security headers are present on the response.
+        assert res.headers["X-Content-Type-Options"] == "nosniff"
+        assert res.headers["X-Frame-Options"] == "DENY"
+        assert "frame-ancestors 'none'" in res.headers["Content-Security-Policy"]
+        assert "Strict-Transport-Security" in res.headers
 
 
 def test_message_stream_runs_a_turn_and_opens_mcp_once() -> None:
@@ -97,6 +102,17 @@ def test_message_to_unknown_session_is_404() -> None:
     with _client(_FakeAgent()) as client:
         res = client.post("/sessions/nope/messages", json={"message": "hi"})
         assert res.status_code == 404
+
+
+def test_oversized_message_is_rejected(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    """A message past the configured cap is a clean 422, not an unbounded read (SEC-4)."""
+    from chemclaw.config import settings
+
+    monkeypatch.setattr(settings, "service_max_message_chars", 10)
+    with _client(_FakeAgent()) as client:
+        session_id = client.post("/sessions").json()["session_id"]
+        res = client.post(f"/sessions/{session_id}/messages", json={"message": "x" * 11})
+        assert res.status_code == 422
 
 
 def test_a_session_is_owner_scoped() -> None:
@@ -156,3 +172,27 @@ def test_pushback_for_unknown_session_is_404() -> None:
     """Subscribing to push-back for a session that never existed is a clean 404."""
     with _client(_FakeAgent()) as client:
         assert client.get("/sessions/nope/events").status_code == 404
+
+
+def test_live_sessions_evicts_least_recently_used() -> None:
+    """The bounded registry drops the LRU entry past capacity, keeping recent ones (COR-3)."""
+    reg = _LiveSessions(capacity=2)
+    reg.add("a", "sess-a", "owner-a")
+    reg.add("b", "sess-b", "owner-b")
+    # Touch "a" so "b" becomes the least-recently-used before the third insert.
+    assert reg.get("a") == ("sess-a", "owner-a")
+    reg.add("c", "sess-c", "owner-c")
+    assert reg.get("b") is None  # evicted (LRU)
+    assert reg.get("a") == ("sess-a", "owner-a")  # kept (recently used)
+    assert reg.get("c") == ("sess-c", "owner-c")  # kept (newest)
+
+
+def test_live_sessions_never_exceeds_capacity() -> None:
+    """Adding far more sessions than the cap keeps the map bounded (no unbounded growth)."""
+    reg = _LiveSessions(capacity=3)
+    for i in range(100):
+        reg.add(f"s{i}", f"sess-{i}", "owner")
+    # Only the last 3 survive; the map never grew past the cap.
+    assert reg.get("s99") is not None
+    assert reg.get("s0") is None
+    assert sum(reg.get(f"s{i}") is not None for i in range(100)) == 3

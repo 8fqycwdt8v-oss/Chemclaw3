@@ -18,14 +18,14 @@ source: this and the free-text adapter share only the `ElnAdapter` contract, not
 import json
 import logging
 from collections.abc import Iterable
-from datetime import UTC, datetime
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
 from pydantic import ValidationError
 
 from chemclaw.config import settings
-from eln.adapter import ElnMappingError, RawEntry
+from eln.adapter import ElnMappingError, RawEntry, parse_iso_utc
 from eln.ord import Component, OrdReaction, ReactionStep, Role, StepKind
 
 logger = logging.getLogger(__name__)
@@ -164,7 +164,7 @@ def _steps(
                 temperature_c=temperature_c,
             )
         )
-    for workup in _list(payload, "workups"):
+    for workup in _optional_list(payload, "workups"):
         steps.append(_workup_step(workup, len(steps) + 1))
     return steps
 
@@ -227,7 +227,7 @@ def _outcomes(payload: dict[str, Any]) -> tuple[list[Component], float | None]:
     """Map ORD `outcomes[].products[]` to product components + the first YIELD measurement."""
     products: list[Component] = []
     yield_percent: float | None = None
-    for outcome in _list(payload, "outcomes"):
+    for outcome in _optional_list(payload, "outcomes"):
         if not isinstance(outcome, dict):
             raise OrdFormatError(f"outcome is not an object: {outcome!r}")
         for product in _as_list(outcome.get("products")):
@@ -342,10 +342,9 @@ def _created_at(payload: dict[str, Any]) -> datetime:
     if not isinstance(value, str):
         raise OrdFormatError("ORD reaction missing 'provenance.record_created.time'")
     try:
-        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        return parse_iso_utc(value)
     except ValueError as exc:
         raise OrdFormatError(f"bad record_created time {value!r}: {exc}") from exc
-    return parsed if parsed.tzinfo is not None else parsed.replace(tzinfo=UTC)
 
 
 def _addition_order(pair: tuple[dict[str, Any], list[Component]]) -> tuple[int, str]:
@@ -368,7 +367,7 @@ def _get(mapping: dict[str, Any], *names: str) -> Any:
     return None
 
 
-def _list(payload: dict[str, Any], key: str) -> list[Any]:
+def _optional_list(payload: dict[str, Any], key: str) -> list[Any]:
     """Return an optional list field as a list (empty when absent), else raise on a non-list."""
     value = payload.get(key)
     if value is None:

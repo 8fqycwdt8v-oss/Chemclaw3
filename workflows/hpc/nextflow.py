@@ -15,7 +15,8 @@ from enum import StrEnum
 import httpx
 
 from chemclaw.config import settings
-from workflows.models import HpcJobHandle, QMJobInput
+from chemclaw.http import error_detail
+from workflows.models import HpcJobHandle, QMJobInput, qm_job_key
 
 
 class NextflowError(RuntimeError):
@@ -79,10 +80,16 @@ async def launch_run(
             "basis_set": job.basis_set,
         },
     }
+    # Idempotency (COR-2): Temporal retries `submit_to_hpc` at-least-once, so a lost launch response
+    # would otherwise re-POST and double-submit an expensive HPC run. Send a deterministic
+    # `Idempotency-Key` derived from the QM job's stable identity (the same molecule+method+basis
+    # hash used for the workflow id and result cache) so a launcher that honors the RFC header
+    # collapses the retry onto the first run instead of starting a second.
+    headers = {"Idempotency-Key": qm_job_key(job)}
     async with await _client(transport) as client:
-        response = await client.post("/workflow/launch", json=payload)
+        response = await client.post("/workflow/launch", json=payload, headers=headers)
     if response.status_code != httpx.codes.OK:
-        raise NextflowError(f"launch failed: {response.status_code} {response.text}")
+        raise NextflowError(f"launch failed: {error_detail(response)}")
     run_id = response.json().get("workflowId")
     if not run_id:
         raise NextflowError("launcher returned no workflowId")
@@ -100,7 +107,7 @@ async def poll_run(
     async with await _client(transport) as client:
         response = await client.get(f"/workflow/{handle.scheduler_job_id}")
     if response.status_code != httpx.codes.OK:
-        raise NextflowError(f"poll failed: {response.status_code} {response.text}")
+        raise NextflowError(f"poll failed: {error_detail(response)}")
     status = str(response.json().get("workflow", {}).get("status", "")).upper()
     state = _STATE_BY_LAUNCHER_STATUS.get(status)
     if state is None:
@@ -123,5 +130,5 @@ async def fetch_artifacts(
     async with await _client(transport) as client:
         response = await client.get(url)
     if response.status_code != httpx.codes.OK:
-        raise NextflowError(f"artifact fetch failed: {response.status_code} {response.text}")
+        raise NextflowError(f"artifact fetch failed: {error_detail(response)}")
     return response.text

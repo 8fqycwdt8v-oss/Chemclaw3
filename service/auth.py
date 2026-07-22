@@ -14,6 +14,7 @@ tokens against a local key without network. The raw-inference-credential excepti
 apply here — this is a user-scoped resource access, so it is fully Entra-scoped.
 """
 
+import logging
 from typing import Any
 
 import jwt
@@ -22,6 +23,8 @@ from jwt import PyJWKClient
 from pydantic import BaseModel, Field
 
 from chemclaw.config import settings
+
+logger = logging.getLogger(__name__)
 
 # The dev stand-in used only when `entra_required` is False (local, no tenant). Never reached in a
 # real deployment, where every request is a validated Entra token.
@@ -103,4 +106,7 @@ async def require_principal(request: Request) -> Principal:
     try:
         return validate_token(header[len("Bearer ") :])
     except AuthError as exc:
-        raise HTTPException(status_code=401, detail=str(exc)) from exc
+        # The specific failure reason (audience/issuer/expiry mismatch) is useful to an operator
+        # but is not disclosed to the caller — log it server-side, return a generic 401 (SEC-7).
+        logger.info("token validation failed: %s", exc)
+        raise HTTPException(status_code=401, detail="invalid or expired token") from exc

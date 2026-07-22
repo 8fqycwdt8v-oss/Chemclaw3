@@ -158,8 +158,11 @@ def test_factory_records_failure_and_reraises() -> None:
 
 
 def test_sink_failure_does_not_break_the_tool_call(caplog: pytest.LogCaptureFixture) -> None:
-    """A broken audit sink is logged and swallowed — the tool call still succeeds."""
+    """A broken audit sink is logged (alertably) and swallowed — the tool call still succeeds."""
     mw = make_audit_middleware(correlation_id="c", actor="a", sink=_BrokenSink())
-    with caplog.at_level(logging.WARNING):
+    with caplog.at_level(logging.ERROR):
         _drive_mw(mw, _ctx("predict_pka", {"smiles": "CCO"}), _ok)  # must not raise
-    assert "audit sink failed" in caplog.text
+    # SEC-3: the lost GxP record is logged at ERROR with a stable, greppable marker so it can alert.
+    record = next(r for r in caplog.records if "audit_sink_failure" in r.getMessage())
+    assert record.levelno == logging.ERROR
+    assert getattr(record, "event", None) == "audit_sink_failure"

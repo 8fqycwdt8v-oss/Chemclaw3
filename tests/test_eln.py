@@ -14,13 +14,11 @@ from pathlib import Path
 
 import pytest
 
-from eln.adapter import RawEntry
+from eln.adapter import RawEntry, parse_iso_utc
 from eln.ingest import IngestError, ingest_reaction
 from eln.json_adapter import ElnFormatError, JsonExportAdapter
 from eln.note import note_from_ord_reaction
 from eln.ord import Component, OrdReaction, Role
-from eln.ord_adapter import OrdJsonAdapter
-from eln.registry import all_eln_adapters, make_eln_adapter
 from eln.sync import sync_entries
 from eln.validate import validate_ord
 from mcp_servers.fpstore import InMemoryFingerprintStore
@@ -57,6 +55,19 @@ def test_reaction_smiles_and_role_validation() -> None:
             outcomes=[Component(smiles="CCO", role=Role.PRODUCT)],
             provenance="p",
         )
+
+
+def test_parse_iso_utc_normalizes_to_tz_aware_utc() -> None:
+    """The shared timestamp helper (CON-3) reads Z, offsets, and naive strings as tz-aware UTC."""
+    # Trailing 'Z' → UTC.
+    assert parse_iso_utc("2026-01-02T03:04:05Z") == datetime(2026, 1, 2, 3, 4, 5, tzinfo=UTC)
+    # Explicit offset is honored (and remains offset-aware).
+    assert parse_iso_utc("2026-01-02T03:04:05+02:00").utcoffset() is not None
+    # Naive (no offset) is read as UTC, never left naive.
+    assert parse_iso_utc("2026-01-02T03:04:05").tzinfo is UTC
+    # An unparseable string raises ValueError for the caller to wrap in its format error.
+    with pytest.raises(ValueError):
+        parse_iso_utc("not-a-timestamp")
 
 
 # --- validator ------------------------------------------------------------------------
@@ -495,18 +506,6 @@ def test_sync_rejects_degenerate_reaction_without_aborting_batch() -> None:
     asyncio.run(_run())
 
 
-# --- adapter registry -----------------------------------------------------------------
-
-
-def test_registry_selects_adapter_by_name() -> None:
-    """The config name maps to the right adapter; an unknown name fails with the valid ones."""
-    assert isinstance(make_eln_adapter("json"), JsonExportAdapter)
-    assert isinstance(make_eln_adapter("ord"), OrdJsonAdapter)
-    with pytest.raises(ValueError, match="unknown ELN adapter 'nope'; valid names: json, ord"):
-        make_eln_adapter("nope")
-
-
-def test_all_adapters_covers_every_registered_source() -> None:
-    """The corpus readers get every registered adapter (both ingestion paths)."""
-    kinds = {type(a) for a in all_eln_adapters()}
-    assert kinds == {JsonExportAdapter, OrdJsonAdapter}
+# The ELN-specific adapter registry (`eln/registry.py`) was removed in DUP-1: source selection is
+# unified in `sources/registry.py` (config-driven via `data_sources`), covered by
+# `tests/test_datasource_seam.py`. Both adapters are still exercised directly throughout this file.

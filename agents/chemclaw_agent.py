@@ -86,7 +86,7 @@ _INSTRUCTIONS = (
 def build_agent(
     chat_client: Any | None = None,
     *,
-    actor: str = "unknown",
+    actor: str = settings.service_actor_id,
     correlation_id: str | None = None,
     audit_sink: AuditSink | None = None,
 ) -> Agent:
@@ -104,7 +104,7 @@ def build_agent(
             config-selected provider client is built via `build_chat_client`
             (needs its credential at run time, not here).
         actor: Who the audit trail attributes tool calls to — the Phase-6 identity
-            seam. Defaults to `"unknown"` until Entra auth populates it.
+            seam. Defaults to the configured `service_actor_id` until Entra auth populates it.
         correlation_id: Ties this conversation's audit events together; a fresh UUID
             is generated when omitted, so each agent gets its own trail id.
         audit_sink: Durable destination for the audit trail. Omitted means log-only

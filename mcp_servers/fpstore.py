@@ -182,9 +182,13 @@ class PostgresFingerprintStore:
 
         Delegates to the shared `chemclaw.db.connect` so a down/misconfigured database
         reports "Postgres unreachable at <host>" instead of a raw psycopg traceback (DRY
-        with the calculation store).
+        with the calculation store). Applies the configured per-statement timeout too, so a
+        slow HNSW similarity scan is cancelled rather than pinning its worker — the same bound
+        every other store carries.
         """
-        return await db.connect(self._dsn)
+        return await db.connect(
+            self._dsn, statement_timeout_seconds=settings.pg_statement_timeout_seconds
+        )
 
     async def add(self, record: FingerprintRecord) -> None:
         """Insert or replace a fingerprint by id."""

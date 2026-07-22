@@ -19,6 +19,7 @@ from pathlib import Path
 import httpx
 
 from chemclaw.config import settings
+from chemclaw.http import error_detail
 
 # The federated client-credentials assertion type — the SA JWT is presented as the client's proof
 # of identity in place of a secret (RFC 7521 / Entra workload identity).
@@ -94,9 +95,7 @@ class WorkloadTokenProvider:
         ) as client:
             response = await client.post(settings.entra_token_endpoint, data=data)
         if response.status_code != httpx.codes.OK:
-            raise WorkloadIdentityError(
-                f"token exchange failed: {response.status_code} {response.text}"
-            )
+            raise WorkloadIdentityError(f"token exchange failed: {error_detail(response)}")
         body = response.json()
         access_token = body.get("access_token")
         expires_in = body.get("expires_in")

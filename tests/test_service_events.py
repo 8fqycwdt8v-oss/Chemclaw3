@@ -95,3 +95,7 @@ def test_run_turn_reports_failure_as_error_event() -> None:
     assert [e.type for e in events] == ["error"]
     assert isinstance(events[0], ErrorEvent)
     assert "could not be completed" in events[0].message
+    # SEC-1: the raw exception text must never reach the client — only a generic message keyed by
+    # the session id (which the client already holds) so an operator can correlate to the log.
+    assert "model exploded" not in events[0].message
+    assert "s2" in events[0].message

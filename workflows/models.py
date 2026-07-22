@@ -32,7 +32,10 @@ class QMJobInput(BaseModel):
     molecule_smiles: str = Field(min_length=1)
     method: str = Field(min_length=1)
     basis_set: str = Field(min_length=1)
-    requested_by: str = "unknown"
+    # Defaults to the configured service identity (not a magic "unknown"): a run constructed
+    # without an actor — tests, system-triggered jobs — is attributed to `service_actor_id`,
+    # the same fallback `require_actor` uses off the authenticated path (CON-1).
+    requested_by: str = settings.service_actor_id
     # When true, the completed result is proposed as a PR-gated graph note (2.8).
     # Opt-in, so a calculation is only published to the graph when deliberately asked.
     publish_to_graph: bool = False
