@@ -43,4 +43,4 @@ verified with `ruff` + `mypy --strict` + the targeted test file(s) for the area.
 | C1 · INV-3 | Postgres round-trip test for `PostgresAuditSink` (the GxP sink) | `900a6d3` | New `test_audit_store.py` (CI-run; skips offline) |
 | C2 · SEC-3 | Audit-sink failure logged at ERROR with stable `audit_sink_failure` marker + trail ids | `afe00cb` | Updated sink-failure test asserts ERROR level + structured marker |
 
-**Final gate:** see `09-handover.md` for the before/after baseline diff.
+**Final gate:** see `11-handover.md` for the before/after baseline diff.

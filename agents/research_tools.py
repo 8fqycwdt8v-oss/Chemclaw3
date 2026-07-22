@@ -81,11 +81,15 @@ async def gather_evidence(
         if key not in seen:
             seen.add(key)
             unique.append(chunk)
+    # Rank by score before the cap so a truncated sweep keeps the best-supported evidence, not an
+    # arbitrary disk-order slice (KM-5). The sort is stable, so equal-scored chunks keep their
+    # retriever/discovery order (the previous behavior for an unscored corpus).
+    ranked = sorted(unique, key=lambda chunk: chunk.score, reverse=True)
     # Frame each chunk's content as retrieved data before it enters the model context, so a
     # note body carrying adversarial text is read as evidence to cite, not an instruction.
     return [
         chunk.model_copy(
             update={"content": frame_untrusted(chunk.content, note_id=chunk.source_note_id)}
         )
-        for chunk in unique[: settings.gather_evidence_max_chunks]
+        for chunk in ranked[: settings.gather_evidence_max_chunks]
     ]

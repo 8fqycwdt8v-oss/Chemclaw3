@@ -25,6 +25,7 @@ from workflows.bo_campaign import BoCampaignWorkflow
 from workflows.bo_knowledge import write_campaign_node
 from workflows.eln_sync import (
     ElnSyncWorkflow,
+    list_ingest_sources,
     load_sync_cursor,
     store_sync_cursor,
     sync_eln_entries,
@@ -68,6 +69,7 @@ BACKGROUND_ACTIVITIES: Sequence[Callable[..., Any]] = [
     evaluate_candidates,
     write_knowledge_node,
     write_campaign_node,
+    list_ingest_sources,
     sync_eln_entries,
     load_sync_cursor,
     store_sync_cursor,

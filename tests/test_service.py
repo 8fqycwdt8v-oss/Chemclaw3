@@ -97,6 +97,48 @@ def test_message_stream_runs_a_turn_and_opens_mcp_once() -> None:
     assert spy.entered == 1 and spy.exited == 1  # MCP lifecycle handled once, in the service
 
 
+def test_turn_is_shed_with_503_at_capacity(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    """A turn that cannot get an admission permit within the timeout is shed with 503 (AG-15)."""
+    import asyncio
+
+    from chemclaw.config import settings
+
+    monkeypatch.setattr(settings, "service_turn_admission_timeout_seconds", 0.05)
+    app = create_app(agent_factory=lambda: _FakeAgent())
+    # Zero permits → every turn is shed after the admission timeout (deterministic, no concurrency).
+    app.state.turn_semaphore = asyncio.Semaphore(0)
+    with TestClient(app) as client:
+        session_id = client.post("/sessions").json()["session_id"]
+        res = client.post(f"/sessions/{session_id}/messages", json={"message": "hi"})
+        assert res.status_code == 503
+
+
+def test_permit_is_released_after_each_turn(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    """A finished turn returns its permit, so more turns than permits still all succeed (AG-15).
+
+    Guards the subtle half of admission control — the `finally: semaphore.release()` in the SSE
+    generator. With a single permit, three sequential turns can only all pass if each releases; a
+    dropped release would silently collapse capacity (every later turn would 503 until restart).
+    """
+    import asyncio
+
+    from chemclaw.config import settings
+
+    monkeypatch.setattr(settings, "service_turn_admission_timeout_seconds", 1.0)
+    app = create_app(agent_factory=lambda: _FakeAgent())
+    app.state.turn_semaphore = asyncio.Semaphore(1)
+    with TestClient(app) as client:
+        session_id = client.post("/sessions").json()["session_id"]
+        for _ in range(3):
+            with client.stream(
+                "POST", f"/sessions/{session_id}/messages", json={"message": "hi"}
+            ) as res:
+                assert res.status_code == 200
+                for _line in res.iter_lines():  # drain the stream so the generator's finally runs
+                    pass
+    assert app.state.turn_semaphore._value == 1  # the permit is back, not leaked
+
+
 def test_message_to_unknown_session_is_404() -> None:
     """Posting to a session that was never created is a clean 404, not a 500."""
     with _client(_FakeAgent()) as client:

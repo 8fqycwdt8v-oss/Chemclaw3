@@ -6,5 +6,6 @@ resolve them by name straight away. Public surface: the metric interface + regis
 """
 
 from evals import metrics as _metrics  # noqa: F401 — imported for its registration side effect
+from evals import retrieval as _retrieval  # noqa: F401 — registers the KM-13 retrieval metrics
 
-__all__ = ["_metrics"]
+__all__ = ["_metrics", "_retrieval"]
