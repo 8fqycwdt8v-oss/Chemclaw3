@@ -2,16 +2,24 @@
 
 A finished background job (a Temporal workflow) cannot reach into the front-door process to update a
 live conversation, and making the user poll is the very thing this closes. Instead the job appends a
-row to `session_events` (the durable mailbox), and the front-door service *tails* the table: for
-each unconsumed row it wakes the owning session and marks the row consumed. This module is that —
-the writer (`record_session_event`), the reader (`fetch_unconsumed`/`mark_consumed`), and a tailer
-(`stream_new_events`) whose polling is dependency-injected so its loop is unit-testable without a
-database. The payload is opaque JSON; only durability of the *notification* lives here — the job's
-own durability stays in Temporal (D-002).
+row to `session_events` (the durable mailbox), and the front-door service *tails* the table: it
+*claims* each unconsumed row and wakes the owning session. This module is that — the writer
+(`record_session_event`), the atomic claim (`claim_unconsumed`), and a tailer (`stream_new_events`)
+whose polling is dependency-injected so its loop is unit-testable without a database. The payload is
+opaque JSON; only durability of the *notification* lives here — the job's own durability stays in
+Temporal (D-002).
+
+The claim is a single `UPDATE … WHERE id IN (SELECT … FOR UPDATE SKIP LOCKED) RETURNING …`
+statement (COR-4): marking a row consumed and reading it back are one atomic step, so two tailers
+racing on the same session can never both deliver a row — the second's `SKIP LOCKED` select simply
+skips the rows the first already claimed. The tradeoff is at-most-once on a crash in the tiny window
+between claim-commit and the event reaching the client (versus the old at-least-once, which paid for
+that with the concurrent double-delivery this fixes); for a "wake the chat" notification whose
+durable result already lives in the graph/session, that is the right side of the trade.
 """
 
 import asyncio
-from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
+from collections.abc import AsyncIterator, Awaitable, Callable
 from typing import Any
 
 from psycopg.types.json import Jsonb
@@ -21,11 +29,16 @@ from chemclaw import db
 from chemclaw.config import settings
 
 _INSERT = "INSERT INTO session_events (session_id, kind, payload) VALUES (%s, %s, %s)"
-_SELECT_UNCONSUMED = (
-    "SELECT id, session_id, kind, payload FROM session_events "
-    "WHERE session_id = %s AND consumed_at IS NULL ORDER BY id"
+# Atomically claim (mark consumed) and read back a session's unconsumed events in one statement.
+# The inner SELECT locks the rows with SKIP LOCKED, so a concurrent tailer skips already-claimed
+# rows instead of re-reading them (COR-4). RETURNING order is unspecified, so the caller re-sorts
+# by id to preserve arrival order.
+_CLAIM = (
+    "UPDATE session_events SET consumed_at = now() WHERE id IN ("
+    "SELECT id FROM session_events WHERE session_id = %s AND consumed_at IS NULL "
+    "ORDER BY id FOR UPDATE SKIP LOCKED"
+    ") RETURNING id, session_id, kind, payload"
 )
-_MARK_CONSUMED = "UPDATE session_events SET consumed_at = now() WHERE id = ANY(%s)"
 
 
 class SessionEvent(BaseModel):
@@ -53,28 +66,22 @@ async def record_session_event(
         await conn.commit()
 
 
-async def fetch_unconsumed(session_id: str, *, dsn: str | None = None) -> list[SessionEvent]:
-    """Return a session's not-yet-consumed events in arrival order."""
+async def claim_unconsumed(session_id: str, *, dsn: str | None = None) -> list[SessionEvent]:
+    """Atomically claim (mark consumed) and return a session's unconsumed events in arrival order.
+
+    One `UPDATE … FOR UPDATE SKIP LOCKED … RETURNING` statement, so a concurrent tailer cannot claim
+    the same rows (COR-4). Rows are re-sorted by id since RETURNING order is unspecified.
+    """
     async with await db.connect(
         _dsn(dsn), statement_timeout_seconds=settings.pg_statement_timeout_seconds
     ) as conn:
-        cursor = await conn.execute(_SELECT_UNCONSUMED, (session_id,))
+        cursor = await conn.execute(_CLAIM, (session_id,))
         rows = await cursor.fetchall()
+        await conn.commit()
     return [
         SessionEvent(event_id=row[0], session_id=row[1], kind=row[2], payload=row[3] or {})
-        for row in rows
+        for row in sorted(rows, key=lambda r: r[0])
     ]
-
-
-async def mark_consumed(event_ids: Sequence[int], *, dsn: str | None = None) -> None:
-    """Mark delivered events consumed so a restarted tailer neither replays nor drops them."""
-    if not event_ids:
-        return
-    async with await db.connect(
-        _dsn(dsn), statement_timeout_seconds=settings.pg_statement_timeout_seconds
-    ) as conn:
-        await conn.execute(_MARK_CONSUMED, (list(event_ids),))
-        await conn.commit()
 
 
 async def stream_new_events(
@@ -82,35 +89,30 @@ async def stream_new_events(
     *,
     poll_seconds: float | None = None,
     max_polls: int | None = None,
-    fetch: Callable[[str], Awaitable[list[SessionEvent]]] | None = None,
-    mark: Callable[[Sequence[int]], Awaitable[None]] | None = None,
+    claim: Callable[[str], Awaitable[list[SessionEvent]]] | None = None,
 ) -> AsyncIterator[SessionEvent]:
-    """Yield a session's push-back events as they arrive, marking each consumed once yielded.
+    """Yield a session's push-back events as they arrive, each already claimed atomically.
 
-    The service runs this as a per-session background task (unbounded, `max_polls=None`). `fetch`/
-    `mark`/`poll_seconds` default to the Postgres channel + configured interval but are injectable,
-    so the loop is unit-testable with fakes and no database. `max_polls` bounds the loop for tests.
+    The service runs this as a per-session background task (unbounded, `max_polls=None`). `claim`/
+    `poll_seconds` default to the Postgres channel + configured interval but are injectable, so the
+    loop is unit-testable with fakes and no database. `max_polls` bounds the loop for tests.
 
     Args:
         session_id: The session to tail.
         poll_seconds: Sleep between polls; defaults to `session_event_poll_seconds`.
         max_polls: Stop after this many polls (None = run forever, the service default).
-        fetch: Reads unconsumed events; defaults to `fetch_unconsumed`.
-        mark: Marks events consumed; defaults to `mark_consumed`.
+        claim: Atomically claims and returns unconsumed events; defaults to `claim_unconsumed`.
 
     Yields:
-        Each `SessionEvent` in arrival order, once across restarts (consumed rows are skipped).
+        Each `SessionEvent` in arrival order, at most once across tailers (a claimed row is never
+        re-delivered — the atomic claim is the concurrency guard, COR-4).
     """
     interval = poll_seconds if poll_seconds is not None else settings.session_event_poll_seconds
-    do_fetch = fetch or (lambda sid: fetch_unconsumed(sid))
-    do_mark = mark or (lambda ids: mark_consumed(ids))
+    do_claim = claim or (lambda sid: claim_unconsumed(sid))
     polls = 0
     while max_polls is None or polls < max_polls:
-        events = await do_fetch(session_id)
-        for event in events:
+        for event in await do_claim(session_id):
             yield event
-        if events:
-            await do_mark([e.event_id for e in events if e.event_id is not None])
         polls += 1
         if max_polls is None or polls < max_polls:
             await asyncio.sleep(interval)
