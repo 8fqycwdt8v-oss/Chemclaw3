@@ -24,10 +24,17 @@ def _generator(radius: int, n_bits: int) -> rdFingerprintGenerator.FingerprintGe
 
 
 def _parse(smiles: str) -> Chem.Mol:
-    """Parse a SMILES into an RDKit molecule, raising `FingerprintError` on failure."""
+    """Parse a SMILES into an RDKit molecule, raising `FingerprintError` on failure.
+
+    RDKit parses the empty string to a zero-atom Mol rather than failing; that would
+    fingerprint to all zeros — a meaningless query/index entry — so it is rejected here
+    too, mirroring rxnfp's empty-fingerprint guard (G4).
+    """
     mol = Chem.MolFromSmiles(smiles)
     if mol is None:
         raise FingerprintError(f"unparseable SMILES: {smiles!r}")
+    if mol.GetNumAtoms() == 0:
+        raise FingerprintError(f"empty SMILES (no atoms): {smiles!r}")
     return mol
 
 

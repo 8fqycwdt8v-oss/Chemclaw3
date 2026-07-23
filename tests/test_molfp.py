@@ -16,7 +16,9 @@ from mcp_servers.fpstore import (
     FingerprintError,
     FingerprintRecord,
     InMemoryFingerprintStore,
+    Match,
     PostgresFingerprintStore,
+    find_matches,
     tanimoto,
 )
 from mcp_servers.molfp.fingerprint import ecfp_bitstring, molecule_definition
@@ -39,6 +41,17 @@ def test_unparseable_smiles_raises() -> None:
     """A bad SMILES is a clear FingerprintError, not a crash (G4)."""
     with pytest.raises(FingerprintError, match="unparseable SMILES"):
         ecfp_bitstring("not-a-molecule(((")
+
+
+def test_empty_smiles_raises() -> None:
+    """An empty/whitespace SMILES is rejected, not fingerprinted to all zeros (G4).
+
+    RDKit parses "" to a zero-atom Mol; without the guard the all-zero fingerprint
+    silently searches as "no similar molecules known" instead of an input error.
+    """
+    for smiles in ["", "   "]:
+        with pytest.raises(FingerprintError):
+            ecfp_bitstring(smiles)
 
 
 def test_tanimoto_bounds() -> None:
@@ -144,6 +157,61 @@ def test_substructure_bad_query_raises() -> None:
     asyncio.run(_run())
 
 
+def test_substructure_empty_query_raises() -> None:
+    """An empty query is an input error, not a silent empty result (G4).
+
+    `MolFromSmarts("")` parses to a zero-atom pattern that matches nothing, so without
+    the guard the tool reads as "no stored molecule contains the fragment".
+    """
+
+    async def _run() -> None:
+        store = InMemoryFingerprintStore()
+        await store.add(record_for("ethanol", "CCO"))
+        with pytest.raises(FingerprintError, match="empty substructure query"):
+            await find_substructure_matches(store, "")
+
+    asyncio.run(_run())
+
+
+def test_substructure_oversized_query_raises(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A model-supplied query beyond the configured length bound is rejected (SEC-4).
+
+    SMARTS matching is subgraph isomorphism run in-process over the scanned corpus, so a
+    pathological multi-KB pattern must be refused up front, not matched for minutes.
+    """
+    monkeypatch.setattr(settings, "substructure_query_max_length", 16)
+
+    async def _run() -> None:
+        with pytest.raises(FingerprintError, match="exceeds 16 characters"):
+            await find_substructure_matches(InMemoryFingerprintStore(), "C" * 17)
+
+    asyncio.run(_run())
+
+
+def test_substructure_hits_are_lean_and_capped(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Substructure hits carry only id + label, and a broad query is capped, not unbounded.
+
+    The fingerprint bits are an internal storage detail (~2KB of '0'/'1' per record); the
+    MCP tool ships hits into the model context, so the result shape must stay lean and the
+    hit count bounded by `fingerprint_max_top_k` — with a warning, never silently.
+    """
+    monkeypatch.setattr(settings, "fingerprint_max_top_k", 2)
+
+    async def _run() -> None:
+        store = InMemoryFingerprintStore()
+        for cid, smiles in [("ethanol", "CCO"), ("propanol", "CCCO"), ("butanol", "CCCCO")]:
+            await store.add(record_for(cid, smiles))
+        with caplog.at_level("WARNING"):
+            hits = await find_substructure_matches(store, "CO")
+        assert len(hits) == 2  # three molecules match; the cap truncates to two
+        assert any("substructure result capped" in r.message for r in caplog.records)
+        assert not any(hasattr(h, "bits") for h in hits)  # lean shape: no fingerprint payload
+
+    asyncio.run(_run())
+
+
 def test_agent_supplied_top_k_is_clamped(monkeypatch: pytest.MonkeyPatch) -> None:
     """A large model-supplied `top_k` is clamped to `fingerprint_max_top_k` (SEC-4).
 
@@ -165,6 +233,46 @@ def test_agent_supplied_top_k_is_clamped(monkeypatch: pytest.MonkeyPatch) -> Non
         # Four records clear the threshold, but the clamp caps the returned neighbors at 2.
         hits = await find_similar_molecules(store, "CCO", top_k=1_000_000, threshold=0.1)
         assert len(hits) == 2
+
+    asyncio.run(_run())
+
+
+def test_agent_supplied_threshold_is_clamped() -> None:
+    """A model-supplied `threshold` is clamped to Tanimoto's [0, 1] range (SEC-4).
+
+    `threshold` lands in the SQL similarity comparison exactly like `top_k` lands in
+    `LIMIT`, so the config-side `[0, 1]` bound must also hold for the per-call override:
+    a negative value would bless disjoint structures as neighbors, and >1 would silently
+    report "no precedent" instead of returning an exact match.
+    """
+
+    class _RecordingStore:
+        """Minimal FingerprintStore capturing what threshold reaches the backend."""
+
+        def __init__(self) -> None:
+            self.thresholds: list[float] = []
+
+        async def add(self, record: FingerprintRecord) -> None:
+            raise NotImplementedError
+
+        async def all_records(self, limit: int | None = None) -> list[FingerprintRecord]:
+            raise NotImplementedError
+
+        async def find_similar(self, query_bits: str, top_k: int, threshold: float) -> list[Match]:
+            self.thresholds.append(threshold)
+            return []
+
+    async def _run() -> None:
+        recording = _RecordingStore()
+        await find_matches(recording, "01", threshold=-5.0)
+        await find_matches(recording, "01", threshold=1.5)
+        assert recording.thresholds == [0.0, 1.0]
+
+        # End to end: an over-1 threshold still returns the exact match instead of [].
+        store = InMemoryFingerprintStore()
+        await store.add(record_for("ethanol", "CCO"))
+        hits = await find_similar_molecules(store, "CCO", threshold=99.0)
+        assert [h.id for h in hits] == ["ethanol"]
 
     asyncio.run(_run())
 

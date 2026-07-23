@@ -113,7 +113,8 @@ class InMemoryFingerprintStore:
 
         Unbounded (`limit=None`) keeps insertion order for byte-identical legacy behavior; a
         bounded scan sorts by id first so the truncated slice matches the Postgres backend's
-        `ORDER BY id LIMIT`.
+        `ORDER BY id COLLATE "C" LIMIT` (Python's code-point sort equals byte order under
+        UTF-8, which is order-preserving — the default database collation is not).
         """
         records = list(self._records.values())
         if limit is None:
@@ -125,7 +126,8 @@ class InMemoryFingerprintStore:
 
         Records whose definition differs from this store's (when one is set) are excluded —
         their equal-width bits are not comparable. Ties break by id so the ordering is
-        deterministic and matches a Postgres `ORDER BY similarity DESC, id`.
+        deterministic and matches the Postgres `ORDER BY similarity DESC, id COLLATE "C"`
+        (code-point order — the locale-independent ordering both backends can share).
         """
         scored = [
             Match(id=r.id, label=r.label, similarity=tanimoto(query_bits, r.bits))
@@ -179,13 +181,16 @@ class PostgresFingerprintStore:
         self._all = f"SELECT id, label, bits::text, definition FROM {table}"
         # `<%%>` is pgvector's Jaccard-distance operator (`%` doubled to escape psycopg).
         # Threshold-filter first (and to this store's definition), then rank by distance and
-        # truncate — the in-memory backend's "threshold then top-k"; ties break by id.
+        # truncate — the in-memory backend's "threshold then top-k"; ties break by id under
+        # COLLATE "C" (byte order), because the database's default text collation (e.g.
+        # en_US.UTF-8/ICU) orders mixed-case ids differently from Python's code-point sort
+        # and would silently break the documented cross-backend ordering parity.
         self._similar = (
             f"SELECT id, label, 1 - (bits <%%> %(q)s::bit({width})) AS similarity "
             f"FROM {table} "
             f"WHERE definition = %(definition)s "
             f"AND 1 - (bits <%%> %(q)s::bit({width})) >= %(threshold)s "
-            f"ORDER BY bits <%%> %(q)s::bit({width}), id "
+            f'ORDER BY bits <%%> %(q)s::bit({width}), id COLLATE "C" '
             f"LIMIT %(k)s"
         )
 
@@ -228,7 +233,7 @@ class PostgresFingerprintStore:
         if limit is None:
             sql, params = self._all, None
         else:
-            sql, params = f"{self._all} ORDER BY id LIMIT %(limit)s", {"limit": limit}
+            sql, params = f'{self._all} ORDER BY id COLLATE "C" LIMIT %(limit)s', {"limit": limit}
         async with await self._connect() as conn:
             async with conn.cursor() as cur:
                 await cur.execute(sql, params)
@@ -263,14 +268,16 @@ async def find_matches(
     from the model (agents.search_tools) and lands in a SQL `LIMIT`, so it is clamped to
     `[1, fingerprint_max_top_k]` here — the fingerprint-search analog of the `graph_max_hops`
     clamp on `expand_note`, applied at the single chokepoint both entry points share.
+    `threshold` is equally model-supplied and lands in the SQL similarity comparison, so it
+    is clamped to `[0, 1]` — the same bound the config default carries (Tanimoto's range);
+    outside it, a negative value blesses disjoint structures as neighbors and >1 silently
+    returns "no precedent" instead of an exact match.
     """
     k = top_k if top_k is not None else settings.fingerprint_top_k
     k = min(max(k, 1), settings.fingerprint_max_top_k)
-    return await store.find_similar(
-        query_bits,
-        k,
-        threshold if threshold is not None else settings.fingerprint_similarity_threshold,
-    )
+    t = threshold if threshold is not None else settings.fingerprint_similarity_threshold
+    t = min(max(t, 0.0), 1.0)
+    return await store.find_similar(query_bits, k, t)
 
 
 def default_molecule_store() -> PostgresFingerprintStore:
