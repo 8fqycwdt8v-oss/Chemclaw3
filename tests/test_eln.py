@@ -9,11 +9,12 @@ fingerprint-indexed", proven end to end without a database or git.
 import asyncio
 import json
 import logging
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
 
+from chemclaw.config import settings
 from eln.adapter import RawEntry, parse_iso_utc
 from eln.ingest import IngestError, ingest_reaction
 from eln.json_adapter import ElnFormatError, JsonExportAdapter
@@ -504,6 +505,152 @@ def test_sync_rejects_degenerate_reaction_without_aborting_batch() -> None:
         assert summary.next_cursor == datetime(2026, 2, 1, tzinfo=UTC)  # cursor advanced
 
     asyncio.run(_run())
+
+
+def _good_entry(entry_id: str, created_at: datetime) -> RawEntry:
+    """A valid, mass-balanced esterification entry for the sync boundary tests."""
+    return RawEntry(
+        entry_id=entry_id,
+        created_at=created_at,
+        payload={
+            "id": entry_id,
+            "reactants": [{"smiles": "CCO"}, {"smiles": "CC(=O)O"}],
+            "products": [{"smiles": "CCOC(C)=O"}],
+        },
+    )
+
+
+class _ListAdapter:
+    """A fake adapter serving a fixed entry list and recording the fetch `since` it saw."""
+
+    def __init__(self, entries: list[RawEntry]) -> None:
+        self.entries = entries
+        self.fetched_since: list[datetime] = []
+
+    async def fetch_new_entries(self, since: datetime) -> list[RawEntry]:
+        self.fetched_since.append(since)
+        return [e for e in self.entries if e.created_at >= since]
+
+    def map_to_ord(self, raw: RawEntry) -> OrdReaction:
+        return JsonExportAdapter().map_to_ord(raw)
+
+
+def test_sync_rejects_non_slug_entry_id_without_aborting_batch() -> None:
+    """An entry id that is not a valid note slug is one rejection, never a batch abort (G4).
+
+    `Note(id="reaction-EXP 2024/001")` raises a pydantic ValidationError, which is not a
+    ChemclawError — it must still be caught per entry, or one routinely-named ELN entry
+    permanently halts the whole sync source.
+    """
+
+    async def _run() -> None:
+        bad_id = _good_entry("EXP 2024/001", datetime(2026, 1, 1, tzinfo=UTC))
+        good = _good_entry("good", datetime(2026, 2, 1, tzinfo=UTC))
+        rxn, mol, sub = InMemoryFingerprintStore(), InMemoryFingerprintStore(), FakeSubmitter()
+        summary = await sync_entries(_ListAdapter([bad_id, good]), rxn, mol, sub, _EPOCH)
+
+        assert summary.ingested == ["good"]
+        assert [r.entry_id for r in summary.rejected] == ["EXP 2024/001"]
+        assert "slug" in summary.rejected[0].reason
+        assert summary.next_cursor == datetime(2026, 2, 1, tzinfo=UTC)
+
+    asyncio.run(_run())
+
+
+def test_future_dated_entry_is_rejected_and_does_not_poison_cursor() -> None:
+    """A typo'd future year is a visible rejection and never becomes the high-water cursor.
+
+    If it advanced the cursor, every later real entry would be silently skipped forever
+    (the persisted cursor is never lowered by any code path).
+    """
+
+    async def _run() -> None:
+        future = _good_entry("future", datetime(2062, 7, 23, tzinfo=UTC))
+        good = _good_entry("good", datetime(2026, 1, 1, tzinfo=UTC))
+        rxn, mol, sub = InMemoryFingerprintStore(), InMemoryFingerprintStore(), FakeSubmitter()
+        summary = await sync_entries(_ListAdapter([future, good]), rxn, mol, sub, _EPOCH)
+
+        assert summary.ingested == ["good"]
+        assert [r.entry_id for r in summary.rejected] == ["future"]
+        assert "future" in summary.rejected[0].reason
+        assert summary.next_cursor == datetime(2026, 1, 1, tzinfo=UTC)  # not 2062
+
+    asyncio.run(_run())
+
+
+def test_sync_fetches_an_overlap_window_behind_the_cursor(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A late-landing export file stamped just before the cursor is still ingested.
+
+    The fetch reaches `since - eln_sync_overlap_seconds` (re-fetching is free — ingestion
+    is idempotent), and the returned cursor never regresses below `since`.
+    """
+
+    async def _run() -> None:
+        monkeypatch.setattr(settings, "eln_sync_overlap_seconds", 1800.0)
+        cursor = datetime(2026, 1, 1, 2, 0, tzinfo=UTC)
+        late = _good_entry("late", cursor - timedelta(minutes=20))
+        adapter = _ListAdapter([late])
+        rxn, mol, sub = InMemoryFingerprintStore(), InMemoryFingerprintStore(), FakeSubmitter()
+        summary = await sync_entries(adapter, rxn, mol, sub, cursor)
+
+        assert adapter.fetched_since == [cursor - timedelta(seconds=1800)]
+        assert summary.ingested == ["late"]
+        assert summary.next_cursor == cursor  # the cursor never moves backwards
+
+    asyncio.run(_run())
+
+
+def test_sync_log_sanitizes_external_entry_ids(caplog: pytest.LogCaptureFixture) -> None:
+    """Control characters in an external entry id cannot forge log lines (trust boundary)."""
+    forged = RawEntry(
+        entry_id="bad\nFORGED line",
+        created_at=datetime(2026, 1, 1, tzinfo=UTC),
+        payload={"reactants": [{"smiles": "CCO"}]},  # missing products → rejected
+    )
+
+    async def _run() -> None:
+        rxn, mol, sub = InMemoryFingerprintStore(), InMemoryFingerprintStore(), FakeSubmitter()
+        await sync_entries(_ListAdapter([forged]), rxn, mol, sub, _EPOCH)
+
+    with caplog.at_level(logging.WARNING):
+        asyncio.run(_run())
+    assert "bad FORGED line" in caplog.text  # newline collapsed, id still identifiable
+
+
+def test_nested_condition_object_is_a_mapping_error() -> None:
+    """A structured field that is an object (`{"temperature_c": {"value": 80}}`) is rejected.
+
+    `float(dict)` raises TypeError, which must become an ElnFormatError so the sync treats
+    the entry as one rejection instead of aborting the batch (G4).
+    """
+    for field, value in [("temperature_c", {"value": 80}), ("time_h", [2.5])]:
+        raw = RawEntry(
+            entry_id=f"nested-{field}",
+            created_at=_EPOCH,
+            payload={
+                "reactants": [{"smiles": "CCO"}],
+                "products": [{"smiles": "CCO"}],
+                field: value,
+            },
+        )
+        with pytest.raises(ElnFormatError, match="cannot map"):
+            JsonExportAdapter().map_to_ord(raw)
+
+
+def test_nested_yield_object_is_a_mapping_error() -> None:
+    """A non-scalar `yield_percent` is an ElnFormatError, not an escaping TypeError (G4)."""
+    raw = RawEntry(
+        entry_id="nested-yield",
+        created_at=_EPOCH,
+        payload={
+            "reactants": [{"smiles": "CCO"}],
+            "products": [{"smiles": "CCO", "yield_percent": {"value": 85}}],
+        },
+    )
+    with pytest.raises(ElnFormatError, match="cannot map"):
+        JsonExportAdapter().map_to_ord(raw)
 
 
 # The ELN-specific adapter registry (`eln/registry.py`) was removed in DUP-1: source selection is

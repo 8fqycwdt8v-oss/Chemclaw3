@@ -133,15 +133,17 @@ class JsonExportAdapter:
     def map_to_ord(self, raw: RawEntry) -> OrdReaction:
         """Map one JSON entry to a canonical `OrdReaction` (structured + free-text).
 
-        Any mapping failure — a missing field, an unknown role, or a schema violation
-        (e.g. a reactant tagged as a product) — becomes an `ElnFormatError`, so the sync's
-        reject-and-continue handler treats one bad entry as a rejection, not a crash (G4).
+        Any mapping failure — a missing field, an unknown role, a schema violation
+        (e.g. a reactant tagged as a product), or a field of the wrong shape (a nested
+        object where a number belongs raises `TypeError` from `float`) — becomes an
+        `ElnFormatError`, so the sync's reject-and-continue handler treats one bad entry
+        as a rejection, not a crash (G4).
         """
         try:
             return self._build(raw)
         except ElnFormatError:
             raise
-        except (ValueError, ValidationError) as exc:
+        except (TypeError, ValueError, ValidationError) as exc:
             raise ElnFormatError(
                 f"entry {raw.entry_id!r}: cannot map to a reaction: {exc}"
             ) from exc
