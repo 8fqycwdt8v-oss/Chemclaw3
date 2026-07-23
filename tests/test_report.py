@@ -173,6 +173,44 @@ def test_graph_retriever_matches_and_cites_notes(tmp_path: Path) -> None:
     asyncio.run(_run())
 
 
+def test_graph_retriever_scores_by_confidence(tmp_path: Path) -> None:
+    """Each chunk carries a score from its note's confidence, defaulting when absent (KM-5)."""
+    from chemclaw.config import settings
+
+    async def _run() -> None:
+        (tmp_path / "a.md").write_text(
+            "---\nid: reaction-a\ntype: reaction\nconfidence: 0.7\n---\nEsterification.\n",
+            encoding="utf-8",
+        )
+        (tmp_path / "b.md").write_text(
+            "---\nid: reaction-b\ntype: reaction\n---\nEsterification.\n", encoding="utf-8"
+        )
+        hits = await GraphRetriever(str(tmp_path)).retrieve("esterification", {})
+        by_id = {c.source_note_id: c.score for c in hits}
+        assert by_id["reaction-a"] == 0.7
+        assert by_id["reaction-b"] == settings.retrieval_default_confidence
+
+    asyncio.run(_run())
+
+
+def test_graph_retriever_excludes_expired_notes(tmp_path: Path) -> None:
+    """A report never cites a note past its `valid_to` as current evidence (KM-7)."""
+
+    async def _run() -> None:
+        (tmp_path / "old.md").write_text(
+            "---\nid: reaction-old\ntype: reaction\nvalid_to: 2000-01-01\n---\nEsterification.\n",
+            encoding="utf-8",
+        )
+        (tmp_path / "new.md").write_text(
+            "---\nid: reaction-new\ntype: reaction\n---\nEsterification, current.\n",
+            encoding="utf-8",
+        )
+        hits = await GraphRetriever(str(tmp_path)).retrieve("esterification", {})
+        assert [c.source_note_id for c in hits] == ["reaction-new"]
+
+    asyncio.run(_run())
+
+
 def test_graph_retriever_excerpt_strips_wikilinks(tmp_path: Path) -> None:
     """An excerpt never carries a source note's `[[wikilink]]` into the report verbatim.
 

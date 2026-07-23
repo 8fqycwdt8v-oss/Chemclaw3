@@ -63,12 +63,15 @@ applied-migrations record yet — re-run `make db-migrate` to be sure a fresh DB
 
 ## (iii) Add / switch an ELN source
 
-Both ingestion adapters (`json` free-text export, `ord` native ORD) are registered in
-`eln/registry.py`. The durable sync ingests from one source — set `CHEMCLAW_ELN_SYNC_ADAPTER`
-(`json` | `ord`) and its export directory (`CHEMCLAW_ELN_EXPORT_DIR` / `CHEMCLAW_ORD_EXPORT_DIR`).
-A *new* ELN source is one new adapter class satisfying the `ElnAdapter` contract plus one entry
-in `ELN_ADAPTERS`; the memory jobs then read it automatically (they ingest every registered
-adapter). Validate an export with `make eln-validate`.
+Sources live on the generic seam (`sources/registry.py`): `eln-json` (free-text export) and
+`eln-ord` (native ORD) are the ingest sources, `graph` the retrieve source. Set which are active
+with `CHEMCLAW_DATA_SOURCES` (a comma list, e.g. `graph,eln-json,eln-ord`) plus each ingest
+source's export directory (`CHEMCLAW_ELN_EXPORT_DIR` / `CHEMCLAW_ORD_EXPORT_DIR`). The durable sync
+ingests **every** active ingest source, each with its own high-water cursor (keyed by registry
+name in `sync_cursors`), so sources advance independently; the memory jobs read the same active set.
+A *new* ELN source is one new adapter class satisfying the `ElnAdapter` contract plus one
+`DATA_SOURCES` entry in `sources/registry.py` and its key in `CHEMCLAW_DATA_SOURCES`. Validate an
+export with `make eln-validate`.
 
 ## (iv) Add a capability/tool the agent can call
 

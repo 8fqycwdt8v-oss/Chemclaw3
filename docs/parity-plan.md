@@ -68,9 +68,9 @@ datastore, no new orchestrator.
 ### F10-A2 — pgvector note-embedding index + Postgres FTS (the two new legs)
 - **Goal:** a derived, rebuildable index over knowledge-graph notes — dense embeddings **and** a lexical
   `tsvector` — with Git-Markdown still the source of truth (D-004).
-- **Touch:** ＋`report/vector_index.py`, ＋`infra/sql/010_note_index.sql`, ~`report/retrievers.py`.
+- **Touch:** ＋`report/vector_index.py`, ＋`infra/sql/012_note_index.sql`, ~`report/retrievers.py`.
 - **Build:**
-  - `010_note_index.sql`: `note_index(note_id text primary key, embedding vector(<dim>), lexeme tsvector,
+  - `012_note_index.sql`: `note_index(note_id text primary key, embedding vector(<dim>), lexeme tsvector,
     updated_at timestamptz)`, HNSW `vector_cosine_ops` on `embedding`, GIN on `lexeme`. Wired into
     `make db-migrate` (D-034 ledger).
   - `report/vector_index.py`: `reindex_notes(notes)` (embed body + `to_tsvector`), an idempotent upsert;
@@ -393,7 +393,7 @@ Each ticket ends green (`make lint type test` + its new tests) and default-off w
 
 ## Appendix B — New SQL migrations (`infra/sql/`, after `009_session_events.sql`)
 
-`010_note_index.sql` (pgvector `embedding` + `tsvector` `lexeme`, HNSW + GIN) · `011_audit_hash_chain.sql`
+`012_note_index.sql` (pgvector `embedding` + `tsvector` `lexeme`, HNSW + GIN) · `011_audit_hash_chain.sql`
 (`prev_hash`/`row_hash` columns on `audit_events`). Both wired into `make db-migrate` (D-034 ledger).
 
 ## Appendix C — New top-level modules

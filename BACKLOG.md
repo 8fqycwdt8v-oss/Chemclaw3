@@ -24,7 +24,7 @@ tickets + disposition table: `docs/parity-plan.md`.
       already existed); surfaced by the parser + `kg-validate`. Test: `test_note.py`.
 - [x] **F10-A** hybrid retrieval (executes/extends F8-T2): embedding provider seam
       (`agents/embedding_provider.py`, `hash` offline / `openai_compatible` prod); derived
-      `note_index` (`infra/sql/010`, `report/vector_index.py` — `NoteIndex` with in-memory +
+      `note_index` (`infra/sql/012`, `report/vector_index.py` — `NoteIndex` with in-memory +
       pgvector/FTS backends, `reindex_notes` + `make reindex`); `VectorRetriever` + `LexicalRetriever`
       attached via the F7 registry (`vector`/`lexical` keys — registry membership is the enable
       switch, D-018); RRF fusion (`report/hybrid.py`) under `retrieval_mode="hybrid"` in

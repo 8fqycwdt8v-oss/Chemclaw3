@@ -110,3 +110,27 @@ deferrals:
 - **Doc cleanup** — the eight interim per-phase audit reports were consolidated into `00-SUMMARY.md`
   and removed (detail preserved in git history); the durable audit record is now `00-SUMMARY.md`,
   `REFACTOR_LOG.md`, and this file.
+
+## Follow-up pass 2 (2026-07-22, "close all found gaps")
+
+A third pass closed the two deferrals that a re-check showed were implementable offline against the
+*existing* contracts (no live infra, no speculative abstraction) — see **ADR D-054**:
+
+- **Per-source ELN cursors** — the durable sync now iterates every active ingest source and keys
+  one high-water cursor per source (the `sync_cursors` table already keyed by name). The interim
+  fail-fast guard from follow-up pass 1 is removed; multi-ingest is first-class. This is a faithful
+  generalization of today's `ElnAdapter` contract (both adapters are datetime-cursored), not a guess
+  about the not-yet-built Snowflake source. The now-dead `eln_sync_adapter` config field was removed
+  (audit **DUP-2**), and `.env.example` + runbook (iii) were corrected to the `data_sources` reality.
+- **Per-scope token lock** — `WorkloadTokenProvider` collapses concurrent cold-cache callers onto a
+  single federation exchange via a per-scope `asyncio.Lock` + double-checked cache re-read.
+
+**Contract notes (dev-stage, no live cluster):** the sync's stored-cursor keying moved from one
+label to per-source names (first scheduled run re-ingests each source from epoch once — idempotent);
+removing `eln_sync_adapter` means a deployment that set `CHEMCLAW_ELN_SYNC_ADAPTER` must drop it
+(`extra="forbid"`). Both are safe now because the F-layer live edges are still open.
+
+**What remains deferred is now genuinely infra/scale/scope-gated** (real Entra tenant / Temporal
+broker / OpenShift cluster / Snowflake feed, a scale not yet reached, or a product-scope decision) —
+implementing those offline would be untested boilerplate, which the repo's quality rules forbid. See
+`DEFERRED.md` and `BACKLOG.md` for the itemized reasons.

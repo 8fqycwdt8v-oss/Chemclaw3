@@ -1124,7 +1124,209 @@ that the memory corpus tracks `data_sources` (adding `eln-ord` expands it; a ret
 yields an empty corpus); the removed `eln/registry.py` tests are covered by
 `tests/test_datasource_seam.py`.
 
-## D-054 — F10-E/B: per-task model routing + answer verification & confidence routing (D-A11)
+## D-054 — Per-source ELN cursors + a per-scope token lock (close the two F-review deferrals)
+
+**Context.** Two consciously-deferred items from the F4–F7 review (D-051) were re-examined under a
+"close all found gaps" pass and found genuinely implementable offline against the *existing*
+contracts — no live infrastructure, no speculative abstraction:
+
+1. **Shared ELN cursor (F7 review F-1/F-2).** The durable sync tracked one high-water cursor
+   (keyed by the now-dead `eln_sync_adapter` label) while F7/DUP-1 made a *multi*-ingest-source
+   config reachable. Two sources whose newest entries differ would let the furthest `max()` cursor
+   skip the lagging source's entries — silent data loss. D-053 shipped an interim fail-fast guard
+   (>1 ingest source → non-retryable error); this ADR removes the guard and does the real fix.
+2. **Thundering-herd token exchange.** On a cold/stale cache, N concurrent
+   `WorkloadTokenProvider.get_service_token(scope)` callers each fired the federation exchange —
+   correct (never a stale token) but wastefully redundant.
+
+The deferral reasoning for (1) was "wait for the second real source (Snowflake), which brings its
+own pipeline cursor." Re-checked: **both** current ingest adapters are datetime-cursored because the
+`ElnAdapter` contract *is* `fetch_new_entries(since: datetime)`. Per-source datetime cursors is
+therefore the faithful generalization of the contract that exists today, not a guess about a source
+that doesn't. A future non-datetime cursor source would generalize the `ElnAdapter` contract itself,
+at which point the cursor storage generalizes with it. So the gap is closable now.
+
+**Decision.**
+- `sources/registry.py` gains `active_ingest_source_names()` (registry names of active sources with
+  an ingest half). `ElnSyncWorkflow` iterates those names: for each source it loads that source's own
+  cursor (scheduled runs), syncs it via `sync_eln_entries(source, since)`, and stores the advanced
+  cursor per source. The `sync_cursors` table already keys by source name — no schema change. A
+  manual backfill (explicit `since`) runs every source from that point and touches no stored cursor.
+- The interim multi-ingest guard is removed; multiple ingest sources are now first-class.
+- `settings.eln_sync_adapter` is **deleted** (audit DUP-2): it was only the single shared-cursor
+  label, which no longer exists. `.env.example` and the runbook (iii) are updated to the
+  `data_sources` reality.
+- `WorkloadTokenProvider` gains a per-scope `asyncio.Lock`; `get_service_token` re-checks the cache
+  under the lock (double-checked), so N concurrent misses on one scope do a single exchange while
+  distinct scopes never block each other.
+
+**Consequence (contract note — dev-stage, no live cluster yet).** The sync's stored-cursor keying
+changes from one `eln_sync_adapter` label to per-source registry names; on a live system the first
+scheduled run after the change re-ingests each source from its epoch once (harmless — ingestion is
+idempotent, id-keyed upserts + idempotent note branches). Removing `eln_sync_adapter` is a config
+surface change: a deployment that set `CHEMCLAW_ELN_SYNC_ADAPTER` must drop it (`extra="forbid"`).
+Both are acceptable now because the F-layer live edges are still open (no in-flight workflows, no
+real deployment).
+
+**Result.** `make lint type test` green; `mypy --strict` clean. `tests/test_eln_workflow.py` adds
+offline unit tests (named-source activity, `active_ingest_source_names`, the summary fold) and a
+server-backed test proving each active ingest source gets its own stored cursor;
+`tests/test_workload_identity.py` adds a concurrency test asserting 10 concurrent misses do exactly
+one exchange.
+
+## D-055 — GxP freshness + read-time provenance in graph retrieval (audit KM-6, KM-7)
+
+**Context.** The knowledge-management gap analysis (`docs/audit/09-knowledge-management-gaps.md`)
+found two read-path gaps that are cheap, offline, and central to the GxP posture — no infra, no
+schema migration, no curated artifact, no chosen threshold:
+
+- **KM-7 (freshness).** `Note.valid_from`/`valid_to` existed but were **never checked at read**, so a
+  not-yet-valid or expired note served as current fact with no signal — sharp for a GxP base that
+  must not present superseded conditions as current.
+- **KM-6 (provenance at read).** `NoteRef` (the agent-facing view from `find_notes`/`expand_note`)
+  exposed only `id/type/smiles/tags`, so the agent could not weigh a source by author/origin/
+  confidence/validity without a second lookup, even though the note carried all of it.
+
+**Decision.**
+- `Note.is_current(as_of)` encodes the validity window (inclusive bounds; either bound optional).
+  The three discovery/evidence sweeps — `find_notes`, `expand_note`'s neighbor list, and
+  `GraphRetriever.retrieve` (the report path) — now exclude non-current notes as of `date.today()`.
+  **Explicit by-id expansion still returns the anchor** even if expired (an explicit lookup, not a
+  discovery sweep); only discovered/neighbor/report evidence is freshness-filtered. Nothing is
+  deleted — the note stays in Git and reachable by id, it is only dropped from *current-evidence*
+  results.
+- `NoteRef` carries `created_by`, `source`, `confidence`, `valid_from`, `valid_to` (all defaulted so
+  a bare reference is still constructible); `_ref` fills them from the note. This also wires the
+  previously-unread `confidence` field into the agent's view (part of KM-5's concern) without
+  building a cross-source ranker.
+
+**Consequence (behavior change, flagged).** Retrieval results change: an expired or not-yet-valid
+note no longer appears in `find_notes`, in `expand_note` neighbors, or in report evidence. This is
+intended GxP behavior (don't serve superseded facts as current). The chosen policy is *exclude
+silently from current-evidence sweeps* (the note is still in Git and by-id reachable) rather than
+*include-with-a-flag*; if a surfaced-but-flagged behavior is later wanted, `is_current` is the single
+seam to branch on.
+
+**Result.** `make lint type test` green; `mypy --strict` clean. Tests: `test_note.py` (window
+semantics incl. inclusive boundaries), `test_graph_tools.py` (provenance surfaced; expired excluded
+from `find_notes` and from `expand_note` neighbors while the anchor is kept), `test_report.py`
+(`GraphRetriever` skips expired). The remaining gap-doc items are either deferred-by-design/
+infra-gated or carry a design decision (a gold-set, a ranking function, a concurrency limit, an audit
+schema migration) and are left for an explicit follow-up rather than guessed.
+
+## D-056 — Retrieval-quality gate: a starter gold set + registered metrics (audit KM-13)
+
+**Context.** KM-13 was the highest-severity knowledge-management gap: the system's core promise is
+"surface the right evidence", yet `evals/` scored only *chemistry* output (E-factor, PMI, prediction,
+regret) — there was no query→expected-source gold set and no retrieval metric, so a change to the
+substring filter or the evidence cap could quietly halve recall with nothing to catch it. The gap
+doc calls a gold set "the cheapest high-value fix, and a small corpus is the ideal time to build it."
+
+**Decision.** Build the starter gold set and register two retrieval metrics on the existing `@metric`
+seam (plan 2b.5):
+- **A fixed corpus fixture** (`evals/retrieval_corpus/`, six realistic notes) — deliberately *not*
+  under `knowledge_dir`, so the score is reproducible and independent of the live graph, and
+  `kg-validate` (which scans `knowledge_dir`) does not treat the fixtures as real notes. The live
+  `knowledge_dir` is effectively empty, so scoring against it would measure nothing.
+- **`retrieval_recall` (gated) + `retrieval_precision` (diagnostic)** in a *separate* module
+  (`evals/retrieval.py`, not `evals/metrics.py`) because they run `GraphRetriever` over the corpus —
+  they are not pure functions of the case, so isolating them keeps `metrics.py`'s "pure function"
+  invariant honest. Recall gates the "did we surface the expected sources" signal against
+  `retrieval_recall_min` (config, default 0.75); precision is order-independent context (`passed`
+  None). Both score `GraphRetriever` — the same source-agnostic path a report uses, and the one that
+  now honors the KM-7 freshness filter.
+- **Gold cases** (`evals/cases/retrieval-*.md`) pair a query with its expected source ids. Five
+  cases: exact-term, broad-recall, a type-filtered query, a conditions-term query — and, on purpose,
+  one query (`cross-coupling`) whose relevant Suzuki-reaction note the literal substring filter
+  cannot reach, so recall = 0.5 and the gate fails **by design**. That case *measures* the KM-4
+  literal-matching limitation (and documents the mitigation — the agent's query reformulation, which
+  this lexical metric does not exercise) instead of leaving it anecdotal. It mirrors the existing
+  eval philosophy of holding a deliberately-failing case to prove the gate fires.
+
+**Why the test suite, not a CI hard-gate.** As with the other scientific metrics, regression gating is
+the **pinned test** (`tests/test_retrieval_eval.py` pins each case's exact recall/precision/verdict),
+not a red `make eval` — the CLI stays report-only and exits 0 so the by-design failing case does not
+break CI. A filter/cap change that moves recall moves a pinned number and fails the test.
+
+**Result.** `make lint type cov` green; `mypy --strict` clean; `make eval` exits 0 and renders the
+retrieval rows (the one literal-miss case shows FAIL, by design). New: `evals/retrieval.py`,
+`evals/retrieval_corpus/` (6 notes + README), `evals/cases/retrieval-*.md` (5 cases),
+`tests/test_retrieval_eval.py`; config `eval_retrieval_corpus_dir` + `retrieval_recall_min`.
+Follow-ups (recorded, not guessed): grow the gold set as the corpus grows, and add an agent-run eval
+that exercises the LLM's query reformulation over the lexical layer.
+
+## D-057 — Four more engine gaps closed (KM-5, KM-14 retrieval half, AG-14, AG-15)
+
+**Context.** After D-055/D-056, five gap-doc findings remained. Each carried a design decision that
+had been left un-guessed. Directed to implement four of them (AG-13 stays deferred — see below), each
+with a **defensible default** documented here rather than a new config knob per open question.
+
+**Decisions.**
+- **KM-5 — rank-before-truncate.** `EvidenceChunk` gains an optional `score` in [0,1]; `gather_evidence`
+  sorts by it (stable) before applying `gather_evidence_max_chunks`, so a truncated sweep keeps the
+  best-supported evidence, not an arbitrary disk slice. Scoring is per-retriever in its own terms —
+  graph hits score by the note's `confidence` (`retrieval_default_confidence` when absent, wiring the
+  previously-unread field), structural hits by their Tanimoto similarity. It is a within-sweep
+  ordering heuristic, **not** a calibrated cross-source probability (documented on the field). Finer
+  lexical relevance is deliberately skipped: the graph filter is whole-substring, so every returned
+  note already contains the full query — a lexical-overlap term would be vacuous until KM-4 lands.
+- **KM-14 — retrieval-path cache (not the clustering half).** `load_notes` caches the parsed notes
+  per directory behind a cheap stat fingerprint (`(path, mtime_ns, size)` per file); any add/edit/
+  delete busts it, so retrieval stays **always-live** while skipping the re-parse when nothing
+  changed. Guarded by a lock (retrieval offloads to threads). `graph_cache_enabled` (default on) can
+  disable it. The separately-deferred O(n²) *clustering* half of KM-14 is untouched — it is a
+  background job, not the per-query interactive path the gap flags as the sharper concern.
+- **AG-14 — version provenance.** `AuditEvent` gains `revision`, stamped from `deployment_revision`
+  (the deployment's Git SHA / image digest, "unknown" until F6 sets it) at middleware build time;
+  migration `010_audit_revision.sql` adds the column (idempotent, `NOT NULL DEFAULT 'unknown'`, no
+  backfill). A past result now ties to the exact version that produced it. The *behavioral* half of
+  AG-14 (a pre-live gate) is AG-13, deferred.
+- **AG-15 — admission control.** The front door holds a config-capped `asyncio.Semaphore`
+  (`service_max_concurrent_turns`, default 8) for a turn's whole streamed run; a turn that cannot get
+  a permit within `service_turn_admission_timeout_seconds` (default 5) is shed with **503** rather
+  than piling onto the shared LLM endpoint. Only the LLM-bound message turn is gated (health and
+  push-back streams are not). The cap is a conservative default to be tuned to the real endpoint's
+  throughput — picking it does not need to wait for that number, only tuning does.
+
+**Deferred (unchanged).** **AG-13** (agent-behavior / prompt / skill regression eval) stays in
+`DEFERRED.md`: a faithful behavior eval must run the agent against the real internal LLM endpoint
+(unreachable offline); a mock would only test the mock. It is the one genuinely infra-gated item.
+
+**Contract / behavior notes.** `gather_evidence` now returns its cap's worth of *highest-scored*
+chunks (order/content otherwise unchanged; an all-unscored corpus keeps disk order via the stable
+sort). Retrieval reads may be served from the graph cache (busted on any note change — never stale).
+The front door can now answer **503** on the messages route under load. Migration `010` must be
+applied (`make db-migrate`); it is idempotent.
+
+**Post-implementation review hardening.** An independent diff review found no live bug but five
+latent/robustness items; four were fixed here, one consciously kept:
+- *Graph cache — stat on a vanished file.* `_dir_fingerprint` now wraps `path.stat()` in
+  `except OSError: continue`, so a note deleted between `rglob` and `stat` (a `git pull` under a live
+  query) drops out of the fingerprint and busts the cache on the next read, instead of crashing the
+  query — the resilience `_parse_notes` already had.
+- *Graph cache — shared mutable notes.* `Note` is now `frozen=True`. The cache hands the same
+  instances to every reader; immutability makes that sharing provably safe (no reader can corrupt a
+  cached note), and no code mutated a note in place, so freezing is behavior-preserving.
+- *Evidence score default.* `EvidenceChunk.score` defaults to a neutral **0.5** (was 0.0). Every
+  current retriever sets it explicitly; the default only governs a future retriever that forgets to,
+  and neutral keeps such a chunk mid-ranking instead of silently pinning it last-and-truncated.
+- *Admission-permit release is now tested.* A test runs three sequential turns against a single
+  permit and asserts all succeed and the permit returns — guarding the `finally: release()` whose
+  regression would silently collapse capacity.
+- *Kept as-is:* the permit is acquired in the handler (not inside the SSE generator) so a shed turn
+  can return a clean **503** before the response starts — moving the acquire into the generator, as
+  one suggested, would break that. The only leak path (response created but never iterated) needs an
+  exotic failure between endpoint return and `response.__call__` under sse-starlette; accepted.
+
+**Result.** `make lint type cov` green; `mypy --strict` clean. Tests: `test_research_tools.py`
+(rank-before-truncate keeps the confident notes), `test_report.py` (`GraphRetriever` scores by
+confidence), `test_graph.py` (cache reuse + fingerprint-bust + disable + vanished-file tolerance),
+`test_note.py` (note is immutable), `test_audit.py` (revision stamped), `test_service.py` (503 at
+zero capacity + permit released across sequential turns). New config: `retrieval_default_confidence`,
+`graph_cache_enabled`, `deployment_revision`, `service_max_concurrent_turns`,
+`service_turn_admission_timeout_seconds`; new migration `infra/sql/010_audit_revision.sql`.
+
+## D-058 — F10-E/B: per-task model routing + answer verification & confidence routing (D-A11)
 
 **Context.** A capability comparison against a commercial pharma-agent *platform* (IntuitionLabs)
 found Chemclaw at or ahead on the durability/identity/audit spine, with deltas in retrieval breadth,
@@ -1153,7 +1355,7 @@ level (it has no synthesized prose); the conversational path gets the LLM faithf
 **Result.** `make lint type test` green. Tests: `test_llm_provider`, `test_verifier`, `test_runner`,
 `test_config`.
 
-## D-055 — F10-C: per-tool authorization middleware (supersedes D-044 scope, D-A12)
+## D-059 — F10-C: per-tool authorization middleware (supersedes D-044 scope, D-A12)
 
 **Context.** `authorize_trigger` guarded only the expensive `submit_qm_job` trigger (F4-T5). Tool-use
 governance at *every* invocation was a platform delta.
@@ -1171,7 +1373,7 @@ scope.
 **Result.** `make lint type test` green. Tests: `test_tool_authz`, `test_agent` (two middlewares),
 `test_config`.
 
-## D-056 — F10-G: audit hash-chain + bi-temporal note fields (D-A15)
+## D-060 — F10-G: audit hash-chain + bi-temporal note fields (D-A15)
 
 **Context.** D-034 left the audit hash-chain "for Phase 6"; `architektur.md` §10.4 proposed
 bi-temporal note fields but never schematized them. Both are low-complexity, GxP-relevant.
@@ -1190,14 +1392,14 @@ when it was valid. The `NullAuditSink` default is unaffected.
 
 **Result.** `make lint type test` green. Tests: `test_audit_chain`, `test_note`, `test_kg_validate`.
 
-## D-057 — F10-A: hybrid retrieval — dense + lexical entry points, RRF fusion (D-A10)
+## D-061 — F10-A: hybrid retrieval — dense + lexical entry points, RRF fusion (D-A10)
 
 **Context.** Retrieval was graph traversal + binary structural fingerprints: no dense-semantic and no
 lexical rank, so a note sharing neither a substring nor a wikilink with the query was unreachable.
 This executes and extends the planned-but-unbuilt F8-T2.
 
 **Decision.** `agents/embedding_provider.py` is the one embedding seam (`hash` offline / internal
-`openai_compatible`). `report/vector_index.py` (`010_note_index.sql`) is a derived, rebuildable
+`openai_compatible`). `report/vector_index.py` (`012_note_index.sql`) is a derived, rebuildable
 pgvector + `tsvector` index over notes with in-memory + Postgres backends. `VectorRetriever` +
 `LexicalRetriever` join `gather_evidence` via the F7 source registry (`vector`/`lexical` keys —
 registry membership is the enable switch, D-018). `report/hybrid.py::reciprocal_rank_fusion` fuses
@@ -1211,27 +1413,33 @@ derived. A scheduled reindex activity is a documented follow-up (today `make rei
 **Result.** `make lint type test` green. Tests: `test_embedding_provider`, `test_vector_index`,
 `test_hybrid_retrieval`, `test_config`.
 
-## D-058 — F10-F: classification metrics (P/R/F1) + eval drift detection (D-A14)
+## D-062 — F10-F: classification metrics (P/R/F1) + eval drift detection (D-A14)
 
 **Context.** The eval harness scored green-chemistry/prediction metrics with absolute-error
 tolerances; it had no precision/recall/F1 and no drift detection.
 
 **Decision.** `evals/metrics.py` adds `precision`/`recall`/`f1` over `output.predicted_note_ids`
 vs `reference.expected_note_ids`, sharing one pure `precision_recall_f1` (report/drift metrics, no
-per-case gate). `evals/retrieval.py::run_retrieval_eval` scores a *live* `SourceRetriever` over
-query→expected cases (reusing `run_eval`) — how F10-A retrieval gets a measured number.
-`evals/baseline.py` (`aggregate_metrics`/`detect_drift`, committed `evals/baseline.json`) +
-`workflows/eval_drift.py::EvalDriftWorkflow` (background-jobs, alerts via the notify seam) re-run the
-case-set on an opt-in Schedule and flag any metric that moved past `eval_drift_epsilon`.
+per-case gate). `evals/baseline.py` (`aggregate_metrics`/`detect_drift`, committed
+`evals/baseline.json`) + `workflows/eval_drift.py::EvalDriftWorkflow` (background-jobs, alerts via
+the notify seam) re-run the case-set on an opt-in Schedule and flag any metric that moved past
+`eval_drift_epsilon`. Live *retriever* scoring is not re-invented here: the merge with the
+audit-hardening line adopted its KM-13 gold-set (D-056) — `retrieval_recall`/`retrieval_precision`
+over a committed fixture corpus — as the corpus-backed retrieval measure; the earlier
+one-caller `run_retrieval_eval` driver was dropped as redundant (KISS). A pinned static
+`precision`/`recall`/`f1` case (`retrieval-precision-recall.md`) keeps those generic metrics under
+the versioned case-set and gives drift a number to watch.
 
 **Consequence.** Retrieval/extraction quality is measurable as P/R/F1 on versioned cases; a silent
-regression trips a scheduled alert. Live retrieval cases are deployment-local (the shipped graph is
-empty), so only a pinned metric-regression case is committed. Drift is off by default.
+regression trips a scheduled alert. Over the deterministic committed case-set the scheduled job is a
+deployment-consistency tripwire; live drift over the deployment's own graph stays deferred
+(DEFERRED.md). Drift is off by default.
 
-**Result.** `make lint type test` green. Tests: `test_metrics_classification`, `test_retrieval_eval`,
-`test_eval_drift` (incl. a baseline-matches-case-set guard), `test_schedules`, `test_config`.
+**Result.** `make lint type test` green. Tests: `test_metrics_classification`, `test_eval_drift`
+(incl. a baseline-matches-case-set guard), `test_schedules`, `test_config`; the KM-13 gold-set is
+pinned by `test_retrieval_eval` (D-056).
 
-## D-059 — F10-D: sub-agent orchestration via Temporal child workflows (D-A13)
+## D-063 — F10-D: sub-agent orchestration via Temporal child workflows (D-A13)
 
 **Context.** Report-section retrieval and memory synthesis each fanned a task into independent steps
 but ran them in one monolithic activity, so a single poison item failed the whole batch and there was
@@ -1255,7 +1463,7 @@ only the execution topology gained parallelism + isolation. Config
 Tests: `test_orchestrator`, `test_memory` (builder behavior-preserving), `test_report_workflow` /
 `test_workers` registration, `test_config`.
 
-## D-060 — F10 post-implementation review cycle: verified fixes
+## D-064 — F10 post-implementation review cycle: verified fixes
 
 **Context.** After F10 (A–G) landed, an adversarial review — five agent teams over the new features
 and the whole codebase — surfaced real plan-vs-code and correctness gaps. The most severe: F10-B's

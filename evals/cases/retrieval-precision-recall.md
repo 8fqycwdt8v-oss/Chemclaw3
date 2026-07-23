@@ -14,7 +14,7 @@ recall = 2/3 ≈ 0.667, and F1 = 0.667.
 This is a *pinned* predicted-vs-expected case: it keeps the `precision`/`recall`/`f1`
 metrics under the versioned case-set (so a change that breaks them fails `make eval`) and
 gives the drift check (F10-F2) a retrieval-quality number to watch over time. Scoring a
-*live* retriever's output against a query is `evals.retrieval.run_retrieval_eval`, which
-runs the retriever and produces exactly this predicted-vs-expected shape; the expected ids
-there come from the deployment's own knowledge graph, so those cases are deployment-local,
-not committed here.
+*live* retriever over a fixed gold corpus is the KM-13 `retrieval_recall`/`retrieval_precision`
+path (`evals/retrieval.py` + `evals/cases/retrieval-*.md` over `evals/retrieval_corpus/`); this
+case instead pins the generic set-based classification metrics on a static predicted/expected
+pair, independent of any corpus.

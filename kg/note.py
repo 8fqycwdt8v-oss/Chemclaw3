@@ -14,7 +14,7 @@ from typing import Literal
 
 import frontmatter
 import yaml
-from pydantic import BaseModel, Field, ValidationError, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
 
 from chemclaw.errors import ChemclawError
 
@@ -54,7 +54,13 @@ class Note(BaseModel):
     `created_by` is the GxP provenance line: `agent`-authored notes must pass the
     PR-gate before merge (D-005). `confidence` (0–1) and `valid_from`/`valid_to`
     let a later query weigh and time-scope evidence.
+
+    Frozen: a note is an immutable value object. The graph indexer caches parsed notes and
+    hands the same instances to every reader (KM-14); immutability makes that sharing safe —
+    no caller can mutate a cached note and corrupt it for the next query.
     """
+
+    model_config = ConfigDict(frozen=True)
 
     id: str = Field(min_length=1)
     type: str = Field(min_length=1)
@@ -115,6 +121,21 @@ class Note(BaseModel):
         same target twice yields one edge.
         """
         return cited_ids(self.body)
+
+    def is_current(self, as_of: date) -> bool:
+        """Whether the note is inside its validity window on `as_of` (bounds inclusive).
+
+        `valid_from`/`valid_to` time-scope a note; either may be absent (open-ended). Discovery
+        retrieval excludes non-current notes so a not-yet-valid or superseded/expired entry is not
+        served as *current* evidence (GxP freshness — audit KM-7). The note is never deleted: it
+        stays in Git and is still reachable by explicit id, it is only dropped from current-evidence
+        sweeps.
+        """
+        if self.valid_from is not None and as_of < self.valid_from:
+            return False
+        if self.valid_to is not None and as_of > self.valid_to:
+            return False
+        return True
 
 
 class NoteError(ChemclawError):

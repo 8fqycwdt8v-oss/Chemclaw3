@@ -8,7 +8,7 @@ stays the source of truth (D-004): the index is rebuildable at any time from the
 
 Two backends behind one `NoteIndex` interface, exactly as the fingerprint store does it
 (`mcp_servers.fpstore`): `InMemoryNoteIndex` computes the ranking in Python (the reference the
-tests use, no database), `PostgresNoteIndex` persists to `note_index` (`infra/sql/010`) and ranks
+tests use, no database), `PostgresNoteIndex` persists to `note_index` (`infra/sql/012`) and ranks
 in SQL. Dense ranking is identical across backends (both cosine); the in-memory lexical
 rank is a simple token-overlap proxy of Postgres `ts_rank` (same ordering intent, not identical
 scores), noted where it is defined.

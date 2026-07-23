@@ -8,6 +8,7 @@ it runs off the event loop.
 """
 
 import asyncio
+from datetime import date
 from pathlib import Path
 
 from pydantic import BaseModel, Field
@@ -21,12 +22,22 @@ from kg.pr_gate import propose_note
 
 
 class NoteRef(BaseModel):
-    """A lightweight reference to a note (no body), for listing and neighbors."""
+    """A lightweight reference to a note (no body), for listing and neighbors.
+
+    Provenance is surfaced here (KM-6) so the agent can weigh a source — who authored it
+    (`created_by`), where it came from (`source`), how sure it is (`confidence`), and its validity
+    window — without a second lookup. Fields default so a bare reference is still constructible.
+    """
 
     id: str
     type: str
     compound_smiles: str | None = None
     tags: list[str] = Field(default_factory=list)
+    created_by: str = "human"
+    source: str | None = None
+    confidence: float | None = None
+    valid_from: date | None = None
+    valid_to: date | None = None
 
 
 class NoteView(BaseModel):
@@ -38,7 +49,17 @@ class NoteView(BaseModel):
 
 
 def _ref(note: Note) -> NoteRef:
-    return NoteRef(id=note.id, type=note.type, compound_smiles=note.compound_smiles, tags=note.tags)
+    return NoteRef(
+        id=note.id,
+        type=note.type,
+        compound_smiles=note.compound_smiles,
+        tags=note.tags,
+        created_by=note.created_by,
+        source=note.source,
+        confidence=note.confidence,
+        valid_from=note.valid_from,
+        valid_to=note.valid_to,
+    )
 
 
 async def find_notes(text: str) -> list[NoteRef]:
@@ -54,10 +75,15 @@ async def find_notes(text: str) -> list[NoteRef]:
     """
     graph = await asyncio.to_thread(build_graph, Path(settings.knowledge_dir))
     needle = text.lower()
+    today = date.today()
     matches = []
     for node_id in graph.nodes:
         note = graph.nodes[node_id].get("note")
         if note is None:
+            continue
+        # Discovery serves current evidence only: a not-yet-valid or expired note is not surfaced
+        # as current fact (KM-7). It stays in Git and remains reachable by explicit id.
+        if not note.is_current(today):
             continue
         haystack = " ".join([note.id, note.type, note.compound_smiles or "", *note.tags, note.body])
         if needle in haystack.lower():
@@ -85,10 +111,13 @@ async def expand_note(note_id: str, hops: int = 1) -> NoteView:
     # `hops` comes from the model; clamp it to [0, graph_max_hops] so a large value is bounded
     # rather than traversing the whole graph (SEC-4).
     hops = min(max(hops, 0), settings.graph_max_hops)
+    today = date.today()
+    # The anchor is an explicit by-id lookup, so it is returned even if expired; its neighbors are a
+    # discovery sweep, so non-current ones are dropped from the current-evidence view (KM-7).
     neighbors = [
         _ref(graph.nodes[nid]["note"])
         for nid in sorted(neighborhood(graph, note_id, hops=hops))
-        if graph.nodes[nid].get("note") is not None
+        if graph.nodes[nid].get("note") is not None and graph.nodes[nid]["note"].is_current(today)
     ]
     # The body is note content (possibly ingested, not agent-authored): frame it as data.
     return NoteView(

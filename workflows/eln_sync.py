@@ -4,14 +4,16 @@ A thin Temporal wrapper over `eln.sync.sync_entries`: the activity wires the pro
 adapter, fingerprint stores, and note submitter and does all the I/O (ELN read, DB writes,
 git push); the workflow invokes it with the high-water cursor. It runs on the
 `background-jobs` queue (light, periodic work), and a Temporal Schedule drives it
-(`scripts/schedules.py`). The sync is **self-cursoring**: when started with no `since` (the
-scheduled case), it loads its high-water mark from `sync_cursors`, syncs from it, and stores
-the advanced value — so the Schedule threads no state through its payload. An explicit
-`since` (a manual backfill) runs from that point and does not touch the stored cursor.
-Factories are module-level so tests swap them for in-memory stores and a fake submitter.
+(`scripts/schedules.py`). The sync is **self-cursoring and per-source**: each active ingest
+source carries its own cursor in `sync_cursors` (keyed by the registry source name). A
+scheduled run (no `since`) loads each source's cursor, syncs from it, and stores the advanced
+value — so two ingest sources whose newest entries differ never let one skip the other's
+lagging entries (the per-source cursor fix, D-054). An explicit `since` (a manual backfill)
+runs every source from that point and does not touch any stored cursor. Factories are
+module-level so tests swap them for in-memory stores and a fake submitter.
 """
 
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 
 from temporalio import activity, workflow
 
@@ -22,7 +24,7 @@ with workflow.unsafe.imports_passed_through():
     from eln.sync import IngestSummary, RejectedEntry, sync_entries
     from kg.git_submitter import default_submitter
     from mcp_servers.fpstore import default_molecule_store, default_reaction_store
-    from sources.registry import active_ingest_sources
+    from sources.registry import active_ingest_source_names, make_data_source
 
 from workflows.publish import BAD_DATA_RETRY
 
@@ -31,50 +33,42 @@ _reaction_store = default_reaction_store
 _molecule_store = default_molecule_store
 
 
-def _merge(summaries: list[IngestSummary], since: datetime) -> IngestSummary:
-    """Fold the (0 or 1) source summary into one: its ids/rejections and its next cursor.
+def _merge(summaries: list[IngestSummary], floor: datetime) -> IngestSummary:
+    """Fold the per-source summaries into one combined report for the workflow's return value.
 
-    `sync_eln_entries` enforces at most one active ingest source (the shared high-water cursor can
-    only track one — see the guard there), so this folds a single summary to itself. With no active
-    ingest source the cursor holds at `since` (nothing was read, so nothing advances). The fold is
-    written as a general reduction so it stays correct if per-source cursors later lift that guard.
+    Each active ingest source is synced and cursored independently; this only combines their
+    outcomes so a single `IngestSummary` describes the whole run. `next_cursor` is the max seen and
+    is informational — the real cursors are stored per source — falling back to `floor` (the run's
+    `since`) when no source ran.
     """
     ingested: list[str] = []
     rejected: list[RejectedEntry] = []
-    cursor = since
+    cursors: list[datetime] = []
     for summary in summaries:
         ingested.extend(summary.ingested)
         rejected.extend(summary.rejected)
-        cursor = max(cursor, summary.next_cursor)
-    return IngestSummary(ingested=ingested, rejected=rejected, next_cursor=cursor)
+        cursors.append(summary.next_cursor)
+    return IngestSummary(
+        ingested=ingested, rejected=rejected, next_cursor=max(cursors, default=floor)
+    )
 
 
 @activity.defn
-async def sync_eln_entries(since: datetime) -> IngestSummary:
-    """Ingest every entry newer than `since` from each active ingest source; merge the summaries."""
-    adapters = active_ingest_sources()
-    # Interim safety valve for the deferred per-source cursor (DEFERRED.md). The workflow tracks ONE
-    # shared high-water cursor, so two ingest sources whose newest entries differ would let the
-    # furthest cursor skip the lagging source's entries — a silent data loss. Until per-source
-    # cursors land (the first second real source, e.g. the Snowflake connector), fail fast and
-    # non-retryably on a multi-ingest config instead of dropping data. (Memory synthesis reads the
-    # same sources with no cursor, so it is unaffected — this guard is the sync's alone.)
-    if len(adapters) > 1:
-        names = ", ".join(sorted(a.__class__.__name__ for a in adapters))
-        raise ChemclawError(
-            f"the ELN sync tracks one shared high-water cursor but {len(adapters)} ingest sources "
-            f"are active ({names}); a multi-source sync would skip the lagging source's entries. "
-            "Configure exactly one ingest source in CHEMCLAW_DATA_SOURCES until per-source cursors "
-            "land (DEFERRED.md)."
-        )
-    reaction_store = _reaction_store()
-    molecule_store = _molecule_store()
-    submitter = default_submitter()
-    summaries = [
-        await sync_entries(adapter, reaction_store, molecule_store, submitter, since)
-        for adapter in adapters
-    ]
-    return _merge(summaries, since)
+async def list_ingest_sources() -> list[str]:
+    """Return the active ingest source names — the set the workflow syncs and cursors per source."""
+    return active_ingest_source_names()
+
+
+@activity.defn
+async def sync_eln_entries(source: str, since: datetime) -> IngestSummary:
+    """Ingest every entry newer than `since` from the one named ingest source."""
+    data_source = make_data_source(source)
+    ingest = data_source.ingest
+    if ingest is None:  # names come from the ingest-filtered set, so this is a wiring bug
+        raise ChemclawError(f"data source {source!r} has no ingest half")
+    return await sync_entries(
+        ingest, _reaction_store(), _molecule_store(), default_submitter(), since
+    )
 
 
 @activity.defn
@@ -91,40 +85,50 @@ async def store_sync_cursor(source: str, cursor: datetime) -> None:
 
 @workflow.defn
 class ElnSyncWorkflow:
-    """Run one ELN sync durably, returning what was ingested and the next cursor.
+    """Run one ELN sync durably, returning what was ingested across every active ingest source.
 
-    Scheduled runs pass no `since`: the workflow loads the stored cursor, syncs, and stores
-    the advanced one, so consecutive firings never re-do or skip work. A manual run may pass
-    an explicit `since` to backfill from a chosen point without disturbing the stored cursor.
+    Scheduled runs pass no `since`: for each active ingest source the workflow loads its stored
+    cursor, syncs, and stores the advanced one — so consecutive firings never re-do or skip work,
+    and each source advances on its own timeline. A manual run may pass an explicit `since` to
+    backfill every source from a chosen point without disturbing any stored cursor.
     """
 
     @workflow.run
     async def run(self, since: datetime | None = None) -> IngestSummary:
-        """Sync from `since` or the stored cursor; advance the stored cursor when scheduled."""
+        """Sync each active source from its cursor (or `since`); advance cursors when scheduled."""
         activity_timeout = timedelta(seconds=settings.eln_sync_timeout_seconds)
-        scheduled = since is None
-        source = settings.eln_sync_adapter
-        if since is None:
-            since = await workflow.execute_activity(
-                load_sync_cursor,
-                source,
-                start_to_close_timeout=activity_timeout,
-                retry_policy=BAD_DATA_RETRY,
-            )
-        summary = await workflow.execute_activity(
-            sync_eln_entries,
-            since,
+        sources: list[str] = await workflow.execute_activity(
+            list_ingest_sources,
             start_to_close_timeout=activity_timeout,
-            # Bad data must reject-and-continue inside the sync, never retry the batch.
             retry_policy=BAD_DATA_RETRY,
         )
-        # Only a scheduled (cursor-driven) run advances the stored high-water mark; a manual
-        # backfill from an explicit `since` leaves the cursor where the scheduled runs put it.
-        if scheduled:
-            await workflow.execute_activity(
-                store_sync_cursor,
-                args=[source, summary.next_cursor],
+        summaries: list[IngestSummary] = []
+        for source in sources:
+            # Scheduled (no `since`): resume from this source's own cursor. Manual backfill: run
+            # every source from the explicit `since` and leave the stored cursors untouched.
+            if since is None:
+                source_since = await workflow.execute_activity(
+                    load_sync_cursor,
+                    source,
+                    start_to_close_timeout=activity_timeout,
+                    retry_policy=BAD_DATA_RETRY,
+                )
+            else:
+                source_since = since
+            summary = await workflow.execute_activity(
+                sync_eln_entries,
+                args=[source, source_since],
                 start_to_close_timeout=activity_timeout,
+                # Bad data must reject-and-continue inside the sync, never retry the batch.
                 retry_policy=BAD_DATA_RETRY,
             )
-        return summary
+            if since is None:
+                await workflow.execute_activity(
+                    store_sync_cursor,
+                    args=[source, summary.next_cursor],
+                    start_to_close_timeout=activity_timeout,
+                    retry_policy=BAD_DATA_RETRY,
+                )
+            summaries.append(summary)
+        floor = since if since is not None else datetime.min.replace(tzinfo=UTC)
+        return _merge(summaries, floor)

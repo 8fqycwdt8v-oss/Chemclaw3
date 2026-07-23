@@ -79,7 +79,7 @@ def check_chain(rows: Iterable[ChainRow]) -> list[str]:
 
 _SELECT_ALL = """
     SELECT id, correlation_id, actor, tool, arguments, outcome, detail, latency_ms,
-           prev_hash, row_hash
+           revision, prev_hash, row_hash
     FROM audit_events
     ORDER BY id ASC
 """
@@ -94,7 +94,9 @@ async def verify_chain(dsn: str | None = None) -> list[str]:
     ) as conn:
         cursor = await conn.execute(_SELECT_ALL)
         for record in await cursor.fetchall():
-            (rid, cid, actor, tool, args, outcome, detail, latency, prev_hash, row_hash) = record
+            rid, cid, actor, tool, args, outcome, detail, latency, revision, prev_hash, row_hash = (
+                record
+            )
             rows.append(
                 ChainRow(
                     id=rid,
@@ -108,6 +110,7 @@ async def verify_chain(dsn: str | None = None) -> list[str]:
                         outcome=outcome,
                         detail=detail,
                         latency_ms=latency,
+                        revision=revision,
                     ),
                 )
             )

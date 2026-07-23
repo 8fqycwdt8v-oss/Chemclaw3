@@ -2,6 +2,10 @@
 
 from pathlib import Path
 
+import pytest
+
+import kg.graph as graph
+from chemclaw.config import settings
 from kg.graph import build_graph, neighborhood
 from kg.validate import validate
 
@@ -22,10 +26,64 @@ def _make_graph_dir(tmp_path: Path) -> Path:
 
 def test_build_graph_nodes_and_edges(tmp_path: Path) -> None:
     """The graph has one node per note (README ignored) and one edge per wikilink."""
-    graph = build_graph(_make_graph_dir(tmp_path))
-    assert set(graph.nodes) == {"a", "b", "c"}
-    assert set(graph.edges) == {("a", "b"), ("a", "c"), ("b", "c")}
-    assert graph.nodes["a"]["note"].id == "a"
+    built = build_graph(_make_graph_dir(tmp_path))
+    assert set(built.nodes) == {"a", "b", "c"}
+    assert set(built.edges) == {("a", "b"), ("a", "c"), ("b", "c")}
+    assert built.nodes["a"]["note"].id == "a"
+
+
+def test_load_notes_caches_parse_until_a_note_changes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A repeat load is served from cache; a changed tree busts it and re-parses (KM-14)."""
+    monkeypatch.setattr(settings, "graph_cache_enabled", True)
+    parses = {"count": 0}
+    real_parse = graph._parse_notes
+
+    def _counting(notes_dir: Path) -> list:  # type: ignore[type-arg]
+        parses["count"] += 1
+        return real_parse(notes_dir)
+
+    monkeypatch.setattr(graph, "_parse_notes", _counting)
+    (tmp_path / "a.md").write_text(_note("a", []), encoding="utf-8")
+
+    first = graph.load_notes(tmp_path)
+    second = graph.load_notes(tmp_path)
+    assert parses["count"] == 1  # the second call hit the cache, no re-parse
+    assert [n.id for n in first] == [n.id for n in second] == ["a"]
+
+    (tmp_path / "b.md").write_text(_note("b", []), encoding="utf-8")
+    third = graph.load_notes(tmp_path)
+    assert parses["count"] == 2  # a changed tree busts the cache
+    assert {n.id for n in third} == {"a", "b"}
+
+
+def test_load_notes_cache_off_always_reparses(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """With the cache disabled every load re-parses (the pre-cache behavior)."""
+    monkeypatch.setattr(settings, "graph_cache_enabled", False)
+    parses = {"count": 0}
+    real_parse = graph._parse_notes
+
+    def _counting(notes_dir: Path) -> list:  # type: ignore[type-arg]
+        parses["count"] += 1
+        return real_parse(notes_dir)
+
+    monkeypatch.setattr(graph, "_parse_notes", _counting)
+    (tmp_path / "a.md").write_text(_note("a", []), encoding="utf-8")
+    graph.load_notes(tmp_path)
+    graph.load_notes(tmp_path)
+    assert parses["count"] == 2
+
+
+def test_dir_fingerprint_tolerates_a_vanished_file(tmp_path: Path) -> None:
+    """A note that cannot be stat'd (e.g. deleted mid-query) is skipped, not a crashed load."""
+    (tmp_path / "a.md").write_text(_note("a", []), encoding="utf-8")
+    dangling = tmp_path / "gone.md"
+    dangling.symlink_to(tmp_path / "does-not-exist.md")  # rglob lists it; stat() raises
+    fingerprint = graph._dir_fingerprint(tmp_path)
+    assert [entry[0] for entry in fingerprint] == [str(tmp_path / "a.md")]
 
 
 def test_neighborhood_expands_both_directions(tmp_path: Path) -> None:

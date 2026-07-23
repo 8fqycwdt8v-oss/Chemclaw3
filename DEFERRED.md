@@ -40,8 +40,8 @@ findings are recorded in D-051. These residuals were **consciously not fixed now
 
 | Deferred | Why not now | Trigger |
 |---|---|---|
-| Per-source pipeline cursor in the ELN sync | The durable sync carries one high-water cursor keyed by `eln_sync_adapter`; with the single default ingest source (`eln-json`) this is correct. With **two** active ingest sources whose newest entries differ, the shared `max()` cursor can skip the lagging source's entries (F7 review F-1/F-2). Fixing means per-source cursors + tying the cursor key to the *active ingest set*, not `eln_sync_adapter`. **Interim guard added (2026-07-22):** `sync_eln_entries` now fails fast + non-retryably when >1 ingest source is active, so the silent-skip is impossible until per-source cursors land. | The first second ingest source lands — i.e. the custom Snowflake ELN connector, which the plan already scopes to bring its own pipeline cursor. Lift the guard and key cursors per source then |
-| Thundering-herd lock in `WorkloadTokenProvider` | On a cold/stale cache, N concurrent `get_service_token(scope)` all fire the exchange (correctness fine — never a stale token, just redundant calls) | Measurable duplicate token exchanges under real concurrency — add an `asyncio.Lock` per scope |
+| ~~Per-source pipeline cursor in the ELN sync~~ | **Done (D-054, 2026-07-22):** the sync now keys one high-water cursor per active ingest source (registry name), iterating every source; the interim fail-fast guard is removed and multi-ingest is safe. Both existing adapters are datetime-cursored (`ElnAdapter` contract), so this is a faithful generalization, not a guess. `eln_sync_adapter` config field deleted (was the dead single-cursor label — audit DUP-2). | — (a future non-datetime cursor source generalizes the `ElnAdapter` contract itself) |
+| ~~Thundering-herd lock in `WorkloadTokenProvider`~~ | **Done (D-054, 2026-07-22):** a per-scope `asyncio.Lock` with a double-checked cache re-read collapses N concurrent cold/stale callers onto one exchange; different scopes never block. | — |
 | Generic ingest half still shaped like `ElnAdapter` | `IngestHalf = ElnAdapter` (verbatim re-host) means a future non-ELN ingest source must expose `fetch_new_entries`/`map_to_ord`. Acceptable while every ingest source is reaction-shaped (maps to the canonical ORD reaction) | A non-reaction ingest source appears — then generalize the ingest half's mapped type |
 
 ## Critical re-review (2026-07-22)
@@ -50,11 +50,18 @@ Every deferred item above was re-examined against current reality, asking "does 
 *now*?" rather than assuming the deferral still stands. Verdict: **all remain correctly deferred
 except one**, which got an interim guard.
 
-**Acted on now — Per-source ELN cursor.** The full per-source-cursor fix stays deferred (no second
-real feed), but the F7/DUP-1 config seam made the *unsafe* two-ingest-source setup reachable by
-config, where the one shared cursor silently skips entries. Added the fail-fast guard this item's own
-"add a startup validator then" note called for (see the row above). This converts a silent data-loss
-into a loud, non-retryable failure — cheap insurance, no scope creep into the full fix.
+**Implemented (D-054, superseding the interim guard).** A follow-up "close all found gaps" pass then
+did the *full* fixes for the two items that turned out to be closable offline against the existing
+contracts:
+
+- **Per-source ELN cursor.** First shipped as an interim fail-fast guard, then replaced by real
+  per-source cursors: the sync iterates every active ingest source and keys one cursor per source
+  (the `sync_cursors` table already keyed by name). Both current adapters are datetime-cursored
+  (that *is* the `ElnAdapter` contract), so this is the faithful generalization of today's contract,
+  not a guess about the not-yet-existing Snowflake source. The `eln_sync_adapter` dead field is gone
+  (audit DUP-2). Multi-ingest is now first-class.
+- **`WorkloadTokenProvider` thundering-herd lock.** A per-scope `asyncio.Lock` + double-checked cache
+  now collapses concurrent cold-cache callers onto one exchange — cheap, correct, offline-testable.
 
 **Confirmed still-deferred (trigger genuinely unmet).** Nothing else crossed its threshold:
 
@@ -63,8 +70,8 @@ into a loud, non-retryable failure — cheap insurance, no scope creep into the 
   confidentiality boundary that does not exist in this environment.
 - *Need a scale we haven't reached:* sub-quadratic playbook clustering (O(n²) is fine below ~10⁴
   reactions), per-key in-flight calc-store dedup (only worth it when duplicate *expensive* HPC runs
-  are a measured cost — still mock), the `WorkloadTokenProvider` thundering-herd lock (no real
-  concurrent token exchanges to measure).
+  are a measured cost — still mock). (The `WorkloadTokenProvider` thundering-herd lock was in this
+  bucket but is now implemented — the lock is cheap enough to add before the scale arrives — D-054.)
 - *Need a capability/source that isn't in scope for v1:* universal ELN abstraction (only a 3rd real
   ELN triggers it — we have 2 adapters), external literature/patent retrievers (Phase 5b core is
   done, but this is a net-new source needing an API decision, not a latent gap), the tabular
@@ -82,11 +89,29 @@ right ones; this review changed one thing (the cursor guard) and left the rest a
 ## F10 review-cycle accepted deferrals (2026-07-22)
 
 The post-F10 adversarial review (five agent teams over the new features + the whole codebase) fixed
-the confirmed defects in-branch (recorded in D-060); these three residuals were **consciously not
+the confirmed defects in-branch (recorded in D-064); these three residuals were **consciously not
 built now**, each because it needs a live edge this offline environment does not have:
 
 | Deferred | Why not now | Trigger to revisit |
 |---|---|---|
 | **F10-B3 — LLM faithfulness check of drafted report sections** | The conversational verifier (B2) scores a chat turn's cited prose. The *durable* report path assembles evidence per section and renders it via a template — there is no free-form synthesized prose in the workflow to LLM-judge, only citations (already gated by `verify_claims`). Wiring an LLM judge in would require the report skill's prose-drafting step to run inside the durable workflow, which it does not. | The report workflow gains an in-workflow LLM prose-synthesis step — then route that prose through `verify_answer` exactly as the chat runner does |
-| **Live-retriever drift eval (retrieval P/R/F1 over the deployment graph)** | `evals.retrieval.run_retrieval_eval` scores a live retriever against labelled cases, but the shipped knowledge graph is empty (deployment-populated) and the labelled retrieval cases are deployment-local (a committed case would be dead/misleading here). So the scheduled drift job scores the deterministic committed case-set — a *deployment-consistency tripwire*, not a runtime quality monitor (documented in `workflows/eval_drift.py`). | A deployment with a populated graph + local labelled retrieval cases exists — then point the drift activity at `run_retrieval_eval` over that graph for genuine runtime drift |
+| **Live-retriever drift over the deployment's *own* graph** | The KM-13 retrieval gold-set (D-056) already scores `GraphRetriever` over a committed fixture corpus (`evals/retrieval_corpus/`), and the scheduled F10-F2 drift job re-runs that deterministic case-set — a *deployment-consistency tripwire* (documented in `workflows/eval_drift.py`). What stays deferred is drift over the *deployment's live, changing* knowledge graph (genuine runtime quality drift), whose labelled cases are deployment-local (the shipped graph is empty), not a committed fixture. | A deployment with a populated graph + local labelled retrieval cases exists — then score the live retriever over that graph on the drift cadence, alongside the fixture tripwire |
 | **Audit-chain tip-truncation anchor** | The hash chain now catches modification, reordering, interior deletion, and prefix (genesis) truncation. Detecting *trailing* deletion (tip truncation) needs an external append-count/max-id anchor recorded out-of-band (a second store), since the remaining rows still link cleanly. | A regulator/GxP audit requires provable completeness of the tail — then add an out-of-band monotonic append-count anchor (e.g. a signed high-water row-count) and verify it |
+
+## Engine gap-doc follow-ups (2026-07-22)
+
+The two engine gap analyses (`docs/audit/08-agentic-engine-gaps.md`,
+`09-knowledge-management-gaps.md`) surfaced a cluster of non-`None`, non-deferred gaps. The
+closable ones were implemented across three passes: KM-6/KM-7 provenance+freshness (D-055), the
+KM-13 retrieval gold-set (D-056), and then **KM-5, AG-14, AG-15, and the retrieval half of KM-14
+(D-057)**. Each of those four made a defensible default decision (documented in D-057) rather than
+staying blocked. **One remains deferred**, and it is genuinely infra-gated:
+
+| Item | Why not now | Trigger to revisit |
+|---|---|---|
+| **AG-13** — agent-behavior / prompt / skill regression eval | A faithful agent-behavior eval must run the agent against a real LLM to observe tool-selection and citation; the target internal OpenAI-compatible endpoint is not reachable offline, and a mock LLM would only test the mock, not behavior. **Genuinely infra-gated** (unlike KM-13, which scores the deterministic retrieval path and *was* done in D-056). | The live internal LLM endpoint is reachable from CI or a test harness — then add a behavior suite (tool-selection + citation assertions over representative prompts), reusing the `evals/` case-set + `@metric` seam |
+
+Two narrower sub-gaps also remain, each with its own existing deferral: the **O(n²) playbook
+clustering** half of KM-14 (see the row in the main table above — sub-quadratic clustering at ~10⁴
+reactions) and **per-user** turn fairness within AG-15 (the global cap is in; per-user quotas wait on
+a real multi-tenant need). Neither is a latent bug.

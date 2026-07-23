@@ -1,60 +1,95 @@
-"""Score a retriever's precision/recall/F1 over query→expected-notes cases (plan F10-F1).
+"""Retrieval-quality metrics over a gold query→expected-source set (audit KM-13).
 
-The base eval harness scores *static* output/reference payloads; a retrieval case instead pins a
-query and the note ids that *should* come back, and the retriever's live output is what gets scored.
-This module bridges the two: it runs a `SourceRetriever` over each case's query, turns the returned
-note ids into an `EvalCase` (predicted vs expected), and hands them to the existing `run_eval` — the
-report/threshold machinery is reused unchanged (no second eval system, D-A14). It is how F10-A's
-hybrid retrieval gets a measurable P/R/F1 rather than an anecdote.
+The scientific metrics in `evals.metrics` are pure functions of a case; retrieval quality cannot
+be — "did we surface the right notes?" requires actually running retrieval over a corpus. So this
+metric lives in its own module: it runs `GraphRetriever` against a small versioned gold corpus
+(`eval_retrieval_corpus_dir`, a fixed fixture, not the live `knowledge_dir`) for a case's query and
+scores the returned note ids against `reference.expected_note_ids`.
+
+This is the gate the KM-13 gap names: the system's core promise is "surface the right evidence", yet
+retrieval quality was previously unmeasured, so a change to the substring filter or the evidence cap
+could quietly halve recall unnoticed. With this, such a regression moves a pinned number in the test
+suite (as the other scientific metrics are pinned) instead of going silent. The gold set is
+deliberately small — a small corpus is the ideal time to build it — and includes one query whose
+relevant note the literal substring filter cannot reach, which documents (and measures) the KM-4
+literal-matching limitation rather than hiding it.
 """
 
-from pydantic import BaseModel, ConfigDict, Field
+import asyncio
 
-from evals.harness import EvalReport, run_eval
-from evals.metric import EvalCase
-from report.evidence import SourceRetriever
-
-# The classification metrics every retrieval case is scored by (F10-F1). Fixed here, not per-case:
-# a retrieval case's job is to pin query→expected, and precision/recall/F1 are the retrieval-quality
-# triple — a case does not get to omit one.
-_RETRIEVAL_METRICS = ["precision", "recall", "f1"]
+from chemclaw.config import settings
+from evals.metric import EvalCase, MetricError, MetricResult, metric
+from report.retrievers import GraphRetriever
 
 
-class RetrievalCase(BaseModel):
-    """One retrieval eval case: a query and the note ids it should surface.
+def _expected_ids(case: EvalCase) -> set[str]:
+    """The gold set of note ids this query should surface, from the case reference (G4)."""
+    if case.reference is None:
+        raise MetricError("retrieval metrics need a reference with `expected_note_ids`")
+    raw = case.reference.get("expected_note_ids")
+    if not isinstance(raw, list) or not raw or not all(isinstance(x, str) for x in raw):
+        raise MetricError("reference.expected_note_ids must be a non-empty list of note ids")
+    return set(raw)
 
-    Extra keys are rejected so a misspelled `expected_notes` (vs `expected_note_ids`) fails loudly
-    instead of scoring against an empty ground truth (G4).
+
+def _retrieved_ids(case: EvalCase) -> list[str]:
+    """Run `GraphRetriever` over the gold corpus for the case query; return the note ids.
+
+    Reads `output.query` (required) and optional `output.filters` (type/tag), scoring the same
+    retrieval path a report uses. Order is preserved and duplicates collapsed, though at present
+    each note yields at most one chunk.
     """
+    query = case.output.get("query")
+    if not isinstance(query, str) or not query.strip():
+        raise MetricError("output.query must be a non-empty string")
+    filters = case.output.get("filters") or {}
+    if not isinstance(filters, dict):
+        raise MetricError("output.filters must be a mapping if given")
+    retriever = GraphRetriever(settings.eval_retrieval_corpus_dir)
+    chunks = asyncio.run(retriever.retrieve(query, filters))
+    return list(dict.fromkeys(chunk.source_note_id for chunk in chunks))
 
-    model_config = ConfigDict(extra="forbid")
 
-    id: str = Field(min_length=1)
-    query: str = Field(min_length=1)
-    expected_note_ids: list[str] = Field(min_length=1)
-    filters: dict[str, str] = Field(default_factory=dict)
+@metric("retrieval_recall")
+def retrieval_recall(case: EvalCase) -> MetricResult:
+    """Fraction of the gold expected sources that retrieval actually surfaced (KM-13).
 
-
-async def score_retrieval_case(case: RetrievalCase, retriever: SourceRetriever) -> EvalCase:
-    """Run `retriever` over the case's query and build the predicted-vs-expected `EvalCase`.
-
-    Predicted ids are the distinct source-note ids the retriever returned, order-deduplicated so a
-    note cited by several chunks counts once. The result is a plain `EvalCase` the base harness
-    scores with the classification metrics — retrieval-specific logic ends here.
+    Recall is the "surface the right evidence" signal — missing a relevant note is the failure
+    this measures — so it is the gated retrieval metric, against `retrieval_recall_min`.
     """
-    chunks = await retriever.retrieve(case.query, dict(case.filters))
-    predicted = list(dict.fromkeys(chunk.source_note_id for chunk in chunks))
-    return EvalCase(
-        id=case.id,
-        metrics=list(_RETRIEVAL_METRICS),
-        output={"predicted_note_ids": predicted},
-        reference={"expected_note_ids": case.expected_note_ids},
+    expected = _expected_ids(case)
+    hits = expected & set(_retrieved_ids(case))
+    value = len(hits) / len(expected)
+    return MetricResult(
+        metric="retrieval_recall",
+        value=value,
+        passed=value >= settings.retrieval_recall_min,
+        provenance=(
+            f"recall = {len(hits)}/{len(expected)} expected sources retrieved for query "
+            f"{case.output['query']!r}; floor {settings.retrieval_recall_min}"
+        ),
     )
 
 
-async def run_retrieval_eval(
-    cases: list[RetrievalCase], retriever: SourceRetriever, case_set_version: str
-) -> EvalReport:
-    """Score every retrieval case against `retriever` into a versioned report (via `run_eval`)."""
-    scored = [await score_retrieval_case(case, retriever) for case in cases]
-    return run_eval(scored, case_set_version)
+@metric("retrieval_precision")
+def retrieval_precision(case: EvalCase) -> MetricResult:
+    """Fraction of retrieved notes that are gold-relevant — a diagnostic, not gated (KM-13).
+
+    A broad query legitimately returns many notes (low precision) without being "wrong", so
+    precision reports context alongside recall rather than gating; `passed` is None.
+    """
+    expected = _expected_ids(case)
+    retrieved = _retrieved_ids(case)
+    hits = expected & set(retrieved)
+    value = len(hits) / len(retrieved) if retrieved else 0.0
+    detail = (
+        f"{len(hits)}/{len(retrieved)} retrieved notes were gold-relevant"
+        if retrieved
+        else "no notes retrieved"
+    )
+    return MetricResult(
+        metric="retrieval_precision",
+        value=value,
+        passed=None,
+        provenance=f"precision = {detail} for query {case.output['query']!r}",
+    )

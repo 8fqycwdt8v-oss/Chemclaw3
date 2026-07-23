@@ -32,8 +32,9 @@ _AUDIT_CHAIN_LOCK_KEY = 0x43484D4157_00_01  # "CHMAW" + a table-local discrimina
 _TIP = "SELECT row_hash FROM audit_events ORDER BY id DESC LIMIT 1"
 _INSERT = """
     INSERT INTO audit_events
-        (correlation_id, actor, tool, arguments, outcome, detail, latency_ms, prev_hash, row_hash)
-    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+        (correlation_id, actor, tool, arguments, outcome, detail, latency_ms,
+         revision, prev_hash, row_hash)
+    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
 """
 
 
@@ -77,6 +78,7 @@ class PostgresAuditSink:
                     event.outcome,
                     event.detail,
                     event.latency_ms,
+                    event.revision,
                     prev_hash,
                     row_hash,
                 ),

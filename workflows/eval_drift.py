@@ -14,6 +14,7 @@ the Temporal shell: one activity does the file I/O, the workflow delivers each a
 `notify` seam. Durability of the *schedule* lives in Temporal (D-035), not host cron.
 """
 
+import asyncio
 from datetime import timedelta
 
 from temporalio import activity, workflow
@@ -43,8 +44,12 @@ async def check_eval_drift() -> list[DriftAlert]:
 
     All the I/O (reading cases + the baseline file) and the pure comparison run in this one
     activity, so the workflow stays deterministic and this is the single side-effecting step.
+    Scoring runs in a worker thread: some case metrics (the KM-13 retrieval gold set) drive a live
+    retriever via `asyncio.run`, which cannot nest inside this activity's own event loop.
     """
-    report = run_eval(load_eval_cases(settings.eval_case_dir), "drift-check")
+    report = await asyncio.to_thread(
+        run_eval, load_eval_cases(settings.eval_case_dir), "drift-check"
+    )
     current = aggregate_metrics(report)
     baseline = load_baseline(settings.eval_baseline_path)
     return detect_drift(baseline, current, settings.eval_drift_epsilon)

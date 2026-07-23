@@ -90,20 +90,22 @@ def test_seed_metrics_are_registered() -> None:
 
 
 def test_harness_runs_over_versioned_case_set_and_gates() -> None:
-    """The harness scores the real case-set reproducibly and flags the failing case."""
+    """The harness scores the real chemistry case-set reproducibly and flags the failing case."""
     cases = load_eval_cases(settings.eval_case_dir)
-    assert {c.id for c in cases} == {
+    # The chemistry seed cases (the retrieval-* gold cases are exercised in test_retrieval_eval.py,
+    # which controls their corpus fixture; scope this test to the chemistry set it is about).
+    assert {
         "bo-regret-reizman",
         "green-esterification",
         "pharma-solvent-heavy",
         "solubility-benzene",
-        "retrieval-precision-recall",
-    }
-    report = run_eval(cases, case_set_version="v1")
+    } <= {c.id for c in cases}
+    chem_cases = [c for c in cases if not c.id.startswith("retrieval-")]
+    report = run_eval(chem_cases, case_set_version="v1")
     failed_ids = {r.case_id for r in report.failed()}
     assert failed_ids == {"pharma-solvent-heavy"}  # only the solvent-heavy case fails the gate
     # Reproducible: same inputs -> identical values.
-    assert run_eval(cases, "v1").model_dump() == report.model_dump()
+    assert run_eval(chem_cases, "v1").model_dump() == report.model_dump()
 
 
 def test_report_is_citable() -> None:
