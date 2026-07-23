@@ -39,8 +39,12 @@ S1 exploitable/corruption · S2 wrong result/latent bug · S3 hardening gap · S
 
 ## Wave 0 — Baseline
 
-- [ ] Run `make lint type test` + `make cov`; record green baseline + coverage number
+- [x] Run `make lint type test` + `make cov`; record green baseline + coverage number
       (if red, fix first).
+      **Baseline (2026-07-23)**: lint clean · mypy strict clean · 508 passed /
+      16 skipped (Temporal test server unreachable in sandbox; Postgres 16 +
+      pgvector 0.8.0 brought up locally, so all 18 DB tests now run) ·
+      coverage **88.43%** (gate 80%). Wave 6 must be ≥ this.
 
 ## Wave 1 — Kernel review (`chemclaw/`, before dependents)
 
