@@ -15,7 +15,8 @@ from temporalio.exceptions import WorkflowAlreadyStartedError
 from temporalio.service import RPCError
 
 from agents.authz import authorize_trigger, require_actor
-from agents.session_context import get_current_session_id
+from agents.harness_todo import mark_awaiting_job
+from agents.session_context import get_current_session, get_current_session_id
 from chemclaw.config import settings
 from chemclaw.temporal_client import connect
 from workflows.models import QMJobInput, QMJobStatus, qm_job_key
@@ -67,9 +68,30 @@ async def submit_qm_job(molecule_smiles: str, method: str, basis_set: str) -> st
         )
     except WorkflowAlreadyStartedError:
         # Same id already running or completed: the identical calculation exists,
-        # so return its id rather than launching a duplicate (idempotent submit).
+        # so return its id rather than launching a duplicate (idempotent submit). Not marked
+        # awaiting again here — a re-submit of an already-*completed* job will never get another
+        # push-back event, so a fresh awaiting todo for it would never be flipped and would block
+        # `todos_remaining` forever.
         return f"qm-{qm_job_key(job)}"
+    await _mark_awaiting_if_harness(handle.id, molecule_smiles=molecule_smiles, method=method)
     return handle.id
+
+
+async def _mark_awaiting_if_harness(job_id: str, *, molecule_smiles: str, method: str) -> None:
+    """Record the harness todo awaiting `job_id`, when the harness's todo list is in play.
+
+    Silent no-op off the harness path (harness disabled, or no live session ambient — e.g. the CLI,
+    which runs single-shot with no `AgentSession`): writing to a todo list nothing ever reads would
+    just be dead state on the classic agent's turns.
+    """
+    if not settings.harness_enabled:
+        return
+    session = get_current_session()
+    if session is None:
+        return
+    await mark_awaiting_job(
+        session, job_id, title=f"Await QM job {job_id} ({molecule_smiles}, {method})"
+    )
 
 
 async def get_qm_job_status(job_id: str) -> QMJobStatus:

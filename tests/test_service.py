@@ -210,6 +210,75 @@ def test_job_pushback_streams_completed_events(monkeypatch) -> None:  # type: ig
     ]
 
 
+def test_job_pushback_flips_the_harness_awaiting_todo(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    """A `job_completed` push-back flips the harness todo waiting on it (F3-T3 follow-up)."""
+    import asyncio
+
+    from agent_framework import DEFAULT_TODO_SOURCE_ID, TodoSessionStore
+
+    import service.app as app_module
+    from agents.harness_todo import mark_awaiting_job
+    from agents.session_events import SessionEvent
+    from chemclaw.config import settings
+
+    monkeypatch.setattr(settings, "harness_enabled", True)
+
+    async def _fake_stream(session_id: str) -> object:
+        yield SessionEvent(session_id=session_id, kind="job_completed", payload={"job_id": "qm-1"})
+
+    monkeypatch.setattr(app_module, "stream_new_events", _fake_stream)
+
+    app = create_app(agent_factory=lambda: _FakeAgent())
+    with TestClient(app) as client:
+        session_id = client.post("/sessions").json()["session_id"]
+        live_session, _owner = app.state.live_sessions.get(session_id)
+        asyncio.run(mark_awaiting_job(live_session, "qm-1", title="Await QM job qm-1"))
+
+        with client.stream("GET", f"/sessions/{session_id}/events") as res:
+            assert res.status_code == 200
+            for _line in res.iter_lines():  # drain so the handler actually runs
+                pass
+
+    items = asyncio.run(
+        TodoSessionStore().load_items(live_session, source_id=DEFAULT_TODO_SOURCE_ID)
+    )
+    assert items[0].is_complete is True
+
+
+def test_job_pushback_does_not_touch_todos_when_harness_disabled(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    """With the harness off, a push-back never touches the (harness-only) todo list."""
+    import asyncio
+
+    from agent_framework import DEFAULT_TODO_SOURCE_ID, TodoSessionStore
+
+    import service.app as app_module
+    from agents.harness_todo import mark_awaiting_job
+    from agents.session_events import SessionEvent
+    from chemclaw.config import settings
+
+    monkeypatch.setattr(settings, "harness_enabled", False)
+
+    async def _fake_stream(session_id: str) -> object:
+        yield SessionEvent(session_id=session_id, kind="job_completed", payload={"job_id": "qm-1"})
+
+    monkeypatch.setattr(app_module, "stream_new_events", _fake_stream)
+
+    app = create_app(agent_factory=lambda: _FakeAgent())
+    with TestClient(app) as client:
+        session_id = client.post("/sessions").json()["session_id"]
+        live_session, _owner = app.state.live_sessions.get(session_id)
+        asyncio.run(mark_awaiting_job(live_session, "qm-1", title="Await QM job qm-1"))
+
+        with client.stream("GET", f"/sessions/{session_id}/events") as res:
+            for _line in res.iter_lines():
+                pass
+
+    items = asyncio.run(
+        TodoSessionStore().load_items(live_session, source_id=DEFAULT_TODO_SOURCE_ID)
+    )
+    assert items[0].is_complete is False
+
+
 def test_pushback_for_unknown_session_is_404() -> None:
     """Subscribing to push-back for a session that never existed is a clean 404."""
     with _client(_FakeAgent()) as client:
