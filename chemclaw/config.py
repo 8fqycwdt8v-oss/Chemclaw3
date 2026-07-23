@@ -338,6 +338,22 @@ class Settings(BaseSettings):
     # LLM-bound).
     service_max_concurrent_turns: int = Field(default=8, gt=0)
     service_turn_admission_timeout_seconds: float = Field(default=5.0, gt=0)
+    # Turn/token budgets — the runaway-cost guard (service.budget). A single turn is already
+    # iteration-capped (`harness_max_loop_iterations` / MAF's 40), but nothing caps the *number* of
+    # turns, so a client or an automated push-back loop could accumulate unbounded LLM spend. When
+    # `budget_enabled`, the front door meters each turn's reported token usage and counts turns per
+    # session and per user, refusing (HTTP 429) a turn that would exceed a cap. Caps are per running
+    # process and best-effort — they reset on restart, bounding a live process's runaway (the
+    # missing ceiling above the per-turn loop cap), not a durable rolling-window quota (deferred).
+    # A cap of 0 means unlimited on that dimension, so a deployment can enable just the guard it
+    # wants; the defaults are generous for a real chemist but finite against a loop. Token metering
+    # reads MAF's usage content, so a provider reporting no usage meters 0 and the turn caps bind.
+    # Off by default (today's behavior).
+    budget_enabled: bool = False
+    budget_max_turns_per_session: int = Field(default=100, ge=0)
+    budget_max_tokens_per_session: int = Field(default=2_000_000, ge=0)
+    budget_max_turns_per_user: int = Field(default=1000, ge=0)
+    budget_max_tokens_per_user: int = Field(default=20_000_000, ge=0)
     # Job→session push-back (plan F3-T2/T3): a finished Temporal job writes a `session_events` row;
     # the front door tails the table and wakes the owning session (appending the result, flipping
     # the `awaiting` todo) instead of the user polling. This is the tailer's poll interval — a
@@ -505,6 +521,18 @@ class Settings(BaseSettings):
     drfp_bits: int = Field(default=2048, gt=0)
     fingerprint_top_k: int = Field(default=10, ge=1)
     fingerprint_similarity_threshold: float = Field(default=0.3, ge=0.0, le=1.0)
+    # Upper bound on an agent-supplied `top_k` for the similarity tools (SEC-4). `top_k` reaches
+    # `find_matches` from the model (agents.search_tools) and lands directly in a SQL `LIMIT`, so an
+    # arbitrarily large value would be an unbounded query. Clamp it to this — the fingerprint-search
+    # analog of the `graph_max_hops` clamp on `expand_note`. Generous for a real neighbor list.
+    fingerprint_max_top_k: int = Field(default=100, ge=1)
+    # Bound on how many stored fingerprints one substructure scan materializes (SEC-4). The scan
+    # has no similarity prefilter, so it loads records and RDKit-matches each; without a cap a
+    # large corpus is a full-table load into the worker heap (the 30s statement_timeout bounds DB
+    # time, not rows returned). The scan takes at most this many rows (deterministic id order) and
+    # logs a warning when it hits the cap so a truncated result is never silent. Raise it for a
+    # larger corpus, or add a pattern-fingerprint prefilter (deferred) when it starts truncating.
+    substructure_scan_max_records: int = Field(default=5000, gt=0)
 
     # ELN ingestion (plan Phase 4). The one concrete adapter reads a JSON-export ELN from
     # this directory; the sync activity's timeout bounds one batch of fetch+validate+index+

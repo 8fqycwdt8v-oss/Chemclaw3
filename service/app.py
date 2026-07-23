@@ -17,7 +17,7 @@ import uuid
 from collections import OrderedDict
 from collections.abc import AsyncIterator, Callable
 from pathlib import Path
-from typing import Any
+from typing import Any, Protocol
 
 from fastapi import Depends, FastAPI, HTTPException
 from fastapi.staticfiles import StaticFiles
@@ -33,6 +33,7 @@ from agents.harness_todo import complete_awaiting_job
 from agents.session_events import stream_new_events
 from chemclaw.config import settings
 from service.auth import Principal, require_principal
+from service.budget import BudgetExceeded, BudgetTracker
 from service.events import JobCompletedEvent
 from service.runner import run_turn
 
@@ -76,6 +77,37 @@ class _LiveSessions:
         return entry
 
 
+class SessionOwners(Protocol):
+    """The durable session-ownership registry the front door rehydrates from after a restart (F3).
+
+    Kept as a Protocol so the concrete `agents.session_store.SessionOwnerStore` (which needs a
+    database) is imported only on the durable path, and a test can inject an in-memory fake.
+    """
+
+    async def record(self, session_id: str, owner: str | None) -> None:
+        """Record a session's owner at creation (idempotent)."""
+        ...
+
+    async def lookup(self, session_id: str) -> tuple[bool, str | None]:
+        """Return `(found, owner)` for a session id — `(False, None)` when unknown."""
+        ...
+
+
+def _default_owner_store() -> SessionOwners | None:
+    """The durable session-ownership store, but only when durable sessions are on (else None).
+
+    Rehydration is meaningful only when there is durable history to resume, so it is gated on the
+    same `session_store="postgres"` switch: under the in-memory store there is nothing to reattach
+    to and a cache miss stays a 404 (today's behavior). Imported lazily so the dev/test path never
+    pulls in psycopg for a store it will not use.
+    """
+    if settings.session_store != "postgres":
+        return None
+    from agents.session_store import SessionOwnerStore
+
+    return SessionOwnerStore()
+
+
 class MessageIn(BaseModel):
     """One turn's user message posted to the messages endpoint."""
 
@@ -100,13 +132,20 @@ class SessionOut(BaseModel):
     session_id: str
 
 
-def create_app(agent_factory: Callable[[], Any] = build_agent) -> FastAPI:
+def create_app(
+    agent_factory: Callable[[], Any] = build_agent,
+    owner_store: SessionOwners | None = None,
+) -> FastAPI:
     """Build the front-door FastAPI app.
 
     Args:
         agent_factory: Builds the process's agent. Defaults to `build_agent` (the config-selected
             provider); tests pass a factory returning a fake streaming agent so the whole HTTP
             surface is exercised without a live model.
+        owner_store: The durable session-ownership registry used to reattach a client to its session
+            after a pod restart. Defaults to the config-gated store (present only under
+            `session_store="postgres"`); tests inject an in-memory fake to exercise rehydration
+            without a database.
 
     Returns:
         A configured `FastAPI` application.
@@ -124,20 +163,49 @@ def create_app(agent_factory: Callable[[], Any] = build_agent) -> FastAPI:
     # posted to / streamed by its creator (defense-in-depth beyond the unguessable uuid4 id). The
     # bound keeps the map from growing for the pod's lifetime (COR-3).
     app.state.live_sessions = _LiveSessions(settings.service_max_live_sessions)
+    # Durable session-ownership registry (F3): the record a restarted front door rehydrates from so
+    # a returning client reattaches to its session instead of being forced onto a new one. None with
+    # the in-memory session store (nothing durable to reattach to — a cache miss stays a 404).
+    app.state.session_owners = owner_store if owner_store is not None else _default_owner_store()
     # Admission control on concurrent turns (AG-15): a bounded permit set caps how many turns hit
     # the shared LLM endpoint at once. A permit is held for a turn's whole streamed run; a turn that
     # cannot get one within the admission timeout is shed with 503. Built here so it binds to the
     # app's event loop on first await.
     app.state.turn_semaphore = asyncio.Semaphore(settings.service_max_concurrent_turns)
+    # Runaway-cost guard (service.budget): meters each turn's token usage and counts turns per
+    # session and per user, refusing a turn (429) that would exceed a configured cap. In-process and
+    # off unless `budget_enabled`; the missing ceiling above the per-turn loop cap.
+    app.state.budget = BudgetTracker()
 
-    def _owned_session(session_id: str, principal: Principal) -> Any:
-        """Return the session iff it exists and the caller owns it, else 404 (no existence leak)."""
+    async def _resolve_session(session_id: str, principal: Principal) -> Any:
+        """Return the caller's session — from the live cache, or rehydrated from durable ownership.
+
+        A live-cache hit is authorized against its stored owner. On a miss, if durable rehydration
+        is on (`session_store="postgres"`), the durable owner is looked up: a session the caller
+        owns is rebuilt as a live handle over its persisted history, so a pod restart no longer
+        forces the client onto a new session (orphaning its history and unconsumed push-back). An
+        unknown session — or one owned by someone else — is a 404 with no existence leak either way.
+        """
         entry = app.state.live_sessions.get(session_id)
-        if entry is None:
+        if entry is not None:
+            session, owner = entry
+            if owner is not None and owner != principal.oid:
+                raise HTTPException(status_code=404, detail="unknown session")
+            return session
+        return await _rehydrate_session(session_id, principal)
+
+    async def _rehydrate_session(session_id: str, principal: Principal) -> Any:
+        """Rebuild a live session from its durable owner record, or 404 if it cannot reattach."""
+        owners: SessionOwners | None = app.state.session_owners
+        if owners is None:
             raise HTTPException(status_code=404, detail="unknown session")
-        session, owner = entry
-        if owner is not None and owner != principal.oid:
+        found, owner = await owners.lookup(session_id)
+        if not found or (owner is not None and owner != principal.oid):
             raise HTTPException(status_code=404, detail="unknown session")
+        # The durable history provider reloads the thread on the session's first use, so rebuilding
+        # the handle is enough to resume the conversation; register it so later turns hit the cache.
+        session = _agent().create_session(session_id=session_id)
+        app.state.live_sessions.add(session_id, session, owner)
         return session
 
     def _agent() -> Any:
@@ -162,6 +230,10 @@ def create_app(agent_factory: Callable[[], Any] = build_agent) -> FastAPI:
     ) -> SessionOut:
         """Start a new conversation session and return its id (requires an authenticated user)."""
         session_id = uuid.uuid4().hex
+        # Persist ownership first (durable path only), so the session reattaches after a restart
+        # even if the pod dies before the first turn writes any history.
+        if app.state.session_owners is not None:
+            await app.state.session_owners.record(session_id, principal.oid)
         app.state.live_sessions.add(
             session_id, _agent().create_session(session_id=session_id), principal.oid
         )
@@ -179,7 +251,13 @@ def create_app(agent_factory: Callable[[], Any] = build_agent) -> FastAPI:
         whole streamed run, and is shed with 503 if none frees within the admission timeout — so a
         burst of concurrent turns cannot pile onto the shared internal LLM endpoint.
         """
-        session = _owned_session(session_id, principal)
+        session = await _resolve_session(session_id, principal)
+        # Runaway-cost guard (budget #3): refuse before taking a permit if this session/user has
+        # already exhausted its turn or token budget — a clean 429, not a started-then-killed turn.
+        try:
+            app.state.budget.check(session_id, principal.oid)
+        except BudgetExceeded as exc:
+            raise HTTPException(status_code=429, detail=str(exc)) from exc
         semaphore = app.state.turn_semaphore
         try:
             await asyncio.wait_for(
@@ -195,7 +273,12 @@ def create_app(agent_factory: Callable[[], Any] = build_agent) -> FastAPI:
             # disconnect (the generator is closed, running this finally) — so it is never leaked.
             try:
                 async for event in run_turn(
-                    _agent(), session, body.message, actor=principal.oid, roles=principal.roles
+                    _agent(),
+                    session,
+                    body.message,
+                    actor=principal.oid,
+                    roles=principal.roles,
+                    budget=app.state.budget,
                 ):
                     yield {"event": event.type, "data": event.model_dump_json()}
             finally:
@@ -209,7 +292,7 @@ def create_app(agent_factory: Callable[[], Any] = build_agent) -> FastAPI:
         principal: Principal = Depends(require_principal),
     ) -> EventSourceResponse:
         """Stream async job push-back for the session (F3-T3): a finished job wakes the chat."""
-        _owned_session(session_id, principal)
+        await _resolve_session(session_id, principal)
 
         async def _events() -> AsyncIterator[dict[str, str]]:
             async for pushed in stream_new_events(session_id):

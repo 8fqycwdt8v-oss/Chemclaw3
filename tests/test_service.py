@@ -285,6 +285,124 @@ def test_pushback_for_unknown_session_is_404() -> None:
         assert client.get("/sessions/nope/events").status_code == 404
 
 
+class _FakeOwnerStore:
+    """In-memory stand-in for the durable session-ownership registry (no database)."""
+
+    def __init__(self) -> None:
+        self.owners: dict[str, str | None] = {}
+
+    async def record(self, session_id: str, owner: str | None) -> None:
+        self.owners.setdefault(session_id, owner)
+
+    async def lookup(self, session_id: str) -> tuple[bool, str | None]:
+        if session_id in self.owners:
+            return (True, self.owners[session_id])
+        return (False, None)
+
+
+def test_session_rehydrates_after_a_restart() -> None:
+    """A returning client reattaches to its session after the live cache is wiped (F3).
+
+    Simulates the pod restart the front door previously could not survive: ownership persists, so a
+    cache miss looks the owner up and rebuilds the live handle instead of forcing a new session.
+    """
+    from chemclaw.config import settings
+    from service.auth import Principal, require_principal
+
+    owners = _FakeOwnerStore()
+    app = create_app(agent_factory=lambda: _FakeAgent(), owner_store=owners)
+    app.dependency_overrides[require_principal] = lambda: Principal(
+        oid="alice", upn="alice@corp", roles=frozenset()
+    )
+    client = TestClient(app)
+
+    session_id = client.post("/sessions").json()["session_id"]
+    assert session_id in owners.owners  # ownership persisted at creation
+
+    # Restart: the in-process live-session cache is gone; the durable owner record survives.
+    app.state.live_sessions = _LiveSessions(settings.service_max_live_sessions)
+    assert app.state.live_sessions.get(session_id) is None
+
+    res = client.post(f"/sessions/{session_id}/messages", json={"message": "hi"})
+    assert res.status_code == 200  # reattached, not a 404
+    assert app.state.live_sessions.get(session_id) is not None  # re-registered in the cache
+
+
+def test_rehydration_is_owner_scoped() -> None:
+    """After a restart, a different user still cannot reattach to someone else's session (F3)."""
+    from chemclaw.config import settings
+    from service.auth import Principal, require_principal
+
+    owners = _FakeOwnerStore()
+    app = create_app(agent_factory=lambda: _FakeAgent(), owner_store=owners)
+    client = TestClient(app)
+
+    app.dependency_overrides[require_principal] = lambda: Principal(
+        oid="alice", upn="a@corp", roles=frozenset()
+    )
+    session_id = client.post("/sessions").json()["session_id"]
+    app.state.live_sessions = _LiveSessions(settings.service_max_live_sessions)  # restart
+
+    app.dependency_overrides[require_principal] = lambda: Principal(
+        oid="bob", upn="b@corp", roles=frozenset()
+    )
+    res = client.post(f"/sessions/{session_id}/messages", json={"message": "x"})
+    assert res.status_code == 404  # not the owner → no reattach, no existence leak
+
+
+def test_no_rehydration_without_durable_store() -> None:
+    """With no durable owner store (the in-memory session store), a cache miss stays a 404.
+
+    The default path is unchanged: rehydration is gated on `session_store="postgres"`.
+    """
+    from chemclaw.config import settings
+
+    app = create_app(agent_factory=lambda: _FakeAgent())  # owner_store None under the memory store
+    assert app.state.session_owners is None
+    with TestClient(app) as client:
+        session_id = client.post("/sessions").json()["session_id"]
+        app.state.live_sessions = _LiveSessions(settings.service_max_live_sessions)  # restart
+        res = client.post(f"/sessions/{session_id}/messages", json={"message": "x"})
+        assert res.status_code == 404
+
+
+def test_turn_is_refused_over_budget(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    """Once a session's turn budget is spent, the next turn is refused with 429 (budget #3)."""
+    from chemclaw.config import settings
+
+    monkeypatch.setattr(settings, "budget_enabled", True)
+    monkeypatch.setattr(settings, "budget_max_turns_per_session", 1)
+    with _client(_FakeAgent()) as client:
+        session_id = client.post("/sessions").json()["session_id"]
+        # First turn runs to completion (draining the stream books it against the budget).
+        with client.stream(
+            "POST", f"/sessions/{session_id}/messages", json={"message": "hi"}
+        ) as res:
+            assert res.status_code == 200
+            for _line in res.iter_lines():
+                pass
+        # Second turn exceeds the one-turn cap → refused before any streaming starts.
+        res = client.post(f"/sessions/{session_id}/messages", json={"message": "again"})
+        assert res.status_code == 429
+
+
+def test_budget_disabled_allows_many_turns(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    """With budgets off (the default), turn count is never capped (unchanged behavior)."""
+    from chemclaw.config import settings
+
+    monkeypatch.setattr(settings, "budget_enabled", False)
+    monkeypatch.setattr(settings, "budget_max_turns_per_session", 1)
+    with _client(_FakeAgent()) as client:
+        session_id = client.post("/sessions").json()["session_id"]
+        for _ in range(3):
+            with client.stream(
+                "POST", f"/sessions/{session_id}/messages", json={"message": "hi"}
+            ) as res:
+                assert res.status_code == 200
+                for _line in res.iter_lines():
+                    pass
+
+
 def test_live_sessions_evicts_least_recently_used() -> None:
     """The bounded registry drops the LRU entry past capacity, keeping recent ones (COR-3)."""
     reg = _LiveSessions(capacity=2)

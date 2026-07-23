@@ -144,6 +144,63 @@ def test_substructure_bad_query_raises() -> None:
     asyncio.run(_run())
 
 
+def test_agent_supplied_top_k_is_clamped(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A large model-supplied `top_k` is clamped to `fingerprint_max_top_k` (SEC-4).
+
+    The similarity tools take `top_k` from the model and it lands in a SQL `LIMIT`; clamp it
+    so an arbitrarily large value cannot become an unbounded query — mirrors `graph_max_hops`.
+    """
+    monkeypatch.setattr(settings, "fingerprint_max_top_k", 2)
+
+    async def _run() -> None:
+        store = InMemoryFingerprintStore()
+        for cid, smiles in [
+            ("ethanol", "CCO"),
+            ("propanol", "CCCO"),
+            ("butanol", "CCCCO"),
+            ("pentanol", "CCCCCO"),
+        ]:
+            await store.add(record_for(cid, smiles))
+
+        # Four records clear the threshold, but the clamp caps the returned neighbors at 2.
+        hits = await find_similar_molecules(store, "CCO", top_k=1_000_000, threshold=0.1)
+        assert len(hits) == 2
+
+    asyncio.run(_run())
+
+
+def test_all_records_limit_is_bounded_and_deterministic() -> None:
+    """`all_records(limit=n)` returns the first n records in id order (bounded scan)."""
+
+    async def _run() -> None:
+        store = InMemoryFingerprintStore()
+        for cid in ["c", "a", "b"]:
+            await store.add(record_for(cid, "CCO"))
+        assert [r.id for r in await store.all_records(limit=2)] == ["a", "b"]
+        assert len(await store.all_records()) == 3  # unbounded still returns all
+
+    asyncio.run(_run())
+
+
+def test_substructure_scan_caps_and_warns(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The substructure scan is bounded by config and warns (not silently) when it truncates."""
+    monkeypatch.setattr(settings, "substructure_scan_max_records", 1)
+
+    async def _run() -> None:
+        store = InMemoryFingerprintStore()
+        for cid in ["aspirin", "benzene", "toluene"]:
+            await store.add(record_for(cid, "c1ccccc1" if cid != "aspirin" else "Cc1ccccc1"))
+        with caplog.at_level("WARNING"):
+            hits = await find_substructure_matches(store, "c1ccccc1")
+        # Only the one capped record is scanned, so at most one match is returned.
+        assert len(hits) <= 1
+        assert any("substructure scan hit" in r.message for r in caplog.records)
+
+    asyncio.run(_run())
+
+
 def test_postgres_store_applies_the_configured_statement_timeout(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

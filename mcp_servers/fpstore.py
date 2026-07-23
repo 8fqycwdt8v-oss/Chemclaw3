@@ -72,8 +72,12 @@ class FingerprintStore(Protocol):
         """Insert or replace a fingerprint by id."""
         ...
 
-    async def all_records(self) -> list[FingerprintRecord]:
-        """Return every stored record (used for substructure scans)."""
+    async def all_records(self, limit: int | None = None) -> list[FingerprintRecord]:
+        """Return stored records (used for substructure scans); at most `limit` when set.
+
+        When `limit` is set the rows are the first `limit` in deterministic id order, so a
+        bounded scan is reproducible across backends.
+        """
         ...
 
     async def find_similar(self, query_bits: str, top_k: int, threshold: float) -> list[Match]:
@@ -104,9 +108,17 @@ class InMemoryFingerprintStore:
         """Insert or replace a fingerprint by id."""
         self._records[record.id] = record
 
-    async def all_records(self) -> list[FingerprintRecord]:
-        """Return every stored record."""
-        return list(self._records.values())
+    async def all_records(self, limit: int | None = None) -> list[FingerprintRecord]:
+        """Return stored records; at most `limit` (first in id order) when set.
+
+        Unbounded (`limit=None`) keeps insertion order for byte-identical legacy behavior; a
+        bounded scan sorts by id first so the truncated slice matches the Postgres backend's
+        `ORDER BY id LIMIT`.
+        """
+        records = list(self._records.values())
+        if limit is None:
+            return records
+        return sorted(records, key=lambda r: r.id)[:limit]
 
     async def find_similar(self, query_bits: str, top_k: int, threshold: float) -> list[Match]:
         """Rank stored records by Tanimoto to `query_bits`, filtered and truncated.
@@ -204,16 +216,22 @@ class PostgresFingerprintStore:
             )
             await conn.commit()
 
-    async def all_records(self) -> list[FingerprintRecord]:
-        """Return every stored record (bits as a text bitstring), regardless of definition.
+    async def all_records(self, limit: int | None = None) -> list[FingerprintRecord]:
+        """Return stored records (bits as text), regardless of definition; capped at `limit`.
 
-        Unfiltered on purpose: the only consumer is substructure search, which re-matches
-        the stored SMILES label with RDKit and never touches the bits, so a stale-definition
-        row is still a correct substructure hit.
+        Unfiltered by definition on purpose: the only consumer is substructure search, which
+        re-matches the stored SMILES label with RDKit and never touches the bits, so a
+        stale-definition row is still a correct substructure hit. When `limit` is set the scan
+        is `ORDER BY id LIMIT` — a bounded, deterministic slice so a huge corpus is never
+        materialized whole into the worker heap (the caller warns when the cap truncates).
         """
+        if limit is None:
+            sql, params = self._all, None
+        else:
+            sql, params = f"{self._all} ORDER BY id LIMIT %(limit)s", {"limit": limit}
         async with await self._connect() as conn:
             async with conn.cursor() as cur:
-                await cur.execute(self._all)
+                await cur.execute(sql, params)
                 rows = await cur.fetchall()
         return [FingerprintRecord(id=r[0], label=r[1], bits=r[2], definition=r[3]) for r in rows]
 
@@ -241,11 +259,16 @@ async def find_matches(
     """Search a store with the configured `top_k`/`threshold` defaults applied.
 
     The one place the generic search knobs fall back to config, so the molecule
-    and reaction entry points cannot drift in how they default (DRY).
+    and reaction entry points cannot drift in how they default (DRY). `top_k` may arrive
+    from the model (agents.search_tools) and lands in a SQL `LIMIT`, so it is clamped to
+    `[1, fingerprint_max_top_k]` here — the fingerprint-search analog of the `graph_max_hops`
+    clamp on `expand_note`, applied at the single chokepoint both entry points share.
     """
+    k = top_k if top_k is not None else settings.fingerprint_top_k
+    k = min(max(k, 1), settings.fingerprint_max_top_k)
     return await store.find_similar(
         query_bits,
-        top_k if top_k is not None else settings.fingerprint_top_k,
+        k,
         threshold if threshold is not None else settings.fingerprint_similarity_threshold,
     )
 

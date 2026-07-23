@@ -113,5 +113,16 @@ staying blocked. **One remains deferred**, and it is genuinely infra-gated:
 
 Two narrower sub-gaps also remain, each with its own existing deferral: the **O(n²) playbook
 clustering** half of KM-14 (see the row in the main table above — sub-quadratic clustering at ~10⁴
-reactions) and **per-user** turn fairness within AG-15 (the global cap is in; per-user quotas wait on
-a real multi-tenant need). Neither is a latent bug.
+reactions) and the **durable** half of per-user turn/token budgeting (see below — the in-process
+guard is now in via D-066; a rolling-window quota surviving restart/multi-pod waits on a real
+multi-tenant need). Neither is a latent bug.
+
+## Resilience-hardening deferrals (2026-07-23, D-066)
+
+Three residual failure-mode gaps were closed on the feature branch (DB-query clamps, front-door
+session reattach, in-process turn/token budgets). Two narrower pieces were consciously left out:
+
+| Item | Why not now | Trigger to revisit |
+|---|---|---|
+| **Durable / rolling-window budget quota** | `service.budget.BudgetTracker` bounds a *running process's* runaway (the "$400 in twenty minutes" failure), which is what the per-turn loop cap left open. A quota that survives a restart or is shared across pods needs a durable store (Postgres) and a time-window policy (per-day/per-month reset) — a bigger piece whose value is real only under multi-tenant billing/fairness pressure, not the single-process runaway this guards. | A real multi-tenant deployment needs per-user spend fairness *across* restarts/pods — then back the counters with a Postgres table + a windowed reset, reusing the same `check`/`record` seam |
+| **Substructure pattern-fingerprint prefilter** | `find_substructure_matches` now bounds its scan to `substructure_scan_max_records` (5000) and warns on truncation, so the full-table-load footgun is closed. Screening candidates with a pattern fingerprint before the RDKit match (to raise the effective ceiling without loading every row) is a genuine optimization, but ECFP bits cannot screen substructures soundly — it needs a dedicated pattern-fingerprint column + index. | The molecule corpus grows past the scan cap in real use (the truncation warning fires) — then add a pattern-fingerprint prefilter column so substructure search scales past ~10⁴ molecules |

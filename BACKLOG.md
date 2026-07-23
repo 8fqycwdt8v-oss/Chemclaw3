@@ -3,6 +3,28 @@
 Prioritized open action items. Top = next. Keep in sync with `docs/implementation-plan.md`
 (phase/step numbers) at session end.
 
+## Done — Resilience hardening (D-066, four-failure-mode review)
+
+Reviewed Chemclaw against four failure modes from another agent system (no memory on restart, no
+idempotency, no budget, unbounded DB queries). Idempotency (D-011 cache + workflow-id dedup) and
+durable job execution (Temporal) already covered; three residual gaps closed, each config-gated:
+
+- [x] **DB clamps (#4).** `find_matches` clamps model-supplied `top_k` to `[1, fingerprint_max_top_k]`
+      (mirrors the `graph_max_hops` clamp); `all_records(limit)` + `substructure_scan_max_records`
+      bound the substructure scan with a truncation **warning** (no silent cap). `mcp_servers/fpstore.py`,
+      `mcp_servers/molfp/search.py`, `chemclaw/config.py`. Tests: `test_molfp.py`.
+- [x] **Session reattach (#1).** `session_owners` table (migration `013`) + `SessionOwnerStore`
+      persist one owner row per session; the front door rehydrates a live handle over durable history
+      on a cache miss (owner-scoped, gated on `session_store="postgres"`). `agents/session_store.py`,
+      `service/app.py`. Tests: `test_service.py` (reattach + owner-scope), `test_session_store.py` (PG).
+- [x] **Turn/token budgets (#3).** `service/budget.py::BudgetTracker` meters token usage + counts
+      turns per session/user; front door refuses over-budget turns with 429 (`budget_*` config, off by
+      default). `service/runner.py` (`_usage_tokens` + `record`). Tests: `test_budget.py`, `test_service.py`.
+- [ ] **Deferred (DEFERRED.md):** durable/rolling-window budget quota (survives restart/multi-pod);
+      substructure pattern-fingerprint prefilter (sound screening past ~10⁴ molecules). The deeper
+      *mid-flight same-turn* resume stays open (see the harness follow-ups below) — distinct from the
+      front-door restart-reattach closed here.
+
 ## Next — Platform-parity hardening (docs/parity-plan.md, Phase F10)
 
 Closes the platform-capability deltas found against a commercial pharma-agent platform. Full

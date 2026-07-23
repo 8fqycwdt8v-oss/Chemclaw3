@@ -27,6 +27,12 @@ from chemclaw.config import settings
 _INSERT = "INSERT INTO session_messages (session_id, message) VALUES (%s, %s)"
 _SELECT = "SELECT message FROM session_messages WHERE session_id = %s ORDER BY id"
 
+_OWNER_INSERT = (
+    "INSERT INTO session_owners (session_id, owner) VALUES (%s, %s) "
+    "ON CONFLICT (session_id) DO NOTHING"
+)
+_OWNER_SELECT = "SELECT owner FROM session_owners WHERE session_id = %s"
+
 
 class PostgresHistoryProvider(HistoryProvider):
     """A `HistoryProvider` that persists a session's messages to Postgres (durable, resumable)."""
@@ -79,3 +85,48 @@ class PostgresHistoryProvider(HistoryProvider):
             async with conn.cursor() as cur:
                 await cur.executemany(_INSERT, rows)
             await conn.commit()
+
+
+class SessionOwnerStore:
+    """Durable session-ownership registry, so a restarted front door can reattach a client (F3).
+
+    The front door holds live `AgentSession` handles in an in-process LRU that a pod restart wipes;
+    without a durable record of *who owns which session id*, a returning client's id is unknown
+    after a restart and it is forced onto a brand-new session — orphaning its durable history
+    (`session_messages`) and any unconsumed job push-back (`session_events`). This is that record:
+    `create_session` writes `(session_id, owner)` once, and on a cache miss the front door looks
+    the owner up to authorize a reattach before rebuilding the live handle over its durable history.
+
+    One identity row per session, deliberately separate from the append-only message history — it
+    carries the single security-relevant fact (the owner) the in-memory LRU lost. The DSN resolves
+    exactly as the history provider's, so both durable-session tables live in one database (D-002).
+    """
+
+    def __init__(self, *, dsn: str | None = None) -> None:
+        """Bind to the session-store database (falling back to the shared `postgres_dsn`)."""
+        self._dsn = dsn or settings.session_store_dsn or settings.postgres_dsn
+
+    async def _connect(self) -> psycopg.AsyncConnection[Any]:
+        """Open a fast-failing connection with the configured per-statement timeout."""
+        return await db.connect(
+            self._dsn, statement_timeout_seconds=settings.pg_statement_timeout_seconds
+        )
+
+    async def record(self, session_id: str, owner: str | None) -> None:
+        """Record a session's owner at creation (idempotent — the first writer wins)."""
+        async with await self._connect() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(_OWNER_INSERT, (session_id, owner))
+            await conn.commit()
+
+    async def lookup(self, session_id: str) -> tuple[bool, str | None]:
+        """Return `(found, owner)` for a session id — `(False, None)` when there is no such session.
+
+        The `found` flag distinguishes an unknown session from a known one owned by the shared
+        principal (a real `NULL` owner), which a bare `str | None` return could not.
+        """
+        async with await self._connect() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(_OWNER_SELECT, (session_id,))
+                row = await cur.fetchone()
+        return (row is not None, row[0] if row is not None else None)
