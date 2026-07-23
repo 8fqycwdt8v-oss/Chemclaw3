@@ -39,3 +39,25 @@ def test_name_directory_mismatch_is_reported(tmp_path: Path) -> None:
 def test_empty_skills_dir_is_reported(tmp_path: Path) -> None:
     """A skills dir with no SKILL.md is a problem (misconfiguration, not silent success)."""
     assert validate_skills([str(tmp_path)]) != []
+
+
+def test_skill_dir_without_skill_md_is_reported(tmp_path: Path) -> None:
+    """A skill directory whose SKILL.md is missing or misnamed is flagged, not glob-invisible."""
+    good = tmp_path / "good-skill" / "SKILL.md"
+    good.parent.mkdir(parents=True)
+    good.write_text("---\nname: good-skill\ndescription: works\n---\nBody.\n", encoding="utf-8")
+    hidden = tmp_path / "renamed-skill" / "skill.md"  # lowercase: invisible to discovery
+    hidden.parent.mkdir(parents=True)
+    hidden.write_text("---\nname: renamed-skill\ndescription: lost\n---\nBody.\n", encoding="utf-8")
+    problems = validate_skills([str(tmp_path)])
+    assert any("renamed-skill" in p and "missing SKILL.md" in p for p in problems)
+    assert not any("good-skill" in p for p in problems)
+
+
+def test_nonexistent_configured_dir_is_reported(tmp_path: Path) -> None:
+    """A typo'd skills dir is flagged even when another configured dir has valid skills."""
+    good = tmp_path / "real" / "good-skill" / "SKILL.md"
+    good.parent.mkdir(parents=True)
+    good.write_text("---\nname: good-skill\ndescription: works\n---\nBody.\n", encoding="utf-8")
+    problems = validate_skills([str(tmp_path / "real"), str(tmp_path / "typo")])
+    assert any("typo" in p and "does not exist" in p for p in problems)

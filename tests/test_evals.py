@@ -7,6 +7,7 @@ tooling does *not* help (the selective-steering evidence, F8/F9).
 """
 
 import math
+import re
 import sys
 from pathlib import Path
 
@@ -18,6 +19,8 @@ from chemclaw.errors import ChemclawError
 from evals.ab import TaskScores, compare_tool_utility
 from evals.harness import (
     EvalCaseError,
+    EvalReport,
+    ScoredResult,
     load_eval_cases,
     main,
     render_report,
@@ -117,6 +120,30 @@ def test_report_is_citable() -> None:
     assert "Delaney" not in text  # provenance is the metric's, not the note body
     assert "tolerance" in text  # prediction_error provenance cites its threshold
     assert "**FAIL**" in text  # the failing gated case is visible
+
+
+def test_report_cells_escape_pipes() -> None:
+    """A provenance containing '|' (set-cardinality notation) cannot split its table row.
+
+    precision/recall/prediction_error legitimately write pipes into provenance; without
+    escaping, a Markdown renderer shifts their values under the wrong headers (G5).
+    """
+    report = EvalReport(
+        case_set_version="v1",
+        results=[
+            ScoredResult(
+                case_id="c",
+                result_metric="precision",
+                value=0.5,
+                unit=None,
+                passed=None,
+                provenance="precision = |predicted ∩ expected| 1 / |predicted| 2",
+            )
+        ],
+    )
+    row = next(line for line in render_report(report).splitlines() if line.startswith("| c |"))
+    assert len(re.findall(r"(?<!\\)\|", row)) == 7  # 6 columns = exactly 7 raw delimiters
+    assert "\\|predicted ∩ expected\\|" in row  # the notation survives, escaped
 
 
 def test_load_rejects_malformed_case(tmp_path: Path) -> None:
@@ -255,6 +282,12 @@ def test_tool_utility_respects_direction() -> None:
     summary = compare_tool_utility(tasks, higher_is_better=False)
     assert summary.helped == ["t"]
     assert summary.utilities[0].delta == pytest.approx(3.0)
+
+
+def test_tool_utility_rejects_empty_task_list() -> None:
+    """tasks=[] raises instead of returning a vacuous 'no effect anywhere' summary (G4)."""
+    with pytest.raises(ValueError, match="empty task list"):
+        compare_tool_utility([], higher_is_better=True)
 
 
 def test_sub_epsilon_delta_is_no_effect(monkeypatch: pytest.MonkeyPatch) -> None:

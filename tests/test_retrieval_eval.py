@@ -8,13 +8,17 @@ live in `evals/cases/retrieval-*.md`; this file loads those exact cases and scor
 """
 
 from pathlib import Path
+from typing import Any
 
 import pytest
 
 import evals  # noqa: F401 — registers the retrieval metrics on import
+import evals.retrieval
 from chemclaw.config import settings
 from evals.harness import load_eval_cases, run_eval
 from evals.metric import get_metric, registered_names
+from report.evidence import EvidenceChunk
+from report.retrievers import GraphRetriever
 
 _REPO = Path(__file__).resolve().parent.parent
 _CORPUS = _REPO / "evals" / "retrieval_corpus"
@@ -58,6 +62,29 @@ def test_gold_case_recall_precision(case_id: str, _corpus: None) -> None:
     assert recall.passed is exp_pass
     assert precision.value == pytest.approx(exp_precision), precision.provenance
     assert precision.passed is None  # precision is a diagnostic, never gated
+
+
+def test_both_metrics_share_one_retrieval(monkeypatch: pytest.MonkeyPatch, _corpus: None) -> None:
+    """Recall + precision on one case run live retrieval once (memoized), not once each."""
+    calls: list[str] = []
+    real_retrieve = GraphRetriever.retrieve
+
+    async def counting(
+        self: GraphRetriever, query: str, filters: dict[str, Any]
+    ) -> list[EvidenceChunk]:
+        calls.append(query)
+        return await real_retrieve(self, query, filters)
+
+    monkeypatch.setattr(GraphRetriever, "retrieve", counting)
+    evals.retrieval._RETRIEVAL_MEMO.clear()
+    case = {c.id: c for c in load_eval_cases(settings.eval_case_dir)}["retrieval-suzuki"]
+
+    recall = get_metric("retrieval_recall")(case)
+    precision = get_metric("retrieval_precision")(case)
+
+    assert calls == [case.output["query"]]  # one sweep, both metrics scored from it
+    assert recall.value == pytest.approx(1.0)
+    assert precision.value == pytest.approx(1.0)
 
 
 def test_run_eval_scores_the_full_gold_set(_corpus: None) -> None:

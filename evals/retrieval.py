@@ -32,12 +32,21 @@ def _expected_ids(case: EvalCase) -> set[str]:
     return set(raw)
 
 
+# Memo of retrieved ids keyed by (corpus dir, query, filters). Recall and precision are
+# both pure functions of the same retrieved-id list, and every gold case names both, so
+# without the memo each case sweeps the corpus twice per eval run for no informational
+# gain. Bounded by the gold case-set size; keyed on the corpus dir so a repointed corpus
+# (e.g. the test fixture) is never served stale ids.
+_RETRIEVAL_MEMO: dict[tuple[str, str, frozenset[tuple[str, str]]], list[str]] = {}
+
+
 def _retrieved_ids(case: EvalCase) -> list[str]:
     """Run `GraphRetriever` over the gold corpus for the case query; return the note ids.
 
     Reads `output.query` (required) and optional `output.filters` (type/tag), scoring the same
     retrieval path a report uses. Order is preserved and duplicates collapsed, though at present
-    each note yields at most one chunk.
+    each note yields at most one chunk. The result is memoized per (corpus, query, filters), so
+    a case scored by both retrieval metrics runs live retrieval once, not once per metric.
     """
     query = case.output.get("query")
     if not isinstance(query, str) or not query.strip():
@@ -45,9 +54,15 @@ def _retrieved_ids(case: EvalCase) -> list[str]:
     filters = case.output.get("filters") or {}
     if not isinstance(filters, dict):
         raise MetricError("output.filters must be a mapping if given")
-    retriever = GraphRetriever(settings.eval_retrieval_corpus_dir)
-    chunks = asyncio.run(retriever.retrieve(query, filters))
-    return list(dict.fromkeys(chunk.source_note_id for chunk in chunks))
+    corpus_dir = settings.eval_retrieval_corpus_dir
+    key = (corpus_dir, query, frozenset((str(k), str(v)) for k, v in filters.items()))
+    ids = _RETRIEVAL_MEMO.get(key)
+    if ids is None:
+        retriever = GraphRetriever(corpus_dir)
+        chunks = asyncio.run(retriever.retrieve(query, filters))
+        ids = list(dict.fromkeys(chunk.source_note_id for chunk in chunks))
+        _RETRIEVAL_MEMO[key] = ids
+    return list(ids)
 
 
 @metric("retrieval_recall")

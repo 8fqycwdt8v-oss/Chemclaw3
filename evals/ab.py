@@ -50,8 +50,12 @@ def compare_tool_utility(tasks: list[TaskScores], higher_is_better: bool) -> ABS
     `delta` is oriented so positive always means "tools improved the metric": for a
     higher-is-better metric it is `augmented - baseline`, otherwise the reverse. A
     delta within +/- `eval_ab_epsilon` (a per-metric noise floor) counts as no effect,
-    so tools are credited or blamed only above measurement noise.
+    so tools are credited or blamed only above measurement noise. An empty task list
+    is rejected: it would yield a benign-looking "no effect anywhere" summary, the
+    same vacuous pass `load_eval_cases` refuses for an empty case-set (G4).
     """
+    if not tasks:
+        raise ValueError("empty task list — an A/B comparison over nothing proves nothing")
     epsilon = settings.eval_ab_epsilon
     utilities: list[ToolUtility] = []
     helped: list[str] = []
