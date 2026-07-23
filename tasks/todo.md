@@ -48,13 +48,13 @@ S1 exploitable/corruption · S2 wrong result/latent bug · S3 hardening gap · S
 
 ## Wave 1 — Kernel review (`chemclaw/`, before dependents)
 
-- [ ] Reviewer A: `config.py` — validator correctness, default posture, dead settings,
+- [x] Reviewer A: `config.py` — validator correctness, default posture, dead settings,
       cohesion (input to Wave-5 split).
-- [ ] Reviewer B: `db.py`, `http.py`, `temporal_client.py` — lifecycle, timeouts,
+- [x] Reviewer B: `db.py`, `http.py`, `temporal_client.py` — lifecycle, timeouts,
       error paths.
-- [ ] Reviewer C: `errors.py`, `ids.py`, `chem.py`, `logging.py` — contracts the ~60
+- [x] Reviewer C: `errors.py`, `ids.py`, `chem.py`, `logging.py` — contracts the ~60
       importers rely on.
-- [ ] Adversarially verify all kernel findings.
+- [x] Adversarially verify all kernel findings.
 
 ## Wave 2 — Domain review fan-out (parallel; find → skeptic-verify per unit)
 
@@ -62,17 +62,22 @@ Each unit = one reviewer with four lenses (correctness; hardening/failure-modes;
 simplification/dead-code; extensibility/config gaps); each finding independently
 refuted-or-confirmed by a skeptic agent before it counts.
 
-- [ ] U1 `calc/` — numeric edge cases, cache-once invariant (D-011)
-- [ ] U2 `kg/` — pr_gate, git_submitter arg/path safety, cross-process lock
-- [ ] U3 `mcp_servers/` — validation of LLM-controlled args, fpstore SQL
-- [ ] U4 `bo/` + calc interface — objective/constraint correctness
-- [ ] U5 `memory/` + `eln/` + kg interface — ingest validation, cursor/idempotency
-- [ ] U6 `agents/` + `report/` (embedding cycle) — authz gates, audit chain, retrievers
-- [ ] U7 `service/` + agents boundary — every route through `_resolve_session`,
+- [x] U1 `calc/` — numeric edge cases, cache-once invariant (D-011)
+- [x] U2 `kg/` — pr_gate, git_submitter arg/path safety, cross-process lock
+- [x] U3 `mcp_servers/` — validation of LLM-controlled args, fpstore SQL
+- [x] U4 `bo/` + calc interface — objective/constraint correctness
+- [x] U5 `memory/` + `eln/` + kg interface — ingest validation, cursor/idempotency
+- [x] U6 `agents/` + `report/` (embedding cycle) — authz gates, audit chain, retrievers
+- [x] U7 `service/` + agents boundary — every route through `_resolve_session`,
       SSE lifecycle, budget
-- [ ] U8 `workflows/` + `workers/` — determinism, retry/idempotency, heartbeats
-- [ ] U9 `evals/`, `sources/`, `scripts/` — light pass (thin-test areas)
-- [ ] Dedicated security reviewer re-walks risk-map targets 1–5.
+- [x] U8 `workflows/` + `workers/` — determinism, retry/idempotency, heartbeats
+- [x] U9 `evals/`, `sources/`, `scripts/` — light pass (thin-test areas)
+- [x] Dedicated security reviewer re-walks risk-map targets 1–5.
+      **Review outcome (2026-07-23)**: 73 raw findings → 23 refuted by skeptics →
+      **50 confirmed** (13 S2, 30 S3, 7 S4) + 11 S3/S4 whose verifiers hit the usage
+      limit (fix agents re-verify those before acting). No S1. Determinism re-walk of
+      workflow datetime usage produced no finding. Findings archive:
+      scratchpad/confirmed_findings.json + unverified_findings.json.
 
 ## Wave 3 — Bug fixes (S1/S2)
 
