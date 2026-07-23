@@ -14,13 +14,30 @@ from typing import Literal
 
 import frontmatter
 import yaml
-from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
 
 from chemclaw.errors import ChemclawError
 
 # [[target]] wikilinks in the body. Targets are note ids; `[[ ... ]]` only. Public because
 # the report layer strips the same markup from evidence excerpts — one pattern, no drift.
 WIKILINK = re.compile(r"\[\[([^\[\]]+)\]\]")
+
+
+def cited_ids(text: str) -> list[str]:
+    """Extract the note ids a body of text cites via `[[wikilinks]]`, stripped and deduped.
+
+    The one extraction every citation reader shares (`Note.outgoing_links`, the answer verifier):
+    each target is stripped (a padded `[[ id ]]` resolves to `id`, matching the slug schema) and
+    empties are dropped, preserving first-seen order so a repeated citation yields one id. Kept here
+    beside `WIKILINK` so the pattern and its normalization have exactly one home and cannot drift.
+    """
+    ordered: dict[str, None] = {}
+    for match in WIKILINK.findall(text):
+        target = match.strip()
+        if target:
+            ordered.setdefault(target, None)
+    return list(ordered)
+
 
 # `id` and `type` become file-path segments (`knowledge/<type>/<id>.md`) and a git
 # branch (`note/<id>`) in the PR-gate, and ELN entry ids flow in from external JSON.
@@ -80,18 +97,30 @@ class Note(BaseModel):
     valid_to: date | None = None
     body: str = ""
 
+    @model_validator(mode="after")
+    def _valid_interval(self) -> "Note":
+        """A bi-temporal note's validity window must not end before it starts (plan F10-G2).
+
+        `valid_from`/`valid_to` answer "what did we know at time T"; a `valid_to` earlier than
+        `valid_from` is a nonsensical window that would silently break any time-scoped query, so
+        it is rejected here at the schema boundary (surfaced by the parser and `kg-validate`).
+        Either bound may be absent (open-ended); the check applies only when both are set.
+        """
+        if (
+            self.valid_from is not None
+            and self.valid_to is not None
+            and self.valid_to < self.valid_from
+        ):
+            raise ValueError(f"valid_to {self.valid_to} is before valid_from {self.valid_from}")
+        return self
+
     def outgoing_links(self) -> list[str]:
         """The ids this note links to, from `[[wikilinks]]` in its body.
 
         Deduplicated, preserving first-seen order, so a note that references the
         same target twice yields one edge.
         """
-        ordered: dict[str, None] = {}
-        for match in WIKILINK.findall(self.body):
-            target = match.strip()
-            if target:
-                ordered.setdefault(target, None)
-        return list(ordered)
+        return cited_ids(self.body)
 
     def is_current(self, as_of: date) -> bool:
         """Whether the note is inside its validity window on `as_of` (bounds inclusive).

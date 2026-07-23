@@ -86,6 +86,18 @@ contracts:
 No other item warranted implementing now. The deferrals are conscious and their triggers are the
 right ones; this review changed one thing (the cursor guard) and left the rest as designed.
 
+## F10 review-cycle accepted deferrals (2026-07-22)
+
+The post-F10 adversarial review (five agent teams over the new features + the whole codebase) fixed
+the confirmed defects in-branch (recorded in D-065); these three residuals were **consciously not
+built now**, each because it needs a live edge this offline environment does not have:
+
+| Deferred | Why not now | Trigger to revisit |
+|---|---|---|
+| **F10-B3 — LLM faithfulness check of drafted report sections** | The conversational verifier (B2) scores a chat turn's cited prose. The *durable* report path assembles evidence per section and renders it via a template — there is no free-form synthesized prose in the workflow to LLM-judge, only citations (already gated by `verify_claims`). Wiring an LLM judge in would require the report skill's prose-drafting step to run inside the durable workflow, which it does not. | The report workflow gains an in-workflow LLM prose-synthesis step — then route that prose through `verify_answer` exactly as the chat runner does |
+| **Live-retriever drift over the deployment's *own* graph** | The KM-13 retrieval gold-set (D-056) already scores `GraphRetriever` over a committed fixture corpus (`evals/retrieval_corpus/`), and the scheduled F10-F2 drift job re-runs that deterministic case-set — a *deployment-consistency tripwire* (documented in `workflows/eval_drift.py`). What stays deferred is drift over the *deployment's live, changing* knowledge graph (genuine runtime quality drift), whose labelled cases are deployment-local (the shipped graph is empty), not a committed fixture. | A deployment with a populated graph + local labelled retrieval cases exists — then score the live retriever over that graph on the drift cadence, alongside the fixture tripwire |
+| **Audit-chain tip-truncation anchor** | The hash chain now catches modification, reordering, interior deletion, and prefix (genesis) truncation. Detecting *trailing* deletion (tip truncation) needs an external append-count/max-id anchor recorded out-of-band (a second store), since the remaining rows still link cleanly. | A regulator/GxP audit requires provable completeness of the tail — then add an out-of-band monotonic append-count anchor (e.g. a signed high-water row-count) and verify it |
+
 ## Engine gap-doc follow-ups (2026-07-22)
 
 The two engine gap analyses (`docs/audit/08-agentic-engine-gaps.md`,

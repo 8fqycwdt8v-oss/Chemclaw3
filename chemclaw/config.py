@@ -204,6 +204,25 @@ class Settings(BaseSettings):
     llm_max_retries: int = Field(default=3, ge=0)
     llm_temperature: float = Field(default=0.0, ge=0)
     llm_max_tokens: int = Field(default=4096, gt=0)
+    # Per-task model routing (plan F10-E). Maps a task name to the model id to use for it, so a
+    # cheap model can run high-throughput/secondary steps (verification, classification) while the
+    # frontier model drives the main reasoning turn — without a second provider or a second import
+    # site (`build_chat_client(task)` stays the one place a client is built). Model ids are for the
+    # *active* provider (an `openai_compatible` model name, or an Anthropic one); a task with no
+    # entry falls back to the provider's default (`llm_model`/`agent_model`), so an empty map (the
+    # default) is exactly today's single-model behavior. ENV override is JSON, e.g.
+    # CHEMCLAW_MODEL_ROUTES='{"verifier": "internal-small", "agent": "internal-large"}'.
+    model_routes: dict[str, str] = Field(default_factory=dict)
+    # Answer verification & confidence routing (plan F10-B). When `verifier_enabled`, a drafted
+    # answer is checked for citation faithfulness by an LLM-as-judge on the cheap routed model
+    # (task `"verifier"`, F10-E): each factual claim is scored against the evidence it cites, and an
+    # aggregate `confidence` in [0,1] is returned. An answer scoring below
+    # `verifier_confidence_threshold` is flagged for human review (the confidence + the unsupported
+    # claims ride on the turn's `AnswerEvent`), reusing the existing D-032 hold — no new gate. When
+    # disabled (the default), the verifier falls back to the deterministic report citation check
+    # (`report.harness.verify_claims`) so there is no network dependency and no behavior change.
+    verifier_enabled: bool = False
+    verifier_confidence_threshold: float = Field(default=0.7, ge=0, le=1)
 
     # MAF agent (plan step 1.5). `agent_model` is the orchestration model name
     # (ENV-overridable); the provider's API key is read by the chat client from
@@ -348,6 +367,16 @@ class Settings(BaseSettings):
     # empty by default: nothing is privileged until a deployment declares it.
     entra_expensive_actions: str = ""
     entra_privileged_roles: str = ""
+    # Per-tool authorization (plan F10-C): generalizes the single expensive-trigger gate to *every*
+    # tool invocation via one middleware. `tool_role_gates` maps a tool name to the Entra app-roles
+    # allowed to call it; a tool with no entry falls back to `tool_authz_default` — `"allow"` (the
+    # safe default = today's behavior, every tool callable) or `"deny"` (allowlist mode: only listed
+    # tools are callable, by a role-holder). Enforced only when `entra_required` (dev gate is open).
+    # ENV override for the gates is JSON, e.g. CHEMCLAW_TOOL_ROLE_GATES='{"submit_qm_job":
+    # ["process-chemist"]}'. Note: `deny` with an empty `tool_role_gates` blocks *all* tools — a
+    # deliberate lockdown, not a footgun to stumble into.
+    tool_role_gates: dict[str, list[str]] = Field(default_factory=dict)
+    tool_authz_default: Literal["allow", "deny"] = "allow"
     # The identity a *user-triggered* workflow records when there is no authenticated user
     # (plan F4-T3). Only reachable in local dev (`entra_required=False`, no tenant) and for
     # system-triggered jobs; under enforcement `require_actor` rejects an absent user instead
@@ -441,6 +470,19 @@ class Settings(BaseSettings):
     # defeating the band); raise it to the actual measurement noise of the metric a
     # given case-set exercises.
     eval_ab_epsilon: float = Field(default=1e-6, ge=0.0)
+    # Eval drift detection (plan F10-F2). A `background-jobs` workflow re-runs the committed
+    # case-set on a cadence and alerts when an aggregate metric moves further than a *relative* band
+    # (`eval_drift_epsilon` × the baseline value) from the Git-committed baseline
+    # (`evals/baseline.json`). Relative, so one knob is scale-appropriate across metrics of
+    # different magnitudes (an `f1` in [0, 1] vs an `e_factor` near 35); 0.05 = a 5% proportional
+    # move. Off by default; enabling it adds the Schedule (D-035).
+    eval_drift_enabled: bool = False
+    eval_drift_schedule_minutes: int = Field(default=1440, ge=1)
+    eval_drift_epsilon: float = Field(default=0.05, ge=0)
+    # The drift-check activity's own timeout (not borrowed from the memory job's): five pinned cases
+    # score in well under this, but a dedicated knob keeps the two jobs' timeouts independent.
+    eval_drift_timeout_seconds: float = Field(default=300.0, gt=0)
+    eval_baseline_path: str = "evals/baseline.json"
     # Retrieval-quality gate (audit KM-13). A gold query→expected-source set scores
     # `GraphRetriever` over this fixed corpus fixture (a small versioned set of notes, NOT the
     # live `knowledge_dir`, so the score is reproducible). `retrieval_recall_min` is the floor
@@ -506,10 +548,37 @@ class Settings(BaseSettings):
     optimization_similarity_threshold: float = Field(default=0.7, ge=0.0, le=1.0)
     memory_job_timeout_seconds: float = Field(default=300.0, gt=0)
 
+    # Hybrid retrieval (plan F10-A). Dense-embedding and lexical (Postgres FTS) retrievers
+    # complement the graph/fingerprint search as *entry points* into graph traversal (D-004: the
+    # git-markdown graph stays the source of truth, embeddings are a derived index). They attach
+    # through the F7 data-source registry (`data_sources`), so the enable switch is registry
+    # membership, not a second boolean. `embedding_provider` selects how a note/query is embedded:
+    # `hash` is a deterministic, offline, dependency-free feature-hash (dev/CI only — token-overlap
+    # similarity, NOT neural-semantic); `openai_compatible` calls the internal endpoint's
+    # `/embeddings` route (`embedding_model`), reusing the LLM base_url/credential/TLS transport.
+    # `embedding_dim` must match both the model's output width and the `note_index.embedding`
+    # column (`vector(N)` in infra/sql/012) — changing it is a new migration, like the fingerprint
+    # bit width. `retrieval_top_k` bounds each new retriever's hits. `retrieval_mode` picks how
+    # `gather_evidence` combines sources: `graph` (default) keeps today's flat union + dedup;
+    # `hybrid` fuses the per-source rankings by Reciprocal Rank Fusion (`retrieval_fusion_k` is the
+    # RRF constant) so a note surfaced by any single source rises, then graph expansion
+    # (expand_note) remains the reasoning path.
+    embedding_provider: Literal["hash", "openai_compatible"] = "hash"
+    embedding_model: str = ""
+    embedding_dim: int = Field(default=1536, gt=0)
+    retrieval_top_k: int = Field(default=8, gt=0)
+    retrieval_mode: Literal["graph", "hybrid"] = "graph"
+    retrieval_fusion_k: int = Field(default=60, gt=0)
+
     # Report harness (plan Phase 5b). Per-section retrieval budget for the durable
     # development-report workflow — one section is one activity, so a long report resumes
     # section by section after a worker restart.
     report_section_timeout_seconds: float = Field(default=300.0, gt=0)
+    # Sub-agent orchestration (plan F10-D). A fan-out job (report sections, memory-synthesis groups)
+    # runs its independent sub-tasks as child workflows; this bounds how many run at once so a large
+    # report/corpus does not spawn hundreds of children simultaneously. Per-child retry + durability
+    # come from each child's own retry policy; the bound is on concurrency only.
+    orchestrator_max_parallel_children: int = Field(default=8, ge=1)
     # How much of a source note's body an excerpt carries — shared by the report harness's
     # evidence excerpts and the memory layer's procedure excerpts (one note-excerpt budget,
     # neutral name since both consume it), so the two cannot drift.

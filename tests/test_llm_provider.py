@@ -95,3 +95,46 @@ def test_anthropic_path_preflights_missing_key(monkeypatch: pytest.MonkeyPatch) 
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
     with pytest.raises(RuntimeError, match="ANTHROPIC_API_KEY"):
         provider.build_chat_client()
+
+
+def _fake_openai_client_capture(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
+    """Wire fake AsyncOpenAI + OpenAIChatClient and return the dict they capture kwargs into."""
+    captured: dict[str, Any] = {}
+    fake_openai = type(sys)("openai")
+    fake_openai.AsyncOpenAI = lambda **k: None  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "openai", fake_openai)
+    fake_af_openai = type(sys)("agent_framework.openai")
+    fake_af_openai.OpenAIChatClient = lambda **k: captured.update(k)  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "agent_framework.openai", fake_af_openai)
+    return captured
+
+
+def test_model_routes_select_the_task_model(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A routed task uses its mapped model; an unrouted task falls back to the default model."""
+    _use_settings(
+        monkeypatch,
+        llm_provider="openai_compatible",
+        llm_base_url="https://llm.internal/v1",
+        llm_model="internal-large",
+        model_routes={"verifier": "internal-small"},
+    )
+    captured = _fake_openai_client_capture(monkeypatch)
+
+    provider.build_chat_client("verifier")
+    assert captured["model"] == "internal-small"  # routed to the cheap model
+
+    provider.build_chat_client("agent")
+    assert captured["model"] == "internal-large"  # unrouted → default llm_model
+
+
+def test_default_task_is_unchanged_without_routes(monkeypatch: pytest.MonkeyPatch) -> None:
+    """With no routes, the default `agent` task keeps the provider's default model."""
+    _use_settings(
+        monkeypatch,
+        llm_provider="openai_compatible",
+        llm_base_url="https://llm.internal/v1",
+        llm_model="internal-model",
+    )
+    captured = _fake_openai_client_capture(monkeypatch)
+    provider.build_chat_client()  # default task, empty model_routes
+    assert captured["model"] == "internal-model"

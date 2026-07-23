@@ -32,6 +32,7 @@ from chemclaw.config import settings
 from chemclaw.logging import configure_logging
 from chemclaw.temporal_client import connect
 from workflows.eln_sync import ElnSyncWorkflow
+from workflows.eval_drift import EvalDriftWorkflow
 from workflows.memory_jobs import (
     CampaignSynthesisWorkflow,
     OptimizationCampaignWorkflow,
@@ -58,12 +59,18 @@ def planned_schedules() -> list[PlannedSchedule]:
     """
     eln_every = timedelta(minutes=settings.eln_sync_schedule_minutes)
     memory_every = timedelta(minutes=settings.memory_synthesis_schedule_minutes)
-    return [
+    schedules = [
         PlannedSchedule("eln-sync", ElnSyncWorkflow, eln_every),
         PlannedSchedule("campaign-synthesis", CampaignSynthesisWorkflow, memory_every),
         PlannedSchedule("playbook-distillation", PlaybookDistillationWorkflow, memory_every),
         PlannedSchedule("optimization-campaign", OptimizationCampaignWorkflow, memory_every),
     ]
+    # The drift check is opt-in (plan F10-F2): it only earns a Schedule where a committed baseline
+    # is maintained, so an unconfigured deployment does not fire an eval it has no baseline for.
+    if settings.eval_drift_enabled:
+        drift_every = timedelta(minutes=settings.eval_drift_schedule_minutes)
+        schedules.append(PlannedSchedule("eval-drift", EvalDriftWorkflow, drift_every))
+    return schedules
 
 
 def _build_schedule(job: PlannedSchedule) -> Schedule:

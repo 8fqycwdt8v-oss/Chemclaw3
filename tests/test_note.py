@@ -63,6 +63,21 @@ def test_missing_required_field_raises(tmp_path: Path) -> None:
         parse_note(_write(tmp_path / "b.md", "---\nid: x\n---\nbody\n"))
 
 
+def test_bitemporal_window_round_trips(tmp_path: Path) -> None:
+    """A note with a well-ordered validity window parses and keeps both bounds (F10-G2)."""
+    text = "---\nid: x\ntype: reaction\nvalid_from: 2026-01-01\nvalid_to: 2026-06-30\n---\nbody\n"
+    note = parse_note(_write(tmp_path / "d.md", text))
+    assert str(note.valid_from) == "2026-01-01"
+    assert str(note.valid_to) == "2026-06-30"
+
+
+def test_reversed_validity_window_is_rejected(tmp_path: Path) -> None:
+    """`valid_to` before `valid_from` is a nonsensical window, refused at the schema boundary."""
+    text = "---\nid: x\ntype: reaction\nvalid_from: 2026-06-30\nvalid_to: 2026-01-01\n---\nbody\n"
+    with pytest.raises(NoteError, match="valid_to .* is before valid_from"):
+        parse_note(_write(tmp_path / "e.md", text))
+
+
 def test_malformed_frontmatter_raises(tmp_path: Path) -> None:
     """Broken YAML frontmatter is a clear error, not a crash (G4)."""
     with pytest.raises(NoteError, match="malformed frontmatter"):

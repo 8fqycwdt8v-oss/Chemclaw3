@@ -55,6 +55,40 @@ def test_llm_provider_defaults_to_anthropic() -> None:
     assert settings.llm_max_tokens == 4096
 
 
+def test_parity_defaults_are_backward_compatible() -> None:
+    """F10 additions default to today's behavior: no model routing, allow-all tool authz."""
+    settings = Settings(_env_file=None)  # type: ignore[call-arg]
+    assert settings.model_routes == {}  # single-model behavior
+    assert settings.tool_role_gates == {}  # nothing gated
+    assert settings.tool_authz_default == "allow"  # every tool callable by default
+    assert settings.verifier_enabled is False  # deterministic citation gate, no LLM judge
+    assert settings.verifier_confidence_threshold == 0.7
+    assert settings.eval_drift_enabled is False  # no scheduled drift job until opted in
+    assert settings.eval_drift_epsilon == 0.05  # relative band: 5% proportional move
+    assert settings.eval_drift_timeout_seconds == 300.0
+    assert settings.orchestrator_max_parallel_children == 8  # bounded child fan-out
+
+
+def test_hybrid_retrieval_defaults_are_backward_compatible() -> None:
+    """F10-A retrieval defaults keep today's behavior: hash embedder, graph (flat) mode."""
+    settings = Settings(_env_file=None)  # type: ignore[call-arg]
+    assert settings.embedding_provider == "hash"
+    assert settings.retrieval_mode == "graph"  # flat union, not hybrid fusion, by default
+    assert settings.embedding_dim == 1536  # matches note_index.embedding vector(1536)
+    assert "vector" not in settings.data_source_list  # new retrievers off until opted in
+
+
+def test_parity_json_env_overrides(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The dict-typed F10 knobs parse their JSON env overrides."""
+    monkeypatch.setenv("CHEMCLAW_MODEL_ROUTES", '{"verifier": "small"}')
+    monkeypatch.setenv("CHEMCLAW_TOOL_ROLE_GATES", '{"submit_qm_job": ["chemist"]}')
+    monkeypatch.setenv("CHEMCLAW_TOOL_AUTHZ_DEFAULT", "deny")
+    settings = Settings(_env_file=None)  # type: ignore[call-arg]
+    assert settings.model_routes == {"verifier": "small"}
+    assert settings.tool_role_gates == {"submit_qm_job": ["chemist"]}
+    assert settings.tool_authz_default == "deny"
+
+
 def test_openai_compatible_requires_endpoint_and_model() -> None:
     """Selecting the internal provider without a base_url/model fails at startup, clearly."""
     with pytest.raises(ValueError, match="llm_base_url"):

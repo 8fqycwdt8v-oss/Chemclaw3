@@ -8,8 +8,8 @@
 --
 -- Append-only by contract: the writer (agents.audit_store.PostgresAuditSink) only
 -- inserts. `actor` is a Phase-6 seam — 'unknown' until Entra identity (oid/upn) is wired,
--- a value change then, not a schema change. A tamper-evident hash chain over rows is a
--- later GxP hardening step and is deliberately not built yet.
+-- a value change then, not a schema change. The tamper-evident hash chain over rows
+-- (prev_hash/row_hash) is added by 011_audit_hash_chain.sql (F10-G1).
 CREATE TABLE IF NOT EXISTS audit_events (
     id             BIGSERIAL PRIMARY KEY,
     ts             TIMESTAMPTZ      NOT NULL DEFAULT now(),

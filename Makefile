@@ -2,7 +2,7 @@
 # CLAUDE.md and CI both go through them, so behavior stays identical everywhere.
 # `uv run` executes inside the project venv without a manual activate step.
 
-.PHONY: install lint type test cov check chat db-migrate schedules-apply kg-validate eval eln-validate skill-validate up down
+.PHONY: install lint type test cov check chat db-migrate schedules-apply kg-validate eval eln-validate skill-validate audit-verify reindex up down
 
 install:  ## Sync the venv with runtime + dev dependencies.
 	uv sync
@@ -42,6 +42,12 @@ eln-validate:  ## Validate the ELN export's reactions (RDKit structure + mass ba
 
 skill-validate:  ## Validate SKILL.md frontmatter (name/description present, name matches dir).
 	uv run python -m scripts.validate_skills
+
+audit-verify:  ## Verify the tamper-evident hash chain over the GxP audit trail (F10-G1).
+	uv run python -m scripts.verify_audit_chain
+
+reindex:  ## Rebuild the derived note index (dense + lexical) for hybrid retrieval (F10-A).
+	uv run python -m report.vector_index
 
 up:  ## Start the local dev stack (Temporal dev server + Postgres/pgvector).
 	docker compose -f infra/docker-compose.yml up -d

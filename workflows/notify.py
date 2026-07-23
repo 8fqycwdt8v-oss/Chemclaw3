@@ -40,6 +40,24 @@ async def record_session_event_activity(event: SessionEventInput) -> None:
     await record_session_event(event.session_id, event.kind, event.payload)
 
 
+async def notify_session(session_id: str, kind: str, payload: dict[str, Any]) -> None:
+    """Record a session push-back event, letting a delivery failure fail the caller.
+
+    The must-deliver half of the push-back seam (shares the one activity + input model so the write
+    logic still lives in one place). For a notification that is the workflow's *only* operator-
+    facing output — the eval-drift alert, whose whole point is to surface a silent regression — a
+    dropped delivery would defeat the feature, so the failure must be visible (a failed workflow),
+    not swallowed. Callers whose result is a durable calculation use `notify_session_best_effort`.
+    """
+    await workflow.execute_activity(
+        record_session_event_activity,
+        SessionEventInput(session_id=session_id, kind=kind, payload=payload),
+        task_queue=settings.background_task_queue,
+        start_to_close_timeout=timedelta(seconds=settings.qm_activity_timeout_seconds),
+        retry_policy=BAD_DATA_RETRY,
+    )
+
+
 async def notify_session_best_effort(session_id: str, kind: str, payload: dict[str, Any]) -> None:
     """Record a session push-back event, but never fail the caller on a delivery failure.
 
@@ -48,12 +66,6 @@ async def notify_session_best_effort(session_id: str, kind: str, payload: dict[s
     for the note write. It runs on the light background queue (a small DB insert, not HPC).
     """
     try:
-        await workflow.execute_activity(
-            record_session_event_activity,
-            SessionEventInput(session_id=session_id, kind=kind, payload=payload),
-            task_queue=settings.background_task_queue,
-            start_to_close_timeout=timedelta(seconds=settings.qm_activity_timeout_seconds),
-            retry_policy=BAD_DATA_RETRY,
-        )
+        await notify_session(session_id, kind, payload)
     except ActivityError:
         workflow.logger.warning("session push-back failed for %s", session_id)

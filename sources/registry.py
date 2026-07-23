@@ -13,7 +13,8 @@ from collections.abc import Callable
 from chemclaw.config import settings
 from eln.json_adapter import JsonExportAdapter
 from eln.ord_adapter import OrdJsonAdapter
-from report.retrievers import GraphRetriever
+from report.retrievers import GraphRetriever, LexicalRetriever, VectorRetriever
+from report.vector_index import default_note_index
 from sources.base import DataSource, IngestHalf, RetrieveHalf, SourceSpec
 
 # Each factory builds a fresh `DataSource` so per-call config (e.g. a monkeypatched knowledge_dir in
@@ -21,6 +22,12 @@ from sources.base import DataSource, IngestHalf, RetrieveHalf, SourceSpec
 DATA_SOURCES: dict[str, Callable[[], DataSource]] = {
     # The knowledge graph is a retrieve-only source (it is written via the PR-gate, not "ingested").
     "graph": lambda: SourceSpec(name="graph", retrieve=GraphRetriever()),
+    # Hybrid-retrieval entry points over the derived note index (F10-A), retrieve-only like `graph`.
+    # They are off until a deployment adds `vector`/`lexical` to `data_sources` — registry
+    # membership is the enable switch (D-018: one config token), no second boolean to keep in sync.
+    # Both read the same `note_index`, populated by `report.vector_index.reindex_notes`.
+    "vector": lambda: SourceSpec(name="vector", retrieve=VectorRetriever(default_note_index())),
+    "lexical": lambda: SourceSpec(name="lexical", retrieve=LexicalRetriever(default_note_index())),
     # The ELN adapters are ingest-only: reactions flow in and become graph notes, which the `graph`
     # source then retrieves — so the ELN source does not also carry the graph retriever (no double
     # count). They re-host the existing adapters verbatim.

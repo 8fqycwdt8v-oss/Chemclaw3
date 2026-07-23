@@ -1373,3 +1373,177 @@ exercised live to get the mutation right, not guessed at in the abstract.
 `test_harness_todo.py` (4, the bridge in isolation), plus wiring tests in `test_qm_tools.py` (3) and
 `test_service.py` (2). No changes to `agents/chemclaw_agent.py` — the harness wiring from D-040 was
 correct as built; this proves it and closes the one deferral that was actually gated on doing so.
+
+## D-059 — F10-E/B: per-task model routing + answer verification & confidence routing (D-A11)
+
+**Context.** A capability comparison against a commercial pharma-agent *platform* (IntuitionLabs)
+found Chemclaw at or ahead on the durability/identity/audit spine, with deltas in retrieval breadth,
+output verification, fine-grained authz, orchestration topology, and metrics polish. Phase F10
+(`docs/parity-plan.md`) closes the ones that add value now and records triggers for the deferred
+ones. Two of those deltas: no per-task model selection, and no verifier/confidence on the answer
+path (only the report's deterministic citation gate).
+
+**Decision.**
+- **F10-E:** `build_chat_client(task="agent")` consults `settings.model_routes` (JSON task→model),
+  falling back to the provider default. Still the single import site for a chat client — a task is a
+  per-model choice on the one internal endpoint, not a second provider.
+- **F10-B:** `agents/verifier.py::verify_answer(answer, evidence)` scores citation faithfulness and
+  returns a `VerificationResult` (per-claim `ClaimCheck` + aggregate `confidence`). When
+  `verifier_enabled`, an LLM-as-judge runs on the cheap routed `"verifier"` model via structured
+  output; otherwise the deterministic report gate (`report.harness.verify_claims`) is the offline
+  fallback (DRY, one citation check). `verify_turn_answer` resolves an answer's `[[wikilinks]]` to
+  the notes it cites — the conversational scoring input. The runner stamps `AnswerEvent.confidence`
+  + `unsupported_claims`; a low-confidence answer surfaces a review affordance and routes to the
+  existing D-032 hold. No new gate primitive; a verifier failure degrades to the unscored answer.
+
+**Consequence.** Default-off: `model_routes={}` and `verifier_enabled=False` reproduce today's
+single-model, unscored-answer behavior exactly. The durable report workflow verifies at citation
+level (it has no synthesized prose); the conversational path gets the LLM faithfulness score.
+
+**Result.** `make lint type test` green. Tests: `test_llm_provider`, `test_verifier`, `test_runner`,
+`test_config`.
+
+## D-060 — F10-C: per-tool authorization middleware (supersedes D-044 scope, D-A12)
+
+**Context.** `authorize_trigger` guarded only the expensive `submit_qm_job` trigger (F4-T5). Tool-use
+governance at *every* invocation was a platform delta.
+
+**Decision.** `agents/tool_authz.py::enforce_tool_authz` is a MAF `@function_middleware` (same shape
+as the audit middleware) that calls `agents/authz.py::authorize_tool(tool)` before each tool runs,
+gating on `settings.tool_role_gates` (JSON tool→roles) with `tool_authz_default` (`allow`|`deny`).
+`authorize_tool` and `authorize_trigger` share one `_has_required_role` predicate (DRY). Enforcement
+is active only under `entra_required`; the expensive-trigger call stays as defense-in-depth.
+
+**Consequence.** Default `allow` + empty gates = zero behavior change; a deployment opts into an
+allowlist by config. Authorization is now uniform per tool call, superseding D-044's trigger-only
+scope.
+
+**Result.** `make lint type test` green. Tests: `test_tool_authz`, `test_agent` (two middlewares),
+`test_config`.
+
+## D-061 — F10-G: audit hash-chain + bi-temporal note fields (D-A15)
+
+**Context.** D-034 left the audit hash-chain "for Phase 6"; `architektur.md` §10.4 proposed
+bi-temporal note fields but never schematized them. Both are low-complexity, GxP-relevant.
+
+**Decision.**
+- **F10-G1:** `011_audit_hash_chain.sql` adds `prev_hash`/`row_hash` to `audit_events`.
+  `PostgresAuditSink.record` computes `row_hash = chain_hash(prev_hash, event)` (reusing
+  `chemclaw.ids.stable_hash`, one hashing scheme — D-033) under a transaction advisory lock so
+  concurrent appends cannot fork the chain. `scripts/verify_audit_chain.py` (`make audit-verify`)
+  walks the rows and reports the first broken link; legacy empty-hash rows are skipped.
+- **F10-G2:** `kg/note.py` gains optional `valid_from`/`valid_to` with a validator rejecting
+  `valid_to < valid_from`; retrievers may filter on them later (no premature consumer).
+
+**Consequence.** Tampering with any audited row is detectable; notes can record what was known and
+when it was valid. The `NullAuditSink` default is unaffected.
+
+**Result.** `make lint type test` green. Tests: `test_audit_chain`, `test_note`, `test_kg_validate`.
+
+## D-062 — F10-A: hybrid retrieval — dense + lexical entry points, RRF fusion (D-A10)
+
+**Context.** Retrieval was graph traversal + binary structural fingerprints: no dense-semantic and no
+lexical rank, so a note sharing neither a substring nor a wikilink with the query was unreachable.
+This executes and extends the planned-but-unbuilt F8-T2.
+
+**Decision.** `agents/embedding_provider.py` is the one embedding seam (`hash` offline / internal
+`openai_compatible`). `report/vector_index.py` (`012_note_index.sql`) is a derived, rebuildable
+pgvector + `tsvector` index over notes with in-memory + Postgres backends. `VectorRetriever` +
+`LexicalRetriever` join `gather_evidence` via the F7 source registry (`vector`/`lexical` keys —
+registry membership is the enable switch, D-018). `report/hybrid.py::reciprocal_rank_fusion` fuses
+the per-source rankings under `retrieval_mode="hybrid"`; graph expansion stays the reasoning path
+(D-004 intact — the new retrievers are *entry points* into the graph, never a replacement).
+
+**Consequence.** Default `retrieval_mode="graph"` + `hash` embedder + `vector`/`lexical` not in
+`data_sources` = today's flat union, unchanged. Git-markdown stays the source of truth; the index is
+derived. A scheduled reindex activity is a documented follow-up (today `make reindex`/CLI populate).
+
+**Result.** `make lint type test` green. Tests: `test_embedding_provider`, `test_vector_index`,
+`test_hybrid_retrieval`, `test_config`.
+
+## D-063 — F10-F: classification metrics (P/R/F1) + eval drift detection (D-A14)
+
+**Context.** The eval harness scored green-chemistry/prediction metrics with absolute-error
+tolerances; it had no precision/recall/F1 and no drift detection.
+
+**Decision.** `evals/metrics.py` adds `precision`/`recall`/`f1` over `output.predicted_note_ids`
+vs `reference.expected_note_ids`, sharing one pure `precision_recall_f1` (report/drift metrics, no
+per-case gate). `evals/baseline.py` (`aggregate_metrics`/`detect_drift`, committed
+`evals/baseline.json`) + `workflows/eval_drift.py::EvalDriftWorkflow` (background-jobs, alerts via
+the notify seam) re-run the case-set on an opt-in Schedule and flag any metric that moved past
+`eval_drift_epsilon`. Live *retriever* scoring is not re-invented here: the merge with the
+audit-hardening line adopted its KM-13 gold-set (D-056) — `retrieval_recall`/`retrieval_precision`
+over a committed fixture corpus — as the corpus-backed retrieval measure; the earlier
+one-caller `run_retrieval_eval` driver was dropped as redundant (KISS). A pinned static
+`precision`/`recall`/`f1` case (`retrieval-precision-recall.md`) keeps those generic metrics under
+the versioned case-set and gives drift a number to watch.
+
+**Consequence.** Retrieval/extraction quality is measurable as P/R/F1 on versioned cases; a silent
+regression trips a scheduled alert. Over the deterministic committed case-set the scheduled job is a
+deployment-consistency tripwire; live drift over the deployment's own graph stays deferred
+(DEFERRED.md). Drift is off by default.
+
+**Result.** `make lint type test` green. Tests: `test_metrics_classification`, `test_eval_drift`
+(incl. a baseline-matches-case-set guard), `test_schedules`, `test_config`; the KM-13 gold-set is
+pinned by `test_retrieval_eval` (D-056).
+
+## D-064 — F10-D: sub-agent orchestration via Temporal child workflows (D-A13)
+
+**Context.** Report-section retrieval and memory synthesis each fanned a task into independent steps
+but ran them in one monolithic activity, so a single poison item failed the whole batch and there was
+no per-step durability. A generic child-workflow fan-out was justified by these *two* real callers
+(Rule of Three), not speculatively.
+
+**Decision.** `workflows/orchestrator.py::fan_out(child, inputs, *, id_prefix, ...)` runs each input
+as a child workflow with bounded concurrency (fixed-size batches — deterministic under replay),
+per-child retry, and D-030 isolation (a child that exhausts its retries is logged and dropped, its
+siblings unaffected, successful results in input order). Adopted by `ReportSectionWorkflow` (one per
+section) and — after extracting the pure `build_*_notes` in `memory/jobs.py` — a shared
+`PublishNoteWorkflow` (one per memory note). Orchestration stays a Temporal-layer concern; MAF remains
+the single conversational agent. The conversational multi-agent mesh stays gated (trigger recorded).
+
+**Consequence.** Report + memory synthesis now run as exactly-once child workflows with per-child
+retry and worker-restart durability. Section/group logic is unchanged (still PR-gated, still cited);
+only the execution topology gained parallelism + isolation. Config
+`orchestrator_max_parallel_children` (default 8).
+
+**Result.** `make lint type test` green (the Temporal-env fan-out test runs in CI, skips offline).
+Tests: `test_orchestrator`, `test_memory` (builder behavior-preserving), `test_report_workflow` /
+`test_workers` registration, `test_config`.
+
+## D-065 — F10 post-implementation review cycle: verified fixes
+
+**Context.** After F10 (A–G) landed, an adversarial review — five agent teams over the new features
+and the whole codebase — surfaced real plan-vs-code and correctness gaps. The most severe: F10-B's
+`verifier_confidence_threshold` was defined but never read (dead config), so the ticket's headline
+*confidence routing* was not actually wired; several docstrings over-claimed behavior that did not
+exist (a D-032 hold, "any deleted row breaks the chain").
+
+**Decision.** Fixed each confirmed finding in-branch rather than deferring:
+- **F10-B routing wired.** `AnswerEvent.review_required` is set when `confidence <
+  verifier_confidence_threshold` — the config is now consumed and low/high confidence are
+  distinguishable. Over-claiming docstrings corrected (the durable D-032 hold is deferred, not built).
+  Wikilink extraction unified into `kg.note.cited_ids` (strips targets, one definition); a citation
+  miss now reports the *unresolved* id, not `citations[0]`.
+- **F10-D report durability.** A failed section degrades to a visible `retrieval_failed` marker
+  (never silently dropped from a GxP draft); the redundant child-level `BAD_DATA_RETRY` was removed
+  (the activity is the single retry boundary); `fan_out` re-raises `CancelledError` instead of
+  logging it as a drop, and guards `max_parallel >= 1`.
+- **F10-F drift honesty.** `detect_drift` uses a *relative* band (scale-appropriate across
+  heterogeneous metrics); `DriftAlert.vanished` disambiguates an absent metric from a 0.0 score; the
+  alert now rides a *must-deliver* `notify_session` (a dropped regression alert fails the run); the
+  scheduled job is documented as a deployment-consistency tripwire (live-retriever drift deferred).
+- **Shipped retrieval/audit.** `PostgresNoteIndex.search_dense` now applies the positive-similarity /
+  zero-vector guard the tested InMemory reference already had (backends no longer diverge);
+  `GraphRetriever` uses the shared `note_text` haystack; RRF is 1-based (canonical); the audit chain
+  gained a genesis anchor (catches prefix truncation) with docstrings corrected to the true guarantee
+  (tip truncation needs an external count anchor — deferred).
+
+**Consequence.** Two of F10-B's three CHECKMATE claims that were aspirational in the merged code are
+now real (routing) or honestly deferred with a trigger (report prose verification). Three deferrals
+are recorded in DEFERRED.md (F10-B3, live-retriever drift, audit tip-truncation anchor).
+
+**Result.** `make lint type test` green. New/updated tests: `test_runner` (threshold routing),
+`test_report`/`test_report_workflow` (failed-section marker), `test_eval_drift` (relative band +
+`vanished`), `test_audit_chain` (prefix-truncation), `test_memory_jobs` (fan-out registration),
+`test_config`.

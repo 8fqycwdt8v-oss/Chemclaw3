@@ -44,6 +44,7 @@ from agents.memory_tools import record_confirmed_answer
 from agents.qm_tools import get_qm_job_status, submit_qm_job
 from agents.research_tools import gather_evidence
 from agents.skill_access import RoleScopedSkillsSource
+from agents.tool_authz import enforce_tool_authz
 from chemclaw.config import McpServerSpec, settings
 
 _INSTRUCTIONS = (
@@ -125,6 +126,11 @@ def build_agent(
         actor=actor,
         sink=audit_sink,
     )
+    # Two function middlewares over every tool call: audit records it, then per-tool authorization
+    # gates it (F10-C). Audit is outermost so a denied call (authz raises before the tool runs) is
+    # still recorded as an error outcome. Both are no-ops on the dev path (log-only sink; authz open
+    # until `entra_required`), so the classic path is unchanged by default.
+    middleware = [audit, enforce_tool_authz]
     # Default generation params from config (F0.3), applied to every turn unless a run overrides
     # them — so temperature/length are a deployment setting, not a per-call literal.
     options = ChatOptions(
@@ -132,7 +138,7 @@ def build_agent(
         max_tokens=settings.llm_max_tokens,
     )
     if settings.harness_enabled:
-        return _build_harness_agent(client, skills, history, audit, options)
+        return _build_harness_agent(client, skills, history, middleware, options)
     compaction = _build_compaction(history.source_id)
     return Agent(
         client=client,
@@ -144,9 +150,8 @@ def build_agent(
         # compaction runs last and sees the full context (before the model) and the freshly
         # stored history (after the run).
         context_providers=[history, skills, compaction],
-        # One function middleware audits every tool call (correlation id, actor, args,
-        # outcome, latency) — the single GxP audit trail over all tools, not per-tool logging.
-        middleware=[audit],
+        # The shared tool middleware chain: GxP audit over every tool call + per-tool authorization.
+        middleware=middleware,
     )
 
 
@@ -154,7 +159,7 @@ def _build_harness_agent(
     client: Any,
     skills: SkillsProvider,
     history: HistoryProvider,
-    audit: Any,
+    middleware: list[Any],
     options: ChatOptions,
 ) -> Agent:
     """Wire MAF's Agent Harness over the *same* Chemclaw tools/skills/audit/compaction (F1).
@@ -194,7 +199,7 @@ def _build_harness_agent(
         # Loop only in execute mode while todos remain — so plan_only stops for approval — capped.
         loop_should_continue=todos_remaining(looping_modes=["execute"]),
         loop_max_iterations=settings.harness_max_loop_iterations,
-        middleware=[audit],
+        middleware=middleware,
     )
 
 

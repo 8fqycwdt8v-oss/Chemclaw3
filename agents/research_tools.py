@@ -19,6 +19,7 @@ from agents.framing import frame_untrusted
 from chemclaw.config import settings
 from mcp_servers.fpstore import default_reaction_store
 from report.evidence import EvidenceChunk, SourceRetriever
+from report.hybrid import reciprocal_rank_fusion
 from report.retrievers import FingerprintReactionRetriever
 from sources.registry import active_retrieve_sources
 
@@ -34,6 +35,23 @@ def _text_retrievers() -> list[SourceRetriever]:
     unchanged until a deployment activates another source.
     """
     return list(active_retrieve_sources())
+
+
+def _flat_dedup(ranked_lists: list[list[EvidenceChunk]]) -> list[EvidenceChunk]:
+    """Flatten source hit-lists into one, dropping exact (note, content) repeats (order kept).
+
+    The `graph` retrieval mode: a plain union of every source's hits with duplicates removed — the
+    behavior before hybrid fusion existed, preserved verbatim so the default is unchanged.
+    """
+    seen: set[tuple[str, str]] = set()
+    unique: list[EvidenceChunk] = []
+    for chunks in ranked_lists:
+        for chunk in chunks:
+            key = (chunk.source_note_id, chunk.content)
+            if key not in seen:
+                seen.add(key)
+                unique.append(chunk)
+    return unique
 
 
 async def gather_evidence(
@@ -67,24 +85,26 @@ async def gather_evidence(
     if tag is not None:
         filters["tag"] = tag
 
-    chunks: list[EvidenceChunk] = []
-    for retriever in _text_retrievers():
-        chunks.extend(await retriever.retrieve(query, filters))
+    # One ordered hit-list per source; each retriever ranks its own hits (best first).
+    ranked_lists: list[list[EvidenceChunk]] = [
+        await retriever.retrieve(query, filters) for retriever in _text_retrievers()
+    ]
     if reaction_smiles is not None:
         reaction_retriever = FingerprintReactionRetriever(_reaction_store())
-        chunks.extend(await reaction_retriever.retrieve(reaction_smiles, {}))
+        ranked_lists.append(await reaction_retriever.retrieve(reaction_smiles, {}))
 
-    seen: set[tuple[str, str]] = set()
-    unique: list[EvidenceChunk] = []
-    for chunk in chunks:
-        key = (chunk.source_note_id, chunk.content)
-        if key not in seen:
-            seen.add(key)
-            unique.append(chunk)
-    # Rank by score before the cap so a truncated sweep keeps the best-supported evidence, not an
-    # arbitrary disk-order slice (KM-5). The sort is stable, so equal-scored chunks keep their
-    # retriever/discovery order (the previous behavior for an unscored corpus).
-    ranked = sorted(unique, key=lambda chunk: chunk.score, reverse=True)
+    # `hybrid` fuses the per-source rankings (a note any source ranks highly rises); `graph` (the
+    # default) keeps the flat union + dedup. Either way graph expansion stays the reasoning path.
+    if settings.retrieval_mode == "hybrid":
+        # RRF already produces the cross-source ranking (best first), so it *is* the order the cap
+        # keeps — re-sorting by a single source's raw score would discard the fusion.
+        ranked = reciprocal_rank_fusion(ranked_lists, k=settings.retrieval_fusion_k)
+    else:
+        unique = _flat_dedup(ranked_lists)
+        # Rank by score before the cap so a truncated sweep keeps the best-supported evidence, not
+        # an arbitrary disk-order slice (KM-5). The sort is stable, so equal-scored chunks keep
+        # their retriever/discovery order (the previous behavior for an unscored corpus).
+        ranked = sorted(unique, key=lambda chunk: chunk.score, reverse=True)
     # Frame each chunk's content as retrieved data before it enters the model context, so a
     # note body carrying adversarial text is read as evidence to cite, not an instruction.
     return [

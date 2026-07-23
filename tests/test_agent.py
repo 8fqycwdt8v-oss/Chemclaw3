@@ -59,12 +59,14 @@ def test_agent_has_skills_history_and_compaction() -> None:
     assert {"SkillsProvider", "InMemoryHistoryProvider", "CompactionProvider"} <= provider_types
 
 
-def test_agent_audits_every_tool_call() -> None:
-    """A single GxP tool-audit middleware is attached (built per-conversation)."""
+def test_agent_audits_and_authorizes_every_tool_call() -> None:
+    """Two tool middlewares are attached: the GxP audit trail, then per-tool authz (F10-C)."""
+    from agents.tool_authz import enforce_tool_authz
+
     agent = build_agent(chat_client=object())
-    middleware = agent.middleware
-    assert middleware is not None
-    assert len(list(middleware)) == 1  # exactly the one audit middleware, over all tools
+    middleware = list(agent.middleware or [])
+    assert len(middleware) == 2  # audit + per-tool authorization, over all tools
+    assert enforce_tool_authz in middleware  # the authz gate is wired, not just audit
 
 
 def test_agent_attaches_fingerprint_search_as_mcp_servers() -> None:

@@ -24,6 +24,8 @@ from agents.session_context import (
     set_current_session,
     set_current_session_id,
 )
+from agents.verifier import verify_turn_answer
+from chemclaw.config import settings
 from service.events import (
     AnswerEvent,
     ApprovalRequestEvent,
@@ -88,7 +90,7 @@ async def run_turn(
                     yield ToolCallEvent(tool=tool_name, arguments=arguments)
                 for request in getattr(update, "user_input_requests", None) or []:
                     yield ApprovalRequestEvent(prompt=_approval_prompt(request))
-        yield AnswerEvent(text="".join(answer_parts))
+        yield await _answer_event("".join(answer_parts))
     except Exception:
         # One turn's failure becomes one user-safe event, never a 500 mid-stream or a leaked trace.
         # The exception detail (DB hosts, SMILES, workflow ids, driver errors) stays server-side in
@@ -106,6 +108,31 @@ async def run_turn(
         reset_current_session(live_session_token)
         if identity_token is not None:
             reset_current_identity(identity_token)
+
+
+async def _answer_event(answer: str) -> AnswerEvent:
+    """Assemble the turn's final `AnswerEvent`, scoring it when verification is enabled (F10-B).
+
+    When `verifier_enabled`, the assembled answer is checked for citation faithfulness against the
+    notes it cites, the aggregate confidence + any unsupported claims are stamped on the event, and
+    `review_required` is set when `confidence < verifier_confidence_threshold` — the routing signal
+    a surface (or a future D-032 hold) uses to flag a low-confidence answer for review rather than
+    presenting it as authoritative. When disabled (the default) this is today's plain answer. A
+    verifier failure must never sink the turn — it degrades to the unscored answer.
+    """
+    if not settings.verifier_enabled:
+        return AnswerEvent(text=answer)
+    try:
+        result = await verify_turn_answer(answer)
+    except Exception:
+        logger.exception("answer verification failed; returning the unscored answer")
+        return AnswerEvent(text=answer)
+    return AnswerEvent(
+        text=answer,
+        confidence=result.confidence,
+        unsupported_claims=[claim.text for claim in result.unsupported],
+        review_required=result.confidence < settings.verifier_confidence_threshold,
+    )
 
 
 def _tool_calls_in(update: Any) -> list[tuple[str, str]]:

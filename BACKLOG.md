@@ -3,6 +3,77 @@
 Prioritized open action items. Top = next. Keep in sync with `docs/implementation-plan.md`
 (phase/step numbers) at session end.
 
+## Next — Platform-parity hardening (docs/parity-plan.md, Phase F10)
+
+Closes the platform-capability deltas found against a commercial pharma-agent platform. Full
+tickets + disposition table: `docs/parity-plan.md`.
+
+- [x] **F10-E** per-task model routing: `build_chat_client(task)` consults `model_routes`
+      (task→model) in the one provider seam; empty map = today's single model. Test:
+      `test_llm_provider.py`, `test_config.py`.
+- [x] **F10-C** per-tool authorization: `agents/authz.py::authorize_tool` (`tool_role_gates` +
+      `tool_authz_default`) enforced by one middleware `agents/tool_authz.py::enforce_tool_authz`,
+      wired into `build_agent` after audit; default-allow, active only under `entra_required`. The
+      coarse expensive-trigger gate now shares `_has_required_role` (DRY). Tests:
+      `test_tool_authz.py`, `test_agent.py`, `test_config.py`.
+- [x] **F10-G1** tamper-evident audit hash-chain: migration `011_audit_hash_chain.sql`
+      (`prev_hash`/`row_hash`), `audit_store.chain_hash` + advisory-lock-serialized chained insert,
+      `scripts/verify_audit_chain.py` + `make audit-verify`. Tests: `test_audit_chain.py` (offline
+      tamper/deletion detection; PG round-trip skips offline).
+- [x] **F10-G2** bi-temporal note validation: `kg/note.py` rejects `valid_to < valid_from` (fields
+      already existed); surfaced by the parser + `kg-validate`. Test: `test_note.py`.
+- [x] **F10-A** hybrid retrieval (executes/extends F8-T2): embedding provider seam
+      (`agents/embedding_provider.py`, `hash` offline / `openai_compatible` prod); derived
+      `note_index` (`infra/sql/012`, `report/vector_index.py` — `NoteIndex` with in-memory +
+      pgvector/FTS backends, `reindex_notes` + `make reindex`); `VectorRetriever` + `LexicalRetriever`
+      attached via the F7 registry (`vector`/`lexical` keys — registry membership is the enable
+      switch, D-018); RRF fusion (`report/hybrid.py`) under `retrieval_mode="hybrid"` in
+      `gather_evidence`, graph flat-union default unchanged. Graph traversal stays the reasoning path
+      (D-004). Config: `embedding_*`, `retrieval_top_k`/`_mode`/`_fusion_k`. Tests:
+      `test_embedding_provider`, `test_vector_index`, `test_hybrid_retrieval`, `test_config`.
+      Deferred (follow-up): a scheduled `background-jobs` reindex activity (today `make reindex` /
+      the CLI populates the index); the enable-flag booleans were intentionally folded into registry
+      membership rather than added.
+- [x] **F10-B** answer verification + confidence routing: `agents/verifier.py` — `verify_answer`
+      scores citation faithfulness, LLM-as-judge (structured output on the routed `verifier` model,
+      F10-E) when `verifier_enabled`, else the deterministic `verify_claims` gate (DRY, offline).
+      `verify_turn_answer` resolves an answer's `[[wikilink]]` citations (shared `kg.note.cited_ids`)
+      to the notes it cites; the runner stamps `AnswerEvent.confidence` + `unsupported_claims` and
+      sets `review_required` when `confidence < verifier_confidence_threshold` (the routing signal a
+      surface/future hold keys off — the durable D-032 hold is deferred, DEFERRED.md). Default-off =
+      today's plain answer. Config: `verifier_enabled`, `verifier_confidence_threshold`. Tests:
+      `test_verifier`, `test_runner`, `test_config`. (F10-B3 — LLM faithfulness of *report* prose —
+      deferred: the durable report path has no in-workflow prose to judge, only citations, which
+      `verify_claims` already gates. See DEFERRED.md.)
+- [x] **F10-F** quality metrics — P/R/F1 + drift: `evals/metrics.py` adds `precision`/`recall`/`f1`
+      (pure `precision_recall_f1` over predicted vs `expected_note_ids`; report/drift metrics, no
+      per-case gate); `evals/retrieval.py` scores a live retriever's P/R/F1 (`run_retrieval_eval`,
+      reuses `run_eval`); `evals/baseline.py` (`aggregate_metrics`/`detect_drift`, committed
+      `evals/baseline.json`) + `workflows/eval_drift.py` (`EvalDriftWorkflow` on background-jobs,
+      alerts via the *must-deliver* notify seam so a dropped alert fails the run). `detect_drift`
+      uses a *relative* band (`_epsilon` × baseline) so one knob fits metrics of different scales;
+      `DriftAlert.vanished` distinguishes an absent metric from a 0.0 score. Config:
+      `eval_drift_enabled`/`_schedule_minutes`/`_epsilon`/`_timeout_seconds`, `eval_baseline_path`.
+      Committed pinned case `retrieval-precision-recall.md`. Tests: `test_metrics_classification`,
+      `test_retrieval_eval`, `test_eval_drift` (incl. a baseline-matches-case-set guard),
+      `test_schedules`, `test_config`. (Over the deterministic committed case-set the scheduled job
+      is a deployment-consistency tripwire; live-retriever drift is deployment-local — DEFERRED.md.)
+- [x] **F10-D** sub-agent orchestration via Temporal child workflows: `workflows/orchestrator.py`
+      `fan_out(child, inputs)` runs N sub-tasks as bounded-parallel child workflows with per-child
+      retry + D-030 isolation (a poison child is dropped, siblings unaffected; results in input
+      order). Adopted by two real callers (Rule of Three): the report workflow (`ReportSectionWorkflow`
+      per section) and the memory jobs (pure `build_*_notes` extracted in `memory/jobs.py`, each note
+      published by a shared `PublishNoteWorkflow` child). Config `orchestrator_max_parallel_children`.
+      Tests: `test_orchestrator` (`_batches` offline + a Temporal-env fan-out isolation test),
+      `test_memory` (builder is behavior-preserving), `test_report_workflow`/`test_workers`
+      registration. A failed report section degrades to a visible `retrieval_failed` marker in the
+      draft (not silently dropped, GxP); `fan_out` re-raises `CancelledError` and carries no
+      redundant child-level retry. Conversational multi-agent mesh stays gated (single agent + skills
+      is KISS).
+- [ ] Gate-until-trigger (documented, not built): OCR/vision ingestion, vendor connectors
+      (Veeva/SAP/LIMS), GAMP-5 validation artifacts, conversational multi-agent mesh — each with its
+      trigger recorded in `docs/parity-plan.md`.
+
 ## Now — Foundation build (docs/foundation-plan.md + docs/implementation-tickets.md)
 
 The target-stack foundation: MAF harness experience on OpenShift + HPC/Nextflow, internal

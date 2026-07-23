@@ -18,6 +18,7 @@ from report.harness import (
     Report,
     ReportRequest,
     ReportSection,
+    SynthesizedSection,
     gather_section,
     report_note,
     verify_claims,
@@ -76,6 +77,18 @@ def test_gather_marks_unsupported_section_instead_of_inventing() -> None:
         assert "[layer: episodic]" in text and "[layer: evidence]" in text  # layers declared
 
     asyncio.run(_run())
+
+
+def test_failed_section_renders_distinctly_from_empty() -> None:
+    """A `retrieval_failed` section is unsupported and rendered as failed, not as 'no data'."""
+    failed = SynthesizedSection(
+        heading="Yield", memory_layer="episodic", evidence=[], retrieval_failed=True
+    )
+    empty = SynthesizedSection(heading="Toxicity", memory_layer="evidence", evidence=[])
+    assert failed.supported is False and empty.supported is False
+    text = report_note(Report(title="R", sections=[failed, empty])).body
+    assert "Retrieval failed" in text  # the errored section is flagged as incomplete
+    assert "No supporting data found" in text  # the genuinely empty section reads differently
 
 
 def test_report_note_cites_every_source() -> None:

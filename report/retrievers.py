@@ -12,12 +12,14 @@ from datetime import date
 from pathlib import Path
 from typing import Any
 
+from agents.embedding_provider import embed_texts
 from chemclaw.config import settings
 from kg.graph import load_notes
-from kg.note import WIKILINK
+from kg.note import WIKILINK, Note
 from mcp_servers.fpstore import FingerprintError, FingerprintStore
 from mcp_servers.rxnfp.search import find_similar_reactions
 from report.evidence import EvidenceChunk
+from report.vector_index import IndexHit, NoteIndex, note_text
 
 
 def _excerpt(body: str) -> str:
@@ -66,7 +68,9 @@ class GraphRetriever:
                 continue
             if want_tag is not None and want_tag not in note.tags:
                 continue
-            haystack = f"{note.id} {' '.join(note.tags)} {note.body}".lower()
+            # Same haystack the dense/lexical index build from (`note_text`), so all three entry
+            # points agree on what "the note's content" is and cannot drift.
+            haystack = note_text(note).lower()
             if needle in haystack:
                 # Score a matched note by its own confidence (KM-5): every returned note already
                 # matched the query, so among candidates the more-trusted note survives truncation
@@ -123,3 +127,97 @@ class FingerprintReactionRetriever:
             )
             for match in matches
         ]
+
+
+async def _eligible_notes(directory: Path, filters: dict[str, Any]) -> dict[str, Note]:
+    """Load notes under the type/tag `filters` into an id→Note map (empty if the dir is absent).
+
+    Shared by the dense and lexical retrievers so both honor the same `type`/`tag` filters the
+    graph retriever does, and both resolve a hit's excerpt from the same on-disk note (the source
+    of truth). Offloaded to a thread — `load_notes` is a synchronous full parse.
+    """
+    if not directory.exists():
+        return {}
+    want_type = filters.get("type")
+    want_tag = filters.get("tag")
+    notes: dict[str, Note] = {}
+    for note in await asyncio.to_thread(load_notes, directory):
+        if want_type is not None and note.type != want_type:
+            continue
+        if want_tag is not None and want_tag not in note.tags:
+            continue
+        notes[note.id] = note
+    return notes
+
+
+def _chunks_from_hits(
+    hits: list[IndexHit], notes: dict[str, Note], retriever_name: str
+) -> list[EvidenceChunk]:
+    """Map index hits to cited evidence chunks, dropping any hit whose note no longer loads.
+
+    A derived index can hold a stale row for a note deleted from disk, or one filtered out by
+    type/tag; either way the note is not in `notes`, so the hit is dropped — the graph on disk
+    stays authoritative and a citation never dangles.
+    """
+    chunks: list[EvidenceChunk] = []
+    for hit in hits:
+        note = notes.get(hit.note_id)
+        if note is None:
+            continue
+        chunks.append(
+            EvidenceChunk(
+                content=_excerpt(note.body) or note.id,
+                source_note_id=note.id,
+                retriever=retriever_name,
+            )
+        )
+    return chunks
+
+
+class VectorRetriever:
+    """Retrieve notes by dense-embedding similarity to the query. A `SourceRetriever` (F10-A).
+
+    An *entry point* into the graph, not a replacement (D-004): it surfaces notes semantically
+    related to the query even when they share no substring or wikilink with it, which the agent
+    then expands via `expand_note`. The index backend is injected for testability.
+    """
+
+    name = "vector"
+
+    def __init__(self, index: NoteIndex, notes_dir: str | None = None) -> None:
+        """Search `index`; resolve excerpts from the given notes dir or `knowledge_dir`."""
+        self._index = index
+        self._dir = Path(notes_dir if notes_dir is not None else settings.knowledge_dir)
+
+    async def retrieve(self, query: str, filters: dict[str, Any]) -> list[EvidenceChunk]:
+        """Return chunks for the notes most cosine-similar to `query` under the type/tag filters."""
+        notes = await _eligible_notes(self._dir, filters)
+        if not notes:
+            return []
+        query_embedding = (await asyncio.to_thread(embed_texts, [query]))[0]
+        hits = await self._index.search_dense(query_embedding, settings.retrieval_top_k)
+        return _chunks_from_hits(hits, notes, self.name)
+
+
+class LexicalRetriever:
+    """Retrieve notes by full-text term match (Postgres FTS). A `SourceRetriever` (F10-A).
+
+    The lexical/BM25-style entry point: a ranked term match that beats the graph retriever's plain
+    substring test (which cannot rank, and matches incidental substrings). Also an entry point into
+    the graph, not a replacement (D-004). The index backend is injected for testability.
+    """
+
+    name = "lexical"
+
+    def __init__(self, index: NoteIndex, notes_dir: str | None = None) -> None:
+        """Search `index`; resolve excerpts from the given notes dir or `knowledge_dir`."""
+        self._index = index
+        self._dir = Path(notes_dir if notes_dir is not None else settings.knowledge_dir)
+
+    async def retrieve(self, query: str, filters: dict[str, Any]) -> list[EvidenceChunk]:
+        """Return chunks for the notes best matching `query`'s terms under the type/tag filters."""
+        notes = await _eligible_notes(self._dir, filters)
+        if not notes:
+            return []
+        hits = await self._index.search_lexical(query, settings.retrieval_top_k)
+        return _chunks_from_hits(hits, notes, self.name)

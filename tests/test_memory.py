@@ -195,6 +195,26 @@ def test_distill_playbooks_proposes_evidence_backed_notes() -> None:
     assert "proj-x" in sub.submissions[0].content and "proj-y" in sub.submissions[0].content
 
 
+def test_build_campaign_notes_is_the_pure_half_of_synthesis() -> None:
+    """`build_campaign_notes` builds exactly the notes `synthesize_campaigns` publishes (F10-D2).
+
+    The fan-out workflow builds notes in one activity and publishes each in its own child; this pins
+    that the extracted builder yields the same content the in-process publish path does, so the
+    refactor is behavior-preserving.
+    """
+    from memory.jobs import build_campaign_notes
+
+    a = _reaction("a", ["CCO"], ["CC=O"], project="proj-x")
+    b = _reaction("b", ["CC=O"], ["CC(O)O"], project="proj-x")
+    notes = build_campaign_notes([a, b])
+    sub = FakeSubmitter()
+    asyncio.run(synthesize_campaigns([a, b], sub))
+    # The builder yields exactly the notes the publish path submits (same ids, in order).
+    assert len(notes) == len(sub.submissions)
+    assert all(n.id in s.path for n, s in zip(notes, sub.submissions, strict=True))
+    assert all(n.type == "campaign" for n in notes)
+
+
 # --- user interaction (5.5) -----------------------------------------------------------
 
 
