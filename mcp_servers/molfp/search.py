@@ -7,8 +7,11 @@ and testable with the in-memory store. Defaults (top_k, threshold) come from con
 capability surfaces them; the `reaction-search` skill decides how to set them (G6).
 """
 
+import logging
+
 from rdkit import Chem
 
+from chemclaw.config import settings
 from mcp_servers.fpstore import (
     FingerprintError,
     FingerprintRecord,
@@ -17,6 +20,8 @@ from mcp_servers.fpstore import (
     find_matches,
 )
 from mcp_servers.molfp.fingerprint import ecfp_bitstring, molecule_definition
+
+log = logging.getLogger(__name__)
 
 
 def record_for(record_id: str, smiles: str) -> FingerprintRecord:
@@ -46,15 +51,24 @@ async def find_substructure_matches(store: FingerprintStore, query: str) -> list
     The query is interpreted as SMARTS (the right language for a substructure pattern; a
     plain SMILES is also valid SMARTS), with a SMILES parse as a fallback for the rare
     string that fails as SMARTS. Exact RDKit matching over the corpus — a structural
-    filter, not a similarity score. v1 scans all records; a pattern-fingerprint prefilter
-    is a later optimization for large corpora (ECFP bits cannot screen substructures
-    soundly).
+    filter, not a similarity score. The scan is bounded to `substructure_scan_max_records`
+    (a full-table load into the worker heap is the failure mode); hitting the cap logs a
+    warning so a truncated result is never silent. A pattern-fingerprint prefilter is a later
+    optimization for large corpora (ECFP bits cannot screen substructures soundly).
     """
     pattern = Chem.MolFromSmarts(query) or Chem.MolFromSmiles(query)
     if pattern is None:
         raise FingerprintError(f"unparseable substructure query: {query!r}")
+    cap = settings.substructure_scan_max_records
+    records = await store.all_records(limit=cap)
+    if len(records) == cap:
+        log.warning(
+            "substructure scan hit the %d-record cap; matches may be incomplete "
+            "(raise CHEMCLAW_SUBSTRUCTURE_SCAN_MAX_RECORDS or narrow the corpus)",
+            cap,
+        )
     matches: list[FingerprintRecord] = []
-    for record in await store.all_records():
+    for record in records:
         mol = Chem.MolFromSmiles(record.label)
         if mol is not None and mol.HasSubstructMatch(pattern):
             matches.append(record)

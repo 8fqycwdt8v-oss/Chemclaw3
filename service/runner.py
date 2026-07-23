@@ -11,7 +11,7 @@ stack trace to the browser — a failed turn must not take down the stream or le
 """
 
 import logging
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Mapping
 from contextlib import AsyncExitStack
 from typing import Any
 
@@ -26,6 +26,7 @@ from agents.session_context import (
 )
 from agents.verifier import verify_turn_answer
 from chemclaw.config import settings
+from service.budget import BudgetTracker
 from service.events import (
     AnswerEvent,
     ApprovalRequestEvent,
@@ -49,6 +50,7 @@ async def run_turn(
     *,
     actor: str | None = None,
     roles: frozenset[str] = frozenset(),
+    budget: BudgetTracker | None = None,
 ) -> AsyncIterator[Event]:
     """Run one turn and yield its events (tokens, tool calls, approvals, then the answer).
 
@@ -60,12 +62,18 @@ async def run_turn(
         actor: The authenticated user's Entra oid (F4), made ambient so the audit trail, the
             authorization gate, and job attribution see it. `None` off the authenticated path.
         roles: The user's app roles, made ambient for the authorization gate.
+        budget: The runaway-cost meter. When set, this turn's reported token usage and its turn
+            count are booked against the session/user when the turn ends (the front-door admission
+            check reads those counters before the *next* turn). `None` disables metering (test/CLI).
 
     Yields:
         `service.events.Event` values in the order the model produced them, ending with an
         `AnswerEvent` on success or an `ErrorEvent` on failure.
     """
     answer_parts: list[str] = []
+    # Metered across the turn's updates and booked once on teardown (even on failure — a failed turn
+    # still spent tokens up to the point it broke, so its cost must count toward the next check).
+    turn_tokens = 0
     # Stamp the turn's session so a job-launching tool (submit_qm_job) records push-back to the
     # right session (F3-T3) — ambient, never a model-supplied argument. Reset on turn teardown.
     session_token = set_current_session_id(session.session_id)
@@ -82,6 +90,7 @@ async def run_turn(
                 await stack.enter_async_context(tool)
             stream = agent.run(user_message, stream=True, session=session)
             async for update in stream:
+                turn_tokens += _usage_tokens(update)
                 text = getattr(update, "text", "") or ""
                 if text:
                     answer_parts.append(text)
@@ -104,6 +113,8 @@ async def run_turn(
             )
         )
     finally:
+        if budget is not None:
+            budget.record(session.session_id, actor, turn_tokens)
         reset_current_session_id(session_token)
         reset_current_session(live_session_token)
         if identity_token is not None:
@@ -133,6 +144,27 @@ async def _answer_event(answer: str) -> AnswerEvent:
         unsupported_claims=[claim.text for claim in result.unsupported],
         review_required=result.confidence < settings.verifier_confidence_threshold,
     )
+
+
+def _usage_tokens(update: Any) -> int:
+    """Best-effort total tokens reported in a streamed update's usage content (0 if none).
+
+    MAF emits usage as a content carrying a `UsageDetails` mapping (`input_token_count`/
+    `output_token_count`/`total_token_count`). Duck-typed on the mapping so a provider or version
+    that reports no usage — or the fake agent in tests — simply meters 0; the turn caps still bind.
+    """
+    total = 0
+    for content in getattr(update, "contents", None) or []:
+        details = getattr(content, "usage_details", None)
+        if not isinstance(details, Mapping):
+            continue
+        tokens = details.get("total_token_count")
+        if tokens is None:
+            tokens = (details.get("input_token_count") or 0) + (
+                details.get("output_token_count") or 0
+            )
+        total += int(tokens or 0)
+    return total
 
 
 def _tool_calls_in(update: Any) -> list[tuple[str, str]]:

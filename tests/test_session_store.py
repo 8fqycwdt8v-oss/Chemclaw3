@@ -10,7 +10,7 @@ import asyncio
 from agent_framework import InMemoryHistoryProvider, Message
 
 from agents.chemclaw_agent import _history_provider
-from agents.session_store import PostgresHistoryProvider
+from agents.session_store import PostgresHistoryProvider, SessionOwnerStore
 from chemclaw.config import settings
 from tests.pg import migrated_db_or_skip
 
@@ -53,5 +53,33 @@ def test_unknown_session_loads_empty() -> None:
         provider = await _provider_or_skip()
         assert await provider.get_messages("sess-does-not-exist") == []
         assert await provider.get_messages(None) == []
+
+    asyncio.run(_run())
+
+
+def test_session_owner_records_and_reattaches() -> None:
+    """Ownership persists and a fresh store instance looks it up — the reattach path (F3)."""
+
+    async def _run() -> None:
+        await migrated_db_or_skip()
+        writer = SessionOwnerStore()
+        await writer.record("sess-owner-1", "alice")
+        await writer.record("sess-owner-1", "mallory")  # idempotent: first writer wins
+
+        reader = SessionOwnerStore()  # a restarted pod would build a fresh instance
+        assert await reader.lookup("sess-owner-1") == (True, "alice")
+        assert await reader.lookup("sess-never-created") == (False, None)
+
+    asyncio.run(_run())
+
+
+def test_session_owner_records_null_owner() -> None:
+    """A session with no Entra oid (the shared dev principal) is still recorded and found."""
+
+    async def _run() -> None:
+        await migrated_db_or_skip()
+        store = SessionOwnerStore()
+        await store.record("sess-owner-null", None)
+        assert await store.lookup("sess-owner-null") == (True, None)
 
     asyncio.run(_run())
