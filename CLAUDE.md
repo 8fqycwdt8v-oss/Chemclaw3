@@ -60,9 +60,31 @@ The toolchain is fixed by the plan (Phase 0) but not yet scaffolded. Once it exi
 
 A step is done only when its acceptance check passes **and** `make lint type test` is green.
 
+## Workflow (how to work a task)
+
+**Plan first.** For any non-trivial task (3+ steps or an architectural decision), enter plan
+mode before touching code; simple, obvious fixes skip this. Write the plan to `tasks/todo.md`
+as checkable items, write detailed specs upfront to kill ambiguity, and check in before
+implementing. Mark items done as you go and give a one-line summary at each step. Plan
+verification too, not just building. If something goes sideways, **stop and re-plan** — never
+keep pushing a failing approach. Close the loop with a short review section in `tasks/todo.md`.
+
+**Verify before done.** Never mark a task complete without proving it works: run the tests,
+check the logs, demonstrate correctness. Where it clarifies things, diff behavior between the
+base and your change. The bar is "would a staff engineer approve this?" — if not, it is not done.
+
+**Fix bugs autonomously.** Given a bug report, failing CI, or an error/log, just fix it:
+find the root cause and resolve it without asking for hand-holding or step-by-step direction.
+
 ## Code quality (non-negotiable)
 
 - **Perfection over speed**: when unsure, ask — do not guess.
+- **Demand elegance (balanced)**: for non-trivial changes, pause and ask "is there a more
+  elegant way?" and challenge your own work before presenting it. If a fix feels hacky,
+  redo it as the elegant solution knowing everything you now know. Skip this for simple,
+  obvious fixes — don't over-engineer.
+- **Root cause, not band-aid**: no temporary patches; fix the underlying cause. Keep changes
+  minimal and focused — touch only what the task needs, and don't introduce new bugs.
 - **KISS**: simplest working solution; no over-engineering. No abstraction without a second
   real caller (Rule of Three); an abstraction with one caller gets inlined.
 - **DRY**: no duplicate logic — extract shared code. The PR-gate and the retriever interface
@@ -84,6 +106,9 @@ after each cluster of steps before moving on.
 - `BACKLOG.md` — prioritized open action items.
 - `DEFERRED.md` — consciously postponed items **with the reason they are not now**.
 - `DECISIONS.md` — architecture decisions with rationale (append-only ADR log).
+- `tasks/lessons.md` — self-improvement log. Review it at session start; after **any**
+  correction from the user, add the pattern here and write a rule for yourself that prevents
+  the same mistake. Iterate ruthlessly until the mistake rate drops.
 
 Keep these current; they are the memory across sessions. For recurring patterns, prefer a
 `.claude/skills/<name>/SKILL.md` over bloating this file.
@@ -95,8 +120,10 @@ Keep these current; they are the memory across sessions. For recurring patterns,
   changed files, and a one-line summary of any failed approach (so it is not retried).
 - After finishing a self-contained step, actively suggest/use `/compact` (or `/clear`).
 - Keep replies as short as possible; no explanations without added value.
-- Use **subagents** for exploration/verification so failed attempts never accumulate in the
-  main context (subagents have their own context window and tools).
+- Use **subagents** liberally to keep the main context clean: offload research, exploration,
+  and parallel analysis so failed attempts never accumulate in the main window (subagents
+  have their own context and tools). One focused task per subagent. For hard problems, throw
+  more compute at them by fanning out across several subagents.
 
 ## Governance
 
