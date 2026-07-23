@@ -89,7 +89,7 @@ right ones; this review changed one thing (the cursor guard) and left the rest a
 ## F10 review-cycle accepted deferrals (2026-07-22)
 
 The post-F10 adversarial review (five agent teams over the new features + the whole codebase) fixed
-the confirmed defects in-branch (recorded in D-064); these three residuals were **consciously not
+the confirmed defects in-branch (recorded in D-065); these three residuals were **consciously not
 built now**, each because it needs a live edge this offline environment does not have:
 
 | Deferred | Why not now | Trigger to revisit |

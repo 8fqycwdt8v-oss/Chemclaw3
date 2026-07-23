@@ -1326,7 +1326,55 @@ zero capacity + permit released across sequential turns). New config: `retrieval
 `graph_cache_enabled`, `deployment_revision`, `service_max_concurrent_turns`,
 `service_turn_admission_timeout_seconds`; new migration `infra/sql/010_audit_revision.sql`.
 
-## D-058 — F10-E/B: per-task model routing + answer verification & confidence routing (D-A11)
+## D-058 — Prove the harness loop live; close the F3-T3 awaiting-todo deferral
+
+**Context.** D-040 wired MAF's harness (`TodoProvider`/`AgentModeProvider`/`AgentLoopMiddleware`),
+but every test built it with a dummy `object()` client — construction was proven, the loop itself
+never actually ran. Separately, F3-T3 shipped job→session push-back but explicitly deferred
+"flipping the harness `awaiting` todo on completion" (`BACKLOG.md`) because it needed the loop
+exercised live to get the mutation right, not guessed at in the abstract.
+
+**Decisions.**
+- **A real scripted chat client, not a mock of the loop.** `tests/test_harness_execution.py` adds
+  `ScriptedChatClient(FunctionInvocationLayer, BaseChatClient)` — the same base classes every
+  concrete MAF client composes — whose replies are a fixed script. `build_agent(chat_client=...)`
+  wires it through the *actual* harness path (`_build_harness_agent`), so `TodoProvider`,
+  `AgentModeProvider`, `AgentLoopMiddleware`, and `todos_remaining` all run for real: the scripted
+  model adds todos, the loop re-invokes it while any remain open (reading real todo-store state,
+  not a stub), completes them one by one, and the loop stops itself. Three cases proven live:
+  `execute` autonomy loops a two-step plan to completion; `plan_only` autonomy produces the plan and
+  genuinely stops (not just a different `default_mode` value); `harness_max_loop_iterations` caps a
+  todo the model never finishes. Nothing about the loop or todo store is faked — only the model.
+- **`agents/harness_todo.py`: the awaiting-job bridge, scoped to what's actually buildable today.**
+  `mark_awaiting_job`/`complete_awaiting_job` operate directly on MAF's `TodoSessionStore`.
+  `TodoItem` has no field for an arbitrary job id, so the link is a description-string convention —
+  never model-authored: `submit_qm_job` creates the "awaiting" todo itself right after Temporal
+  hands back a job id, so the match is exact-string. On the `job_completed` push-back
+  (`service/app.py`'s `/sessions/{id}/events`), the live session is looked up in `_LiveSessions` and
+  the matching todo is flipped complete. This closes exactly what F3-T3 deferred.
+  - **Not attempted:** resuming the *same* streamed turn while the job is still running. That needs
+    deciding how a new turn gets triggered server-side with no client request in flight — genuinely
+    open (`docs/harness-konzept.md` §4, and the F1 backlog's `awaiting`-state-resume follow-up) and
+    not guessed at here. The flipped todo is picked up on the session's *next* turn instead.
+  - A fresh submit marks awaiting; a re-submit that hits `WorkflowAlreadyStartedError` (an
+    already-running *or already-completed* job, D-011) does not — marking again for an
+    already-completed job would create a todo no future push-back will ever flip, blocking
+    `todos_remaining` forever.
+  - Gated on `settings.harness_enabled` at both ends (submit and completion) and on the ambient live
+    session being present, so the classic (default) agent path never writes to a todo list nothing
+    reads, and the CLI (single-shot, no `AgentSession`) is an inert no-op.
+- **New ambient: `agents.session_context.get_current_session`/`set_current_session`.** A second
+  contextvar alongside the existing session-id one, carrying the live `AgentSession` object —
+  needed because `TodoSessionStore` operates on `session.state`, not reachable from the id alone.
+  Kept separate rather than changing the id ambient's contract so every existing id-only consumer is
+  unaffected. `service/runner.py::run_turn` sets/resets it alongside the id, same turn lifecycle.
+
+**Result.** `make lint type test` green. New tests: `test_harness_execution.py` (3, the live loop),
+`test_harness_todo.py` (4, the bridge in isolation), plus wiring tests in `test_qm_tools.py` (3) and
+`test_service.py` (2). No changes to `agents/chemclaw_agent.py` — the harness wiring from D-040 was
+correct as built; this proves it and closes the one deferral that was actually gated on doing so.
+
+## D-059 — F10-E/B: per-task model routing + answer verification & confidence routing (D-A11)
 
 **Context.** A capability comparison against a commercial pharma-agent *platform* (IntuitionLabs)
 found Chemclaw at or ahead on the durability/identity/audit spine, with deltas in retrieval breadth,
@@ -1355,7 +1403,7 @@ level (it has no synthesized prose); the conversational path gets the LLM faithf
 **Result.** `make lint type test` green. Tests: `test_llm_provider`, `test_verifier`, `test_runner`,
 `test_config`.
 
-## D-059 — F10-C: per-tool authorization middleware (supersedes D-044 scope, D-A12)
+## D-060 — F10-C: per-tool authorization middleware (supersedes D-044 scope, D-A12)
 
 **Context.** `authorize_trigger` guarded only the expensive `submit_qm_job` trigger (F4-T5). Tool-use
 governance at *every* invocation was a platform delta.
@@ -1373,7 +1421,7 @@ scope.
 **Result.** `make lint type test` green. Tests: `test_tool_authz`, `test_agent` (two middlewares),
 `test_config`.
 
-## D-060 — F10-G: audit hash-chain + bi-temporal note fields (D-A15)
+## D-061 — F10-G: audit hash-chain + bi-temporal note fields (D-A15)
 
 **Context.** D-034 left the audit hash-chain "for Phase 6"; `architektur.md` §10.4 proposed
 bi-temporal note fields but never schematized them. Both are low-complexity, GxP-relevant.
@@ -1392,7 +1440,7 @@ when it was valid. The `NullAuditSink` default is unaffected.
 
 **Result.** `make lint type test` green. Tests: `test_audit_chain`, `test_note`, `test_kg_validate`.
 
-## D-061 — F10-A: hybrid retrieval — dense + lexical entry points, RRF fusion (D-A10)
+## D-062 — F10-A: hybrid retrieval — dense + lexical entry points, RRF fusion (D-A10)
 
 **Context.** Retrieval was graph traversal + binary structural fingerprints: no dense-semantic and no
 lexical rank, so a note sharing neither a substring nor a wikilink with the query was unreachable.
@@ -1413,7 +1461,7 @@ derived. A scheduled reindex activity is a documented follow-up (today `make rei
 **Result.** `make lint type test` green. Tests: `test_embedding_provider`, `test_vector_index`,
 `test_hybrid_retrieval`, `test_config`.
 
-## D-062 — F10-F: classification metrics (P/R/F1) + eval drift detection (D-A14)
+## D-063 — F10-F: classification metrics (P/R/F1) + eval drift detection (D-A14)
 
 **Context.** The eval harness scored green-chemistry/prediction metrics with absolute-error
 tolerances; it had no precision/recall/F1 and no drift detection.
@@ -1439,7 +1487,7 @@ deployment-consistency tripwire; live drift over the deployment's own graph stay
 (incl. a baseline-matches-case-set guard), `test_schedules`, `test_config`; the KM-13 gold-set is
 pinned by `test_retrieval_eval` (D-056).
 
-## D-063 — F10-D: sub-agent orchestration via Temporal child workflows (D-A13)
+## D-064 — F10-D: sub-agent orchestration via Temporal child workflows (D-A13)
 
 **Context.** Report-section retrieval and memory synthesis each fanned a task into independent steps
 but ran them in one monolithic activity, so a single poison item failed the whole batch and there was
@@ -1463,7 +1511,7 @@ only the execution topology gained parallelism + isolation. Config
 Tests: `test_orchestrator`, `test_memory` (builder behavior-preserving), `test_report_workflow` /
 `test_workers` registration, `test_config`.
 
-## D-064 — F10 post-implementation review cycle: verified fixes
+## D-065 — F10 post-implementation review cycle: verified fixes
 
 **Context.** After F10 (A–G) landed, an adversarial review — five agent teams over the new features
 and the whole codebase — surfaced real plan-vs-code and correctness gaps. The most severe: F10-B's

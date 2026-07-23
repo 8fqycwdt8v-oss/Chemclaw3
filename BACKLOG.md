@@ -111,6 +111,10 @@ MAF ships the harness natively (`create_harness_agent` + `TodoProvider`/`AgentMo
       (capped). Test: `test_agent.py::test_harness_autonomy_sets_start_mode`.
 - [x] ADR **D-020** finalized + **D-A1** (F0) — written in DECISIONS.md (D-020, and D-039 = foundation
       D-A1, D-040 = foundation D-020). Checkbox was stale; confirmed present.
+- [x] **F1-T4** The loop proven live, not just constructed: `test_harness_execution.py` drives
+      `build_agent`'s real harness path with a scripted-but-real `BaseChatClient`/
+      `FunctionInvocationLayer` chat client — genuine multi-iteration execute-mode looping,
+      plan-mode's loop actually not continuing, and the iteration cap actually capping. ADR **D-058**.
 
 ### Phase F2 — Front door + run service (the agent finally runs)
 - [x] **F2-T1** `service/app.py::create_app` (FastAPI) + `service/runner.py::run_turn` — builds/holds
@@ -143,9 +147,14 @@ MAF ships the harness natively (`create_harness_agent` + `TodoProvider`/`AgentMo
       on the background queue, registered on the worker); front-door `GET /sessions/{id}/events` SSE
       streams `job_completed` push-back (`JobCompletedEvent`). Tests: `test_session_context.py`,
       `test_service.py` (all offline with fakes); the workflow-emit + DB round-trip prove live.
-- [ ] Deferred within F3-T3: flipping the harness `awaiting` todo on completion (needs MAF
-      TodoProvider store mutation — best done when the harness loop runs live); `PlanEvent`/live
-      `JobStartedEvent` emission. ADR **D-042** written.
+- [x] Deferred-within-F3-T3 item resolved: flipping the harness `awaiting` todo on completion.
+      `agents/harness_todo.py` (`mark_awaiting_job`/`complete_awaiting_job`, direct
+      `TodoSessionStore` mutation); `submit_qm_job` marks on a fresh submit, `/sessions/{id}/events`
+      flips on `job_completed`. Gated on `harness_enabled` + the ambient live session
+      (`agents.session_context.get_current_session`, new). Tests: `test_harness_todo.py`,
+      wiring tests in `test_qm_tools.py`/`test_service.py`. ADR **D-058**. Still open: resuming the
+      *same* streamed turn mid-flight (vs. picked up next turn) — see the F1 follow-up below.
+- [ ] Still deferred: `PlanEvent`/live `JobStartedEvent` emission. ADR **D-042** written.
 
 ### Phase F4 — Entra ID identity & RBAC (system-wide)
 - [x] **F4-T1** Front-door user auth (Entra OIDC): `service/auth.py` (`Principal`, `validate_token`
@@ -353,10 +362,12 @@ MAF ships the harness natively (`create_harness_agent` + `TodoProvider`/`AgentMo
       deterministic compaction (D-025, passed as last context provider), GxP audit middleware
       (D-027), role-filtered skills, and MCP capability tools (D-029). ADR renumbered D-020→D-038
       (D-020 was taken by the report harness on main).
-- [ ] **Follow-ups (open):** `awaiting`-state resume via the durable-approval seam (D-032/D-035) ·
-      plan/loop metrics for Phase 2b · plan-mode approval + finer autonomy behind RBAC (Phase 6,
-      authz in the MCP server) · agent-harness ↔ report-pipeline interplay (open research per
-      section vs. fixed synthesis flow).
+- [x] The awaiting-todo half of the resume follow-up: flipping the todo on job completion, closed —
+      see F3-T3 above and `agents/harness_todo.py` (D-058).
+- [ ] **Follow-ups (still open):** resuming the *same* streamed turn mid-flight (vs. picked up on the
+      session's next turn) via the durable-approval seam (D-032/D-035) · plan/loop metrics for Phase
+      2b · plan-mode approval + finer autonomy behind RBAC (Phase 6, authz in the MCP server) ·
+      agent-harness ↔ report-pipeline interplay (open research per section vs. fixed synthesis flow).
 
 ## Done — Phase 5: memory layers (episodic + semantic, no new infra — D-019)
 - [x] 5.1/5.2/5.3 episodic: `memory/chains.py` (chain detection — product A = reactant B via the

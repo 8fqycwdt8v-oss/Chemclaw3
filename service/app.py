@@ -29,6 +29,7 @@ from starlette.requests import Request
 from starlette.responses import Response
 
 from agents.chemclaw_agent import build_agent
+from agents.harness_todo import complete_awaiting_job
 from agents.session_events import stream_new_events
 from chemclaw.config import settings
 from service.auth import Principal, require_principal
@@ -213,9 +214,19 @@ def create_app(agent_factory: Callable[[], Any] = build_agent) -> FastAPI:
         async def _events() -> AsyncIterator[dict[str, str]]:
             async for pushed in stream_new_events(session_id):
                 if pushed.kind == "job_completed":
-                    event = JobCompletedEvent(
-                        job_id=str(pushed.payload.get("job_id", "")), summary=pushed.payload
-                    )
+                    job_id = str(pushed.payload.get("job_id", ""))
+                    # Flip the harness todo that was waiting on this job (F3-T3 follow-up), so the
+                    # session's *next* turn sees it as done instead of open forever. The live
+                    # session may already be gone from the LRU cache (`_owned_session` above only
+                    # required it to exist when this stream *started*) — a miss here is a safe
+                    # no-op, matching `complete_awaiting_job`'s own no-op-on-miss contract.
+                    if settings.harness_enabled:
+                        live_entry = app.state.live_sessions.get(session_id)
+                        if live_entry is not None:
+                            await complete_awaiting_job(
+                                live_entry[0], job_id, reason=f"QM job {job_id} completed"
+                            )
+                    event = JobCompletedEvent(job_id=job_id, summary=pushed.payload)
                     yield {"event": event.type, "data": event.model_dump_json()}
 
         return EventSourceResponse(_events())

@@ -18,7 +18,12 @@ from typing import Any
 from agent_framework import AgentSession
 
 from agents.identity_context import reset_current_identity, set_current_identity
-from agents.session_context import reset_current_session_id, set_current_session_id
+from agents.session_context import (
+    reset_current_session,
+    reset_current_session_id,
+    set_current_session,
+    set_current_session_id,
+)
 from agents.verifier import verify_turn_answer
 from chemclaw.config import settings
 from service.events import (
@@ -64,6 +69,9 @@ async def run_turn(
     # Stamp the turn's session so a job-launching tool (submit_qm_job) records push-back to the
     # right session (F3-T3) — ambient, never a model-supplied argument. Reset on turn teardown.
     session_token = set_current_session_id(session.session_id)
+    # The live session object too, so a job-launching tool can mark the harness todo it's waiting
+    # on (`agents.harness_todo`) — the id alone cannot reach the session's own todo-list state.
+    live_session_token = set_current_session(session)
     # Stamp the authenticated identity (F4) so audit/authorization/attribution see the user.
     identity_token = set_current_identity(actor, roles) if actor is not None else None
     try:
@@ -97,6 +105,7 @@ async def run_turn(
         )
     finally:
         reset_current_session_id(session_token)
+        reset_current_session(live_session_token)
         if identity_token is not None:
             reset_current_identity(identity_token)
 

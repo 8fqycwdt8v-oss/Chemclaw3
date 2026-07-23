@@ -99,6 +99,93 @@ def test_submit_pins_completed_safe_reuse_policy(monkeypatch: pytest.MonkeyPatch
     assert captured["id_reuse_policy"] is WorkflowIDReusePolicy.ALLOW_DUPLICATE_FAILED_ONLY
 
 
+def test_submit_marks_harness_todo_awaiting_when_harness_enabled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A fresh submit records an awaiting todo on the live session when the harness is on.
+
+    Offline-runnable (no Temporal server): a `_FakeClient` stands in for `connect()`, matching
+    `test_submit_pins_completed_safe_reuse_policy` above.
+    """
+    from agent_framework import AgentSession
+
+    from agents.harness_todo import complete_awaiting_job
+    from agents.session_context import reset_current_session, set_current_session
+
+    class _FakeHandle:
+        id = "qm-fresh"
+
+    class _FakeClient:
+        async def start_workflow(self, *args: Any, **kwargs: Any) -> _FakeHandle:
+            return _FakeHandle()
+
+    async def _fake_connect() -> Any:
+        return _FakeClient()
+
+    monkeypatch.setattr(qm_tools, "connect", _fake_connect)
+    monkeypatch.setattr(settings, "harness_enabled", True)
+
+    session = AgentSession(session_id="s1")
+    token = set_current_session(session)
+    try:
+        job_id = asyncio.run(submit_qm_job("CCO", "B3LYP", "def2-SVP"))
+    finally:
+        reset_current_session(token)
+
+    assert job_id == "qm-fresh"
+    # The awaiting todo round-trips through the public bridge, not a hardcoded internal format.
+    assert asyncio.run(complete_awaiting_job(session, job_id, reason="done")) is True
+
+
+def test_submit_does_not_touch_todos_when_harness_disabled(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The classic (default) agent path never writes to a todo list nobody reads."""
+    from agent_framework import AgentSession
+
+    from agents.harness_todo import complete_awaiting_job
+    from agents.session_context import reset_current_session, set_current_session
+
+    class _FakeHandle:
+        id = "qm-classic"
+
+    class _FakeClient:
+        async def start_workflow(self, *args: Any, **kwargs: Any) -> _FakeHandle:
+            return _FakeHandle()
+
+    async def _fake_connect() -> Any:
+        return _FakeClient()
+
+    monkeypatch.setattr(qm_tools, "connect", _fake_connect)
+    monkeypatch.setattr(settings, "harness_enabled", False)
+
+    session = AgentSession(session_id="s1")
+    token = set_current_session(session)
+    try:
+        job_id = asyncio.run(submit_qm_job("CCO", "B3LYP", "def2-SVP"))
+    finally:
+        reset_current_session(token)
+
+    assert asyncio.run(complete_awaiting_job(session, job_id, reason="done")) is False
+
+
+def test_submit_with_no_ambient_session_does_not_crash(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The CLI path (harness on, but no `AgentSession` ambient) submits without erroring."""
+
+    class _FakeHandle:
+        id = "qm-cli"
+
+    class _FakeClient:
+        async def start_workflow(self, *args: Any, **kwargs: Any) -> _FakeHandle:
+            return _FakeHandle()
+
+    async def _fake_connect() -> Any:
+        return _FakeClient()
+
+    monkeypatch.setattr(qm_tools, "connect", _fake_connect)
+    monkeypatch.setattr(settings, "harness_enabled", True)
+
+    assert asyncio.run(submit_qm_job("CCO", "B3LYP", "def2-SVP")) == "qm-cli"
+
+
 def test_status_of_foreign_workflow_is_clear_error(monkeypatch: pytest.MonkeyPatch) -> None:
     """A valid non-QM workflow id is a clear error, not an opaque pydantic crash (G4)."""
 
