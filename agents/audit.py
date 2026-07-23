@@ -182,9 +182,3 @@ async def _emit(sink: AuditSink, event: AuditEvent) -> None:
                 "actor": event.actor,
             },
         )
-
-
-# The default, log-only middleware for the credential-free path (and the direct unit tests):
-# no conversation id, no identity, no durable sink. `build_agent` builds a per-conversation
-# middleware with a real correlation id (and an optional durable sink) instead.
-audit_tool_calls = make_audit_middleware(correlation_id="-", actor=settings.service_actor_id)

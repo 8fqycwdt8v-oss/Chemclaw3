@@ -12,6 +12,7 @@ from typing import Any
 import pytest
 
 import agents.research_tools as research_tools
+from agents.embedding_provider import embed_texts
 from chemclaw.config import settings
 from report.evidence import EvidenceChunk
 from report.hybrid import reciprocal_rank_fusion
@@ -56,6 +57,67 @@ def test_lexical_retriever_honors_type_filter(tmp_path: Path) -> None:
         retriever = LexicalRetriever(index, notes_dir=str(tmp_path))
         chunks = await retriever.retrieve("amide coupling", {"type": "playbook"})
         assert [c.source_note_id for c in chunks] == ["play-1"]
+
+    asyncio.run(_run())
+
+
+def test_vector_and_lexical_retrievers_exclude_expired_notes(tmp_path: Path) -> None:
+    """An expired note in the index is never served as current evidence (KM-7, all entry points)."""
+
+    async def _run() -> None:
+        (tmp_path / "old.md").write_text(
+            "---\nid: note-old\ntype: reaction\nvalid_to: 2000-01-01\n---\n"
+            "amide coupling epimerization\n",
+            encoding="utf-8",
+        )
+        _write_note(tmp_path, "note-new", "amide coupling epimerization")
+        index = await _index_for(tmp_path)
+        for retriever in (
+            VectorRetriever(index, notes_dir=str(tmp_path)),
+            LexicalRetriever(index, notes_dir=str(tmp_path)),
+        ):
+            chunks = await retriever.retrieve("amide coupling epimerization", {})
+            assert [c.source_note_id for c in chunks] == ["note-new"]
+
+    asyncio.run(_run())
+
+
+def test_index_hit_scores_survive_into_chunks(tmp_path: Path) -> None:
+    """Vector chunks carry the index's own ranking score, not the neutral 0.5 default."""
+
+    async def _run() -> None:
+        _write_note(tmp_path, "note-001", "amide coupling with HATU gave epimerization")
+        _write_note(tmp_path, "note-002", "amide coupling")
+        index = await _index_for(tmp_path)
+        retriever = VectorRetriever(index, notes_dir=str(tmp_path))
+        query = "epimerization during amide coupling"
+        chunks = await retriever.retrieve(query, {})
+        (query_embedding,) = embed_texts([query])
+        hits = await index.search_dense(query_embedding, settings.retrieval_top_k)
+        expected = {h.note_id: min(max(h.score, 0.0), 1.0) for h in hits}
+        assert chunks and all(c.score == expected[c.source_note_id] for c in chunks)
+        assert any(c.score != 0.5 for c in chunks)  # the index signal, not the default
+
+    asyncio.run(_run())
+
+
+def test_type_filter_keeps_recall_past_global_top_k(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A filtered query finds the eligible note even when the global top-k are all wrong-type."""
+
+    async def _run() -> None:
+        _write_note(tmp_path, "rxn-1", "amide coupling epimerization", note_type="reaction")
+        _write_note(tmp_path, "rxn-2", "amide coupling epimerization study", note_type="reaction")
+        _write_note(tmp_path, "play-1", "amide coupling workup", note_type="playbook")
+        index = await _index_for(tmp_path)
+        monkeypatch.setattr(settings, "retrieval_top_k", 1)
+        for retriever in (
+            VectorRetriever(index, notes_dir=str(tmp_path)),
+            LexicalRetriever(index, notes_dir=str(tmp_path)),
+        ):
+            chunks = await retriever.retrieve("amide coupling epimerization", {"type": "playbook"})
+            assert [c.source_note_id for c in chunks] == ["play-1"]
 
     asyncio.run(_run())
 

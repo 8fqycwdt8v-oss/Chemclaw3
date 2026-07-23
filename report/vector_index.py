@@ -67,12 +67,24 @@ class NoteIndex(Protocol):
         """Insert or replace index rows by note id."""
         ...
 
-    async def search_dense(self, query_embedding: list[float], top_k: int) -> list[IndexHit]:
-        """Return up to `top_k` notes most cosine-similar to `query_embedding`, best first."""
+    async def search_dense(
+        self, query_embedding: list[float], top_k: int, within: set[str] | None = None
+    ) -> list[IndexHit]:
+        """Return up to `top_k` notes most cosine-similar to `query_embedding`, best first.
+
+        `within` restricts hits to the given note ids *before* the top-k cut, so a caller's
+        eligibility filter keeps full recall instead of competing with ineligible neighbors for
+        the k slots. None means the whole index.
+        """
         ...
 
-    async def search_lexical(self, query: str, top_k: int) -> list[IndexHit]:
-        """Return up to `top_k` notes best matching the terms in `query`, best first."""
+    async def search_lexical(
+        self, query: str, top_k: int, within: set[str] | None = None
+    ) -> list[IndexHit]:
+        """Return up to `top_k` notes best matching the terms in `query`, best first.
+
+        `within` scopes the search exactly as in `search_dense`.
+        """
         ...
 
 
@@ -100,21 +112,28 @@ class InMemoryNoteIndex:
         for record in records:
             self._records[record.note_id] = record
 
-    async def search_dense(self, query_embedding: list[float], top_k: int) -> list[IndexHit]:
+    async def search_dense(
+        self, query_embedding: list[float], top_k: int, within: set[str] | None = None
+    ) -> list[IndexHit]:
         """Rank notes by cosine similarity to the query; drop zero-similarity, tie-break by id."""
         hits = [
             IndexHit(note_id=r.note_id, score=_cosine(query_embedding, r.embedding))
             for r in self._records.values()
+            if within is None or r.note_id in within
         ]
         hits = [h for h in hits if h.score > 0.0]
         hits.sort(key=lambda h: (-h.score, h.note_id))
         return hits[:top_k]
 
-    async def search_lexical(self, query: str, top_k: int) -> list[IndexHit]:
+    async def search_lexical(
+        self, query: str, top_k: int, within: set[str] | None = None
+    ) -> list[IndexHit]:
         """Rank notes by shared-token count with the query; drop non-matches, tie-break by id."""
         query_tokens = set(_TOKEN.findall(query.lower()))
         hits: list[IndexHit] = []
         for record in self._records.values():
+            if within is not None and record.note_id not in within:
+                continue
             overlap = len(query_tokens & set(_TOKEN.findall(record.text.lower())))
             if overlap:
                 hits.append(IndexHit(note_id=record.note_id, score=float(overlap)))
@@ -125,6 +144,11 @@ class InMemoryNoteIndex:
 def _vector_literal(embedding: list[float]) -> str:
     """Render an embedding as a pgvector text literal (`[a,b,c]`), cast `::vector(N)` in SQL."""
     return "[" + ",".join(str(component) for component in embedding) + "]"
+
+
+def _scope_array(within: set[str] | None) -> list[str] | None:
+    """A `within` scope as the SQL array parameter: sorted for a stable query, NULL = unscoped."""
+    return sorted(within) if within is not None else None
 
 
 class PostgresNoteIndex:
@@ -153,10 +177,15 @@ class PostgresNoteIndex:
         # unconditionally, so a small corpus would surface unrelated notes as cited evidence — a
         # ranking the tests never see. (A zero query vector is short-circuited in `search_dense`
         # before the query, so `<=>` never produces a NaN distance to order by.)
+        # The `within` scope lives in the SQL itself (NULL = unrestricted), so a caller's
+        # eligibility set bounds the search *before* the LIMIT — the top-k slots are never spent
+        # on notes the caller would drop afterwards (the same semantics the InMemory backend has).
+        scope = "AND (%(ids)s::text[] IS NULL OR note_id = ANY(%(ids)s::text[])) "
         self._dense = (
             f"SELECT note_id, 1 - (embedding <=> %(q)s::vector({width})) AS score "
             "FROM note_index WHERE embedding IS NOT NULL "
             f"AND 1 - (embedding <=> %(q)s::vector({width})) > 0 "
+            f"{scope}"
             # `note_id` secondary sort mirrors the InMemory reference's (-score, note_id) tie-break,
             # so equal-similarity notes order deterministically and identically across backends.
             f"ORDER BY embedding <=> %(q)s::vector({width}), note_id LIMIT %(k)s"
@@ -164,7 +193,7 @@ class PostgresNoteIndex:
         self._lexical = (
             "SELECT note_id, ts_rank(lexeme, query) AS score "
             "FROM note_index, websearch_to_tsquery('english', %(q)s) AS query "
-            "WHERE lexeme @@ query ORDER BY score DESC, note_id LIMIT %(k)s"
+            f"WHERE lexeme @@ query {scope}ORDER BY score DESC, note_id LIMIT %(k)s"
         )
 
     async def _connect(self) -> psycopg.AsyncConnection[TupleRow]:
@@ -189,24 +218,31 @@ class PostgresNoteIndex:
                 )
             await conn.commit()
 
-    async def search_dense(self, query_embedding: list[float], top_k: int) -> list[IndexHit]:
+    async def search_dense(
+        self, query_embedding: list[float], top_k: int, within: set[str] | None = None
+    ) -> list[IndexHit]:
         """Rank notes by cosine similarity to `query_embedding` (pgvector HNSW), positive only."""
         # A zero query vector (a token-less/symbol-only query under the hash embedder) has cosine 0
         # to everything — no hit, exactly as the InMemory reference returns. Short-circuit so we
         # never hand pgvector a zero vector (whose `<=>` distance is NaN) to order by.
         if not any(query_embedding):
             return []
+        params = {"q": _vector_literal(query_embedding), "k": top_k, "ids": _scope_array(within)}
         async with await self._connect() as conn:
             async with conn.cursor() as cur:
-                await cur.execute(self._dense, {"q": _vector_literal(query_embedding), "k": top_k})
+                await cur.execute(self._dense, params)
                 rows = await cur.fetchall()
         return [IndexHit(note_id=r[0], score=float(r[1])) for r in rows]
 
-    async def search_lexical(self, query: str, top_k: int) -> list[IndexHit]:
+    async def search_lexical(
+        self, query: str, top_k: int, within: set[str] | None = None
+    ) -> list[IndexHit]:
         """Rank notes by full-text `ts_rank` against the terms in `query`."""
         async with await self._connect() as conn:
             async with conn.cursor() as cur:
-                await cur.execute(self._lexical, {"q": query, "k": top_k})
+                await cur.execute(
+                    self._lexical, {"q": query, "k": top_k, "ids": _scope_array(within)}
+                )
                 rows = await cur.fetchall()
         return [IndexHit(note_id=r[0], score=float(r[1])) for r in rows]
 
