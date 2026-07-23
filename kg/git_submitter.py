@@ -7,15 +7,20 @@ object itself is the git platform's job (e.g. GitHub "create PR from branch"); t
 submitter guarantees the agent note never lands directly on the base branch.
 
 Concurrency: `git checkout -B` switches the *entire* working tree, so two
-overlapping submissions in one process would corrupt each other's branches. All
-submissions therefore serialize through a module-level lock (per-note worktrees
-would be over-engineering at current note volume — KISS). The lock only covers
-this process: cross-process safety relies on each activity/process using its own
-checkout, so in production `settings.note_repo_dir` must point at a dedicated
-clone of the knowledge repo, never a tree with uncommitted work.
+overlapping submissions would corrupt each other's branches. Submissions in this
+process serialize through a module-level asyncio lock (per-note worktrees would
+be over-engineering at current note volume — KISS). Cross-process ownership is
+*enforced*, not just documented: each submission holds an exclusive OS-level
+`flock` on a file under the checkout's `.git/`, so a second process pointing at
+the same `note_repo_dir` gets a clear `GitSubmitError` instead of silently
+interleaving checkouts. In production `settings.note_repo_dir` must still point
+at a dedicated clone of the knowledge repo, never a tree with uncommitted work.
 """
 
 import asyncio
+import contextlib
+import fcntl
+from collections.abc import Iterator
 from pathlib import Path
 
 from chemclaw.config import settings
@@ -23,6 +28,45 @@ from kg.pr_gate import NoteSubmission, NoteSubmitter
 
 # Serializes every submit() in this process — see the module docstring.
 _SUBMIT_LOCK = asyncio.Lock()
+
+# The advisory-lock file guarding the checkout across processes. It lives under
+# `.git/` so `reset --hard`/`clean -fd` (which submit() runs) can never delete it —
+# unlinking a held lock file would let a second process lock a *new* inode at the
+# same path and break mutual exclusion.
+_LOCK_FILE_NAME = "chemclaw-submit.lock"
+
+
+@contextlib.contextmanager
+def _checkout_lock(repo_dir: str) -> Iterator[None]:
+    """Hold an exclusive OS-level advisory lock on the checkout for one submission.
+
+    The asyncio lock only serializes submissions *within* this process; two processes
+    sharing `note_repo_dir` would still interleave `checkout -B` calls and corrupt
+    each other's branches. A non-blocking exclusive `flock` turns that silent
+    corruption into an immediate, actionable error. `flock` is tied to the open file
+    description, so it genuinely excludes other processes and is released by the
+    kernel even if this process dies mid-submission.
+
+    Raises:
+        GitSubmitError: When another process holds the lock, or the lock file cannot
+            be opened (e.g. `repo_dir` is not a git checkout).
+    """
+    lock_path = Path(repo_dir) / ".git" / _LOCK_FILE_NAME
+    try:
+        lock_file = lock_path.open("a")
+    except OSError as exc:
+        raise GitSubmitError(f"cannot open submit lock {lock_path}: {exc}") from exc
+    try:
+        try:
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError as exc:
+            raise GitSubmitError(
+                f"note_repo_dir is in use by another process (submit lock {lock_path} "
+                "is held) — every process needs its own dedicated clone"
+            ) from exc
+        yield
+    finally:
+        lock_file.close()
 
 
 class GitSubmitError(RuntimeError):
@@ -107,39 +151,44 @@ class GitNoteSubmitter:
         review, so no reviewable ref is (re)created.
         """
         async with _SUBMIT_LOCK:
-            await self._git("fetch", self._remote, self._base)
-            # Start from a clean slate: a prior submission that died between `add`
-            # and `commit` leaves its note staged, and `checkout -B` would carry
-            # that residue into this note's branch and commit. Dropping staged,
-            # dirty, and untracked state first also guarantees the checkout below
-            # cannot fail on local changes. Safe because `note_repo_dir` is a
-            # dedicated clone (module docstring) — there is never work to keep.
-            await self._git("reset", "--hard")
-            await self._git("clean", "-fd")
-            await self._git("checkout", "-B", submission.branch, f"{self._remote}/{self._base}")
-            note_path = self._contained_note_path(submission.path)
+            with _checkout_lock(self._repo_dir):
+                return await self._submit_locked(submission)
 
-            note_path.parent.mkdir(parents=True, exist_ok=True)
-            note_path.write_text(submission.content, encoding="utf-8")
+    async def _submit_locked(self, submission: NoteSubmission) -> str:
+        """The submission body, called with both the in-process and OS locks held."""
+        await self._git("fetch", self._remote, self._base)
+        # Start from a clean slate: a prior submission that died between `add`
+        # and `commit` leaves its note staged, and `checkout -B` would carry
+        # that residue into this note's branch and commit. Dropping staged,
+        # dirty, and untracked state first also guarantees the checkout below
+        # cannot fail on local changes. Safe because `note_repo_dir` is a
+        # dedicated clone (module docstring) — there is never work to keep.
+        await self._git("reset", "--hard")
+        await self._git("clean", "-fd")
+        await self._git("checkout", "-B", submission.branch, f"{self._remote}/{self._base}")
+        note_path = self._contained_note_path(submission.path)
 
-            await self._git("add", submission.path)
-            # Idempotent: if the note is byte-identical to what the base already has,
-            # there is nothing to commit — re-proposing it is a no-op, not an error.
-            returncode, _ = await self._run("diff", "--cached", "--quiet")
-            if returncode == 0:
-                return submission.branch
-            await self._git("commit", "-m", submission.title)
-            # `--force-with-lease` needs a fresh remote-tracking ref: in a fresh
-            # clone that never fetched the note branch, the lease is "stale" and
-            # git rejects the push. Fetch it first, tolerating absence (first
-            # submission of this note has no remote branch yet).
-            await self._run(
-                "fetch",
-                self._remote,
-                f"+refs/heads/{submission.branch}:refs/remotes/{self._remote}/{submission.branch}",
-            )
-            await self._git("push", "--force-with-lease", "-u", self._remote, submission.branch)
+        note_path.parent.mkdir(parents=True, exist_ok=True)
+        note_path.write_text(submission.content, encoding="utf-8")
+
+        await self._git("add", submission.path)
+        # Idempotent: if the note is byte-identical to what the base already has,
+        # there is nothing to commit — re-proposing it is a no-op, not an error.
+        returncode, _ = await self._run("diff", "--cached", "--quiet")
+        if returncode == 0:
             return submission.branch
+        await self._git("commit", "-m", submission.title)
+        # `--force-with-lease` needs a fresh remote-tracking ref: in a fresh
+        # clone that never fetched the note branch, the lease is "stale" and
+        # git rejects the push. Fetch it first, tolerating absence (first
+        # submission of this note has no remote branch yet).
+        await self._run(
+            "fetch",
+            self._remote,
+            f"+refs/heads/{submission.branch}:refs/remotes/{self._remote}/{submission.branch}",
+        )
+        await self._git("push", "--force-with-lease", "-u", self._remote, submission.branch)
+        return submission.branch
 
 
 def default_submitter() -> NoteSubmitter:

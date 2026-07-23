@@ -2,6 +2,7 @@
 
 import asyncio
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -146,6 +147,59 @@ def test_concurrent_submits_do_not_corrupt_branches(tmp_path: Path) -> None:
         assert other not in files
 
 
+def test_second_process_holding_the_checkout_is_rejected(tmp_path: Path) -> None:
+    """A submit against a checkout flocked by *another process* fails fast, then recovers.
+
+    Cross-process ownership of `note_repo_dir` is enforced with an exclusive
+    `flock` on `.git/chemclaw-submit.lock`. A real child process takes the lock;
+    the submit must raise `GitSubmitError` instead of interleaving checkouts, and
+    must succeed once the child releases it.
+    """
+    _, work = _make_remote_and_clone(tmp_path)
+    submitter = GitNoteSubmitter(repo_dir=str(work), base_branch="main", remote="origin")
+    lock_path = work / ".git" / "chemclaw-submit.lock"
+
+    holder = subprocess.Popen(
+        [
+            sys.executable,
+            "-c",
+            "import fcntl, sys\n"
+            f"f = open({str(lock_path)!r}, 'a')\n"
+            "fcntl.flock(f.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)\n"
+            "print('locked', flush=True)\n"
+            "sys.stdin.readline()\n",  # hold the lock until the parent closes stdin
+        ],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        text=True,
+    )
+    try:
+        assert holder.stdout is not None and holder.stdout.readline().strip() == "locked"
+        with pytest.raises(GitSubmitError, match="in use by another process"):
+            asyncio.run(submitter.submit(_note_submission("job-locked")))
+    finally:
+        assert holder.stdin is not None
+        holder.stdin.close()
+        holder.wait(timeout=30)
+
+    assert asyncio.run(submitter.submit(_note_submission("job-locked"))) == "note/job-locked"
+
+
+def test_lock_is_released_after_a_failed_submission(tmp_path: Path) -> None:
+    """The flock does not outlive a submission that errored (no wedged checkout).
+
+    A failed git command must not leave the checkout permanently 'in use': the
+    next submit acquires the lock and runs normally.
+    """
+    _, work = _make_remote_and_clone(tmp_path)
+    bad = GitNoteSubmitter(repo_dir=str(work), base_branch="no-such-base", remote="origin")
+    with pytest.raises(GitSubmitError, match="fetch"):
+        asyncio.run(bad.submit(_note_submission("job-x")))
+
+    good = GitNoteSubmitter(repo_dir=str(work), base_branch="main", remote="origin")
+    assert asyncio.run(good.submit(_note_submission("job-x"))) == "note/job-x"
+
+
 def test_repropose_updated_note_from_fresh_clone(tmp_path: Path) -> None:
     """Re-proposing an updated note from a clone that never fetched the branch works.
 
@@ -270,6 +324,7 @@ def test_git_command_timeout_kills_the_child_and_raises(
         return _HangingProcess()
 
     monkeypatch.setattr("kg.git_submitter.asyncio.create_subprocess_exec", _fake_exec)
+    (tmp_path / ".git").mkdir()  # submit() flocks a file under .git/ before running git
     submitter = GitNoteSubmitter(repo_dir=str(tmp_path), base_branch="main", remote="origin")
 
     with pytest.raises(GitSubmitError, match="timed out"):
