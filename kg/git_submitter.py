@@ -87,7 +87,10 @@ class GitNoteSubmitter:
         """Resolve the note path and refuse anything escaping the checkout.
 
         Defense in depth behind the `Note` slug validation: even a hand-built
-        `NoteSubmission` must not write outside the repo.
+        `NoteSubmission` must not write outside the repo. Must be called *after*
+        the branch checkout: `resolve()` follows symlinks in the working tree as
+        it exists now, so checking the pre-checkout tree would let a symlinked
+        directory committed on the base branch redirect the write.
         """
         repo_root = Path(self._repo_dir).resolve()
         note_path = (repo_root / relative).resolve()
@@ -104,10 +107,17 @@ class GitNoteSubmitter:
         review, so no reviewable ref is (re)created.
         """
         async with _SUBMIT_LOCK:
-            note_path = self._contained_note_path(submission.path)
-
             await self._git("fetch", self._remote, self._base)
+            # Start from a clean slate: a prior submission that died between `add`
+            # and `commit` leaves its note staged, and `checkout -B` would carry
+            # that residue into this note's branch and commit. Dropping staged,
+            # dirty, and untracked state first also guarantees the checkout below
+            # cannot fail on local changes. Safe because `note_repo_dir` is a
+            # dedicated clone (module docstring) — there is never work to keep.
+            await self._git("reset", "--hard")
+            await self._git("clean", "-fd")
             await self._git("checkout", "-B", submission.branch, f"{self._remote}/{self._base}")
+            note_path = self._contained_note_path(submission.path)
 
             note_path.parent.mkdir(parents=True, exist_ok=True)
             note_path.write_text(submission.content, encoding="utf-8")

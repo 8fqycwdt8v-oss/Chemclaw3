@@ -32,6 +32,21 @@ def test_build_graph_nodes_and_edges(tmp_path: Path) -> None:
     assert built.nodes["a"]["note"].id == "a"
 
 
+def test_load_notes_skips_unreadable_file(tmp_path: Path) -> None:
+    """One non-UTF-8 note file is skipped by the indexer, not a crashed graph load (G4)."""
+    (tmp_path / "a.md").write_text(_note("a", []), encoding="utf-8")
+    (tmp_path / "bad.md").write_bytes("---\nid: b\ntype: t\n---\nl\xf6slich\n".encode("latin-1"))
+    assert [note.id for note in graph.load_notes(tmp_path)] == ["a"]
+
+
+def test_validate_reports_unreadable_note(tmp_path: Path) -> None:
+    """An unreadable (non-UTF-8) note file is reported rather than aborting validation."""
+    (tmp_path / "a.md").write_text(_note("a", []), encoding="utf-8")
+    (tmp_path / "bad.md").write_bytes("---\nid: b\ntype: t\n---\nl\xf6slich\n".encode("latin-1"))
+    problems = validate(tmp_path)
+    assert any("unreadable" in p for p in problems)
+
+
 def test_load_notes_caches_parse_until_a_note_changes(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

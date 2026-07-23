@@ -187,6 +187,61 @@ def test_submitter_refuses_path_escaping_the_checkout(tmp_path: Path) -> None:
     assert not (tmp_path / "evil.md").exists()
 
 
+def test_poisoned_index_does_not_leak_into_next_submission(tmp_path: Path) -> None:
+    """Residue staged by a failed prior submission is not committed into the next note's branch.
+
+    A submission that dies between `git add` and `git commit` (timeout kill, rejecting
+    hook) leaves its note staged; `checkout -B` preserves staged changes, so without a
+    reset the next submission would silently commit the stray note into its own PR.
+    """
+    remote, work = _make_remote_and_clone(tmp_path)
+    stray = work / "knowledge" / "job-result" / "job-stray.md"
+    stray.parent.mkdir(parents=True)
+    stray.write_text("half-written residue\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(work), "add", str(stray)], check=True)
+
+    submitter = GitNoteSubmitter(repo_dir=str(work), base_branch="main", remote="origin")
+    asyncio.run(submitter.submit(_note_submission("job-b", content="note b\n")))
+
+    files = subprocess.run(
+        ["git", "-C", str(remote), "ls-tree", "-r", "--name-only", "note/job-b"],
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout
+    assert "knowledge/job-result/job-b.md" in files
+    assert "job-stray.md" not in files
+
+
+def test_symlinked_directory_on_base_is_refused(tmp_path: Path) -> None:
+    """A symlinked `knowledge` dir committed on the base branch cannot redirect the write.
+
+    Containment must hold against the tree as it exists *after* `checkout -B` swaps
+    in the base branch: a symlink merged onto base would otherwise resolve as a real
+    directory pre-checkout, pass the check, then be followed by the write.
+    """
+    remote, work = _make_remote_and_clone(tmp_path)
+    submitter = GitNoteSubmitter(repo_dir=str(work), base_branch="main", remote="origin")
+    # A prior submission leaves the clone on a note branch where knowledge/ is real.
+    asyncio.run(submitter.submit(_note_submission("job-a", content="note a\n")))
+
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    attacker = _clone(remote, tmp_path / "attacker")
+    subprocess.run(["git", "-C", str(attacker), "checkout", "-q", "main"], check=True)
+    (attacker / "knowledge").symlink_to(outside, target_is_directory=True)
+    for cmd in (
+        ["add", "knowledge"],
+        ["commit", "-q", "-m", "symlink"],
+        ["push", "-q", "origin", "main"],
+    ):
+        subprocess.run(["git", "-C", str(attacker), *cmd], check=True)
+
+    with pytest.raises(GitSubmitError, match="escapes"):
+        asyncio.run(submitter.submit(_note_submission("job-b", content="note b\n")))
+    assert list(outside.rglob("*")) == []  # nothing was written outside the checkout
+
+
 def test_git_command_timeout_kills_the_child_and_raises(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

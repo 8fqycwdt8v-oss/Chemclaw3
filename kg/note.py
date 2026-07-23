@@ -145,13 +145,21 @@ class NoteError(ChemclawError):
 def read_note(path: Path) -> Note | None:
     """Parse a note file; return None if it has no frontmatter (not a note).
 
-    A file with malformed YAML frontmatter, or valid frontmatter that fails the
-    schema, raises `NoteError` with the path. A plain Markdown file with no
-    frontmatter (e.g. a README) is not a note and returns None.
+    This is the one error boundary for per-file failures: an unreadable file
+    (non-UTF-8 bytes, vanished mid-scan), malformed YAML frontmatter — including
+    non-string keys like bare dates, which surface as TypeError — or valid
+    frontmatter that fails the schema all raise `NoteError` with the path, so one
+    bad file can never crash a whole-tree consumer (`load_notes`, `kg-validate`)
+    that catches only `NoteError` (G4). A plain Markdown file with no frontmatter
+    (e.g. a README) is not a note and returns None.
     """
     try:
-        post = frontmatter.loads(path.read_text(encoding="utf-8"))
-    except yaml.YAMLError as exc:
+        text = path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError) as exc:
+        raise NoteError(f"{path}: unreadable: {exc}") from exc
+    try:
+        post = frontmatter.loads(text)
+    except (yaml.YAMLError, TypeError) as exc:
         raise NoteError(f"{path}: malformed frontmatter: {exc}") from exc
     if not post.metadata:
         return None
@@ -160,7 +168,7 @@ def read_note(path: Path) -> Note | None:
     metadata = {key: value for key, value in post.metadata.items() if key != "body"}
     try:
         return Note(body=post.content, **metadata)
-    except ValidationError as exc:
+    except (ValidationError, TypeError) as exc:
         raise NoteError(f"{path}: invalid note: {exc}") from exc
 
 
