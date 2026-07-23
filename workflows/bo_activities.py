@@ -20,17 +20,22 @@ from bo.problem import Candidate, Observation, OptimizationProblem
 
 
 @activity.defn
-async def propose_initial(problem: OptimizationProblem, n: int) -> list[Candidate]:
+async def propose_initial(
+    problem: OptimizationProblem, n: int, seed: int | None = None
+) -> list[Candidate]:
     """Space-filling seed candidates (random design) for a new campaign."""
-    return await asyncio.to_thread(initial_candidates, problem, n)
+    return await asyncio.to_thread(initial_candidates, problem, n, seed)
 
 
 @activity.defn
 async def propose_next(
-    problem: OptimizationProblem, observations: list[Observation], n: int
+    problem: OptimizationProblem,
+    observations: list[Observation],
+    n: int,
+    seed: int | None = None,
 ) -> list[Candidate]:
     """Model-guided candidates from the observations so far (BoFire SOBO)."""
-    return await asyncio.to_thread(propose_candidates, problem, observations, n)
+    return await asyncio.to_thread(propose_candidates, problem, observations, n, seed)
 
 
 @activity.defn

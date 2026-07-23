@@ -14,6 +14,11 @@ from pydantic import BaseModel, Field, model_validator
 # A parameter value is a float (continuous) or a category label (categorical).
 ParamValue = float | str
 
+# The fewest observations a surrogate can be fitted on (BoFire's SOBO floor):
+# below two experiments the strategy raises mid-campaign, so specs and the
+# engine guard against it up front instead (gate G4).
+MIN_SEED_OBSERVATIONS = 2
+
 
 class ContinuousParameter(BaseModel):
     """A continuous decision variable with inclusive bounds."""
@@ -77,10 +82,13 @@ class Observation(BaseModel):
 
     `provenance` distinguishes a real measurement from a model prediction, so a
     campaign fed by predicted values stays honest about its evidence (D-011).
+    `value` must be finite: NaN compares false in both directions, so it would
+    silently win `best_of`, and BoFire drops the row mid-campaign — reject it at
+    the boundary instead (gate G4).
     """
 
     params: dict[str, ParamValue]
-    value: float
+    value: float = Field(allow_inf_nan=False)
     provenance: str = "measured"
 
 
@@ -100,10 +108,14 @@ class CampaignSpec(BaseModel):
 
     problem: OptimizationProblem
     objective_name: str = Field(min_length=1)
-    # A surrogate needs >=1 seed point; batch >=1 per round; rounds may be 0.
-    n_initial: int = Field(default=5, ge=1)
+    # A surrogate needs >=2 seed points (BoFire's floor); batch >=1 per round;
+    # rounds may be 0.
+    n_initial: int = Field(default=5, ge=MIN_SEED_OBSERVATIONS)
     n_rounds: int = Field(default=10, ge=0)
     batch: int = Field(default=1, ge=1)
+    # Per-campaign RNG seed so replicate campaigns can vary independently;
+    # None means the config default (`settings.bo_seed`), resolved in `bo.engine`.
+    seed: int | None = None
     # Opt-in: publish the campaign's recommendation as a PR-gated graph note (1d.5).
     publish_to_graph: bool = False
 
@@ -147,9 +159,18 @@ def discrete_candidate_count(problem: OptimizationProblem) -> int | None:
     return total
 
 
+def params_key(params: dict[str, ParamValue]) -> tuple[tuple[str, ParamValue], ...]:
+    """A hashable, order-independent identity for one parameter assignment.
+
+    The single definition of "same candidate", shared by the exhaustion
+    accounting here and the seed deduplication in `bo.engine`.
+    """
+    return tuple(sorted(params.items()))
+
+
 def distinct_candidate_count(observations: list[Observation]) -> int:
     """How many distinct parameter combinations appear in the observations."""
-    return len({tuple(sorted(o.params.items())) for o in observations})
+    return len({params_key(o.params) for o in observations})
 
 
 def space_exhausted(space: int | None, history: list[Observation], batch: int) -> bool:
