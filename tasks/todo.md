@@ -79,12 +79,17 @@ refuted-or-confirmed by a skeptic agent before it counts.
       workflow datetime usage produced no finding. Findings archive:
       scratchpad/confirmed_findings.json + unverified_findings.json.
 
-## Wave 3 — Bug fixes (S1/S2)
+## Wave 3 — Bug fixes (S1/S2, batched per package with their S3/S4 siblings)
 
-- [ ] Fix confirmed S1/S2 findings grouped per unit (disjoint units parallel;
-      U6/U7 sequenced — both touch `agents/`).
-- [ ] Per fix: root cause → failing test first where feasible → minimal fix →
-      `make lint type test` green → second agent re-reads the diff.
+- [x] Batch A (kernel, calc, kg, bo, mcp_servers): 28 findings fixed, committed as
+      five scoped commits (2e7148c kg, 4a47a07 calc, b23df5c mcp, 2e317b2 kernel,
+      ef9bce9 bo). Combined tree gated green: lint + mypy strict clean,
+      551 passed / 16 Temporal-only skips (43 new behavior tests over baseline).
+- [ ] Batch B (eln/memory, report/agents, service, workflows, evals/scripts,
+      Wave-4 residuals): 32 findings + fail-closed startup + ownership-boundary
+      test + write-tool authz defaults + git cross-process lock — in flight.
+- [x] Orchestrator verification of the 11 skeptic-orphaned findings: 10 confirmed,
+      1 refuted (evals/baseline.py:70 — documented deliberate behavior).
 
 ## Wave 4 — Hardening (S3 + risk-map targets)
 
