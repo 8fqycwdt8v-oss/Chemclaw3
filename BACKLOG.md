@@ -181,7 +181,7 @@ MAF ships the harness natively (`create_harness_agent` + `TodoProvider`/`AgentMo
 ### Phase F4 — Entra ID identity & RBAC (system-wide)
 - [x] **F4-T1** Front-door user auth (Entra OIDC): `service/auth.py` (`Principal`, `validate_token`
       with RS256 + audience + issuer checks, `require_principal` FastAPI dep), config
-      `entra_required`/`entra_tenant_id`/`entra_client_id`/`entra_audience` + derived
+      `entra_required`/`entra_tenant_id`/`entra_audience` + derived
       `entra_jwks_endpoint`/`entra_issuer_url`; guards all non-health routes; dev stand-in when
       `entra_required` is off. Dep `pyjwt[crypto]`; ruff allows `fastapi.Depends` (B008). Tests:
       `test_auth.py` (local-RSA token validation, 401 gate, dev mode), `test_config.py`.

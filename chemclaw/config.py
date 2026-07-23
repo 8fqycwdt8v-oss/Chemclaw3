@@ -368,10 +368,9 @@ class Settings(BaseSettings):
     # enforcement: True in any real deployment (a missing/invalid token is 401); False only for
     # local dev, where a stand-in principal runs the app without a tenant. `entra_jwks_url`/
     # `entra_issuer` default empty and derive from `entra_tenant_id` when set (the standard v2.0
-    # endpoints), so a deployment sets just tenant + client (audience) + required.
+    # endpoints), so a deployment sets just tenant + audience + required.
     entra_required: bool = False
     entra_tenant_id: str = ""
-    entra_client_id: str = ""
     entra_audience: str = ""
     entra_jwks_url: str = ""
     entra_issuer: str = ""
@@ -533,6 +532,12 @@ class Settings(BaseSettings):
     # logs a warning when it hits the cap so a truncated result is never silent. Raise it for a
     # larger corpus, or add a pattern-fingerprint prefilter (deferred) when it starts truncating.
     substructure_scan_max_records: int = Field(default=5000, gt=0)
+    # Bound on the length of a model-supplied substructure query string (SEC-4). SMARTS
+    # matching is subgraph isomorphism (worst-case exponential) run in-process over the
+    # scanned corpus with no statement_timeout analog, so a pathological multi-KB pattern
+    # could pin the server. Real pharmacophore/functional-group SMARTS run tens to a few
+    # hundred characters; 500 leaves generous headroom while rejecting degenerate input.
+    substructure_query_max_length: int = Field(default=500, gt=0)
 
     # ELN ingestion (plan Phase 4). The one concrete adapter reads a JSON-export ELN from
     # this directory; the sync activity's timeout bounds one batch of fetch+validate+index+
@@ -689,11 +694,64 @@ class Settings(BaseSettings):
 
         Otherwise every `poll_hpc_status` activity is declared dead between two
         heartbeats and retried in a loop — a mis-set interval must fail at startup.
+        The `nextflow` backend heartbeats on the same interval but against its own
+        `hpc_run_heartbeat_timeout_seconds`, so that pair is checked when selected.
         """
         if self.hpc_poll_interval_seconds >= self.qm_poll_heartbeat_timeout_seconds:
             raise ValueError(
                 "hpc_poll_interval_seconds must be smaller than qm_poll_heartbeat_timeout_seconds"
             )
+        if (
+            self.hpc_launch_interface == "nextflow"
+            and self.hpc_poll_interval_seconds >= self.hpc_run_heartbeat_timeout_seconds
+        ):
+            raise ValueError(
+                "hpc_poll_interval_seconds must be smaller than hpc_run_heartbeat_timeout_seconds "
+                "when hpc_launch_interface='nextflow'"
+            )
+        return self
+
+    @model_validator(mode="after")
+    def _hpc_launch_config(self) -> "Settings":
+        """`nextflow` needs the launcher endpoint, pipeline, and artifact store to be set.
+
+        Checked at startup (mirroring `_llm_provider_config`) so a half-configured backend
+        fails here with a clear message rather than as an opaque httpx protocol error five
+        retried activity attempts deep in the first QM job. The `mock` dev path needs none.
+        """
+        if self.hpc_launch_interface == "nextflow":
+            required = (
+                ("hpc_api_base_url", self.hpc_api_base_url),
+                ("hpc_pipeline_name", self.hpc_pipeline_name),
+                ("hpc_artifact_store_url", self.hpc_artifact_store_url),
+            )
+            missing = [name for name, value in required if not value]
+            if missing:
+                raise ValueError(
+                    f"hpc_launch_interface='nextflow' requires {', '.join(missing)} to be set"
+                )
+        return self
+
+    @model_validator(mode="after")
+    def _embedding_provider_config(self) -> "Settings":
+        """`openai_compatible` embeddings need the shared endpoint and a model name.
+
+        The embedding path reuses the LLM transport (`llm_base_url`), which stays empty under
+        the default `anthropic` chat provider — so the combination must be rejected at startup
+        instead of surfacing as an opaque connection error on the first note-index or query
+        embedding deep in the retrieval path.
+        """
+        if self.embedding_provider == "openai_compatible":
+            required = (
+                ("llm_base_url", self.llm_base_url),
+                ("embedding_model", self.embedding_model),
+            )
+            missing = [name for name, value in required if not value]
+            if missing:
+                raise ValueError(
+                    f"embedding_provider='openai_compatible' requires "
+                    f"{', '.join(missing)} to be set"
+                )
         return self
 
     @model_validator(mode="after")
@@ -701,8 +759,10 @@ class Settings(BaseSettings):
         """Under `entra_required`, fail fast on a half-configured identity setup (review finding).
 
         Two footguns the front-door/authorization code cannot catch at request time:
-        - an empty `entra_audience` (or no tenant/issuer) makes every token rejected — a deny-all
-          availability outage that should surface at startup, not as mysterious 401s;
+        - an empty `entra_audience` (or no tenant/issuer/JWKS) makes every token rejected — a
+          deny-all availability outage that should surface at startup, not as mysterious 401s.
+          The issuer and the JWKS endpoint derive independently from the tenant, so each needs
+          its own source: an issuer alone cannot resolve the keys endpoint;
         - declaring privileged roles *or* expensive actions but not the other leaves the role gate
           silently open (an action with no expensive-set entry authorizes every user), so the two
           must be set together — set neither to deliberately gate nothing.
@@ -713,6 +773,11 @@ class Settings(BaseSettings):
             raise ValueError("entra_audience must be set when entra_required")
         if not (self.entra_tenant_id or self.entra_issuer):
             raise ValueError("entra_tenant_id or entra_issuer must be set when entra_required")
+        if not (self.entra_tenant_id or self.entra_jwks_url):
+            raise ValueError(
+                "entra_tenant_id or entra_jwks_url must be set when entra_required "
+                "(the issuer alone cannot resolve the JWKS keys endpoint)"
+            )
         if bool(self.entra_expensive_actions) != bool(self.entra_privileged_roles):
             raise ValueError(
                 "entra_expensive_actions and entra_privileged_roles must be set together "

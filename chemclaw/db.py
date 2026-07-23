@@ -11,27 +11,27 @@ unreachable database is a transient infrastructure fault, so Temporal should ret
 activity, whereas `ChemclawError` (a `ValueError`) is marked non-retryable bad data.
 """
 
-from urllib.parse import urlsplit, urlunsplit
-
 import psycopg
+from psycopg import conninfo
 from psycopg.rows import TupleRow
 
 from chemclaw.config import settings
 
 
 def _redact(dsn: str) -> str:
-    """Return `dsn` with any password removed, so it is safe to echo in an error message."""
+    """Return `dsn` with any password removed, so it is safe to echo in an error message.
+
+    Round-trips through libpq's own parser (`conninfo_to_dict`/`make_conninfo`) so every
+    form psycopg accepts is covered — URL userinfo, URL query parameter, and the keyword
+    `host=... password=...` form — not just the userinfo case a URL split can see. A DSN
+    libpq cannot parse is replaced wholesale rather than echoed on a guess.
+    """
     try:
-        parts = urlsplit(dsn)
-    except ValueError:
+        parts = conninfo.conninfo_to_dict(dsn)
+    except psycopg.ProgrammingError:
         return "<postgres>"
-    if parts.password is None:
-        return dsn
-    host = parts.hostname or ""
-    netloc = f"{parts.username}@{host}" if parts.username else host
-    if parts.port:
-        netloc += f":{parts.port}"
-    return urlunsplit((parts.scheme, netloc, parts.path, "", ""))
+    parts.pop("password", None)
+    return conninfo.make_conninfo("", **parts)
 
 
 async def connect(

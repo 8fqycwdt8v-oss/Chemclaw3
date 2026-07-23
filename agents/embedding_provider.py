@@ -36,9 +36,8 @@ def embed_texts(texts: list[str]) -> list[list[float]]:
     Returns:
         One vector per input, in order. Vectors are directly comparable by cosine similarity.
 
-    Raises:
-        RuntimeError: When `openai_compatible` is selected but its endpoint/model config is absent,
-            naming what to set (so a misconfiguration fails at build time, not as an opaque error).
+    A half-configured `openai_compatible` selection (missing `llm_base_url`/`embedding_model`)
+    is rejected at startup by the config validator, so this path can rely on both being set.
     """
     if not texts:
         return []
@@ -71,11 +70,6 @@ def _hash_embedding(text: str) -> list[float]:
 
 def _openai_compatible_embeddings(texts: list[str]) -> list[list[float]]:
     """Embed via the internal OpenAI-compatible endpoint (reuses the chat transport config)."""
-    if not settings.embedding_model:
-        raise RuntimeError(
-            "embedding_provider='openai_compatible' requires embedding_model to be set "
-            "(and llm_base_url for the endpoint)."
-        )
     from openai import OpenAI
 
     client = OpenAI(
