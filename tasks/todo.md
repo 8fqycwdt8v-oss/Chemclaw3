@@ -112,20 +112,24 @@ refuted-or-confirmed by a skeptic agent before it counts.
 
 ## Wave 5 — Simplification / refactoring (S4, only on green)
 
-- [ ] Split `chemclaw/config.py` into cohesive sub-models, keeping the single
-      `settings` import surface (no caller churn).
-- [ ] Break `agents ↔ report` cycle: move the embedding-provider seam to a neutral
-      home so dependencies point one way.
-- [ ] Apply confirmed S4 simplifications (dead params, single-caller abstractions
-      inlined, DRY extractions) — one agent per package.
+- [x] Split `chemclaw/config.py` into cohesive sub-models, keeping the single
+      `settings` import surface (no caller churn). → 18 mixin sections, 160 fields
+      byte-identical, zero call-site edits (4afbada).
+- [x] Break `agents ↔ report` cycle: move the embedding-provider seam to a neutral
+      home so dependencies point one way. → `chemclaw/embeddings.py`, layering
+      regression test in `tests/test_layering.py` (cca7b65 + a0009fc).
+- [x] Apply confirmed S4 simplifications (dead params, single-caller abstractions
+      inlined, DRY extractions) — landed inside the per-package fix commits.
 
 ## Wave 6 — Close-out
 
-- [ ] Full `make lint type test` + `make cov`; coverage ≥ Wave-0 baseline.
-- [ ] Security-review pass over the whole branch diff.
-- [ ] Update `BACKLOG.md`, `DECISIONS.md` (Wave-4 ADRs), `DEFERRED.md`; write the
+- [x] Full `make lint type test` + `make cov`; coverage ≥ Wave-0 baseline.
+      → lint + mypy strict clean; 616 passed / 17 Temporal-only skips;
+      coverage **89.60%** vs 88.43% baseline.
+- [ ] Security-review pass over the whole branch diff — in flight.
+- [x] Update `BACKLOG.md`, `DECISIONS.md` (ADRs D-067…D-072), `DEFERRED.md`; write the
       review section below.
-- [ ] Commit in logical chunks (kernel / fixes-per-unit / hardening / refactor) and
+- [x] Commit in logical chunks (kernel / fixes-per-unit / hardening / refactor) and
       push to `claude/code-review-refactor-plan-wm34wc`.
 
 ## Token-efficiency rules (bind all agents)
@@ -136,6 +140,23 @@ refuted-or-confirmed by a skeptic agent before it counts.
 - Style is out of scope (ruff owns it); dedupe by file:line before verification.
 - Main context carries only plan state, confirmed-finding queue, and gate results.
 
-## Review (filled at close-out)
+## Review (close-out, 2026-07-24)
 
-_(pending)_
+**Method.** 13 reviewer agents (3 kernel, 9 domain units, 1 security re-walk), every finding
+independently attacked by a refute-by-default skeptic; only survivors were fixed. 73 raw →
+23 refuted → 60 actioned (59 fixed, 1 refuted late). Fixes ran as 12 scoped agents in two
+parallel batches plus two Wave-5 refactor agents, each gated by ruff + mypy strict + targeted
+behavior tests before its commit; the combined tree was full-gated after every batch.
+
+**Outcome.** No S1 existed. 13 S2 correctness bugs fixed (chemistry: wrong-charge xTB energies
+cached forever, pKa charge inversion, cache-key/compute spelling mismatch; infra: git staged-residue
+leak, sync cursor poisoning, DSN password leak, Entra deny-all half-config, retrieval eligibility
+drift, Nextflow transient/terminal conflation). 4 risk-map hardening items landed (fail-closed
+startup D-067, write-tool gates D-068, submitter flock D-069, ownership-boundary sweep test).
+Structure: config split into 18 sections, agents↔report cycle broken with a layering guard.
+Coverage 88.43% → 89.60%, tests 508 → 616, all green. ADRs D-067…D-072; new follow-ups and
+deferrals recorded in BACKLOG.md / DEFERRED.md.
+
+**Lesson captured.** Long-running parallel fix batches survive session usage limits cleanly when
+each agent's scope is disjoint and committed independently — resumed agents (SendMessage) and the
+workflow journal cache made both interruptions lossless.

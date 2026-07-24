@@ -314,7 +314,7 @@ MAF ships the harness natively (`create_harness_agent` + `TodoProvider`/`AgentMo
 
 ### MAF out-of-the-box features (analysis done)
 - [x] **Function middleware** (`@function_middleware`) — one DRY GxP tool-audit trail
-      (`agents/audit.py::audit_tool_calls`: name/args/outcome/latency, observe-only) over all
+      (`agents/audit.py::make_audit_middleware`: name/args/outcome/latency, observe-only) over all
       agent tools, on the logging floor. Attached via `Agent(..., middleware=[...])` (D-027).
 - [x] **OpenTelemetry** — opt-in `chemclaw.logging.configure_telemetry()` gated on
       `CHEMCLAW_OTEL_ENABLED`; calls MAF's `configure_otel_providers` at each worker's entrypoint.
@@ -590,3 +590,20 @@ MAF ships the harness natively (`create_harness_agent` + `TodoProvider`/`AgentMo
 ## Later
 - [ ] Phase 2 knowledge-graph core + PR-gate · Phase 3 fingerprint search · Phase 4 ELN
       ingestion · Phase 5 memory layers · Phase 5b report harness · Phase 6 identity/RBAC.
+
+## Post-campaign follow-ups (2026-07-24, D-072)
+
+- [ ] **ELN late-file detection** — export files older than `eln_sync_overlap_seconds` are still
+      dropped silently; add a file-mtime vs cursor WARN so operators see them (manual backfill via
+      explicit `since` remains the recovery).
+- [ ] **Memory cluster merge/shrink supersede** — anchor ids keep grown clusters stable (D-070),
+      but a cluster *merge* leaves the losing note without a supersede link, and losing the
+      smallest member mints a new id; emit supersedes/valid_to on merge/shrink.
+- [ ] **`system-eval-drift` consumer surface** — eval-drift alerts push to a pseudo-session no UI
+      consumes; give them a consumer (or route to ops notification).
+- [ ] **Deployment docs** — point exposed deployments at `CHEMCLAW_ENTRA_REQUIRED=true` now that
+      unauthenticated+exposed refuses to boot (D-067); note `CHEMCLAW_ENTRA_CLIENT_ID` was removed
+      (startup fails under `extra="forbid"` if still exported).
+- [ ] **Substructure match compute bound** — query length is bounded (`substructure_query_max_length`),
+      but a maximally adversarial recursive SMARTS can still be slow on the event loop; consider
+      `asyncio.to_thread` + wall-clock bound (touches the async tool contract).
