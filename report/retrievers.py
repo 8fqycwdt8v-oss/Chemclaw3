@@ -12,8 +12,8 @@ from datetime import date
 from pathlib import Path
 from typing import Any
 
-from agents.embedding_provider import embed_texts
 from chemclaw.config import settings
+from chemclaw.embeddings import embed_texts
 from kg.graph import load_notes
 from kg.note import WIKILINK, Note
 from mcp_servers.fpstore import FingerprintError, FingerprintStore

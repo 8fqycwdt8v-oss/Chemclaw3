@@ -12,8 +12,8 @@ from typing import Any
 import pytest
 
 import agents.research_tools as research_tools
-from agents.embedding_provider import embed_texts
 from chemclaw.config import settings
+from chemclaw.embeddings import embed_texts
 from report.evidence import EvidenceChunk
 from report.hybrid import reciprocal_rank_fusion
 from report.retrievers import LexicalRetriever, VectorRetriever

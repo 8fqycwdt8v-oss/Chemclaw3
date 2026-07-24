@@ -24,9 +24,9 @@ import psycopg
 from psycopg.rows import TupleRow
 from pydantic import BaseModel, Field
 
-from agents.embedding_provider import embed_texts
 from chemclaw import db
 from chemclaw.config import settings
+from chemclaw.embeddings import embed_texts
 from kg.graph import load_notes
 from kg.note import Note
 
