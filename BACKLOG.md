@@ -598,7 +598,10 @@ MAF ships the harness natively (`create_harness_agent` + `TodoProvider`/`AgentMo
       explicit `since` remains the recovery).
 - [ ] **Memory cluster merge/shrink supersede** — anchor ids keep grown clusters stable (D-070),
       but a cluster *merge* leaves the losing note without a supersede link, and losing the
-      smallest member mints a new id; emit supersedes/valid_to on merge/shrink.
+      smallest member mints a new id; emit supersedes/valid_to on merge/shrink. NOTE: the
+      set→anchor id switch is itself a one-time migration — any notes minted under old
+      set-derived ids will be re-synthesized under new ids without a supersede link; if any
+      such notes exist before first production sync, clean them up once by hand.
 - [ ] **`system-eval-drift` consumer surface** — eval-drift alerts push to a pseudo-session no UI
       consumes; give them a consumer (or route to ops notification).
 - [ ] **Deployment docs** — point exposed deployments at `CHEMCLAW_ENTRA_REQUIRED=true` now that
@@ -607,3 +610,9 @@ MAF ships the harness natively (`create_harness_agent` + `TodoProvider`/`AgentMo
 - [ ] **Substructure match compute bound** — query length is bounded (`substructure_query_max_length`),
       but a maximally adversarial recursive SMARTS can still be slow on the event loop; consider
       `asyncio.to_thread` + wall-clock bound (touches the async tool contract).
+- [ ] **Workflow versioning policy before first live deploy** — the campaign changed workflow
+      logic without `workflow.patched()` gates (fan_out's local activity, ElnSyncWorkflow's
+      chunk loop, BO activities' seed arg). Safe today only because no live Temporal cluster
+      holds in-flight histories (live edges still open). Before the first production deploy,
+      adopt a versioning policy: gate logic changes with `workflow.patched()` or make
+      drain-in-flight-runs an explicit deploy step.
