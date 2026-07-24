@@ -12,7 +12,7 @@ from typing import Any
 
 import pytest
 
-import agents.embedding_provider as provider
+import chemclaw.embeddings as provider
 from chemclaw.config import Settings
 
 

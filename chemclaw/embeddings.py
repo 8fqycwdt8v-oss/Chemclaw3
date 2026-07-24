@@ -4,7 +4,8 @@ Mirrors `agents.llm_provider`: `embed_texts` selects how text is turned into a v
 (`settings.embedding_provider`), so pointing Chemclaw at the internal endpoint's `/embeddings` route
 versus the offline dev embedder is a single config change, never a code edit at a call site. Only
 this module knows how an embedding is produced; retrieval (`report.vector_index`) consumes the
-vectors provider-agnostically.
+vectors provider-agnostically. It lives in the shared kernel (not `agents/`) because retrieval
+infrastructure depends on it — the dependency must point report → chemclaw, never report → agents.
 
 Two providers:
 - `hash` (default): a deterministic, dependency-free **feature-hash** of the text's tokens into a
