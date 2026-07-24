@@ -3,6 +3,23 @@
 Prioritized open action items. Top = next. Keep in sync with `docs/implementation-plan.md`
 (phase/step numbers) at session end.
 
+## Open — OKF-inspired graph polish (D-067)
+
+Two conventions from Google's Open Knowledge Format, checked against our already-equivalent
+design (D-004/D-005) and queued rather than adopted wholesale — see D-067 for the comparison.
+
+- [ ] **Per-bundle `log.md` changelog.** Today a note's history lives only in git/PR history.
+      Add a per-note-type (or per-bundle-directory) `log.md` that the PR-gate appends one line to
+      on every merge (who/what/when, human-readable) — a changelog view that doesn't require
+      `git log`. Small, additive; no new store (fits `kg/pr_gate.py`).
+- [ ] **External ontology anchoring on notes.** Frontmatter `type`/tags are free strings today —
+      no class hierarchy, so an agent can't query by subsumption (e.g. "all electrophilic aromatic
+      substitutions" matching a `reaction_class: acetylation` note). Add optional frontmatter
+      fields carrying **existing** external ontology IDs — ChEBI for compounds, RXNO for reaction
+      classes — rather than building an in-house OWL/RDF ontology (no second caller yet; KISS).
+      Needs: which notes get which field, whether resolution is validated at `kg-validate` time or
+      left as an unchecked reference.
+
 ## Done — Resilience hardening (D-066, four-failure-mode review)
 
 Reviewed Chemclaw against four failure modes from another agent system (no memory on restart, no
