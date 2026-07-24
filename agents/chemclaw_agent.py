@@ -35,16 +35,22 @@ from agent_framework import (
 # package top level, so it is imported from its (experimental) home here.
 from agent_framework._harness._loop import todos_remaining
 
+# Importing each tool module runs its `@tool` decorators, populating the capability-tool registry
+# (a registration side effect, exactly as `evals/__init__.py` seeds the metric registry). With the
+# registry populated, `_capability_tools` assembles the advertised set from it instead of from a
+# hand-maintained list — so adding a tool is a `@tool` at its definition site, not an edit here.
+from agents import bo_tools as _bo_tools  # noqa: F401
+from agents import calc_tools as _calc_tools  # noqa: F401
+from agents import graph_tools as _graph_tools  # noqa: F401
+from agents import memory_tools as _memory_tools  # noqa: F401
+from agents import qm_tools as _qm_tools  # noqa: F401
+from agents import research_tools as _research_tools  # noqa: F401
 from agents.audit import AuditSink, make_audit_middleware
-from agents.bo_tools import suggest_next_experiment
-from agents.calc_tools import compute_xtb_energy, predict_pka, predict_solubility
-from agents.graph_tools import expand_note, find_notes, propose_knowledge_note
 from agents.llm_provider import build_chat_client
-from agents.memory_tools import record_confirmed_answer
-from agents.qm_tools import get_qm_job_status, submit_qm_job
-from agents.research_tools import gather_evidence
+from agents.profiles import AgentProfile, get_profile
 from agents.skill_access import RoleScopedSkillsSource
 from agents.tool_authz import enforce_tool_authz
+from agents.tool_registry import registered_tools
 from chemclaw.config import McpServerSpec, settings
 
 _INSTRUCTIONS = (
@@ -87,6 +93,7 @@ _INSTRUCTIONS = (
 def build_agent(
     chat_client: Any | None = None,
     *,
+    profile: str | AgentProfile | None = None,
     actor: str = settings.service_actor_id,
     correlation_id: str | None = None,
     audit_sink: AuditSink | None = None,
@@ -104,6 +111,11 @@ def build_agent(
         chat_client: A MAF chat client. Injected in tests; when omitted, the
             config-selected provider client is built via `build_chat_client`
             (needs its credential at run time, not here).
+        profile: The named agent profile to build (a name, an `AgentProfile`, or `None`
+            for the default). A profile *narrows* the instructions/tools/MCP/harness of the
+            one agent for a use case; it can only attenuate, never widen — the audit + authz
+            middleware and skill role-gates below run after any narrowing (`agents.profiles`).
+            `None` reproduces today's global agent verbatim.
         actor: Who the audit trail attributes tool calls to — the Phase-6 identity
             seam. Defaults to the configured `service_actor_id` until Entra auth populates it.
         correlation_id: Ties this conversation's audit events together; a fresh UUID
@@ -114,6 +126,12 @@ def build_agent(
     Returns:
         A ready-to-run `Agent`. No LLM call and no subprocess happen at construction.
     """
+    prof = profile if isinstance(profile, AgentProfile) else get_profile(profile)
+    # Resolve each profile dimension against the global default (an unset override means "default").
+    instructions = prof.instructions if prof.instructions is not None else _INSTRUCTIONS
+    harness_enabled = (
+        settings.harness_enabled if prof.harness_enabled is None else prof.harness_enabled
+    )
     client = chat_client if chat_client is not None else build_chat_client()
     # Advertised skills are role-scoped by `settings.skill_role_gates` against the turn's ambient
     # identity (`agents.identity_context`); an empty gate map (the default) shows every skill.
@@ -129,7 +147,9 @@ def build_agent(
     # Two function middlewares over every tool call: audit records it, then per-tool authorization
     # gates it (F10-C). Audit is outermost so a denied call (authz raises before the tool runs) is
     # still recorded as an error outcome. Both are no-ops on the dev path (log-only sink; authz open
-    # until `entra_required`), so the classic path is unchanged by default.
+    # until `entra_required`), so the classic path is unchanged by default. They are attached
+    # unconditionally, *after* the profile narrows the toolset — so a profile attenuates capability
+    # but can never bypass audit or authorization (the safety rubric, audit §7).
     middleware = [audit, enforce_tool_authz]
     # Default generation params from config (F0.3), applied to every turn unless a run overrides
     # them — so temperature/length are a deployment setting, not a per-call literal.
@@ -137,15 +157,16 @@ def build_agent(
         temperature=settings.llm_temperature,
         max_tokens=settings.llm_max_tokens,
     )
-    if settings.harness_enabled:
-        return _build_harness_agent(client, skills, history, middleware, options)
+    tools = _capability_tools(prof)
+    if harness_enabled:
+        return _build_harness_agent(client, skills, history, middleware, options, prof, tools)
     compaction = _build_compaction(history.source_id)
     return Agent(
         client=client,
         name="chemclaw",
-        instructions=_INSTRUCTIONS,
+        instructions=instructions,
         default_options=options,
-        tools=_capability_tools(),
+        tools=tools,
         # Order matters: history loads/stores the thread, then compaction trims it — so
         # compaction runs last and sees the full context (before the model) and the freshly
         # stored history (after the run).
@@ -161,6 +182,8 @@ def _build_harness_agent(
     history: HistoryProvider,
     middleware: list[Any],
     options: ChatOptions,
+    profile: AgentProfile,
+    tools: list[Any],
 ) -> Agent:
     """Wire MAF's Agent Harness over the *same* Chemclaw tools/skills/audit/compaction (F1).
 
@@ -169,21 +192,30 @@ def _build_harness_agent(
     (file memory/access, web search, shell) are disabled, so the agent reaches structure/property/
     knowledge tools through our function tools + MCP servers, not the harness built-ins.
 
-    `harness_autonomy` picks the starting mode. `plan_only` starts in **plan** mode: the agent
-    proposes a plan and waits for human approval before executing — the pre-execution GxP gate —
-    and, because the loop only continues in **execute** mode, it does not auto-run until approval
-    switches it. `execute` starts in execute mode and loops through the todos immediately. Either
-    way the loop is capped by `harness_max_loop_iterations` (the runaway guard). Compaction reuses
-    the classic strategy so context is kept within budget on both paths.
+    The starting mode comes from the profile's `harness_autonomy` override, or
+    `settings.harness_autonomy` when the profile leaves it unset. `plan_only` starts in **plan**
+    mode: the agent proposes a plan and waits for human approval before executing — the
+    pre-execution GxP gate — and, because the loop only continues in **execute** mode, it does not
+    auto-run until approval switches it. `execute` starts in execute mode and loops through the
+    todos immediately. Either way the loop is capped by `harness_max_loop_iterations` (the runaway
+    guard). Compaction reuses the classic strategy so context is kept within budget on both paths.
+    `instructions` and `tools` are pre-resolved by `build_agent` from the profile, so this path
+    advertises exactly the profile's (possibly narrowed) surface.
     """
     strategy, tokenizer = _compaction_strategy()
-    start_mode = "plan" if settings.harness_autonomy == "plan_only" else "execute"
+    instructions = profile.instructions if profile.instructions is not None else _INSTRUCTIONS
+    autonomy = (
+        profile.harness_autonomy
+        if profile.harness_autonomy is not None
+        else settings.harness_autonomy
+    )
+    start_mode = "plan" if autonomy == "plan_only" else "execute"
     return create_harness_agent(
         client,
         name="chemclaw",
-        agent_instructions=_INSTRUCTIONS,
+        agent_instructions=instructions,
         default_options=options,
-        tools=_capability_tools(),
+        tools=tools,
         history_provider=history,
         skills_provider=skills,
         # Generic batteries off — capability is ours (MCP servers + function tools), not harness's.
@@ -219,26 +251,46 @@ def _history_provider() -> HistoryProvider:
     return InMemoryHistoryProvider()
 
 
-def _capability_tools() -> list[Any]:
+def _capability_tools(profile: AgentProfile | None = None) -> list[Any]:
     """The Chemclaw capability tools, shared by the classic and harness agents (one source, DRY).
 
-    Structural fingerprint search (similar_reactions/similar_molecules/substructure_matches) comes
-    from the MCP capability servers, not in-process; the rest are the in-process function tools.
+    The in-process function tools come from the capability-tool registry (`agents.tool_registry`),
+    populated by the `@tool` decorators when their modules are imported above — so adding a tool
+    needs no edit here. Structural fingerprint search (similar_reactions/similar_molecules/
+    substructure_matches) comes from the MCP capability servers, which stay config-driven
+    (`settings.mcp_servers`); they are appended after the in-process tools.
+
+    A profile's `tool_names` / `mcp_server_names` *narrow* the advertised surface to the named
+    subset — attenuation only, never widening. A name that no built tool provides is a loud error
+    (fail-fast) rather than a silently-empty toolset. `None` (the default profile) advertises the
+    full surface, so the classic path and the registry tests build the complete set unchanged.
     """
-    return [
-        compute_xtb_energy,
-        predict_solubility,
-        predict_pka,
-        submit_qm_job,
-        get_qm_job_status,
-        find_notes,
-        expand_note,
-        gather_evidence,
-        *_mcp_capability_tools(),
-        suggest_next_experiment,
-        propose_knowledge_note,
-        record_confirmed_answer,
-    ]
+    prof = profile if profile is not None else get_profile(None)
+    inprocess = registered_tools()
+    if prof.tool_names is not None:
+        inprocess = _narrow(inprocess, prof.tool_names, prof.name, "tool")
+    mcp: list[Any] = list(_mcp_capability_tools())
+    if prof.mcp_server_names is not None:
+        mcp = _narrow(mcp, prof.mcp_server_names, prof.name, "MCP server")
+    return [*inprocess, *mcp]
+
+
+def _narrow(tools: list[Any], keep: frozenset[str], profile_name: str, kind: str) -> list[Any]:
+    """Keep only tools whose advertised name is in `keep`, raising if `keep` names an absent tool.
+
+    MAF advertises an in-process tool under its `__name__` and an MCP server under its `.name`;
+    both expose the advertised name, so `getattr(t, "name", t.__name__)` reads either. A profile
+    listing a name nothing provides is a configuration error surfaced at build time, not a tool
+    that silently vanishes from the agent's surface.
+    """
+    available = {getattr(t, "name", None) or t.__name__: t for t in tools}
+    unknown = keep - available.keys()
+    if unknown:
+        raise ValueError(
+            f"agent profile {profile_name!r} lists unknown {kind}(s) {sorted(unknown)}; "
+            f"known: {sorted(available)}"
+        )
+    return [tool for name, tool in available.items() if name in keep]
 
 
 def _mcp_capability_tools() -> list[MCPStdioTool]:

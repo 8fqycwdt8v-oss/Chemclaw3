@@ -3,6 +3,39 @@
 Prioritized open action items. Top = next. Keep in sync with `docs/implementation-plan.md`
 (phase/step numbers) at session end.
 
+## Open — Config extensibility investigation (docs/audit/10-config-extensibility.md)
+
+Super-extensive investigation of how new skills/MCP-servers/tools/datasources/use-case agent
+workflows are added, plus a substrate challenge and three passing offline spikes. Full analysis,
+options matrices, and the two worked designs (datasource-*type*; `AgentProfile`) live in the doc.
+Prioritized, dependency-ordered follow-ups (each ADR-ready, none needs live infra):
+
+- [x] **Fix `.env.example` merge conflict** (unresolved markers at lines 156/170/173) — [S]. Done
+      (both sides were real, non-overlapping Settings fields → kept both). Commit `b07a2b2`.
+- [x] **Tool registry** (`@tool` + `_TOOL_REGISTRY`, mirror `evals/metric.py`) so a new tool is a
+      decorator, not an edit to the hardcoded `_capability_tools()` list — [M]. Done: `agents/tool_registry.py`,
+      12 tools decorated, `_capability_tools()` assembles from the registry, audit+authz middleware
+      unchanged. Commit `76c03b2`. **KISS deviation:** Spike 1's `agent_facing` flag dropped (no hidden
+      in-process tool exists — Rule of Three). **No `make tool-validate`:** name-drift is already guarded
+      by `tests/test_agent.py::test_instructions_only_name_available_tools` + the registration guard; a
+      separate CLI gate would be redundant.
+- [x] **`AgentProfile` seam, Stage 1** (`agents/profiles.py` + one `"default"` entry ==
+      today's agent + `build_agent(profile=…)` narrowing) — [M]. Done: default reproduces today's agent
+      byte-for-byte; a profile narrows tools/MCP + swaps instructions/harness; unknown tool names fail
+      fast; the *attenuate-not-authorize* invariant is test-proven (audit+authz attach regardless of
+      profile). Stage 2 (front-door selection) triggers on a **second real use case**.
+- [ ] **`DataSourceSpec` discriminated union (scoped), Stage 1** — [M]. Trigger: the deferred
+      Snowflake connector. Spike 3 proves "one variant + one token" survives real
+      connection/auth/mapping config; Snowflake is the first `exchange_obo` caller.
+- [ ] **Per-extension manifest + explicit enable-list** (steal from Django; keep discovery ≠
+      auto-enable) — [S]. Trigger: skills needing to declare capability deps, or profile authoring.
+- [ ] **MCP transport `type` union** (stdio/HTTP discriminator on `McpServerSpec`) — [S]. Trigger:
+      first remote/HTTP MCP server.
+
+Substrate verdict: **evolve the flat `pydantic-settings` singleton additively** (nested sections +
+discriminated unions); do **not** adopt entry-points/pluggy/Django-apps — all target the
+out-of-tree plugin problem this single-repo app does not have.
+
 ## Open — OKF-inspired graph polish (D-074)
 
 Two conventions from Google's Open Knowledge Format, checked against our already-equivalent
