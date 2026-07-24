@@ -9,6 +9,8 @@ scientific result is already done — the push-back is a notification, not a dur
 (durability stays in the job's own result path).
 """
 
+import hashlib
+import json
 from datetime import timedelta
 from typing import Any
 
@@ -28,6 +30,25 @@ class SessionEventInput(BaseModel):
     session_id: str = Field(min_length=1)
     kind: str = Field(min_length=1)
     payload: dict[str, Any] = Field(default_factory=dict)
+    # Deterministic identity of this logical event, derived in workflow code (`_dedupe_key`):
+    # the activity runs at-least-once, so without it a retry after a committed-but-unacked
+    # insert would deliver the same notification twice.
+    dedupe_key: str | None = None
+
+
+def _dedupe_key(workflow_id: str, run_id: str, kind: str, payload: dict[str, Any]) -> str:
+    """The deterministic identity of one logical push-back event, for the at-most-once insert.
+
+    Derived from the *run* (not just the workflow id — a later re-execution of the same workflow
+    id is genuinely a new event) plus the kind and a payload digest, because one run may emit
+    several events of the same kind (e.g. one eval-drift alert per drifted metric) that must not
+    dedupe each other. Every input is replay-stable, so an activity retry recomputes the same key
+    and lands on the unique index instead of duplicating the notification.
+    """
+    digest = hashlib.sha256(
+        json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
+    return f"{workflow_id}:{run_id}:{kind}:{digest}"
 
 
 @activity.defn
@@ -37,7 +58,9 @@ async def record_session_event_activity(event: SessionEventInput) -> None:
     A thin wrapper over `agents.session_events.record_session_event`, so the channel's write logic
     lives in one place.
     """
-    await record_session_event(event.session_id, event.kind, event.payload)
+    await record_session_event(
+        event.session_id, event.kind, event.payload, dedupe_key=event.dedupe_key
+    )
 
 
 async def notify_session(session_id: str, kind: str, payload: dict[str, Any]) -> None:
@@ -49,9 +72,15 @@ async def notify_session(session_id: str, kind: str, payload: dict[str, Any]) ->
     dropped delivery would defeat the feature, so the failure must be visible (a failed workflow),
     not swallowed. Callers whose result is a durable calculation use `notify_session_best_effort`.
     """
+    info = workflow.info()
     await workflow.execute_activity(
         record_session_event_activity,
-        SessionEventInput(session_id=session_id, kind=kind, payload=payload),
+        SessionEventInput(
+            session_id=session_id,
+            kind=kind,
+            payload=payload,
+            dedupe_key=_dedupe_key(info.workflow_id, info.run_id, kind, payload),
+        ),
         task_queue=settings.background_task_queue,
         start_to_close_timeout=timedelta(seconds=settings.qm_activity_timeout_seconds),
         retry_policy=BAD_DATA_RETRY,

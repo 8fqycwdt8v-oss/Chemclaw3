@@ -37,6 +37,7 @@ from bo.problem import (
 from calc.solubility import SolubilityInput, predict_solubility
 from calc.store import InMemoryStore
 from chemclaw.chem import InvalidSmilesError
+from chemclaw.config import settings
 from tests.temporal_env import pydantic_client, start_env_or_skip
 from workflows.bo_activities import evaluate_candidates, propose_initial, propose_next
 from workflows.bo_campaign import BoCampaignWorkflow
@@ -249,3 +250,26 @@ def test_durable_campaign_runs_end_to_end() -> None:
         assert result.best == best_of(spec.problem, result.history)
 
     asyncio.run(_run())
+
+
+def test_campaign_spec_rejects_rounds_beyond_the_ceiling(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """n_rounds beyond `bo_max_rounds` fails at spec time, not at the history limit mid-run.
+
+    The workflow re-sends the full observation history to every propose round, so an unbounded
+    round count grows Temporal event history quadratically until the server terminates the
+    campaign — discarding every already-paid evaluation. The ceiling is config-backed so a
+    deployment with a real need can raise it consciously.
+    """
+    problem = build_problem(load_dataset())
+    with pytest.raises(ValueError, match="bo_max_rounds"):
+        CampaignSpec(problem=problem, objective_name="reizman_suzuki", n_rounds=501)
+    # At the ceiling is fine — the bound is inclusive.
+    assert (
+        CampaignSpec(problem=problem, objective_name="reizman_suzuki", n_rounds=500).n_rounds == 500
+    )
+    # The ceiling is the config knob, not a hardcoded constant.
+    monkeypatch.setattr(settings, "bo_max_rounds", 3)
+    with pytest.raises(ValueError, match="bo_max_rounds=3"):
+        CampaignSpec(problem=problem, objective_name="reizman_suzuki", n_rounds=4)

@@ -8,15 +8,19 @@ directly. No running cluster required.
 
 import asyncio
 
+import httpx
 import pytest
 from temporalio.client import WorkflowFailureError
 from temporalio.contrib.pydantic import pydantic_data_converter
-from temporalio.exceptions import ActivityError
+from temporalio.exceptions import ActivityError, ApplicationError
+from temporalio.testing import ActivityEnvironment
 from temporalio.worker import Replayer, Worker
 
+from chemclaw.config import settings
 from tests.temporal_env import QM_ACTIVITIES, pydantic_client, start_env_or_skip
-from workflows.activities import parse_qm_output, prepare_input
-from workflows.models import QMJobInput
+from workflows.activities import parse_qm_output, poll_hpc_status, prepare_input
+from workflows.hpc import nextflow
+from workflows.models import HpcJobHandle, QMJobInput
 from workflows.qm_job import QMJobWorkflow
 
 _TASK_QUEUE = "test-hpc"
@@ -117,3 +121,106 @@ def test_bad_input_surfaces_as_workflow_failure() -> None:
                 assert isinstance(excinfo.value.cause, ActivityError)
 
     asyncio.run(_run())
+
+
+class _ScriptedPoll:
+    """A scripted `nextflow.poll_run` stand-in: pops one outcome per call (exception or state)."""
+
+    def __init__(self, outcomes: list[object]) -> None:
+        self.outcomes = outcomes
+        self.calls = 0
+
+    async def __call__(self, handle: object) -> object:
+        self.calls += 1
+        outcome = self.outcomes.pop(0)
+        if isinstance(outcome, BaseException):
+            raise outcome
+        return outcome
+
+
+@pytest.fixture
+def _nextflow_poll(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Route `poll_hpc_status` to the nextflow path with a near-zero poll interval."""
+    monkeypatch.setattr(settings, "hpc_launch_interface", "nextflow")
+    monkeypatch.setattr(settings, "hpc_poll_interval_seconds", 0.001)
+
+
+def test_poll_survives_transient_launcher_blips(
+    _nextflow_poll: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """HTTP blips mid-poll keep polling instead of failing the attempt (the run is still fine).
+
+    A 24h DFT run sees a handful of launcher restarts/network blips; each one must not burn
+    one of the activity's shared retry attempts — five blips over a day would otherwise
+    permanently fail a job whose HPC run actually succeeds.
+    """
+    poll = _ScriptedPoll(
+        [
+            nextflow.NextflowError("poll failed: 502 launcher restarting"),
+            httpx.ConnectError("connection refused"),
+            nextflow.RunState.RUNNING,
+            nextflow.RunState.SUCCEEDED,
+        ]
+    )
+    monkeypatch.setattr(nextflow, "poll_run", poll)
+
+    async def _fetch(handle: object) -> str:
+        return "energy=-1.500000 converged=True"
+
+    monkeypatch.setattr(nextflow, "fetch_artifacts", _fetch)
+    output = asyncio.run(
+        ActivityEnvironment().run(poll_hpc_status, HpcJobHandle(scheduler_job_id="run-77"))
+    )
+    assert output == "energy=-1.500000 converged=True"
+    assert poll.calls == 4  # both blips were absorbed by the loop, not surfaced as attempt failures
+
+
+def test_failed_run_is_non_retryable(_nextflow_poll: None, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A terminally FAILED run raises a non-retryable error — re-polling it cannot help."""
+    monkeypatch.setattr(nextflow, "poll_run", _ScriptedPoll([nextflow.RunState.FAILED]))
+    with pytest.raises(ApplicationError, match="failed") as excinfo:
+        asyncio.run(
+            ActivityEnvironment().run(poll_hpc_status, HpcJobHandle(scheduler_job_id="run-78"))
+        )
+    assert excinfo.value.non_retryable is True
+
+
+def test_persistent_launcher_outage_still_fails(
+    _nextflow_poll: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Consecutive poll errors beyond the configured bound surface (no silent 24h error loop)."""
+    monkeypatch.setattr(settings, "hpc_poll_max_consecutive_errors", 3)
+    poll = _ScriptedPoll([nextflow.NextflowError(f"poll failed: {i}") for i in range(5)])
+    monkeypatch.setattr(nextflow, "poll_run", poll)
+    with pytest.raises(nextflow.NextflowError, match="poll failed"):
+        asyncio.run(
+            ActivityEnvironment().run(poll_hpc_status, HpcJobHandle(scheduler_job_id="run-79"))
+        )
+    assert poll.calls == 3  # gave up at the bound, not on the first blip
+
+
+def test_a_success_resets_the_consecutive_error_count(
+    _nextflow_poll: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Blips spread across a long run never accumulate — only *consecutive* failures count."""
+    monkeypatch.setattr(settings, "hpc_poll_max_consecutive_errors", 2)
+    poll = _ScriptedPoll(
+        [
+            nextflow.NextflowError("blip 1"),
+            nextflow.RunState.RUNNING,
+            nextflow.NextflowError("blip 2"),
+            nextflow.RunState.RUNNING,
+            nextflow.NextflowError("blip 3"),
+            nextflow.RunState.SUCCEEDED,
+        ]
+    )
+    monkeypatch.setattr(nextflow, "poll_run", poll)
+
+    async def _fetch(handle: object) -> str:
+        return "energy=-2.000000 converged=True"
+
+    monkeypatch.setattr(nextflow, "fetch_artifacts", _fetch)
+    output = asyncio.run(
+        ActivityEnvironment().run(poll_hpc_status, HpcJobHandle(scheduler_job_id="run-80"))
+    )
+    assert output == "energy=-2.000000 converged=True"

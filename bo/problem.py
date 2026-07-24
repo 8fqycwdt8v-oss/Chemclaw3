@@ -11,6 +11,8 @@ from typing import Annotated, Literal
 
 from pydantic import BaseModel, Field, model_validator
 
+from chemclaw.config import settings
+
 # A parameter value is a float (continuous) or a category label (categorical).
 ParamValue = float | str
 
@@ -109,7 +111,7 @@ class CampaignSpec(BaseModel):
     problem: OptimizationProblem
     objective_name: str = Field(min_length=1)
     # A surrogate needs >=2 seed points (BoFire's floor); batch >=1 per round;
-    # rounds may be 0.
+    # rounds may be 0 (ceiling checked against config below).
     n_initial: int = Field(default=5, ge=MIN_SEED_OBSERVATIONS)
     n_rounds: int = Field(default=10, ge=0)
     batch: int = Field(default=1, ge=1)
@@ -118,6 +120,22 @@ class CampaignSpec(BaseModel):
     seed: int | None = None
     # Opt-in: publish the campaign's recommendation as a PR-gated graph note (1d.5).
     publish_to_graph: bool = False
+
+    @model_validator(mode="after")
+    def _rounds_within_ceiling(self) -> "CampaignSpec":
+        """Reject a round count beyond `bo_max_rounds` — Temporal event history is finite (G4).
+
+        The durable campaign carries its observation history as workflow state and re-sends it
+        to the propose activity every round, so history bytes grow quadratically with rounds;
+        an unbounded spec would be terminated by the server's hard history limit mid-run,
+        losing every already-paid evaluation. Fail at spec time instead, with the knob named.
+        """
+        if self.n_rounds > settings.bo_max_rounds:
+            raise ValueError(
+                f"n_rounds={self.n_rounds} exceeds the configured ceiling "
+                f"bo_max_rounds={settings.bo_max_rounds}"
+            )
+        return self
 
 
 class CampaignResult(BaseModel):

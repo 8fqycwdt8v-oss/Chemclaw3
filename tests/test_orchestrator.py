@@ -64,3 +64,28 @@ def test_fan_out_runs_children_in_order_and_isolates_failures() -> None:
         assert out == [2, 4, 8, 10]  # 13 dropped (poison), others doubled, input order kept
 
     asyncio.run(_run())
+
+
+def test_fan_out_limit_is_resolved_via_an_activity(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    """The default concurrency bound comes from a recorded activity, not a live settings read.
+
+    Reading `orchestrator_max_parallel_children` inside workflow code would change how many
+    StartChildWorkflow commands a replayed task emits when the config changes mid-flight — a
+    nondeterminism error that wedges every in-flight fan-out parent. The activity records the
+    value in history, so replay always sees the batch size the original execution used.
+    """
+    from temporalio.testing import ActivityEnvironment
+
+    from chemclaw.config import settings
+    from workflows.orchestrator import resolve_fan_out_limit
+
+    monkeypatch.setattr(settings, "orchestrator_max_parallel_children", 3)
+    assert asyncio.run(ActivityEnvironment().run(resolve_fan_out_limit)) == 3
+
+
+def test_background_worker_registers_fan_out_limit_activity() -> None:
+    """Every worker hosting a fan-out parent must serve the limit-resolving activity."""
+    from workers.background_worker import BACKGROUND_ACTIVITIES
+    from workflows.orchestrator import resolve_fan_out_limit
+
+    assert resolve_fan_out_limit in BACKGROUND_ACTIVITIES
