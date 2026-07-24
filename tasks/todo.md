@@ -22,7 +22,7 @@ validation — must be preserved by every change.
     `tests/test_agent.py::test_instructions_only_name_available_tools` and duplicate names by the
     registration guard — a separate CLI gate would be redundant churn.
 
-- [ ] **3. [M] `AgentProfile` seam, Stage 1.** New `agents/profiles.py`: `AgentProfile` (pydantic, like
+- [x] **3. [M] `AgentProfile` seam, Stage 1.** New `agents/profiles.py`: `AgentProfile` (pydantic, like
   `McpServerSpec`) + a one-entry `{name: profile}` registry whose sole `"default"` reproduces today's agent
   byte-for-byte; `build_agent(profile=…)` resolves (None→default), narrows tools + MCP by name-subsets,
   picks instructions + harness flags. **Invariant:** a profile *attenuates* (narrows), it never *authorizes*
@@ -38,4 +38,25 @@ validation — must be preserved by every change.
   profile default == today's agent; profile narrowing attenuates but audit+authz still attach.
 
 ## Review
-(to fill in at the end)
+
+Landed items 1–3 of the audit backlog as three scoped commits, each green under
+`make lint type test` (ruff + mypy --strict clean; full suite 606 → 613 passed, only
+offline Postgres/Temporal skips):
+
+- **1 — `.env.example` conflict** (`b07a2b2`): kept both non-overlapping real-field blocks.
+- **2 — tool registry** (`76c03b2`): `agents/tool_registry.py` (`@tool` + name-keyed registry,
+  mirroring `evals.metric`); 12 tools decorated at their definition sites; `_capability_tools()`
+  now assembles `[*registered_tools(), *_mcp_capability_tools()]`. Audit+authz middleware and the
+  MCP config-driven path unchanged. Dropped Spike 1's `agent_facing` flag (no hidden tool today —
+  Rule of Three); skipped `make tool-validate` (name-drift already test-guarded).
+- **3 — `AgentProfile` seam**: `agents/profiles.py` (spec + one-entry registry) + `build_agent(profile=…)`
+  that resolves `None`→global default, narrows tools/MCP, swaps instructions/harness. Default is
+  byte-identical to today's agent; narrowing fails fast on an unknown name; the
+  *attenuate-not-authorize* invariant is test-proven.
+
+**Deviations from the audit/spikes, with reasons:** (a) `agent_facing` flag dropped per Rule of
+Three; (b) no `make tool-validate` (redundant with existing tests); (c) profile instructions read
+from `default_options["instructions"]` — MAF's `Agent` has no `.instructions` attribute.
+
+Item 4 (`DataSourceSpec` union) deliberately left for a follow-up: larger `sources/` blast radius,
+and its forcing function (the Snowflake connector) is itself deferred — no trigger has fired.

@@ -10,14 +10,20 @@ workflows are added, plus a substrate challenge and three passing offline spikes
 options matrices, and the two worked designs (datasource-*type*; `AgentProfile`) live in the doc.
 Prioritized, dependency-ordered follow-ups (each ADR-ready, none needs live infra):
 
-- [ ] **Fix `.env.example` merge conflict** (unresolved markers at lines 156/170/173) — [S], do now.
-- [ ] **Tool registry** (`@tool` + `_TOOL_REGISTRY`, mirror `evals/metric.py`) so a new tool is a
-      decorator, not an edit to the hardcoded `_capability_tools()` list — [M]. Spike 1 proves audit
-      + authz + `allowed_tools` exclusion survive. Add a `make tool-validate` gate.
-- [ ] **`AgentProfile` seam, Stage 1** (`agents/profiles.py` + one `"default"` entry ==
-      today's agent + `build_agent(profile=…)` narrowing) — [M]. Spike 2 proves per-use-case
-      selection with the *attenuate-not-authorize* invariant. Stage 2 (front-door selection)
-      triggers on a **second real use case**.
+- [x] **Fix `.env.example` merge conflict** (unresolved markers at lines 156/170/173) — [S]. Done
+      (both sides were real, non-overlapping Settings fields → kept both). Commit `b07a2b2`.
+- [x] **Tool registry** (`@tool` + `_TOOL_REGISTRY`, mirror `evals/metric.py`) so a new tool is a
+      decorator, not an edit to the hardcoded `_capability_tools()` list — [M]. Done: `agents/tool_registry.py`,
+      12 tools decorated, `_capability_tools()` assembles from the registry, audit+authz middleware
+      unchanged. Commit `76c03b2`. **KISS deviation:** Spike 1's `agent_facing` flag dropped (no hidden
+      in-process tool exists — Rule of Three). **No `make tool-validate`:** name-drift is already guarded
+      by `tests/test_agent.py::test_instructions_only_name_available_tools` + the registration guard; a
+      separate CLI gate would be redundant.
+- [x] **`AgentProfile` seam, Stage 1** (`agents/profiles.py` + one `"default"` entry ==
+      today's agent + `build_agent(profile=…)` narrowing) — [M]. Done: default reproduces today's agent
+      byte-for-byte; a profile narrows tools/MCP + swaps instructions/harness; unknown tool names fail
+      fast; the *attenuate-not-authorize* invariant is test-proven (audit+authz attach regardless of
+      profile). Stage 2 (front-door selection) triggers on a **second real use case**.
 - [ ] **`DataSourceSpec` discriminated union (scoped), Stage 1** — [M]. Trigger: the deferred
       Snowflake connector. Spike 3 proves "one variant + one token" survives real
       connection/auth/mapping config; Snowflake is the first `exchange_obo` caller.
