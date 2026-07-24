@@ -85,26 +85,30 @@ refuted-or-confirmed by a skeptic agent before it counts.
       five scoped commits (2e7148c kg, 4a47a07 calc, b23df5c mcp, 2e317b2 kernel,
       ef9bce9 bo). Combined tree gated green: lint + mypy strict clean,
       551 passed / 16 Temporal-only skips (43 new behavior tests over baseline).
-- [ ] Batch B (eln/memory, report/agents, service, workflows, evals/scripts,
-      Wave-4 residuals): 32 findings + fail-closed startup + ownership-boundary
-      test + write-tool authz defaults + git cross-process lock — in flight.
+- [x] Batch B (eln/memory, report/agents, service, workflows, evals/scripts,
+      Wave-4 residuals): completed as commits 9eade98 (wave-4 residuals),
+      dcae2d1 (evals/scripts), 79625a1 (eln/memory), 82b8723 (report/agents),
+      50fc856 (workflows), 4af678b (service). Combined tree gated green:
+      lint + mypy strict clean, 610 passed / 17 Temporal-only skips
+      (102 new behavior tests over baseline). All 60 findings resolved
+      (59 fixed, 1 refuted).
 - [x] Orchestrator verification of the 11 skeptic-orphaned findings: 10 confirmed,
       1 refuted (evals/baseline.py:70 — documented deliberate behavior).
 
 ## Wave 4 — Hardening (S3 + risk-map targets)
 
-- [ ] Fail-closed startup: refuse boot when `entra_required=False` AND bind address
+- [x] Fail-closed startup: refuse boot when `entra_required=False` AND bind address
       non-loopback, unless explicit `service_allow_insecure=true`; ADR in DECISIONS.md.
-- [ ] Ownership-boundary test enumerating session-scoped routes → each must funnel
+- [x] Ownership-boundary test enumerating session-scoped routes → each must funnel
       through `_resolve_session`.
-- [ ] `tool_authz_default`: deny-by-default for write tools or default gate set for
+- [x] `tool_authz_default`: deny-by-default for write tools or default gate set for
       `index_molecule`/job launchers; ADR either way.
-- [ ] `git_submitter`: enforce single-process ownership (advisory lock file or
+- [x] `git_submitter`: enforce single-process ownership (advisory lock file or
       fail-fast on concurrent use).
-- [ ] Confirm/fix workflow-body `datetime` usage in `eln_sync.py`/`memory_jobs.py`.
-- [ ] Behavioral-test reinforcement for `test_authz.py`/`test_service.py` where
+- [x] Confirm/fix workflow-body `datetime` usage in `eln_sync.py`/`memory_jobs.py`.
+- [x] Behavioral-test reinforcement for `test_authz.py`/`test_service.py` where
       feasible offline.
-- [ ] Apply remaining confirmed S3 findings.
+- [x] Apply remaining confirmed S3 findings.
 
 ## Wave 5 — Simplification / refactoring (S4, only on green)
 
