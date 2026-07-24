@@ -126,7 +126,9 @@ refuted-or-confirmed by a skeptic agent before it counts.
 - [x] Full `make lint type test` + `make cov`; coverage ≥ Wave-0 baseline.
       → lint + mypy strict clean; 616 passed / 17 Temporal-only skips;
       coverage **89.60%** vs 88.43% baseline.
-- [ ] Security-review pass over the whole branch diff — in flight.
+- [x] Security-review pass over the whole branch diff → 9 findings (1 S2
+      introduced by the campaign's own kg fix, 6 S3, 2 S4), all fixed or
+      documented (D-073). Final gate: 625 passed / 17 skips, coverage 89.64%.
 - [x] Update `BACKLOG.md`, `DECISIONS.md` (ADRs D-067…D-072), `DEFERRED.md`; write the
       review section below.
 - [x] Commit in logical chunks (kernel / fixes-per-unit / hardening / refactor) and
