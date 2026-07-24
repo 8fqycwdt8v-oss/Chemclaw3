@@ -42,7 +42,7 @@ class BoCampaignWorkflow:
 
         seed = await workflow.execute_activity(
             propose_initial,
-            args=[spec.problem, spec.n_initial],
+            args=[spec.problem, spec.n_initial, spec.seed],
             start_to_close_timeout=timeout,
             retry_policy=BAD_DATA_RETRY,
         )
@@ -60,7 +60,7 @@ class BoCampaignWorkflow:
                 break
             proposed = await workflow.execute_activity(
                 propose_next,
-                args=[spec.problem, history, spec.batch],
+                args=[spec.problem, history, spec.batch, spec.seed],
                 start_to_close_timeout=timeout,
                 retry_policy=BAD_DATA_RETRY,
             )

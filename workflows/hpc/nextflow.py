@@ -53,6 +53,30 @@ def _auth_headers() -> dict[str, str]:
     return {"Authorization": f"Bearer {settings.hpc_api_token}"} if settings.hpc_api_token else {}
 
 
+def _same_origin(url_a: str, url_b: str) -> bool:
+    """Whether two URLs share scheme+host+port — the boundary a bearer token must not cross."""
+    a, b = httpx.URL(url_a), httpx.URL(url_b)
+    default_ports = {"http": 80, "https": 443}
+    port_a = a.port if a.port is not None else default_ports.get(a.scheme)
+    port_b = b.port if b.port is not None else default_ports.get(b.scheme)
+    return (a.scheme, a.host, port_a) == (b.scheme, b.host, port_b)
+
+
+def _artifact_headers() -> dict[str, str]:
+    """Auth for the artifact store — never the launcher's token on a foreign origin (F4).
+
+    The store has its own credential seam (`hpc_artifact_store_token`); without one, the launcher
+    token applies only when the store shares the launcher's origin (e.g. Tower serving its own
+    artifacts). A cross-origin store with no token of its own is fetched unauthenticated, so the
+    Seqera credential — which can launch and cancel pipelines — is never handed to a third host.
+    """
+    if settings.hpc_artifact_store_token:
+        return {"Authorization": f"Bearer {settings.hpc_artifact_store_token}"}
+    if _same_origin(settings.hpc_artifact_store_url, settings.hpc_api_base_url):
+        return _auth_headers()
+    return {}
+
+
 async def _client(transport: httpx.AsyncBaseTransport | None) -> httpx.AsyncClient:
     """Build an httpx client for the launcher, timeout-bounded from config; transport for tests."""
     return httpx.AsyncClient(
@@ -127,7 +151,14 @@ async def fetch_artifacts(
         NextflowError: When the artifact cannot be fetched.
     """
     url = f"{settings.hpc_artifact_store_url}/{handle.scheduler_job_id}/qm_output.txt"
-    async with await _client(transport) as client:
+    # A dedicated client, not `_client`: the store may be a different origin than the launcher,
+    # and a client-wide launcher Authorization header would ride along to it (httpx applies
+    # client headers to every request regardless of host).
+    async with httpx.AsyncClient(
+        headers=_artifact_headers(),
+        timeout=settings.hpc_http_timeout_seconds,
+        transport=transport,
+    ) as client:
         response = await client.get(url)
     if response.status_code != httpx.codes.OK:
         raise NextflowError(f"artifact fetch failed: {error_detail(response)}")

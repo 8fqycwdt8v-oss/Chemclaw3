@@ -9,13 +9,9 @@ is the `reaction-search` skill's call (G6).
 
 from mcp.server.fastmcp import FastMCP
 
-from mcp_servers.fpstore import (
-    FingerprintRecord,
-    FingerprintStore,
-    Match,
-    default_molecule_store,
-)
+from mcp_servers.fpstore import FingerprintStore, Match, default_molecule_store
 from mcp_servers.molfp.search import (
+    SubstructureHit,
     find_similar_molecules,
     find_substructure_matches,
     record_for,
@@ -37,7 +33,7 @@ async def similar_molecules(
 
 
 @server.tool()
-async def substructure_matches(query: str) -> list[FingerprintRecord]:
+async def substructure_matches(query: str) -> list[SubstructureHit]:
     """Return stored molecules containing the `query` fragment (SMARTS or SMILES)."""
     return await find_substructure_matches(_store, query)
 

@@ -161,7 +161,55 @@ def test_hpc_and_deploy_defaults() -> None:
 def test_hpc_launch_interface_env_override(monkeypatch: pytest.MonkeyPatch) -> None:
     """The real backend is selected by one `CHEMCLAW_`-prefixed env var, like every setting."""
     monkeypatch.setenv("CHEMCLAW_HPC_LAUNCH_INTERFACE", "nextflow")
+    monkeypatch.setenv("CHEMCLAW_HPC_API_BASE_URL", "https://tower.internal/api")
+    monkeypatch.setenv("CHEMCLAW_HPC_PIPELINE_NAME", "qm-dft")
+    monkeypatch.setenv("CHEMCLAW_HPC_ARTIFACT_STORE_URL", "https://artifacts.internal")
     assert Settings(_env_file=None).hpc_launch_interface == "nextflow"  # type: ignore[call-arg]
+
+
+def test_nextflow_requires_launcher_endpoints() -> None:
+    """Selecting the real backend without its endpoints fails at startup, naming the fields."""
+    with pytest.raises(ValueError, match="hpc_api_base_url"):
+        Settings(_env_file=None, hpc_launch_interface="nextflow")  # type: ignore[call-arg]
+    with pytest.raises(ValueError, match="hpc_pipeline_name, hpc_artifact_store_url"):
+        Settings(  # type: ignore[call-arg]
+            _env_file=None,
+            hpc_launch_interface="nextflow",
+            hpc_api_base_url="https://tower.internal/api",
+        )
+
+
+def test_nextflow_poll_interval_must_beat_run_heartbeat() -> None:
+    """The nextflow poll heartbeats against its own timeout — the pair is validated too."""
+    with pytest.raises(ValueError, match="hpc_run_heartbeat_timeout_seconds"):
+        Settings(  # type: ignore[call-arg]
+            _env_file=None,
+            hpc_launch_interface="nextflow",
+            hpc_api_base_url="https://tower.internal/api",
+            hpc_pipeline_name="qm-dft",
+            hpc_artifact_store_url="https://artifacts.internal",
+            hpc_poll_interval_seconds=300.0,
+            qm_poll_heartbeat_timeout_seconds=600.0,  # mock pair satisfied...
+            # ...but hpc_run_heartbeat_timeout_seconds stays at its 120s default.
+        )
+
+
+def test_openai_compatible_embeddings_require_endpoint_and_model() -> None:
+    """The embedding provider reuses `llm_base_url`; selecting it half-configured fails early."""
+    with pytest.raises(ValueError, match="llm_base_url"):
+        Settings(  # type: ignore[call-arg]
+            _env_file=None,
+            embedding_provider="openai_compatible",
+            embedding_model="internal-embed",
+        )
+    with pytest.raises(ValueError, match="embedding_model"):
+        Settings(  # type: ignore[call-arg]
+            _env_file=None,
+            llm_provider="openai_compatible",
+            llm_base_url="https://llm.internal/v1",
+            llm_model="internal-model",
+            embedding_provider="openai_compatible",
+        )
 
 
 def test_entra_required_needs_audience_and_issuer() -> None:
@@ -170,6 +218,29 @@ def test_entra_required_needs_audience_and_issuer() -> None:
         Settings(_env_file=None, entra_required=True)  # type: ignore[call-arg]
     with pytest.raises(ValueError, match="tenant_id or entra_issuer"):
         Settings(_env_file=None, entra_required=True, entra_audience="api://x")  # type: ignore[call-arg]
+
+
+def test_entra_required_rejects_issuer_only_config() -> None:
+    """An issuer alone cannot resolve the JWKS keys endpoint — reject the deny-all half-config."""
+    with pytest.raises(ValueError, match="entra_jwks_url"):
+        Settings(  # type: ignore[call-arg]
+            _env_file=None,
+            entra_required=True,
+            entra_audience="api://x",
+            entra_issuer="https://login.microsoftonline.com/tid-1/v2.0",
+        )
+
+
+def test_entra_required_accepts_issuer_plus_jwks_url() -> None:
+    """Explicit issuer + explicit JWKS URL is a complete config even without a tenant id."""
+    settings = Settings(  # type: ignore[call-arg]
+        _env_file=None,
+        entra_required=True,
+        entra_audience="api://x",
+        entra_issuer="https://login.microsoftonline.com/tid-1/v2.0",
+        entra_jwks_url="https://login.microsoftonline.com/tid-1/discovery/v2.0/keys",
+    )
+    assert settings.entra_required is True
 
 
 def test_entra_role_gate_must_be_configured_symmetrically() -> None:

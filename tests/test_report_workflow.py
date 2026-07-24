@@ -17,6 +17,7 @@ from report.evidence import EvidenceChunk
 from report.harness import ReportRequest, ReportSection
 from tests.conftest import FakeSubmitter
 from tests.temporal_env import pydantic_client, start_env_or_skip
+from workflows.orchestrator import resolve_fan_out_limit
 from workflows.report_workflow import (
     DevelopmentReportWorkflow,
     ReportSectionWorkflow,
@@ -65,7 +66,7 @@ def test_report_workflow_drafts_and_pr_gates(monkeypatch: pytest.MonkeyPatch) ->
                 client,
                 task_queue=settings.background_task_queue,
                 workflows=[DevelopmentReportWorkflow, ReportSectionWorkflow],
-                activities=[retrieve_section, propose_report],
+                activities=[retrieve_section, propose_report, resolve_fan_out_limit],
             ):
                 ref = await client.execute_workflow(
                     DevelopmentReportWorkflow.run,
@@ -100,7 +101,7 @@ def test_failed_section_is_marked_not_dropped(monkeypatch: pytest.MonkeyPatch) -
                 client,
                 task_queue=settings.background_task_queue,
                 workflows=[DevelopmentReportWorkflow, ReportSectionWorkflow],
-                activities=[retrieve_section, propose_report],
+                activities=[retrieve_section, propose_report, resolve_fan_out_limit],
             ):
                 await client.execute_workflow(
                     DevelopmentReportWorkflow.run,

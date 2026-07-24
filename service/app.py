@@ -34,7 +34,7 @@ from agents.session_events import stream_new_events
 from chemclaw.config import settings
 from service.auth import Principal, require_principal
 from service.budget import BudgetExceeded, BudgetTracker
-from service.events import JobCompletedEvent
+from service.events import ErrorEvent, JobCompletedEvent
 from service.runner import run_turn
 
 logger = logging.getLogger(__name__)
@@ -150,7 +150,7 @@ def create_app(
     Returns:
         A configured `FastAPI` application.
     """
-    _warn_if_unauthenticated_and_exposed()
+    _refuse_unauthenticated_exposure()
     app = FastAPI(title="Chemclaw", docs_url=None, redoc_url=None)
     _add_security_headers(app)
     _add_cors(app)
@@ -172,6 +172,19 @@ def create_app(
     # cannot get one within the admission timeout is shed with 503. Built here so it binds to the
     # app's event loop on first await.
     app.state.turn_semaphore = asyncio.Semaphore(settings.service_max_concurrent_turns)
+    # Per-session turn serialization: session ids with a turn currently in flight. Two concurrent
+    # turns on one session would drive `agent.run` against the same AgentSession state at once,
+    # interleaving two turns' messages in one thread — so a second turn is rejected with 409 while
+    # one runs, matching the admission semaphore's shed-don't-queue semantics (a queued turn would
+    # silently pin a second permit and still interleave from the user's point of view; a 409 tells
+    # the client — a double-submit or a second tab — to wait for the running turn). Check-and-add is
+    # atomic on the event loop (no await between them), so the gate has no race window.
+    app.state.active_turns = set()
+    # Per-user count of open push-back event streams. The turn semaphore only guards POSTed turns;
+    # each event stream polls the database for its whole lifetime, so without a cap one user's
+    # scripted (or abandoned-tab) streams could pile up unbounded DB load. Entries are removed when
+    # a user's last stream closes, so the map stays small.
+    app.state.event_streams = {}
     # Runaway-cost guard (service.budget): meters each turn's token usage and counts turns per
     # session and per user, refusing a turn (429) that would exceed a configured cap. In-process and
     # off unless `budget_enabled`; the missing ceiling above the per-turn loop cap.
@@ -202,6 +215,12 @@ def create_app(
         found, owner = await owners.lookup(session_id)
         if not found or (owner is not None and owner != principal.oid):
             raise HTTPException(status_code=404, detail="unknown session")
+        # Re-check the cache after the awaited lookup: two racing requests would otherwise each
+        # mint a live handle over the same durable thread, and the loser's handle would keep
+        # writing outside the cache. The first rehydrator's handle wins; both callers share it.
+        entry = app.state.live_sessions.get(session_id)
+        if entry is not None:
+            return entry[0]
         # The durable history provider reloads the thread on the session's first use, so rebuilding
         # the handle is enough to resume the conversation; register it so later turns hit the cache.
         session = _agent().create_session(session_id=session_id)
@@ -249,54 +268,125 @@ def create_app(
 
         Admission-controlled (AG-15): the turn takes one of the process's turn permits for its
         whole streamed run, and is shed with 503 if none frees within the admission timeout — so a
-        burst of concurrent turns cannot pile onto the shared internal LLM endpoint.
+        burst of concurrent turns cannot pile onto the shared internal LLM endpoint. One turn at a
+        time per session: a second concurrent POST to the same session is a 409 (a double-submit
+        cannot interleave two turns into one conversation thread). The permit hold is wall-clock
+        bounded (`service_turn_timeout_seconds`): a hung model stream or a slow-reading client
+        cannot pin a permit forever — on expiry the client gets one error event and the permit is
+        released.
         """
         session = await _resolve_session(session_id, principal)
-        # Runaway-cost guard (budget #3): refuse before taking a permit if this session/user has
-        # already exhausted its turn or token budget — a clean 429, not a started-then-killed turn.
-        try:
-            app.state.budget.check(session_id, principal.oid)
-        except BudgetExceeded as exc:
-            raise HTTPException(status_code=429, detail=str(exc)) from exc
-        semaphore = app.state.turn_semaphore
-        try:
-            await asyncio.wait_for(
-                semaphore.acquire(), timeout=settings.service_turn_admission_timeout_seconds
-            )
-        except TimeoutError as exc:
+        active_turns: set[str] = app.state.active_turns
+        if session_id in active_turns:
             raise HTTPException(
-                status_code=503, detail="server at capacity; retry shortly"
-            ) from exc
+                status_code=409, detail="a turn is already running for this session"
+            )
+        active_turns.add(session_id)
+        semaphore = app.state.turn_semaphore
 
-        async def _events() -> AsyncIterator[dict[str, str]]:
-            # Release the permit when the stream ends — normal completion, error, or client
-            # disconnect (the generator is closed, running this finally) — so it is never leaked.
+        async def _turn_events() -> AsyncIterator[dict[str, str]]:
+            # Release the permit and the session's turn slot when the stream ends — normal
+            # completion, error, timeout, or client disconnect (the generator is closed, running
+            # this finally) — so neither is ever leaked.
             try:
-                async for event in run_turn(
-                    _agent(),
-                    session,
-                    body.message,
-                    actor=principal.oid,
-                    roles=principal.roles,
-                    budget=app.state.budget,
-                ):
-                    yield {"event": event.type, "data": event.model_dump_json()}
+                try:
+                    # The deadline covers the whole streamed run *including* client consumption:
+                    # the generator is suspended inside this scope at each `yield`, so a stalled
+                    # model stream and a slow-reading client are both bounded (AG-15's missing
+                    # wall-clock half). A stall inside `run_turn` surfaces here as TimeoutError and
+                    # becomes one user-safe error event; a stall in the transport tears the stream
+                    # down, and the `finally` still frees the permit either way.
+                    async with asyncio.timeout(settings.service_turn_timeout_seconds):
+                        async for event in run_turn(
+                            _agent(),
+                            session,
+                            body.message,
+                            actor=principal.oid,
+                            roles=principal.roles,
+                            budget=app.state.budget,
+                        ):
+                            yield {"event": event.type, "data": event.model_dump_json()}
+                except TimeoutError:
+                    logger.warning(
+                        "turn timed out after %ss for session %s",
+                        settings.service_turn_timeout_seconds,
+                        session_id,
+                    )
+                    timeout_event = ErrorEvent(
+                        message=(
+                            "The turn exceeded the "
+                            f"{settings.service_turn_timeout_seconds:g}s time limit and was "
+                            f"cancelled (session {session_id})."
+                        )
+                    )
+                    yield {"event": timeout_event.type, "data": timeout_event.model_dump_json()}
             finally:
                 semaphore.release()
+                active_turns.discard(session_id)
 
-        return EventSourceResponse(_events())
+        acquired = False
+        handed_off = False
+        try:
+            # Runaway-cost guard (budget #3): refuse before taking a permit if this session/user
+            # has exhausted its turn or token budget — a clean 429, not a started-then-killed turn.
+            try:
+                app.state.budget.check(session_id, principal.oid)
+            except BudgetExceeded as exc:
+                raise HTTPException(status_code=429, detail=str(exc)) from exc
+            try:
+                await asyncio.wait_for(
+                    semaphore.acquire(), timeout=settings.service_turn_admission_timeout_seconds
+                )
+            except TimeoutError as exc:
+                raise HTTPException(
+                    status_code=503, detail="server at capacity; retry shortly"
+                ) from exc
+            acquired = True
+            response = EventSourceResponse(_turn_events())
+            handed_off = True
+            return response
+        finally:
+            # try/finally, not `except Exception`: cancellation (a client gone mid-admission)
+            # is a BaseException, and missing it here leaked the session's active-turns entry —
+            # 409-bricking the session until restart. Until the streaming response is handed
+            # off, this owns the cleanup; afterwards the generator's own finally does.
+            if not handed_off:
+                active_turns.discard(session_id)
+                if acquired:
+                    semaphore.release()
 
     @app.get("/sessions/{session_id}/events")
     async def session_events(
         session_id: str,
         principal: Principal = Depends(require_principal),
     ) -> EventSourceResponse:
-        """Stream async job push-back for the session (F3-T3): a finished job wakes the chat."""
+        """Stream async job push-back for the session (F3-T3): a finished job wakes the chat.
+
+        Bounded per user (`service_max_event_streams_per_user`): each stream polls the database
+        for its whole lifetime, so unbounded streams are a connection-exhaustion vector (429 past
+        the cap). The claim is scoped to `job_completed` in the SQL itself — the claim is
+        destructive (at-most-once), so filtering after it would silently destroy events of any
+        other kind meant for another consumer.
+        """
         await _resolve_session(session_id, principal)
+        streams: dict[str, int] = app.state.event_streams
+        if streams.get(principal.oid, 0) >= settings.service_max_event_streams_per_user:
+            raise HTTPException(
+                status_code=429, detail="too many concurrent event streams; close one and retry"
+            )
+        streams[principal.oid] = streams.get(principal.oid, 0) + 1
+
+        def _release_stream_slot() -> None:
+            """Return this stream's per-user slot — exactly once, whoever owns cleanup."""
+            remaining = streams.get(principal.oid, 1) - 1
+            if remaining <= 0:
+                streams.pop(principal.oid, None)
+            else:
+                streams[principal.oid] = remaining
 
         async def _events() -> AsyncIterator[dict[str, str]]:
-            async for pushed in stream_new_events(session_id):
-                if pushed.kind == "job_completed":
+            try:
+                async for pushed in stream_new_events(session_id, kinds=("job_completed",)):
                     job_id = str(pushed.payload.get("job_id", ""))
                     # Flip the harness todo that was waiting on this job (F3-T3 follow-up), so the
                     # session's *next* turn sees it as done instead of open forever. The live
@@ -311,8 +401,19 @@ def create_app(
                             )
                     event = JobCompletedEvent(job_id=job_id, summary=pushed.payload)
                     yield {"event": event.type, "data": event.model_dump_json()}
+            finally:
+                _release_stream_slot()
 
-        return EventSourceResponse(_events())
+        handed_off = False
+        try:
+            response = EventSourceResponse(_events())
+            handed_off = True
+            return response
+        finally:
+            # Mirrors the turn route: any BaseException before the response is handed off
+            # must return the slot, or the user's stream budget leaks toward a permanent 429.
+            if not handed_off:
+                _release_stream_slot()
 
     if _STATIC_DIR.is_dir():
         app.mount("/", StaticFiles(directory=str(_STATIC_DIR), html=True), name="static")
@@ -330,22 +431,33 @@ _CONTENT_SECURITY_POLICY = (
 )
 
 
-def _warn_if_unauthenticated_and_exposed() -> None:
-    """Warn loudly when the app runs unauthenticated (`entra_required` off) on a non-loopback bind.
+def _refuse_unauthenticated_exposure() -> None:
+    """Fail closed when the app would run unauthenticated (`entra_required` off) network-exposed.
 
     With `entra_required` False every request is the shared dev principal and all authorization
     gates are open (SEC-2) — intended for local dev only. Binding that mode to a non-loopback
-    interface (the `service_host="0.0.0.0"` default) exposes it to the network, so surface it at
-    startup rather than leaving the whole deployment's safety to one env var defaulting the
-    insecure way. Per the sign-off this warns and still boots; a deployment sets
-    `CHEMCLAW_ENTRA_REQUIRED=true`.
+    interface (the `service_host="0.0.0.0"` default) exposes it to the network, so the service
+    refuses to boot rather than leaving the whole deployment's safety to one env var defaulting
+    the insecure way (the earlier warn-and-boot was one missed log line from an open deployment).
+    `service_allow_insecure=true` is the explicit, conscious opt-out — it boots with the loud
+    warning instead. Loopback dev and Entra-enforced deployments are untouched.
     """
     if settings.entra_required or settings.service_host in _LOOPBACK_HOSTS:
         return
+    if not settings.service_allow_insecure:
+        raise RuntimeError(
+            "SECURITY: entra_required is False but the service binds a non-loopback interface "
+            f"({settings.service_host!r}) — every request would run as the shared dev principal "
+            "with all authorization gates OPEN. Set CHEMCLAW_ENTRA_REQUIRED=true for any shared/"
+            "exposed deployment, bind a loopback interface for local dev, or set "
+            "CHEMCLAW_SERVICE_ALLOW_INSECURE=true to explicitly accept an unauthenticated, "
+            "network-exposed service."
+        )
     logger.warning(
         "SECURITY: entra_required is False but the service binds a non-loopback interface (%r) — "
-        "every request runs as the shared dev principal with all authorization gates OPEN. Set "
-        "CHEMCLAW_ENTRA_REQUIRED=true for any shared/exposed deployment.",
+        "every request runs as the shared dev principal with all authorization gates OPEN "
+        "(service_allow_insecure=true). Set CHEMCLAW_ENTRA_REQUIRED=true for any shared/exposed "
+        "deployment.",
         settings.service_host,
     )
 

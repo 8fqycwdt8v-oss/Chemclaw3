@@ -11,7 +11,7 @@ import asyncio
 import pytest
 
 from chemclaw.config import settings
-from mcp_servers.fpstore import PostgresFingerprintStore
+from mcp_servers.fpstore import InMemoryFingerprintStore, PostgresFingerprintStore
 from mcp_servers.molfp.fingerprint import molecule_definition
 from mcp_servers.molfp.search import (
     find_similar_molecules,
@@ -47,6 +47,32 @@ def test_similarity_ranking_in_sql() -> None:
         assert hits[0].similarity == pytest.approx(1.0)
         assert "pg-benzene" not in {h.id for h in hits}  # disjoint, below threshold
         assert all(hits[i].similarity >= hits[i + 1].similarity for i in range(len(hits) - 1))
+
+    asyncio.run(_run())
+
+
+def test_tie_break_order_matches_the_in_memory_backend() -> None:
+    """Equal-similarity hits come back in the same id order from both backends.
+
+    The in-memory reference tie-breaks by Python's code-point sort; the SQL side must
+    order identically (`id COLLATE "C"`), or the database's locale collation (e.g.
+    en_US.UTF-8 puts 'a1' before 'B1') silently breaks the documented cross-backend
+    determinism for mixed-case ids.
+    """
+
+    async def _run() -> None:
+        pg_store = await _store_or_skip()
+        mem_store = InMemoryFingerprintStore(definition=molecule_definition())
+        octanol = "CCCCCCCCO"  # unique to this test so a high threshold isolates the tie
+        for cid in ["pg-collate-a1", "pg-collate-B1"]:
+            await pg_store.add(record_for(cid, octanol))
+            await mem_store.add(record_for(cid, octanol))
+
+        pg_hits = await find_similar_molecules(pg_store, octanol, threshold=0.99)
+        mem_hits = await find_similar_molecules(mem_store, octanol, threshold=0.99)
+        pg_ids = [h.id for h in pg_hits if h.id.startswith("pg-collate-")]
+        mem_ids = [h.id for h in mem_hits]
+        assert pg_ids == mem_ids == ["pg-collate-B1", "pg-collate-a1"]  # code-point order
 
     asyncio.run(_run())
 

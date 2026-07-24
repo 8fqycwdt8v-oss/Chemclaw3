@@ -24,17 +24,22 @@ from bo.objectives import (
 )
 from bo.problem import (
     CampaignSpec,
+    CategoricalParameter,
     ContinuousParameter,
     Objective,
     Observation,
     OptimizationProblem,
     Parameter,
+    ParamValue,
     best_of,
     discrete_candidate_count,
     distinct_candidate_count,
+    require_rounds_within_ceiling,
 )
 from calc.solubility import SolubilityInput, predict_solubility
 from calc.store import InMemoryStore
+from chemclaw.chem import InvalidSmilesError
+from chemclaw.config import settings
 from tests.temporal_env import pydantic_client, start_env_or_skip
 from workflows.bo_activities import evaluate_candidates, propose_initial, propose_next
 from workflows.bo_campaign import BoCampaignWorkflow
@@ -50,11 +55,25 @@ def test_get_objective_unknown_raises() -> None:
         get_objective("does-not-exist")
 
 
-def test_campaign_spec_rejects_zero_initial() -> None:
-    """n_initial must be >= 1 so a surrogate has data to seed from (no empty history)."""
+@pytest.mark.parametrize("n_initial", [0, 1])
+def test_campaign_spec_rejects_insufficient_seed(n_initial: int) -> None:
+    """n_initial below the surrogate floor (2) fails at spec time, not at round 1.
+
+    BoFire's SOBO strategy needs at least two experiments to fit; a spec with
+    fewer would burn its seed evaluations and then crash non-retryably.
+    """
     problem = build_problem(load_dataset())
-    with pytest.raises(ValueError, match="greater than or equal to 1"):
-        CampaignSpec(problem=problem, objective_name="reizman_suzuki", n_initial=0)
+    with pytest.raises(ValueError, match="greater than or equal to 2"):
+        CampaignSpec(problem=problem, objective_name="reizman_suzuki", n_initial=n_initial)
+
+
+def test_campaign_spec_carries_per_campaign_seed() -> None:
+    """The spec is the per-campaign seed seam; unset means the config default."""
+    problem = build_problem(load_dataset())
+    spec = CampaignSpec(problem=problem, objective_name="reizman_suzuki")
+    assert spec.seed is None  # engine resolves None to settings.bo_seed
+    replicate = spec.model_copy(update={"seed": 7})
+    assert replicate.seed == 7
 
 
 def test_best_of_honors_direction() -> None:
@@ -150,8 +169,26 @@ def test_candidate_set_bo_finds_soluble_molecule() -> None:
 
 def test_discrete_candidate_count() -> None:
     """Pure-categorical spaces are finite (product of categories); mixed spaces are infinite."""
-    assert discrete_candidate_count(molecule_library_problem(["A", "B", "C"])) == 3
+    assert discrete_candidate_count(molecule_library_problem(["CCO", "O", "c1ccccc1"])) == 3
     assert discrete_candidate_count(build_problem(load_dataset())) is None  # has continuous dims
+
+
+def test_molecule_library_rejects_bad_smiles_up_front() -> None:
+    """One unparseable library entry fails at problem construction, naming the entry.
+
+    Without this, the campaign would fail non-retryably only when BO finally
+    proposes the bad molecule, discarding all completed rounds.
+    """
+    with pytest.raises(InvalidSmilesError, match="C1CC"):
+        molecule_library_problem(["CCO", "C1CC", "O"])
+
+
+def test_molecule_library_collapses_duplicate_spellings() -> None:
+    """Two spellings of one molecule become one candidate, not two."""
+    problem = molecule_library_problem(["CCO", "OCC", "O"])
+    parameter = problem.parameters[0]
+    assert isinstance(parameter, CategoricalParameter)
+    assert parameter.categories == ["CCO", "O"]
 
 
 def test_optimize_stops_gracefully_on_exhausted_discrete_space() -> None:
@@ -215,3 +252,39 @@ def test_durable_campaign_runs_end_to_end() -> None:
         assert result.best == best_of(spec.problem, result.history)
 
     asyncio.run(_run())
+
+
+def test_round_ceiling_is_enforced_at_creation_not_in_the_model(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`require_rounds_within_ceiling` gates creation; the spec model itself stays config-free.
+
+    The workflow re-sends the full observation history to every propose round, so an unbounded
+    round count grows Temporal event history quadratically until the server terminates the
+    campaign — hence the config-backed ceiling. But `CampaignSpec` crosses the Temporal
+    serialization boundary: a model validator reading live `bo_max_rounds` would make an
+    in-flight campaign's own input fail deserialization at replay when the setting is lowered.
+    So the ceiling is a creation-time check, and a spec serialized under a higher ceiling must
+    still round-trip after the ceiling drops.
+    """
+    monkeypatch.setattr(settings, "bo_max_rounds", 3)
+    with pytest.raises(ValueError, match="bo_max_rounds=3"):
+        require_rounds_within_ceiling(4)
+    require_rounds_within_ceiling(3)  # at the ceiling is fine — the bound is inclusive
+
+    # Replay survives a lowered ceiling: the in-flight spec's own input still deserializes.
+    problem = build_problem(load_dataset())
+    spec = CampaignSpec(problem=problem, objective_name="reizman_suzuki", n_rounds=4)
+    assert CampaignSpec.model_validate(spec.model_dump()).n_rounds == 4
+
+
+def test_optimize_rejects_rounds_beyond_the_ceiling(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The in-process campaign entry point enforces the config ceiling before spending budget."""
+    monkeypatch.setattr(settings, "bo_max_rounds", 3)
+    problem = molecule_library_problem(["CCO", "O", "c1ccccc1"])
+
+    async def _never(_params: dict[str, ParamValue]) -> float:
+        raise AssertionError("no evaluation may run for a rejected campaign")
+
+    with pytest.raises(ValueError, match="bo_max_rounds=3"):
+        asyncio.run(optimize(problem, _never, n_initial=2, n_rounds=4))

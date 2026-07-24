@@ -193,6 +193,24 @@ def test_graph_retriever_scores_by_confidence(tmp_path: Path) -> None:
     asyncio.run(_run())
 
 
+def test_graph_retriever_ranks_hits_by_score_not_disk_order(tmp_path: Path) -> None:
+    """Graph hits come back best-first (KM-5), not in alphabetical file order (the RRF contract)."""
+
+    async def _run() -> None:
+        (tmp_path / "aaa.md").write_text(
+            "---\nid: reaction-aaa\ntype: reaction\nconfidence: 0.2\n---\nEsterification.\n",
+            encoding="utf-8",
+        )
+        (tmp_path / "zzz.md").write_text(
+            "---\nid: reaction-zzz\ntype: reaction\nconfidence: 0.9\n---\nEsterification.\n",
+            encoding="utf-8",
+        )
+        hits = await GraphRetriever(str(tmp_path)).retrieve("esterification", {})
+        assert [c.source_note_id for c in hits] == ["reaction-zzz", "reaction-aaa"]
+
+    asyncio.run(_run())
+
+
 def test_graph_retriever_excludes_expired_notes(tmp_path: Path) -> None:
     """A report never cites a note past its `valid_to` as current evidence (KM-7)."""
 

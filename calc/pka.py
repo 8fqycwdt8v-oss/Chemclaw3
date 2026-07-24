@@ -7,15 +7,24 @@ linear calibration (slope/intercept from config). Candidate sites are enumerated
 each conjugate base is evaluated, and the most stable anion defines the pKa.
 
 Approximate by construction — the result carries the calibration's residual as an
-uncertainty; never present the value as exact. v1 covers O-H/S-H acids (carboxylic
-acids, phenols, alcohols, thiols); N-H and C-H acids are a later extension.
+uncertainty; never present the value as exact. v1 covers **net-neutral** O-H/S-H
+acids (carboxylic acids, phenols, alcohols, thiols); the calibration was fitted
+over neutral reference acids through this exact acid(0)/anion(-1) path, so charged
+inputs are rejected rather than mapped through an out-of-domain calibration (G4).
+N-H and C-H acids are a later extension.
 """
 
 from pydantic import BaseModel, Field
 from rdkit import Chem
 
 from calc.store import CalculationKey, ResultStore, run_cached
-from calc.xtb_engine import engine_version, geometry, gfn2_energy, parse_molecule
+from calc.xtb_engine import (
+    engine_version,
+    geometry,
+    gfn2_energy,
+    parse_molecule,
+    require_closed_shell,
+)
 from chemclaw.chem import require_canonical_smiles
 from chemclaw.config import settings
 
@@ -73,12 +82,22 @@ def _conjugate_bases(mol: Chem.Mol) -> list[Chem.Mol]:
 
 
 def predict_pka(job: PkaInput) -> PkaResult:
-    """Predict the pKa of the most acidic O-H/S-H site of a molecule.
+    """Predict the pKa of the most acidic O-H/S-H site of a neutral molecule.
 
-    Raises `ValueError` on an unparseable SMILES or a molecule with no acidic
-    O-H/S-H site (nothing to deprotonate), rather than inventing a value (G4).
+    Raises `ValueError` on an unparseable SMILES, a net-charged or open-shell
+    input, or a molecule with no acidic O-H/S-H site (nothing to deprotonate),
+    rather than inventing a value (G4). Charged acids are outside the v1
+    calibration domain (fitted on neutral acids at charge 0 with -1 anions);
+    computing them here would silently run both species at wrong electron
+    counts and can even invert real acidity orderings.
     """
     neutral = parse_molecule(job.smiles)
+    formal_charge = Chem.GetFormalCharge(neutral)
+    if formal_charge != 0:
+        raise ValueError(
+            f"pKa v1 requires a neutral acid; {job.smiles!r} has net formal charge {formal_charge}"
+        )
+    require_closed_shell(neutral, 0)
     anions = _conjugate_bases(neutral)
     if not anions:
         raise ValueError(f"no acidic O-H/S-H site to deprotonate in {job.smiles!r}")
@@ -115,12 +134,12 @@ def _calc_version() -> str:
     """Cache-key version tying pKa results to method, engine, solvent, calibration, uncertainty.
 
     The engine build is included (see `calc.xtb_engine.engine_version`) so a tblite
-    upgrade recomputes, exactly as the xTB energy key does. The reported `uncertainty`
-    is part of the stored result, so it is keyed too — otherwise re-tuning
-    `pka_uncertainty` would serve the old value from cache.
+    or RDKit upgrade recomputes, exactly as the xTB energy key does. The reported
+    `uncertainty` is part of the stored result, so it is keyed too — otherwise
+    re-tuning `pka_uncertainty` would serve the old value from cache.
     """
     return (
-        f"{settings.xtb_method}+tblite-{engine_version()}/alpb-{settings.pka_solvent}/"
+        f"{settings.xtb_method}+{engine_version()}/alpb-{settings.pka_solvent}/"
         f"cal-{settings.pka_calibration_slope}:{settings.pka_calibration_intercept}/"
         f"u-{settings.pka_uncertainty}"
     )
@@ -131,12 +150,16 @@ async def run_cached_pka(store: ResultStore, job: PkaInput) -> tuple[PkaResult, 
 
     The key is versioned by method, engine build, solvent, and calibration, so an
     engine upgrade, a recalibration, or a solvent switch recomputes rather than
-    serving a stale pKa.
+    serving a stale pKa. The computation runs on the same canonical SMILES the
+    key is built from — atom order steers the seeded embedding, so computing on
+    the raw spelling would make the stored value depend on which spelling
+    arrived first (D-011 determinism).
     """
+    canonical = job.model_copy(update={"smiles": require_canonical_smiles(job.smiles)})
     key = CalculationKey.build(
         calc_type=CALC_TYPE,
         calc_version=_calc_version(),
-        inputs={"smiles": require_canonical_smiles(job.smiles)},
+        inputs={"smiles": canonical.smiles},
         params={"embed_seed": settings.xtb_embed_seed},
     )
-    return await run_cached(store, key, lambda: predict_pka(job), PkaResult)
+    return await run_cached(store, key, lambda: predict_pka(canonical), PkaResult)

@@ -14,6 +14,7 @@ tokens against a local key without network. The raw-inference-credential excepti
 apply here — this is a user-scoped resource access, so it is fully Entra-scoped.
 """
 
+import asyncio
 import logging
 from typing import Any
 
@@ -50,11 +51,17 @@ _jwks_clients: dict[str, PyJWKClient] = {}
 
 
 def _signing_key(token: str) -> Any:
-    """Resolve the RSA signing key for `token` from the tenant JWKS (indirected for tests)."""
+    """Resolve the RSA signing key for `token` from the tenant JWKS (indirected for tests).
+
+    The JWKS fetch is synchronous network I/O (PyJWT's urllib), so callers on the event loop must
+    run validation in a worker thread (`require_principal` does); the client is built with the
+    configured `entra_http_timeout_seconds` so a slow/blackholed IdP is bounded by our config, not
+    PyJWT's 30s default.
+    """
     endpoint = settings.entra_jwks_endpoint
     client = _jwks_clients.get(endpoint)
     if client is None:
-        client = PyJWKClient(endpoint)
+        client = PyJWKClient(endpoint, timeout=settings.entra_http_timeout_seconds)
         _jwks_clients[endpoint] = client
     return client.get_signing_key_from_jwt(token).key
 
@@ -97,6 +104,11 @@ async def require_principal(request: Request) -> Principal:
 
     With `entra_required` False (local dev) a fixed dev principal is returned so the app runs
     without a tenant; otherwise a missing/invalid `Authorization: Bearer` token is a 401.
+
+    Validation runs in a worker thread: on a JWKS cache miss (cold start, lifespan expiry, key
+    rotation) `_signing_key` performs a blocking HTTP fetch, and this single-process service serves
+    every SSE stream and health probe on one event loop — a fetch stall on the loop would freeze
+    them all.
     """
     if not settings.entra_required:
         return Principal(oid=_DEV_PRINCIPAL_OID, upn="dev@localhost")
@@ -104,7 +116,7 @@ async def require_principal(request: Request) -> Principal:
     if not header.startswith("Bearer "):
         raise HTTPException(status_code=401, detail="missing bearer token")
     try:
-        return validate_token(header[len("Bearer ") :])
+        return await asyncio.to_thread(validate_token, header[len("Bearer ") :])
     except AuthError as exc:
         # The specific failure reason (audience/issuer/expiry mismatch) is useful to an operator
         # but is not disclosed to the caller — log it server-side, return a generic 401 (SEC-7).

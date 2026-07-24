@@ -7,8 +7,12 @@ the exact types — forgetting one turned a single bad record into a batch-abort
 poison pill (the CHECKMATE-review sync bug). Deriving them all from `ChemclawError`
 makes "this input is bad, skip it and move on" one catchable contract.
 
-It stays a `ValueError` subclass so Temporal retry policies that mark `ValueError`
-non-retryable keep treating bad data as a fast failure, never a retry loop.
+It stays a `ValueError` subclass so in-process `except ValueError` boundaries keep
+catching bad data. Temporal, however, matches `non_retryable_error_types` by exact
+class-name string — NOT by isinstance — so subclassing alone does not make an error
+non-retryable across an activity boundary: every concrete subclass name must also be
+registered in `workflows.publish._BAD_DATA_TYPES` (a completeness test in
+`tests/test_publish.py` fails when one is forgotten).
 """
 
 
@@ -16,5 +20,8 @@ class ChemclawError(ValueError):
     """Base for all domain errors meaning "this input/data is invalid".
 
     Catch this at batch boundaries (reject-and-continue); raise a specific
-    subclass at the point of failure so messages stay layer-accurate.
+    subclass at the point of failure so messages stay layer-accurate. When a new
+    subclass can cross a Temporal activity boundary, add its class name to
+    `workflows.publish._BAD_DATA_TYPES` — Temporal matches non-retryable types
+    by exact name, so the hierarchy alone does not cover it.
     """

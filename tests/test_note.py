@@ -105,6 +105,27 @@ def test_frontmatter_body_key_does_not_crash(tmp_path: Path) -> None:
     assert note.body.strip() == "real body"
 
 
+def test_non_string_frontmatter_key_raises_note_error(tmp_path: Path) -> None:
+    """YAML keys parsed as non-strings (bare dates, ints) are a NoteError, not a TypeError (G4)."""
+    text = "---\nid: x\ntype: t\n2020-01-01: oops\n---\nbody\n"
+    with pytest.raises(NoteError, match="malformed frontmatter"):
+        parse_note(_write(tmp_path / "h.md", text))
+
+
+def test_non_utf8_note_raises_note_error(tmp_path: Path) -> None:
+    """A note saved in a non-UTF-8 encoding (e.g. Latin-1) is a NoteError, not a crash (G4)."""
+    path = tmp_path / "latin1.md"
+    path.write_bytes("---\nid: x\ntype: t\n---\nl\xf6slich\n".encode("latin-1"))
+    with pytest.raises(NoteError, match="unreadable"):
+        read_note(path)
+
+
+def test_vanished_note_file_raises_note_error(tmp_path: Path) -> None:
+    """A file that disappears before the read (e.g. a `git pull` mid-scan) is a NoteError (G4)."""
+    with pytest.raises(NoteError, match="unreadable"):
+        read_note(tmp_path / "gone.md")
+
+
 @pytest.mark.parametrize(
     "bad",
     [

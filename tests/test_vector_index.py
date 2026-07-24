@@ -9,8 +9,8 @@ the same way over real pgvector + full-text search.
 import asyncio
 from pathlib import Path
 
-from agents.embedding_provider import embed_texts
 from chemclaw.config import settings
+from chemclaw.embeddings import embed_texts
 from report.vector_index import (
     InMemoryNoteIndex,
     NoteRecord,
@@ -85,6 +85,40 @@ def test_reindex_empty_dir_is_a_noop(tmp_path: Path) -> None:
     """Reindexing an empty knowledge dir indexes nothing (no crash, no rows)."""
     index = InMemoryNoteIndex()
     assert asyncio.run(reindex_notes(index, notes_dir=str(tmp_path))) == 0
+
+
+def test_postgres_index_within_restricts_before_top_k() -> None:
+    """`within` scopes the SQL query itself, so a filtered search keeps full top-k recall."""
+
+    async def _run() -> None:
+        await migrated_db_or_skip()
+        import psycopg
+
+        async with await psycopg.AsyncConnection.connect(settings.postgres_dsn) as conn:
+            await conn.execute("TRUNCATE note_index")
+            await conn.commit()
+
+        index = PostgresNoteIndex()
+        close, far = await asyncio.to_thread(
+            embed_texts, ["amide coupling epimerization", "amide coupling workup"]
+        )
+        await index.upsert(
+            [
+                NoteRecord(note_id="rxn-1", text="amide coupling epimerization", embedding=close),
+                NoteRecord(note_id="play-1", text="amide coupling workup", embedding=far),
+            ]
+        )
+        (query_embedding,) = await asyncio.to_thread(embed_texts, ["amide coupling epimerization"])
+        # Unrestricted, the single top slot goes to the nearest note (rxn-1)...
+        dense = await index.search_dense(query_embedding, top_k=1)
+        assert [h.note_id for h in dense] == ["rxn-1"]
+        # ...but a `within` scope still finds the eligible note past that global rank.
+        dense = await index.search_dense(query_embedding, top_k=1, within={"play-1"})
+        assert [h.note_id for h in dense] == ["play-1"]
+        lexical = await index.search_lexical("amide coupling", top_k=1, within={"play-1"})
+        assert [h.note_id for h in lexical] == ["play-1"]
+
+    asyncio.run(_run())
 
 
 def test_postgres_note_index_round_trip() -> None:

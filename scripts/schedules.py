@@ -51,6 +51,21 @@ class PlannedSchedule:
     interval: timedelta
 
 
+# Every Schedule id this script has ever owned — the prune namespace. Pruning must only
+# ever delete this script's own Schedules, so the namespace is a fixed explicit set (never
+# a prefix match against a shared Temporal namespace). `test_schedules.py` asserts the plan
+# stays inside this set, so a new planned job that forgets to register here fails a test.
+OWNED_SCHEDULE_IDS = frozenset(
+    {
+        "eln-sync",
+        "campaign-synthesis",
+        "playbook-distillation",
+        "optimization-campaign",
+        "eval-drift",
+    }
+)
+
+
 def planned_schedules() -> list[PlannedSchedule]:
     """The Schedules this script maintains — the ELN sync plus the three memory jobs.
 
@@ -97,9 +112,31 @@ async def _apply(client: Client, job: PlannedSchedule) -> str:
         return "updated"
 
 
+async def _prune(client: Client, planned_ids: set[str]) -> None:
+    """Delete script-owned Schedules that exist in Temporal but are no longer planned.
+
+    Without this, a job removed from the plan (e.g. `eval-drift` after
+    `eval_drift_enabled` is switched off) keeps firing forever. Only ids inside
+    `OWNED_SCHEDULE_IDS` are ever deleted, so Schedules created by anything else
+    in the namespace are untouched.
+    """
+    stale = OWNED_SCHEDULE_IDS - planned_ids
+    if not stale:
+        return
+    async for listing in await client.list_schedules():
+        if listing.id in stale:
+            await client.get_schedule_handle(listing.id).delete()
+            logger.info("deleted stale schedule %s (no longer planned)", listing.id)
+
+
 async def apply_schedules(client: Client, jobs: Sequence[PlannedSchedule] | None = None) -> None:
-    """Apply every planned Schedule idempotently against `client`."""
-    for job in jobs if jobs is not None else planned_schedules():
+    """Apply every planned Schedule idempotently against `client`, then prune stale ones.
+
+    Pruning makes a re-apply declarative: the Schedules in Temporal end up exactly the
+    planned set (within this script's owned id namespace), not a monotone accumulation.
+    """
+    plan = list(jobs) if jobs is not None else planned_schedules()
+    for job in plan:
         action = await _apply(client, job)
         logger.info(
             "%s schedule %s (every %s) -> %s",
@@ -108,6 +145,7 @@ async def apply_schedules(client: Client, jobs: Sequence[PlannedSchedule] | None
             job.interval,
             job.workflow.__name__,
         )
+    await _prune(client, {job.schedule_id for job in plan})
 
 
 async def main() -> None:

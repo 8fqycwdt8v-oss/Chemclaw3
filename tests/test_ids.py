@@ -52,6 +52,27 @@ def test_require_canonical_smiles_rejects_unparseable() -> None:
         require_canonical_smiles("not-a-molecule")
 
 
+def test_require_canonical_smiles_rejects_empty() -> None:
+    """RDKit parses `""` to a zero-atom Mol; the strict gate rejects it instead of keying it."""
+    with pytest.raises(InvalidSmilesError):
+        require_canonical_smiles("")
+    with pytest.raises(InvalidSmilesError):
+        require_canonical_smiles("   ")
+
+
+def test_require_canonical_smiles_rejects_embedded_whitespace() -> None:
+    """RDKit would truncate at whitespace, silently keying a different molecule — rejected."""
+    with pytest.raises(InvalidSmilesError):
+        require_canonical_smiles("CCO junk")
+    with pytest.raises(InvalidSmilesError):
+        require_canonical_smiles("C O")
+
+
+def test_require_canonical_smiles_tolerates_surrounding_whitespace() -> None:
+    """Leading/trailing whitespace is a copy-paste artifact, not a different molecule."""
+    assert require_canonical_smiles(" CCO\n") == require_canonical_smiles("CCO")
+
+
 def test_qm_job_key_ignores_smiles_spelling() -> None:
     """Same molecule, different SMILES spelling → one QM workflow id (D-011)."""
     a = QMJobInput(molecule_smiles="CCO", method="B3LYP", basis_set="def2-SVP")

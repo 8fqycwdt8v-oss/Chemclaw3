@@ -134,3 +134,52 @@ def test_pipeline_version_enters_cache_key(monkeypatch: pytest.MonkeyPatch) -> N
     monkeypatch.setattr(settings, "hpc_pipeline_version", "1.5.0")
     v2 = qm_job_key(job)
     assert base != v1 != v2 and base != v2  # every distinct version is a distinct cache identity
+
+
+class _RecordingStore:
+    """A fake artifact store that records each request's Authorization header (or absence)."""
+
+    def __init__(self) -> None:
+        self.auth_headers: list[str | None] = []
+
+    def handler(self, request: httpx.Request) -> httpx.Response:
+        self.auth_headers.append(request.headers.get("Authorization"))
+        return httpx.Response(200, text="energy=-1.000000 converged=True")
+
+
+def _fetch(store: _RecordingStore) -> str:
+    handle = HpcJobHandle(scheduler_job_id="run-77")
+    transport = httpx.MockTransport(store.handler)
+    return asyncio.run(nextflow.fetch_artifacts(handle, transport=transport))
+
+
+def test_launcher_token_never_sent_to_a_foreign_artifact_store(_launcher_env: None) -> None:
+    """A cross-origin artifact fetch carries no launcher credential (F4 three-secret model).
+
+    The fixture's store (blobs.test) is a different origin than the launcher (tower.test): the
+    Tower token can launch and cancel pipelines, so handing it to a third host is a scope
+    violation — the fetch must go out unauthenticated unless the store has its own token.
+    """
+    store = _RecordingStore()
+    assert _fetch(store) == "energy=-1.000000 converged=True"
+    assert store.auth_headers == [None]
+
+
+def test_artifact_store_uses_its_own_token(
+    _launcher_env: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A configured artifact-store token is sent to the store — never the launcher's."""
+    monkeypatch.setattr(settings, "hpc_artifact_store_token", "blob-token")
+    store = _RecordingStore()
+    _fetch(store)
+    assert store.auth_headers == ["Bearer blob-token"]
+
+
+def test_same_origin_artifact_store_keeps_the_launcher_token(
+    _launcher_env: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A store on the launcher's own origin (Tower serving artifacts) still authenticates."""
+    monkeypatch.setattr(settings, "hpc_artifact_store_url", "https://tower.test/artifacts")
+    store = _RecordingStore()
+    _fetch(store)
+    assert store.auth_headers == ["Bearer tower-token"]

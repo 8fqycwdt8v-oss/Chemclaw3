@@ -13,6 +13,7 @@ import pytest
 from eln.ord import Component, OrdReaction, Role
 from memory.campaign import campaign_note_from_chain
 from memory.chains import detect_chains
+from memory.ids import stable_id
 from memory.interaction import note_from_confirmed_answer
 from memory.jobs import distill_playbooks, synthesize_campaigns
 from memory.playbook import (
@@ -126,6 +127,18 @@ def test_campaign_id_is_stable() -> None:
     first = campaign_note_from_chain(chain, {"a": a, "b": b}).id
     second = campaign_note_from_chain(chain, {"a": a, "b": b}).id
     assert first == second
+
+
+def test_growing_cluster_keeps_its_note_id() -> None:
+    """A cluster that gains a member keeps its note id, so re-synthesis supersedes in place.
+
+    A member-set-derived id would mint a fresh note on every corpus growth, accumulating
+    stale siblings in the graph; anchoring on the smallest member keeps the `note/<id>`
+    PR-gate branch (and the merged file path) stable while the note's body grows.
+    """
+    assert stable_id("optimization", ["r2", "r1"]) == stable_id("optimization", ["r1", "r2", "r3"])
+    assert stable_id("optimization", ["r1", "r2"]) != stable_id("optimization", ["r4", "r5"])
+    assert stable_id("optimization", ["r1"]) != stable_id("playbook", ["r1"])  # prefix separates
 
 
 # --- playbook (5.4) -------------------------------------------------------------------

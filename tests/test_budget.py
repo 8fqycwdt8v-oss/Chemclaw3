@@ -106,3 +106,53 @@ def test_usage_tokens_zero_without_usage() -> None:
     """An update with no usage content meters 0 (the fake-agent / no-usage-provider path)."""
     assert _usage_tokens(SimpleNamespace(contents=[SimpleNamespace(text="hi")])) == 0
     assert _usage_tokens(SimpleNamespace()) == 0
+
+
+def test_session_counters_are_bounded_by_live_session_cap(
+    monkeypatch: pytest.MonkeyPatch, _enabled: None
+) -> None:
+    """The per-session map is LRU-bounded by `service_max_live_sessions`.
+
+    The tracker lives for the pod's lifetime, so unbounded per-scope counters would be a slow
+    memory leak.
+    """
+    monkeypatch.setattr(settings, "service_max_live_sessions", 2)
+    tracker = BudgetTracker()
+    for sid in ("s1", "s2", "s3"):
+        tracker.record(sid, None, tokens=0)
+    assert len(tracker._sessions._entries) == 2  # bounded: the LRU session was evicted
+
+
+def test_user_counters_are_bounded_and_evict_lru(
+    monkeypatch: pytest.MonkeyPatch, _enabled: None
+) -> None:
+    """Past `budget_max_tracked_users` the LRU user's counters are evicted (reset).
+
+    Eviction resets that user's budget — the documented best-effort trade; the durable
+    rolling-window quota stays deferred.
+    """
+    monkeypatch.setattr(settings, "budget_max_tracked_users", 2)
+    monkeypatch.setattr(settings, "budget_max_turns_per_user", 1)
+    tracker = BudgetTracker()
+    tracker.record("s1", "alice", tokens=0)
+    tracker.record("s2", "bob", tokens=0)
+    tracker.record("s3", "carol", tokens=0)  # evicts alice (LRU)
+    with pytest.raises(BudgetExceeded, match="user turn budget"):
+        tracker.check("s4", "bob")  # bob's counter survived and binds
+    tracker.check("s4", "alice")  # alice was evicted → her budget reset (best-effort trade)
+
+
+def test_recently_checked_user_survives_eviction(
+    monkeypatch: pytest.MonkeyPatch, _enabled: None
+) -> None:
+    """`check` marks a scope recently active, so a user mid-conversation is not the one evicted."""
+    monkeypatch.setattr(settings, "budget_max_tracked_users", 2)
+    monkeypatch.setattr(settings, "budget_max_turns_per_user", 1)
+    tracker = BudgetTracker()
+    tracker.record("s1", "alice", tokens=0)
+    tracker.record("s2", "bob", tokens=0)
+    with pytest.raises(BudgetExceeded, match="user turn budget"):
+        tracker.check("s3", "alice")  # touches alice → bob becomes the LRU
+    tracker.record("s4", "carol", tokens=0)  # evicts bob, not alice
+    with pytest.raises(BudgetExceeded, match="user turn budget"):
+        tracker.check("s5", "alice")  # alice's spent budget still binds

@@ -19,15 +19,29 @@ _REQUIRED = ("name", "description")
 
 
 def validate_skills(skills_dirs: list[str]) -> list[str]:
-    """Return a list of problems across every `SKILL.md` under `skills_dirs` (empty = all good)."""
+    """Return a list of problems across every skill under `skills_dirs` (empty = all good).
+
+    Walks the skill *directories* rather than globbing `*/SKILL.md`, because the failures
+    this gate exists to catch are invisible to the glob: a skill directory whose SKILL.md
+    is missing or misnamed, and a configured skills dir that does not exist at all. Each
+    configured dir is checked on its own, so one healthy dir cannot mask another's typo.
+    """
     problems: list[str] = []
-    seen_any = False
     for directory in skills_dirs:
-        for skill_file in sorted(Path(directory).glob("*/SKILL.md")):
-            seen_any = True
+        root = Path(directory)
+        if not root.is_dir():
+            problems.append(f"skills directory {directory!r} does not exist")
+            continue
+        skill_dirs = sorted(path for path in root.iterdir() if path.is_dir())
+        if not skill_dirs:
+            problems.append(f"no skill directories found under {directory!r}")
+            continue
+        for skill_dir in skill_dirs:
+            skill_file = skill_dir / "SKILL.md"
+            if not skill_file.is_file():
+                problems.append(f"{skill_dir}: missing SKILL.md — skill invisible to discovery")
+                continue
             problems.extend(_problems_for(skill_file))
-    if not seen_any:
-        problems.append(f"no SKILL.md files found under {skills_dirs}")
     return problems
 
 

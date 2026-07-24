@@ -19,7 +19,6 @@ from agent_framework import FunctionInvocationContext
 
 from agents.audit import (
     AuditEvent,
-    audit_tool_calls,
     make_audit_middleware,
 )
 from chemclaw.config import settings
@@ -34,10 +33,11 @@ def _ctx(name: str, arguments: object, result: object = None) -> FunctionInvocat
 
 
 def _drive(ctx: FunctionInvocationContext, call_next: Callable[[], Awaitable[None]]) -> None:
-    """Run the middleware over a stand-in context to completion."""
+    """Run a log-only middleware (no sink, no conversation) over a stand-in context."""
+    mw = make_audit_middleware(correlation_id="-", actor=settings.service_actor_id)
 
     async def _run() -> None:
-        await audit_tool_calls(ctx, call_next)
+        await mw(ctx, call_next)
 
     asyncio.run(_run())
 

@@ -96,6 +96,22 @@ def test_llm_verifier_falls_back_when_no_structured_value(monkeypatch: pytest.Mo
     assert result.confidence == 0.0  # deterministic gate caught the fabricated citation
 
 
+def test_llm_verifier_falls_back_when_the_client_raises(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Verifier on: a failing judge endpoint degrades to the deterministic gate, never unscored."""
+    monkeypatch.setattr(settings, "verifier_enabled", True)
+
+    class _ExplodingClient:
+        async def get_response(self, prompt: str, *, response_format: Any) -> Any:
+            raise RuntimeError("verifier endpoint down")
+
+    result = asyncio.run(
+        verify_answer(
+            "Yield was 90% [[reaction-x]].", [_chunk("reaction-y")], client=_ExplodingClient()
+        )
+    )
+    assert result.confidence == 0.0  # the offline citation gate still caught the fabrication
+
+
 def _write_note(directory: Path, note_id: str, body: str) -> None:
     (directory / f"{note_id}.md").write_text(
         f"---\nid: {note_id}\ntype: reaction\n---\n{body}\n", encoding="utf-8"

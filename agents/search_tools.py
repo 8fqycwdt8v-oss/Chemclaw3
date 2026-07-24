@@ -102,5 +102,5 @@ async def find_substructure_matches(pattern: str) -> list[MoleculeHit]:
     Returns:
         Matching molecules (canonical SMILES; no similarity score).
     """
-    records = await _substructure_matches(_molecule_store(), pattern)
-    return [MoleculeHit(smiles=r.label) for r in records]
+    hits = await _substructure_matches(_molecule_store(), pattern)
+    return [MoleculeHit(smiles=h.label) for h in hits]

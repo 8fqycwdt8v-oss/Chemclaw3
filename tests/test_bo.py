@@ -11,7 +11,7 @@ import warnings
 import pytest
 
 from bo.campaign import optimize
-from bo.engine import propose_candidates
+from bo.engine import initial_candidates, propose_candidates
 from bo.problem import (
     CategoricalParameter,
     ContinuousParameter,
@@ -60,11 +60,13 @@ def test_maximize_direction_is_honored() -> None:
     assert result.best.value > -0.3  # close to the maximum of 0
 
 
-def test_propose_requires_observations() -> None:
-    """SOBO needs data to fit; empty observations is a clear error (gate G4)."""
+@pytest.mark.parametrize("count", [0, 1])
+def test_propose_requires_enough_observations(count: int) -> None:
+    """SOBO needs >= 2 observations to fit; fewer is a clear error, not BoFire's opaque one (G4)."""
     problem = OptimizationProblem(parameters=_PARAMS, objective=Objective(name="y"))
-    with pytest.raises(ValueError, match="at least one observation"):
-        propose_candidates(problem, [], n=1)
+    observations = [Observation(params={"x1": 0.0, "x2": 0.0}, value=1.0)][:count]
+    with pytest.raises(ValueError, match="at least 2 observations"):
+        propose_candidates(problem, observations, n=1)
 
 
 def test_best_of_empty_raises() -> None:
@@ -80,6 +82,50 @@ def test_space_exhausted_predicate() -> None:
     assert space_exhausted(None, history, 5) is False  # infinite space never exhausts
     assert space_exhausted(2, history, 1) is False  # 1 seen + 1 <= 2
     assert space_exhausted(2, history, 2) is True  # 1 seen + 2 > 2
+
+
+@pytest.mark.parametrize("bad", [float("nan"), float("inf"), float("-inf")])
+def test_observation_rejects_non_finite_value(bad: float) -> None:
+    """A NaN/inf objective value is rejected at the boundary (G4).
+
+    NaN compares false in both directions, so it would silently win `best_of`
+    and poison the campaign result instead of failing the bad evaluation.
+    """
+    with pytest.raises(ValueError):
+        Observation(params={"x1": 0.0}, value=bad)
+
+
+def _library_problem(categories: list[str]) -> OptimizationProblem:
+    """A purely discrete (all-categorical) problem over the given labels."""
+    return OptimizationProblem(
+        parameters=[CategoricalParameter(name="c", categories=categories)],
+        objective=Objective(name="y"),
+    )
+
+
+def test_initial_candidates_are_distinct_in_discrete_space() -> None:
+    """Seeding a finite space never proposes the same candidate twice.
+
+    A duplicate seed wastes evaluation budget (a repeated wet-lab experiment for
+    a measured campaign) and fits the surrogate on fewer points than paid for.
+    """
+    candidates = initial_candidates(_library_problem(["a", "b", "c"]), 3)
+    assert {c.params["c"] for c in candidates} == {"a", "b", "c"}
+
+
+def test_initial_candidates_reject_overdrawn_discrete_space() -> None:
+    """Asking for more seed points than the space holds is a clear error, not silence."""
+    with pytest.raises(ValueError, match="discrete space"):
+        initial_candidates(_library_problem(["a", "b", "c"]), 5)
+
+
+def test_initial_candidates_seed_is_a_per_call_seam() -> None:
+    """Different seeds give different seed designs; the default stays reproducible."""
+    problem = OptimizationProblem(parameters=_PARAMS, objective=Objective(name="y"))
+    default = initial_candidates(problem, 3)
+    assert initial_candidates(problem, 3) == default  # config default is stable
+    assert initial_candidates(problem, 3, seed=7) != default  # replicates can vary
+    assert initial_candidates(problem, 3, seed=7) == initial_candidates(problem, 3, seed=7)
 
 
 def test_problem_validation() -> None:

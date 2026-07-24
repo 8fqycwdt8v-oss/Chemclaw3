@@ -13,15 +13,16 @@ import httpx
 _ERROR_BODY_MAX_CHARS = 500
 
 
-def error_detail(response: httpx.Response, *, limit: int = _ERROR_BODY_MAX_CHARS) -> str:
+def error_detail(response: httpx.Response) -> str:
     """Return a bounded "STATUS REASON: BODY" summary of a failed HTTP response for logs/errors.
 
-    The body is truncated to `limit` characters (with an ellipsis when cut) so a large or hostile
-    upstream response cannot flood the log. On a failed request an OAuth/launcher body carries an
-    error description, not a credential, so a bounded excerpt is safe and useful for diagnosis.
+    The body is truncated to `_ERROR_BODY_MAX_CHARS` (with an ellipsis when cut) so a large or
+    hostile upstream response cannot flood the log. On a failed request an OAuth/launcher body
+    carries an error description, not a credential, so a bounded excerpt is safe and useful for
+    diagnosis.
     """
     body = response.text
-    if len(body) > limit:
-        body = body[:limit] + "…"
+    if len(body) > _ERROR_BODY_MAX_CHARS:
+        body = body[:_ERROR_BODY_MAX_CHARS] + "…"
     reason = response.reason_phrase or ""
     return f"{response.status_code} {reason}: {body}".rstrip()

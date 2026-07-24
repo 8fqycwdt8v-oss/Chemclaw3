@@ -342,7 +342,7 @@ carry identity as a claim; the generic LLM credential is the one documented exce
 ### F4-T1 — User auth at the front door (Entra OIDC)
 - **Touch:** ＋`service/auth.py` (JWT validation), ~`service/app.py` (auth dependency on all non-health
   routes).
-- **Build:** config `entra_tenant_id`, `entra_client_id`, `entra_jwks_url`, `entra_audience`,
+- **Build:** config `entra_tenant_id`, `entra_jwks_url`, `entra_audience`,
   `entra_required` (`bool = True`; `False` only for local dev). Validate signature against tenant JWKS,
   **check `aud`** (confused-deputy, §7), extract `oid`/`upn` + app-roles/groups into a
   `Principal(oid, upn, roles: frozenset[str])`. Reject unauthenticated when `entra_required`.
@@ -696,7 +696,7 @@ Runs alongside every phase.
 | F1 | `harness_enabled`, `harness_autonomy`, `harness_max_loop_iterations` |
 | F2 | `service_host`, `service_port`, `service_cors_origins` |
 | F3 | `session_store`, `session_store_dsn`, `session_event_poll_seconds` |
-| F4 | `entra_tenant_id`, `entra_client_id`, `entra_jwks_url`, `entra_audience`, `entra_required`, `entra_workload_federation_enabled`, `entra_workload_client_id`, `entra_token_endpoint`, `entra_sa_token_path`, `entra_obo_enabled`, `entra_role_skill_map`, `entra_expensive_actions`, `temporal_tls_cert`, `temporal_tls_key`, `temporal_tls_ca`, `temporal_api_key`, `hpc_bridge_identity`, `hpc_bridge_log_dsn` |
+| F4 | `entra_tenant_id`, `entra_jwks_url`, `entra_audience`, `entra_required`, `entra_workload_federation_enabled`, `entra_workload_client_id`, `entra_token_endpoint`, `entra_sa_token_path`, `entra_obo_enabled`, `entra_role_skill_map`, `entra_expensive_actions`, `temporal_tls_cert`, `temporal_tls_key`, `temporal_tls_ca`, `temporal_api_key`, `hpc_bridge_identity`, `hpc_bridge_log_dsn` |
 | F5 | `hpc_launch_interface`, `hpc_api_base_url`, `hpc_api_token`, `hpc_pipeline_name`, `hpc_pipeline_version`, `hpc_artifact_store_url` (retire `hpc_mock_*` or keep behind `hpc_launch_interface="mock"`) |
 | F6 | `otel_endpoint` |
 | F7 | `data_sources` |

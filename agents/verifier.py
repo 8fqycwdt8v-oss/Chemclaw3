@@ -19,6 +19,8 @@ DEFERRED.md — so today a low-confidence answer is marked, not blocked.
 """
 
 import asyncio
+import logging
+from functools import cache
 from pathlib import Path
 from typing import Any
 
@@ -29,6 +31,8 @@ from kg.graph import load_notes
 from kg.note import cited_ids
 from report.evidence import EvidenceChunk
 from report.harness import Claim, verify_claims
+
+logger = logging.getLogger(__name__)
 
 
 class ClaimCheck(BaseModel):
@@ -108,26 +112,44 @@ def _verifier_prompt(answer: str, evidence: list[EvidenceChunk]) -> str:
     )
 
 
+@cache
+def _default_client() -> Any:
+    """The process-wide verifier chat client, built once from the provider seam.
+
+    Client construction is pure config (no network), so one instance serves every verified turn —
+    building a fresh client per turn would redo TLS/transport setup and drop connection keep-alive
+    on the answer hot path for no benefit.
+    """
+    from agents.llm_provider import build_chat_client
+
+    return build_chat_client("verifier")
+
+
 async def verify_answer(
     answer: str, evidence: list[EvidenceChunk], *, client: Any | None = None
 ) -> VerificationResult:
     """Score `answer` for citation faithfulness against its retrieved `evidence`.
 
     When `verifier_enabled`, runs the LLM-as-judge on the routed `"verifier"` model (structured
-    output) and returns its per-claim verdicts + confidence; a client with no structured value falls
-    back to the deterministic gate rather than failing the turn. When disabled (the default), runs
-    the deterministic `verify_claims` citation check offline. The `client` is injected in tests; in
-    production it is built from the one provider seam.
+    output) and returns its per-claim verdicts + confidence; a client that fails or returns no
+    structured value falls back to the deterministic gate rather than failing the turn. When
+    disabled (the default), runs the deterministic `verify_claims` citation check offline. The
+    `client` is injected in tests; in production it is built once from the one provider seam.
     """
     if not settings.verifier_enabled:
         return _deterministic_result(answer, evidence)
     if client is None:
-        from agents.llm_provider import build_chat_client
-
-        client = build_chat_client("verifier")
-    response = await client.get_response(
-        _verifier_prompt(answer, evidence), response_format=VerificationResult
-    )
+        client = _default_client()
+    try:
+        response = await client.get_response(
+            _verifier_prompt(answer, evidence), response_format=VerificationResult
+        )
+    except Exception:
+        # An unreachable/failing judge endpoint must not weaken verification below the offline
+        # gate: degrade to the deterministic citation check (which needs no network) instead of
+        # letting the exception bubble up and leave the answer entirely unscored.
+        logger.exception("LLM verifier failed; degrading to the deterministic citation gate")
+        return _deterministic_result(answer, evidence)
     value = getattr(response, "value", None)
     if isinstance(value, VerificationResult):
         return value

@@ -106,13 +106,14 @@ class OrdJsonAdapter:
         """Map one ORD message to the canonical `OrdReaction` (structured, step-linked).
 
         Any shape violation becomes an `OrdFormatError`, so the sync treats one bad message
-        as a rejection rather than a crash (G4).
+        as a rejection rather than a crash (G4). `TypeError` is caught alongside because a
+        quantity whose `value` is an object/list fails inside `float`, not as a ValueError.
         """
         try:
             return _build(raw)
         except OrdFormatError:
             raise
-        except (ValueError, ValidationError) as exc:
+        except (TypeError, ValueError, ValidationError) as exc:
             raise OrdFormatError(f"entry {raw.entry_id!r}: cannot map ORD reaction: {exc}") from exc
 
 
@@ -251,9 +252,17 @@ def _smiles(compound: dict[str, Any]) -> str:
 
 
 def _role(compound: dict[str, Any], default: Role) -> Role:
-    """Map a compound's ORD `reaction_role` to our subset (defaulting when unstated)."""
+    """Map a compound's ORD `reaction_role` to our subset (defaulting only when unstated).
+
+    A *stated* role outside the subset (WORKUP, INTERNAL_STANDARD, AUTHENTIC_STANDARD)
+    collapses to REAGENT, per the `_ROLES` rationale: an auxiliary species must never read
+    as a true REACTANT — `memory.chains` keys causal product→reactant edges on REACTANT,
+    so mis-labeling an internal standard would fabricate handoffs that never happened.
+    """
     name = str(_get(compound, "reaction_role", "reactionRole") or "").upper()
-    return _ROLES.get(name, default) if name else default
+    if not name:
+        return default
+    return _ROLES.get(name, Role.REAGENT)
 
 
 def _yield(product: dict[str, Any]) -> float | None:
