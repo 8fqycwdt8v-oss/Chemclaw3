@@ -26,9 +26,9 @@ A cross-field validator lives in the section that owns the relationship.
 
 import os
 import sys
-from typing import Literal, Self
+from typing import Annotated, Literal, Self
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -44,6 +44,48 @@ class McpServerSpec(BaseModel):
     command: str
     args: list[str]
     allowed_tools: list[str] | None = None
+
+
+class JsonElnSourceSpec(BaseModel):
+    """A JSON-export ELN ingest source carrying its own export dir (a `DataSourceSpec` variant).
+
+    The bare `eln-json` registry key reads the single global `eln_export_dir`; this typed spec
+    nests a per-instance `export_dir`, so two JSON-ELN instances (e.g. prod and staging) with
+    different directories can be configured side by side — the capability a single global field
+    cannot provide. `name` is both the source's registry key and its `sync_cursors` cursor key, so
+    it must be unique across every configured source. `extra="forbid"` rejects a foreign field.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    type: Literal["eln-json"] = "eln-json"
+    name: str = Field(min_length=1)
+    export_dir: str = Field(min_length=1)
+
+
+class OrdElnSourceSpec(BaseModel):
+    """A native-ORD ELN ingest source carrying its own export dir (a `DataSourceSpec` variant).
+
+    The structured-recipe counterpart of `JsonElnSourceSpec`: the same per-instance `export_dir`
+    story, reading Open Reaction Database JSON instead of the free-text export. The two variants
+    differ only by which adapter `sources.registry.build_data_source` constructs.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    type: Literal["eln-ord"] = "eln-ord"
+    name: str = Field(min_length=1)
+    export_dir: str = Field(min_length=1)
+
+
+# A config-carrying data source, discriminated on `type` and built by `sources.registry`'s
+# `build_data_source`. This typed list is the *additive* path (alongside the bare-key `data_sources`
+# comma list) for sources that nest their own per-instance config; keyless/default sources
+# (graph, vector, the global-dir eln-json) stay in the comma list, so there is no regression. A new
+# config-carrying type — the deferred Snowflake connector, which would nest its connection /
+# credential-ref / schema-mapping config — joins as one more variant here plus one branch in
+# `build_data_source`, with no edit to any source consumer (D-054's "one entry + one token" story).
+DataSourceSpec = Annotated[JsonElnSourceSpec | OrdElnSourceSpec, Field(discriminator="type")]
 
 
 class ObservabilitySettings(BaseSettings):
@@ -929,10 +971,35 @@ class SourcesSettings(BaseSettings):
     # defaulting to the JSON adapter as before.
     data_sources: str = "graph,eln-json"
 
+    # Config-carrying data sources (typed, discriminated on `type`), additive to `data_sources`.
+    # A `DataSourceSpec` both names a source and nests its per-instance config (e.g. a JSON/ORD
+    # ELN's own `export_dir`), so two instances of one type with different directories coexist —
+    # impossible with the single global `eln_export_dir`. Keyless/default sources stay in the
+    # `data_sources` comma list; this list is only for sources that carry their own config. Each
+    # name is a registry key and a per-source cursor key, so names are unique across both tokens.
+    data_source_specs: list[DataSourceSpec] = []
+
     @property
     def data_source_list(self) -> list[str]:
         """The active data-source keys, parsed from the comma list (order kept, blanks dropped)."""
         return [s.strip() for s in self.data_sources.split(",") if s.strip()]
+
+    @model_validator(mode="after")
+    def _distinct_source_names(self) -> Self:
+        """Reject a name shared by two sources — each is a registry key and a per-source cursor key.
+
+        A collision (spec vs spec, or a spec reusing a comma-list key) would make two sources share
+        one `sync_cursors` row, so one's advancing cursor could silently skip the other's entries.
+        Caught at startup, before any sync runs.
+        """
+        names = [*self.data_source_list, *(spec.name for spec in self.data_source_specs)]
+        duplicated = sorted({name for name in names if names.count(name) > 1})
+        if duplicated:
+            raise ValueError(
+                "data source names must be unique across data_sources and data_source_specs; "
+                f"duplicated: {duplicated}"
+            )
+        return self
 
 
 class MemorySettings(BaseSettings):

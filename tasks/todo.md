@@ -28,9 +28,22 @@ validation — must be preserved by every change.
   picks instructions + harness flags. **Invariant:** a profile *attenuates* (narrows), it never *authorizes*
   — audit/authz/skill-gates run after narrowing. No front-door change (Stage 2 triggers on a 2nd use case).
 
-- [ ] **4. [M] `DataSourceSpec` discriminated union (scoped), Stage 1.** Deferred to a follow-up commit —
-  larger blast radius (`sources/`), and its forcing function (the Snowflake connector) is itself deferred.
-  Ship items 2–3 first; re-evaluate here.
+- [x] **4. [M] `DataSourceSpec` discriminated union (scoped), Stage 1.** Add a typed, discriminated
+  (`type`) union for sources that carry per-instance config, **additive** to the comma-string
+  `data_sources` (no regression for keyless sources). Real second-caller found without the deferred
+  Snowflake stub: both ELN adapters already accept a per-instance `export_dir`, so the two genuine
+  config-carrying variants are `JsonElnSourceSpec` (free-text) and `OrdElnSourceSpec` (structured ORD)
+  — delivering the "two instances / different dirs" capability the audit (§2.3) flags as impossible
+  today. **Deviation from audit §5:** dropped the near-empty `RegisteredSourceSpec` bridge variant —
+  it duplicates the comma-string token (the §2.4 "two ways to configure a list" friction) and adds
+  double-build/collision ambiguity; the two real ELN variants already make it a genuine union.
+  Snowflake stays the documented future variant (needs OBO + live connection).
+  - Spec models live in `config.py` beside `McpServerSpec` (the cited precedent); factory dispatch
+    (`build_data_source`) lives in `sources/registry.py` (imports the adapters).
+  - **Temporal boundary unchanged:** `sync_eln_entries(source: str)` still calls `make_data_source(name)`;
+    that resolver now falls through to spec-by-name, so histories stay byte-identical (§5).
+  - Guards: spec names unique across both tokens (config validator); a spec name colliding with a
+    built-in registry key is a loud error in `build_data_source`.
 
 ## Verification
 - `make lint type test` green after each item.
@@ -58,5 +71,12 @@ offline Postgres/Temporal skips):
 Three; (b) no `make tool-validate` (redundant with existing tests); (c) profile instructions read
 from `default_options["instructions"]` — MAF's `Agent` has no `.instructions` attribute.
 
-Item 4 (`DataSourceSpec` union) deliberately left for a follow-up: larger `sources/` blast radius,
-and its forcing function (the Snowflake connector) is itself deferred — no trigger has fired.
+- **4 — `DataSourceSpec` union** (D-076): `DataSourceSpec = JsonElnSourceSpec | OrdElnSourceSpec`
+  (discriminated on `type`, in `config.py` beside `McpServerSpec`) + additive `data_source_specs`
+  token + `sources.registry.build_data_source`. Full suite 613 → **624 passed** (11 new tests),
+  ruff + mypy --strict clean over 231 files. **Real second caller without a stub:** both ELN adapters
+  already accept a per-instance `export_dir`, so two instances with different dirs now coexist (audit
+  §2.3) — no Snowflake stub needed. Temporal boundary kept string-keyed (`make_data_source` falls
+  through to spec-by-name). **Deviation from audit §5:** dropped the near-empty `RegisteredSourceSpec`
+  bridge variant — it duplicates the comma token (§2.4 friction) and adds collision ambiguity; the two
+  real ELN variants already make it a genuine union. Snowflake stays deferred as the future variant.

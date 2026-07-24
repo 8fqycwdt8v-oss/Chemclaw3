@@ -24,9 +24,14 @@ Prioritized, dependency-ordered follow-ups (each ADR-ready, none needs live infr
       byte-for-byte; a profile narrows tools/MCP + swaps instructions/harness; unknown tool names fail
       fast; the *attenuate-not-authorize* invariant is test-proven (audit+authz attach regardless of
       profile). Stage 2 (front-door selection) triggers on a **second real use case**.
-- [ ] **`DataSourceSpec` discriminated union (scoped), Stage 1** — [M]. Trigger: the deferred
-      Snowflake connector. Spike 3 proves "one variant + one token" survives real
-      connection/auth/mapping config; Snowflake is the first `exchange_obo` caller.
+- [x] **`DataSourceSpec` discriminated union (scoped), Stage 1** — [M]. Done (D-076):
+      `DataSourceSpec = JsonElnSourceSpec | OrdElnSourceSpec` (discriminated on `type`, in `config.py`)
+      + additive `data_source_specs` token + `sources.registry.build_data_source`. Real second caller
+      without a stub — both ELN adapters already take a per-instance `export_dir`, so two instances with
+      different dirs now coexist (audit §2.3). Temporal boundary kept string-keyed. Dropped the audit's
+      near-empty `RegisteredSourceSpec` bridge (duplicates the comma token). **Snowflake connector still
+      deferred** — it joins as one more variant (nesting connection/auth/mapping; first `exchange_obo`
+      caller) when a real tenant/cluster exists (DEFERRED.md).
 - [ ] **Per-extension manifest + explicit enable-list** (steal from Django; keep discovery ≠
       auto-enable) — [S]. Trigger: skills needing to declare capability deps, or profile authoring.
 - [ ] **MCP transport `type` union** (stdio/HTTP discriminator on `McpServerSpec`) — [S]. Trigger:
