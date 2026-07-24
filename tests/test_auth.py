@@ -23,6 +23,9 @@ from service.auth import AuthError, validate_token
 
 _AUDIENCE = "api://chemclaw"
 _ISSUER = "https://issuer.test/v2.0"
+# Captured at import time, before the autouse fixture swaps `_signing_key` out — so the JWKS-client
+# construction test can exercise the real implementation.
+_REAL_SIGNING_KEY = auth._signing_key
 
 
 class _FakeAgent:
@@ -119,26 +122,99 @@ def test_healthz_never_requires_auth(monkeypatch: pytest.MonkeyPatch) -> None:
         assert client.get("/healthz").status_code == 200
 
 
-@pytest.mark.parametrize(
-    ("entra_required", "host", "should_warn"),
-    [
-        (False, "0.0.0.0", True),  # unauthenticated + exposed → warn (SEC-2)
-        (False, "127.0.0.1", False),  # unauthenticated but loopback-only → safe, no warn
-        (False, "localhost", False),  # loopback alias → no warn
-        (True, "0.0.0.0", False),  # authenticated → no warn even when exposed
-    ],
-)
-def test_warns_when_unauthenticated_and_exposed(
-    monkeypatch: pytest.MonkeyPatch,
-    caplog: pytest.LogCaptureFixture,
-    entra_required: bool,
-    host: str,
-    should_warn: bool,
-) -> None:
-    """The startup warning fires only for the unauthenticated, non-loopback bind (SEC-2)."""
-    monkeypatch.setattr(settings, "entra_required", entra_required)
+def test_token_validation_runs_off_the_event_loop(monkeypatch: pytest.MonkeyPatch) -> None:
+    """`require_principal` validates in a worker thread, never on the event loop.
+
+    The JWKS fetch inside validation is synchronous network I/O; run on the loop, a slow IdP
+    would freeze every in-flight SSE stream and health probe of this single-process service.
+    """
+    import asyncio
+
+    from service.auth import Principal
+
+    monkeypatch.setattr(settings, "entra_required", True)
+    on_loop: list[bool] = []
+
+    def _probe(token: str) -> Principal:
+        try:
+            asyncio.get_running_loop()
+            on_loop.append(True)
+        except RuntimeError:
+            on_loop.append(False)
+        return Principal(oid="u-thread")
+
+    monkeypatch.setattr(auth, "validate_token", _probe)
+    with TestClient(create_app(agent_factory=_FakeAgent)) as client:
+        res = client.post("/sessions", headers={"Authorization": "Bearer x.y.z"})
+    assert res.status_code == 200
+    assert on_loop == [False]  # validation ran in a thread, not on the serving loop
+
+
+def test_jwks_client_uses_the_configured_timeout(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The JWKS client is bounded by `entra_http_timeout_seconds`, not PyJWT's 30s default."""
+    from types import SimpleNamespace
+
+    captured: dict[str, object] = {}
+
+    class _FakeJwksClient:
+        def __init__(self, endpoint: str, *, timeout: float) -> None:
+            captured["endpoint"] = endpoint
+            captured["timeout"] = timeout
+
+        def get_signing_key_from_jwt(self, token: str) -> SimpleNamespace:
+            return SimpleNamespace(key="the-key")
+
+    monkeypatch.setattr(settings, "entra_tenant_id", "tid-1")
+    monkeypatch.setattr(settings, "entra_http_timeout_seconds", 7.5)
+    monkeypatch.setattr(auth, "PyJWKClient", _FakeJwksClient)
+    monkeypatch.setattr(auth, "_jwks_clients", {})
+    assert _REAL_SIGNING_KEY("tok") == "the-key"
+    assert captured["timeout"] == 7.5
+    assert captured["endpoint"] == settings.entra_jwks_endpoint
+
+
+@pytest.mark.parametrize("host", ["127.0.0.1", "localhost", "::1"])
+def test_unauthenticated_loopback_boots(monkeypatch: pytest.MonkeyPatch, host: str) -> None:
+    """The local dev flow is untouched: no auth on a loopback bind boots without complaint."""
+    monkeypatch.setattr(settings, "entra_required", False)
     monkeypatch.setattr(settings, "service_host", host)
+    with TestClient(create_app(agent_factory=_FakeAgent)) as client:
+        assert client.get("/healthz").status_code == 200
+
+
+def test_unauthenticated_exposed_refuses_to_boot(monkeypatch: pytest.MonkeyPatch) -> None:
+    """No auth on a non-loopback bind fails closed at startup with an actionable message (SEC-2).
+
+    The earlier warn-and-boot left a network-exposed, authorization-gates-open deployment one
+    missed log line away; refusing to start makes the insecure combination impossible by default.
+    """
+    monkeypatch.setattr(settings, "entra_required", False)
+    monkeypatch.setattr(settings, "service_host", "0.0.0.0")
+    monkeypatch.setattr(settings, "service_allow_insecure", False)
+    with pytest.raises(RuntimeError, match="CHEMCLAW_ENTRA_REQUIRED"):
+        create_app(agent_factory=_FakeAgent)
+
+
+def test_unauthenticated_exposed_boots_only_with_explicit_opt_in(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """`service_allow_insecure=true` is the conscious opt-out: it boots, but warns loudly."""
+    monkeypatch.setattr(settings, "entra_required", False)
+    monkeypatch.setattr(settings, "service_host", "0.0.0.0")
+    monkeypatch.setattr(settings, "service_allow_insecure", True)
+    with caplog.at_level(logging.WARNING, logger="service.app"):
+        app = create_app(agent_factory=_FakeAgent)
+    assert any("authorization gates OPEN" in r.message for r in caplog.records)
+    with TestClient(app) as client:
+        assert client.get("/healthz").status_code == 200
+
+
+def test_entra_required_exposed_boots_without_warning(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The production posture (enforcement on, exposed bind) boots cleanly — nothing to warn."""
+    monkeypatch.setattr(settings, "entra_required", True)
+    monkeypatch.setattr(settings, "service_host", "0.0.0.0")
     with caplog.at_level(logging.WARNING, logger="service.app"):
         create_app(agent_factory=_FakeAgent)
-    warned = any("authorization gates OPEN" in r.message for r in caplog.records)
-    assert warned is should_warn
+    assert not any("authorization gates OPEN" in r.message for r in caplog.records)

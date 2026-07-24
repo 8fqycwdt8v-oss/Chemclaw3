@@ -18,9 +18,22 @@ function add(cls, text) {
   return el;
 }
 
+// Build an Error for a failed response, carrying the server's `detail` when it sent one — a
+// non-2xx (401/404/409/429/503) must surface in the transcript, never vanish silently.
+async function httpError(res, what) {
+  let detail = "";
+  try {
+    detail = (await res.json()).detail || "";
+  } catch (e) {
+    // Non-JSON error body — the status alone still tells the user what happened.
+  }
+  return new Error(`${what} failed (HTTP ${res.status}${detail ? `: ${detail}` : ""})`);
+}
+
 async function ensureSession() {
   if (sessionId) return sessionId;
   const res = await fetch("/sessions", { method: "POST" });
+  if (!res.ok) throw await httpError(res, "creating a session");
   sessionId = (await res.json()).session_id;
   return sessionId;
 }
@@ -63,6 +76,7 @@ async function sendMessage(message) {
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ message }),
   });
+  if (!res.ok) throw await httpError(res, "sending the message");
   const reader = res.body.getReader();
   const decoder = new TextDecoder();
   let buffer = "";

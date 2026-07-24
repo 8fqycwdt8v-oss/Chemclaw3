@@ -6,7 +6,9 @@ live model, MCP subprocess, or credentials. The MCP lifecycle is asserted to ope
 per turn via a spy tool.
 """
 
+import asyncio
 import json
+from collections.abc import Callable
 
 from agent_framework import AgentSession
 from fastapi.testclient import TestClient
@@ -183,7 +185,7 @@ def test_job_pushback_streams_completed_events(monkeypatch) -> None:  # type: ig
     import service.app as app_module
     from agents.session_events import SessionEvent
 
-    async def _fake_stream(session_id: str) -> object:
+    async def _fake_stream(session_id: str, **_: object) -> object:
         yield SessionEvent(
             session_id=session_id,
             kind="job_completed",
@@ -223,7 +225,7 @@ def test_job_pushback_flips_the_harness_awaiting_todo(monkeypatch) -> None:  # t
 
     monkeypatch.setattr(settings, "harness_enabled", True)
 
-    async def _fake_stream(session_id: str) -> object:
+    async def _fake_stream(session_id: str, **_: object) -> object:
         yield SessionEvent(session_id=session_id, kind="job_completed", payload={"job_id": "qm-1"})
 
     monkeypatch.setattr(app_module, "stream_new_events", _fake_stream)
@@ -258,7 +260,7 @@ def test_job_pushback_does_not_touch_todos_when_harness_disabled(monkeypatch) ->
 
     monkeypatch.setattr(settings, "harness_enabled", False)
 
-    async def _fake_stream(session_id: str) -> object:
+    async def _fake_stream(session_id: str, **_: object) -> object:
         yield SessionEvent(session_id=session_id, kind="job_completed", payload={"job_id": "qm-1"})
 
     monkeypatch.setattr(app_module, "stream_new_events", _fake_stream)
@@ -425,3 +427,234 @@ def test_live_sessions_never_exceeds_capacity() -> None:
     assert reg.get("s99") is not None
     assert reg.get("s0") is None
     assert sum(reg.get(f"s{i}") is not None for i in range(100)) == 3
+
+
+def _gated_agent_factory(
+    gate: asyncio.Event, started: asyncio.Event, blocked_message: str
+) -> Callable[[], _FakeAgent]:
+    """An agent factory whose turn for `blocked_message` parks on `gate` (concurrency tests).
+
+    The sync TestClient runs each request to completion before returning, so it cannot hold one
+    turn open while another is issued — these tests drive the app over httpx's ASGI transport on
+    a real event loop instead, with `started`/`gate` sequencing the overlap deterministically.
+    """
+
+    class _GatedAgent(_FakeAgent):
+        def run(self, message: str, *, stream: bool, session: AgentSession) -> object:
+            async def _gen() -> object:
+                if message == blocked_message:
+                    started.set()
+                    await gate.wait()
+                yield _Update(text="done")
+
+            return _gen()
+
+    return lambda: _GatedAgent()
+
+
+def test_concurrent_turn_on_same_session_is_409() -> None:
+    """While one turn runs, a second POST to the same session is rejected with 409.
+
+    Two concurrent turns would drive `agent.run` against the same AgentSession at once,
+    interleaving two turns' messages into one conversation thread — so the second is shed
+    (matching the admission semaphore's shed-don't-queue semantics), and the slot frees when
+    the running turn's stream ends.
+    """
+    import httpx
+
+    async def _run() -> None:
+        gate = asyncio.Event()
+        started = asyncio.Event()
+        app = create_app(agent_factory=_gated_agent_factory(gate, started, "first"))
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+            session_id = (await client.post("/sessions")).json()["session_id"]
+            first = asyncio.create_task(
+                client.post(f"/sessions/{session_id}/messages", json={"message": "first"})
+            )
+            await asyncio.wait_for(started.wait(), timeout=5)  # the first turn is mid-run
+            dup = await client.post(f"/sessions/{session_id}/messages", json={"message": "second"})
+            assert dup.status_code == 409
+            gate.set()
+            assert (await first).status_code == 200
+            # The slot is released with the stream — the next turn is admitted again.
+            ok = await client.post(f"/sessions/{session_id}/messages", json={"message": "third"})
+            assert ok.status_code == 200
+
+    asyncio.run(_run())
+
+
+def test_concurrent_turns_on_different_sessions_are_admitted() -> None:
+    """The per-session gate is per session: a turn on another session is not blocked."""
+    import httpx
+
+    async def _run() -> None:
+        gate = asyncio.Event()
+        started = asyncio.Event()
+        app = create_app(agent_factory=_gated_agent_factory(gate, started, "blocked"))
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+            first = (await client.post("/sessions")).json()["session_id"]
+            second = (await client.post("/sessions")).json()["session_id"]
+            blocked = asyncio.create_task(
+                client.post(f"/sessions/{first}/messages", json={"message": "blocked"})
+            )
+            await asyncio.wait_for(started.wait(), timeout=5)
+            other = await client.post(f"/sessions/{second}/messages", json={"message": "b"})
+            assert other.status_code == 200  # a different session's turn runs concurrently
+            gate.set()
+            assert (await blocked).status_code == 200
+
+    asyncio.run(_run())
+
+
+def test_stalled_turn_times_out_and_frees_the_permit(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    """A turn past the wall-clock bound ends with one error event and releases its permit.
+
+    Without this, a hung model stream would hold one of the few admission permits forever; a
+    handful of stalls would collapse the front door (every turn shed 503) until restart.
+    """
+    from chemclaw.config import settings
+
+    class _HungAgent(_FakeAgent):
+        def run(self, message: str, *, stream: bool, session: AgentSession) -> object:
+            async def _gen() -> object:
+                import asyncio
+
+                yield _Update(text="partial")
+                await asyncio.sleep(60)  # a hung LLM endpoint: never yields again
+                yield _Update(text="never")
+
+            return _gen()
+
+    monkeypatch.setattr(settings, "service_turn_timeout_seconds", 0.2)
+    app = create_app(agent_factory=lambda: _HungAgent())
+    with TestClient(app) as client:
+        session_id = client.post("/sessions").json()["session_id"]
+        events = []
+        with client.stream(
+            "POST", f"/sessions/{session_id}/messages", json={"message": "hi"}
+        ) as res:
+            assert res.status_code == 200
+            for line in res.iter_lines():
+                if line.startswith("data:"):
+                    events.append(json.loads(line[len("data:") :].strip()))
+    assert events[-1]["type"] == "error"
+    assert "time limit" in events[-1]["message"]
+    # The permit and the session's turn slot are both released — capacity is not pinned.
+    assert app.state.turn_semaphore._value == settings.service_max_concurrent_turns
+    assert session_id not in app.state.active_turns
+
+
+def test_event_streams_are_capped_per_user(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    """Past the per-user cap, another push-back stream is refused with 429 (DB-load guard).
+
+    Each stream polls the database for its whole lifetime; unbounded streams from one user are
+    a connection-exhaustion vector against the shared session store.
+    """
+    import contextlib
+
+    import httpx
+
+    import service.app as app_module
+    from agents.session_events import SessionEvent
+    from chemclaw.config import settings
+
+    async def _idle_stream(session_id: str, **_: object) -> object:
+        while True:  # holds the stream open without ever delivering
+            await asyncio.sleep(3600)
+            yield SessionEvent(session_id=session_id, kind="job_completed", payload={})
+
+    monkeypatch.setattr(app_module, "stream_new_events", _idle_stream)
+    monkeypatch.setattr(settings, "service_max_event_streams_per_user", 1)
+
+    async def _run() -> None:
+        app = create_app(agent_factory=lambda: _FakeAgent())
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+            session_id = (await client.post("/sessions")).json()["session_id"]
+            first = asyncio.create_task(client.get(f"/sessions/{session_id}/events"))
+            async with asyncio.timeout(5):
+                while not app.state.event_streams:  # the first stream is admitted and counted
+                    await asyncio.sleep(0.01)
+            second = await client.get(f"/sessions/{session_id}/events")
+            assert second.status_code == 429  # the per-user cap binds
+            first.cancel()
+            with contextlib.suppress(asyncio.CancelledError, httpx.HTTPError):
+                await first
+            async with asyncio.timeout(5):
+                while app.state.event_streams:  # closing the stream freed the user's slot
+                    await asyncio.sleep(0.01)
+
+    asyncio.run(_run())
+
+
+def test_events_route_claims_only_job_completed(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    """The push-back route scopes its (destructive) claim to `job_completed` in the claim itself.
+
+    The claim marks rows consumed atomically; claiming every kind and filtering afterwards would
+    silently destroy events of other kinds meant for other consumers.
+    """
+    import service.app as app_module
+    from agents.session_events import SessionEvent
+
+    captured: dict[str, object] = {}
+
+    async def _fake_stream(session_id: str, **kwargs: object) -> object:
+        captured.update(kwargs)
+        yield SessionEvent(session_id=session_id, kind="job_completed", payload={"job_id": "j1"})
+
+    monkeypatch.setattr(app_module, "stream_new_events", _fake_stream)
+    with _client(_FakeAgent()) as client:
+        session_id = client.post("/sessions").json()["session_id"]
+        with client.stream("GET", f"/sessions/{session_id}/events") as res:
+            for _line in res.iter_lines():
+                pass
+    assert captured["kinds"] == ("job_completed",)
+
+
+def test_every_session_scoped_route_is_ownership_gated() -> None:
+    """Every route carrying a session id resolves ownership — a non-owner gets 404 on all of them.
+
+    Enumerates the app's routes rather than hardcoding today's two, so a future session-scoped
+    route that skips the `_resolve_session` gate fails here: the inventory assertion forces a
+    conscious update, and the behavioral sweep then proves the new route 404s for a non-owner.
+    """
+    from fastapi.routing import APIRoute
+
+    from service.auth import Principal, require_principal
+
+    app = create_app(agent_factory=lambda: _FakeAgent())
+    session_routes = [
+        route
+        for route in app.routes
+        if isinstance(route, APIRoute) and "{session_id}" in route.path
+    ]
+    inventory = {
+        (route.path, method)
+        for route in session_routes
+        for method in (route.methods or set()) - {"HEAD", "OPTIONS"}
+    }
+    assert inventory == {
+        ("/sessions/{session_id}/messages", "POST"),
+        ("/sessions/{session_id}/events", "GET"),
+    }, (
+        "new session-scoped route detected — it MUST resolve ownership via _resolve_session, "
+        "and this inventory + the non-owner sweep below must cover it"
+    )
+
+    alice = Principal(oid="alice", upn="a@corp", roles=frozenset())
+    bob = Principal(oid="bob", upn="b@corp", roles=frozenset())
+    client = TestClient(app)
+    app.dependency_overrides[require_principal] = lambda: alice
+    session_id = client.post("/sessions").json()["session_id"]
+
+    app.dependency_overrides[require_principal] = lambda: bob
+    for route in session_routes:
+        for method in (route.methods or set()) - {"HEAD", "OPTIONS"}:
+            url = route.path.format(session_id=session_id)
+            res = client.request(method, url, json={"message": "x"})
+            assert res.status_code == 404, (
+                f"{method} {route.path} answered {res.status_code} for a non-owner — "
+                "it must resolve ownership (404, no existence leak) before doing anything"
+            )

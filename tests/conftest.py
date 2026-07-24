@@ -34,3 +34,15 @@ def fast_mock(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(settings, "hpc_mock_submit_seconds", 0.0)
     monkeypatch.setattr(settings, "hpc_mock_run_seconds", 0.02)
     monkeypatch.setattr(settings, "hpc_poll_interval_seconds", 0.01)
+
+
+@pytest.fixture(autouse=True)
+def loopback_service_host(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Run tests in the loopback dev posture, so `create_app`'s fail-closed guard admits them.
+
+    The front door refuses to boot unauthenticated on a non-loopback bind (SEC-2); tests drive
+    the app entirely in-process (TestClient — no socket is ever bound), so they use the loopback
+    posture. The guard's own refuse/opt-in/boot behavior is proven explicitly in test_auth.py,
+    which overrides these settings per test.
+    """
+    monkeypatch.setattr(settings, "service_host", "127.0.0.1")

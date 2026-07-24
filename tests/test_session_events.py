@@ -6,6 +6,7 @@ no-double-claim guarantee — is proven against a real database when one is pres
 """
 
 import asyncio
+from uuid import uuid4
 
 from agents.session_events import (
     SessionEvent,
@@ -107,3 +108,119 @@ def test_concurrent_claims_never_double_deliver() -> None:
         assert await claim_unconsumed(session_id) == []  # all consumed
 
     asyncio.run(_run())
+
+
+def test_kind_scoped_claim_leaves_other_kinds_unconsumed() -> None:
+    """A `kinds`-scoped claim consumes only matching rows.
+
+    The claim is destructive, so a kind-selective consumer must filter in the claim itself or it
+    would silently destroy other consumers' events (the front door claims only `job_completed`
+    this way).
+    """
+
+    async def _run() -> None:
+        await migrated_db_or_skip()
+        session_id = "sess-f3t2-kinds"
+        await claim_unconsumed(session_id)  # start clean
+
+        await record_session_event(session_id, "job_completed", {"job_id": "j-1"})
+        await record_session_event(session_id, "eval_drift", {"metric": "faithfulness"})
+
+        claimed = await claim_unconsumed(session_id, kinds=["job_completed"])
+        assert [e.kind for e in claimed] == ["job_completed"]
+        # The other kind was NOT destructively claimed — its own consumer can still get it.
+        leftover = await claim_unconsumed(session_id)
+        assert [e.kind for e in leftover] == ["eval_drift"]
+
+    asyncio.run(_run())
+
+
+def test_tailer_reuses_one_connection_across_polls(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    """The default (database) tailer opens one connection for the stream's lifetime.
+
+    Per-poll connects would churn a fresh Postgres connection every interval for every stream,
+    an exhaustion vector on the shared session store.
+    """
+    from chemclaw import db
+
+    connects: list[str] = []
+    real_connect = db.connect
+
+    async def _counting_connect(dsn: str, **kwargs: object) -> object:
+        connects.append(dsn)
+        return await real_connect(dsn, **kwargs)  # type: ignore[arg-type]
+
+    async def _run() -> None:
+        await migrated_db_or_skip()
+        session_id = "sess-f3t2-connection-reuse"
+        await claim_unconsumed(session_id)  # start clean
+        for i in range(3):
+            await record_session_event(session_id, "job_completed", {"job_id": f"j-{i}"})
+
+        monkeypatch.setattr(db, "connect", _counting_connect)
+        seen = [event async for event in stream_new_events(session_id, poll_seconds=0, max_polls=3)]
+        assert len(seen) == 3
+        assert len(connects) == 1  # one connection for the whole 3-poll stream
+
+    asyncio.run(_run())
+
+
+def test_duplicate_dedupe_key_inserts_once() -> None:
+    """A retried insert with the same dedupe key is a no-op — one notification, not two.
+
+    This is the at-least-once activity retry scenario: the first insert committed but the worker
+    died before acking, so Temporal re-runs the activity with the identical input. The unique
+    index on `dedupe_key` must absorb the retry; a distinct key (a genuinely different event)
+    still appends.
+    """
+
+    async def _run() -> None:
+        await migrated_db_or_skip()
+        session_id = "sess-f3t2-dedupe"
+        await claim_unconsumed(session_id)  # start clean
+
+        # Unique per test run: the index is global and permanent, exactly like a real
+        # workflow run id — a previous run's keys must not absorb this run's inserts.
+        run = uuid4().hex
+        key = f"wf-qm-1:{run}:job_completed:abc"
+        await record_session_event(session_id, "job_completed", {"job_id": "j-1"}, dedupe_key=key)
+        await record_session_event(session_id, "job_completed", {"job_id": "j-1"}, dedupe_key=key)
+        other_key = f"wf-qm-1:{run}:job_completed:def"
+        await record_session_event(
+            session_id, "job_completed", {"job_id": "j-2"}, dedupe_key=other_key
+        )
+        claimed = await claim_unconsumed(session_id)
+        assert [e.payload["job_id"] for e in claimed] == ["j-1", "j-2"]  # the retry deduped
+
+    asyncio.run(_run())
+
+
+def test_null_dedupe_key_keeps_plain_append() -> None:
+    """Writers without retry semantics (no key) still append unconditionally."""
+
+    async def _run() -> None:
+        await migrated_db_or_skip()
+        session_id = "sess-f3t2-nokey"
+        await claim_unconsumed(session_id)
+
+        await record_session_event(session_id, "job_completed", {"job_id": "j-1"})
+        await record_session_event(session_id, "job_completed", {"job_id": "j-1"})
+        assert len(await claim_unconsumed(session_id)) == 2
+
+    asyncio.run(_run())
+
+
+def test_dedupe_key_derivation_is_stable_and_event_specific() -> None:
+    """The workflow-side key is retry-stable but distinguishes runs, kinds, and payloads.
+
+    Same inputs → same key (an activity retry must land on the unique index); a different run of
+    the same workflow id, a different kind, or a different payload (one drift alert per metric in
+    one run) → different keys, so genuinely distinct events never dedupe each other.
+    """
+    from workflows.notify import _dedupe_key
+
+    base = _dedupe_key("wf-1", "run-1", "job_completed", {"job_id": "j", "energy": -1.5})
+    assert base == _dedupe_key("wf-1", "run-1", "job_completed", {"energy": -1.5, "job_id": "j"})
+    assert base != _dedupe_key("wf-1", "run-2", "job_completed", {"job_id": "j", "energy": -1.5})
+    assert base != _dedupe_key("wf-1", "run-1", "eval_drift", {"job_id": "j", "energy": -1.5})
+    assert base != _dedupe_key("wf-1", "run-1", "job_completed", {"job_id": "k", "energy": -1.5})

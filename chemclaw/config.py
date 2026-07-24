@@ -151,6 +151,16 @@ class Settings(BaseSettings):
     hpc_run_timeout_seconds: float = Field(default=86400.0, gt=0)
     hpc_run_heartbeat_timeout_seconds: float = Field(default=120.0, gt=0)
     hpc_http_timeout_seconds: float = Field(default=30.0, gt=0)
+    # How many *consecutive* failed launcher polls (HTTP 5xx, transport blips) the poll activity
+    # tolerates before failing its attempt. A transient blip during an up-to-24h run must not burn
+    # the activity's shared retry budget — the loop just polls again next interval — while a
+    # persistently broken launcher still surfaces within roughly this many poll intervals.
+    hpc_poll_max_consecutive_errors: int = Field(default=30, ge=1)
+    # Bearer token for the artifact store when it lives on a different origin than the launcher:
+    # the launcher token must never be sent to a third host (F4 three-secret model). Empty means
+    # the artifact fetch is unauthenticated — unless the store shares the launcher's origin, in
+    # which case the launcher token still applies.
+    hpc_artifact_store_token: str = ""
     # The HPC/Nextflow identity bridge (plan F4-T6, §7.2): the other non-Entra bridge. HPC is not an
     # Entra relying party, so user jobs run under one service identity while the requesting Entra
     # `oid` is carried in the payload (F4-T3) and *every* oid→HPC-identity mapping is logged for the
@@ -182,6 +192,12 @@ class Settings(BaseSettings):
     # Seed for BoFire's random design + SOBO strategies, so a campaign is reproducible
     # (deterministic seeding + proposals) rather than flaky run-to-run.
     bo_seed: int = 42
+    # Ceiling on a campaign spec's round count. The observation history is carried as workflow
+    # state and re-sent to the propose activity every round, so history bytes grow quadratically
+    # with rounds and an unbounded spec would hit Temporal's hard event-history limit mid-run,
+    # losing every already-paid evaluation. Generous versus the default of 10 rounds; a spec
+    # beyond it is rejected at build time, not terminated by the server mid-campaign.
+    bo_max_rounds: int = Field(default=500, ge=1)
 
     # LLM provider seam (plan Phase F0). The agent's chat client is selected by config, so the
     # deployment can point the agent at the internal OpenAI-compatible ("OpenLLM-like") endpoint
@@ -303,6 +319,13 @@ class Settings(BaseSettings):
     # Binds all interfaces inside the container; the OpenShift Route + NetworkPolicy gate ingress.
     service_host: str = "0.0.0.0"
     service_port: int = Field(default=8080, gt=0)
+    # Explicit opt-in to boot *unauthenticated on a non-loopback bind* (SEC-2). With
+    # `entra_required` False every request runs as the shared dev principal with all authorization
+    # gates open — safe only behind loopback. The front door refuses to start in that mode on an
+    # exposed interface unless this is set, so an exposed unauthenticated deployment is a conscious
+    # decision (one loud env var), never a default. Loopback dev and Entra-enforced deployments
+    # never need it.
+    service_allow_insecure: bool = False
     service_cors_origins: str = ""
     # Max characters accepted in one chat message at the front door (SEC-4). Bounds the request body
     # at the trust boundary so an oversized POST is a clean 422, not an unbounded allocation.
@@ -338,6 +361,13 @@ class Settings(BaseSettings):
     # LLM-bound).
     service_max_concurrent_turns: int = Field(default=8, gt=0)
     service_turn_admission_timeout_seconds: float = Field(default=5.0, gt=0)
+    # Wall-clock bound on one streamed turn — how long a turn may hold its admission permit. The
+    # admission timeout only bounds the *wait* for a permit; without this, a hung model stream or a
+    # deliberately slow-reading SSE client pins a permit indefinitely, and a handful of such streams
+    # collapses the whole front door's capacity (every other turn is shed 503). On expiry the client
+    # gets one user-safe error event and the permit is released. Generous for a real turn (an async
+    # QM job is submitted, not awaited, within the turn), finite against a stall.
+    service_turn_timeout_seconds: float = Field(default=600.0, gt=0)
     # Turn/token budgets — the runaway-cost guard (service.budget). A single turn is already
     # iteration-capped (`harness_max_loop_iterations` / MAF's 40), but nothing caps the *number* of
     # turns, so a client or an automated push-back loop could accumulate unbounded LLM spend. When
@@ -354,11 +384,23 @@ class Settings(BaseSettings):
     budget_max_tokens_per_session: int = Field(default=2_000_000, ge=0)
     budget_max_turns_per_user: int = Field(default=1000, ge=0)
     budget_max_tokens_per_user: int = Field(default=20_000_000, ge=0)
+    # Cap on distinct users the in-process budget tracker keeps counters for. The tracker lives for
+    # the pod's lifetime, so without a bound its per-user map grows with every principal ever seen
+    # (a slow leak); past the cap the least-recently-active user's counters are evicted (reset) —
+    # acceptable for a best-effort guard whose durable rolling-window quota is a conscious deferral.
+    # The per-session map is bounded by `service_max_live_sessions` (the session lifecycle bound).
+    budget_max_tracked_users: int = Field(default=10_000, gt=0)
     # Job→session push-back (plan F3-T2/T3): a finished Temporal job writes a `session_events` row;
     # the front door tails the table and wakes the owning session (appending the result, flipping
     # the `awaiting` todo) instead of the user polling. This is the tailer's poll interval — a
     # LISTEN/NOTIFY-free fallback that is simple and correct; lower it for snappier wake-ups.
     session_event_poll_seconds: float = Field(default=2.0, gt=0)
+    # Cap on concurrent push-back event streams (`GET /sessions/{id}/events`) per user. The turn
+    # semaphore only guards POSTed turns; each event stream polls the database for its whole
+    # lifetime, so without a bound one user (or a pile of abandoned tabs) can accumulate hundreds of
+    # forever-polling streams and exhaust Postgres connections for everyone. A real client needs one
+    # stream per open session view; past the cap the request is refused with 429.
+    service_max_event_streams_per_user: int = Field(default=5, gt=0)
 
     # Azure Entra ID identity (plan Phase F4). User auth at the front door is OIDC with Entra as the
     # IdP: the service is an Entra app registration, and every non-health request carries an Entra
@@ -384,9 +426,12 @@ class Settings(BaseSettings):
     entra_privileged_roles: str = ""
     # Per-tool authorization (plan F10-C): generalizes the single expensive-trigger gate to *every*
     # tool invocation via one middleware. `tool_role_gates` maps a tool name to the Entra app-roles
-    # allowed to call it; a tool with no entry falls back to `tool_authz_default` — `"allow"` (the
-    # safe default = today's behavior, every tool callable) or `"deny"` (allowlist mode: only listed
-    # tools are callable, by a role-holder). Enforced only when `entra_required` (dev gate is open).
+    # allowed to call it; a tool with no entry falls back to the built-in write-tool gates
+    # (`agents.authz.DEFAULT_WRITE_TOOL_GATES`: job launchers and state-mutating tools require an
+    # `entra_privileged_roles` role out of the box — an explicit entry here overrides that), then
+    # to `tool_authz_default` — `"allow"` (read tools callable by default) or `"deny"` (allowlist
+    # mode: only listed tools are callable, by a role-holder). Enforced only when `entra_required`
+    # (dev gate is open).
     # ENV override for the gates is JSON, e.g. CHEMCLAW_TOOL_ROLE_GATES='{"submit_qm_job":
     # ["process-chemist"]}'. Note: `deny` with an empty `tool_role_gates` blocks *all* tools — a
     # deliberate lockdown, not a footgun to stumble into.
@@ -544,6 +589,28 @@ class Settings(BaseSettings):
     # PR-gate work. ELN-specific format lives only in the adapter, never in config (G6).
     eln_export_dir: str = "eln/exports"
     eln_sync_timeout_seconds: float = Field(default=300.0, gt=0)
+    # The sync fetches from this far *behind* its high-water cursor, so an export file that
+    # lands late with an older payload timestamp (an upstream export-job retry) is still
+    # picked up instead of being silently dropped forever. Re-fetching the window is safe
+    # and cheap because ingestion is idempotent; one day covers routine export retries —
+    # anything later needs a manual backfill (explicit `since`).
+    eln_sync_overlap_seconds: float = Field(default=86400.0, ge=0)
+    # An entry stamped further than this beyond the wall clock is rejected, not ingested: a
+    # typo'd future year would otherwise become the persisted high-water cursor and silently
+    # skip every later real entry (no code path ever lowers a stored cursor). One day
+    # tolerates clock skew and timezone mishaps while catching implausible timestamps.
+    eln_sync_future_tolerance_seconds: float = Field(default=86400.0, ge=0)
+    # Bounds one sync activity attempt's *new* work: at most this many entries newer than the
+    # cursor are ingested per attempt, and the workflow loops chunk by chunk, persisting the
+    # advanced cursor after each one — so an arbitrarily large backlog makes bounded forward
+    # progress instead of timing out one giant attempt forever. Entries inside the overlap
+    # window re-ingest idempotently and do not count against the bound. Sized so a full chunk
+    # of per-entry PR-gate pushes fits comfortably inside `eln_sync_timeout_seconds`.
+    eln_sync_batch_size: int = Field(default=100, ge=1)
+    # Dead-worker detection for the (long-running) sync activity: it heartbeats while it
+    # ingests, so Temporal notices a dead worker within this window instead of waiting out
+    # the whole `eln_sync_timeout_seconds` start-to-close before retrying elsewhere.
+    eln_sync_heartbeat_timeout_seconds: float = Field(default=60.0, gt=0)
     # A second concrete adapter reads native Open Reaction Database messages (human-readable
     # ORD JSON) from this directory — the "structured recipe" path, alongside the free-text
     # JSON export above. Same `ElnAdapter` contract, so both flow through the one sync loop.
