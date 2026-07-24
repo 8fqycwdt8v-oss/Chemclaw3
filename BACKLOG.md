@@ -3,6 +3,33 @@
 Prioritized open action items. Top = next. Keep in sync with `docs/implementation-plan.md`
 (phase/step numbers) at session end.
 
+## Open — Config extensibility investigation (docs/audit/10-config-extensibility.md)
+
+Super-extensive investigation of how new skills/MCP-servers/tools/datasources/use-case agent
+workflows are added, plus a substrate challenge and three passing offline spikes. Full analysis,
+options matrices, and the two worked designs (datasource-*type*; `AgentProfile`) live in the doc.
+Prioritized, dependency-ordered follow-ups (each ADR-ready, none needs live infra):
+
+- [ ] **Fix `.env.example` merge conflict** (unresolved markers at lines 156/170/173) — [S], do now.
+- [ ] **Tool registry** (`@tool` + `_TOOL_REGISTRY`, mirror `evals/metric.py`) so a new tool is a
+      decorator, not an edit to the hardcoded `_capability_tools()` list — [M]. Spike 1 proves audit
+      + authz + `allowed_tools` exclusion survive. Add a `make tool-validate` gate.
+- [ ] **`AgentProfile` seam, Stage 1** (`agents/profiles.py` + one `"default"` entry ==
+      today's agent + `build_agent(profile=…)` narrowing) — [M]. Spike 2 proves per-use-case
+      selection with the *attenuate-not-authorize* invariant. Stage 2 (front-door selection)
+      triggers on a **second real use case**.
+- [ ] **`DataSourceSpec` discriminated union (scoped), Stage 1** — [M]. Trigger: the deferred
+      Snowflake connector. Spike 3 proves "one variant + one token" survives real
+      connection/auth/mapping config; Snowflake is the first `exchange_obo` caller.
+- [ ] **Per-extension manifest + explicit enable-list** (steal from Django; keep discovery ≠
+      auto-enable) — [S]. Trigger: skills needing to declare capability deps, or profile authoring.
+- [ ] **MCP transport `type` union** (stdio/HTTP discriminator on `McpServerSpec`) — [S]. Trigger:
+      first remote/HTTP MCP server.
+
+Substrate verdict: **evolve the flat `pydantic-settings` singleton additively** (nested sections +
+discriminated unions); do **not** adopt entry-points/pluggy/Django-apps — all target the
+out-of-tree plugin problem this single-repo app does not have.
+
 ## Open — OKF-inspired graph polish (D-074)
 
 Two conventions from Google's Open Knowledge Format, checked against our already-equivalent
