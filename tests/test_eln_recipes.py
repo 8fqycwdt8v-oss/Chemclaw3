@@ -213,6 +213,58 @@ def test_ord_unknown_units_is_a_mapping_error() -> None:
         OrdJsonAdapter().map_to_ord(RawEntry(entry_id="x", created_at=_EPOCH, payload=payload))
 
 
+def test_ord_non_scalar_quantity_is_a_mapping_error() -> None:
+    """An ORD quantity whose `value` is an object/list is an OrdFormatError, not a TypeError.
+
+    `float(dict)` raises TypeError; escaping the mapping boundary would abort the whole
+    sync batch instead of rejecting the one malformed entry (G4).
+    """
+    payload = {
+        "inputs": {
+            "a": {
+                "components": [
+                    {
+                        "identifiers": [{"type": "SMILES", "value": "CCO"}],
+                        "amount": {"mass": {"value": [460], "units": "GRAM"}},
+                    }
+                ]
+            }
+        },
+        "outcomes": [{"products": [{"identifiers": [{"type": "SMILES", "value": "CCO"}]}]}],
+    }
+    with pytest.raises(OrdFormatError, match="cannot map"):
+        OrdJsonAdapter().map_to_ord(RawEntry(entry_id="x", created_at=_EPOCH, payload=payload))
+
+
+def test_ord_auxiliary_role_collapses_to_reagent_not_reactant() -> None:
+    """A stated role outside the subset (INTERNAL_STANDARD) maps to REAGENT, unstated to REACTANT.
+
+    An internal standard read as a REACTANT would fabricate causal chain edges in
+    `memory.chains` (which keys handoffs on REACTANT only).
+    """
+    payload = {
+        "reaction_id": "ord-aux",
+        "inputs": {
+            "a": {
+                "components": [
+                    {
+                        "identifiers": [{"type": "SMILES", "value": "CCO"}],
+                        "reaction_role": "INTERNAL_STANDARD",
+                    },
+                    {"identifiers": [{"type": "SMILES", "value": "CC(=O)O"}]},
+                ]
+            }
+        },
+        "outcomes": [{"products": [{"identifiers": [{"type": "SMILES", "value": "CCO"}]}]}],
+    }
+    reaction = OrdJsonAdapter().map_to_ord(
+        RawEntry(entry_id="ord-aux", created_at=_EPOCH, payload=payload)
+    )
+    roles = {c.smiles: c.role for c in reaction.inputs}
+    assert roles["CCO"] == Role.REAGENT  # stated auxiliary role → reagent, per _ROLES
+    assert roles["CC(=O)O"] == Role.REACTANT  # unstated role → the input default
+
+
 def test_ord_fetch_skips_file_without_timestamp(tmp_path: Path) -> None:
     """An ORD file with no creation time is skipped, not allowed to abort the fetch (G4)."""
 

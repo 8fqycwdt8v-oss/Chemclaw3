@@ -1589,3 +1589,177 @@ multi-pod), and the substructure pattern-fingerprint prefilter (sound screening 
 (tracker caps + usage metering), `test_service.py` (rehydration, owner-scoping, 429 over budget),
 `test_molfp.py` (top_k clamp, bounded scan + truncation warning), `test_session_store.py`
 (`SessionOwnerStore` round-trip), `test_config.py` unaffected.
+
+## D-067 — Fail-closed startup: unauthenticated + network-exposed refuses to boot
+
+**Context.** With `entra_required=false` every request runs as the shared dev principal and every
+authorization gate is open (SEC-2). The default bind is `service_host="0.0.0.0"` (correct inside a
+container behind the OpenShift Route), so the *default* combination — no auth, all interfaces —
+was a network-exposed, gates-open deployment guarded only by a startup WARNING log line. A missed
+log line is not a security control; the earlier sign-off ("warn and still boot") predated the F4
+identity work that made `entra_required=true` the sole production posture.
+
+**Decision.** `create_app` now *refuses to boot* (`RuntimeError` with an actionable message) when
+`entra_required` is false and `service_host` is non-loopback. Two escapes, both explicit: bind a
+loopback interface (the local dev flow, unchanged), or set the new `service_allow_insecure=true`
+(default false), which boots and keeps the loud warning — making an exposed unauthenticated
+deployment a conscious, greppable decision instead of a default. Entra-enforced deployments are
+untouched.
+
+**Consequence.** A deployment that forgets `CHEMCLAW_ENTRA_REQUIRED=true` now fails at startup
+with the fix in the error message, rather than serving the network with authorization gates open.
+
+**Result.** Tests pin all four postures (loopback+no-auth boots; exposed+no-auth refuses;
+exposed+no-auth+opt-in boots with warning; exposed+enforced boots clean); the in-process test
+suite uses the loopback posture via an autouse fixture. `make lint type test` green.
+
+## D-068 — Write tools are role-gated by default (DEFAULT_WRITE_TOOL_GATES)
+
+**Context.** Per-tool RBAC defaulted to `tool_authz_default="allow"`: any tool without an explicit
+`tool_role_gates` entry — including job launchers and state-mutating tools — was callable by every
+authenticated user. Flipping the global default to `deny` would break the dev flow and every read
+tool.
+
+**Decision.** `agents/authz.py` gains `DEFAULT_WRITE_TOOL_GATES`, the built-in set of
+write/side-effect tools (`submit_qm_job`, `propose_knowledge_note`, `record_confirmed_answer`,
+plus `index_molecule`/`index_reaction` as defense-in-depth behind the D-029 `allowed_tools`
+boundary). Under `entra_required`, an *unconfigured* tool in this set requires a role from
+`entra_privileged_role_set` — reusing the F4-T5 privileged set rather than inventing a second role
+vocabulary — and fails closed when that set is empty. An explicit `tool_role_gates` entry
+overrides the built-in gate; read tools keep the `allow` default; dev mode is unchanged. The
+constant lives in `authz.py`, the one home for authorization decisions.
+
+**Consequence.** Secure by default: an enforced deployment can no longer expose writes by
+forgetting to configure a gate. A new write tool must be added to the set when registered — a
+hand-maintained list, acceptable at the current tool count.
+
+**Result.** `tests/test_tool_authz.py` proves: default-gated write denied/allowed by privileged
+role, fail-closed on an empty privileged set, operator override wins, read tools and dev mode
+unchanged.
+
+## D-069 — Submitter checkout ownership enforced with an OS-level advisory lock
+
+**Context.** `GitNoteSubmitter` serializes submissions with a module-level `asyncio.Lock`, but that
+lock is per-process: two processes sharing `settings.note_repo_dir` would interleave `checkout -B`
+calls and silently corrupt each other's note branches. The "dedicated clone per process" rule was
+documented, never enforced.
+
+**Decision.** Every submission additionally holds an exclusive non-blocking `flock` on
+`.git/chemclaw-submit.lock` inside the checkout for its full duration. A second process gets an
+immediate `GitSubmitError` ("note_repo_dir is in use by another process") instead of corruption.
+The lock file lives under `.git/` because `submit()` now runs `reset --hard` + `clean -fd` before
+each submission (itself a fix: staged residue from a failed submission no longer leaks into the
+next note's branch) — deleting a held lock file would let a new process lock a fresh inode at the
+same path and break mutual exclusion. The asyncio lock stays for in-process serialization.
+
+**Consequence.** Misconfiguration (two workers, one clone) is now a loud, actionable error, not a
+data-integrity incident. flock is advisory: out-of-band git use in the clone remains outside the
+contract; the kernel releases the lock if the holder dies (no stale-lock cleanup needed).
+
+**Result.** Cross-process denial proven with a real child process holding the flock
+(`tests/test_knowledge.py`); lock release after a failed submission proven too.
+
+## D-070 — ELN sync cursor semantics: future-tolerance clamp, overlap window, chunked activities
+
+**Context.** Three independent failure modes could silently stall or starve ELN ingestion: (1) one
+future-dated entry timestamp became the persisted high-water cursor, permanently skipping all later
+real entries; (2) an export file landing *after* a newer-stamped sibling was dropped forever by the
+`created_at >= since` filter; (3) the sync activity ingested an unbounded backlog in one 300s
+attempt with no heartbeat.
+
+**Decision.** The cursor still advances past sane-timestamped rejections (re-fetching
+deterministic bad data only re-rejects it), but entries stamped beyond wall clock +
+`eln_sync_future_tolerance_seconds` are rejected *without* cursor advance; every fetch reaches
+`eln_sync_overlap_seconds` behind the cursor (idempotent ingestion makes re-fetch free) with the
+cursor floored at `since`; and the activity heartbeats and ingests in cursor-persisting chunks of
+`eln_sync_batch_size`, capping only past-cursor entries so a truncated chunk strictly advances.
+Relatedly, memory note ids now anchor on the cluster's *smallest member* rather than the full
+member set, so a grown cluster supersedes its note in place through the PR-gate instead of minting
+a duplicate note per sync.
+
+**Consequence.** A typo'd year, a late-landing export, or a large backfill each degrade to a
+visible per-run warning and bounded catch-up work instead of silent permanent data loss.
+
+**Result.** Behavior tests in `tests/test_eln.py`, `tests/test_eln_workflow.py`,
+`tests/test_memory.py`; chunk-resume proven with cursor persistence per chunk.
+
+## D-071 — Deterministic config capture in workflows; idempotent session events
+
+**Context.** Two at-least-once/replay correctness gaps: `fan_out` read live
+`settings.orchestrator_max_parallel_children` inside workflow code (replay after a config change
+sees a different batch structure), and `record_session_event` had no idempotency key (an activity
+retry after a committed-but-unacked insert duplicated the notification).
+
+**Decision.** Workflow code must never read live settings where the value shapes command
+structure: such values are captured once via a local activity (`resolve_fan_out_limit`) so replay
+sees the recorded value. Settings reads that only shape command *attributes* (timeouts, queue
+names) remain acceptable. Push-back events recorded from activities carry a deterministic
+`dedupe_key` (`workflow_id:run_id:kind:payload-digest`) enforced by a partial unique index
+(`infra/sql/014`), converting at-least-once retries into exactly-once notifications; NULL-key
+writers keep plain append semantics.
+
+**Consequence.** Replays are structurally deterministic under config drift, and duplicate
+notifications from activity retries are impossible for workflow-recorded events.
+
+**Result.** Proven against real Postgres (duplicate-insert dedupe) and via worker-registration +
+history tests. `make lint type test` green.
+
+## D-072 — CHECKMATE campaign 2026-07: adversarially-verified review, hardening, and refactor pass
+
+**Context.** A full-codebase review campaign (13 reviewer agents; 73 raw findings; every finding
+adversarially verified by an independent skeptic, 23 refuted; 50 confirmed + 10 of 11
+orphaned-verifier findings confirmed by the orchestrator) followed by per-package fix waves. No S1
+found; 13 S2 correctness bugs, the rest hardening/simplification.
+
+**Decision (highlights beyond D-067…D-071).**
+- *Chemistry correctness*: `run_xtb` rejects charge/SMILES-formal-charge mismatches and
+  odd-electron species (fail-fast beats a silently guessed doublet — SMILES carries no spin);
+  `predict_pka` rejects net-charged inputs (v1 calibration is neutral-acid-only); cached compute
+  runs on the same canonical form its cache key hashes; `engine_version()` embeds the RDKit build
+  so geometry/descriptor stacks invalidate stale cache entries per D-011.
+- *Retrieval correctness*: one eligibility gate (`_eligible_notes`: type/tag + KM-7 currency)
+  feeds graph, vector, and lexical retrieval; filters push into the index query
+  (`NoteIndex.search_*(within=…)`) so top-k slots are never spent on ineligible neighbors; graph
+  hits rank best-first for RRF; index scores survive into evidence chunks.
+- *Layering*: the embedding seam moved to `chemclaw/embeddings.py`; `report/` depends only on the
+  kernel, enforced by `tests/test_layering.py` (fresh-interpreter import guard). `Settings` was
+  restructured into 18 cohesive mixin sections with zero call-site churn (160 fields byte-identical).
+- *Front door bounds*: per-session turn serialization (409 on concurrent POST), streamed turns
+  bounded by `service_turn_timeout_seconds`, per-user SSE stream cap, one connection per stream,
+  kind-scoped event claims, LRU-bounded budget counters, JWKS validation off the event loop.
+- *Config fail-fast*: Entra enforcement requires a resolvable JWKS source; nextflow completeness
+  and poll-vs-heartbeat pairs validated at startup; `_redact` strips passwords from all libpq DSN
+  forms before they can reach persisted error messages.
+
+**Consequence.** The review's verified-findings queue is fully drained (59 fixed, 1 refuted);
+coverage rose from 88.43% to 89.60% with 108 new behavior tests (616 passing), all proven against
+real RDKit/BoFire/Postgres where applicable.
+
+**Result.** Branch `claude/code-review-refactor-plan-wm34wc`, commits `2e7148c`…`4afbada`;
+`make lint type test` + `make cov` green at every landed cluster.
+
+## D-073 — Final adversarial diff pass: campaign-introduced defects caught and fixed
+
+**Context.** After all fix waves landed green, one adversarial reviewer re-read the entire branch
+diff (90 files) hunting only for defects the campaign itself introduced or left: regressions,
+incomplete fixes, cross-agent seam inconsistencies, and dishonest tests.
+
+**Decision (findings → fixes).** Nine confirmed: (1) **S2** — the new submitter reset/clean plus
+the `note_repo_dir="."` default could destroy a developer's own working tree; `submit()` now
+refuses the process's CWD/checkout root before any destructive git command. (2) deny-mode authz
+inversion — the built-in write gate now only narrows `allow`, never widens `deny`. (3) ELN
+overlap×chunk amplification — merged-note short-circuit, first-chunk-only overlap, DEBUG replay
+logging (sync trail INFO line now also reports `skipped_existing=K`). (4) `CampaignSpec` read
+live config inside a Temporal-crossing validator — ceiling moved to the creation entry point so
+replays cannot fail on config drift. (5) drift-eval memo keyed on paths — corpus stat signature
+added. (6) `except Exception` counter cleanup — BaseException-safe try/finally for turn and
+stream slots. Plus docs: workflow-versioning policy recorded in BACKLOG (no live histories yet),
+memory-id one-time migration note, stale `entra_client_id` references removed. SQL surface,
+artifact-token scoping, flock semantics, budget LRU, charge-validation coverage, and test honesty
+were probed and confirmed sound.
+
+**Consequence.** The campaign's own changes went through the same skeptic gauntlet as the code it
+reviewed; the one severe self-introduced risk (dev-tree destruction) was caught before merge.
+
+**Result.** Final gate: lint + mypy strict clean; 625 passed / 17 Temporal-only skips; coverage
+89.64% (baseline 88.43%). Branch `claude/code-review-refactor-plan-wm34wc`.

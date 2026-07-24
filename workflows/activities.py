@@ -13,7 +13,9 @@ theirs.
 import asyncio
 import re
 
+import httpx
 from temporalio import activity
+from temporalio.exceptions import ApplicationError
 
 from chemclaw.chem import require_canonical_smiles
 from chemclaw.config import settings
@@ -82,16 +84,40 @@ async def poll_hpc_status(handle: HpcJobHandle) -> str:
 async def _poll_nextflow(handle: HpcJobHandle) -> str:
     """Heartbeat-poll the Nextflow launcher to a terminal state, then fetch the output artifact.
 
-    Raises `NextflowError` on a failed run (surfaced through the workflow's retry policy) so a
-    failed compute never silently becomes an unparseable-output error downstream.
+    Transient and terminal failures are deliberately kept apart: a launcher/network blip
+    (`NextflowError` from a non-200 poll, or an `httpx` transport error) is absorbed by the loop —
+    up to `hpc_poll_max_consecutive_errors` in a row — because during an up-to-24h run each blip
+    would otherwise burn one of the activity's few shared retry attempts and fail a job whose HPC
+    run actually succeeds. A run the launcher reports FAILED is terminal: it raises a
+    *non-retryable* `ApplicationError`, since re-polling a failed run can never change the outcome,
+    and it must never silently become an unparseable-output error downstream.
     """
+    consecutive_errors = 0
     while True:
         activity.heartbeat(f"{handle.scheduler_job_id}: polling")
-        state = await nextflow.poll_run(handle)
+        try:
+            state = await nextflow.poll_run(handle)
+        except (nextflow.NextflowError, httpx.HTTPError) as exc:
+            consecutive_errors += 1
+            if consecutive_errors >= settings.hpc_poll_max_consecutive_errors:
+                raise
+            activity.logger.warning(
+                "transient poll error for %s (%d consecutive): %s",
+                handle.scheduler_job_id,
+                consecutive_errors,
+                exc,
+            )
+            await asyncio.sleep(settings.hpc_poll_interval_seconds)
+            continue
+        consecutive_errors = 0
         if state is nextflow.RunState.SUCCEEDED:
             return await nextflow.fetch_artifacts(handle)
         if state is nextflow.RunState.FAILED:
-            raise nextflow.NextflowError(f"run {handle.scheduler_job_id} failed")
+            raise ApplicationError(
+                f"run {handle.scheduler_job_id} failed",
+                type="NextflowRunFailed",
+                non_retryable=True,
+            )
         await asyncio.sleep(settings.hpc_poll_interval_seconds)
 
 

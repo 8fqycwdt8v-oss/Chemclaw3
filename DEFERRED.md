@@ -126,3 +126,17 @@ session reattach, in-process turn/token budgets). Two narrower pieces were consc
 |---|---|---|
 | **Durable / rolling-window budget quota** | `service.budget.BudgetTracker` bounds a *running process's* runaway (the "$400 in twenty minutes" failure), which is what the per-turn loop cap left open. A quota that survives a restart or is shared across pods needs a durable store (Postgres) and a time-window policy (per-day/per-month reset) — a bigger piece whose value is real only under multi-tenant billing/fairness pressure, not the single-process runaway this guards. | A real multi-tenant deployment needs per-user spend fairness *across* restarts/pods — then back the counters with a Postgres table + a windowed reset, reusing the same `check`/`record` seam |
 | **Substructure pattern-fingerprint prefilter** | `find_substructure_matches` now bounds its scan to `substructure_scan_max_records` (5000) and warns on truncation, so the full-table-load footgun is closed. Screening candidates with a pattern fingerprint before the RDKit match (to raise the effective ceiling without loading every row) is a genuine optimization, but ECFP bits cannot screen substructures soundly — it needs a dedicated pattern-fingerprint column + index. | The molecule corpus grows past the scan cap in real use (the truncation warning fires) — then add a pattern-fingerprint prefilter column so substructure search scales past ~10⁴ molecules |
+
+## Review-campaign deferrals (2026-07-24, D-072)
+
+- **`within=` id-array scaling** — retrieval eligibility ships the full eligible-id list as a SQL
+  array parameter; fine at the current corpus scale (10^3–10^4 notes). Revisit with indexed
+  type/tag/currency columns when the corpus approaches ~10^5 notes.
+- **`XtbInput.charge` redundancy** — with charge now validated against the SMILES formal charge,
+  the field is fully determined by the SMILES; kept so the LLM tool signature stays loud on
+  mismatch rather than silently ignoring the argument. Revisit if the tool schema is ever versioned.
+- **Even-electron open-shell species** (e.g. triplet O2) — undetectable from SMILES, which carries
+  no spin multiplicity; documented input-format limit of `require_closed_shell`. Revisit only if a
+  spin-aware input format is adopted.
+- **JS test infra** — `service/static/app.js` error surfacing is covered by `node --check` only;
+  no JS test runner exists in the repo. Revisit if the web client grows beyond a demo shell.

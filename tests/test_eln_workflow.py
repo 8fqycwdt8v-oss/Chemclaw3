@@ -9,21 +9,27 @@ activity and the summary fold.
 """
 
 import asyncio
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
+from pathlib import Path
+from typing import Any
 
 import pytest
 from temporalio.client import Client
+from temporalio.testing import ActivityEnvironment
 from temporalio.worker import Worker
 
 import workflows.eln_sync as eln_sync
 from chemclaw.config import settings
-from eln.sync import IngestSummary, RejectedEntry
+from eln.adapter import RawEntry
+from eln.ord import OrdReaction
+from eln.sync import IngestSummary, RejectedEntry, sync_entries
 from mcp_servers.fpstore import InMemoryFingerprintStore
 from sources.registry import active_ingest_source_names
 from tests.conftest import FakeSubmitter
 from tests.temporal_env import pydantic_client, start_env_or_skip
 from workflows.eln_sync import (
     ElnSyncWorkflow,
+    _BoundedIngest,
     _merge,
     list_ingest_sources,
     load_sync_cursor,
@@ -56,21 +62,100 @@ def test_active_ingest_source_names(monkeypatch: pytest.MonkeyPatch) -> None:
 def test_sync_eln_entries_ingests_one_named_source(monkeypatch: pytest.MonkeyPatch) -> None:
     """The activity syncs exactly the named source (offline; no Temporal server needed)."""
     fake, reaction_store = _swap_stores(monkeypatch)
-    summary = asyncio.run(sync_eln_entries("eln-json", _EPOCH))
+    beats: list[object] = []
+    env = ActivityEnvironment()
+    env.on_heartbeat = lambda *details: beats.append(details)
+    chunk = asyncio.run(env.run(sync_eln_entries, "eln-json", _EPOCH))
     # The JSON seed corpus (eln/exports) has two valid reactions.
-    assert set(summary.ingested) == {"eln-2026-001", "eln-2026-002"}
-    assert summary.rejected == []
+    assert set(chunk.summary.ingested) == {"eln-2026-001", "eln-2026-002"}
+    assert chunk.summary.rejected == []
+    assert chunk.has_more is False  # nothing beyond the batch bound remains
     assert len(fake.submissions) == 2
+    # The activity heartbeats while it ingests, so a dead worker is caught within the
+    # heartbeat timeout instead of only at the (much larger) start-to-close.
+    assert beats
+
+
+def test_sync_eln_entries_bounds_one_attempt(monkeypatch: pytest.MonkeyPatch) -> None:
+    """One attempt ingests at most `eln_sync_batch_size` new entries and reports the remainder."""
+    _swap_stores(monkeypatch)
+    monkeypatch.setattr(settings, "eln_sync_batch_size", 1)
+    chunk = asyncio.run(ActivityEnvironment().run(sync_eln_entries, "eln-json", _EPOCH))
+    assert len(chunk.summary.ingested) == 1  # bounded: one new entry per attempt
+    assert chunk.has_more is True  # the second seed entry remains for the next chunk
+    # The next chunk resumes from the advanced cursor and drains the rest.
+    follow_up = asyncio.run(
+        ActivityEnvironment().run(sync_eln_entries, "eln-json", chunk.summary.next_cursor)
+    )
+    assert follow_up.has_more is False
+    ingested = set(chunk.summary.ingested) | set(follow_up.summary.ingested)
+    assert {"eln-2026-001", "eln-2026-002"} <= ingested
+
+
+def test_sync_eln_entries_applies_overlap_only_when_asked(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`apply_overlap=False` fetches from the cursor itself; True replays the window.
+
+    This is the per-chunk seam: the workflow passes False for every chunk after the first,
+    so a backlog drain fetches (and re-checks) the overlap window once per run, not once
+    per chunk.
+    """
+    _swap_stores(monkeypatch)
+    monkeypatch.setattr(settings, "knowledge_dir", str(tmp_path))  # no merged notes
+    monkeypatch.setattr(settings, "eln_sync_overlap_seconds", 90 * 86400.0)
+    between = datetime(2026, 2, 1, tzinfo=UTC)  # after seed 001 (Jan 15), before 002 (Feb 3)
+    no_overlap = asyncio.run(
+        ActivityEnvironment().run(sync_eln_entries, "eln-json", between, False)
+    )
+    assert set(no_overlap.summary.ingested) == {"eln-2026-002"}  # nothing behind the cursor
+    with_overlap = asyncio.run(
+        ActivityEnvironment().run(sync_eln_entries, "eln-json", between, True)
+    )
+    assert set(with_overlap.summary.ingested) == {"eln-2026-001", "eln-2026-002"}
+
+
+def test_bounded_ingest_keeps_overlap_and_truncates_new() -> None:
+    """The bound applies only past the cursor: overlap re-ingests pass through uncapped.
+
+    The overlap window exists to re-pick-up late-landing files (idempotent, never advances the
+    cursor), so capping it would starve it; capping only the *new* tail guarantees a truncated
+    chunk always advances the cursor — the workflow loop's progress condition.
+    """
+
+    def entry(entry_id: str, ts: datetime) -> RawEntry:
+        return RawEntry(entry_id=entry_id, created_at=ts, payload={})
+
+    since = datetime(2026, 6, 1, tzinfo=UTC)
+    older = [entry("old-1", since - timedelta(days=1)), entry("old-2", since)]
+    newer = [entry(f"new-{i}", since + timedelta(hours=i)) for i in range(1, 5)]
+
+    class _FakeAdapter:
+        async def fetch_new_entries(self, _since: datetime) -> list[RawEntry]:
+            return newer + older  # deliberately unsorted
+
+        def map_to_ord(self, raw: RawEntry) -> OrdReaction:  # pragma: no cover - never reached
+            raise AssertionError("not used")
+
+    bounded = _BoundedIngest(_FakeAdapter(), since, limit=2)
+    kept = asyncio.run(bounded.fetch_new_entries(since - timedelta(days=30)))
+    assert [e.entry_id for e in kept] == ["old-1", "old-2", "new-1", "new-2"]
+    assert bounded.truncated is True
+    # Under the limit: everything passes and nothing is reported as remaining.
+    roomy = _BoundedIngest(_FakeAdapter(), since, limit=10)
+    assert len(asyncio.run(roomy.fetch_new_entries(since))) == 6
+    assert roomy.truncated is False
 
 
 def test_merge_folds_per_source_summaries() -> None:
-    """`_merge` unions ingested/rejected across sources and takes the max cursor."""
+    """`_merge` unions ingested/skipped/rejected across sources and takes the max cursor."""
     early, late = datetime(2026, 1, 1, tzinfo=UTC), datetime(2026, 6, 1, tzinfo=UTC)
-    a = IngestSummary(ingested=["a1"], rejected=[], next_cursor=early)
+    a = IngestSummary(ingested=["a1"], skipped_existing=["a0"], rejected=[], next_cursor=early)
     reject = RejectedEntry(entry_id="b-bad", reason="nope", created_at=late)
     b = IngestSummary(ingested=["b1"], rejected=[reject], next_cursor=late)
     merged = _merge([a, b], _EPOCH)
     assert merged.ingested == ["a1", "b1"]
+    assert merged.skipped_existing == ["a0"]
     assert merged.rejected == [reject]
     assert merged.next_cursor == late
     # No source ran → the cursor holds at the passed floor.
@@ -149,6 +234,69 @@ def test_eln_sync_workflow_cursors_each_source_independently(
         assert set(cursors) == {"eln-json", "eln-ord"}
         # The JSON source's reactions still land (union across sources).
         assert {"eln-2026-001", "eln-2026-002"} <= set(summary.ingested)
+
+    asyncio.run(_run())
+
+
+def test_eln_sync_workflow_drains_a_backlog_in_chunks(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """With a batch bound of 1 the workflow loops, persisting the cursor after every chunk.
+
+    This is the fix for the wedged-backfill failure mode: progress must be durable per chunk,
+    so a backlog larger than one activity window completes across attempts instead of retrying
+    one giant attempt forever from the same cursor. The drain must also replay the late-file
+    overlap window only on its first chunk — per-chunk replay is quadratic over a backlog.
+    """
+    _swap_stores(monkeypatch)
+    monkeypatch.setattr(settings, "knowledge_dir", str(tmp_path))  # no merged notes
+    monkeypatch.setattr(settings, "eln_sync_batch_size", 1)
+    cursors: dict[str, datetime] = {}
+    stored: list[datetime] = []
+    overlap_flags: list[bool] = []
+
+    async def recording_sync(*args: Any, apply_overlap: bool = True) -> IngestSummary:
+        overlap_flags.append(apply_overlap)
+        return await sync_entries(*args, apply_overlap=apply_overlap)
+
+    monkeypatch.setattr(eln_sync, "sync_entries", recording_sync)
+
+    async def fake_load(source: str) -> datetime:
+        return cursors.get(source, _EPOCH)
+
+    async def fake_store(source: str, cursor: datetime) -> None:
+        cursors[source] = cursor
+        stored.append(cursor)
+
+    monkeypatch.setattr(eln_sync, "load_cursor", fake_load)
+    monkeypatch.setattr(eln_sync, "store_cursor", fake_store)
+
+    async def _run() -> None:
+        async with await start_env_or_skip() as env:
+            client: Client = pydantic_client(env)
+            async with Worker(
+                client,
+                task_queue="test-eln-chunks",
+                workflows=[ElnSyncWorkflow],
+                activities=[
+                    list_ingest_sources,
+                    sync_eln_entries,
+                    load_sync_cursor,
+                    store_sync_cursor,
+                ],
+            ):
+                summary = await client.execute_workflow(
+                    ElnSyncWorkflow.run,
+                    id="eln-sync-chunks",
+                    task_queue="test-eln-chunks",
+                )
+        assert {"eln-2026-001", "eln-2026-002"} <= set(summary.ingested)
+        assert len(stored) >= 2  # one persisted cursor per chunk, not one per run
+        assert stored == sorted(stored)  # the cursor only ever advances
+        # The overlap window is fetched by the first chunk only; later chunks of the same
+        # drain fetch from the advancing cursor (no per-chunk window replay).
+        assert overlap_flags[0] is True
+        assert overlap_flags[1:] and all(flag is False for flag in overlap_flags[1:])
 
     asyncio.run(_run())
 

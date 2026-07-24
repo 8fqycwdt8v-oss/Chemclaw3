@@ -24,6 +24,7 @@ from bo.problem import (
 from calc.postgres_store import PostgresStore
 from calc.solubility import SolubilityInput, run_cached_solubility
 from calc.store import ResultStore
+from chemclaw.chem import require_canonical_smiles
 
 Objective = Callable[[dict[str, ParamValue]], Awaitable[float]]
 
@@ -40,9 +41,16 @@ def molecule_library_problem(smiles: list[str]) -> OptimizationProblem:
     *without* evaluating the whole library. The evaluation budget
     (`n_initial + n_rounds * batch`) must stay below the library size, else the
     unique-candidate pool is exhausted.
+
+    Every entry is canonicalized up front: an unparseable SMILES raises
+    `InvalidSmilesError` naming it *before* any budget is spent (otherwise the
+    campaign would fail non-retryably only when the bad molecule is finally
+    proposed, discarding all completed rounds), and duplicate spellings of one
+    molecule collapse so the discrete-space accounting counts real candidates.
     """
+    library = list(dict.fromkeys(require_canonical_smiles(entry) for entry in smiles))
     return OptimizationProblem(
-        parameters=[CategoricalParameter(name=MOLECULE_KEY, categories=smiles)],
+        parameters=[CategoricalParameter(name=MOLECULE_KEY, categories=library)],
         objective=ObjectiveSpec(name="log_s", direction="maximize"),
     )
 

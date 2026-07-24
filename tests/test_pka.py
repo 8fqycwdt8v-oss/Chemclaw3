@@ -15,8 +15,42 @@ from calc.store import InMemoryStore
 
 
 def test_calc_version_embeds_engine_build() -> None:
-    """The pKa cache key carries the tblite build, so an engine upgrade recomputes (D-011)."""
+    """The pKa cache key carries the tblite and RDKit builds (D-011).
+
+    An engine or geometry-stack upgrade recomputes rather than serving a stale pKa.
+    """
     assert version("tblite") in _calc_version()
+    assert version("rdkit") in _calc_version()
+
+
+def test_charged_input_raises() -> None:
+    """A net-charged acid is rejected: the v1 calibration covers neutral acids only (G4).
+
+    Protonated nicotinic acid (net +1, true pKa ~2) would otherwise run the acid
+    at charge 0 and the conjugate base at -1 — both wrong electron counts — and
+    return a silently inverted pKa.
+    """
+    with pytest.raises(ValueError, match="neutral"):
+        predict_pka(PkaInput(smiles="OC(=O)c1cccc[nH+]1"))
+
+
+def test_pka_is_independent_of_smiles_spelling() -> None:
+    """Equivalent spellings predict the same pKa (D-011 determinism).
+
+    The cache key canonicalizes, so the computation must run on the canonical
+    form too — before the fix, `CCS` vs `SCC` differed by ~2e-3 pKa units.
+    Fresh stores force both spellings to actually compute. tblite's SCF carries
+    ~1e-12 run-to-run numerical noise, so assert agreement far below chemical
+    significance rather than bitwise equality.
+    """
+
+    async def _run() -> None:
+        first, _ = await run_cached_pka(InMemoryStore(), PkaInput(smiles="CCS"))
+        second, _ = await run_cached_pka(InMemoryStore(), PkaInput(smiles="SCC"))
+        assert first.pka == pytest.approx(second.pka, abs=1e-8)
+        assert first.smiles == second.smiles  # both report the canonical form
+
+    asyncio.run(_run())
 
 
 def test_acid_ordering_is_physical() -> None:

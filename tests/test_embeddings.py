@@ -12,7 +12,7 @@ from typing import Any
 
 import pytest
 
-import agents.embedding_provider as provider
+import chemclaw.embeddings as provider
 from chemclaw.config import Settings
 
 
@@ -54,7 +54,12 @@ def test_hash_embedding_of_tokenless_text_is_zero(monkeypatch: pytest.MonkeyPatc
 
 def test_empty_input_returns_empty(monkeypatch: pytest.MonkeyPatch) -> None:
     """No texts in, no vectors out (no endpoint call)."""
-    _use_settings(monkeypatch, embedding_provider="openai_compatible", embedding_model="m")
+    _use_settings(
+        monkeypatch,
+        embedding_provider="openai_compatible",
+        embedding_model="m",
+        llm_base_url="https://llm.internal/v1",
+    )
     assert provider.embed_texts([]) == []
 
 
@@ -91,8 +96,7 @@ def test_openai_compatible_path_calls_the_endpoint(monkeypatch: pytest.MonkeyPat
     assert vectors == [[0.0], [1.0]]
 
 
-def test_openai_compatible_requires_a_model(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A missing embedding_model fails clearly at call time, not as an opaque endpoint error."""
-    _use_settings(monkeypatch, embedding_provider="openai_compatible", llm_base_url="x")
-    with pytest.raises(RuntimeError, match="embedding_model"):
-        provider.embed_texts(["a"])
+def test_openai_compatible_half_config_is_rejected_at_build_time() -> None:
+    """A missing endpoint/model fails when Settings is built, before any embed call happens."""
+    with pytest.raises(ValueError, match="embedding_model"):
+        Settings(embedding_provider="openai_compatible", llm_base_url="x")

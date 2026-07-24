@@ -15,13 +15,30 @@ flows through unchanged: `fan_out` passes each input to its child verbatim, so a
 
 import asyncio
 from collections.abc import Sequence
+from datetime import timedelta
 from typing import Any
 
-from temporalio import workflow
+from temporalio import activity, workflow
 from temporalio.common import RetryPolicy
 
 with workflow.unsafe.imports_passed_through():
     from chemclaw.config import settings
+
+from workflows.publish import BAD_DATA_RETRY
+
+
+@activity.defn
+async def resolve_fan_out_limit() -> int:
+    """Resolve the configured fan-out concurrency bound — outside workflow code, on purpose.
+
+    The batch size decides how many StartChildWorkflow commands each workflow task emits, so
+    reading live settings *inside* `fan_out` would break replay whenever the config changed
+    mid-flight (history recorded N starts, the redeployed worker emits M). Resolving it through
+    a (local) activity records the value in history once per fan-out, making the batch shape a
+    pure function of history — the deterministic-capture pattern the Temporal SDK prescribes
+    for mutable config.
+    """
+    return settings.orchestrator_max_parallel_children
 
 
 def _batches(items: list[Any], size: int) -> list[list[Any]]:
@@ -69,16 +86,24 @@ async def fan_out(
         task_queue: Queue the children run on; defaults to the light `background-jobs` queue.
         retry_policy: Per-child retry policy (durability + bounded attempts). None uses Temporal's
             default child retry.
-        max_parallel: Concurrency bound; defaults to `orchestrator_max_parallel_children`.
+        max_parallel: Concurrency bound; defaults to `orchestrator_max_parallel_children`,
+            resolved via a local activity so the recorded value — not a live settings read —
+            shapes the batches, keeping replay deterministic across config changes.
 
     Returns:
         The results of the children that succeeded, in input order. A child that fails after its
         retries is logged and omitted (D-030: reject-and-continue), never restarting its siblings.
     """
     queue = task_queue if task_queue is not None else settings.background_task_queue
-    limit = (
-        max_parallel if max_parallel is not None else settings.orchestrator_max_parallel_children
-    )
+    if max_parallel is not None:
+        limit = max_parallel
+    else:
+        limit = await workflow.execute_local_activity(
+            resolve_fan_out_limit,
+            # The generic short-activity budget (same knob the notify seam uses for its write).
+            start_to_close_timeout=timedelta(seconds=settings.qm_activity_timeout_seconds),
+            retry_policy=BAD_DATA_RETRY,
+        )
     if limit < 1:
         raise ValueError(f"max_parallel must be >= 1, got {limit}")
     parent_id = workflow.info().workflow_id

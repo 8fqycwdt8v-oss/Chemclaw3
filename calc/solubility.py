@@ -7,6 +7,8 @@ never presented as exact. There is one model, so it is called directly; when a
 second (e.g. a trained GNN) exists, reintroduce a selection seam (Rule of Three).
 """
 
+from importlib.metadata import version
+
 from pydantic import BaseModel, Field
 from rdkit import Chem
 from rdkit.Chem import Crippen, Descriptors, rdMolDescriptors
@@ -89,13 +91,17 @@ async def run_cached_solubility(
 ) -> tuple[SolubilityResult, bool]:
     """Return a solubility prediction for `job`, reusing the store on a repeat.
 
-    The key is versioned by model name+version *and* the reported RMSE, so bumping the
-    model or re-tuning `solubility_rmse_log` recomputes rather than serving a prediction
-    (or a stale uncertainty) from the old one.
+    The key is versioned by model name+version, the RDKit build, *and* the reported
+    RMSE, so bumping the model, upgrading RDKit (all four ESOL descriptors are
+    RDKit-computed), or re-tuning `solubility_rmse_log` recomputes rather than
+    serving a prediction (or a stale uncertainty) from the old one.
     """
     key = CalculationKey.build(
         calc_type=CALC_TYPE,
-        calc_version=f"{_MODEL.name}@{_MODEL.version}/u-{settings.solubility_rmse_log}",
+        calc_version=(
+            f"{_MODEL.name}@{_MODEL.version}/rdkit-{version('rdkit')}/"
+            f"u-{settings.solubility_rmse_log}"
+        ),
         inputs={"smiles": require_canonical_smiles(job.smiles)},
     )
     return await run_cached(store, key, lambda: predict_solubility(job), SolubilityResult)

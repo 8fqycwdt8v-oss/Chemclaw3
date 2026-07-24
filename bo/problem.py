@@ -11,8 +11,15 @@ from typing import Annotated, Literal
 
 from pydantic import BaseModel, Field, model_validator
 
+from chemclaw.config import settings
+
 # A parameter value is a float (continuous) or a category label (categorical).
 ParamValue = float | str
+
+# The fewest observations a surrogate can be fitted on (BoFire's SOBO floor):
+# below two experiments the strategy raises mid-campaign, so specs and the
+# engine guard against it up front instead (gate G4).
+MIN_SEED_OBSERVATIONS = 2
 
 
 class ContinuousParameter(BaseModel):
@@ -77,10 +84,13 @@ class Observation(BaseModel):
 
     `provenance` distinguishes a real measurement from a model prediction, so a
     campaign fed by predicted values stays honest about its evidence (D-011).
+    `value` must be finite: NaN compares false in both directions, so it would
+    silently win `best_of`, and BoFire drops the row mid-campaign — reject it at
+    the boundary instead (gate G4).
     """
 
     params: dict[str, ParamValue]
-    value: float
+    value: float = Field(allow_inf_nan=False)
     provenance: str = "measured"
 
 
@@ -100,12 +110,39 @@ class CampaignSpec(BaseModel):
 
     problem: OptimizationProblem
     objective_name: str = Field(min_length=1)
-    # A surrogate needs >=1 seed point; batch >=1 per round; rounds may be 0.
-    n_initial: int = Field(default=5, ge=1)
+    # A surrogate needs >=2 seed points (BoFire's floor); batch >=1 per round; rounds may
+    # be 0. The config ceiling (`bo_max_rounds`) is deliberately NOT validated here: the
+    # spec crosses the Temporal serialization boundary, and a validator reading live config
+    # would make an in-flight campaign's own input fail deserialization at replay when the
+    # setting is lowered — creation entry points call `require_rounds_within_ceiling` instead.
+    n_initial: int = Field(default=5, ge=MIN_SEED_OBSERVATIONS)
     n_rounds: int = Field(default=10, ge=0)
     batch: int = Field(default=1, ge=1)
+    # Per-campaign RNG seed so replicate campaigns can vary independently;
+    # None means the config default (`settings.bo_seed`), resolved in `bo.engine`.
+    seed: int | None = None
     # Opt-in: publish the campaign's recommendation as a PR-gated graph note (1d.5).
     publish_to_graph: bool = False
+
+
+def require_rounds_within_ceiling(n_rounds: int) -> None:
+    """Reject a round count beyond `bo_max_rounds` — Temporal event history is finite (G4).
+
+    The durable campaign carries its observation history as workflow state and re-sends it
+    to the propose activity every round, so history bytes grow quadratically with rounds;
+    an unbounded round count would be terminated by the server's hard history limit mid-run,
+    losing every already-paid evaluation. Enforced at campaign/spec *creation* — never inside
+    the `CampaignSpec` model, whose validators re-run on deserialization at workflow replay,
+    where a lowered ceiling must not fail an in-flight campaign's own input.
+
+    Raises:
+        ValueError: When `n_rounds` exceeds the configured `bo_max_rounds`.
+    """
+    if n_rounds > settings.bo_max_rounds:
+        raise ValueError(
+            f"n_rounds={n_rounds} exceeds the configured ceiling "
+            f"bo_max_rounds={settings.bo_max_rounds}"
+        )
 
 
 class CampaignResult(BaseModel):
@@ -147,9 +184,18 @@ def discrete_candidate_count(problem: OptimizationProblem) -> int | None:
     return total
 
 
+def params_key(params: dict[str, ParamValue]) -> tuple[tuple[str, ParamValue], ...]:
+    """A hashable, order-independent identity for one parameter assignment.
+
+    The single definition of "same candidate", shared by the exhaustion
+    accounting here and the seed deduplication in `bo.engine`.
+    """
+    return tuple(sorted(params.items()))
+
+
 def distinct_candidate_count(observations: list[Observation]) -> int:
     """How many distinct parameter combinations appear in the observations."""
-    return len({tuple(sorted(o.params.items())) for o in observations})
+    return len({params_key(o.params) for o in observations})
 
 
 def space_exhausted(space: int | None, history: list[Observation], batch: int) -> bool:

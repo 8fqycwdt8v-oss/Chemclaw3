@@ -47,6 +47,7 @@ from workflows.memory_jobs import (
     publish_memory_note_activity,
 )
 from workflows.notify import record_session_event_activity
+from workflows.orchestrator import resolve_fan_out_limit
 from workflows.report_workflow import (
     DevelopmentReportWorkflow,
     ReportSectionWorkflow,
@@ -89,6 +90,7 @@ BACKGROUND_ACTIVITIES: Sequence[Callable[..., Any]] = [
     propose_confirmed_answer_activity,
     record_session_event_activity,
     check_eval_drift,
+    resolve_fan_out_limit,
 ]
 
 

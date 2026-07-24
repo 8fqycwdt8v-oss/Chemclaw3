@@ -42,8 +42,16 @@ def require_canonical_smiles(smiles: str) -> str:
     not distinguish two spellings of one molecule: the calculation cache keys and
     the QM durable boundary (G4). Canonicalizing before the key means `"CCO"` and
     `"OCC"` share one cache entry / one workflow id, honoring D-011.
+
+    Stricter than RDKit's parser, which would silently truncate `"CCO junk"` at the
+    first whitespace (keying a different molecule than the caller submitted) and
+    parse `""` to a zero-atom molecule — both are rejected here, since a key for
+    the wrong or empty structure is worse than a fast failure at the boundary.
     """
-    mol = Chem.MolFromSmiles(smiles)
-    if mol is None:
+    stripped = smiles.strip()
+    if not stripped or any(ch.isspace() for ch in stripped):
+        raise InvalidSmilesError(f"invalid SMILES (empty or contains whitespace): {smiles!r}")
+    mol = Chem.MolFromSmiles(stripped)
+    if mol is None or mol.GetNumAtoms() == 0:
         raise InvalidSmilesError(f"invalid SMILES: {smiles!r}")
     return str(Chem.MolToSmiles(mol))

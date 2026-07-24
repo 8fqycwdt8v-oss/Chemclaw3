@@ -2,6 +2,7 @@
 
 import asyncio
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -146,6 +147,59 @@ def test_concurrent_submits_do_not_corrupt_branches(tmp_path: Path) -> None:
         assert other not in files
 
 
+def test_second_process_holding_the_checkout_is_rejected(tmp_path: Path) -> None:
+    """A submit against a checkout flocked by *another process* fails fast, then recovers.
+
+    Cross-process ownership of `note_repo_dir` is enforced with an exclusive
+    `flock` on `.git/chemclaw-submit.lock`. A real child process takes the lock;
+    the submit must raise `GitSubmitError` instead of interleaving checkouts, and
+    must succeed once the child releases it.
+    """
+    _, work = _make_remote_and_clone(tmp_path)
+    submitter = GitNoteSubmitter(repo_dir=str(work), base_branch="main", remote="origin")
+    lock_path = work / ".git" / "chemclaw-submit.lock"
+
+    holder = subprocess.Popen(
+        [
+            sys.executable,
+            "-c",
+            "import fcntl, sys\n"
+            f"f = open({str(lock_path)!r}, 'a')\n"
+            "fcntl.flock(f.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)\n"
+            "print('locked', flush=True)\n"
+            "sys.stdin.readline()\n",  # hold the lock until the parent closes stdin
+        ],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        text=True,
+    )
+    try:
+        assert holder.stdout is not None and holder.stdout.readline().strip() == "locked"
+        with pytest.raises(GitSubmitError, match="in use by another process"):
+            asyncio.run(submitter.submit(_note_submission("job-locked")))
+    finally:
+        assert holder.stdin is not None
+        holder.stdin.close()
+        holder.wait(timeout=30)
+
+    assert asyncio.run(submitter.submit(_note_submission("job-locked"))) == "note/job-locked"
+
+
+def test_lock_is_released_after_a_failed_submission(tmp_path: Path) -> None:
+    """The flock does not outlive a submission that errored (no wedged checkout).
+
+    A failed git command must not leave the checkout permanently 'in use': the
+    next submit acquires the lock and runs normally.
+    """
+    _, work = _make_remote_and_clone(tmp_path)
+    bad = GitNoteSubmitter(repo_dir=str(work), base_branch="no-such-base", remote="origin")
+    with pytest.raises(GitSubmitError, match="fetch"):
+        asyncio.run(bad.submit(_note_submission("job-x")))
+
+    good = GitNoteSubmitter(repo_dir=str(work), base_branch="main", remote="origin")
+    assert asyncio.run(good.submit(_note_submission("job-x"))) == "note/job-x"
+
+
 def test_repropose_updated_note_from_fresh_clone(tmp_path: Path) -> None:
     """Re-proposing an updated note from a clone that never fetched the branch works.
 
@@ -187,6 +241,92 @@ def test_submitter_refuses_path_escaping_the_checkout(tmp_path: Path) -> None:
     assert not (tmp_path / "evil.md").exists()
 
 
+def test_submit_refuses_the_checkout_the_process_runs_from(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A submitter pointed at the process's own checkout is refused before any git op.
+
+    Every submission starts with `git reset --hard` + `git clean -fd`; against a
+    non-dedicated checkout (the `note_repo_dir="."` default resolves to the process
+    CWD — typically the developer's own repo) that would silently destroy uncommitted
+    work and untracked files. The refusal must fire before anything destructive runs.
+    """
+    _, work = _make_remote_and_clone(tmp_path)
+    uncommitted = work / "work-in-progress.txt"
+    uncommitted.write_text("do not destroy\n", encoding="utf-8")
+
+    monkeypatch.chdir(work)
+    for repo_dir in (".", str(work)):
+        submitter = GitNoteSubmitter(repo_dir=repo_dir, base_branch="main", remote="origin")
+        with pytest.raises(GitSubmitError, match="CHEMCLAW_NOTE_REPO_DIR"):
+            asyncio.run(submitter.submit(_note_submission("job-own")))
+
+    # Running from a subdirectory of the same checkout is refused too (repo-root match).
+    subdir = work / "sub"
+    subdir.mkdir()
+    monkeypatch.chdir(subdir)
+    submitter = GitNoteSubmitter(repo_dir=str(work), base_branch="main", remote="origin")
+    with pytest.raises(GitSubmitError, match="CHEMCLAW_NOTE_REPO_DIR"):
+        asyncio.run(submitter.submit(_note_submission("job-own")))
+
+    assert uncommitted.read_text(encoding="utf-8") == "do not destroy\n"  # nothing was wiped
+
+
+def test_poisoned_index_does_not_leak_into_next_submission(tmp_path: Path) -> None:
+    """Residue staged by a failed prior submission is not committed into the next note's branch.
+
+    A submission that dies between `git add` and `git commit` (timeout kill, rejecting
+    hook) leaves its note staged; `checkout -B` preserves staged changes, so without a
+    reset the next submission would silently commit the stray note into its own PR.
+    """
+    remote, work = _make_remote_and_clone(tmp_path)
+    stray = work / "knowledge" / "job-result" / "job-stray.md"
+    stray.parent.mkdir(parents=True)
+    stray.write_text("half-written residue\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(work), "add", str(stray)], check=True)
+
+    submitter = GitNoteSubmitter(repo_dir=str(work), base_branch="main", remote="origin")
+    asyncio.run(submitter.submit(_note_submission("job-b", content="note b\n")))
+
+    files = subprocess.run(
+        ["git", "-C", str(remote), "ls-tree", "-r", "--name-only", "note/job-b"],
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout
+    assert "knowledge/job-result/job-b.md" in files
+    assert "job-stray.md" not in files
+
+
+def test_symlinked_directory_on_base_is_refused(tmp_path: Path) -> None:
+    """A symlinked `knowledge` dir committed on the base branch cannot redirect the write.
+
+    Containment must hold against the tree as it exists *after* `checkout -B` swaps
+    in the base branch: a symlink merged onto base would otherwise resolve as a real
+    directory pre-checkout, pass the check, then be followed by the write.
+    """
+    remote, work = _make_remote_and_clone(tmp_path)
+    submitter = GitNoteSubmitter(repo_dir=str(work), base_branch="main", remote="origin")
+    # A prior submission leaves the clone on a note branch where knowledge/ is real.
+    asyncio.run(submitter.submit(_note_submission("job-a", content="note a\n")))
+
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    attacker = _clone(remote, tmp_path / "attacker")
+    subprocess.run(["git", "-C", str(attacker), "checkout", "-q", "main"], check=True)
+    (attacker / "knowledge").symlink_to(outside, target_is_directory=True)
+    for cmd in (
+        ["add", "knowledge"],
+        ["commit", "-q", "-m", "symlink"],
+        ["push", "-q", "origin", "main"],
+    ):
+        subprocess.run(["git", "-C", str(attacker), *cmd], check=True)
+
+    with pytest.raises(GitSubmitError, match="escapes"):
+        asyncio.run(submitter.submit(_note_submission("job-b", content="note b\n")))
+    assert list(outside.rglob("*")) == []  # nothing was written outside the checkout
+
+
 def test_git_command_timeout_kills_the_child_and_raises(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -215,6 +355,7 @@ def test_git_command_timeout_kills_the_child_and_raises(
         return _HangingProcess()
 
     monkeypatch.setattr("kg.git_submitter.asyncio.create_subprocess_exec", _fake_exec)
+    (tmp_path / ".git").mkdir()  # submit() flocks a file under .git/ before running git
     submitter = GitNoteSubmitter(repo_dir=str(tmp_path), base_branch="main", remote="origin")
 
     with pytest.raises(GitSubmitError, match="timed out"):

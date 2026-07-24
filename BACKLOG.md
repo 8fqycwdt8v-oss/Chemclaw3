@@ -181,7 +181,7 @@ MAF ships the harness natively (`create_harness_agent` + `TodoProvider`/`AgentMo
 ### Phase F4 — Entra ID identity & RBAC (system-wide)
 - [x] **F4-T1** Front-door user auth (Entra OIDC): `service/auth.py` (`Principal`, `validate_token`
       with RS256 + audience + issuer checks, `require_principal` FastAPI dep), config
-      `entra_required`/`entra_tenant_id`/`entra_client_id`/`entra_audience` + derived
+      `entra_required`/`entra_tenant_id`/`entra_audience` + derived
       `entra_jwks_endpoint`/`entra_issuer_url`; guards all non-health routes; dev stand-in when
       `entra_required` is off. Dep `pyjwt[crypto]`; ruff allows `fastapi.Depends` (B008). Tests:
       `test_auth.py` (local-RSA token validation, 401 gate, dev mode), `test_config.py`.
@@ -314,7 +314,7 @@ MAF ships the harness natively (`create_harness_agent` + `TodoProvider`/`AgentMo
 
 ### MAF out-of-the-box features (analysis done)
 - [x] **Function middleware** (`@function_middleware`) — one DRY GxP tool-audit trail
-      (`agents/audit.py::audit_tool_calls`: name/args/outcome/latency, observe-only) over all
+      (`agents/audit.py::make_audit_middleware`: name/args/outcome/latency, observe-only) over all
       agent tools, on the logging floor. Attached via `Agent(..., middleware=[...])` (D-027).
 - [x] **OpenTelemetry** — opt-in `chemclaw.logging.configure_telemetry()` gated on
       `CHEMCLAW_OTEL_ENABLED`; calls MAF's `configure_otel_providers` at each worker's entrypoint.
@@ -590,3 +590,29 @@ MAF ships the harness natively (`create_harness_agent` + `TodoProvider`/`AgentMo
 ## Later
 - [ ] Phase 2 knowledge-graph core + PR-gate · Phase 3 fingerprint search · Phase 4 ELN
       ingestion · Phase 5 memory layers · Phase 5b report harness · Phase 6 identity/RBAC.
+
+## Post-campaign follow-ups (2026-07-24, D-072)
+
+- [ ] **ELN late-file detection** — export files older than `eln_sync_overlap_seconds` are still
+      dropped silently; add a file-mtime vs cursor WARN so operators see them (manual backfill via
+      explicit `since` remains the recovery).
+- [ ] **Memory cluster merge/shrink supersede** — anchor ids keep grown clusters stable (D-070),
+      but a cluster *merge* leaves the losing note without a supersede link, and losing the
+      smallest member mints a new id; emit supersedes/valid_to on merge/shrink. NOTE: the
+      set→anchor id switch is itself a one-time migration — any notes minted under old
+      set-derived ids will be re-synthesized under new ids without a supersede link; if any
+      such notes exist before first production sync, clean them up once by hand.
+- [ ] **`system-eval-drift` consumer surface** — eval-drift alerts push to a pseudo-session no UI
+      consumes; give them a consumer (or route to ops notification).
+- [ ] **Deployment docs** — point exposed deployments at `CHEMCLAW_ENTRA_REQUIRED=true` now that
+      unauthenticated+exposed refuses to boot (D-067); note `CHEMCLAW_ENTRA_CLIENT_ID` was removed
+      (startup fails under `extra="forbid"` if still exported).
+- [ ] **Substructure match compute bound** — query length is bounded (`substructure_query_max_length`),
+      but a maximally adversarial recursive SMARTS can still be slow on the event loop; consider
+      `asyncio.to_thread` + wall-clock bound (touches the async tool contract).
+- [ ] **Workflow versioning policy before first live deploy** — the campaign changed workflow
+      logic without `workflow.patched()` gates (fan_out's local activity, ElnSyncWorkflow's
+      chunk loop, BO activities' seed arg). Safe today only because no live Temporal cluster
+      holds in-flight histories (live edges still open). Before the first production deploy,
+      adopt a versioning policy: gate logic changes with `workflow.patched()` or make
+      drain-in-flight-runs an explicit deploy step.

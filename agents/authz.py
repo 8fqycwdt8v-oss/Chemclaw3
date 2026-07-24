@@ -8,7 +8,8 @@ Two gates, one home, so authorization is never scattered across tools and layers
   entitlements. Config: `entra_expensive_actions` × `entra_privileged_roles`.
 - `authorize_tool` — the fine-grained gate applied to **every tool invocation** by one middleware
   (`agents.tool_authz`), generalizing the coarse gate so per-tool RBAC does not have to be hand-
-  wired into each tool. Config: `tool_role_gates` (tool → allowed roles) + `tool_authz_default`.
+  wired into each tool. Config: `tool_role_gates` (tool → allowed roles) + `tool_authz_default`,
+  with the built-in `DEFAULT_WRITE_TOOL_GATES` closing the write tools out of the box.
 
 Both read the turn's ambient identity (`agents.identity_context`) and are active only when
 `entra_required` (a real deployment with real Entra roles); in local dev they are open, so the app
@@ -22,6 +23,24 @@ from chemclaw.config import settings
 
 class AuthorizationError(Exception):
     """The current user is not entitled to trigger the requested action."""
+
+
+# The write/side-effect tools gated to `entra_privileged_role_set` when the operator has NOT
+# configured an explicit `tool_role_gates` entry for them. Under `tool_authz_default="allow"`
+# every *read* tool stays open (the dev-friendly posture), but a tool that launches a job or
+# mutates state must never be callable by any authenticated user just because nobody remembered
+# to gate it — writes are closed by default, opened by explicit operator config. The index_*
+# entries are defense in depth: the MCP `allowed_tools` boundary already keeps them off the
+# agent (D-029), so this gate only matters if an operator ever widens that list.
+DEFAULT_WRITE_TOOL_GATES: frozenset[str] = frozenset(
+    {
+        "submit_qm_job",  # launches a durable (potentially HPC) job
+        "propose_knowledge_note",  # pushes a branch to the knowledge repo
+        "record_confirmed_answer",  # pushes a branch to the knowledge repo
+        "index_molecule",  # mutates the fingerprint index
+        "index_reaction",  # mutates the fingerprint index
+    }
+)
 
 
 def _has_required_role(required: frozenset[str]) -> bool:
@@ -40,27 +59,46 @@ def authorize_tool(tool: str) -> None:
     """Authorize the current turn's user to invoke `tool`, or raise `AuthorizationError` (F10-C).
 
     Per-tool RBAC applied by `agents.tool_authz` to every tool call. Consults `tool_role_gates`
-    (tool name → allowed roles) against the turn's ambient roles; a tool with no gate entry falls
-    back to `tool_authz_default` (`"allow"` = today's behavior, `"deny"` = allowlist mode). The
-    gate is active only under `entra_required`; in dev it is open.
+    (tool name → allowed roles) against the turn's ambient roles. A tool with no gate entry
+    follows `tool_authz_default`: under `"deny"` (allowlist mode) it is refused outright, and
+    under `"allow"` it is open — except the built-in `DEFAULT_WRITE_TOOL_GATES`, which require a
+    role from `entra_privileged_role_set` out of the box (an explicit operator gate overrides
+    this). The built-in write gate only *narrows* the `"allow"` default; it never widens
+    `"deny"` — a privileged role is not an allowlist entry. The gate is active only under
+    `entra_required`; in dev it is open.
 
     Args:
         tool: The tool's registered name (e.g. `"submit_qm_job"`, `"gather_evidence"`).
 
     Raises:
         AuthorizationError: When enforcement is on and the user is not permitted to call `tool` —
-            either it is ungated under a `deny` default, or its gate lists roles the user lacks.
+            its gate (explicit or built-in) lists roles the user lacks, or it is ungated under a
+            `deny` default.
     """
     if not settings.entra_required:
         return  # dev: no tenant, open gate
     required = settings.tool_role_gates.get(tool)
-    if required is None:
-        if settings.tool_authz_default == "deny":
-            raise AuthorizationError(f"{tool} is not in the tool allowlist (deny by default)")
-        return  # not gated, allow-by-default
-    if not _has_required_role(frozenset(required)):
-        actor = get_current_actor() or "an unauthenticated user"
-        raise AuthorizationError(f"{actor} lacks a role permitted to call {tool}")
+    if required is not None:
+        if not _has_required_role(frozenset(required)):
+            actor = get_current_actor() or "an unauthenticated user"
+            raise AuthorizationError(f"{actor} lacks a role permitted to call {tool}")
+        return
+    if settings.tool_authz_default == "deny":
+        # Allowlist mode: not listed ⇒ refused, always. Checked *before* the built-in write
+        # gate so a privileged role can never open an unlisted write tool under `deny` —
+        # that would invert the allowlist for exactly the dangerous tools.
+        raise AuthorizationError(f"{tool} is not in the tool allowlist (deny by default)")
+    if tool in DEFAULT_WRITE_TOOL_GATES:
+        privileged = settings.entra_privileged_role_set
+        # An empty privileged set means fail closed, not open: `_has_required_role` treats
+        # "no roles required" as satisfied, which is right for operator gates but would
+        # silently void the built-in write gate on an unconfigured deployment.
+        if not privileged or not _has_required_role(privileged):
+            actor = get_current_actor() or "an unauthenticated user"
+            raise AuthorizationError(
+                f"{actor} lacks a privileged role for the write tool {tool} "
+                "(gated by default; override via tool_role_gates)"
+            )
 
 
 def authorize_trigger(action: str) -> None:

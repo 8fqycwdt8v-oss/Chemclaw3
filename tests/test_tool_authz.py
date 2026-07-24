@@ -57,6 +57,78 @@ def test_gated_tool_requires_a_permitted_role(monkeypatch: pytest.MonkeyPatch) -
         reset_current_identity(denied)
 
 
+def test_write_tools_are_gated_by_default(monkeypatch: pytest.MonkeyPatch) -> None:
+    """An unconfigured write tool requires a privileged role even under the 'allow' default.
+
+    The built-in `DEFAULT_WRITE_TOOL_GATES` closes job launchers and state-mutating tools
+    out of the box: only `entra_privileged_roles` holders may call them until an operator
+    sets an explicit gate.
+    """
+    _enforced(
+        monkeypatch,
+        tool_role_gates={},
+        tool_authz_default="allow",
+        entra_privileged_roles="process-chemist",
+    )
+
+    denied = set_current_identity("u-6", frozenset({"reader"}))
+    try:
+        with pytest.raises(AuthorizationError, match="write tool submit_qm_job"):
+            authorize_tool("submit_qm_job")
+        with pytest.raises(AuthorizationError):
+            authorize_tool("propose_knowledge_note")
+        authorize_tool("find_notes")  # read tools stay open under 'allow'
+    finally:
+        reset_current_identity(denied)
+
+    ok = set_current_identity("u-7", frozenset({"process-chemist"}))
+    try:
+        authorize_tool("submit_qm_job")  # privileged role → allowed
+    finally:
+        reset_current_identity(ok)
+
+
+def test_default_write_gate_fails_closed_without_privileged_roles(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """With no `entra_privileged_roles` configured, a default-gated write tool is denied.
+
+    An empty required set means 'no role needed' for operator gates, but the built-in write
+    gate must not silently open on an unconfigured deployment.
+    """
+    _enforced(monkeypatch, tool_role_gates={}, entra_privileged_roles="")
+    token = set_current_identity("u-8", frozenset({"reader"}))
+    try:
+        with pytest.raises(AuthorizationError):
+            authorize_tool("record_confirmed_answer")
+    finally:
+        reset_current_identity(token)
+
+
+def test_explicit_operator_gate_overrides_the_default_write_gate(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A `tool_role_gates` entry for a write tool replaces the built-in privileged-role gate."""
+    _enforced(
+        monkeypatch,
+        tool_role_gates={"submit_qm_job": ["reader"]},
+        entra_privileged_roles="process-chemist",
+    )
+    token = set_current_identity("u-9", frozenset({"reader"}))
+    try:
+        authorize_tool("submit_qm_job")  # operator opened it to 'reader' → allowed
+    finally:
+        reset_current_identity(token)
+
+
+def test_dev_mode_leaves_write_tools_open(monkeypatch: pytest.MonkeyPatch) -> None:
+    """With enforcement off, the built-in write gates are no-ops (local dev unchanged)."""
+    monkeypatch.setattr(settings, "entra_required", False)
+    authorize_tool("submit_qm_job")
+    authorize_tool("propose_knowledge_note")
+    authorize_tool("record_confirmed_answer")
+
+
 def test_deny_default_blocks_ungated_tools(monkeypatch: pytest.MonkeyPatch) -> None:
     """Under the 'deny' default an ungated tool is refused; a gated one still works by role."""
     _enforced(
@@ -69,6 +141,31 @@ def test_deny_default_blocks_ungated_tools(monkeypatch: pytest.MonkeyPatch) -> N
         authorize_tool("find_notes")  # gated + role held → allowed
         with pytest.raises(AuthorizationError):
             authorize_tool("submit_qm_job")  # not in the allowlist → denied
+    finally:
+        reset_current_identity(token)
+
+
+def test_deny_default_refuses_write_tools_even_for_privileged_roles(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Under 'deny', an unlisted write tool is refused even for a privileged-role holder.
+
+    The built-in write gate only *narrows* the 'allow' default; it must never widen
+    'deny' — an empty `tool_role_gates` under 'deny' is documented as blocking ALL
+    tools, and privileged roles are not an allowlist entry.
+    """
+    _enforced(
+        monkeypatch,
+        tool_authz_default="deny",
+        tool_role_gates={},
+        entra_privileged_roles="process-chemist",
+    )
+    token = set_current_identity("u-10", frozenset({"process-chemist"}))
+    try:
+        with pytest.raises(AuthorizationError, match="not in the tool allowlist"):
+            authorize_tool("submit_qm_job")
+        with pytest.raises(AuthorizationError, match="not in the tool allowlist"):
+            authorize_tool("propose_knowledge_note")
     finally:
         reset_current_identity(token)
 

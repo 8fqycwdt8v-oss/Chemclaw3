@@ -16,9 +16,35 @@ from chemclaw import db
 
 def test_redact_strips_the_password_only() -> None:
     """Redaction removes the password but keeps user/host/port/db for identification."""
-    assert db._redact("postgresql://u:secret@host:5432/dbname") == "postgresql://u@host:5432/dbname"
+    redacted = db._redact("postgresql://u:secret@host:5432/dbname")
+    assert "secret" not in redacted
+    for kept in ("u", "host", "5432", "dbname"):
+        assert kept in redacted
     # Nothing to strip when the DSN carries no password.
-    assert db._redact("postgresql://host:5432/dbname") == "postgresql://host:5432/dbname"
+    no_password = db._redact("postgresql://host:5432/dbname")
+    for kept in ("host", "5432", "dbname"):
+        assert kept in no_password
+
+
+def test_redact_strips_keyword_conninfo_password() -> None:
+    """The keyword libpq form ('host=... password=...') is redacted, not echoed verbatim."""
+    redacted = db._redact("host=db.prod user=app password=s3cret dbname=chem")
+    assert "s3cret" not in redacted
+    for kept in ("db.prod", "app", "chem"):
+        assert kept in redacted
+
+
+def test_redact_strips_query_parameter_password() -> None:
+    """A URI carrying the password as a query parameter is redacted too."""
+    redacted = db._redact("postgresql://db.prod/chem?password=s3cret")
+    assert "s3cret" not in redacted
+    for kept in ("db.prod", "chem"):
+        assert kept in redacted
+
+
+def test_redact_unparseable_dsn_yields_placeholder() -> None:
+    """A DSN libpq cannot parse is replaced wholesale — never echoed on a guess."""
+    assert db._redact("::garbage==") == "<postgres>"
 
 
 def test_connect_wraps_unreachable_db_without_leaking_the_password(

@@ -14,6 +14,8 @@ consciously deferred (see DEFERRED.md). Off by default (`budget_enabled`), so a 
 """
 
 import threading
+from collections import OrderedDict
+from collections.abc import Callable
 from dataclasses import dataclass
 
 from chemclaw.config import settings
@@ -40,6 +42,40 @@ def _over(cap: int, used: int) -> bool:
     return cap > 0 and used >= cap
 
 
+class _BoundedCounters:
+    """An LRU-bounded map of scope key → `_Counter`, so the tracker cannot grow forever.
+
+    The tracker lives for the pod's whole lifetime; without a bound every session/user ever seen
+    keeps a counter (a slow memory leak in the long-lived front door). Past capacity the
+    least-recently-active scope is evicted — its budget resets, which is the documented best-effort
+    trade (same as the restart reset); the durable rolling-window quota stays deferred. Capacity is
+    read per call so the config stays live/env-overridable.
+    """
+
+    def __init__(self, capacity: Callable[[], int]) -> None:
+        """Create the map with `capacity` returning the current entry cap (config-backed)."""
+        self._capacity = capacity
+        self._entries: OrderedDict[str, _Counter] = OrderedDict()
+
+    def get(self, key: str) -> _Counter | None:
+        """Return the counter for `key` (marking it recently active), or None if untracked."""
+        counter = self._entries.get(key)
+        if counter is not None:
+            self._entries.move_to_end(key)
+        return counter
+
+    def book(self, key: str, tokens: int) -> None:
+        """Add one turn and its (non-negative) tokens to `key`, evicting the LRU past capacity."""
+        counter = self._entries.get(key)
+        if counter is None:
+            counter = self._entries[key] = _Counter()
+        self._entries.move_to_end(key)
+        counter.turns += 1
+        counter.tokens += max(tokens, 0)
+        while len(self._entries) > self._capacity():
+            self._entries.popitem(last=False)
+
+
 class BudgetTracker:
     """In-process meter + admission gate for agent-turn cost, keyed by session and by user.
 
@@ -47,13 +83,16 @@ class BudgetTracker:
     turn-count and token usage. A lock guards the counters because the ASGI server runs turns for
     different sessions concurrently. `check` and `record` are separate calls, so up to
     `service_max_concurrent_turns` in-flight turns may pass `check` before any of them `record` — a
-    bounded overshoot acceptable for a best-effort guard, not an exact accountant.
+    bounded overshoot acceptable for a best-effort guard, not an exact accountant. Both counter maps
+    are LRU-bounded (sessions by `service_max_live_sessions` — a budget counter lives as long as the
+    live session it meters can — users by `budget_max_tracked_users`), so the tracker never grows
+    unbounded in the long-lived front door.
     """
 
     def __init__(self) -> None:
-        """Start with empty per-session and per-user counters."""
-        self._sessions: dict[str, _Counter] = {}
-        self._users: dict[str, _Counter] = {}
+        """Start with empty, LRU-bounded per-session and per-user counters."""
+        self._sessions = _BoundedCounters(lambda: settings.service_max_live_sessions)
+        self._users = _BoundedCounters(lambda: settings.budget_max_tracked_users)
         self._lock = threading.Lock()
 
     def check(self, session_id: str, user: str | None) -> None:
@@ -98,13 +137,6 @@ class BudgetTracker:
         if not settings.budget_enabled:
             return
         with self._lock:
-            self._book(self._sessions, session_id, tokens)
+            self._sessions.book(session_id, tokens)
             if user is not None:
-                self._book(self._users, user, tokens)
-
-    @staticmethod
-    def _book(scope_map: dict[str, _Counter], key: str, tokens: int) -> None:
-        """Increment a scope's turn count and add its (non-negative) token usage."""
-        counter = scope_map.setdefault(key, _Counter())
-        counter.turns += 1
-        counter.tokens += max(tokens, 0)
+                self._users.book(user, tokens)

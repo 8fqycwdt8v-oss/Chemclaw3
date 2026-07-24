@@ -109,6 +109,16 @@ def _load_case(path: Path) -> EvalCase:
         raise EvalCaseError(f"{path}: invalid eval case: {exc}") from exc
 
 
+def _cell(text: str) -> str:
+    """Escape Markdown table delimiters so cell content cannot split its row.
+
+    Provenance legitimately contains literal pipes (the set-cardinality/absolute-value
+    notation of `precision`/`recall`/`prediction_error`), which would otherwise shift
+    values under the wrong headers of the citable table (G5).
+    """
+    return text.replace("|", "\\|")
+
+
 def render_report(report: EvalReport) -> str:
     """Render the report as a citable Markdown table (case id + provenance per row)."""
     lines = [
@@ -119,10 +129,10 @@ def render_report(report: EvalReport) -> str:
     ]
     for r in report.results:
         gate = "—" if r.passed is None else ("pass" if r.passed else "**FAIL**")
-        unit = r.unit or ""
+        unit = _cell(r.unit or "")
         lines.append(
-            f"| {r.case_id} | {r.result_metric} | {r.value:.4g} | {unit} | {gate} "
-            f"| {r.provenance} |"
+            f"| {_cell(r.case_id)} | {_cell(r.result_metric)} | {r.value:.4g} | {unit} | {gate} "
+            f"| {_cell(r.provenance)} |"
         )
     failed = report.failed()
     lines += ["", f"**{len(failed)} gated metric(s) failed** of {len(report.results)} scored."]
