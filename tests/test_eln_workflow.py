@@ -10,6 +10,8 @@ activity and the summary fold.
 
 import asyncio
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
+from typing import Any
 
 import pytest
 from temporalio.client import Client
@@ -20,7 +22,7 @@ import workflows.eln_sync as eln_sync
 from chemclaw.config import settings
 from eln.adapter import RawEntry
 from eln.ord import OrdReaction
-from eln.sync import IngestSummary, RejectedEntry
+from eln.sync import IngestSummary, RejectedEntry, sync_entries
 from mcp_servers.fpstore import InMemoryFingerprintStore
 from sources.registry import active_ingest_source_names
 from tests.conftest import FakeSubmitter
@@ -90,6 +92,29 @@ def test_sync_eln_entries_bounds_one_attempt(monkeypatch: pytest.MonkeyPatch) ->
     assert {"eln-2026-001", "eln-2026-002"} <= ingested
 
 
+def test_sync_eln_entries_applies_overlap_only_when_asked(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`apply_overlap=False` fetches from the cursor itself; True replays the window.
+
+    This is the per-chunk seam: the workflow passes False for every chunk after the first,
+    so a backlog drain fetches (and re-checks) the overlap window once per run, not once
+    per chunk.
+    """
+    _swap_stores(monkeypatch)
+    monkeypatch.setattr(settings, "knowledge_dir", str(tmp_path))  # no merged notes
+    monkeypatch.setattr(settings, "eln_sync_overlap_seconds", 90 * 86400.0)
+    between = datetime(2026, 2, 1, tzinfo=UTC)  # after seed 001 (Jan 15), before 002 (Feb 3)
+    no_overlap = asyncio.run(
+        ActivityEnvironment().run(sync_eln_entries, "eln-json", between, False)
+    )
+    assert set(no_overlap.summary.ingested) == {"eln-2026-002"}  # nothing behind the cursor
+    with_overlap = asyncio.run(
+        ActivityEnvironment().run(sync_eln_entries, "eln-json", between, True)
+    )
+    assert set(with_overlap.summary.ingested) == {"eln-2026-001", "eln-2026-002"}
+
+
 def test_bounded_ingest_keeps_overlap_and_truncates_new() -> None:
     """The bound applies only past the cursor: overlap re-ingests pass through uncapped.
 
@@ -123,13 +148,14 @@ def test_bounded_ingest_keeps_overlap_and_truncates_new() -> None:
 
 
 def test_merge_folds_per_source_summaries() -> None:
-    """`_merge` unions ingested/rejected across sources and takes the max cursor."""
+    """`_merge` unions ingested/skipped/rejected across sources and takes the max cursor."""
     early, late = datetime(2026, 1, 1, tzinfo=UTC), datetime(2026, 6, 1, tzinfo=UTC)
-    a = IngestSummary(ingested=["a1"], rejected=[], next_cursor=early)
+    a = IngestSummary(ingested=["a1"], skipped_existing=["a0"], rejected=[], next_cursor=early)
     reject = RejectedEntry(entry_id="b-bad", reason="nope", created_at=late)
     b = IngestSummary(ingested=["b1"], rejected=[reject], next_cursor=late)
     merged = _merge([a, b], _EPOCH)
     assert merged.ingested == ["a1", "b1"]
+    assert merged.skipped_existing == ["a0"]
     assert merged.rejected == [reject]
     assert merged.next_cursor == late
     # No source ran → the cursor holds at the passed floor.
@@ -212,17 +238,28 @@ def test_eln_sync_workflow_cursors_each_source_independently(
     asyncio.run(_run())
 
 
-def test_eln_sync_workflow_drains_a_backlog_in_chunks(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_eln_sync_workflow_drains_a_backlog_in_chunks(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """With a batch bound of 1 the workflow loops, persisting the cursor after every chunk.
 
     This is the fix for the wedged-backfill failure mode: progress must be durable per chunk,
     so a backlog larger than one activity window completes across attempts instead of retrying
-    one giant attempt forever from the same cursor.
+    one giant attempt forever from the same cursor. The drain must also replay the late-file
+    overlap window only on its first chunk — per-chunk replay is quadratic over a backlog.
     """
     _swap_stores(monkeypatch)
+    monkeypatch.setattr(settings, "knowledge_dir", str(tmp_path))  # no merged notes
     monkeypatch.setattr(settings, "eln_sync_batch_size", 1)
     cursors: dict[str, datetime] = {}
     stored: list[datetime] = []
+    overlap_flags: list[bool] = []
+
+    async def recording_sync(*args: Any, apply_overlap: bool = True) -> IngestSummary:
+        overlap_flags.append(apply_overlap)
+        return await sync_entries(*args, apply_overlap=apply_overlap)
+
+    monkeypatch.setattr(eln_sync, "sync_entries", recording_sync)
 
     async def fake_load(source: str) -> datetime:
         return cursors.get(source, _EPOCH)
@@ -256,6 +293,10 @@ def test_eln_sync_workflow_drains_a_backlog_in_chunks(monkeypatch: pytest.Monkey
         assert {"eln-2026-001", "eln-2026-002"} <= set(summary.ingested)
         assert len(stored) >= 2  # one persisted cursor per chunk, not one per run
         assert stored == sorted(stored)  # the cursor only ever advances
+        # The overlap window is fetched by the first chunk only; later chunks of the same
+        # drain fetch from the advancing cursor (no per-chunk window replay).
+        assert overlap_flags[0] is True
+        assert overlap_flags[1:] and all(flag is False for flag in overlap_flags[1:])
 
     asyncio.run(_run())
 

@@ -12,8 +12,9 @@ lagging entries (the per-source cursor fix, D-054). An explicit `since` (a manua
 runs every source from that point and does not touch any stored cursor. Each source is
 drained in bounded, heartbeating chunks (`eln_sync_batch_size` new entries per activity
 attempt, cursor persisted per chunk), so an arbitrarily large backlog makes durable forward
-progress instead of wedging one over-window attempt forever. Factories are module-level so
-tests swap them for in-memory stores and a fake submitter.
+progress instead of wedging one over-window attempt forever; only the first chunk reaches
+into the late-file overlap window, so a drain never replays it once per chunk. Factories are
+module-level so tests swap them for in-memory stores and a fake submitter.
 """
 
 import asyncio
@@ -51,14 +52,19 @@ def _merge(summaries: list[IngestSummary], floor: datetime) -> IngestSummary:
     `since`) when no source ran.
     """
     ingested: list[str] = []
+    skipped_existing: list[str] = []
     rejected: list[RejectedEntry] = []
     cursors: list[datetime] = []
     for summary in summaries:
         ingested.extend(summary.ingested)
+        skipped_existing.extend(summary.skipped_existing)
         rejected.extend(summary.rejected)
         cursors.append(summary.next_cursor)
     return IngestSummary(
-        ingested=ingested, rejected=rejected, next_cursor=max(cursors, default=floor)
+        ingested=ingested,
+        skipped_existing=skipped_existing,
+        rejected=rejected,
+        next_cursor=max(cursors, default=floor),
     )
 
 
@@ -130,11 +136,14 @@ async def _heartbeat_forever() -> None:
 
 
 @activity.defn
-async def sync_eln_entries(source: str, since: datetime) -> SyncChunk:
+async def sync_eln_entries(source: str, since: datetime, apply_overlap: bool = True) -> SyncChunk:
     """Ingest a bounded chunk of entries newer than `since` from the one named ingest source.
 
     Bounded (`eln_sync_batch_size`) and heartbeating, so a large backlog can neither blow the
     activity's start-to-close window in one giant attempt nor hide a dead worker until it lapses.
+    `apply_overlap` is True only for a run's first chunk: the late-file overlap window is a
+    per-run re-check, so subsequent chunks of the same drain fetch from the advancing cursor
+    instead of replaying the whole window once per chunk (quadratic during a backlog drain).
     """
     data_source = make_data_source(source)
     ingest = data_source.ingest
@@ -147,7 +156,12 @@ async def sync_eln_entries(source: str, since: datetime) -> SyncChunk:
     heartbeater = asyncio.create_task(_heartbeat_forever())
     try:
         summary = await sync_entries(
-            bounded, _reaction_store(), _molecule_store(), default_submitter(), since
+            bounded,
+            _reaction_store(),
+            _molecule_store(),
+            default_submitter(),
+            since,
+            apply_overlap=apply_overlap,
         )
     finally:
         heartbeater.cancel()
@@ -204,10 +218,14 @@ class ElnSyncWorkflow:
                 )
             else:
                 source_since = since
+            # The overlap window is a per-run re-check for late-landing files: only the first
+            # chunk reaches behind the cursor; later chunks of the same drain fetch from the
+            # advancing cursor, or every chunk would replay the full window (quadratic).
+            apply_overlap = True
             while True:
                 chunk: SyncChunk = await workflow.execute_activity(
                     sync_eln_entries,
-                    args=[source, source_since],
+                    args=[source, source_since, apply_overlap],
                     start_to_close_timeout=activity_timeout,
                     heartbeat_timeout=timedelta(
                         seconds=settings.eln_sync_heartbeat_timeout_seconds
@@ -215,6 +233,7 @@ class ElnSyncWorkflow:
                     # Bad data must reject-and-continue inside the sync, never retry the batch.
                     retry_policy=BAD_DATA_RETRY,
                 )
+                apply_overlap = False
                 summaries.append(chunk.summary)
                 if since is None:
                     await workflow.execute_activity(
