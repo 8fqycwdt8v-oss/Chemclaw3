@@ -7,13 +7,13 @@ fails — which is the whole point of the KM-13 gate. The gold cases and their e
 live in `evals/cases/retrieval-*.md`; this file loads those exact cases and scores them.
 """
 
+import shutil
 from pathlib import Path
 from typing import Any
 
 import pytest
 
 import evals  # noqa: F401 — registers the retrieval metrics on import
-import evals.retrieval
 from chemclaw.config import settings
 from evals.harness import load_eval_cases, run_eval
 from evals.metric import get_metric, registered_names
@@ -64,8 +64,20 @@ def test_gold_case_recall_precision(case_id: str, _corpus: None) -> None:
     assert precision.passed is None  # precision is a diagnostic, never gated
 
 
-def test_both_metrics_share_one_retrieval(monkeypatch: pytest.MonkeyPatch, _corpus: None) -> None:
-    """Recall + precision on one case run live retrieval once (memoized), not once each."""
+def test_memo_shares_one_retrieval_and_observes_corpus_changes(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Recall + precision on one case run live retrieval once — until the corpus changes on disk.
+
+    The memo lives for the process, and the scheduled drift worker is a long-lived process:
+    an on-disk corpus edit must be a natural memo miss (fresh retrieval, fresh ids), never a
+    stale hit served for the pod's lifetime. No manual `.clear()` — the invalidation is the
+    behavior under test.
+    """
+    corpus = tmp_path / "corpus"
+    shutil.copytree(_CORPUS, corpus)
+    monkeypatch.setattr(settings, "eval_retrieval_corpus_dir", str(corpus))
+    monkeypatch.setattr(settings, "retrieval_recall_min", 0.75)
     calls: list[str] = []
     real_retrieve = GraphRetriever.retrieve
 
@@ -76,7 +88,6 @@ def test_both_metrics_share_one_retrieval(monkeypatch: pytest.MonkeyPatch, _corp
         return await real_retrieve(self, query, filters)
 
     monkeypatch.setattr(GraphRetriever, "retrieve", counting)
-    evals.retrieval._RETRIEVAL_MEMO.clear()
     case = {c.id: c for c in load_eval_cases(settings.eval_case_dir)}["retrieval-suzuki"]
 
     recall = get_metric("retrieval_recall")(case)
@@ -85,6 +96,13 @@ def test_both_metrics_share_one_retrieval(monkeypatch: pytest.MonkeyPatch, _corp
     assert calls == [case.output["query"]]  # one sweep, both metrics scored from it
     assert recall.value == pytest.approx(1.0)
     assert precision.value == pytest.approx(1.0)
+
+    # The corpus changes on disk: one of the two expected notes disappears. The memo must
+    # miss (a second live retrieval) and the metric must reflect the current corpus.
+    (corpus / "reaction-suzuki-biaryl.md").unlink()
+    stale_free = get_metric("retrieval_recall")(case)
+    assert calls == [case.output["query"]] * 2  # a fresh retrieval, not a stale hit
+    assert stale_free.value == pytest.approx(0.5)  # 1 of 2 expected sources remains
 
 
 def test_run_eval_scores_the_full_gold_set(_corpus: None) -> None:

@@ -241,6 +241,37 @@ def test_submitter_refuses_path_escaping_the_checkout(tmp_path: Path) -> None:
     assert not (tmp_path / "evil.md").exists()
 
 
+def test_submit_refuses_the_checkout_the_process_runs_from(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A submitter pointed at the process's own checkout is refused before any git op.
+
+    Every submission starts with `git reset --hard` + `git clean -fd`; against a
+    non-dedicated checkout (the `note_repo_dir="."` default resolves to the process
+    CWD — typically the developer's own repo) that would silently destroy uncommitted
+    work and untracked files. The refusal must fire before anything destructive runs.
+    """
+    _, work = _make_remote_and_clone(tmp_path)
+    uncommitted = work / "work-in-progress.txt"
+    uncommitted.write_text("do not destroy\n", encoding="utf-8")
+
+    monkeypatch.chdir(work)
+    for repo_dir in (".", str(work)):
+        submitter = GitNoteSubmitter(repo_dir=repo_dir, base_branch="main", remote="origin")
+        with pytest.raises(GitSubmitError, match="CHEMCLAW_NOTE_REPO_DIR"):
+            asyncio.run(submitter.submit(_note_submission("job-own")))
+
+    # Running from a subdirectory of the same checkout is refused too (repo-root match).
+    subdir = work / "sub"
+    subdir.mkdir()
+    monkeypatch.chdir(subdir)
+    submitter = GitNoteSubmitter(repo_dir=str(work), base_branch="main", remote="origin")
+    with pytest.raises(GitSubmitError, match="CHEMCLAW_NOTE_REPO_DIR"):
+        asyncio.run(submitter.submit(_note_submission("job-own")))
+
+    assert uncommitted.read_text(encoding="utf-8") == "do not destroy\n"  # nothing was wiped
+
+
 def test_poisoned_index_does_not_leak_into_next_submission(tmp_path: Path) -> None:
     """Residue staged by a failed prior submission is not committed into the next note's branch.
 

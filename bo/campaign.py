@@ -19,6 +19,7 @@ from bo.problem import (
     ParamValue,
     best_of,
     discrete_candidate_count,
+    require_rounds_within_ceiling,
     space_exhausted,
 )
 
@@ -57,7 +58,8 @@ async def optimize(
         n_initial: Space-filling points to seed the surrogate before it can guide.
             Must be at least `MIN_SEED_OBSERVATIONS` (BoFire's fitting floor) —
             rejected here so the campaign fails before spending any budget.
-        n_rounds: Model-guided rounds after seeding.
+        n_rounds: Model-guided rounds after seeding. Bounded by `bo_max_rounds`
+            (rejected here, before any budget is spent).
         batch: Candidates proposed (and evaluated) per round.
         provenance: Recorded on each observation (e.g. "predicted" vs "measured").
         seed: Per-campaign RNG seed for replicate runs; None uses the config default.
@@ -69,6 +71,7 @@ async def optimize(
         raise ValueError(
             f"n_initial must be >= {MIN_SEED_OBSERVATIONS}: the surrogate cannot fit on fewer"
         )
+    require_rounds_within_ceiling(n_rounds)
     history = await _evaluate(initial_candidates(problem, n_initial, seed), evaluate, provenance)
     space = discrete_candidate_count(problem)
     for _ in range(n_rounds):

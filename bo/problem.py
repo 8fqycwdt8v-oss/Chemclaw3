@@ -110,8 +110,11 @@ class CampaignSpec(BaseModel):
 
     problem: OptimizationProblem
     objective_name: str = Field(min_length=1)
-    # A surrogate needs >=2 seed points (BoFire's floor); batch >=1 per round;
-    # rounds may be 0 (ceiling checked against config below).
+    # A surrogate needs >=2 seed points (BoFire's floor); batch >=1 per round; rounds may
+    # be 0. The config ceiling (`bo_max_rounds`) is deliberately NOT validated here: the
+    # spec crosses the Temporal serialization boundary, and a validator reading live config
+    # would make an in-flight campaign's own input fail deserialization at replay when the
+    # setting is lowered — creation entry points call `require_rounds_within_ceiling` instead.
     n_initial: int = Field(default=5, ge=MIN_SEED_OBSERVATIONS)
     n_rounds: int = Field(default=10, ge=0)
     batch: int = Field(default=1, ge=1)
@@ -121,21 +124,25 @@ class CampaignSpec(BaseModel):
     # Opt-in: publish the campaign's recommendation as a PR-gated graph note (1d.5).
     publish_to_graph: bool = False
 
-    @model_validator(mode="after")
-    def _rounds_within_ceiling(self) -> "CampaignSpec":
-        """Reject a round count beyond `bo_max_rounds` — Temporal event history is finite (G4).
 
-        The durable campaign carries its observation history as workflow state and re-sends it
-        to the propose activity every round, so history bytes grow quadratically with rounds;
-        an unbounded spec would be terminated by the server's hard history limit mid-run,
-        losing every already-paid evaluation. Fail at spec time instead, with the knob named.
-        """
-        if self.n_rounds > settings.bo_max_rounds:
-            raise ValueError(
-                f"n_rounds={self.n_rounds} exceeds the configured ceiling "
-                f"bo_max_rounds={settings.bo_max_rounds}"
-            )
-        return self
+def require_rounds_within_ceiling(n_rounds: int) -> None:
+    """Reject a round count beyond `bo_max_rounds` — Temporal event history is finite (G4).
+
+    The durable campaign carries its observation history as workflow state and re-sends it
+    to the propose activity every round, so history bytes grow quadratically with rounds;
+    an unbounded round count would be terminated by the server's hard history limit mid-run,
+    losing every already-paid evaluation. Enforced at campaign/spec *creation* — never inside
+    the `CampaignSpec` model, whose validators re-run on deserialization at workflow replay,
+    where a lowered ceiling must not fail an in-flight campaign's own input.
+
+    Raises:
+        ValueError: When `n_rounds` exceeds the configured `bo_max_rounds`.
+    """
+    if n_rounds > settings.bo_max_rounds:
+        raise ValueError(
+            f"n_rounds={n_rounds} exceeds the configured ceiling "
+            f"bo_max_rounds={settings.bo_max_rounds}"
+        )
 
 
 class CampaignResult(BaseModel):

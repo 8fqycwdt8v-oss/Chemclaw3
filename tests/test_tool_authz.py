@@ -145,6 +145,31 @@ def test_deny_default_blocks_ungated_tools(monkeypatch: pytest.MonkeyPatch) -> N
         reset_current_identity(token)
 
 
+def test_deny_default_refuses_write_tools_even_for_privileged_roles(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Under 'deny', an unlisted write tool is refused even for a privileged-role holder.
+
+    The built-in write gate only *narrows* the 'allow' default; it must never widen
+    'deny' — an empty `tool_role_gates` under 'deny' is documented as blocking ALL
+    tools, and privileged roles are not an allowlist entry.
+    """
+    _enforced(
+        monkeypatch,
+        tool_authz_default="deny",
+        tool_role_gates={},
+        entra_privileged_roles="process-chemist",
+    )
+    token = set_current_identity("u-10", frozenset({"process-chemist"}))
+    try:
+        with pytest.raises(AuthorizationError, match="not in the tool allowlist"):
+            authorize_tool("submit_qm_job")
+        with pytest.raises(AuthorizationError, match="not in the tool allowlist"):
+            authorize_tool("propose_knowledge_note")
+    finally:
+        reset_current_identity(token)
+
+
 def _ctx(name: str) -> FunctionInvocationContext:
     """A minimal stand-in exposing the one field the middleware reads."""
     return cast(FunctionInvocationContext, SimpleNamespace(function=SimpleNamespace(name=name)))

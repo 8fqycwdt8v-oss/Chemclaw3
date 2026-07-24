@@ -546,6 +546,47 @@ def test_stalled_turn_times_out_and_frees_the_permit(monkeypatch) -> None:  # ty
     assert session_id not in app.state.active_turns
 
 
+def test_cancelled_admission_wait_does_not_brick_the_session(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    """A request cancelled while waiting for a turn permit frees the session's turn slot.
+
+    CancelledError is a BaseException: an `except Exception` cleanup missed it, so a client
+    disconnecting mid-admission leaked the active-turns entry — every later POST to that
+    session answered 409 until restart. The slot must be released on *any* pre-handoff exit,
+    and the session must accept a turn again once capacity exists.
+    """
+    import contextlib
+
+    import httpx
+
+    from chemclaw.config import settings
+
+    monkeypatch.setattr(settings, "service_turn_admission_timeout_seconds", 30.0)
+
+    async def _run() -> None:
+        app = create_app(agent_factory=lambda: _FakeAgent())
+        # Zero permits: the turn parks on the semaphore *after* taking the session's slot.
+        app.state.turn_semaphore = asyncio.Semaphore(0)
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+            session_id = (await client.post("/sessions")).json()["session_id"]
+            waiting = asyncio.create_task(
+                client.post(f"/sessions/{session_id}/messages", json={"message": "hi"})
+            )
+            async with asyncio.timeout(5):
+                while session_id not in app.state.active_turns:  # parked mid-admission
+                    await asyncio.sleep(0.01)
+            waiting.cancel()  # the client goes away between add and handoff
+            with contextlib.suppress(asyncio.CancelledError, httpx.HTTPError):
+                await waiting
+
+            assert session_id not in app.state.active_turns  # the slot is freed, not leaked
+            app.state.turn_semaphore.release()  # capacity returns...
+            res = await client.post(f"/sessions/{session_id}/messages", json={"message": "hi"})
+            assert res.status_code == 200  # ...and the session is usable, not 409-bricked
+
+    asyncio.run(_run())
+
+
 def test_event_streams_are_capped_per_user(monkeypatch) -> None:  # type: ignore[no-untyped-def]
     """Past the per-user cap, another push-back stream is refused with 429 (DB-load guard).
 

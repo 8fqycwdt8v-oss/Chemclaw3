@@ -73,6 +73,43 @@ class GitSubmitError(RuntimeError):
     """A git command in the submission flow failed."""
 
 
+def _process_repo_root() -> Path | None:
+    """The root of the git checkout this process runs from, or None outside any checkout.
+
+    The nearest ancestor of the CWD containing `.git` — the tree whose uncommitted work
+    would be destroyed if the submitter's reset/clean ever ran against it.
+    """
+    cwd = Path.cwd().resolve()
+    for candidate in (cwd, *cwd.parents):
+        if (candidate / ".git").exists():
+            return candidate
+    return None
+
+
+def _require_dedicated_checkout(repo_dir: str) -> None:
+    """Refuse a checkout that is verifiably the process's own working tree (G4).
+
+    Every submission starts with `git reset --hard` + `git clean -fd` (poisoned-index
+    recovery), which destroys uncommitted work and untracked files. That is safe only in
+    a dedicated clone — but the `note_repo_dir` default (".") resolves to the process
+    CWD, typically the developer's or service's own repo, where those commands would
+    silently wipe real work. So the one path every submission traverses refuses loudly,
+    before any git command runs.
+
+    Raises:
+        GitSubmitError: When `repo_dir` resolves to the process CWD or to the root of
+            the git checkout the process is running from.
+    """
+    resolved = Path(repo_dir).resolve()
+    if resolved == Path.cwd().resolve() or resolved == _process_repo_root():
+        raise GitSubmitError(
+            f"note_repo_dir {repo_dir!r} resolves to {resolved} — the checkout this "
+            "process is running from. Submissions reset/clean the working tree and would "
+            "destroy uncommitted work there. Set CHEMCLAW_NOTE_REPO_DIR to a dedicated "
+            "clone of the knowledge repo."
+        )
+
+
 class GitNoteSubmitter:
     """Push a note on a per-note branch via git. Conforms to `NoteSubmitter`."""
 
@@ -148,8 +185,11 @@ class GitNoteSubmitter:
         Returns the pushed branch name — the reference a reviewer turns into a PR.
         If the note is byte-identical to what the base branch already contains,
         the branch name is returned *without* a push: there is nothing new to
-        review, so no reviewable ref is (re)created.
+        review, so no reviewable ref is (re)created. A `repo_dir` that is the
+        process's own checkout is refused up front (`_require_dedicated_checkout`)
+        — submissions reset/clean the tree and need a dedicated clone.
         """
+        _require_dedicated_checkout(self._repo_dir)
         async with _SUBMIT_LOCK:
             with _checkout_lock(self._repo_dir):
                 return await self._submit_locked(submission)

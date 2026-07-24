@@ -283,26 +283,8 @@ def create_app(
             )
         active_turns.add(session_id)
         semaphore = app.state.turn_semaphore
-        try:
-            # Runaway-cost guard (budget #3): refuse before taking a permit if this session/user
-            # has exhausted its turn or token budget — a clean 429, not a started-then-killed turn.
-            try:
-                app.state.budget.check(session_id, principal.oid)
-            except BudgetExceeded as exc:
-                raise HTTPException(status_code=429, detail=str(exc)) from exc
-            try:
-                await asyncio.wait_for(
-                    semaphore.acquire(), timeout=settings.service_turn_admission_timeout_seconds
-                )
-            except TimeoutError as exc:
-                raise HTTPException(
-                    status_code=503, detail="server at capacity; retry shortly"
-                ) from exc
-        except Exception:
-            active_turns.discard(session_id)
-            raise
 
-        async def _events() -> AsyncIterator[dict[str, str]]:
+        async def _turn_events() -> AsyncIterator[dict[str, str]]:
             # Release the permit and the session's turn slot when the stream ends — normal
             # completion, error, timeout, or client disconnect (the generator is closed, running
             # this finally) — so neither is ever leaked.
@@ -342,7 +324,36 @@ def create_app(
                 semaphore.release()
                 active_turns.discard(session_id)
 
-        return EventSourceResponse(_events())
+        acquired = False
+        handed_off = False
+        try:
+            # Runaway-cost guard (budget #3): refuse before taking a permit if this session/user
+            # has exhausted its turn or token budget — a clean 429, not a started-then-killed turn.
+            try:
+                app.state.budget.check(session_id, principal.oid)
+            except BudgetExceeded as exc:
+                raise HTTPException(status_code=429, detail=str(exc)) from exc
+            try:
+                await asyncio.wait_for(
+                    semaphore.acquire(), timeout=settings.service_turn_admission_timeout_seconds
+                )
+            except TimeoutError as exc:
+                raise HTTPException(
+                    status_code=503, detail="server at capacity; retry shortly"
+                ) from exc
+            acquired = True
+            response = EventSourceResponse(_turn_events())
+            handed_off = True
+            return response
+        finally:
+            # try/finally, not `except Exception`: cancellation (a client gone mid-admission)
+            # is a BaseException, and missing it here leaked the session's active-turns entry —
+            # 409-bricking the session until restart. Until the streaming response is handed
+            # off, this owns the cleanup; afterwards the generator's own finally does.
+            if not handed_off:
+                active_turns.discard(session_id)
+                if acquired:
+                    semaphore.release()
 
     @app.get("/sessions/{session_id}/events")
     async def session_events(
@@ -365,6 +376,14 @@ def create_app(
             )
         streams[principal.oid] = streams.get(principal.oid, 0) + 1
 
+        def _release_stream_slot() -> None:
+            """Return this stream's per-user slot — exactly once, whoever owns cleanup."""
+            remaining = streams.get(principal.oid, 1) - 1
+            if remaining <= 0:
+                streams.pop(principal.oid, None)
+            else:
+                streams[principal.oid] = remaining
+
         async def _events() -> AsyncIterator[dict[str, str]]:
             try:
                 async for pushed in stream_new_events(session_id, kinds=("job_completed",)):
@@ -383,13 +402,18 @@ def create_app(
                     event = JobCompletedEvent(job_id=job_id, summary=pushed.payload)
                     yield {"event": event.type, "data": event.model_dump_json()}
             finally:
-                remaining = streams.get(principal.oid, 1) - 1
-                if remaining <= 0:
-                    streams.pop(principal.oid, None)
-                else:
-                    streams[principal.oid] = remaining
+                _release_stream_slot()
 
-        return EventSourceResponse(_events())
+        handed_off = False
+        try:
+            response = EventSourceResponse(_events())
+            handed_off = True
+            return response
+        finally:
+            # Mirrors the turn route: any BaseException before the response is handed off
+            # must return the slot, or the user's stream budget leaks toward a permanent 429.
+            if not handed_off:
+                _release_stream_slot()
 
     if _STATIC_DIR.is_dir():
         app.mount("/", StaticFiles(directory=str(_STATIC_DIR), html=True), name="static")

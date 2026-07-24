@@ -59,11 +59,13 @@ def authorize_tool(tool: str) -> None:
     """Authorize the current turn's user to invoke `tool`, or raise `AuthorizationError` (F10-C).
 
     Per-tool RBAC applied by `agents.tool_authz` to every tool call. Consults `tool_role_gates`
-    (tool name → allowed roles) against the turn's ambient roles. A tool with no gate entry falls
-    back to the built-in `DEFAULT_WRITE_TOOL_GATES` (write tools require a role from
-    `entra_privileged_role_set` out of the box — an explicit operator gate overrides this), then
-    to `tool_authz_default` (`"allow"` = read tools open, `"deny"` = allowlist mode). The gate is
-    active only under `entra_required`; in dev it is open.
+    (tool name → allowed roles) against the turn's ambient roles. A tool with no gate entry
+    follows `tool_authz_default`: under `"deny"` (allowlist mode) it is refused outright, and
+    under `"allow"` it is open — except the built-in `DEFAULT_WRITE_TOOL_GATES`, which require a
+    role from `entra_privileged_role_set` out of the box (an explicit operator gate overrides
+    this). The built-in write gate only *narrows* the `"allow"` default; it never widens
+    `"deny"` — a privileged role is not an allowlist entry. The gate is active only under
+    `entra_required`; in dev it is open.
 
     Args:
         tool: The tool's registered name (e.g. `"submit_qm_job"`, `"gather_evidence"`).
@@ -76,7 +78,17 @@ def authorize_tool(tool: str) -> None:
     if not settings.entra_required:
         return  # dev: no tenant, open gate
     required = settings.tool_role_gates.get(tool)
-    if required is None and tool in DEFAULT_WRITE_TOOL_GATES:
+    if required is not None:
+        if not _has_required_role(frozenset(required)):
+            actor = get_current_actor() or "an unauthenticated user"
+            raise AuthorizationError(f"{actor} lacks a role permitted to call {tool}")
+        return
+    if settings.tool_authz_default == "deny":
+        # Allowlist mode: not listed ⇒ refused, always. Checked *before* the built-in write
+        # gate so a privileged role can never open an unlisted write tool under `deny` —
+        # that would invert the allowlist for exactly the dangerous tools.
+        raise AuthorizationError(f"{tool} is not in the tool allowlist (deny by default)")
+    if tool in DEFAULT_WRITE_TOOL_GATES:
         privileged = settings.entra_privileged_role_set
         # An empty privileged set means fail closed, not open: `_has_required_role` treats
         # "no roles required" as satisfied, which is right for operator gates but would
@@ -87,14 +99,6 @@ def authorize_tool(tool: str) -> None:
                 f"{actor} lacks a privileged role for the write tool {tool} "
                 "(gated by default; override via tool_role_gates)"
             )
-        return
-    if required is None:
-        if settings.tool_authz_default == "deny":
-            raise AuthorizationError(f"{tool} is not in the tool allowlist (deny by default)")
-        return  # not gated, allow-by-default
-    if not _has_required_role(frozenset(required)):
-        actor = get_current_actor() or "an unauthenticated user"
-        raise AuthorizationError(f"{actor} lacks a role permitted to call {tool}")
 
 
 def authorize_trigger(action: str) -> None:

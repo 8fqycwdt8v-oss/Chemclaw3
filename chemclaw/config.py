@@ -626,12 +626,13 @@ class EntraSettings(BaseSettings):
     entra_privileged_roles: str = ""
     # Per-tool authorization (plan F10-C): generalizes the single expensive-trigger gate to *every*
     # tool invocation via one middleware. `tool_role_gates` maps a tool name to the Entra app-roles
-    # allowed to call it; a tool with no entry falls back to the built-in write-tool gates
+    # allowed to call it. A tool with no entry follows `tool_authz_default`: under `"deny"`
+    # (allowlist mode) it is refused outright — only listed tools are callable, by a role-holder;
+    # under `"allow"` it is callable, except the built-in write-tool gates
     # (`agents.authz.DEFAULT_WRITE_TOOL_GATES`: job launchers and state-mutating tools require an
-    # `entra_privileged_roles` role out of the box — an explicit entry here overrides that), then
-    # to `tool_authz_default` — `"allow"` (read tools callable by default) or `"deny"` (allowlist
-    # mode: only listed tools are callable, by a role-holder). Enforced only when `entra_required`
-    # (dev gate is open).
+    # `entra_privileged_roles` role out of the box — an explicit entry here overrides that). The
+    # built-in write gate only narrows `"allow"`; it never widens `"deny"`. Enforced only when
+    # `entra_required` (dev gate is open).
     # ENV override for the gates is JSON, e.g. CHEMCLAW_TOOL_ROLE_GATES='{"submit_qm_job":
     # ["process-chemist"]}'. Note: `deny` with an empty `tool_role_gates` blocks *all* tools — a
     # deliberate lockdown, not a footgun to stumble into.

@@ -30,9 +30,11 @@ from bo.problem import (
     Observation,
     OptimizationProblem,
     Parameter,
+    ParamValue,
     best_of,
     discrete_candidate_count,
     distinct_candidate_count,
+    require_rounds_within_ceiling,
 )
 from calc.solubility import SolubilityInput, predict_solubility
 from calc.store import InMemoryStore
@@ -252,24 +254,37 @@ def test_durable_campaign_runs_end_to_end() -> None:
     asyncio.run(_run())
 
 
-def test_campaign_spec_rejects_rounds_beyond_the_ceiling(
+def test_round_ceiling_is_enforced_at_creation_not_in_the_model(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """n_rounds beyond `bo_max_rounds` fails at spec time, not at the history limit mid-run.
+    """`require_rounds_within_ceiling` gates creation; the spec model itself stays config-free.
 
     The workflow re-sends the full observation history to every propose round, so an unbounded
     round count grows Temporal event history quadratically until the server terminates the
-    campaign — discarding every already-paid evaluation. The ceiling is config-backed so a
-    deployment with a real need can raise it consciously.
+    campaign — hence the config-backed ceiling. But `CampaignSpec` crosses the Temporal
+    serialization boundary: a model validator reading live `bo_max_rounds` would make an
+    in-flight campaign's own input fail deserialization at replay when the setting is lowered.
+    So the ceiling is a creation-time check, and a spec serialized under a higher ceiling must
+    still round-trip after the ceiling drops.
     """
-    problem = build_problem(load_dataset())
-    with pytest.raises(ValueError, match="bo_max_rounds"):
-        CampaignSpec(problem=problem, objective_name="reizman_suzuki", n_rounds=501)
-    # At the ceiling is fine — the bound is inclusive.
-    assert (
-        CampaignSpec(problem=problem, objective_name="reizman_suzuki", n_rounds=500).n_rounds == 500
-    )
-    # The ceiling is the config knob, not a hardcoded constant.
     monkeypatch.setattr(settings, "bo_max_rounds", 3)
     with pytest.raises(ValueError, match="bo_max_rounds=3"):
-        CampaignSpec(problem=problem, objective_name="reizman_suzuki", n_rounds=4)
+        require_rounds_within_ceiling(4)
+    require_rounds_within_ceiling(3)  # at the ceiling is fine — the bound is inclusive
+
+    # Replay survives a lowered ceiling: the in-flight spec's own input still deserializes.
+    problem = build_problem(load_dataset())
+    spec = CampaignSpec(problem=problem, objective_name="reizman_suzuki", n_rounds=4)
+    assert CampaignSpec.model_validate(spec.model_dump()).n_rounds == 4
+
+
+def test_optimize_rejects_rounds_beyond_the_ceiling(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The in-process campaign entry point enforces the config ceiling before spending budget."""
+    monkeypatch.setattr(settings, "bo_max_rounds", 3)
+    problem = molecule_library_problem(["CCO", "O", "c1ccccc1"])
+
+    async def _never(_params: dict[str, ParamValue]) -> float:
+        raise AssertionError("no evaluation may run for a rejected campaign")
+
+    with pytest.raises(ValueError, match="bo_max_rounds=3"):
+        asyncio.run(optimize(problem, _never, n_initial=2, n_rounds=4))

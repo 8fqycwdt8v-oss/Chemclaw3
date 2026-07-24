@@ -16,6 +16,7 @@ literal-matching limitation rather than hiding it.
 """
 
 import asyncio
+from pathlib import Path
 
 from chemclaw.config import settings
 from evals.metric import EvalCase, MetricError, MetricResult, metric
@@ -32,12 +33,34 @@ def _expected_ids(case: EvalCase) -> set[str]:
     return set(raw)
 
 
-# Memo of retrieved ids keyed by (corpus dir, query, filters). Recall and precision are
-# both pure functions of the same retrieved-id list, and every gold case names both, so
-# without the memo each case sweeps the corpus twice per eval run for no informational
-# gain. Bounded by the gold case-set size; keyed on the corpus dir so a repointed corpus
-# (e.g. the test fixture) is never served stale ids.
-_RETRIEVAL_MEMO: dict[tuple[str, str, frozenset[tuple[str, str]]], list[str]] = {}
+# Memo of retrieved ids keyed by (corpus dir, corpus signature, query, filters). Recall and
+# precision are both pure functions of the same retrieved-id list, and every gold case names
+# both, so without the memo each case sweeps the corpus twice per eval run for no
+# informational gain. The signature makes an on-disk corpus change a natural miss: the memo
+# lives for the process, and a long-lived process (the scheduled drift worker) must observe
+# corpus edits rather than serve ids retrieved before them. Stale-signature entries are
+# dropped on insert, so the memo stays bounded by the gold case-set size per corpus dir.
+_RETRIEVAL_MEMO: dict[tuple[str, tuple[int, int], str, frozenset[tuple[str, str]]], list[str]] = {}
+
+
+def _corpus_signature(corpus_dir: str) -> tuple[int, int]:
+    """A cheap content signature of the corpus: (note-file count, newest mtime_ns).
+
+    Stat-only over the same `*.md` set the retriever parses — any add, edit, or delete
+    changes the count or the newest mtime, invalidating the memo without reading a byte.
+    A file vanishing mid-scan (e.g. a `git pull` rewriting the tree) is simply absent,
+    matching `kg.graph`'s fingerprint tolerance.
+    """
+    count = 0
+    newest = 0
+    for path in Path(corpus_dir).rglob("*.md"):
+        try:
+            stat = path.stat()
+        except OSError:
+            continue
+        count += 1
+        newest = max(newest, stat.st_mtime_ns)
+    return count, newest
 
 
 def _retrieved_ids(case: EvalCase) -> list[str]:
@@ -45,8 +68,9 @@ def _retrieved_ids(case: EvalCase) -> list[str]:
 
     Reads `output.query` (required) and optional `output.filters` (type/tag), scoring the same
     retrieval path a report uses. Order is preserved and duplicates collapsed, though at present
-    each note yields at most one chunk. The result is memoized per (corpus, query, filters), so
-    a case scored by both retrieval metrics runs live retrieval once, not once per metric.
+    each note yields at most one chunk. The result is memoized per (corpus, corpus signature,
+    query, filters), so a case scored by both retrieval metrics runs live retrieval once, not
+    once per metric — while an on-disk corpus change invalidates the memo naturally.
     """
     query = case.output.get("query")
     if not isinstance(query, str) or not query.strip():
@@ -55,12 +79,15 @@ def _retrieved_ids(case: EvalCase) -> list[str]:
     if not isinstance(filters, dict):
         raise MetricError("output.filters must be a mapping if given")
     corpus_dir = settings.eval_retrieval_corpus_dir
-    key = (corpus_dir, query, frozenset((str(k), str(v)) for k, v in filters.items()))
+    signature = _corpus_signature(corpus_dir)
+    key = (corpus_dir, signature, query, frozenset((str(k), str(v)) for k, v in filters.items()))
     ids = _RETRIEVAL_MEMO.get(key)
     if ids is None:
         retriever = GraphRetriever(corpus_dir)
         chunks = asyncio.run(retriever.retrieve(query, filters))
         ids = list(dict.fromkeys(chunk.source_note_id for chunk in chunks))
+        for stale in [k for k in _RETRIEVAL_MEMO if k[0] == corpus_dir and k[1] != signature]:
+            del _RETRIEVAL_MEMO[stale]
         _RETRIEVAL_MEMO[key] = ids
     return list(ids)
 
