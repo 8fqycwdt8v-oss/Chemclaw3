@@ -6,10 +6,12 @@ through the **same** PR-gate as every other agent note (a human validates it bef
 becomes trusted knowledge, D-005) — the fourth memory source, on the one shared write path.
 """
 
+from agents.tool_registry import tool
 from kg.git_submitter import default_submitter
 from memory.interaction import propose_confirmed_answer
 
 
+@tool
 async def record_confirmed_answer(
     interaction_id: str,
     question: str,

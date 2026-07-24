@@ -17,10 +17,12 @@ cross this boundary.
 
 import asyncio
 
+from agents.tool_registry import tool
 from bo.engine import initial_candidates, propose_candidates
 from bo.problem import Candidate, Observation, OptimizationProblem
 
 
+@tool
 async def suggest_next_experiment(
     problem: OptimizationProblem,
     observations: list[Observation] | None = None,

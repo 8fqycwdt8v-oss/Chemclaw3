@@ -17,12 +17,14 @@ from temporalio.service import RPCError
 from agents.authz import authorize_trigger, require_actor
 from agents.harness_todo import mark_awaiting_job
 from agents.session_context import get_current_session, get_current_session_id
+from agents.tool_registry import tool
 from chemclaw.config import settings
 from chemclaw.temporal_client import connect
 from workflows.models import QMJobInput, QMJobStatus, qm_job_key
 from workflows.qm_job import QMJobWorkflow
 
 
+@tool
 async def submit_qm_job(molecule_smiles: str, method: str, basis_set: str) -> str:
     """Start a quantum-mechanical calculation and return its job id immediately.
 
@@ -94,6 +96,7 @@ async def _mark_awaiting_if_harness(job_id: str, *, molecule_smiles: str, method
     )
 
 
+@tool
 async def get_qm_job_status(job_id: str) -> QMJobStatus:
     """Return the current status of a QM job, and its result once completed.
 

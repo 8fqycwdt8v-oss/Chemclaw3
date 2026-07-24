@@ -7,6 +7,7 @@ idempotent. `default_store` names the production backend and is the seam tests
 swap for an in-memory store.
 """
 
+from agents.tool_registry import tool
 from calc.pka import PkaInput, PkaResult, run_cached_pka
 from calc.postgres_store import PostgresStore
 from calc.solubility import SolubilityInput, SolubilityResult, run_cached_solubility
@@ -19,6 +20,7 @@ def default_store() -> ResultStore:
     return PostgresStore()
 
 
+@tool
 async def compute_xtb_energy(smiles: str, charge: int = 0) -> XtbResult:
     """Compute the GFN2-xTB total energy of a molecule (fast, semiempirical).
 
@@ -36,6 +38,7 @@ async def compute_xtb_energy(smiles: str, charge: int = 0) -> XtbResult:
     return result
 
 
+@tool
 async def predict_solubility(smiles: str) -> SolubilityResult:
     """Predict aqueous solubility (log S, mol/L) of a molecule, with uncertainty.
 
@@ -53,6 +56,7 @@ async def predict_solubility(smiles: str) -> SolubilityResult:
     return result
 
 
+@tool
 async def predict_pka(smiles: str) -> PkaResult:
     """Predict the pKa of a molecule's most acidic O-H/S-H site via GFN2-xTB.
 

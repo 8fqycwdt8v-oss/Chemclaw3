@@ -35,16 +35,21 @@ from agent_framework import (
 # package top level, so it is imported from its (experimental) home here.
 from agent_framework._harness._loop import todos_remaining
 
+# Importing each tool module runs its `@tool` decorators, populating the capability-tool registry
+# (a registration side effect, exactly as `evals/__init__.py` seeds the metric registry). With the
+# registry populated, `_capability_tools` assembles the advertised set from it instead of from a
+# hand-maintained list — so adding a tool is a `@tool` at its definition site, not an edit here.
+from agents import bo_tools as _bo_tools  # noqa: F401
+from agents import calc_tools as _calc_tools  # noqa: F401
+from agents import graph_tools as _graph_tools  # noqa: F401
+from agents import memory_tools as _memory_tools  # noqa: F401
+from agents import qm_tools as _qm_tools  # noqa: F401
+from agents import research_tools as _research_tools  # noqa: F401
 from agents.audit import AuditSink, make_audit_middleware
-from agents.bo_tools import suggest_next_experiment
-from agents.calc_tools import compute_xtb_energy, predict_pka, predict_solubility
-from agents.graph_tools import expand_note, find_notes, propose_knowledge_note
 from agents.llm_provider import build_chat_client
-from agents.memory_tools import record_confirmed_answer
-from agents.qm_tools import get_qm_job_status, submit_qm_job
-from agents.research_tools import gather_evidence
 from agents.skill_access import RoleScopedSkillsSource
 from agents.tool_authz import enforce_tool_authz
+from agents.tool_registry import registered_tools
 from chemclaw.config import McpServerSpec, settings
 
 _INSTRUCTIONS = (
@@ -222,23 +227,13 @@ def _history_provider() -> HistoryProvider:
 def _capability_tools() -> list[Any]:
     """The Chemclaw capability tools, shared by the classic and harness agents (one source, DRY).
 
-    Structural fingerprint search (similar_reactions/similar_molecules/substructure_matches) comes
-    from the MCP capability servers, not in-process; the rest are the in-process function tools.
+    The in-process function tools come from the capability-tool registry (`agents.tool_registry`),
+    populated by the `@tool` decorators when their modules are imported above — so adding a tool
+    needs no edit here. Structural fingerprint search (similar_reactions/similar_molecules/
+    substructure_matches) comes from the MCP capability servers, which stay config-driven
+    (`settings.mcp_servers`); they are appended after the in-process tools.
     """
-    return [
-        compute_xtb_energy,
-        predict_solubility,
-        predict_pka,
-        submit_qm_job,
-        get_qm_job_status,
-        find_notes,
-        expand_note,
-        gather_evidence,
-        *_mcp_capability_tools(),
-        suggest_next_experiment,
-        propose_knowledge_note,
-        record_confirmed_answer,
-    ]
+    return [*registered_tools(), *_mcp_capability_tools()]
 
 
 def _mcp_capability_tools() -> list[MCPStdioTool]:
