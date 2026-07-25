@@ -52,6 +52,21 @@ class JobCompletedEvent(BaseModel):
     summary: dict[str, object] = {}
 
 
+class QuestionEvent(BaseModel):
+    """The agent needs the chemist to disambiguate before it can answer well (gap AGT-5).
+
+    `_INSTRUCTIONS` tells the agent to "say plainly when the data is silent", but there was no
+    contract for it to *ask*. An ambiguous question ("what did we get on the Suzuki?") therefore
+    produced a best-guess sweep across every matching campaign — both worse and more expensive than
+    asking which one. `options` are concrete choices when the agent can enumerate them, so a
+    surface can render buttons instead of free text.
+    """
+
+    type: Literal["question"] = "question"
+    question: str
+    options: list[str] = []
+
+
 class NoteProposedEvent(BaseModel):
     """A note was opened on a branch for human review through the PR-gate (gap RCH-4).
 
@@ -113,6 +128,7 @@ Event = (
     | JobCompletedEvent
     | ApprovalRequestEvent
     | NoteProposedEvent
+    | QuestionEvent
     | AnswerEvent
     | ErrorEvent
 )

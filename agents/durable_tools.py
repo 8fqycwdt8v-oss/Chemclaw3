@@ -23,6 +23,7 @@ from temporalio.exceptions import WorkflowAlreadyStartedError
 from temporalio.service import RPCError
 
 from agents.authz import authorize_trigger, require_actor
+from agents.dialogue_tools import dry_run_notice, is_dry_run
 from agents.turn_signals import record_job_started
 from bo.problem import CampaignSpec, require_rounds_within_ceiling
 from chemclaw.config import settings
@@ -95,6 +96,10 @@ async def request_development_report(title: str, sections: list[ReportSection]) 
         The job id to poll for progress.
     """
     authorize_trigger("request_development_report")
+    if is_dry_run():
+        return dry_run_notice(
+            "draft a development report", f"{title!r} with {len(sections)} section(s)"
+        )
     request = ReportRequest(title=title, sections=sections)
     # `require_actor` is the core rule (F4-T3): under Entra, refuse durable work with no user.
     require_actor()
@@ -138,6 +143,11 @@ async def start_optimization_campaign(spec: CampaignSpec) -> str:
         The job id to poll for progress.
     """
     authorize_trigger("start_optimization_campaign")
+    if is_dry_run():
+        return dry_run_notice(
+            "start an optimization campaign",
+            f"objective {spec.objective_name!r}, {spec.n_rounds} round(s) of {spec.batch}",
+        )
     # Enforce the round ceiling at the creation entry point — deliberately not in the model, whose
     # validators must stay replay-stable across a config change (see `CampaignSpec`).
     require_rounds_within_ceiling(spec.n_rounds)

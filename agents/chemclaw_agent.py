@@ -46,6 +46,7 @@ from agents.chem_tools import (
     screen_hazards,
     stoichiometry_table,
 )
+from agents.dialogue_tools import ask_clarifying_question
 from agents.durable_tools import (
     get_durable_job_status,
     request_development_report,
@@ -263,6 +264,7 @@ def _capability_tools() -> list[Any]:
         request_development_report,
         start_optimization_campaign,
         get_durable_job_status,
+        ask_clarifying_question,
         propose_knowledge_note,
         record_confirmed_answer,
     ]

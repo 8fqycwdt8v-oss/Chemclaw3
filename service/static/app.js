@@ -89,6 +89,9 @@ function applyEvent(evt, answerEl) {
     case "job_started":
       add("trace", `⏳ ${evt.kind || "job"} started (${evt.job_id})`);
       return answerEl;
+    case "question":
+      add("trace", `❓ ${evt.question}` + ((evt.options || []).length ? `\n   options: ${evt.options.join(" | ")}` : ""));
+      return answerEl;
     case "note_proposed":
       add("trace", `📝 proposed ${evt.note_id} for review — ${evt.reference}`);
       return answerEl;

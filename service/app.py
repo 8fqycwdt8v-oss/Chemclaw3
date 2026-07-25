@@ -126,6 +126,10 @@ class MessageIn(BaseModel):
     """One turn's user message posted to the messages endpoint."""
 
     message: str
+    # Plan the turn without launching anything expensive (gap IDEA-4). Every expensive path is
+    # idempotent and cached, but there was no way to ask "what would you do, what would it cost"
+    # without doing it — a natural primitive for a deployment whose default autonomy is `plan_only`.
+    dry_run: bool = False
 
     @field_validator("message")
     @classmethod
@@ -340,6 +344,7 @@ def create_app(
                             actor=principal.oid,
                             roles=principal.roles,
                             budget=app.state.budget,
+                            dry_run=body.dry_run,
                         ):
                             if event.type == "error":
                                 METRICS.increment("chemclaw_turns_failed_total")

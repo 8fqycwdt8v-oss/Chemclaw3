@@ -17,6 +17,7 @@ from typing import Any
 
 from agent_framework import AgentSession
 
+from agents.dialogue_tools import reset_dry_run, set_dry_run
 from agents.framing import frame_untrusted
 from agents.harness_todo import todo_titles
 from agents.identity_context import reset_current_identity, set_current_identity
@@ -27,7 +28,14 @@ from agents.session_context import (
     set_current_session,
     set_current_session_id,
 )
-from agents.turn_signals import JobSignal, ProposalSignal, begin_turn, drain, end_turn
+from agents.turn_signals import (
+    JobSignal,
+    ProposalSignal,
+    QuestionSignal,
+    begin_turn,
+    drain,
+    end_turn,
+)
 from agents.verifier import verify_turn_answer
 from chemclaw.config import settings
 from service.budget import BudgetTracker
@@ -39,6 +47,7 @@ from service.events import (
     JobStartedEvent,
     NoteProposedEvent,
     PlanEvent,
+    QuestionEvent,
     TokenEvent,
     ToolCallEvent,
 )
@@ -58,6 +67,7 @@ async def run_turn(
     actor: str | None = None,
     roles: frozenset[str] = frozenset(),
     budget: BudgetTracker | None = None,
+    dry_run: bool = False,
 ) -> AsyncIterator[Event]:
     """Run one turn and yield its events (tokens, tool calls, approvals, then the answer).
 
@@ -69,6 +79,8 @@ async def run_turn(
         actor: The authenticated user's Entra oid (F4), made ambient so the audit trail, the
             authorization gate, and job attribution see it. `None` off the authenticated path.
         roles: The user's app roles, made ambient for the authorization gate.
+        dry_run: Plan the turn without launching anything expensive (IDEA-4). Ambient for the
+            turn rather than a tool argument, so the model can neither set it nor clear it.
         budget: The runaway-cost meter. When set, this turn's reported token usage and its turn
             count are booked against the session/user when the turn ends (the front-door admission
             check reads those counters before the *next* turn). `None` disables metering (test/CLI).
@@ -94,6 +106,7 @@ async def run_turn(
     signals_token = begin_turn()
     # Durable jobs this turn launched, for the optional mid-turn resume below.
     started_jobs: list[str] = []
+    dry_run_token = set_dry_run(dry_run)
     # The harness's todo list as last rendered, so a plan is emitted when it first appears and
     # again whenever it changes — not once per update (which would spam an unchanged plan).
     last_plan: list[str] = []
@@ -165,6 +178,7 @@ async def run_turn(
         if budget is not None:
             budget.record(session.session_id, actor, turn_tokens)
         end_turn(signals_token)
+        reset_dry_run(dry_run_token)
         reset_current_session_id(session_token)
         reset_current_session(live_session_token)
         if identity_token is not None:
@@ -222,10 +236,12 @@ async def _resume(
             yield ToolCallEvent(tool=tool_name, arguments=arguments)
 
 
-def _signal_event(signal: JobSignal | ProposalSignal) -> Event:
+def _signal_event(signal: JobSignal | ProposalSignal | QuestionSignal) -> Event:
     """Map one out-of-band turn signal to its stream event (one place, so the two cannot drift)."""
     if isinstance(signal, JobSignal):
         return JobStartedEvent(job_id=signal.job_id, kind=signal.kind)
+    if isinstance(signal, QuestionSignal):
+        return QuestionEvent(question=signal.question, options=signal.options)
     return NoteProposedEvent(note_id=signal.note_id, reference=signal.reference)
 
 

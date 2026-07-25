@@ -28,6 +28,13 @@ class JobSignal(BaseModel):
     kind: str
 
 
+class QuestionSignal(BaseModel):
+    """A disambiguation the agent asked for during this turn."""
+
+    question: str
+    options: list[str]
+
+
 class ProposalSignal(BaseModel):
     """A note a tool proposed through the PR-gate during this turn."""
 
@@ -37,7 +44,7 @@ class ProposalSignal(BaseModel):
 
 # One buffer per turn, holding both kinds in the order they occurred. A single list (rather than one
 # per kind) keeps ordering across kinds, which is what a transcript needs.
-_signals: ContextVar[list[JobSignal | ProposalSignal] | None] = ContextVar(
+_signals: ContextVar[list[JobSignal | ProposalSignal | QuestionSignal] | None] = ContextVar(
     "chemclaw_turn_signals", default=None
 )
 
@@ -66,7 +73,14 @@ def record_proposal(note_id: str, reference: str) -> None:
         buffer.append(ProposalSignal(note_id=note_id, reference=reference))
 
 
-def drain() -> list[JobSignal | ProposalSignal]:
+def record_question(question: str, options: list[str]) -> None:
+    """Note that the agent asked the chemist to disambiguate. A no-op off the request path."""
+    buffer = _signals.get()
+    if buffer is not None:
+        buffer.append(QuestionSignal(question=question, options=options))
+
+
+def drain() -> list[JobSignal | ProposalSignal | QuestionSignal]:
     """Take and clear everything recorded since the last drain (empty off the request path)."""
     buffer = _signals.get()
     if not buffer:
