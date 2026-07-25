@@ -14,6 +14,7 @@ from pathlib import Path
 from pydantic import BaseModel, Field
 
 from agents.framing import frame_untrusted
+from agents.tool_registry import tool
 from agents.turn_signals import record_proposal
 from chemclaw.config import settings
 from kg.analytics import GraphGaps, analyze
@@ -64,6 +65,7 @@ def _ref(note: Note) -> NoteRef:
     )
 
 
+@tool
 async def find_notes(text: str) -> list[NoteRef]:
     """Find notes whose id, tags, SMILES, or body contain `text` (case-insensitive).
 
@@ -93,6 +95,7 @@ async def find_notes(text: str) -> list[NoteRef]:
     return matches
 
 
+@tool
 async def expand_note(note_id: str, hops: int = 1) -> NoteView:
     """Return a note's body and the notes within `hops` links of it (1–2 typical).
 
@@ -127,6 +130,7 @@ async def expand_note(note_id: str, hops: int = 1) -> NoteView:
     )
 
 
+@tool
 async def find_knowledge_gaps() -> GraphGaps:
     """Report where the knowledge graph is thin, unreachable, or load-bearing (gap KNW-5).
 
@@ -145,6 +149,7 @@ async def find_knowledge_gaps() -> GraphGaps:
     return analyze(graph, notes)
 
 
+@tool
 async def propose_knowledge_note(
     id: str,
     type: str,

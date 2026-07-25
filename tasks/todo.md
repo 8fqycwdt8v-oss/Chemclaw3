@@ -1,139 +1,114 @@
-# Code Review, Hardening & Refactoring Campaign — Plan
+# Backlog features — assessment + implementation plan
 
-Approved plan for the full campaign: code review → bug fixing → hardening →
-simplification/refactoring across all 15 packages (~13.6k prod lines, ~9.6k test
-lines). Orchestration constraint: all deep reading happens in subagent contexts
-(find → adversarial-verify pipelines returning structured findings only), keeping
-the main context lean while coverage stays exhaustive. Branch:
-`claude/code-review-refactor-plan-wm34wc`.
+Source: `BACKLOG.md` (every open item) + the open rows of `DEFERRED.md` it points at.
+Plan with the per-item assessment: **`docs/backlog-plan.md`**.
+Branch: `claude/backlog-feature-assessment-dytr10`.
 
-## Exploration findings that shape the campaign
+## Assessment (done)
 
-- **Architecture**: `chemclaw/` is the shared kernel (imported by every package,
-  imports none) → reviewed first, highest blast radius. `workflows/` is the top
-  integration layer. One import cycle: `agents ↔ report` via
-  `agents/embedding_provider.py`.
-- **Quality baseline is high** (mypy --strict, mandatory docstrings, coverage gate
-  80%/baseline ~86%, zero inline TODOs, config fully centralized) → the campaign
-  targets deep correctness/security verification and targeted refactoring, not
-  style cleanup.
-- **Risk map** (no shell/SQL injection, no eval/pickle, Temporal determinism clean
-  on first pass; residual risk is config-default posture):
-  1. `entra_required=False` + `service_host="0.0.0.0"` defaults = unauthenticated
-     service on all interfaces; startup only warns (`config.py:372/304`, `app.py:333`).
-  2. `_resolve_session` (`service/app.py:180`) is the sole IDOR/ownership boundary.
-  3. `tool_authz_default="allow"` (`config.py:395`) — RBAC opt-in; write tools
-     (`index_molecule`, job launchers) ungated by default.
-  4. `kg/git_submitter.py` lock is per-process only — shared `note_repo_dir` across
-     processes would corrupt branches (documented, unenforced).
-  5. `datetime` imports in `workflows/eln_sync.py:16` / `memory_jobs.py:11` need an
-     activity-only confirmation.
-- **Catalogued debt worth acting on**: 736-line `chemclaw/config.py` (split),
-  mock-heavy boundary tests (`test_authz.py`, `test_service.py`, `test_runner.py`).
-  O(n²) playbook clustering and the 5000-row substructure scan cap stay in
-  DEFERRED.md (triggers haven't fired).
+- [x] Enumerate every open backlog item (31) and check each claim against the tree, not memory.
+- [x] Assess each against the five questions (trigger held? real defect? offline-verifiable?
+      KISS/Rule of Three? cost vs value) → BUILD / DEFER / DROP / BLOCKED.
+- [x] Write `docs/backlog-plan.md`: verdict table, specs for the survivors, triggers for the rest.
+- [x] Correct the backlog entries whose claims are false today (the DROP verdicts).
 
-## Severity rubric
+Result: **8 BUILD · 14 DEFER · 5 DROP · 12 BLOCKED**. No BUILD item needs live infra.
 
-S1 exploitable/corruption · S2 wrong result/latent bug · S3 hardening gap · S4 refactor.
+## Stale entries corrected in `BACKLOG.md`
 
-## Wave 0 — Baseline
+- [x] F4-T5 "per-request role → skills scoping" — already delivered by D-052
+      (`agents/skill_access.py::RoleScopedSkillsSource`, wired at `agents/chemclaw_agent.py:139`).
+- [x] 1b.5 Temporal lookup/persist activities — folded into 1c.5 by design; checkbox never cleared.
+- [x] `QMJobWorkflow`→`CalculationWorkflow` rename — dropped, not deferred: the workflow type name
+      is durable-history state, so the rename is the exact un-versioned change C1's policy forbids.
+- [x] OKF per-bundle `log.md` — dropped *as designed* (concurrent note branches all append to one
+      file = manufactured merge conflicts); redesign as a generated view recorded with its trigger.
+- [x] Design caution "apply skills/tools selectively, measured per task" — satisfied by `evals/ab.py`
+      (2b.4) + `AgentProfile` (D-075); nothing left to build.
+- [x] F0-T4 stand-in-server variant — dropped (would test the stand-in; the client-wiring half is
+      already proven by `tests/test_harness_execution.py`, D-058). Live-endpoint half stays blocked.
 
-- [x] Run `make lint type test` + `make cov`; record green baseline + coverage number
-      (if red, fix first).
-      **Baseline (2026-07-23)**: lint clean · mypy strict clean · 508 passed /
-      16 skipped (Temporal test server unreachable in sandbox; Postgres 16 +
-      pgvector 0.8.0 brought up locally, so all 18 DB tests now run) ·
-      coverage **88.43%** (gate 80%). Wave 6 must be ≥ this.
+## Build queue (specs in `docs/backlog-plan.md` §3)
 
-## Wave 1 — Kernel review (`chemclaw/`, before dependents)
+### Wave A — silent failures made visible [S]
+- [x] **A1** ELN late-file detection — aggregated WARNING when a file arrives after the cursor with
+      an older payload timestamp (`eln/adapter.py` helper + both adapters). Tests: `test_eln.py`.
+- [x] **A2** Deployment docs: `CHEMCLAW_ENTRA_REQUIRED` for exposed deployments, removed
+      `CHEMCLAW_ENTRA_CLIENT_ID`; comment pinning the background worker at `replicas: 1`.
+- [x] **A3** Eval-drift alert visibility — WARNING at emission + documented read procedure.
+      Tests: `test_eval_drift.py`.
 
-- [x] Reviewer A: `config.py` — validator correctness, default posture, dead settings,
-      cohesion (input to Wave-5 split).
-- [x] Reviewer B: `db.py`, `http.py`, `temporal_client.py` — lifecycle, timeouts,
-      error paths.
-- [x] Reviewer C: `errors.py`, `ids.py`, `chem.py`, `logging.py` — contracts the ~60
-      importers rely on.
-- [x] Adversarially verify all kernel findings.
+### Wave B — real defects [S]–[M]
+- [x] **B1** Substructure matching off the event loop (`asyncio.to_thread` + wall-clock bound,
+      `substructure_match_timeout_seconds`). Tests: `test_molfp.py` incl. loop-responsiveness.
+- [x] **B2** Emit `PlanEvent` + `JobStartedEvent` (both currently dead types; closes D-042).
+      Ambient job sink + changed-only plan emission. Tests: `test_runner.py`/`test_service.py`. ADR D-077.
+- [x] **B3** Supersede memory notes on cluster merge/shrink (`memory/supersede.py`, bi-temporal
+      `valid_to` + plain-text replacement id). Tests: `test_memory.py`. ADR D-078.
 
-## Wave 2 — Domain review fan-out (parallel; find → skeptic-verify per unit)
+### Wave C — needs a decision first
+- [x] **C1** Workflow-versioning policy doc + deploy checklist (no CI guard, on purpose). ADR D-079.
+- [x] **C2** Chemical safety screening, minimum viable slice — implemented under the plan's stated
+      defaults (advisory-only, committed SMARTS table, hard-failing `kg-validate` gate). All three
+      are config, so reversing any of them is an env change. ADR D-080.
 
-Each unit = one reviewer with four lenses (correctness; hardening/failure-modes;
-simplification/dead-code; extensibility/config gaps); each finding independently
-refuted-or-confirmed by a skeptic agent before it counts.
+## Verification
+- One commit per item; `make lint type test` green after each.
+- CHECKMATE (G1–G7) after wave B, and again after C2 — B3 and C2 both touch the GxP surface.
+- `BACKLOG.md`/`DEFERRED.md` updated at the end of each wave.
 
-- [x] U1 `calc/` — numeric edge cases, cache-once invariant (D-011)
-- [x] U2 `kg/` — pr_gate, git_submitter arg/path safety, cross-process lock
-- [x] U3 `mcp_servers/` — validation of LLM-controlled args, fpstore SQL
-- [x] U4 `bo/` + calc interface — objective/constraint correctness
-- [x] U5 `memory/` + `eln/` + kg interface — ingest validation, cursor/idempotency
-- [x] U6 `agents/` + `report/` (embedding cycle) — authz gates, audit chain, retrievers
-- [x] U7 `service/` + agents boundary — every route through `_resolve_session`,
-      SSE lifecycle, budget
-- [x] U8 `workflows/` + `workers/` — determinism, retry/idempotency, heartbeats
-- [x] U9 `evals/`, `sources/`, `scripts/` — light pass (thin-test areas)
-- [x] Dedicated security reviewer re-walks risk-map targets 1–5.
-      **Review outcome (2026-07-23)**: 73 raw findings → 23 refuted by skeptics →
-      **50 confirmed** (13 S2, 30 S3, 7 S4) + 11 S3/S4 whose verifiers hit the usage
-      limit (fix agents re-verify those before acting). No S1. Determinism re-walk of
-      workflow datetime usage produced no finding. Findings archive:
-      scratchpad/confirmed_findings.json + unverified_findings.json.
+## Review — implementation (all eight items shipped)
 
-## Wave 3 — Bug fixes (S1/S2, batched per package with their S3/S4 siblings)
+Seven commits, each green under `make lint type test`; the suite went **624 → 684 passing**
+(41 offline skips unchanged). One commit per item, revertable on its own.
 
-- [x] Batch A (kernel, calc, kg, bo, mcp_servers): 28 findings fixed, committed as
-      five scoped commits (2e7148c kg, 4a47a07 calc, b23df5c mcp, 2e317b2 kernel,
-      ef9bce9 bo). Combined tree gated green: lint + mypy strict clean,
-      551 passed / 16 Temporal-only skips (43 new behavior tests over baseline).
-- [x] Batch B (eln/memory, report/agents, service, workflows, evals/scripts,
-      Wave-4 residuals): completed as commits 9eade98 (wave-4 residuals),
-      dcae2d1 (evals/scripts), 79625a1 (eln/memory), 82b8723 (report/agents),
-      50fc856 (workflows), 4af678b (service). Combined tree gated green:
-      lint + mypy strict clean, 610 passed / 17 Temporal-only skips
-      (102 new behavior tests over baseline). All 60 findings resolved
-      (59 fixed, 1 refuted).
-- [x] Orchestrator verification of the 11 skeptic-orphaned findings: 10 confirmed,
-      1 refuted (evals/baseline.py:70 — documented deliberate behavior).
+| Item | Commit | What landed |
+|---|---|---|
+| A1 | `d23d2fd` | Late-arriving ELN exports warn by name instead of vanishing (`eln/adapter.py` helper, both adapters) |
+| A2+A3 | `7fb9fdb` | Boot-blocking settings documented; drift alerts logged at WARNING; three stale runbook statements corrected |
+| B1 | `cf13334` | Substructure matching moved to a worker thread under `substructure_match_timeout_seconds` |
+| B2 | `f2e083a` | `PlanEvent` + `JobStartedEvent` emitted (D-077) — the two dead event types are now live |
+| B3 | `6d96da2` | Memory notes retired on cluster merge/shrink (D-078) |
+| C1 | `b2ea2d4` | `docs/workflow-versioning.md` + deploy checklist (D-079) |
+| C2 | `744c265` | Advisory hazard screening: rule table, tool, skill, `kg-validate` gate, recall metric (D-080) |
 
-## Wave 4 — Hardening (S3 + risk-map targets)
+**Decisions taken during implementation, not in the plan:**
 
-- [x] Fail-closed startup: refuse boot when `entra_required=False` AND bind address
-      non-loopback, unless explicit `service_allow_insecure=true`; ADR in DECISIONS.md.
-- [x] Ownership-boundary test enumerating session-scoped routes → each must funnel
-      through `_resolve_session`.
-- [x] `tool_authz_default`: deny-by-default for write tools or default gate set for
-      `index_molecule`/job launchers; ADR either way.
-- [x] `git_submitter`: enforce single-process ownership (advisory lock file or
-      fail-fast on concurrent use).
-- [x] Confirm/fix workflow-body `datetime` usage in `eln_sync.py`/`memory_jobs.py`.
-- [x] Behavioral-test reinforcement for `test_authz.py`/`test_service.py` where
-      feasible offline.
-- [x] Apply remaining confirmed S3 findings.
+- **B3's supersede predicate is `valid_to is None`, not `is_current`.** The plan said "still
+  current"; that made the future-`valid_from` clamp unreachable dead code and left the idempotence
+  argument implicit. Testing for an unset end date is simpler, makes re-runs provably idempotent,
+  and covers not-yet-valid notes.
+- **B2 announces only genuine launches.** The idempotent re-submit branch returns a possibly
+  already-completed job that will never push back; announcing it would leave a permanently
+  "running" row in the UI.
+- **C2 shipped under the plan's default answers** to its three open questions rather than blocking,
+  since each is config-reversible and the gate has nothing to break today (no procedure notes in
+  the corpus). Flagged for confirmation below.
+- **Rule-table SMARTS were verified against parsed molecules, not read.** Perchlorate and
+  permanganate needed `~` (any-bond) patterns because RDKit sanitizes them to charge-separated
+  forms — a double-bond pattern would have silently never fired.
 
-## Wave 5 — Simplification / refactoring (S4, only on green)
+**Guards that fired and were fixed properly, not around:** `SafetyRulesError` had to join the
+non-retryable bad-data list (`test_publish.py` walks every `ChemclawError` subclass), and
+`screen_hazards` had to be added to the expected in-process tool set (`test_tool_registry.py`).
+Both existed to catch exactly this kind of omission.
 
-- [x] Split `chemclaw/config.py` into cohesive sub-models, keeping the single
-      `settings` import surface (no caller churn). → 18 mixin sections, 160 fields
-      byte-identical, zero call-site edits (4afbada).
-- [x] Break `agents ↔ report` cycle: move the embedding-provider seam to a neutral
-      home so dependencies point one way. → `chemclaw/embeddings.py`, layering
-      regression test in `tests/test_layering.py` (cca7b65 + a0009fc).
-- [x] Apply confirmed S4 simplifications (dead params, single-caller abstractions
-      inlined, DRY extractions) — landed inside the per-package fix commits.
+**Still open for the user** (unchanged from the plan's §5): confirm C2's scope defaults; decide
+whether to give the Neo4j tipping point a measurable trigger.
 
-## Wave 6 — Close-out
+## Review — assessment pass
 
-- [x] Full `make lint type test` + `make cov`; coverage ≥ Wave-0 baseline.
-      → lint + mypy strict clean; 616 passed / 17 Temporal-only skips;
-      coverage **89.60%** vs 88.43% baseline.
-- [x] Security-review pass over the whole branch diff → 9 findings (1 S2
-      introduced by the campaign's own kg fix, 6 S3, 2 S4), all fixed or
-      documented (D-073). Final gate: 625 passed / 17 skips, coverage 89.64%.
-- [x] Update `BACKLOG.md`, `DECISIONS.md` (ADRs D-067…D-072), `DEFERRED.md`; write the
-      review section below.
-- [x] Commit in logical chunks (kernel / fixes-per-unit / hardening / refactor) and
-      push to `claude/code-review-refactor-plan-wm34wc`.
+The three findings worth flagging:
 
+1. **Six backlog lines were claims about the tree that are no longer true** — the largest being
+   F4-T5's "per-request role scoping" open item, which D-052 delivered. Assessing before building
+   removed more work than it added.
+2. **Two "deferred polish" items are actually defects**, and both were sitting under headings that
+   read as done: the substructure match blocks the shared event loop (B1), and memory cluster
+   merge/shrink leaves stale notes as current knowledge with no supersede link (B3).
+3. **The one genuinely large item (C2, safety screening) is the one the user parked for a decision**,
+   and its own precondition — "decide before a phase that could propose a hazardous procedure" — is
+   already past, since BO recommendations and development reports both publish procedures today.
 ## Token-efficiency rules (bind all agents)
 
 - Reviewers/verifiers return structured findings only (file:line, claim, concrete

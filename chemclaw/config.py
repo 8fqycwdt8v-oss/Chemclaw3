@@ -26,9 +26,9 @@ A cross-field validator lives in the section that owns the relationship.
 
 import os
 import sys
-from typing import Literal, Self
+from typing import Annotated, Literal, Self
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -65,6 +65,48 @@ class McpServerSpec(BaseModel):
                 "`url` (streamable HTTP)"
             )
         return self
+
+
+class JsonElnSourceSpec(BaseModel):
+    """A JSON-export ELN ingest source carrying its own export dir (a `DataSourceSpec` variant).
+
+    The bare `eln-json` registry key reads the single global `eln_export_dir`; this typed spec
+    nests a per-instance `export_dir`, so two JSON-ELN instances (e.g. prod and staging) with
+    different directories can be configured side by side — the capability a single global field
+    cannot provide. `name` is both the source's registry key and its `sync_cursors` cursor key, so
+    it must be unique across every configured source. `extra="forbid"` rejects a foreign field.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    type: Literal["eln-json"] = "eln-json"
+    name: str = Field(min_length=1)
+    export_dir: str = Field(min_length=1)
+
+
+class OrdElnSourceSpec(BaseModel):
+    """A native-ORD ELN ingest source carrying its own export dir (a `DataSourceSpec` variant).
+
+    The structured-recipe counterpart of `JsonElnSourceSpec`: the same per-instance `export_dir`
+    story, reading Open Reaction Database JSON instead of the free-text export. The two variants
+    differ only by which adapter `sources.registry.build_data_source` constructs.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    type: Literal["eln-ord"] = "eln-ord"
+    name: str = Field(min_length=1)
+    export_dir: str = Field(min_length=1)
+
+
+# A config-carrying data source, discriminated on `type` and built by `sources.registry`'s
+# `build_data_source`. This typed list is the *additive* path (alongside the bare-key `data_sources`
+# comma list) for sources that nest their own per-instance config; keyless/default sources
+# (graph, vector, the global-dir eln-json) stay in the comma list, so there is no regression. A new
+# config-carrying type — the deferred Snowflake connector, which would nest its connection /
+# credential-ref / schema-mapping config — joins as one more variant here plus one branch in
+# `build_data_source`, with no edit to any source consumer (D-054's "one entry + one token" story).
+DataSourceSpec = Annotated[JsonElnSourceSpec | OrdElnSourceSpec, Field(discriminator="type")]
 
 
 class ObservabilitySettings(BaseSettings):
@@ -844,6 +886,11 @@ class EvalSettings(BaseSettings):
     # score in well under this, but a dedicated knob keeps the two jobs' timeouts independent.
     eval_drift_timeout_seconds: float = Field(default=300.0, gt=0)
     eval_baseline_path: str = "evals/baseline.json"
+    # Minimum share of the pinned hazard rules that must still fire on their reference
+    # molecules (`hazard_flag_recall`, D-080). 1.0: the rule table is small enough that one
+    # silently-broken SMARTS means a whole hazard class goes unflagged, which the screen
+    # reports as "nothing matched" — exactly the failure the metric exists to catch.
+    eval_hazard_recall_min: float = Field(default=1.0, ge=0.0, le=1.0)
     # Retrieval-quality gate (audit KM-13). A gold query→expected-source set scores
     # `GraphRetriever` over this fixed corpus fixture (a small versioned set of notes, NOT the
     # live `knowledge_dir`, so the score is reproducible). `retrieval_recall_min` is the floor
@@ -892,6 +939,15 @@ class FingerprintSettings(BaseSettings):
     # could pin the server. Real pharmacophore/functional-group SMARTS run tens to a few
     # hundred characters; 500 leaves generous headroom while rejecting degenerate input.
     substructure_query_max_length: int = Field(default=500, gt=0)
+    # Wall-clock bound on one substructure scan's matching work (SEC-4, completing the guard above).
+    # Length and record caps bound the *inputs*, but a short adversarial recursive SMARTS can still
+    # run for minutes, and the scan is invoked from the async front door — so the matching loop runs
+    # in a worker thread under this timeout and the caller is released with a clear error instead of
+    # every other session's stream stalling behind it. Honest limit: the timeout frees the event
+    # loop and the caller, it cannot kill the RDKit thread (RDKit offers no interruption hook), so
+    # one CPU stays busy until that pattern finishes. Killing the work outright would need a
+    # subprocess — over-engineering until a real abuse case is measured. Seconds; normally ms.
+    substructure_match_timeout_seconds: float = Field(default=5.0, gt=0.0)
 
 
 class ElnSettings(BaseSettings):
@@ -957,10 +1013,35 @@ class SourcesSettings(BaseSettings):
     # defaulting to the JSON adapter as before.
     data_sources: str = "graph,eln-json"
 
+    # Config-carrying data sources (typed, discriminated on `type`), additive to `data_sources`.
+    # A `DataSourceSpec` both names a source and nests its per-instance config (e.g. a JSON/ORD
+    # ELN's own `export_dir`), so two instances of one type with different directories coexist —
+    # impossible with the single global `eln_export_dir`. Keyless/default sources stay in the
+    # `data_sources` comma list; this list is only for sources that carry their own config. Each
+    # name is a registry key and a per-source cursor key, so names are unique across both tokens.
+    data_source_specs: list[DataSourceSpec] = []
+
     @property
     def data_source_list(self) -> list[str]:
         """The active data-source keys, parsed from the comma list (order kept, blanks dropped)."""
         return [s.strip() for s in self.data_sources.split(",") if s.strip()]
+
+    @model_validator(mode="after")
+    def _distinct_source_names(self) -> Self:
+        """Reject a name shared by two sources — each is a registry key and a per-source cursor key.
+
+        A collision (spec vs spec, or a spec reusing a comma-list key) would make two sources share
+        one `sync_cursors` row, so one's advancing cursor could silently skip the other's entries.
+        Caught at startup, before any sync runs.
+        """
+        names = [*self.data_source_list, *(spec.name for spec in self.data_source_specs)]
+        duplicated = sorted({name for name in names if names.count(name) > 1})
+        if duplicated:
+            raise ValueError(
+                "data source names must be unique across data_sources and data_source_specs; "
+                f"duplicated: {duplicated}"
+            )
+        return self
 
 
 class MemorySettings(BaseSettings):
@@ -1118,6 +1199,27 @@ class ReportSettings(BaseSettings):
     orchestrator_max_parallel_children: int = Field(default=8, ge=1)
 
 
+class SafetySettings(BaseSettings):
+    """Structural hazard screening of proposed chemistry (D-080).
+
+    Grouped because both knobs govern one advisory gate: which rule table is
+    screened against, and how serious a flag must be before a proposed
+    procedure note is required to document it.
+    """
+
+    # The committed, cited SMARTS rule table (`safety/screen.py`). A path, not inline rules: a
+    # process-safety chemist maintains it as data, and a deployment can point at its own table.
+    safety_rules_path: str = "safety/rules.yaml"
+    # The minimum flag severity that makes a `## Hazards` section mandatory in an agent-proposed
+    # procedure note (enforced by `kg-validate`, so it gates the PR rather than the runtime).
+    # "high" only, by default: the gate must fire rarely enough that a firing means something.
+    safety_gate_severity: Literal["high", "medium", "low"] = "high"
+    # Whether `kg-validate` enforces that gate at all. On by default — the corpus holds no
+    # procedure notes yet, so it costs nothing today and is the conservative direction for a
+    # safety check; a deployment migrating a legacy corpus can turn it off while it catches up.
+    safety_gate_enabled: bool = True
+
+
 class Settings(
     ObservabilitySettings,
     TemporalSettings,
@@ -1137,6 +1239,7 @@ class Settings(
     MemorySettings,
     RetrievalSettings,
     ReportSettings,
+    SafetySettings,
 ):
     """Environment configuration, loaded from process env then a local `.env`.
 

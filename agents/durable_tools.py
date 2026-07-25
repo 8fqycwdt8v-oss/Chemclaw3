@@ -24,6 +24,7 @@ from temporalio.service import RPCError
 
 from agents.authz import authorize_trigger, require_actor
 from agents.dialogue_tools import dry_run_notice, is_dry_run
+from agents.tool_registry import tool
 from agents.turn_signals import record_job_started
 from bo.problem import CampaignSpec, require_rounds_within_ceiling
 from chemclaw.config import settings
@@ -76,6 +77,7 @@ async def _status_of(workflow_id: str, kind: str) -> str:
     return _TERMINAL.get(description.status, "running") if description.status else "running"
 
 
+@tool
 async def request_development_report(title: str, sections: list[ReportSection]) -> str:
     """Start a durable development report and return its job id immediately.
 
@@ -124,6 +126,7 @@ async def request_development_report(title: str, sections: list[ReportSection]) 
     return handle.id
 
 
+@tool
 async def start_optimization_campaign(spec: CampaignSpec) -> str:
     """Start a durable multi-round Bayesian-optimization campaign; return its job id immediately.
 
@@ -168,6 +171,7 @@ async def start_optimization_campaign(spec: CampaignSpec) -> str:
     return handle.id
 
 
+@tool
 async def get_durable_job_status(job_id: str) -> str:
     """Check a durable report or optimization campaign: `running`, `completed`, `failed`, ….
 

@@ -80,6 +80,32 @@ def record_question(question: str, options: list[str]) -> None:
         buffer.append(QuestionSignal(question=question, options=options))
 
 
+def set_job_sink() -> object:
+    """Open a per-turn sink. Alias of `begin_turn`, kept as the name main's callers already use.
+
+    The two mechanisms were built independently (this branch's `turn_signals`, main's
+    `job_events`) and were consolidated here rather than kept side by side: two contextvar sinks
+    drained separately leave the *relative order* of a launched job and a proposed note undefined,
+    which is precisely what a transcript must get right.
+    """
+    return begin_turn()
+
+
+def reset_job_sink(token: object) -> None:
+    """Close the per-turn sink (alias of `end_turn`, main's caller-facing name)."""
+    end_turn(token)
+
+
+def announce_job_started(job_id: str) -> None:
+    """Announce a launched job (main's name for `record_job_started`, kind unspecified)."""
+    record_job_started(job_id, "job")
+
+
+def drain_started_jobs() -> list[str]:
+    """Drain only the job ids recorded so far — main's narrower view of the same sink."""
+    return [s.job_id for s in drain() if isinstance(s, JobSignal)]
+
+
 def drain() -> list[JobSignal | ProposalSignal | QuestionSignal]:
     """Take and clear everything recorded since the last drain (empty off the request path)."""
     buffer = _signals.get()

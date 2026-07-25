@@ -7,6 +7,7 @@ idempotent. `default_store` names the production backend and is the seam tests
 swap for an in-memory store.
 """
 
+from agents.tool_registry import tool
 from calc.calibration import (
     Calibration,
     PredictionRecord,
@@ -53,6 +54,7 @@ async def _log_prediction(
     )
 
 
+@tool
 async def report_measurement(property_name: str, smiles: str, measured_value: float) -> str:
     """Record a *measured* property value, so predictions can be scored against reality.
 
@@ -82,6 +84,7 @@ async def report_measurement(property_name: str, smiles: str, measured_value: fl
     )
 
 
+@tool
 async def calculator_trust(property_name: str) -> Calibration:
     """Report how far a calculator's predictions have actually been off, measured not asserted.
 
@@ -105,6 +108,7 @@ async def calculator_trust(property_name: str) -> Calibration:
     )
 
 
+@tool
 async def compute_xtb_energy(smiles: str, charge: int = 0) -> XtbResult:
     """Compute the GFN2-xTB total energy of a molecule (fast, semiempirical).
 
@@ -122,6 +126,7 @@ async def compute_xtb_energy(smiles: str, charge: int = 0) -> XtbResult:
     return result
 
 
+@tool
 async def predict_solubility(smiles: str) -> SolubilityResult:
     """Predict aqueous solubility (log S, mol/L) of a molecule, with uncertainty.
 
@@ -142,6 +147,7 @@ async def predict_solubility(smiles: str) -> SolubilityResult:
     return result
 
 
+@tool
 async def predict_pka(smiles: str) -> PkaResult:
     """Predict the pKa of a molecule's most acidic O-H/S-H site via GFN2-xTB.
 

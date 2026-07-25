@@ -18,6 +18,7 @@ from agents.authz import authorize_trigger, require_actor
 from agents.dialogue_tools import dry_run_notice, is_dry_run
 from agents.harness_todo import mark_awaiting_job
 from agents.session_context import get_current_session, get_current_session_id
+from agents.tool_registry import tool
 from agents.turn_signals import record_job_started
 from chemclaw.config import settings
 from chemclaw.temporal_client import connect
@@ -25,6 +26,7 @@ from workflows.models import QMJobInput, QMJobStatus, qm_job_key
 from workflows.qm_job import QMJobWorkflow
 
 
+@tool
 async def submit_qm_job(molecule_smiles: str, method: str, basis_set: str) -> str:
     """Start a quantum-mechanical calculation and return its job id immediately.
 
@@ -77,6 +79,10 @@ async def submit_qm_job(molecule_smiles: str, method: str, basis_set: str) -> st
         # push-back event, so a fresh awaiting todo for it would never be flipped and would block
         # `todos_remaining` forever.
         return f"qm-{qm_job_key(job)}"
+    # Tell the streaming turn a job is now running (D-042), so the surface shows the launch instead
+    # of silence until the push-back. Only on a genuine start: the re-submit branch above returns an
+    # existing (possibly already completed) job, which will never emit a matching `job_completed`
+    # event — announcing it would leave a permanently "running" row in the UI.
     await _mark_awaiting_if_harness(handle.id, molecule_smiles=molecule_smiles, method=method)
     # Surface the launch on the turn's event stream (gap RCH-5). Only on a *fresh* start, for the
     # same reason the awaiting todo is: a duplicate submit of a finished job never starts anything.
@@ -101,6 +107,7 @@ async def _mark_awaiting_if_harness(job_id: str, *, molecule_smiles: str, method
     )
 
 
+@tool
 async def get_qm_job_status(job_id: str) -> QMJobStatus:
     """Return the current status of a QM job, and its result once completed.
 

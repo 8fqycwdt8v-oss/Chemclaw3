@@ -20,6 +20,7 @@ from typing import Any
 from pydantic import BaseModel
 
 from agents.authz import require_actor
+from agents.tool_registry import tool
 from chemclaw import db
 from chemclaw.config import settings
 
@@ -107,6 +108,7 @@ async def mark_reported(subscription_id: int) -> None:
         await conn.commit()
 
 
+@tool
 async def watch_for(query: str, note_type: str | None = None) -> str:
     """Watch for new knowledge matching a query, and get told when it lands.
 
@@ -126,6 +128,7 @@ async def watch_for(query: str, note_type: str | None = None) -> str:
     return f"Watching for {query!r}; you'll be told when something new matches."
 
 
+@tool
 async def list_watches() -> list[Subscription]:
     """List the standing queries this chemist has saved.
 
@@ -135,6 +138,7 @@ async def list_watches() -> list[Subscription]:
     return await for_owner(require_actor())
 
 
+@tool
 async def stop_watching(query: str) -> str:
     """Stop watching for a query the chemist no longer cares about.
 

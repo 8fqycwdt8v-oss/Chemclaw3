@@ -4,8 +4,9 @@ Four capabilities that were absent from the tool surface even though the chemist
 them already existed somewhere in the repo:
 
 - `resolve_compound` — every other chemistry tool takes SMILES; chemists write names (TOOL-2).
-- `screen_hazards` — the agent is instructed to design protocols and had nothing between its
-  proposal and the knowledge graph but a human reading prose (TOOL-3).
+- hazard screening (TOOL-3) — landed independently on `main` as `safety/` + `agents.safety_tools`;
+  this branch's named-substance and named-pair knowledge was contributed to `safety/rules.yaml`
+  rather than kept as a second screen (see D-081).
 - `stoichiometry_table` — mass balance exists in `eln.validate` (for validation) and E-factor/PMI
   in `evals.metrics` (for scoring), but the agent could not answer "what do I weigh out?" (TOOL-4).
 - `render_structure` — RDKit is already a dependency and the UI showed SMILES strings (TOOL-5).
@@ -19,9 +20,9 @@ from rdkit import Chem
 from rdkit.Chem import Descriptors, Draw, rdChemReactions
 from rdkit.Chem.Draw import rdMolDraw2D
 
+from agents.tool_registry import tool
 from chemclaw.chem import InvalidSmilesError, require_canonical_smiles
 from chemclaw.config import settings
-from chemclaw.hazard import HazardReport, screen_species
 from chemclaw.reagents import ResolvedCompound, resolve_compound_name
 
 
@@ -45,6 +46,7 @@ class ChargeTable(BaseModel):
     unresolved: list[str] = Field(default_factory=list)
 
 
+@tool
 async def resolve_compound(name: str) -> ResolvedCompound | None:
     """Resolve a reagent name, abbreviation, or SMILES to its canonical structure.
 
@@ -65,28 +67,7 @@ async def resolve_compound(name: str) -> ResolvedCompound | None:
     return resolve_compound_name(name)
 
 
-async def screen_hazards(species: list[str]) -> HazardReport:
-    """Screen reagents/solvents/intermediates for process-safety hazards. Call before proposing.
-
-    **Call this before proposing any protocol, route, or set of conditions**, and fold what it
-    returns into the proposal. It catches three things a plausible-looking procedure hides:
-    energetic structural motifs (azides, peroxides, diazo, polynitro), substance-specific hazards
-    (NaH/DMF runaway, LiAlH4 quenching), and pairs that are safe apart and dangerous together
-    (sodium azide with dichloromethane forms explosive diazidomethane).
-
-    The screen is deterministic and advisory — it annotates, it never clears. Anything listed in
-    `unresolved` was **not screened**, so a report with no findings is not a safety statement about
-    those species; say so explicitly rather than implying the combination is safe.
-
-    Args:
-        species: Reagents, solvents, and intermediates, as names or SMILES (both work).
-
-    Returns:
-        Findings ordered most severe first, plus what was screened and what could not be resolved.
-    """
-    return screen_species(species)
-
-
+@tool
 async def stoichiometry_table(
     basis: str, basis_mass_g: float, reagents: list[str], equivalents: list[float]
 ) -> ChargeTable:
@@ -157,6 +138,7 @@ class GreenMetrics(BaseModel):
     pmi: float
 
 
+@tool
 async def green_metrics(input_masses_g: list[float], product_mass_g: float) -> GreenMetrics:
     """Compute the E-factor and PMI of a set of conditions (gap IDEA-3).
 
@@ -198,6 +180,7 @@ async def green_metrics(input_masses_g: list[float], product_mass_g: float) -> G
     )
 
 
+@tool
 async def render_structure(smiles: str) -> str:
     """Draw a molecule or reaction as an SVG the chat surface can show inline.
 

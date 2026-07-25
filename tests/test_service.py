@@ -99,6 +99,39 @@ def test_message_stream_runs_a_turn_and_opens_mcp_once() -> None:
     assert spy.entered == 1 and spy.exited == 1  # MCP lifecycle handled once, in the service
 
 
+def test_a_launched_job_reaches_the_browser_as_an_sse_event() -> None:
+    """A job announced by a tool is serialized into the turn's SSE stream, before the answer.
+
+    The end-to-end half of D-042: without it the chemist saw nothing between their message and
+    the answer, with the first sign of the job arriving only as the completion push-back.
+    """
+    from agents.turn_signals import announce_job_started
+
+    class _JobAgent(_FakeAgent):
+        def run(self, message: str, *, stream: bool, session: AgentSession) -> object:
+            async def _gen() -> object:
+                announce_job_started("qm-sse")
+                yield _Update(text="submitted")
+
+            return _gen()
+
+    with _client(_JobAgent()) as client:
+        session_id = client.post("/sessions").json()["session_id"]
+        events = []
+        with client.stream("POST", f"/sessions/{session_id}/messages", json={"message": "go"}) as r:
+            for line in r.iter_lines():
+                if line.startswith("data:"):
+                    events.append(json.loads(line[len("data:") :].strip()))
+
+    # Order is chronological: the fake announces the job *before* yielding its text, and the
+    # consolidated sink (agents.turn_signals) drains at the top of each update for exactly that
+    # reason — a tool that ran while the model was producing an update ran before the text it then
+    # produced. main's original assertion had token-first, which reported the text ahead of the job
+    # that preceded it; the property this test names ("before the answer") holds either way.
+    assert [e["type"] for e in events] == ["job_started", "token", "answer"]
+    assert events[0]["job_id"] == "qm-sse"
+
+
 def test_turn_is_shed_with_503_at_capacity(monkeypatch) -> None:  # type: ignore[no-untyped-def]
     """A turn that cannot get an admission permit within the timeout is shed with 503 (AG-15)."""
     import asyncio

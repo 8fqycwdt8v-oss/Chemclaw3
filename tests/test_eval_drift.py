@@ -8,6 +8,7 @@ baseline refresh trips here (in CI) rather than as a silent false alert in produ
 """
 
 import asyncio
+import logging
 from pathlib import Path
 
 import pytest
@@ -94,9 +95,13 @@ def test_committed_baseline_matches_current_case_set() -> None:
 
 
 def test_drift_activity_alerts_on_a_perturbed_baseline(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
-    """Pointing the check at a baseline shifted past epsilon raises exactly that metric's alert."""
+    """Pointing the check at a baseline shifted past epsilon raises exactly that metric's alert.
+
+    The alert is also logged at WARNING: the push-back channel is must-deliver but unconsumed, so
+    the log is where an operator actually meets a regression.
+    """
     # Re-run the committed case-set for the true current aggregates, then shift one past the band.
     current = aggregate_metrics(run_eval(load_eval_cases(settings.eval_case_dir), "now"))
     shifted = dict(current)
@@ -104,5 +109,31 @@ def test_drift_activity_alerts_on_a_perturbed_baseline(
     path = str(tmp_path / "baseline.json")
     save_baseline(Baseline(case_set_version="shifted", metrics=shifted), path)
     monkeypatch.setattr(settings, "eval_baseline_path", path)
-    alerts = asyncio.run(check_eval_drift())
+    with caplog.at_level(logging.WARNING):
+        alerts = asyncio.run(check_eval_drift())
     assert [a.metric for a in alerts] == ["f1"]
+    assert "eval drift" in caplog.text and "'f1'" in caplog.text
+
+
+def test_a_vanished_metric_is_not_logged_as_a_zero_score(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A vanished metric logs as absent, never as "scored 0.0" — the two mean different bugs."""
+    current = aggregate_metrics(run_eval(load_eval_cases(settings.eval_case_dir), "now"))
+    path = str(tmp_path / "baseline.json")
+    save_baseline(
+        Baseline(case_set_version="ghost", metrics={**current, "no_such_metric": 0.9}), path
+    )
+    monkeypatch.setattr(settings, "eval_baseline_path", path)
+    with caplog.at_level(logging.WARNING):
+        alerts = asyncio.run(check_eval_drift())
+    assert [a.metric for a in alerts] == ["no_such_metric"]
+    assert "disappeared from the run" in caplog.text
+    assert "0.0000" not in caplog.text  # never rendered as a score
+
+
+def test_no_drift_logs_nothing(caplog: pytest.LogCaptureFixture) -> None:
+    """A clean run is silent — a warning per scheduled check would train operators to ignore it."""
+    with caplog.at_level(logging.WARNING):
+        assert asyncio.run(check_eval_drift()) == []
+    assert caplog.text == ""

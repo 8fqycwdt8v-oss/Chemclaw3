@@ -3,6 +3,67 @@
 Prioritized open action items. Top = next. Keep in sync with `docs/implementation-plan.md`
 (phase/step numbers) at session end.
 
+> **Every open item below was assessed on 2026-07-25** — trigger held? real defect? offline-verifiable?
+> KISS? — in **`docs/backlog-plan.md`** (verdict table + specs for the survivors + the working queue in
+> `tasks/todo.md`). Verdicts: 8 BUILD (waves A/B/C), 14 DEFER, 5 DROP, 12 BLOCKED. The DROP verdicts are
+> corrected in place below, because they were claims about the tree that are no longer true.
+
+## Open — Config extensibility investigation (docs/audit/10-config-extensibility.md)
+
+Super-extensive investigation of how new skills/MCP-servers/tools/datasources/use-case agent
+workflows are added, plus a substrate challenge and three passing offline spikes. Full analysis,
+options matrices, and the two worked designs (datasource-*type*; `AgentProfile`) live in the doc.
+Prioritized, dependency-ordered follow-ups (each ADR-ready, none needs live infra):
+
+- [x] **Fix `.env.example` merge conflict** (unresolved markers at lines 156/170/173) — [S]. Done
+      (both sides were real, non-overlapping Settings fields → kept both). Commit `b07a2b2`.
+- [x] **Tool registry** (`@tool` + `_TOOL_REGISTRY`, mirror `evals/metric.py`) so a new tool is a
+      decorator, not an edit to the hardcoded `_capability_tools()` list — [M]. Done: `agents/tool_registry.py`,
+      12 tools decorated, `_capability_tools()` assembles from the registry, audit+authz middleware
+      unchanged. Commit `76c03b2`. **KISS deviation:** Spike 1's `agent_facing` flag dropped (no hidden
+      in-process tool exists — Rule of Three). **No `make tool-validate`:** name-drift is already guarded
+      by `tests/test_agent.py::test_instructions_only_name_available_tools` + the registration guard; a
+      separate CLI gate would be redundant.
+- [x] **`AgentProfile` seam, Stage 1** (`agents/profiles.py` + one `"default"` entry ==
+      today's agent + `build_agent(profile=…)` narrowing) — [M]. Done: default reproduces today's agent
+      byte-for-byte; a profile narrows tools/MCP + swaps instructions/harness; unknown tool names fail
+      fast; the *attenuate-not-authorize* invariant is test-proven (audit+authz attach regardless of
+      profile). Stage 2 (front-door selection) triggers on a **second real use case**.
+- [x] **`DataSourceSpec` discriminated union (scoped), Stage 1** — [M]. Done (D-076):
+      `DataSourceSpec = JsonElnSourceSpec | OrdElnSourceSpec` (discriminated on `type`, in `config.py`)
+      + additive `data_source_specs` token + `sources.registry.build_data_source`. Real second caller
+      without a stub — both ELN adapters already take a per-instance `export_dir`, so two instances with
+      different dirs now coexist (audit §2.3). Temporal boundary kept string-keyed. Dropped the audit's
+      near-empty `RegisteredSourceSpec` bridge (duplicates the comma token). **Snowflake connector still
+      deferred** — it joins as one more variant (nesting connection/auth/mapping; first `exchange_obo`
+      caller) when a real tenant/cluster exists (DEFERRED.md).
+- [ ] **Per-extension manifest + explicit enable-list** (steal from Django; keep discovery ≠
+      auto-enable) — [S]. Trigger: skills needing to declare capability deps, or profile authoring.
+- [ ] **MCP transport `type` union** (stdio/HTTP discriminator on `McpServerSpec`) — [S]. Trigger:
+      first remote/HTTP MCP server.
+
+Substrate verdict: **evolve the flat `pydantic-settings` singleton additively** (nested sections +
+discriminated unions); do **not** adopt entry-points/pluggy/Django-apps — all target the
+out-of-tree plugin problem this single-repo app does not have.
+
+## Open — OKF-inspired graph polish (D-074)
+
+Two conventions from Google's Open Knowledge Format, checked against our already-equivalent
+design (D-004/D-005) and queued rather than adopted wholesale — see D-074 for the comparison.
+
+- [ ] ~~**Per-bundle `log.md` changelog** appended by the PR-gate~~ — **DROPPED as designed**
+      (assessment 2026-07-25): every note lands on its own branch, so N concurrent proposals all
+      append to the same `log.md` and every one after the first conflicts — manufacturing merge
+      failures to duplicate what git already records. Redesigned as a *generated* view (`git log` →
+      rendered changelog), deferred until a reviewer/auditor actually asks for one.
+- [ ] **External ontology anchoring on notes.** Frontmatter `type`/tags are free strings today —
+      no class hierarchy, so an agent can't query by subsumption (e.g. "all electrophilic aromatic
+      substitutions" matching a `reaction_class: acetylation` note). Add optional frontmatter
+      fields carrying **existing** external ontology IDs — ChEBI for compounds, RXNO for reaction
+      classes — rather than building an in-house OWL/RDF ontology (no second caller yet; KISS).
+      Needs: which notes get which field, whether resolution is validated at `kg-validate` time or
+      left as an unchecked reference.
+
 ## Done — Resilience hardening (D-066, four-failure-mode review)
 
 Reviewed Chemclaw against four failure modes from another agent system (no memory on restart, no
@@ -261,8 +322,10 @@ an internal data pipeline, no vendor**). Full ticket breakdown: `docs/implementa
 - [x] **F0-T3** Streaming + generation params: `Agent(default_options=ChatOptions(temperature,
       max_tokens))` from config. Test: `test_agent.py::test_agent_applies_default_generation_options`.
 - [ ] **F0-T4** Tool-calling capability spike (the H0 risk) — `scripts/spike_toolcalling.py` +
-      `docs/spikes/f0-toolcalling.md` verdict. **Needs the live internal endpoint** (or a stand-in
-      OpenAI-compatible server); run before building on the harness.
+      `docs/spikes/f0-toolcalling.md` verdict. **Needs the live internal endpoint**; run before
+      building on the harness. (The "stand-in OpenAI-compatible server" variant is **dropped** —
+      it would test the stand-in; the client-wiring half is already proven live by
+      `tests/test_harness_execution.py`, D-058. Only the endpoint's own fidelity is still unknown.)
 
 ### Phase F1 — Harness backbone (autonomous plan/execute)
 MAF ships the harness natively (`create_harness_agent` + `TodoProvider`/`AgentModeProvider`/
@@ -322,7 +385,12 @@ MAF ships the harness natively (`create_harness_agent` + `TodoProvider`/`AgentMo
       (`agents.session_context.get_current_session`, new). Tests: `test_harness_todo.py`,
       wiring tests in `test_qm_tools.py`/`test_service.py`. ADR **D-058**. Still open: resuming the
       *same* streamed turn mid-flight (vs. picked up next turn) — see the F1 follow-up below.
-- [ ] Still deferred: `PlanEvent`/live `JobStartedEvent` emission. ADR **D-042** written.
+- [x] `PlanEvent`/live `JobStartedEvent` emission (ADR **D-042**, closed by **D-077**): a per-turn
+      contextvar sink (`agents/job_events.py`) carries a launch from `submit_qm_job` to the runner,
+      which drains it between updates and after the stream; `PlanEvent` renders the harness todo
+      list (`agents.harness_todo.todo_titles`) and is emitted only when it changes. The idempotent
+      re-submit announces nothing (that job may already be complete and will never push back).
+      Tests: `test_runner.py`, `test_service.py`, `test_qm_tools.py`.
 
 ### Phase F4 — Entra ID identity & RBAC (system-wide)
 - [x] **F4-T1** Front-door user auth (Entra OIDC): `service/auth.py` (`Principal`, `validate_token`
@@ -341,8 +409,9 @@ MAF ships the harness natively (`create_harness_agent` + `TodoProvider`/`AgentMo
       (config `entra_expensive_actions`/`entra_privileged_roles`) called by `submit_qm_job` before the
       durable job; ambient identity via `agents/identity_context.py` (contextvar, stamped by the
       runner from the `Principal`); `make_audit_middleware` records the ambient Entra oid over its
-      build-time default. Tests: `test_authz.py`, `test_audit.py`. Remaining in T5:
-      roles→`RoleFilteredSkillsSource` per request (needs per-user agent or an ambient skills filter).
+      build-time default. Tests: `test_authz.py`, `test_audit.py`. T5's "roles→skills per request"
+      remainder is **done** — delivered by D-052 as the ambient skills filter
+      (`agents/skill_access.py::RoleScopedSkillsSource`, wired at `agents/chemclaw_agent.py:139`).
 - [x] **F4-T2** Workload identity federation: `agents/identity/workload.py::WorkloadTokenProvider`
       (SA-JWT→Entra client-credentials exchange, per-scope cache). ADR D-045. `test_workload_identity.py`.
 - [x] **F4-T4** OBO exchange: `agents/identity/obo.py::exchange_obo` (wired, dormant). ADR D-046.
@@ -352,12 +421,14 @@ MAF ships the harness natively (`create_harness_agent` + `TodoProvider`/`AgentMo
       `test_hpc_bridge.py`.
 - [ ] **F4 live edges** (need a real tenant/broker/cluster; code + fake-endpoint tests already green):
       real Entra token validation against a live JWKS, real federation/OBO exchanges, live Temporal
-      mTLS handshake. Also open: per-request role→`RoleFilteredSkillsSource` scoping.
+      mTLS handshake. (Per-request role→skills scoping is **not** open — done in D-052, see F4-T5.)
 - [x] **F5** Real HPC path behind the QM activities: `workflows/hpc/nextflow.py` (Tower REST adapter
       `launch_run`/`poll_run`/`fetch_artifacts`, fake-HTTP tested), dispatched by `hpc_launch_interface`
       (mock kept for CI). `hpc_pipeline_version` in the cache key when set (F5-T3). Worker unchanged
       (F5-T4). ADR D-048. `test_nextflow_adapter.py`.
-- [ ] **F5 deferred**: `QMJobWorkflow→CalculationWorkflow` rename (cosmetic, high-churn); real `cclib`
+- [ ] **F5 deferred**: ~~`QMJobWorkflow→CalculationWorkflow` rename~~ — **DROPPED** (assessment
+      2026-07-25): the workflow type name is durable-history state, so the rename is exactly the
+      un-versioned change the workflow-versioning policy below exists to forbid; real `cclib`
       parsing once a live QM output format is fixed; live-cluster durability spike (needs a cluster).
 - [x] **F6** OpenShift delivery: one rootless multi-target image (`deploy/Containerfile` +
       `entrypoint.sh`), Helm chart (`deploy/helm/chemclaw/`: ConfigMap/Secret, SA with federation,
@@ -648,7 +719,8 @@ MAF ships the harness natively (`create_harness_agent` + `TodoProvider`/`AgentMo
 - [x] 1b.1 Store interface `get/put` (Protocol); 1b.2 versioned key `(calc_type, calc_version, input_hash, params_hash)`.
 - [x] 1b.3 In-memory backend (tests) + Postgres backend (`calculation_results` table) + `make db-migrate` + CI DB.
 - [x] 1b.4 One `cached_compute()` path (lookup-before-compute, DRY); returns was_cached for hit/miss metric.
-- [ ] 1b.5 Temporal lookup/persist activities — fold into 1c.5 (generic CalculationWorkflow) to avoid a stub.
+- [x] 1b.5 Temporal lookup/persist activities — folded into 1c.5 by design (no stub); checkbox was
+      stale, cleared 2026-07-25.
 
 ### Phase 1c — Fast predictors + semiempirical (first *real* calculations)
 - [x] 1c.2 **xTB / GFN2** calculator via `tblite` (real single-point energy, RDKit 3D embed, CPU) —
@@ -711,14 +783,31 @@ MAF ships the harness natively (`create_harness_agent` + `TodoProvider`/`AgentMo
 ## Capability gaps to triage (from `docs/research-review.md`) — decide per item
 - [x] **Evaluation / scientific-output metrics layer** → promoted to first-class **Phase 2b**
       (see plan + D-009). No longer a backlog decision.
-- [ ] **Chemical/biological safety layer** — distinct from Entra-ID/RBAC (IT security).
+- [x] **Chemical/biological safety layer** (D-080) — shipped as a deterministic, **advisory**
+      structural screen: committed cited SMARTS table (`safety/rules.yaml`), `screen_structure`/
+      `screen_reaction`, the `screen_hazards` agent tool + `safety-screening` skill, a `kg-validate`
+      gate requiring a `## Hazards` section on flagged agent-proposed procedures, and the
+      `hazard_flag_recall` metric (gated at 1.0) so a silently-broken SMARTS fails `make eval`.
+      Invariant: the system flags, it never certifies — an empty result reads "no rule matched",
+      never "safe". Non-goals (each still open, none implied): GHS/SDS database, toxicity
+      prediction, route-level verdicts, regulatory classification. Config: `safety_rules_path`,
+      `safety_gate_severity`, `safety_gate_enabled`, `eval_hazard_recall_min`. Original entry:
+      distinct from Entra-ID/RBAC (IT security).
       GxP / data-integrity + hazard checks. **Kept in backlog** (user decision); decide scope
-      before any capability phase that could propose a hazardous route/procedure.
+      before any capability phase that could propose a hazardous route/procedure. **Assessment
+      2026-07-25: that precondition is already past** — BO recommendations (1d.5) and development
+      reports (5b) publish agent-authored procedures today with no hazard awareness anywhere in the
+      tree. Promoted to **wave C2** with a proposed advisory-only, deterministic slice (committed
+      SMARTS rule table + `@tool` + skill + `kg-validate` hazard-section rule + a recall metric);
+      three scope questions await the user — `docs/backlog-plan.md` §3/§5.
 - [ ] Retrosynthesis + reaction prediction · DoE/Bayesian optimization · lab automation/SiLA2
       closed-loop · process flowsheet synthesis · multimodal analytical data · domain foundation
       models — all currently in `DEFERRED.md` with triggers; confirm or pull forward.
-- [ ] Design cautions to bake in: apply Skills/tools **selectively + measured per task** (not
-      universally); design the CoALA memory layer against DMR/LongMemEval, not by assumption.
+- [x] Design caution "apply Skills/tools **selectively + measured per task**" — **satisfied**:
+      `evals/ab.py` (2b.4) measures per-task tool utility including where tooling hurts, and
+      `AgentProfile` (D-075) narrows the toolset per use case. Nothing left to build.
+- [ ] Design caution: evaluate the CoALA memory layer against DMR/LongMemEval, not by assumption —
+      deferred with AG-13 (needs an external benchmark + a live LLM to score it).
 
 ## Open questions / awaiting input (see `docs/research-review.md`)
 - [ ] **"pKs models"** — interpreted as **pKa** prediction; confirm (could mean PK/ADMET). The
@@ -737,28 +826,29 @@ MAF ships the harness natively (`create_harness_agent` + `TodoProvider`/`AgentMo
 - [ ] Phase 2 knowledge-graph core + PR-gate · Phase 3 fingerprint search · Phase 4 ELN
       ingestion · Phase 5 memory layers · Phase 5b report harness · Phase 6 identity/RBAC.
 
-## Post-campaign follow-ups (2026-07-24, D-072)
+## Post-campaign follow-ups (2026-07-24, D-072) — worked off 2026-07-25
 
-- [ ] **ELN late-file detection** — export files older than `eln_sync_overlap_seconds` are still
-      dropped silently; add a file-mtime vs cursor WARN so operators see them (manual backfill via
-      explicit `since` remains the recovery).
-- [ ] **Memory cluster merge/shrink supersede** — anchor ids keep grown clusters stable (D-070),
-      but a cluster *merge* leaves the losing note without a supersede link, and losing the
-      smallest member mints a new id; emit supersedes/valid_to on merge/shrink. NOTE: the
-      set→anchor id switch is itself a one-time migration — any notes minted under old
-      set-derived ids will be re-synthesized under new ids without a supersede link; if any
-      such notes exist before first production sync, clean them up once by hand.
-- [ ] **`system-eval-drift` consumer surface** — eval-drift alerts push to a pseudo-session no UI
-      consumes; give them a consumer (or route to ops notification).
-- [ ] **Deployment docs** — point exposed deployments at `CHEMCLAW_ENTRA_REQUIRED=true` now that
-      unauthenticated+exposed refuses to boot (D-067); note `CHEMCLAW_ENTRA_CLIENT_ID` was removed
-      (startup fails under `extra="forbid"` if still exported).
-- [ ] **Substructure match compute bound** — query length is bounded (`substructure_query_max_length`),
-      but a maximally adversarial recursive SMARTS can still be slow on the event loop; consider
-      `asyncio.to_thread` + wall-clock bound (touches the async tool contract).
-- [ ] **Workflow versioning policy before first live deploy** — the campaign changed workflow
-      logic without `workflow.patched()` gates (fan_out's local activity, ElnSyncWorkflow's
-      chunk loop, BO activities' seed arg). Safe today only because no live Temporal cluster
-      holds in-flight histories (live edges still open). Before the first production deploy,
-      adopt a versioning policy: gate logic changes with `workflow.patched()` or make
-      drain-in-flight-runs an explicit deploy step.
+Assessed then implemented per `docs/backlog-plan.md` (waves A/B/C); all six are now closed.
+
+- [x] **ELN late-file detection** — both file adapters compare a dropped file's mtime against the
+      fetch floor and emit one aggregated WARNING naming the late files plus the backfill recovery
+      (`eln/adapter.py::is_late_arrival`/`warn_late_arrivals`). Runbook §(v). Tests: `test_eln.py`.
+- [x] **Memory cluster merge/shrink supersede** (D-078) — `memory/supersede.py` retires the notes a
+      run's clusters replaced: `valid_to` closed (dropped from current-evidence sweeps, never
+      deleted) plus a plain-text successor line, proposed through the same PR-gate from inside the
+      three `build_*_notes` builders. This also auto-retires notes minted under the old set-derived
+      ids, so the one-time manual cleanup noted here is no longer needed. Tests: `test_memory.py`.
+- [x] **`system-eval-drift` consumer surface** — each alert is logged at WARNING where operators
+      already look (a vanished metric stays distinct from a 0.0 score), and the runbook §(vii)
+      documents the SQL for the durable channel. No UI, by design. Tests: `test_eval_drift.py`.
+- [x] **Deployment docs** — runbook + `deploy/README.md` cover `CHEMCLAW_ENTRA_REQUIRED` (with the
+      exact refuse-to-boot message) and the removed `CHEMCLAW_ENTRA_CLIENT_ID`; `values.yaml`
+      records why the background worker stays at one replica.
+- [x] **Substructure match compute bound** — the match loop runs in a worker thread under
+      `substructure_match_timeout_seconds`, so an adversarial SMARTS no longer stalls every
+      session's stream. Documented limit: the bound frees the event loop, not the CPU.
+      Tests: `test_molfp.py` (incl. loop responsiveness).
+- [x] **Workflow versioning policy before first live deploy** (D-079) —
+      `docs/workflow-versioning.md` + deploy checklist: what counts as a logic change, patch-gate
+      vs drain, and why there is no CI guard. Today's un-gated changes need no retroactive patches
+      (no live histories); binding from the first production deploy.

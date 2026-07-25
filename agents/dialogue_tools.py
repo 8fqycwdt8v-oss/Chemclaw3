@@ -16,6 +16,7 @@ Two interaction capabilities that had no expression in the tool surface:
 
 from contextvars import ContextVar
 
+from agents.tool_registry import tool
 from agents.turn_signals import record_question
 
 # Whether the turn in flight is a dry run. A contextvar for the same reason the ambient session and
@@ -51,6 +52,7 @@ def dry_run_notice(action: str, detail: str) -> str:
     )
 
 
+@tool
 async def ask_clarifying_question(question: str, options: list[str] | None = None) -> str:
     """Ask the chemist to disambiguate, instead of guessing across several possible readings.
 

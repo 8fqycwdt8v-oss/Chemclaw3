@@ -31,6 +31,7 @@ from pydantic import BaseModel, Field
 
 from agents.framing import frame_untrusted
 from agents.session_context import get_current_session_id
+from agents.tool_registry import tool
 from chemclaw.config import settings
 
 logger = logging.getLogger(__name__)
@@ -165,6 +166,7 @@ class AttachmentSummary(BaseModel):
     excerpt: str = Field(default="")
 
 
+@tool
 async def list_attachments() -> list[AttachmentSummary]:
     """List the files the chemist has attached to this conversation.
 
@@ -186,6 +188,7 @@ async def list_attachments() -> list[AttachmentSummary]:
     ]
 
 
+@tool
 async def read_attachment(name: str) -> str:
     """Read an attached file in full.
 

@@ -21,6 +21,7 @@ from typing import Any
 from pydantic import BaseModel
 
 from agents.authz import require_actor
+from agents.tool_registry import tool
 from chemclaw import db
 from chemclaw.config import settings
 
@@ -107,6 +108,7 @@ class PreferenceStore:
 _STORE = PreferenceStore()
 
 
+@tool
 async def remember_preference(key: str, value: str) -> str:
     """Remember how this chemist likes to work, for future turns and future sessions.
 
@@ -131,6 +133,7 @@ async def remember_preference(key: str, value: str) -> str:
     return f"Remembered {key}={value!r} for this chemist."
 
 
+@tool
 async def recall_preferences() -> list[Preference]:
     """Recall how this chemist likes to work (their project, solvents, units, constraints).
 
@@ -144,6 +147,7 @@ async def recall_preferences() -> list[Preference]:
     return await _STORE.recall(require_actor())
 
 
+@tool
 async def forget_preference(key: str) -> str:
     """Forget one of this chemist's preferences, when they say it no longer applies.
 

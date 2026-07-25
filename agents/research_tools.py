@@ -16,6 +16,7 @@ evidenced fact from transferred analogy, and drafting new protocols — lives in
 """
 
 from agents.framing import frame_untrusted
+from agents.tool_registry import tool
 from chemclaw.config import settings
 from mcp_servers.fpstore import default_reaction_store
 from report.evidence import EvidenceChunk, SourceRetriever
@@ -54,6 +55,7 @@ def _flat_dedup(ranked_lists: list[list[EvidenceChunk]]) -> list[EvidenceChunk]:
     return unique
 
 
+@tool
 async def gather_evidence(
     query: str,
     reaction_smiles: str | None = None,

@@ -43,6 +43,20 @@ async def mark_awaiting_job(
     await _store.save_state(session, items, next_id=next_id + 1, source_id=source_id)
 
 
+async def todo_titles(
+    session: AgentSession, *, source_id: str = DEFAULT_TODO_SOURCE_ID
+) -> list[str]:
+    """Return the session's todo list as human-readable `[x]`/`[ ] title` lines (the plan).
+
+    The read side of the same store the two functions above mutate — kept here so every access to
+    the harness's todo state goes through one module. Used by the front-door runner to emit
+    `PlanEvent`, which is why the rendering is a plain string per item: the surfaces show a
+    checklist, and completion state is the one thing they must not have to infer.
+    """
+    items, _ = await _store.load_state(session, source_id=source_id)
+    return [f"[{'x' if item.is_complete else ' '}] {item.title}" for item in items]
+
+
 async def complete_awaiting_job(
     session: AgentSession, job_id: str, *, reason: str, source_id: str = DEFAULT_TODO_SOURCE_ID
 ) -> bool:
@@ -69,17 +83,3 @@ async def complete_awaiting_job(
     if found:
         await _store.save_state(session, updated_items, next_id=next_id, source_id=source_id)
     return found
-
-
-async def todo_titles(
-    session: AgentSession, *, source_id: str = DEFAULT_TODO_SOURCE_ID
-) -> list[str]:
-    """The session's plan as display strings — the source for `PlanEvent` (gap RCH-5).
-
-    Reads the harness's own `TodoProvider` state rather than tracking a parallel copy, so the plan
-    the chemist sees is exactly the plan the loop is working; a second representation would drift
-    the moment the model revised its todos mid-turn. Completed items are marked rather than hidden,
-    because a plan is most useful when it shows what has already been done.
-    """
-    items, _next_id = await _store.load_state(session, source_id=source_id)
-    return [f"[{'x' if item.is_complete else ' '}] {item.title}" for item in items]

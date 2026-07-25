@@ -14,6 +14,7 @@ from typing import Any
 
 from chemclaw.config import settings
 from evals.metric import EvalCase, MetricError, MetricResult, metric
+from safety.screen import SafetyRulesError, screen_structure
 
 
 class _ProcessMasses:
@@ -287,3 +288,44 @@ def _scalar(raw: Any, field: str) -> float:
         return float(raw)
     except (TypeError, ValueError) as exc:
         raise MetricError(f"{field} must be a number, got {raw!r}") from exc
+
+
+@metric("hazard_flag_recall")
+def hazard_flag_recall(case: EvalCase) -> MetricResult:
+    """Fraction of the pinned hazard rules that still fire on their reference molecules (D-080).
+
+    The rule table (`safety/rules.yaml`) is data a chemist edits, and a SMARTS that silently stops
+    matching is invisible — the screen just reports nothing, which reads as "no hazard". This case
+    pins one molecule per rule and scores how many of the expected rule ids the real screen still
+    raises, so an edit that breaks a pattern fails `make eval` instead of degrading the gate in
+    production. Reads `output.screened_smiles` and `reference.expected_rule_ids`.
+
+    Each molecule is screened *individually* (`screen_structure`), never as one reaction: the
+    pairwise incompatibility rules would otherwise fire across molecules that never meet, scoring
+    a rule the case did not pin. The gate is `eval_hazard_recall_min` (1.0 by default — every
+    pinned rule must fire; a table this small has no room for a broken pattern).
+    """
+    if case.reference is None:
+        raise MetricError("hazard_flag_recall needs a reference with `expected_rule_ids`")
+    smiles = case.output.get("screened_smiles")
+    if not isinstance(smiles, (list, tuple)) or not smiles:
+        raise MetricError("output.screened_smiles must be a non-empty list of SMILES")
+    expected = _id_set(case.reference.get("expected_rule_ids"), "reference.expected_rule_ids")
+    if not expected:
+        raise MetricError("reference.expected_rule_ids must name at least one rule")
+    try:
+        found = {flag.rule_id for s in smiles for flag in screen_structure(str(s)).flags}
+    except SafetyRulesError as exc:
+        raise MetricError(f"hazard screening failed: {exc}") from exc
+    missing = sorted(expected - found)
+    value = len(expected & found) / len(expected)
+    return MetricResult(
+        metric="hazard_flag_recall",
+        value=value,
+        unit=None,
+        passed=value >= settings.eval_hazard_recall_min,
+        provenance=(
+            f"{len(expected & found)}/{len(expected)} pinned hazard rules fired over "
+            f"{len(smiles)} molecules" + (f"; missing: {', '.join(missing)}" if missing else "")
+        ),
+    )

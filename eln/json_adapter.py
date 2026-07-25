@@ -33,7 +33,13 @@ from typing import Any
 from pydantic import ValidationError
 
 from chemclaw.config import settings
-from eln.adapter import ElnMappingError, RawEntry, parse_iso_utc
+from eln.adapter import (
+    ElnMappingError,
+    RawEntry,
+    is_late_arrival,
+    parse_iso_utc,
+    warn_late_arrivals,
+)
 from eln.ord import (
     Component,
     Impurity,
@@ -115,8 +121,13 @@ class JsonExportAdapter:
         `kg.graph.load_notes`). Such a file cannot become a `RawEntry`, so it never reaches
         the sync report — instead it is logged at WARNING here, the one signal an admin gets
         that a specific export file was dropped.
+
+        A file whose payload predates `since` but which *arrived* after it is a late arrival: it
+        is filtered out here and on every later run, so it is collected and reported in one
+        aggregated WARNING (`warn_late_arrivals`) instead of vanishing silently.
         """
         entries: list[RawEntry] = []
+        late: list[str] = []
         for path in sorted(self._dir.glob("*.json")):
             try:
                 payload = json.loads(path.read_text(encoding="utf-8"))
@@ -135,6 +146,9 @@ class JsonExportAdapter:
                         payload=payload,
                     )
                 )
+            elif is_late_arrival(path, since):
+                late.append(path.name)
+        warn_late_arrivals(logger, "ELN JSON export", late)
         entries.sort(key=lambda e: e.created_at)
         return entries
 

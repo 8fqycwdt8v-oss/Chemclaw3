@@ -6,9 +6,9 @@ Four capabilities the agent lacked. The two that matter most:
   so a name-shaped question missed a SMILES-keyed corpus entirely. The load-bearing property here
   is *conservatism*: an unrecognised name must return nothing, never a guess, because a fabricated
   structure propagates silently into a calculation, a similarity search, and a proposed note.
-- **TOOL-3 hazard screening.** The only gap in the analysis whose failure mode is physical. The
-  agent is instructed to design protocols and `propose_knowledge_note` turns those into reusable
-  precedent, with nothing between the two but a human reading prose.
+Hazard screening (TOOL-3) landed independently on `main` (`safety/`, D-080); this branch's
+named-substance and named-pair knowledge was contributed to `safety/rules.yaml` and is pinned by
+`tests/test_safety_pairs.py` rather than by a second screen.
 """
 
 import asyncio
@@ -16,14 +16,8 @@ from typing import Any
 
 import pytest
 
-from agents.chem_tools import (
-    render_structure,
-    resolve_compound,
-    screen_hazards,
-    stoichiometry_table,
-)
+from agents.chem_tools import render_structure, resolve_compound, stoichiometry_table
 from chemclaw.chem import InvalidSmilesError
-from chemclaw.hazard import Severity, screen_species
 from chemclaw.reagents import display_name, known_names, resolve_compound_name
 
 
@@ -95,84 +89,6 @@ def test_the_tool_returns_none_not_an_error_on_a_miss() -> None:
     """The agent must be able to say "unknown reagent" without the turn failing."""
     assert _run(resolve_compound("nonsense-xyz")) is None
     assert _run(resolve_compound("DIPEA")) is not None
-
-
-# --- TOOL-3: hazard screening ----------------------------------------------------------------
-
-
-def test_a_documented_incompatible_pair_is_flagged_critical() -> None:
-    """Sodium azide in DCM forms diazidomethane — a combination with documented detonations.
-
-    Neither species alone is remarkable in a process lab, which is exactly why a pair table is
-    needed and why a per-substance screen would miss it.
-    """
-    report = screen_species(["NaN3", "DCM"])
-    assert report.highest_severity is Severity.CRITICAL
-    pair = [f for f in report.findings if "+" in f.subject]
-    assert len(pair) == 1
-    assert "triazidomethane" in pair[0].hazard
-    assert "Substitute the solvent" in pair[0].guidance
-
-
-def test_the_pair_is_flagged_however_it_is_written_and_ordered() -> None:
-    """Order and spelling must not change a safety verdict."""
-    for species in (["dichloromethane", "sodium azide"], ["ClCCl", "NaN3"], ["DCM", "NaN3"]):
-        assert screen_species(species).highest_severity is Severity.CRITICAL
-
-
-def test_a_novel_energetic_intermediate_is_caught_by_structure() -> None:
-    """A table can only list what someone thought of; SMARTS catch a structure nobody listed.
-
-    This acyl azide is not in the reagent table at all — it is flagged purely on its motif.
-    """
-    report = screen_species(["CC(=O)N=[N+]=[N-]"])
-    hazards = {f.hazard for f in report.findings}
-    assert any("azide" in h for h in hazards)
-    assert report.highest_severity is Severity.CRITICAL
-
-
-def test_a_substance_hazard_the_structure_does_not_express_is_caught() -> None:
-    """NaH/DMF runaway is a property of the pairing, not of either structure."""
-    report = screen_species(["NaH", "DMF"])
-    assert any("autocatalytic exotherm" in f.hazard for f in report.findings)
-
-
-def test_a_peroxide_forming_solvent_is_flagged_as_caution_not_critical() -> None:
-    """Severity has to be calibrated, or every answer becomes noise and gets ignored."""
-    report = screen_species(["THF"])
-    assert report.highest_severity is Severity.CAUTION
-
-
-def test_an_ordinary_combination_is_not_flagged() -> None:
-    """A screen that flags everything is a screen nobody reads."""
-    report = screen_species(["EtOAc", "water", "K2CO3"])
-    assert report.findings == []
-    assert report.highest_severity is None
-
-
-def test_an_unscreenable_species_is_reported_not_silently_dropped() -> None:
-    """A clean report over species the screen never saw would read as a clearance it has not earned.
-
-    This is the honesty property of the whole module: `unresolved` is as load-bearing as `findings`.
-    """
-    report = screen_species(["EtOAc", "Compound 27b"])
-    assert report.findings == []
-    assert report.unresolved == ["Compound 27b"]
-    assert "Compound 27b" not in report.screened
-
-
-def test_findings_are_ordered_most_severe_first() -> None:
-    """The agent quotes the top of the list, so the ordering is part of the contract."""
-    report = screen_species(["NaN3", "DCM", "THF"])
-    rank = {"critical": 0, "high": 1, "caution": 2}
-    severities = [f.severity for f in report.findings]
-    assert severities == sorted(severities, key=lambda s: rank[s])
-
-
-def test_the_screen_is_reachable_as_a_tool() -> None:
-    """And returns the same report the module produces."""
-    report = _run(screen_hazards(["NaN3", "DCM"]))
-    assert report.highest_severity is Severity.CRITICAL
 
 
 # --- TOOL-4: stoichiometry -------------------------------------------------------------------

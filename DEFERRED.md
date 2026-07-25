@@ -141,6 +141,27 @@ session reattach, in-process turn/token budgets). Two narrower pieces were consc
 - **JS test infra** — `service/static/app.js` error surfacing is covered by `node --check` only;
   no JS test runner exists in the repo. Revisit if the web client grows beyond a demo shell.
 
+## Backlog-assessment outcomes (2026-07-25, waves A–C)
+
+The full per-item assessment lives in `docs/backlog-plan.md`; the implemented items are marked done
+in `BACKLOG.md`. Three entries here changed state, and one deferral is newly recorded:
+
+- **Substructure pattern-fingerprint prefilter** — still deferred, but the *event-loop* half of the
+  concern is closed: matching now runs in a worker thread under `substructure_match_timeout_seconds`
+  (D-080 sibling work). The prefilter's own trigger is unchanged — the truncation warning firing in
+  real use, past ~10⁴ molecules. Honest residual: the wall-clock bound frees the caller and the loop,
+  not the CPU (RDKit exposes no interruption hook); killing the work outright needs a subprocess,
+  which stays deferred until a measured abuse case exists.
+- **Durable / rolling-window budget quota** — unchanged, trigger unmet (multi-tenant spend fairness).
+- **Per-bundle `log.md` changelog (OKF, D-074)** — **dropped as designed, redeferred as a redesign**:
+  every note lands on its own PR-gate branch, so N concurrent proposals appending to one file
+  manufacture merge conflicts to duplicate what git history already holds. The sound form is a
+  *generated* view (`git log` → rendered changelog). Trigger: a reviewer or auditor asks for a
+  changelog view that does not require `git log`.
+
+| Newly deferred | Why not now | Trigger to revisit |
+|---|---|---|
+| **Hazard screening beyond structural alerts** (D-080) — GHS/SDS data, toxicity/ADMET prediction, thermal-stability data, regulatory/transport classification, route-level safety verdicts | The shipped screen is deliberately a *structural alert* layer: deterministic, offline, citable, and honest about being advisory. Each excluded capability needs either a licensed data source, a predictive model with its own validation burden, or a claim the system must not make (a route-level "safe" verdict). Bolting any of them onto an advisory screen would blur the one invariant that makes it usable — the system flags, it never certifies. | A named, licensed hazard data source is procured (GHS/SDS), or a regulated deliverable requires a documented hazard assessment — then design it as its own layer with its own review, not as more rules in `safety/rules.yaml` |
 ## F11 gap-closure outcomes (2026-07-25, D-074/D-075)
 
 Implementing `docs/audit/12-capability-gap-analysis.md` resolved several long-standing deferrals and

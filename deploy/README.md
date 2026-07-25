@@ -25,6 +25,20 @@ OpenShift SCC), no secret baked in. `deploy/entrypoint.sh` dispatches on `CHEMCL
   exchanged for an Entra token — no client secret at rest.
 - Populate the three secrets via `ExternalSecret`/`SealedSecret`; the chart only *names* them.
 
+### Two settings that decide whether the pod boots at all
+
+- **`CHEMCLAW_ENTRA_REQUIRED=true` is mandatory for any exposed deployment.** With it off, every
+  request runs as the shared dev principal and all authorization gates are open, so the front door
+  **refuses to start** when that mode is bound to a non-loopback interface (the `0.0.0.0` default) —
+  it exits with `SECURITY: entra_required is False but the service binds a non-loopback interface …`
+  instead of silently serving an open deployment. `CHEMCLAW_SERVICE_ALLOW_INSECURE=true` is the deliberate opt-out (boots with a
+  loud warning) and belongs in local dev only. Under `entra_required`, `CHEMCLAW_ENTRA_TENANT_ID`
+  and `CHEMCLAW_ENTRA_AUDIENCE` must also be set — a half-configured identity setup fails fast at
+  startup rather than at the first request.
+- **`CHEMCLAW_ENTRA_CLIENT_ID` no longer exists.** `Settings` is `extra="forbid"`, so a stale export
+  of the removed field aborts startup with a validation error naming it. Drop it from any inherited
+  ConfigMap/env before upgrading.
+
 ## Stateful dependencies (F6-T3, ADR **D-A6a**)
 
 - **Temporal: self-hosted in-cluster** (not Temporal Cloud). Rationale: keeps the durable core inside
@@ -44,6 +58,18 @@ OpenShift SCC), no secret baked in. `deploy/entrypoint.sh` dispatches on `CHEMCL
 - **Probes**: the service exposes `/readyz` (readiness) and `/healthz` (liveness); the workers' health
   is their Temporal poll loop. HPA scales the stateless front door on CPU; workers scale by hand
   (queue depth), not HPA.
+
+## Before a deploy that touches workflow code
+
+Temporal replays workflow **code** against recorded **history**, so a control-flow change deployed
+while a run is in flight fails that run with a nondeterminism error. Every release that touches a
+`@workflow.defn` body (or a helper called from one) goes through the checklist in
+[`docs/workflow-versioning.md`](../docs/workflow-versioning.md): gate the change with
+`workflow.patched()`, or pause the Schedules and drain in-flight runs as an explicit deploy step.
+Renaming a workflow or activity type is never safe in place — it is a different command in history.
+
+No live cluster holds Chemclaw histories yet, so the changes made so far need no retroactive gates;
+this becomes binding at the first production deploy.
 
 ## Observability (F6-T5)
 

@@ -11,6 +11,7 @@ from typing import Any
 import pytest
 from temporalio.client import Client, WorkflowExecutionStatus
 from temporalio.common import WorkflowIDReusePolicy
+from temporalio.exceptions import WorkflowAlreadyStartedError
 from temporalio.worker import Worker
 
 import agents.qm_tools as qm_tools
@@ -184,6 +185,56 @@ def test_submit_with_no_ambient_session_does_not_crash(monkeypatch: pytest.Monke
     monkeypatch.setattr(settings, "harness_enabled", True)
 
     assert asyncio.run(submit_qm_job("CCO", "B3LYP", "def2-SVP")) == "qm-cli"
+
+
+def test_fresh_submit_announces_the_job_to_the_streaming_turn(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A genuine launch is announced, so the front door can surface it while the turn streams."""
+    from agents.turn_signals import drain_started_jobs, reset_job_sink, set_job_sink
+
+    class _FakeHandle:
+        id = "qm-announced"
+
+    class _FakeClient:
+        async def start_workflow(self, *args: Any, **kwargs: Any) -> _FakeHandle:
+            return _FakeHandle()
+
+    async def _fake_connect() -> Any:
+        return _FakeClient()
+
+    monkeypatch.setattr(qm_tools, "connect", _fake_connect)
+    token = set_job_sink()
+    try:
+        asyncio.run(submit_qm_job("CCO", "B3LYP", "def2-SVP"))
+        assert drain_started_jobs() == ["qm-announced"]  # announced exactly once
+    finally:
+        reset_job_sink(token)
+
+
+def test_idempotent_resubmit_announces_nothing(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Re-submitting an existing job is not a launch.
+
+    The returned id may belong to an already-*completed* job, which will never emit a matching
+    `job_completed` push-back — announcing it would leave a permanently "running" row in the UI.
+    """
+    from agents.turn_signals import drain_started_jobs, reset_job_sink, set_job_sink
+
+    class _FakeClient:
+        async def start_workflow(self, *args: Any, **kwargs: Any) -> Any:
+            raise WorkflowAlreadyStartedError("dup", "qm-dup", run_id=None)
+
+    async def _fake_connect() -> Any:
+        return _FakeClient()
+
+    monkeypatch.setattr(qm_tools, "connect", _fake_connect)
+    token = set_job_sink()
+    try:
+        job_id = asyncio.run(submit_qm_job("CCO", "B3LYP", "def2-SVP"))
+        assert job_id.startswith("qm-")  # the existing job's id is still returned
+        assert drain_started_jobs() == []
+    finally:
+        reset_job_sink(token)
 
 
 def test_status_of_foreign_workflow_is_clear_error(monkeypatch: pytest.MonkeyPatch) -> None:
