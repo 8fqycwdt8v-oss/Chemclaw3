@@ -19,7 +19,7 @@ data:
   {{- /* Derived from the knowledge volume layout rather than hand-written in `config`, so the
          path the PR-gate submitter writes to can never drift from the volume it is mounted on
          (gap DEP-2). `CHEMCLAW_KNOWLEDGE_DIR` stays at its relative default: it resolves against
-         the image WORKDIR (/app), which is exactly `knowledge.publishPath`. */ -}}
+         the image WORKDIR (/app), which is exactly `knowledge.publishPath`. */}}
   CHEMCLAW_NOTE_REPO_DIR: {{ .Values.knowledge.noteRepoPath | quote }}
 ---
 apiVersion: v1

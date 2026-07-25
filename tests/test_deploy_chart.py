@@ -161,3 +161,27 @@ def test_mcp_deployments_become_meaningful_once_the_transport_is_networked() -> 
     networked = HttpMcpServerSpec(name="mcp-molfp", url="http://chemclaw-mcp-molfp:8080/mcp")
     assert networked.transport == "http"
     assert networked.url
+
+
+def test_a_comment_never_swallows_the_line_after_it() -> None:
+    """A `-}}` comment closure strips the following newline, gluing the next line onto the previous.
+
+    Harmless at the top of a document (the next line is an unindented `apiVersion:`, and there is no
+    preceding output to glue it to) and **fatal mid-document**: a `{{- /* … */ -}}` sitting inside a
+    `data:` block appended `CHEMCLAW_NOTE_REPO_DIR:` to the line above, and `helm lint` failed with
+    "did not find expected key".
+
+    The brace-balance and include/values checks above could not see this — it is a *whitespace*
+    bug, not a structural one — so CI's `helm lint` caught it first. This is the offline half:
+    a comment closed with `-}}` must not be followed by an indented line.
+    """
+    offenders: list[str] = []
+    for path in [*TEMPLATES, CHART / "templates" / "_helpers.tpl"]:
+        lines = path.read_text().splitlines()
+        for index, line in enumerate(lines[:-1]):
+            if not re.search(r"\*/\s*-\}\}", line):
+                continue
+            following = next((ln for ln in lines[index + 1 :] if ln.strip()), "")
+            if following.startswith((" ", "\t")):
+                offenders.append(f"{path.name}:{index + 1} swallows {following.strip()!r}")
+    assert not offenders, "comment closures that eat the next line: " + "; ".join(offenders)
