@@ -270,3 +270,40 @@ analytics, networked MCP transport, file ingress, mid-turn resume). I implemente
 tested waves rather than starting a fifth and leaving it half-built — a half-wired metrics endpoint
 or a partial compound-note migration would be worse than an honest boundary. The open items are
 listed in `BACKLOG.md` with their original severity, unchanged.
+
+## Continuation — W3 remainder + W4 (same session)
+
+- [x] **W3 remainder** — DEP-4 metrics, SCH-4 schedule health, SCH-5 scheduled chain verify,
+      AGT-2 mid-turn resume.
+- [x] **W4a** — KNW-5 gap queries, KNW-6 type registry, KNW-3 negative results, IDEA-5 source
+      tiers, IDEA-3 (tool half).
+- [x] **W4b** — TOOL-1 networked MCP, SCH-6 merge webhook, KNW-7 compound notes, KNW-4 vocabulary.
+- [x] **W4c** — AGT-5 clarifying questions, IDEA-4 dry-run, AGT-4 user preferences.
+- [ ] **Open, with reasons in BACKLOG.md/DEFERRED.md** — TOOL-6 (needs a literature-source
+      decision), AGT-3 (needs a first document format), IDEA-2 and IDEA-1 (sizeable, own design
+      note), IDEA-6 (depends on AGT-3). TOOL-7 and AGT-6 closed as not-gaps after assessment.
+
+## Review (continuation)
+
+Gate green throughout: 696 → 755 passing, ruff + `mypy --strict` clean, `kg-validate`,
+`skill-validate` and `prose-validate` all pass. Five commits. ADR **D-075**.
+
+**The pattern that kept recurring, and is worth naming.** Three separate findings resolved into the
+same rule: *a capability that cannot cover something must say so, or its silence reads as a
+clearance it has not earned.* It shows up in `screen_hazards` reporting `unresolved` as prominently
+as findings, in retention refusing `audit_events` rather than quietly skipping it, and in
+`/schedules` reporting a never-applied Schedule rather than omitting it. Each was a place where the
+honest-but-quiet implementation would have been actively misleading.
+
+**Two findings closed as not-gaps**, which is a result rather than an omission: TOOL-7 (units are
+already carried in field names; a `Quantity` type would be a one-caller abstraction) and AGT-6 (the
+W1 tools' typed pydantic arguments already force a validated payload at the exact call site whose
+absence justified the original deferral). Both are recorded in `DEFERRED.md` so they are not
+re-opened blindly.
+
+**Where I stopped.** Five items remain, and the split matters: three are blocked on a decision or a
+prerequisite rather than on effort (TOOL-6 needs a literature-source choice; AGT-3 needs a first
+real document format; IDEA-6 depends on AGT-3), and two are genuinely large enough to deserve their
+own design note (IDEA-2 calibration, IDEA-1 standing queries). Building TOOL-6 against a guessed API
+or IDEA-6 over a parser that does not exist would have produced confident-looking stubs — worse than
+an honest boundary.

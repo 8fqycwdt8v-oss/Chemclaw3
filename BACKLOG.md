@@ -88,18 +88,70 @@ everything below is built, tested, and green under `make lint type test` (688+ p
       needs archive-then-reseal in an ADR) and `calculation_results` (age is the wrong axis for a
       cache; D-011 makes eviction a recomputation). Off until a deployment states a policy.
 
-### Open — W3 remainder and W4
-- [ ] **SCH-4** schedule health (last run/last failure per Schedule) — pairs with DEP-4.
-- [ ] **SCH-5** `make audit-verify` on a cadence, alerting via the must-deliver notify seam.
-- [ ] **DEP-4** `GET /metrics`: turn rate/latency/error, shed turns (503), budget refusals (429),
-      audit-sink failures, schedule health. The HPA currently scales on CPU, a poor proxy for an
-      SSE/LLM-latency-bound service.
-- [ ] **AGT-2** mid-turn durable-job resume (both halves — D-032 hold, D-058 todo flip — exist).
-- [ ] **W4**: `KNW-3` negative results · `KNW-4` conditions vocabulary · `KNW-5` graph analytics /
-      "what don't we know" gap queries · `KNW-6` note-type registry · `KNW-7` compound notes ·
-      `TOOL-1` networked MCP transport · `TOOL-6` literature retriever · `TOOL-7` units ·
-      `AGT-3` file ingress · `AGT-4` user preferences · `AGT-5` clarifying questions ·
-      `AGT-6` structured outputs · `SCH-6` inbound events · `IDEA-1`–`IDEA-6`.
+### Done — W3 (complete)
+- [x] **SCH-3** `ScheduleOverlapPolicy.SKIP` + a deterministic per-job phase offset.
+- [x] **SCH-1** `workflows/retention.py` + Schedule; **refuses** `audit_events` (deleting from a
+      hash chain is indistinguishable from tampering) and `calculation_results` (age is the wrong
+      axis for a cache — D-011 makes eviction a recomputation). Off until a policy is stated.
+- [x] **DEP-4** `service/metrics.py` + `GET /metrics` (Prometheus text, no new dependency). Counts
+      shed turns, budget refusals, 409s, timeouts, audit-sink failures; gauges read live structures
+      so they cannot drift. Names the HPA problem in `values.yaml`: CPU is noise for a stream-bound
+      service, `turns_in_flight`/`turn_capacity` is the saturation signal.
+- [x] **SCH-4** `GET /schedules` from Temporal's own state (no mirrored table). A planned Schedule
+      missing from Temporal is *reported*, not omitted. Surfaces `skipped_overlap`, the early
+      warning that a job no longer fits its interval.
+- [x] **SCH-5** `AuditChainVerifyWorkflow` on a cadence, alerting via the must-deliver notify seam.
+- [x] **AGT-2** mid-turn durable-job resume: opt-in, bounded, non-recursive, degrading to the
+      previous behavior (result next turn) rather than to an error.
+
+### Done — W4
+- [x] **KNW-5** `kg/analytics.py` + `find_knowledge_gaps`: isolated notes, projects with evidence
+      but no distillation, hubs. The graph could only be walked outward from a hit, so "what don't
+      we know" — the question that steers experiment design — was unaskable.
+- [x] **KNW-6** `KNOWN_NOTE_TYPES` enforced by `kg-validate` (not the schema, so the agent can still
+      propose a new type for a human to review).
+- [x] **KNW-3** `outcome_class` + required `failure_reason`, and failures are filtered out of
+      playbook distillation — without that filter a repeated failure would distil into a
+      recommendation, inverting the record.
+- [x] **KNW-7 + KNW-4** `eln/compound.py` (structure-derived compound notes so a structural hit can
+      cite something) and `memory.canonical_condition` (DMF / N,N-dimethylformamide / CN(C)C=O fold
+      to one token), both reusing the one identity table.
+- [x] **TOOL-1** networked (streamable-HTTP) MCP transport — "adding a capability is a config
+      entry" is now true at org level, and DEP-3's `transport: http` guard is satisfiable.
+- [x] **IDEA-5** optional per-retriever weights in the RRF fusion; ships inert.
+- [x] **IDEA-3 (tool half)** `green_metrics` exposes E-factor/PMI to the agent.
+- [x] **SCH-6** `POST /events/knowledge-merged` — the first inbound event path; collapses SCH-2's
+      staleness window from an interval to seconds.
+- [x] **AGT-5** `QuestionEvent` + `ask_clarifying_question` — the agent can ask instead of guessing.
+- [x] **IDEA-4** dry-run mode: ambient (never a tool argument, so the model can neither set nor
+      clear it), gating all three durable launchers.
+- [x] **AGT-4** `agents/preferences.py` + migration `015` — per-user working preferences,
+      deliberately *not* graph notes (the PR-gate protects shared knowledge, not personal trivia).
+
+### Open — the W4 remainder, each with why it is not built
+
+- [ ] **TOOL-6 external literature/patent retriever** — blocked on a *decision*, not on work: which
+      source (PubChem / Reaxys / SciFinder / an internal mirror), under which licence and
+      credential. The F7 registry means it is one adapter once that is answered; building against a
+      guessed API would be the wrong integration shipped confidently.
+- [ ] **AGT-3 file/attachment ingress** — the upload route is small; the *parsing* is open-ended
+      (spectra, CoAs, PDFs, CSVs each need their own mapper) and is the gated OCR/vision item in
+      `docs/parity-plan.md`. Needs a first real document format to aim at.
+- [ ] **IDEA-2 predicted-vs-actual calibration** — the most valuable remaining item. Needs a
+      predictions table plus a reconciliation job that matches a stored prediction to the ELN
+      result that later lands. Sizeable and worth its own design note.
+- [ ] **IDEA-1 standing queries / digest** — needs a subscription store plus a Schedule; the
+      push-back channel it would ride already exists.
+- [ ] **IDEA-6 corpus backfill** — needs AGT-3's document parsing first; a backfill driver over a
+      parser that does not exist would be a stub.
+- [ ] **TOOL-7 units at the LLM boundary** — *assessed and deliberately closed as not-a-gap*: units
+      are carried in field names (`temperature_c`, `mass_g`, `moles_mmol`) throughout, including
+      every model added in F11. A `Quantity` type would be an abstraction with no second caller.
+- [ ] **AGT-6 structured final output** — *assessed and largely satisfied*: the tools added in W1
+      (`request_development_report`, `start_optimization_campaign`) take typed pydantic arguments,
+      so MAF already forces a validated payload at exactly the machine-consumed call site whose
+      absence was the reason for the original deferral. A second `response_format` mechanism on the
+      prose answer would add a path with no consumer.
 
 ## Next — Platform-parity hardening (docs/parity-plan.md, Phase F10)
 

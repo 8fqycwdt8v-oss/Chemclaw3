@@ -60,6 +60,7 @@ from agents.graph_tools import (
 )
 from agents.llm_provider import build_chat_client
 from agents.memory_tools import record_confirmed_answer
+from agents.preferences import forget_preference, recall_preferences, remember_preference
 from agents.qm_tools import get_qm_job_status, submit_qm_job
 from agents.research_tools import gather_evidence
 from agents.skill_access import RoleScopedSkillsSource
@@ -265,6 +266,9 @@ def _capability_tools() -> list[Any]:
         start_optimization_campaign,
         get_durable_job_status,
         ask_clarifying_question,
+        recall_preferences,
+        remember_preference,
+        forget_preference,
         propose_knowledge_note,
         record_confirmed_answer,
     ]
