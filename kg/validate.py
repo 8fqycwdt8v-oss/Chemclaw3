@@ -1,9 +1,11 @@
 """Knowledge-graph validation, usable as a CLI in CI (plan step 2.4).
 
-Checks a notes directory for the three failure modes that would corrupt the
-graph: unparseable/invalid notes, duplicate ids, and links to unknown notes.
-Run as `python -m kg.validate [notes_dir]`; it exits non-zero if any problem is
-found, so it gates the PR that adds or edits notes (D-005).
+Checks a notes directory for the failure modes that would corrupt the graph:
+unparseable/invalid notes, duplicate ids, and links to unknown notes — plus the
+hazard gate (D-080), which refuses an agent-proposed procedure that does not
+document the hazard flags its structures raise. Run as
+`python -m kg.validate [notes_dir]`; it exits non-zero if any problem is found,
+so it gates the PR that adds or edits notes (D-005).
 """
 
 import sys
@@ -11,6 +13,7 @@ from pathlib import Path
 
 from chemclaw.config import settings
 from kg.note import NoteError, read_note
+from safety.notes import hazard_problems
 
 
 def validate(notes_dir: Path) -> list[str]:
@@ -38,6 +41,7 @@ def validate(notes_dir: Path) -> list[str]:
         for target in note.outgoing_links():
             if target not in known:
                 problems.append(f"note {note.id!r} links to unknown note {target!r}")
+        problems.extend(hazard_problems(note))
     return problems
 
 

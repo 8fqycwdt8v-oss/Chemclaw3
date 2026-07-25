@@ -42,6 +42,7 @@ _BAD_DATA_TYPES = [
     "PlaybookError",
     "NoteError",
     "EvalCaseError",
+    "SafetyRulesError",
 ]
 
 # Bad data is non-retryable by type; `maximum_attempts` bounds the *transient* retries
