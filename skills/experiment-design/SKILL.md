@@ -4,6 +4,9 @@ description: >-
   Judgment for answering "which experiment should I run next?" — turning a vague optimization
   goal and scattered historic runs into a concrete Bayesian-optimization problem, calling
   suggest_next_experiment, and presenting the proposal as something a human still runs.
+tools:
+  - suggest_next_experiment
+  - propose_knowledge_note
 ---
 
 # Experiment design

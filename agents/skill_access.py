@@ -1,4 +1,11 @@
-"""Role-scoped skill visibility — Phase-6 RBAC for advertised skills (plan step 6.2).
+"""Skill visibility decorators: admin enablement, then Phase-6 RBAC (plan step 6.2).
+
+Two independent narrowings, deliberately kept as separate `SkillsSource` decorators because they
+answer different questions. `EnabledSkillsSource` answers *"is this skill turned on in this
+deployment?"* (an admin/config concern); `RoleScopedSkillsSource` answers *"may this caller see
+it?"* (an identity concern). Both only ever remove skills, so chaining them in either order is
+safe; `build_agent` wraps enablement innermost (what exists at all) and role scoping outermost
+(who sees what), which reads in the same direction as the request.
 
 By default every skill is advertised to every caller (the model sees them all). This scopes
 skills by the caller's Entra app-roles: a *gated* skill (named in `settings.skill_role_gates`,
@@ -14,11 +21,42 @@ file source (and any future source) gains role scoping without duplicating the f
 gate map is config, so scoping a skill is an admin change, not code.
 """
 
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 
 from agent_framework import Skill, SkillsSource, SkillsSourceContext
 
 from agents.identity_context import get_current_roles
+
+
+class EnabledSkillsSource(SkillsSource):
+    """Wrap a `SkillsSource`, advertising only the explicitly enabled skills.
+
+    Discovery is not enablement: `FileSkillsSource` advertises every `SKILL.md` it finds, which
+    means adding a folder silently changes what the agent offers. An explicit enable-list lets a
+    deployment ship the whole skills tree and turn on the subset it has validated.
+
+    An **empty** list means "everything discovered" — the default, and today's behavior — so this
+    decorator is a no-op until a deployment opts in. A name that no directory provides is simply
+    absent from the result rather than an exception: this runs per turn, so a config typo must
+    degrade the advertised set, not break every live conversation. `make skill-validate` is where
+    that typo is caught loudly, before deploy.
+
+    Args:
+        inner: The wrapped source (e.g. a `FileSkillsSource`).
+        enabled: The skill names to advertise; empty leaves every discovered skill visible.
+    """
+
+    def __init__(self, inner: SkillsSource, enabled: Iterable[str] | None = None) -> None:
+        """Wrap `inner` and pre-normalize the enable-list to a frozenset for cheap lookups."""
+        self._inner = inner
+        self._enabled: frozenset[str] = frozenset(enabled or ())
+
+    async def get_skills(self, context: SkillsSourceContext) -> list[Skill]:
+        """Return the inner source's skills, narrowed to the enabled names when one is set."""
+        skills = await self._inner.get_skills(context)
+        if not self._enabled:
+            return skills
+        return [skill for skill in skills if skill.frontmatter.name in self._enabled]
 
 
 class RoleScopedSkillsSource(SkillsSource):

@@ -109,6 +109,65 @@ The three findings worth flagging:
 3. **The one genuinely large item (C2, safety screening) is the one the user parked for a decision**,
    and its own precondition — "decide before a phase that could propose a hazardous procedure" — is
    already past, since BO recommendations and development reports both publish procedures today.
+
+**Method note for next time:** two mutation "survivors" were mis-targeted patches (one replaced a
+docstring, not the guard) and two more only survived because I ran a narrow test file instead of the
+suite. Every survivor was re-verified against the full suite before being reported; nothing went
+into the findings table on the strength of the first run. Worth keeping as the default discipline —
+a false finding costs more than a missed one.
+
+---
+
+# Config-extensibility backlog — items 5–7 (completing the audit backlog)
+
+Source: `docs/audit/10-config-extensibility.md` §9. Items 1–4 landed earlier (`b07a2b2`, `76c03b2`,
+`4884024`, `024105d`; ADRs D-075/D-076). Items 5–7 were BACKLOG-gated on triggers that had not
+fired; completed on instruction. ADR **D-081**.
+
+- [x] **6. [S] MCP transport union** (`6390f91`) — `StdioMcpServerSpec | HttpMcpServerSpec`
+  discriminated on `transport`; `_mcp_tool` dispatches to `MCPStdioTool`/`MCPStreamableHTTPTool`,
+  `assert_never`-exhaustive. **Callable `Discriminator`** reads a missing tag as `stdio` so every
+  pre-union config keeps working — a plain `Field(discriminator=…)` would have broken every
+  deployment at startup. `allowed_tools` is transport-independent, so the PR-gate boundary is too.
+- [x] **5. [S] Skill manifest + enable-list** — `agents/skill_manifest.py` (`SkillManifest`,
+  `extra="forbid"`) + `EnabledSkillsSource` + `settings.skills_enabled`. `make skill-validate` now
+  validates frontmatter *and* checks declared `tools`/`mcp_servers` against the live registries;
+  four shipped skills declare their real deps. Empty enable-list = today's behavior.
+- [x] **7. [S] Config idiom house rule** — recorded in `config.py`'s module docstring; no field
+  migration (churn without a defect).
+
+## Review
+
+Gate green after the cluster: ruff + `mypy --strict` clean over 234 files, `make skill-validate`
+passes, full suite **631 → 650 passed** (19 new tests), 41 offline-only skips.
+
+**The item-5 payoff is the dependency check, not the schema.** A manifest that merely typed
+`name`/`description` would be ceremony. What earns its place is that a skill can now *declare* the
+capabilities its judgment is written about, and the gate verifies them against the live tool
+registry (D-075) and `settings.mcp_servers`. Verified by deliberately renaming a declared tool:
+the gate fails with the exact name and exits non-zero. That closes a real hole — a skill teaching
+a deleted tool previously survived as plausible, stale prose that nothing could detect.
+
+**The item-6 risk was backwards compatibility, not the union.** Every shipped config is untagged;
+a textbook `Field(discriminator="transport")` rejects untagged payloads, so the "clean" version of
+this change would have broken `.env.example`, the Helm values, and every deployment at startup. The
+callable discriminator defaulting to `stdio` is the whole reason the change is safe to ship.
+
+**Invariant held (audit §7).** Both new narrowings attenuate and neither authorizes: the enable-list
+cannot advertise a skill no directory provides and `RoleScopedSkillsSource` still runs on top; a
+manifest's declared tools are documentation the gate validates, never a grant — `enforce_tool_authz`
+is untouched. Fail-fast was placed by blast radius: an unknown enabled-skill name fails the
+pre-deploy gate rather than raising per turn, since a config typo must not break live conversations.
+
+**Rule-of-Three note.** These two items were trigger-gated and the triggers had not fired; they were
+built on instruction. Both are honest rather than speculative — item 6 is a real second variant with
+working dispatch, item 5's check has four real declaring skills. What *would* have been speculative
+stayed out: no HTTP server is configured, and profile Stage 3 (filesystem-discovered profiles)
+remains deferred.
+
+**Still open, deliberately:** the deep-analysis items DA-5 and DA-10 are marked "needs a decision"
+(cache staleness policy; how much live-edge risk to buy down offline) — those are judgement calls
+for sign-off, not implementation work, per the audit's do-not-self-resolve convention.
 ## Token-efficiency rules (bind all agents)
 
 - Reviewers/verifiers return structured findings only (file:line, claim, concrete

@@ -3,6 +3,10 @@ name: calculation-selection
 description: >-
   Judgment for choosing which fast calculator to run for a given question
   (semiempirical energy vs. predicted property) and reading the result honestly.
+tools:
+  - compute_xtb_energy
+  - predict_pka
+  - predict_solubility
 ---
 
 # Calculation selection

@@ -8,6 +8,7 @@ it runs off the event loop.
 """
 
 import asyncio
+import logging
 from datetime import date
 from pathlib import Path
 
@@ -22,6 +23,8 @@ from kg.git_submitter import default_submitter
 from kg.graph import build_graph, load_notes, neighborhood
 from kg.note import Note
 from kg.pr_gate import propose_note
+
+log = logging.getLogger(__name__)
 
 
 class NoteRef(BaseModel):
@@ -80,8 +83,12 @@ async def find_notes(text: str) -> list[NoteRef]:
     graph = await asyncio.to_thread(build_graph, Path(settings.knowledge_dir))
     needle = text.lower()
     today = date.today()
+    # A broad needle matches most of the corpus, and the whole hit list goes into the model's
+    # context. Bound it like every other retrieval surface (`fingerprint_max_top_k`,
+    # `retrieval_top_k`), and warn on truncation so it is never a silent cap (D-066 #4).
+    cap = settings.graph_max_results
     matches = []
-    for node_id in graph.nodes:
+    for node_id in sorted(graph.nodes):
         note = graph.nodes[node_id].get("note")
         if note is None:
             continue
@@ -92,6 +99,14 @@ async def find_notes(text: str) -> list[NoteRef]:
         haystack = " ".join([note.id, note.type, note.compound_smiles or "", *note.tags, note.body])
         if needle in haystack.lower():
             matches.append(_ref(note))
+            if len(matches) == cap:
+                log.warning(
+                    "find_notes capped at %d matches (id order) for %r; "
+                    "narrow the query or raise CHEMCLAW_GRAPH_MAX_RESULTS",
+                    cap,
+                    text,
+                )
+                break
     return matches
 
 

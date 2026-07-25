@@ -25,6 +25,13 @@ _Fingerprint = frozenset[tuple[str, int, int]]
 _CACHE_LOCK = threading.Lock()
 _NOTES_CACHE: dict[str, tuple[_Fingerprint, list[Note]]] = {}
 
+# Assembled-graph cache, same key and same fingerprint as `_NOTES_CACHE`. The notes cache spares the
+# parse, but every `find_notes`/`expand_note` call still re-added every node and edge — measured at
+# ~86 ms per call for 10k notes, and the agent's documented flow (`find_notes` then `expand_note`)
+# pays it twice per turn. Caching the assembled graph makes a warm interactive query O(1) work plus
+# the stat scan, instead of O(N) node/edge insertion.
+_GRAPH_CACHE: dict[str, tuple[_Fingerprint, nx.DiGraph]] = {}
+
 
 def _dir_fingerprint(notes_dir: Path) -> _Fingerprint:
     """Stat every note file under `notes_dir`; return the (path, mtime_ns, size) fingerprint."""
@@ -54,6 +61,27 @@ def _parse_notes(notes_dir: Path) -> list[Note]:
     return notes
 
 
+def _cached_notes(notes_dir: Path) -> tuple[_Fingerprint | None, list[Note]]:
+    """The parsed notes plus the fingerprint they were parsed at (`None` when caching is off).
+
+    Handing the fingerprint back is what lets `build_graph` reuse it to key its own cache: the
+    stat scan is the dominant cost of a warm read (~76 ms for 10k notes), so computing it once
+    per call rather than once per cache layer matters.
+    """
+    if not settings.graph_cache_enabled:
+        return None, _parse_notes(notes_dir)
+    key = str(notes_dir)
+    fingerprint = _dir_fingerprint(notes_dir)
+    with _CACHE_LOCK:
+        cached = _NOTES_CACHE.get(key)
+        if cached is not None and cached[0] == fingerprint:
+            return fingerprint, cached[1]
+    notes = _parse_notes(notes_dir)
+    with _CACHE_LOCK:
+        _NOTES_CACHE[key] = (fingerprint, notes)
+    return fingerprint, notes
+
+
 def load_notes(notes_dir: Path) -> list[Note]:
     """Parse every note under `notes_dir` (recursively), skipping non-note and invalid files.
 
@@ -67,18 +95,18 @@ def load_notes(notes_dir: Path) -> list[Note]:
     is never stale. A shallow copy is returned so a caller cannot mutate the cached list, and `Note`
     is frozen, so the shared note instances cannot be mutated either.
     """
-    if not settings.graph_cache_enabled:
-        return _parse_notes(notes_dir)
-    key = str(notes_dir)
-    fingerprint = _dir_fingerprint(notes_dir)
-    with _CACHE_LOCK:
-        cached = _NOTES_CACHE.get(key)
-        if cached is not None and cached[0] == fingerprint:
-            return list(cached[1])
-    notes = _parse_notes(notes_dir)
-    with _CACHE_LOCK:
-        _NOTES_CACHE[key] = (fingerprint, notes)
-    return list(notes)
+    return list(_cached_notes(notes_dir)[1])
+
+
+def _assemble_graph(notes: list[Note]) -> nx.DiGraph:
+    """Assemble the directed note graph from already-parsed notes."""
+    graph: nx.DiGraph = nx.DiGraph()
+    for note in notes:
+        graph.add_node(note.id, note=note)
+    for note in notes:
+        for target in note.outgoing_links():
+            graph.add_edge(note.id, target)
+    return graph
 
 
 def build_graph(notes_dir: Path) -> nx.DiGraph:
@@ -88,14 +116,25 @@ def build_graph(notes_dir: Path) -> nx.DiGraph:
     attribute. Each `[[wikilink]]` becomes an edge id → target. A link to an
     unknown id still creates the edge (a dangling node with no `note` attribute),
     so `kg.validate` can report it rather than the graph silently dropping it.
+
+    Cached behind the same stat fingerprint as the parsed notes, so a warm interactive query
+    skips reassembly entirely. The cached graph is **frozen** (`nx.freeze`) rather than copied:
+    copying a large graph would give back most of the saving, and freezing makes the shared
+    instance safe for the same reason `Note` is frozen — no reader can corrupt it for the next
+    query. Readers (`find_notes`, `expand_note`, `neighborhood`) only traverse; a caller that
+    genuinely needs a mutable graph should take `graph.copy()`.
     """
-    graph: nx.DiGraph = nx.DiGraph()
-    notes = load_notes(notes_dir)
-    for note in notes:
-        graph.add_node(note.id, note=note)
-    for note in notes:
-        for target in note.outgoing_links():
-            graph.add_edge(note.id, target)
+    fingerprint, notes = _cached_notes(notes_dir)
+    if fingerprint is None:
+        return _assemble_graph(notes)
+    key = str(notes_dir)
+    with _CACHE_LOCK:
+        cached = _GRAPH_CACHE.get(key)
+        if cached is not None and cached[0] == fingerprint:
+            return cached[1]
+    graph = nx.freeze(_assemble_graph(notes))
+    with _CACHE_LOCK:
+        _GRAPH_CACHE[key] = (fingerprint, graph)
     return graph
 
 

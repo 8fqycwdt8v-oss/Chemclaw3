@@ -3,6 +3,9 @@ name: qm-job-submission
 description: >-
   Judgment for when to run a quantum-mechanical (QM/DFT) calculation and how to
   choose the method and basis set before calling submit_qm_job.
+tools:
+  - submit_qm_job
+  - get_qm_job_status
 ---
 
 # QM job submission

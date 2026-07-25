@@ -156,7 +156,8 @@ def test_mcp_deployments_become_meaningful_once_the_transport_is_networked() -> 
     The agent can now attach a server it does not spawn, which is what the MCP Deployments were
     written in anticipation of.
     """
-    from chemclaw.config import McpServerSpec
+    from chemclaw.config import HttpMcpServerSpec
 
-    networked = McpServerSpec(name="mcp-molfp", url="http://chemclaw-mcp-molfp:8080/mcp")
-    assert networked.url and not networked.command
+    networked = HttpMcpServerSpec(name="mcp-molfp", url="http://chemclaw-mcp-molfp:8080/mcp")
+    assert networked.transport == "http"
+    assert networked.url

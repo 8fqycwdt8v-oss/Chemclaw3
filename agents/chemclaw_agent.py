@@ -12,7 +12,7 @@ edit here.
 """
 
 import uuid
-from typing import Any
+from typing import Any, assert_never
 
 from agent_framework import (
     Agent,
@@ -24,6 +24,7 @@ from agent_framework import (
     HistoryProvider,
     InMemoryHistoryProvider,
     MCPStdioTool,
+    MCPStreamableHTTPTool,
     SkillsProvider,
     SlidingWindowStrategy,
     TokenBudgetComposedStrategy,
@@ -55,10 +56,19 @@ from agents import subscriptions as _subscriptions  # noqa: F401
 from agents.audit import AuditSink, make_audit_middleware
 from agents.llm_provider import build_chat_client
 from agents.profiles import AgentProfile, get_profile
-from agents.skill_access import RoleScopedSkillsSource
+from agents.skill_access import EnabledSkillsSource, RoleScopedSkillsSource
 from agents.tool_authz import enforce_tool_authz
 from agents.tool_registry import registered_tools
-from chemclaw.config import McpServerSpec, settings
+from chemclaw.config import (
+    HttpMcpServerSpec,
+    McpServerSpec,
+    StdioMcpServerSpec,
+    settings,
+)
+
+# What one configured MCP capability server becomes, whichever transport it declares. Both are
+# MAF MCP tools with the same agent-facing surface, so callers never branch on the transport.
+McpCapabilityTool = MCPStdioTool | MCPStreamableHTTPTool
 
 _INSTRUCTIONS = (
     "You are Chemclaw, a research assistant for pharmaceutical/chemical process R&D. Your job "
@@ -145,10 +155,17 @@ def build_agent(
         settings.harness_enabled if prof.harness_enabled is None else prof.harness_enabled
     )
     client = chat_client if chat_client is not None else build_chat_client()
-    # Advertised skills are role-scoped by `settings.skill_role_gates` against the turn's ambient
-    # identity (`agents.identity_context`); an empty gate map (the default) shows every skill.
+    # Advertised skills are narrowed twice, both only ever removing: `settings.skills_enabled`
+    # picks which discovered skills this deployment turns on (empty = all, today's behavior), then
+    # `settings.skill_role_gates` hides gated ones from callers lacking the roles, against the
+    # turn's ambient identity (`agents.identity_context`; an empty gate map shows every skill).
     skills = SkillsProvider(
-        RoleScopedSkillsSource(FileSkillsSource(settings.skills_dirs), settings.skill_role_gates)
+        RoleScopedSkillsSource(
+            EnabledSkillsSource(
+                FileSkillsSource(settings.skills_dirs), settings.skills_enabled_list
+            ),
+            settings.skill_role_gates,
+        )
     )
     history = _history_provider()
     audit = make_audit_middleware(
@@ -305,8 +322,8 @@ def _narrow(tools: list[Any], keep: frozenset[str], profile_name: str, kind: str
     return [tool for name, tool in available.items() if name in keep]
 
 
-def _mcp_capability_tools() -> list[MCPStdioTool]:
-    """Build one `MCPStdioTool` per configured MCP capability server (unconnected).
+def _mcp_capability_tools() -> list[McpCapabilityTool]:
+    """Build one MCP tool per configured MCP capability server (unconnected).
 
     These realise the plan's capability layer: the agent reaches the fingerprint search over
     the MCP protocol instead of importing it in-process, so adding a capability is a
@@ -317,15 +334,31 @@ def _mcp_capability_tools() -> list[MCPStdioTool]:
     return [_mcp_tool(spec) for spec in settings.mcp_servers]
 
 
-def _mcp_tool(spec: McpServerSpec) -> MCPStdioTool:
-    """Construct one MCP stdio tool from its config spec."""
-    return MCPStdioTool(
-        name=spec.name,
-        command=spec.command,
-        args=spec.args,
-        allowed_tools=spec.allowed_tools,
-        load_prompts=False,
-    )
+def _mcp_tool(spec: McpServerSpec) -> McpCapabilityTool:
+    """Construct one MCP tool from its config spec, dispatching on the transport.
+
+    The two transports differ only in how the server is *reached* — a locally spawned subprocess
+    vs. an already-running remote endpoint. Everything that bounds what the agent may do with it
+    (`allowed_tools`, prompts off) is identical on both, so the PR-gate/RBAC boundary does not
+    depend on transport.
+    """
+    if isinstance(spec, HttpMcpServerSpec):
+        return MCPStreamableHTTPTool(
+            name=spec.name,
+            url=spec.url,
+            allowed_tools=spec.allowed_tools,
+            request_timeout=spec.request_timeout,
+            load_prompts=False,
+        )
+    if isinstance(spec, StdioMcpServerSpec):
+        return MCPStdioTool(
+            name=spec.name,
+            command=spec.command,
+            args=spec.args,
+            allowed_tools=spec.allowed_tools,
+            load_prompts=False,
+        )
+    assert_never(spec)  # exhaustive over the union — a new transport without a branch is a bug
 
 
 def _build_compaction(history_source_id: str) -> CompactionProvider:
