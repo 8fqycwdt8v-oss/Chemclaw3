@@ -69,3 +69,17 @@ async def complete_awaiting_job(
     if found:
         await _store.save_state(session, updated_items, next_id=next_id, source_id=source_id)
     return found
+
+
+async def todo_titles(
+    session: AgentSession, *, source_id: str = DEFAULT_TODO_SOURCE_ID
+) -> list[str]:
+    """The session's plan as display strings — the source for `PlanEvent` (gap RCH-5).
+
+    Reads the harness's own `TodoProvider` state rather than tracking a parallel copy, so the plan
+    the chemist sees is exactly the plan the loop is working; a second representation would drift
+    the moment the model revised its todos mid-turn. Completed items are marked rather than hidden,
+    because a plan is most useful when it shows what has already been done.
+    """
+    items, _next_id = await _store.load_state(session, source_id=source_id)
+    return [f"[{'x' if item.is_complete else ' '}] {item.title}" for item in items]

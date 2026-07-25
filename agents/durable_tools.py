@@ -21,6 +21,7 @@ from temporalio.exceptions import WorkflowAlreadyStartedError
 from temporalio.service import RPCError
 
 from agents.authz import authorize_trigger, require_actor
+from agents.turn_signals import record_job_started
 from bo.problem import CampaignSpec, require_rounds_within_ceiling
 from chemclaw.config import settings
 from chemclaw.ids import stable_hash
@@ -107,7 +108,11 @@ async def request_development_report(title: str, sections: list[ReportSection]) 
     except WorkflowAlreadyStartedError:
         # Same report already running or completed: hand back the existing id rather than
         # redrafting it (the QM tool's idempotency contract, applied here).
+        # Deliberately no `job_started` signal: this run already existed (and may already be
+        # finished), so announcing a start would be false. Mirrors `submit_qm_job`, which for the
+        # same reason does not re-mark an awaiting todo on a duplicate submit.
         return workflow_id
+    record_job_started(handle.id, "report")
     return handle.id
 
 
@@ -145,7 +150,8 @@ async def start_optimization_campaign(spec: CampaignSpec) -> str:
             id_reuse_policy=WorkflowIDReusePolicy.ALLOW_DUPLICATE_FAILED_ONLY,
         )
     except WorkflowAlreadyStartedError:
-        return workflow_id
+        return workflow_id  # already running/finished — see the note in the report tool
+    record_job_started(handle.id, "campaign")
     return handle.id
 
 

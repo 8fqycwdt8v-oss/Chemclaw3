@@ -17,6 +17,7 @@ from typing import Any
 
 from agent_framework import AgentSession
 
+from agents.harness_todo import todo_titles
 from agents.identity_context import reset_current_identity, set_current_identity
 from agents.session_context import (
     reset_current_session,
@@ -24,6 +25,7 @@ from agents.session_context import (
     set_current_session,
     set_current_session_id,
 )
+from agents.turn_signals import JobSignal, ProposalSignal, begin_turn, drain, end_turn
 from agents.verifier import verify_turn_answer
 from chemclaw.config import settings
 from service.budget import BudgetTracker
@@ -32,6 +34,9 @@ from service.events import (
     ApprovalRequestEvent,
     ErrorEvent,
     Event,
+    JobStartedEvent,
+    NoteProposedEvent,
+    PlanEvent,
     TokenEvent,
     ToolCallEvent,
 )
@@ -82,6 +87,12 @@ async def run_turn(
     live_session_token = set_current_session(session)
     # Stamp the authenticated identity (F4) so audit/authorization/attribution see the user.
     identity_token = set_current_identity(actor, roles) if actor is not None else None
+    # Buffer for what tools learn mid-turn that the stream must surface (started jobs, PR-gate
+    # proposals) — the runner only sees the model's updates, so tools hand these over out of band.
+    signals_token = begin_turn()
+    # The harness's todo list as last rendered, so a plan is emitted when it first appears and
+    # again whenever it changes — not once per update (which would spam an unchanged plan).
+    last_plan: list[str] = []
     try:
         async with AsyncExitStack() as stack:
             # Open each MCP capability server for the duration of the turn, then tear it down — the
@@ -91,6 +102,11 @@ async def run_turn(
             stream = agent.run(user_message, stream=True, session=session)
             async for update in stream:
                 turn_tokens += _usage_tokens(update)
+                # Drain *before* this update's own content: a tool that ran while the model was
+                # producing this update ran before the text it then produced, so emitting the
+                # signal first is the truthful transcript order (RCH-4/RCH-5).
+                for signal in drain():
+                    yield _signal_event(signal)
                 text = getattr(update, "text", "") or ""
                 if text:
                     answer_parts.append(text)
@@ -99,6 +115,15 @@ async def run_turn(
                     yield ToolCallEvent(tool=tool_name, arguments=arguments)
                 for request in getattr(update, "user_input_requests", None) or []:
                     yield ApprovalRequestEvent(prompt=_approval_prompt(request))
+                plan = await _current_plan(session)
+                if plan and plan != last_plan:
+                    last_plan = plan
+                    yield PlanEvent(todos=plan)
+            # A signal recorded while producing the *final* update has no next iteration to carry
+            # it, so drain once more before the answer — otherwise the last job started or note
+            # proposed in a turn would be silently dropped.
+            for signal in drain():
+                yield _signal_event(signal)
         yield await _answer_event("".join(answer_parts))
     except Exception:
         # One turn's failure becomes one user-safe event, never a 500 mid-stream or a leaked trace.
@@ -115,6 +140,7 @@ async def run_turn(
     finally:
         if budget is not None:
             budget.record(session.session_id, actor, turn_tokens)
+        end_turn(signals_token)
         reset_current_session_id(session_token)
         reset_current_session(live_session_token)
         if identity_token is not None:
@@ -144,6 +170,34 @@ async def _answer_event(answer: str) -> AnswerEvent:
         unsupported_claims=[claim.text for claim in result.unsupported],
         review_required=result.confidence < settings.verifier_confidence_threshold,
     )
+
+
+def _signal_event(signal: JobSignal | ProposalSignal) -> Event:
+    """Map one out-of-band turn signal to its stream event (one place, so the two cannot drift)."""
+    if isinstance(signal, JobSignal):
+        return JobStartedEvent(job_id=signal.job_id, kind=signal.kind)
+    return NoteProposedEvent(note_id=signal.note_id, reference=signal.reference)
+
+
+async def _current_plan(session: Any) -> list[str]:
+    """The harness's todo titles for this session, or `[]` when the harness is off (gap RCH-5).
+
+    `PlanEvent` has been in the typed contract and rendered by the UI since F2, but nothing emitted
+    one — so `plan_only` autonomy, which the Helm chart ships as the production default, asked a
+    human to approve a plan the surface could never show. The titles are read from the harness's own
+    `TodoProvider` state, the same store `agents.harness_todo` mutates, so there is no second
+    representation of the plan to drift.
+
+    Best-effort by design: a plan is a *display* concern, and a failure to read it must never sink a
+    turn that is otherwise working.
+    """
+    if not settings.harness_enabled:
+        return []
+    try:
+        return await todo_titles(session)
+    except Exception:  # pragma: no cover - display-only path
+        logger.debug("could not read the harness plan for session %s", session.session_id)
+        return []
 
 
 def _usage_tokens(update: Any) -> int:

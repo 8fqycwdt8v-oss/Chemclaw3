@@ -39,6 +39,9 @@ class JobStartedEvent(BaseModel):
 
     type: Literal["job_started"] = "job_started"
     job_id: str
+    # What kind of durable job this is ("qm", "report", "campaign"), so a surface can label it
+    # without parsing the id. Defaulted so the field is additive for any existing consumer.
+    kind: str = "job"
 
 
 class JobCompletedEvent(BaseModel):
@@ -47,6 +50,20 @@ class JobCompletedEvent(BaseModel):
     type: Literal["job_completed"] = "job_completed"
     job_id: str
     summary: dict[str, object] = {}
+
+
+class NoteProposedEvent(BaseModel):
+    """A note was opened on a branch for human review through the PR-gate (gap RCH-4).
+
+    The GxP "AI proposes, human signs off" line is the architecture's spine, but it lived only in
+    a git host's UI: `propose_note` returned its reference into the model's context and the chemist
+    never learned their contribution landed. This carries the branch reference back to the surface
+    that produced it.
+    """
+
+    type: Literal["note_proposed"] = "note_proposed"
+    note_id: str
+    reference: str
 
 
 class ApprovalRequestEvent(BaseModel):
@@ -95,6 +112,7 @@ Event = (
     | JobStartedEvent
     | JobCompletedEvent
     | ApprovalRequestEvent
+    | NoteProposedEvent
     | AnswerEvent
     | ErrorEvent
 )

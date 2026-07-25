@@ -14,6 +14,7 @@ from pathlib import Path
 from pydantic import BaseModel, Field
 
 from agents.framing import frame_untrusted
+from agents.turn_signals import record_proposal
 from chemclaw.config import settings
 from kg.git_submitter import default_submitter
 from kg.graph import build_graph, neighborhood
@@ -159,4 +160,7 @@ async def propose_knowledge_note(
         source=source,
         created_by="agent",
     )
-    return await propose_note(note, default_submitter())
+    reference = await propose_note(note, default_submitter())
+    # Surface the opened branch on the turn's stream (gap RCH-4) — see `agents.turn_signals`.
+    record_proposal(note.id, reference)
+    return reference

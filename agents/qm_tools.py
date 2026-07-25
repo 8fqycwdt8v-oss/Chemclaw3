@@ -17,6 +17,7 @@ from temporalio.service import RPCError
 from agents.authz import authorize_trigger, require_actor
 from agents.harness_todo import mark_awaiting_job
 from agents.session_context import get_current_session, get_current_session_id
+from agents.turn_signals import record_job_started
 from chemclaw.config import settings
 from chemclaw.temporal_client import connect
 from workflows.models import QMJobInput, QMJobStatus, qm_job_key
@@ -74,6 +75,9 @@ async def submit_qm_job(molecule_smiles: str, method: str, basis_set: str) -> st
         # `todos_remaining` forever.
         return f"qm-{qm_job_key(job)}"
     await _mark_awaiting_if_harness(handle.id, molecule_smiles=molecule_smiles, method=method)
+    # Surface the launch on the turn's event stream (gap RCH-5). Only on a *fresh* start, for the
+    # same reason the awaiting todo is: a duplicate submit of a finished job never starts anything.
+    record_job_started(handle.id, "qm")
     return handle.id
 
 

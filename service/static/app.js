@@ -87,7 +87,10 @@ function applyEvent(evt, answerEl) {
       transcript.scrollTop = transcript.scrollHeight;
       return answerEl;
     case "job_started":
-      add("trace", `job started (${evt.job_id})`);
+      add("trace", `⏳ ${evt.kind || "job"} started (${evt.job_id})`);
+      return answerEl;
+    case "note_proposed":
+      add("trace", `📝 proposed ${evt.note_id} for review — ${evt.reference}`);
       return answerEl;
     case "approval_request":
       addApproval(evt);
