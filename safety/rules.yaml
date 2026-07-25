@@ -110,3 +110,48 @@ incompatible_pairs:
       these mixtures can ignite or detonate; verify the intended order of addition, dilution, and
       thermal control before running.
     citation: "Bretherick's Handbook of Reactive Chemical Hazards, 8th ed., oxidant/reductant mixtures"
+
+  # Named-substance pairs contributed from the F11 gap-closure branch. Structural SMARTS rather
+  # than names, so they fire however a source spells the reagent — the identity table
+  # (`chemclaw.reagents`) resolves the name, and these match the resolved structure.
+  - id: azide-with-dichloromethane
+    # X1 on both terminal nitrogens: RDKit sanitizes the azide *anion* to two one-coordinate N-
+    # atoms, so the X2 form (correct for an organic azide) silently never fires on a salt — the
+    # exact failure this table's header warns about, found by testing against parsed molecules.
+    left: "[N;X1-]=[N;X2+]=[N;X1-]"
+    right: "[CH2](Cl)Cl"
+    severity: high
+    explanation: >-
+      An azide salt together with dichloromethane forms di- and triazidomethane, which are
+      explosive and shock-sensitive and have caused documented laboratory detonations. Substitute
+      the solvent (MeCN, DMF or 2-MeTHF are the usual choices) rather than controlling for it.
+    citation: "Peet & Weber, Chem. Eng. News 1988, 66(31), 2; Bretherick's, 8th ed., diazidomethane"
+
+  - id: hydride-with-dipolar-aprotic
+    left: "[H-]"
+    right: "[$(CN(C)C=O),$(CS(C)=O)]"
+    severity: high
+    explanation: >-
+      Sodium hydride in DMF or DMSO undergoes a well-documented autocatalytic exotherm above
+      roughly 40 C. Use THF or 2-MeTHF, or hold below that temperature with active cooling and a
+      thermal screen before scaling.
+    citation: "Buckley et al., Org. Process Res. Dev. 2021, 25, 587 (NaH/DMF thermal runaway)"
+
+  - id: peroxide-with-ketone
+    left: "[OX2H][OX2H]"
+    right: "[#6][CX3](=[OX1])[#6]"
+    severity: high
+    explanation: >-
+      Hydrogen peroxide with a ketone forms cyclic acetone-peroxide species (TATP/TCAP), which are
+      primary explosives. Choose a different oxidant or a non-ketone solvent; this is not a
+      combination to control for.
+    citation: "Bretherick's Handbook of Reactive Chemical Hazards, 8th ed., peroxide/ketone"
+
+  - id: complex-hydride-with-chlorinated-solvent
+    left: "[$([AlH4-]),$([BH4-])]"
+    right: "[CX4](Cl)(Cl)"
+    severity: medium
+    explanation: >-
+      Complex hydride reducing agents react exothermically, and on scale violently, with
+      chlorinated solvents. Use an ethereal solvent (THF, 2-MeTHF, Et2O).
+    citation: "Bretherick's Handbook of Reactive Chemical Hazards, 8th ed., metal hydrides"

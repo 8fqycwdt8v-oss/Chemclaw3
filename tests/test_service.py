@@ -105,7 +105,7 @@ def test_a_launched_job_reaches_the_browser_as_an_sse_event() -> None:
     The end-to-end half of D-042: without it the chemist saw nothing between their message and
     the answer, with the first sign of the job arriving only as the completion push-back.
     """
-    from agents.job_events import announce_job_started
+    from agents.turn_signals import announce_job_started
 
     class _JobAgent(_FakeAgent):
         def run(self, message: str, *, stream: bool, session: AgentSession) -> object:
@@ -123,8 +123,13 @@ def test_a_launched_job_reaches_the_browser_as_an_sse_event() -> None:
                 if line.startswith("data:"):
                     events.append(json.loads(line[len("data:") :].strip()))
 
-    assert [e["type"] for e in events] == ["token", "job_started", "answer"]
-    assert events[1]["job_id"] == "qm-sse"
+    # Order is chronological: the fake announces the job *before* yielding its text, and the
+    # consolidated sink (agents.turn_signals) drains at the top of each update for exactly that
+    # reason — a tool that ran while the model was producing an update ran before the text it then
+    # produced. main's original assertion had token-first, which reported the text ahead of the job
+    # that preceded it; the property this test names ("before the answer") holds either way.
+    assert [e["type"] for e in events] == ["job_started", "token", "answer"]
+    assert events[0]["job_id"] == "qm-sse"
 
 
 def test_turn_is_shed_with_503_at_capacity(monkeypatch) -> None:  # type: ignore[no-untyped-def]
@@ -707,6 +712,7 @@ def test_every_session_scoped_route_is_ownership_gated() -> None:
     assert inventory == {
         ("/sessions/{session_id}/messages", "POST"),
         ("/sessions/{session_id}/events", "GET"),
+        ("/sessions/{session_id}/attachments", "POST"),
     }, (
         "new session-scoped route detected — it MUST resolve ownership via _resolve_session, "
         "and this inventory + the non-owner sweep below must cover it"
@@ -722,7 +728,12 @@ def test_every_session_scoped_route_is_ownership_gated() -> None:
     for route in session_routes:
         for method in (route.methods or set()) - {"HEAD", "OPTIONS"}:
             url = route.path.format(session_id=session_id)
-            res = client.request(method, url, json={"message": "x"})
+            # The upload route takes multipart, the others JSON; send whichever the route expects so
+            # a 404 here proves the *ownership* gate rather than a body-parsing rejection.
+            if url.endswith("/attachments"):
+                res = client.request(method, url, files={"file": ("a.txt", b"x", "text/plain")})
+            else:
+                res = client.request(method, url, json={"message": "x"})
             assert res.status_code == 404, (
                 f"{method} {route.path} answered {res.status_code} for a non-owner — "
                 "it must resolve ownership (404, no existence leak) before doing anything"

@@ -58,6 +58,9 @@ jobs:
       - name: Validate skills
         run: make skill-validate
 
+      - name: Validate the prose/tool contract
+        run: make prose-validate
+
       # The deployment gate (DA-10/D-2): the Helm chart is the one artifact no test can exercise
       # offline, and a broken chart is only discovered at `helm install` — in production, on the
       # worst day. Rendering it and checking the result against the Kubernetes schemas is the

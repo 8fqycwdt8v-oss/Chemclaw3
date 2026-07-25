@@ -2147,3 +2147,336 @@ one's own assumptions back; they would buy confidence, not correctness.
 ignored) and plausibly useful to an operator reading `kubectl describe`, so it is allow-listed by
 name in the parity test rather than deleted or the check loosened — any *other* non-field key is a
 real finding.
+
+## D-083 — F11 waves 0–3: closing the capability gaps (deployment, reachability, chemistry)
+
+**Phase F11 wave 0–3: closing the capability gaps found in `docs/audit/12-capability-gap-analysis.md`.**
+
+**Context.** A whole-codebase completeness sweep asked "what does this system need that nobody has
+listed yet?" — a different question from the AG-*/KM-* gap docs, which checked named capabilities
+against a checklist. The answer reframed the priority order: the engine is sound (as those docs
+concluded), but the seams *around* it had three classes of hole, and the sharpest ones were
+capability the repo had already paid for and could not use.
+
+**Decision (what was built, and the reasoning that shaped each).**
+
+1. **The chart could not run the knowledge layer in either direction.** Readers resolve
+   `knowledge_dir` as a local path; the chart mounted no volume and ran no sync, so a merged note
+   never reached a live pod. `GitNoteSubmitter` needs a push credential; the chart declared three
+   secrets, none of them git. Fixed with a clone-or-refresh replica (init container + sidecar) and
+   a separate writable submitter clone. The two are deliberately **different directories**:
+   `git checkout -B note/<id>` switches a whole working tree, so the submitter cannot share the
+   tree readers are reading. Refresh is `fetch`+`reset --hard`, never `pull` — a read replica must
+   not be able to land on a merge conflict.
+
+2. **The image was missing what the running components read.** `skills/`, `scripts/`, `evals/` and
+   `knowledge/` were never COPYed and `git` was never installed. In-cluster this meant the agent
+   advertised *no skills at all*, no Temporal Schedule could ever be created (nothing ran
+   `scripts.schedules`), and the PR-gate could not shell out to git — three silent capability
+   losses, none of which fails a test or a lint. `tests/test_deploy_chart.py` now gates image
+   completeness, include/values resolution, control-flow balance, and entrypoint dispatch offline;
+   F6's "offline-verified" check had confirmed the chart was *well-formed*, not *sufficient*, and
+   that distinction is the whole lesson.
+
+3. **Three finished subsystems had no caller.** `DevelopmentReportWorkflow`, `BoCampaignWorkflow`,
+   and the human half of `InteractionApprovalWorkflow` were implemented, tested and
+   worker-registered, reachable only from the Temporal CLI. The repo's rule is "no abstraction
+   without a second caller"; this is the inverse failure — a complete implementation with zero —
+   and it is worse than absent because the backlog marks the phases complete. The approval decision
+   is an **HTTP route, never an agent tool**: a tool would let the agent approve its own candidate
+   and collapse the GxP line the PR-gate exists to draw.
+
+4. **Prose promised capability the code lacked.** Two independent findings turned out to be one
+   defect class: a skill directing the agent at `BoCampaignWorkflow` (uninvocable), and
+   `_INSTRUCTIONS` advertising impurity answers with no schema field. `make prose-validate` gates
+   it and immediately found a third, live instance — `deep-research/SKILL.md` taught three tool
+   names (`find_similar_*`) that differ from the agent's actual MCP tools and would have failed at
+   call time. This is the *deterministic half* of the AG-13 behavior eval, and unlike AG-13 it needs
+   no live LLM, so the AG-13 deferral never covered it.
+
+5. **Chemistry the prompt already promised.** `performed_at` gives the largest note class a time
+   axis and finally feeds F10-G2's bi-temporal fields; `purity_percent`/`impurities` make the
+   advertised impurity answers possible. A test pins that none of it reaches `reaction_smiles()` —
+   feeding structure would have changed every DRFP fingerprint and silently invalidated the
+   structural index. `resolve_compound` bridges names to structures (and unblocks the deferred
+   per-step species linking, whose own trigger was "a name→SMILES tool exists"). `screen_hazards`
+   is the safety layer `BACKLOG.md` said to scope "before any capability phase that could propose a
+   hazardous route" — that phase had shipped.
+
+6. **Two refusals are as load-bearing as the additions.** Retention prunes spent operational rows
+   but **refuses** `audit_events` (deleting from a hash chain is indistinguishable from the
+   tampering it detects; safe disposal needs archive-then-reseal, a GxP design decision for its own
+   ADR with QA sign-off) and `calculation_results` (age is the wrong axis for a cache — D-011 makes
+   eviction a silent recomputation, potentially an HPC run). Similarly, `screen_hazards` reports
+   `unresolved` species as prominently as findings, so a clean report cannot read as a clearance.
+
+**Correction recorded.** **AGT-1 ("no turn cancellation") was withdrawn as a false finding.** The
+claim — that an abandoned turn holds its admission permit and never books its tokens — rested on a
+`grep` for `CancelledError` returning nothing. That was true but not load-bearing: the handling is
+structural (sse-starlette closes the generator; the front door's and runner's `finally` blocks
+release the permit and book the budget), and was already correct as of `4bc9b04`.
+`tests/test_turn_cancellation.py` measures it and is kept, because nothing previously *proved* the
+behavior and a plausible refactor (an `await` in the runner's `finally`) would reintroduce exactly
+the leak that was alleged. The analysis document records the withdrawal rather than quietly
+dropping the row.
+
+**Consequences.** Six new config groups (all default-off where they change a path), three new
+Schedules (reindex, retention, gated on explicit opt-in), one new skill (`process-safety`), one new
+CI gate (`make prose-validate`), and the chart is deployable. W3's remainder (metrics, schedule
+health, mid-turn resume) and all of W4 stay open and are listed in `BACKLOG.md` — scaling the work
+down mid-wave is the user's call, so the boundary is recorded rather than blurred.
+
+## D-084 — F11 waves 3–4: operating the system; the knowledge model reasoning about itself
+
+**Phase F11 waves 3–4: operating the system, and the knowledge model reasoning about itself.**
+
+**Context.** D-083 closed the deployment and reachability gaps. This completes the phase: the
+operational surfaces the system had no way to expose, and the knowledge-model capabilities it had no
+way to ask for.
+
+**Decision (and the reasoning that shaped each).**
+
+1. **Metrics without a dependency, and only what a scrape needs.** `service/metrics.py` renders the
+   Prometheus text format directly rather than adding `prometheus_client` — ~80 lines of stable
+   protocol against another package to install, scan and pin. Counters and gauges only: latency
+   distribution already rides the OTel trace pipeline, and duplicating it would create a second
+   source of truth. Gauges are *callables over live structures*, so they cannot drift from what
+   they describe. The route carries no labels at all, which is what lets it stay unauthenticated
+   (like `/healthz`) without leaking a session id or user.
+
+2. **Schedule health reads Temporal, not a mirror.** Temporal already knows when a Schedule fired
+   and how often; a second table could only ever disagree with it. A *planned* Schedule missing from
+   Temporal is reported rather than omitted — "the job was never applied" is exactly the failure the
+   surface exists to show, and silence makes it indistinguishable from a healthy quiet job.
+
+3. **Two refusals, again, are the substance.** Retention refuses `audit_events` (deleting from a
+   hash chain is indistinguishable from the tampering it detects) and `calculation_results` (age is
+   the wrong axis for a cache; D-011 makes eviction a silent recomputation). The pattern repeats in
+   `screen_hazards` reporting `unresolved` as prominently as findings: **a capability that cannot
+   cover something must say so, or its silence reads as a clearance it has not earned.**
+
+4. **Mid-turn resume is defined by its failure modes.** Opt-in (holding a turn open holds an
+   admission permit), bounded below the front door's deadline, non-recursive (else one turn could
+   hold a permit indefinitely by launching a job from each continuation), and degrading to the
+   *previous* behavior — result on the next turn — rather than to an error.
+
+5. **Dry-run is ambient, never a tool argument.** As an argument the model could clear it, turning a
+   chemist's requested dry run into a real HPC submission, or set it, silently no-op'ing real work.
+   The same reasoning already governs the ambient session and identity.
+
+6. **The knowledge model can now be asked about itself.** `kg/analytics.py` answers "what don't we
+   know" — the complement of outward traversal, and the question that actually steers experimental
+   design. `KNOWN_NOTE_TYPES` is enforced by `kg-validate` rather than by the schema, so the agent
+   may still *propose* a new type and a human judges it at the PR-gate. `outcome_class` gives
+   negative results somewhere to live, and the filter keeping failures out of playbook distillation
+   is the load-bearing half — without it a repeated failure distils into a recommendation.
+
+7. **One identity table, three consumers.** `chemclaw.reagents` (W2) now backs the hazard screen,
+   the compound notes (KNW-7) and the conditions vocabulary (KNW-4). That is the Rule of Three
+   satisfied by real callers rather than anticipated ones, and it is why `DMF`,
+   `N,N-dimethylformamide` and `CN(C)C=O` can no longer split one campaign into two.
+
+8. **Preferences are deliberately not graph notes.** Routing "Anna prefers 2-MeTHF" through the
+   PR-gate would ask a reviewer to sign off on personal trivia — which is how a gate stops being
+   taken seriously. The graph holds what the organisation knows; `user_preferences` holds how one
+   person works.
+
+**Two findings closed as not-gaps after assessment**, recorded so they are not re-opened blindly:
+**TOOL-7** (units are carried in field names throughout, including every model added in this phase;
+a `Quantity` type would be an abstraction with no second caller) and **AGT-6** (the W1 tools take
+typed pydantic arguments, so MAF already forces a validated payload at the machine-consumed call
+site whose absence was the original reason to defer structured outputs).
+
+**Consequences.** Five items remain open and are listed in `BACKLOG.md` with the reason each is not
+built. Three are blocked on a decision or a prerequisite rather than on effort (TOOL-6 needs a
+literature-source decision; AGT-3 needs a first real document format; IDEA-6 depends on AGT-3), and
+two are genuinely sizeable and warrant their own design note (IDEA-2 predicted-vs-actual
+calibration, IDEA-1 standing queries). Stopping on those boundaries rather than half-building them
+is the deliberate call.
+
+## D-085 — F11 completion: the five items blocked on a decision or a prerequisite
+
+**Phase F11 completion: the five items that were blocked on a decision or a prerequisite.**
+
+**Context.** D-084 closed W3–W4 except five items I had recorded as blocked. Asked to implement them
+anyway, the right move was the one D-057 already established for this repo: **make the blocking
+decision explicitly and record it, rather than defer a second time.** Each decision below is stated
+in the module that embodies it, so a future reader sees the reasoning at the point of use.
+
+**Decisions.**
+
+1. **External literature source → PubChem PUG-REST** (TOOL-6). Chosen because it is the only option
+   clearing every constraint this repo actually has: public and licence-clean (Reaxys/SciFinder need
+   a site licence this repo cannot assume), credential-free (every other external integration here
+   needs a secret), and **structure-keyed** — it answers by the same key the fingerprint index uses,
+   so a hit joins the corpus without a second naming scheme. The alternatives are not excluded; they
+   are one sibling class each, which is exactly what the F7 retriever seam was built to buy.
+   Retrieval is by structure only: free-text search over a chemistry question returns noise, so a
+   query with no parseable structure returns empty rather than guessing — the same conservatism
+   `resolve_compound` applies. Every failure mode degrades to *empty*: external evidence must never
+   be able to sink an answer the internal corpus could already give.
+
+2. **Upload formats → a closed allowlist that refuses what it cannot parse** (AGT-3). Markdown,
+   plain text, CSV and TSV parse completely and deterministically offline. PDFs, spectra and images
+   are **refused with a message naming what is supported**. This is the load-bearing half: a PDF
+   "read" by scraping whatever bytes look like text produces confident nonsense a chemist cannot
+   distinguish from a real reading, which is strictly worse than the gap. Attachments are
+   session-scoped working material, never knowledge — routing an upload into the graph would bypass
+   the PR-gate.
+
+3. **Backfill proposes documents verbatim, one note each** (IDEA-6). No summarizing, no extraction,
+   no chunking. A backfill's job is to make existing documents *reachable*; deciding what they mean
+   belongs to the retrieval and synthesis layers. An LLM-summarized backfill would put thousands of
+   unreviewed paraphrases into the corpus, which is the fastest way to make a knowledge graph
+   untrustworthy. Ids follow content, not filename, so a rename cannot mint a duplicate.
+
+4. **Calibration reports three figures, not one** (IDEA-2). Bias says whether a calculator is
+   *correctable*; MAE says how far off it typically is; **uncertainty coverage** says how often the
+   truth fell inside the stated error bars — the figure a mean error cannot show, and the one that
+   distinguishes "imprecise but honest" from "precise-looking and misleading". `n` accompanies every
+   figure because a bias from three points is not a bias. Recording is best-effort throughout: a
+   ledger about predictions must never cost a prediction.
+
+5. **Digest watermarks advance after delivery** (IDEA-1). A crash between "found matches" and
+   "delivered" must re-report rather than silently skip: a duplicate digest line is a nuisance, a
+   missed one defeats the feature entirely.
+
+**A pre-existing test earned its keep.** `test_every_session_scoped_route_is_ownership_gated`
+enumerates session-scoped routes rather than hardcoding them, and failed the moment the attachments
+route appeared — forcing a conscious update plus a behavioural non-owner sweep over the new route.
+That is exactly the design intent of an inventory assertion, and worth copying.
+
+**Consequences.** Phase F11 is complete: every finding in `docs/audit/12-capability-gap-analysis.md`
+is either implemented or explicitly closed as a not-gap, with three findings (AGT-1, TOOL-7, AGT-6)
+withdrawn after assessment and recorded in `DEFERRED.md` so they are not re-opened blindly. Two
+things remain genuinely out of reach here and are unchanged: the live edges needing a real
+tenant/broker/cluster, and the audit-trail archive-then-reseal design, which needs an ADR with QA
+sign-off rather than a cleanup job.
+
+## D-086 — First reconciliation with `main` (PRs #17–#20): hazard screen, event sink, tool registry
+
+**Context.** While this branch built F11, `main` merged PRs #17–#20, three commits of which solved
+problems this branch had also solved, independently and differently: hazard screening (`744c265`,
+D-080), `PlanEvent`/`JobStartedEvent` emission (`f2e083a`, D-077), and the `@tool` capability
+registry (`76c03b2`). Merging without reconciling would have shipped two hazard screens, two
+per-turn contextvar sinks, and a hardcoded tool list alongside a registry.
+
+**Decisions — each resolved on merit, not on which side wrote it first.**
+
+1. **Hazard screening: `main`'s `safety/` wins outright; this branch's module is deleted.** Its rule
+   table is *data* (`safety/rules.yaml`) that a process-safety chemist maintains without touching
+   Python, every rule carries a literature citation, and it is enforced by a `kg-validate` gate plus
+   a `hazard_flag_recall` eval metric. This branch's `chemclaw/hazard.py` was a Python table with
+   none of that. What was genuinely additive — four **named-substance incompatibility pairs** (azide
+   salt + DCM, NaH + DMF/DMSO, peroxide + ketone, complex hydride + chlorinated solvent), each safe
+   apart and dangerous together and therefore invisible to a per-substance screen — moved into
+   `rules.yaml` as SMARTS pair rules. `tests/test_safety_pairs.py` pins them.
+
+   **The azide rule earned its own comment.** Written the obvious way (the X2 form correct for an
+   *organic* azide) it silently never fired on an azide **salt**, because RDKit sanitizes the anion
+   to two one-coordinate nitrogens. It was caught only by screening a parsed molecule — exactly what
+   `rules.yaml`'s own header instructs a contributor to do, and the same trap PR #20 recorded for
+   perchlorate and permanganate. A rule that never fires is worse than no rule: it reports "no rule
+   matched" for a hazard the table claims to cover.
+
+2. **One event sink, not two.** `main`'s `agents/job_events.py` and this branch's
+   `agents/turn_signals.py` are the same design (a task-local contextvar drained between streamed
+   updates) with the same rationale. This branch's is a strict superset — it also carries PR-gate
+   proposals and clarifying questions, and preserves their order *relative to* job launches.
+   Consolidated onto it, keeping `main`'s function names as the caller-facing API so its callers and
+   tests were untouched. Two sinks drained separately would have left the relative order of a
+   launched job and a proposed note undefined, which is precisely what a transcript must get right.
+
+3. **Drain ordering: signal-first, and `main`'s test assertion corrected.** A tool that ran while
+   the model was producing an update ran *before* the text it then produced. `main`'s test fake
+   announces its job before yielding text, so its `["token", "job_started"]` assertion reported the
+   text ahead of the job that preceded it. Flipped, with the reasoning recorded at the assertion —
+   the property that test names ("before the answer") holds either way.
+
+4. **The `@tool` registry is adopted wholesale.** `main`'s `_capability_tools()` assembles from the
+   registry, so this branch's 19 new tools became decorators at their definition sites and their
+   modules joined the registration-side-effect import block. `agents/chemclaw_agent.py` was taken
+   from `main` unchanged.
+
+**Two inventory guards did their job.** `test_registry_holds_exactly_the_inprocess_tools` and
+`test_every_session_scoped_route_is_ownership_gated` both enumerate rather than hardcode, and both
+failed the moment new tools and a new session-scoped route appeared — forcing a conscious update
+instead of silent drift. That pattern is worth applying to further families.
+
+**Result.** 857 passing (41 offline skips unchanged), ruff + `mypy --strict` clean, `kg-validate` /
+`skill-validate` / `prose-validate` / `eln-validate` all green — with one hazard screen, one event
+sink, and one tool registry.
+
+## D-087 — Second reconciliation with `main` (PR #21): the MCP transport union
+
+`main` landed its own transport discrimination while this branch's networked-MCP work (gap TOOL-1)
+was in flight. **`main`'s wins outright.** It is a proper discriminated union
+(`StdioMcpServerSpec | HttpMcpServerSpec`) with a *callable* discriminator that defaults an absent
+tag to `stdio`, so every existing config keeps loading; this branch had one class with an
+either/or `command`-xor-`url` validator, which is exactly the ambiguity a union removes. Per-variant
+`request_timeout` also supersedes this branch's global `mcp_request_timeout_seconds` — the timeout
+belongs to the remote spec that needs it, not to every server including local subprocesses.
+
+The dispatch in `_mcp_tool` came from `main` unchanged; this branch's contribution here reduces to
+the chart-side half (gap DEP-3: the standalone MCP Deployments were default-on while stdio-only,
+i.e. a crash loop), which is unaffected and still needed.
+
+Three guards caught the fallout rather than letting it drift: `mypy --strict` on the leftover field
+from the resolution, `test_env_example_documents_only_real_fields` on the now-nonexistent env key,
+and the chart test on the superseded constructor. That is three independent gates on one merge
+mistake, which is the point of having them.
+
+## D-088 — Third reconciliation with `main` (PR #23): ADR renumbering, and the chart's env parity guard
+
+`main` landed the graph-cache TTL and the Helm render gate while this branch was in review. Two
+resolutions were mechanical (both CI steps and both `make` targets are additive; the `tasks/todo.md`
+logs are append-only and both kept). Three were not.
+
+**The ADR numbers had collided head-on, and this is the fix.** This branch appended its ADRs as
+D-074…D-076 and D-081…D-082 while `main` had independently allocated the *same* numbers for
+different decisions — a defect this branch introduced in the first reconciliation and that nobody
+caught, because nothing checks the log for uniqueness. `main`'s allocation keeps the numbers (it
+merged first and its numbers are already cited from `BACKLOG.md`, `docs/backlog-plan.md` and
+`DEFERRED.md`); this branch's five renumber to **D-083…D-087**, and the seven references that
+pointed at them — `tasks/todo.md`, `docs/gap-closure-plan.md`, `DEFERRED.md`, `agents/chem_tools.py`,
+`tests/test_safety_pairs.py` — move with them. An append-only log with duplicate ids is not an
+audit trail, so the collision is fixed rather than annotated.
+
+**`main`'s new chart test caught a real defect in this branch, and the fix widened the guard.**
+`test_chart_config_keys_are_real_settings` asserts every `CHEMCLAW_*` env the chart injects names a
+real `Settings` field — the point being that pydantic-settings *silently ignores* an unknown
+prefixed environment variable, so an operator who sets it gets no error and no effect. This branch's
+knowledge-sync work added five such keys (`…_REPO_TOKEN`, `…_REPO_URL`, `…_SYNC_DIR`,
+`…_PUBLISH_DIR`, `…_SYNC_INTERVAL_SECONDS`), and only one of them was even visible to the test.
+
+The naive resolution — exempt them — would have thrown away the guard. The premise it encodes is
+slightly too narrow rather than wrong: the real invariant is not "every key is a `Settings` field"
+but **"every key is read by something"**, and `deploy/knowledge-sync.sh` and `deploy/entrypoint.sh`
+are first-party consumers that happen to be shell. So the check now (a) reads the `_helpers.tpl`
+env block as well as `values.yaml`, closing the half of the surface it could not see, and (b)
+*discovers* the shell-consumed names by scanning `deploy/*.sh` instead of listing them. Discovery,
+not a list: the earlier lesson on this branch was that a guard which enumerates catches drift while
+one that hardcodes only catches what someone already thought of. Mutation-verified by adding a
+`CHEMCLAW_TYPO_SETTING` key to `values.yaml` — the guard names it.
+
+The knowledge-repo push credential is therefore a *fourth* declared secret, against the
+three-secret model (D-047). Recorded rather than waved through: the PR-gate submitter shells out to
+`git push` and a git host authenticates that push with a token — there is no federated exchange for
+it the way there is for the Entra-fronted APIs. The alternative is a knowledge layer that cannot
+write.
+
+A companion test asserting shell-consumed keys are never *also* `Settings` fields was written and
+then deleted: every overlap it found (`CHEMCLAW_SERVICE_HOST`/`_PORT`, which `entrypoint.sh` passes
+to uvicorn) was shared by design, so its exemption list equalled its finding list. A guard with no
+possible signal is decoration.
+
+**`service/runner.py` had absorbed two of everything.** Both branches had independently built a
+per-turn signal sink and a "last plan emitted" variable, and the auto-merge kept all four. The
+consequences were live, not cosmetic: `begin_turn()` and `set_job_sink()` are the *same* contextvar,
+so calling both nested one buffer inside the other and the teardown reset them out of LIFO order;
+and two `_current_plan` definitions meant the second silently shadowed the first. Consolidated to
+one sink and one plan variable. `main`'s `_current_plan` is the one kept — its `None` return
+distinguishes "this agent has no plan" from "this agent does not plan", which an empty list cannot
+express — with this branch's reason-for-existing (gap RCH-5) folded into its docstring. The
+post-resume drain now takes the whole signal buffer rather than only job ids, so a note proposed
+during a mid-turn resume still reaches the stream.

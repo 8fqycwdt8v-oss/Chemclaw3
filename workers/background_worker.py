@@ -16,6 +16,7 @@ from temporalio.worker import Worker
 from chemclaw.config import settings
 from chemclaw.logging import configure_logging, configure_telemetry
 from chemclaw.temporal_client import connect
+from workflows.audit_verify import AuditChainVerifyWorkflow, check_audit_chain
 from workflows.bo_activities import (
     evaluate_candidates,
     propose_initial,
@@ -23,6 +24,7 @@ from workflows.bo_activities import (
 )
 from workflows.bo_campaign import BoCampaignWorkflow
 from workflows.bo_knowledge import write_campaign_node
+from workflows.digest import DigestWorkflow, acknowledge_digest, collect_digests
 from workflows.eln_sync import (
     ElnSyncWorkflow,
     list_ingest_sources,
@@ -46,6 +48,7 @@ from workflows.memory_jobs import (
     build_playbook_notes_activity,
     publish_memory_note_activity,
 )
+from workflows.note_index import NoteReindexWorkflow, reindex_notes_activity
 from workflows.notify import record_session_event_activity
 from workflows.orchestrator import resolve_fan_out_limit
 from workflows.report_workflow import (
@@ -54,6 +57,7 @@ from workflows.report_workflow import (
     propose_report,
     retrieve_section,
 )
+from workflows.retention import RetentionWorkflow, prune_expired_rows
 
 logger = logging.getLogger(__name__)
 
@@ -70,6 +74,10 @@ BACKGROUND_WORKFLOWS: list[type] = [
     ReportSectionWorkflow,
     InteractionApprovalWorkflow,
     EvalDriftWorkflow,
+    NoteReindexWorkflow,
+    RetentionWorkflow,
+    AuditChainVerifyWorkflow,
+    DigestWorkflow,
 ]
 BACKGROUND_ACTIVITIES: Sequence[Callable[..., Any]] = [
     propose_initial,
@@ -88,6 +96,11 @@ BACKGROUND_ACTIVITIES: Sequence[Callable[..., Any]] = [
     retrieve_section,
     propose_report,
     propose_confirmed_answer_activity,
+    reindex_notes_activity,
+    prune_expired_rows,
+    check_audit_chain,
+    collect_digests,
+    acknowledge_digest,
     record_session_event_activity,
     check_eval_drift,
     resolve_fan_out_limit,

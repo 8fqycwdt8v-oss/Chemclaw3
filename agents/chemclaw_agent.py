@@ -40,13 +40,19 @@ from agent_framework._harness._loop import todos_remaining
 # (a registration side effect, exactly as `evals/__init__.py` seeds the metric registry). With the
 # registry populated, `_capability_tools` assembles the advertised set from it instead of from a
 # hand-maintained list — so adding a tool is a `@tool` at its definition site, not an edit here.
+from agents import attachments as _attachments  # noqa: F401
 from agents import bo_tools as _bo_tools  # noqa: F401
 from agents import calc_tools as _calc_tools  # noqa: F401
+from agents import chem_tools as _chem_tools  # noqa: F401
+from agents import dialogue_tools as _dialogue_tools  # noqa: F401
+from agents import durable_tools as _durable_tools  # noqa: F401
 from agents import graph_tools as _graph_tools  # noqa: F401
 from agents import memory_tools as _memory_tools  # noqa: F401
+from agents import preferences as _preferences  # noqa: F401
 from agents import qm_tools as _qm_tools  # noqa: F401
 from agents import research_tools as _research_tools  # noqa: F401
 from agents import safety_tools as _safety_tools  # noqa: F401
+from agents import subscriptions as _subscriptions  # noqa: F401
 from agents.audit import AuditSink, make_audit_middleware
 from agents.llm_provider import build_chat_client
 from agents.profiles import AgentProfile, get_profile

@@ -51,7 +51,6 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 class StdioMcpServerSpec(BaseModel):
     """Launch spec for one **stdio** MCP server the agent attaches as a capability (D-029).
 
-    `command` + `args` are how MAF's `MCPStdioTool` spawns the server as a subprocess;
     `allowed_tools` restricts which of that server's tools the conversational agent may call
     (the write/index tools are excluded — ingestion writes go through the PR-gate, not chat).
     """
@@ -61,7 +60,7 @@ class StdioMcpServerSpec(BaseModel):
     transport: Literal["stdio"] = "stdio"
     name: str
     command: str
-    args: list[str]
+    args: list[str] = Field(default_factory=list)
     allowed_tools: list[str] | None = None
 
 
@@ -862,6 +861,9 @@ class KgSettings(BaseSettings):
     # `fingerprint_max_top_k` bounds for substructure search. Hitting the cap logs a warning, so a
     # truncated result is never silent (D-066 #4).
     graph_max_results: int = Field(default=50, ge=1)
+    # Edge length of a rendered structure depiction (gap TOOL-5). Config, not a magic number, so a
+    # deployment whose surface renders larger cards can change it without a code edit.
+    structure_render_size_px: int = Field(default=320, gt=0)
     # PR-gate git settings (plan steps 2.7, 2.8): agent notes branch off this base
     # branch on this remote before a human merges.
     note_base_branch: str = "main"
@@ -1125,6 +1127,56 @@ class MemorySettings(BaseSettings):
     # Temporal Schedule cadence for the memory-synthesis jobs (`scripts/schedules.py`): they
     # re-scan the whole corpus, so they run less often than the cursor-driven ELN sync.
     memory_synthesis_schedule_minutes: float = Field(default=1440.0, gt=0)
+    # Fraction of a Schedule's interval used as a deterministic per-job phase offset (gap SCH-3).
+    # The memory jobs share one cadence and each re-scans the whole corpus, so without an offset
+    # they fire together against one background worker. 0 disables the spread.
+    schedule_jitter_fraction: float = Field(default=0.2, ge=0.0, lt=1.0)
+    # Retention windows in days (gap SCH-1). Nothing in the system deleted anything before this, so
+    # every durable table grew for the deployment's lifetime. 0 disables pruning for that table,
+    # which is the default: a retention period is a *policy* decision (GxP: keep for N years, then
+    # dispose, provably), so a deployment must state it rather than inherit a number from code.
+    # `audit_events` and `calculation_results` are deliberately absent — see workflows/retention.py
+    # for why each needs its own design rather than an age cutoff.
+    retention_enabled: bool = False
+    retention_schedule_minutes: float = Field(default=1440.0, gt=0)
+    retention_timeout_seconds: float = Field(default=600.0, gt=0)
+    retention_session_events_days: int = Field(default=0, ge=0)
+    retention_session_messages_days: int = Field(default=0, ge=0)
+    # Scheduled verification of the tamper-evident audit chain (gap SCH-5). A chain checked only by
+    # a manual `make audit-verify` detects tampering only when someone remembers to look. Only
+    # earns a Schedule where a durable audit sink is actually configured.
+    audit_verify_enabled: bool = False
+    audit_verify_schedule_minutes: float = Field(default=1440.0, gt=0)
+    audit_verify_timeout_seconds: float = Field(default=600.0, gt=0)
+    # Mid-turn durable-job resume (gap AGT-2): when a turn launches a durable job, wait this long
+    # for its result and continue the *same* turn with it, so "compute this, then reason about the
+    # result" is one exchange. Off by default — holding a turn open holds an admission permit, so
+    # a deployment opts in deliberately. Must stay below `service_turn_timeout_seconds`, which
+    # bounds the whole streamed turn regardless.
+    mid_turn_resume_enabled: bool = False
+    mid_turn_resume_timeout_seconds: float = Field(default=60.0, gt=0)
+    # Predicted-vs-actual calibration ledger (gap IDEA-2). Off by default: it needs the
+    # `predictions` table (migration 016), and a deployment without it must not log warnings on
+    # every prediction. `calibration_min_observations` is the floor below which the figures are
+    # reported as not-yet-meaningful — a bias from three points is not a bias.
+    calibration_enabled: bool = False
+    calibration_min_observations: int = Field(default=8, ge=1)
+    # Standing-query digests (gap IDEA-1). Off by default: it needs the `subscriptions` table
+    # (migration 017), and a deployment nobody has subscribed on would just run an empty sweep.
+    digest_enabled: bool = False
+    digest_schedule_minutes: float = Field(default=1440.0, gt=0)
+    digest_timeout_seconds: float = Field(default=300.0, gt=0)
+    # Uploaded working files (gap AGT-3). Bounded in both directions: one oversized upload must not
+    # blow a pod's memory, and a chemist uploading all morning must not either. Attachments are
+    # session-scoped working material, so they are lost with the pod by design.
+    attachment_max_bytes: int = Field(default=2_000_000, gt=0)
+    attachment_max_per_session: int = Field(default=10, ge=1)
+    # External literature retriever (gap TOOL-6). PubChem PUG-REST: public, licence-clean, needs no
+    # credential, and answers by structure — the key this system already speaks. Attaches only when
+    # a deployment adds `literature` to `data_sources` (registry membership is the enable switch,
+    # D-018), so CI and offline runs never reach the network.
+    literature_base_url: str = "https://pubchem.ncbi.nlm.nih.gov/rest/pug"
+    literature_timeout_seconds: float = Field(default=10.0, gt=0)
 
 
 class RetrievalSettings(BaseSettings):
@@ -1149,6 +1201,13 @@ class RetrievalSettings(BaseSettings):
     retrieval_top_k: int = Field(default=8, gt=0)
     retrieval_mode: Literal["graph", "hybrid"] = "graph"
     retrieval_fusion_k: int = Field(default=60, gt=0)
+    # Per-retriever weight in the hybrid fusion (gap IDEA-5). RRF is score-agnostic, which is right
+    # for combining heterogeneous *rankers* and wrong for combining heterogeneous *evidence
+    # classes*: a validated internal ELN entry and a transferred analogy otherwise fuse identically.
+    # Keys are retriever names as they appear on `EvidenceChunk.retriever`; an absent retriever
+    # weighs 1.0, and an empty map (the default) is exactly today's uniform behavior.
+    # ENV override is JSON, e.g. CHEMCLAW_RETRIEVAL_SOURCE_WEIGHTS='{"graph": 1.5, "vector": 0.8}'.
+    retrieval_source_weights: dict[str, float] = Field(default_factory=dict)
     # How much of a source note's body an excerpt carries — shared by the report harness's
     # evidence excerpts and the memory layer's procedure excerpts (one note-excerpt budget,
     # neutral name since both consume it), so the two cannot drift.
@@ -1180,6 +1239,21 @@ class RetrievalSettings(BaseSettings):
     # `0` disables the window — every query re-scans, which is the exact pre-DA-5 behavior and the
     # setting to choose where any staleness is unacceptable.
     graph_cache_ttl_seconds: float = Field(default=5.0, ge=0.0)
+
+    @property
+    def retrieval_source_weights_map(self) -> dict[str, float] | None:
+        """The fusion weights, or `None` when unset — so the fusion keeps its uniform fast path."""
+        return self.retrieval_source_weights or None
+
+    # The derived note index is only as good as its last rebuild (gap SCH-2). The graph changes on
+    # every merged PR, and RRF fusion is score-agnostic, so a stale dense/lexical entry would rank
+    # confidently beside live graph hits with no staleness signal. `NoteReindexWorkflow` runs on
+    # this cadence; the interval is therefore also the worst-case staleness of the derived legs.
+    # Only earns its Schedule when a hybrid leg is actually attached (registry membership, D-018),
+    # so `note_reindex_enabled` keeps a graph-only deployment from running an index it never reads.
+    note_reindex_enabled: bool = False
+    note_reindex_schedule_minutes: float = Field(default=60.0, gt=0)
+    note_reindex_timeout_seconds: float = Field(default=600.0, gt=0)
 
 
 class ReportSettings(BaseSettings):

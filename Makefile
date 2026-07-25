@@ -6,7 +6,7 @@
 # 1.29; override (`make helm-validate KUBE_VERSION=1.30.0`) when the target cluster moves.
 KUBE_VERSION ?= 1.29.0
 
-.PHONY: install lint type test cov check chat db-migrate schedules-apply kg-validate eval eln-validate skill-validate helm-validate audit-verify reindex up down
+.PHONY: install lint type test cov check chat db-migrate schedules-apply kg-validate eval eln-validate skill-validate prose-validate helm-validate audit-verify reindex up down
 
 install:  ## Sync the venv with runtime + dev dependencies.
 	uv sync
@@ -46,6 +46,9 @@ eln-validate:  ## Validate the ELN export's reactions (RDKit structure + mass ba
 
 skill-validate:  ## Validate SKILL.md frontmatter (name/description present, name matches dir).
 	uv run python -m scripts.validate_skills
+
+prose-validate:  ## Check the agent's prose only names tools that exist (gap IDEA-7).
+	uv run python -m scripts.validate_prose_contract
 
 helm-validate:  ## Render the Helm chart and validate it against the Kubernetes schemas.
 	@command -v helm >/dev/null || { echo "helm not installed - see docs/runbook.md"; exit 1; }

@@ -7,6 +7,7 @@ becomes trusted knowledge, D-005) — the fourth memory source, on the one share
 """
 
 from agents.tool_registry import tool
+from agents.turn_signals import record_proposal
 from kg.git_submitter import default_submitter
 from memory.interaction import propose_confirmed_answer
 
@@ -33,6 +34,10 @@ async def record_confirmed_answer(
     Returns:
         The submitted PR reference.
     """
-    return await propose_confirmed_answer(
+    reference = await propose_confirmed_answer(
         interaction_id, question, answer, evidence_note_ids, default_submitter()
     )
+    # Surface the opened branch on the turn's stream, so the chemist sees their contribution land
+    # instead of the PR-gate being visible only in a git host's UI (gap RCH-4).
+    record_proposal(f"interaction-{interaction_id}", reference)
+    return reference

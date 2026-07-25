@@ -48,11 +48,13 @@ spec:
           resources:
             {{- toYaml .Values.resources.service | nindent 12 }}
           volumeMounts:
-            - name: temporal-tls
-              mountPath: {{ .Values.secrets.temporalTls.mountPath }}
-              readOnly: true
+            {{- include "chemclaw.tlsMount" . | nindent 12 }}
+            {{- include "chemclaw.knowledgeMounts" . | nindent 12 }}
+            {{- include "chemclaw.noteRepoMount" . | nindent 12 }}
+        {{- include "chemclaw.knowledgeSidecar" . | nindent 8 }}
+      initContainers:
+        {{- include "chemclaw.knowledgeInit" . | nindent 8 }}
+        {{- include "chemclaw.noteRepoInit" . | nindent 8 }}
       volumes:
-        - name: temporal-tls
-          secret:
-            secretName: {{ .Values.secrets.temporalTls.secretName }}
-            optional: true
+        {{- include "chemclaw.volumes" . | nindent 8 }}
+        {{- include "chemclaw.noteRepoVolume" . | nindent 8 }}

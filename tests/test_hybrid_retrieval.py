@@ -122,9 +122,7 @@ def test_type_filter_keeps_recall_past_global_top_k(
     asyncio.run(_run())
 
 
-def test_retriever_drops_a_stale_index_hit(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_retriever_drops_a_stale_index_hit(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """A hit whose note is not on disk (stale derived row) is dropped, never cited.
 
     Pins `graph_cache_ttl_seconds = 0` because this asserts the *disk-authoritative* guard, and
