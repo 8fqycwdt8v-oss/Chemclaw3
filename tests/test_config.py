@@ -5,11 +5,23 @@ load with no `.env`, and any value is overridable via a prefixed env var.
 """
 
 import os
+import re
 from collections.abc import Iterator
+from pathlib import Path
 
 import pytest
 
 from chemclaw.config import Settings
+
+# `CHEMCLAW_FOO=...`, optionally commented out (a documented-but-unset key, e.g. the JSON
+# spec tokens). Both forms count as "documented" for the parity test below.
+_ENV_KEY = re.compile(r"^#?\s*CHEMCLAW_([A-Z0-9_]+)=", re.MULTILINE)
+_ENV_EXAMPLE = Path(__file__).resolve().parent.parent / ".env.example"
+
+
+def _documented_keys() -> set[str]:
+    """The lower-cased field names `.env.example` documents."""
+    return {m.lower() for m in _ENV_KEY.findall(_ENV_EXAMPLE.read_text(encoding="utf-8"))}
 
 
 def test_defaults_load_without_env() -> None:
@@ -283,6 +295,40 @@ def test_absolute_knowledge_dir_is_rejected() -> None:
 def test_relative_knowledge_dir_is_accepted() -> None:
     """A relative `knowledge_dir` (the default kind) loads fine."""
     assert Settings(_env_file=None, knowledge_dir="knowledge").knowledge_dir == "knowledge"  # type: ignore[call-arg]
+
+
+def test_env_example_documents_only_real_fields() -> None:
+    """Every `CHEMCLAW_*` key in `.env.example` names a real `Settings` field.
+
+    `Settings.model_config` sets `extra="forbid"`, so a stale key is not a cosmetic doc bug:
+    `cp .env.example .env` (the README quickstart) makes `Settings()` raise at import time and
+    every entry point dies. This test is the guard that keeps the documented onboarding path
+    working.
+    """
+    unknown = _documented_keys() - set(Settings.model_fields)
+    assert not unknown, f".env.example documents non-existent settings: {sorted(unknown)}"
+
+
+def test_env_example_documents_every_field() -> None:
+    """Every `Settings` field appears in `.env.example`.
+
+    `docs/runbook.md` and `docs/implementation-plan.md` both promise "every field mirrored in
+    `.env.example`" — an operator reads that file to learn what is tunable. An undocumented
+    field is an invisible knob, so this makes the promise machine-checked rather than aspirational.
+    """
+    undocumented = set(Settings.model_fields) - _documented_keys()
+    assert not undocumented, f"settings missing from .env.example: {sorted(undocumented)}"
+
+
+def test_env_example_loads_as_a_real_env_file(tmp_path: Path) -> None:
+    """`cp .env.example .env` boots — the end-to-end proof of the README quickstart.
+
+    The two field-set tests above catch drift by name; this one catches anything that makes the
+    file itself unloadable (a malformed value, a bad JSON spec token).
+    """
+    env = tmp_path / ".env"
+    env.write_text(_ENV_EXAMPLE.read_text(encoding="utf-8"), encoding="utf-8")
+    Settings(_env_file=env)  # type: ignore[call-arg]
 
 
 @pytest.fixture(autouse=True)

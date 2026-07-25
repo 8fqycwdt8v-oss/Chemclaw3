@@ -774,6 +774,12 @@ class KgSettings(BaseSettings):
     # model; an unbounded value would traverse the whole graph. 1–2 is typical; clamp to this so a
     # large value is bounded rather than rejected.
     graph_max_hops: int = Field(default=3, ge=1)
+    # Upper bound on how many notes `find_notes` returns. It is a substring sweep over every
+    # current note, so a broad needle (a single letter, a common element symbol) matches most of
+    # the corpus and an uncapped hit list would flood the model context — the same failure mode
+    # `fingerprint_max_top_k` bounds for substructure search. Hitting the cap logs a warning, so a
+    # truncated result is never silent (D-066 #4).
+    graph_max_results: int = Field(default=50, ge=1)
     # PR-gate git settings (plan steps 2.7, 2.8): agent notes branch off this base
     # branch on this remote before a human merges.
     note_base_branch: str = "main"

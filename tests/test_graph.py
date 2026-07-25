@@ -2,6 +2,7 @@
 
 from pathlib import Path
 
+import networkx as nx
 import pytest
 
 import kg.graph as graph
@@ -90,6 +91,49 @@ def test_load_notes_cache_off_always_reparses(
     graph.load_notes(tmp_path)
     graph.load_notes(tmp_path)
     assert parses["count"] == 2
+
+
+def test_build_graph_caches_assembly_until_a_note_changes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A repeat build reuses the assembled graph; a changed tree rebuilds it.
+
+    The parse cache alone still re-added every node and edge per query, and the agent's
+    `find_notes` → `expand_note` flow builds twice per turn.
+    """
+    monkeypatch.setattr(settings, "graph_cache_enabled", True)
+    graph._GRAPH_CACHE.clear()
+    graph._NOTES_CACHE.clear()
+    assemblies = {"count": 0}
+    real_assemble = graph._assemble_graph
+
+    def _counting(notes: list) -> object:  # type: ignore[type-arg]
+        assemblies["count"] += 1
+        return real_assemble(notes)
+
+    monkeypatch.setattr(graph, "_assemble_graph", _counting)
+    (tmp_path / "a.md").write_text(_note("a", []), encoding="utf-8")
+
+    first = build_graph(tmp_path)
+    second = build_graph(tmp_path)
+    assert assemblies["count"] == 1  # the second call hit the cache
+    assert first is second  # and got the very same graph back
+
+    (tmp_path / "b.md").write_text(_note("b", []), encoding="utf-8")
+    third = build_graph(tmp_path)
+    assert assemblies["count"] == 2  # a changed tree busts the cache
+    assert set(third.nodes) == {"a", "b"}
+
+
+def test_cached_graph_is_frozen(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The shared cached graph rejects mutation, so one reader cannot corrupt the next query."""
+    monkeypatch.setattr(settings, "graph_cache_enabled", True)
+    graph._GRAPH_CACHE.clear()
+    graph._NOTES_CACHE.clear()
+    (tmp_path / "a.md").write_text(_note("a", []), encoding="utf-8")
+    built = build_graph(tmp_path)
+    with pytest.raises(nx.NetworkXError):
+        built.add_node("injected")
 
 
 def test_dir_fingerprint_tolerates_a_vanished_file(tmp_path: Path) -> None:

@@ -106,6 +106,45 @@ def test_expand_note_drops_expired_neighbor(
     assert [n.id for n in view.neighbors] == ["reaction-r"]  # expired neighbor excluded
 
 
+def test_find_notes_caps_the_hit_list(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A broad needle is truncated to the cap, in a stable order.
+
+    Every hit lands in the model's context window, so an uncapped sweep over a real corpus is a
+    context blowout. Truncation is by sorted id so the same query returns the same notes.
+    """
+    for i in range(10):
+        (tmp_path / f"n{i:02d}.md").write_text(
+            f"---\nid: reaction-{i:02d}\ntype: reaction\n---\nAn acetylation.\n", encoding="utf-8"
+        )
+    monkeypatch.setattr(settings, "knowledge_dir", str(tmp_path))
+    monkeypatch.setattr(settings, "graph_max_results", 3)
+    refs = asyncio.run(find_notes("acetylation"))
+    assert [r.id for r in refs] == ["reaction-00", "reaction-01", "reaction-02"]
+    assert [r.id for r in asyncio.run(find_notes("acetylation"))] == [r.id for r in refs]
+
+
+def test_find_notes_warns_only_when_it_truncates(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Hitting the cap warns (never a silent partial answer); a complete result stays quiet."""
+    for i in range(4):
+        (tmp_path / f"n{i}.md").write_text(
+            f"---\nid: reaction-{i}\ntype: reaction\n---\nAn acetylation.\n", encoding="utf-8"
+        )
+    monkeypatch.setattr(settings, "knowledge_dir", str(tmp_path))
+
+    monkeypatch.setattr(settings, "graph_max_results", 2)
+    with caplog.at_level("WARNING"):
+        asyncio.run(find_notes("acetylation"))
+    assert "find_notes capped at 2 matches" in caplog.text
+
+    caplog.clear()
+    monkeypatch.setattr(settings, "graph_max_results", 50)
+    with caplog.at_level("WARNING"):
+        asyncio.run(find_notes("acetylation"))
+    assert "capped" not in caplog.text
+
+
 def test_propose_knowledge_note_uses_gate(monkeypatch: pytest.MonkeyPatch) -> None:
     """The write tool proposes an agent note through the (fake) PR-gate."""
     fake = FakeSubmitter()
