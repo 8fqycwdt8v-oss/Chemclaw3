@@ -9,6 +9,7 @@ fingerprint-indexed", proven end to end without a database or git.
 import asyncio
 import json
 import logging
+import os
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -20,6 +21,7 @@ from eln.ingest import IngestError, ingest_reaction
 from eln.json_adapter import ElnFormatError, JsonExportAdapter
 from eln.note import note_from_ord_reaction
 from eln.ord import Component, OrdReaction, Role
+from eln.ord_adapter import OrdJsonAdapter
 from eln.sync import sync_entries
 from eln.validate import validate_ord
 from mcp_servers.fpstore import InMemoryFingerprintStore
@@ -321,6 +323,111 @@ def test_fetch_logs_the_skipped_corrupt_file(
     with caplog.at_level(logging.WARNING):
         asyncio.run(_run())
     assert "corrupt.json" in caplog.text  # the specific file is identified, not silently lost
+
+
+def _set_mtime(path: Path, moment: datetime) -> None:
+    """Stamp a file's modification time — how a late *arrival* is distinguished from old data."""
+    stamp = moment.timestamp()
+    os.utime(path, (stamp, stamp))
+
+
+def test_late_arriving_export_is_reported_not_silently_dropped(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A file that lands after the cursor with an older payload timestamp warns by name.
+
+    This is the silent-data-loss case: the entry is filtered out on this run and on every run
+    after it, so without this warning an operator has no way to learn the reaction was lost.
+    """
+
+    async def _run() -> None:
+        _write_entry(tmp_path / "late.json", "late", "2026-01-01T00:00:00Z")
+        _set_mtime(tmp_path / "late.json", datetime(2026, 6, 1, tzinfo=UTC))  # arrived late
+        new = await JsonExportAdapter(str(tmp_path)).fetch_new_entries(
+            datetime(2026, 3, 1, tzinfo=UTC)
+        )
+        assert new == []  # unchanged behavior: it is still (correctly) not ingested
+
+    with caplog.at_level(logging.WARNING):
+        asyncio.run(_run())
+    assert "late.json" in caplog.text
+    assert "not ingested" in caplog.text
+
+
+def test_genuinely_old_export_does_not_warn(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """An old file that was already there before the cursor is silent — no false alarm.
+
+    A warning that fires for ordinary already-ingested history would be ignored within a week,
+    taking the real late-arrival signal with it.
+    """
+
+    async def _run() -> None:
+        _write_entry(tmp_path / "old.json", "old", "2026-01-01T00:00:00Z")
+        _set_mtime(tmp_path / "old.json", datetime(2026, 1, 1, tzinfo=UTC))
+        assert (
+            await JsonExportAdapter(str(tmp_path)).fetch_new_entries(
+                datetime(2026, 3, 1, tzinfo=UTC)
+            )
+            == []
+        )
+
+    with caplog.at_level(logging.WARNING):
+        asyncio.run(_run())
+    assert caplog.text == ""
+
+
+def test_late_arrival_warning_is_one_bounded_line(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Many late files produce a single WARNING with a capped name list and the full count.
+
+    A permanently-late file re-qualifies on every sync run, so per-file lines would grow into a
+    storm; one bounded line per fetch stays readable.
+    """
+
+    async def _run() -> None:
+        for index in range(12):
+            path = tmp_path / f"late-{index:02d}.json"
+            _write_entry(path, f"late-{index:02d}", "2026-01-01T00:00:00Z")
+            _set_mtime(path, datetime(2026, 6, 1, tzinfo=UTC))
+        await JsonExportAdapter(str(tmp_path)).fetch_new_entries(datetime(2026, 3, 1, tzinfo=UTC))
+
+    with caplog.at_level(logging.WARNING):
+        asyncio.run(_run())
+    assert len(caplog.records) == 1
+    assert "12 export file(s)" in caplog.text
+    assert "+2 more" in caplog.text  # names capped, count preserved
+
+
+def test_ord_adapter_reports_late_arrivals_too(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The ORD adapter shares the late-arrival check — the guard lives once, not per adapter."""
+
+    async def _run() -> None:
+        path = tmp_path / "late-ord.json"
+        path.write_text(
+            json.dumps(
+                {
+                    "reaction_id": "ord-late",
+                    "provenance": {"record_created": {"time": {"value": "2026-01-01T00:00:00Z"}}},
+                    "inputs": {},
+                    "outcomes": [],
+                }
+            ),
+            encoding="utf-8",
+        )
+        _set_mtime(path, datetime(2026, 6, 1, tzinfo=UTC))
+        assert (
+            await OrdJsonAdapter(str(tmp_path)).fetch_new_entries(datetime(2026, 3, 1, tzinfo=UTC))
+            == []
+        )
+
+    with caplog.at_level(logging.WARNING):
+        asyncio.run(_run())
+    assert "late-ord.json" in caplog.text
 
 
 def test_naive_timestamp_is_read_as_utc(tmp_path: Path) -> None:

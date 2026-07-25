@@ -8,12 +8,16 @@ per source (DEFERRED.md: generalize only from a third source).
 """
 
 from datetime import UTC, datetime
+from logging import Logger
+from pathlib import Path
 from typing import Any, Protocol, runtime_checkable
 
 from pydantic import BaseModel, Field
 
 from chemclaw.errors import ChemclawError
 from eln.ord import OrdReaction
+
+_LATE_ARRIVAL_NAMES_LOGGED = 10
 
 
 def parse_iso_utc(value: str) -> datetime:
@@ -27,6 +31,52 @@ def parse_iso_utc(value: str) -> datetime:
     """
     parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
     return parsed if parsed.tzinfo is not None else parsed.replace(tzinfo=UTC)
+
+
+def is_late_arrival(path: Path, since: datetime) -> bool:
+    """True if `path` appeared at/after the fetch floor although its payload predates it.
+
+    Why this exists: a file-export adapter keeps entries stamped `>= since` and drops the rest,
+    and the sync's overlap window (`eln_sync_overlap_seconds`) rewinds `since` only far enough to
+    catch entries written slightly late. A file dropped into the export directory *after* that
+    window, carrying an older payload timestamp, is therefore filtered out on this run and on
+    every run after it — real data lost with no rejection and no counter. The file's modification
+    time is the one available evidence that it arrived late rather than being old data already
+    ingested, so it separates "genuinely stale" from "silently dropped".
+
+    A file whose mtime cannot be read (removed mid-fetch, permission error) is *not* reported: the
+    caller's own skip-and-continue path already handles unreadable files, and a false alarm here
+    would train operators to ignore the warning.
+    """
+    try:
+        mtime = datetime.fromtimestamp(path.stat().st_mtime, tz=UTC)
+    except OSError:
+        return False
+    return mtime >= since
+
+
+def warn_late_arrivals(logger: Logger, source: str, names: list[str]) -> None:
+    """Log one aggregated WARNING naming export files that arrived too late to be ingested.
+
+    Aggregated, not one line per file, because a permanently-late file re-qualifies on *every*
+    sync run: one bounded line per fetch stays readable where an unbounded per-file storm would
+    be scrolled past. Names are capped at `_LATE_ARRIVAL_NAMES_LOGGED` with the full count kept,
+    so the log line cannot grow without limit. Logs nothing when nothing was late (the normal case),
+    and takes the caller's `logger` so the record carries the adapter's own module name.
+    """
+    if not names:
+        return
+    shown = ", ".join(names[:_LATE_ARRIVAL_NAMES_LOGGED])
+    if len(names) > _LATE_ARRIVAL_NAMES_LOGGED:
+        shown += f", … (+{len(names) - _LATE_ARRIVAL_NAMES_LOGGED} more)"
+    logger.warning(
+        "%s: %d export file(s) arrived after the sync cursor but carry an older timestamp, so "
+        "they were not ingested (%s); re-run the sync with an explicit earlier `since` to "
+        "backfill them",
+        source,
+        len(names),
+        shown,
+    )
 
 
 class ElnMappingError(ChemclawError):
