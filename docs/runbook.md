@@ -21,6 +21,9 @@ overridable as `CHEMCLAW_<FIELD>`); this runbook covers the four recurring admin
   entry, per skipped broken export file, and one aggregated WARNING naming export files that
   arrived too late to be ingested (recovery: section (v)); `DEBUG` adds calculation cache
   hit-vs-compute (the "why did this recompute?" answer).
+- **Changing workflow code:** a control-flow change deployed while a run is in flight fails that run
+  on replay. Follow `docs/workflow-versioning.md` (patch-gate or drain) for any release touching a
+  `@workflow.defn` body.
 - **A stuck/failed job:** open the Temporal UI (:8080) → the workflow → event history; cross-check
   the worker's stderr logs. A worker not picking up jobs is usually the wrong queue/namespace —
   the startup log line shows exactly what it connected to.

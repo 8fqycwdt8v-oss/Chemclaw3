@@ -59,6 +59,18 @@ OpenShift SCC), no secret baked in. `deploy/entrypoint.sh` dispatches on `CHEMCL
   is their Temporal poll loop. HPA scales the stateless front door on CPU; workers scale by hand
   (queue depth), not HPA.
 
+## Before a deploy that touches workflow code
+
+Temporal replays workflow **code** against recorded **history**, so a control-flow change deployed
+while a run is in flight fails that run with a nondeterminism error. Every release that touches a
+`@workflow.defn` body (or a helper called from one) goes through the checklist in
+[`docs/workflow-versioning.md`](../docs/workflow-versioning.md): gate the change with
+`workflow.patched()`, or pause the Schedules and drain in-flight runs as an explicit deploy step.
+Renaming a workflow or activity type is never safe in place — it is a different command in history.
+
+No live cluster holds Chemclaw histories yet, so the changes made so far need no retroactive gates;
+this becomes binding at the first production deploy.
+
 ## Observability (F6-T5)
 
 `CHEMCLAW_OTEL_ENABLED=true` + `CHEMCLAW_OTEL_ENDPOINT` wire OTLP to the in-cluster collector
