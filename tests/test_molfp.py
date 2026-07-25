@@ -7,6 +7,8 @@ The Postgres backend reproduces the same ranking in SQL (tested in CI).
 """
 
 import asyncio
+import time
+from collections.abc import Callable
 
 import pytest
 
@@ -21,8 +23,10 @@ from mcp_servers.fpstore import (
     find_matches,
     tanimoto,
 )
+from mcp_servers.molfp import search
 from mcp_servers.molfp.fingerprint import ecfp_bitstring, molecule_definition
 from mcp_servers.molfp.search import (
+    SubstructureHit,
     find_similar_molecules,
     find_substructure_matches,
     record_for,
@@ -210,6 +214,69 @@ def test_substructure_hits_are_lean_and_capped(
         assert not any(hasattr(h, "bits") for h in hits)  # lean shape: no fingerprint payload
 
     asyncio.run(_run())
+
+
+def _sleeping_scan(seconds: float) -> Callable[..., list[SubstructureHit]]:
+    """A stand-in for the CPU-bound scan that blocks its thread for `seconds`, then matches nothing.
+
+    A real pathological SMARTS would take minutes and is not reproducible across RDKit versions;
+    what both tests need is only that the scan blocks a *thread*, which this reproduces exactly.
+    """
+
+    def _scan(*_args: object, **_kwargs: object) -> list[SubstructureHit]:
+        time.sleep(seconds)
+        return []
+
+    return _scan
+
+
+def test_slow_substructure_match_times_out_with_a_clear_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A pathological match is abandoned at the wall-clock bound, not run to completion.
+
+    Query length and scan size bound the *inputs*; a short adversarial recursive SMARTS can
+    still match for minutes, so the caller must be released with an actionable error.
+    """
+    monkeypatch.setattr(settings, "substructure_match_timeout_seconds", 0.05)
+    # The stand-in sleeps well past the bound but stays short: the timeout releases the caller,
+    # it cannot kill the thread, and `asyncio.run` waits for the executor on shutdown.
+    monkeypatch.setattr(search, "_scan_for_matches", _sleeping_scan(0.5))
+
+    async def _run() -> None:
+        store = InMemoryFingerprintStore()
+        await store.add(record_for("ethanol", "CCO"))
+        with pytest.raises(FingerprintError, match="exceeded 0.05s"):
+            await find_substructure_matches(store, "CO")
+
+    asyncio.run(_run())
+
+
+def test_substructure_match_does_not_block_the_event_loop(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Other sessions keep making progress while a slow match runs (the property that matters).
+
+    The scan is served by the async front door: run in-loop, one adversarial pattern stalls
+    *every* streamed turn, not just its own. Running it in a worker thread is what prevents that.
+    """
+    monkeypatch.setattr(settings, "substructure_match_timeout_seconds", 5.0)
+    monkeypatch.setattr(search, "_scan_for_matches", _sleeping_scan(0.3))
+    ticks = 0
+
+    async def _tick() -> None:
+        nonlocal ticks
+        for _ in range(20):
+            await asyncio.sleep(0.01)
+            ticks += 1
+
+    async def _run() -> None:
+        store = InMemoryFingerprintStore()
+        await store.add(record_for("ethanol", "CCO"))
+        await asyncio.gather(find_substructure_matches(store, "CO"), _tick())
+
+    asyncio.run(_run())
+    assert ticks == 20  # the concurrent task ran to completion during the blocking match
 
 
 def test_agent_supplied_top_k_is_clamped(monkeypatch: pytest.MonkeyPatch) -> None:

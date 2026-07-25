@@ -906,6 +906,15 @@ class FingerprintSettings(BaseSettings):
     # could pin the server. Real pharmacophore/functional-group SMARTS run tens to a few
     # hundred characters; 500 leaves generous headroom while rejecting degenerate input.
     substructure_query_max_length: int = Field(default=500, gt=0)
+    # Wall-clock bound on one substructure scan's matching work (SEC-4, completing the guard above).
+    # Length and record caps bound the *inputs*, but a short adversarial recursive SMARTS can still
+    # run for minutes, and the scan is invoked from the async front door — so the matching loop runs
+    # in a worker thread under this timeout and the caller is released with a clear error instead of
+    # every other session's stream stalling behind it. Honest limit: the timeout frees the event
+    # loop and the caller, it cannot kill the RDKit thread (RDKit offers no interruption hook), so
+    # one CPU stays busy until that pattern finishes. Killing the work outright would need a
+    # subprocess — over-engineering until a real abuse case is measured. Seconds; normally ms.
+    substructure_match_timeout_seconds: float = Field(default=5.0, gt=0.0)
 
 
 class ElnSettings(BaseSettings):
