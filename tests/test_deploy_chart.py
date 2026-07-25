@@ -91,15 +91,41 @@ def test_every_declared_component_has_an_entrypoint_case() -> None:
     assert concrete <= cases, f"components with no entrypoint case: {sorted(concrete - cases)}"
 
 
-def test_image_ships_every_directory_the_components_read() -> None:
-    """Directories read at runtime (`skills/`, `scripts/`, `evals/`, `knowledge/`) must ship.
+# Top-level directories that are never shipped: test code, and the docs/infra trees the image
+# either does not need or COPYs under a different name. Everything else first-party must ship.
+_NOT_SHIPPED = frozenset({"tests", "examples"})
 
-    Their absence is invisible offline: the agent simply advertises no skills, no Schedule is ever
-    created, and the drift job has no case-set — each a silent capability loss, not a crash.
+
+def test_image_ships_every_first_party_package() -> None:
+    """Every first-party Python package must be in the image, discovered — not listed by hand.
+
+    This started as a hardcoded list and **missed `safety/`**: `main` added the package, the image
+    never COPYd it, and the container died at import with `ModuleNotFoundError: No module named
+    'safety'`. A hardcoded list only ever catches the omissions someone already thought of, which
+    is precisely the failure it was written to prevent. Discovering the packages instead means the
+    next one is covered on the day it is created.
+    """
+    root = DEPLOY.parent
+    packages = {
+        path.name
+        for path in root.iterdir()
+        if path.is_dir() and (path / "__init__.py").exists() and path.name not in _NOT_SHIPPED
+    }
+    containerfile = (DEPLOY / "Containerfile").read_text()
+    copied = set(re.findall(r"^COPY\s+(\S+)\s", containerfile, flags=re.MULTILINE))
+    missing = sorted(packages - copied)
+    assert not missing, f"Containerfile never COPYs first-party package(s): {missing}"
+
+
+def test_image_ships_the_data_directories_read_at_runtime() -> None:
+    """`skills/`, `knowledge/` and `infra/` are data, not packages, so discovery cannot find them.
+
+    Their absence is invisible offline: the agent simply advertises no skills, the graph is empty,
+    and migrations have no SQL — each a silent capability loss rather than a crash.
     """
     containerfile = (DEPLOY / "Containerfile").read_text()
     copied = set(re.findall(r"^COPY\s+(\S+)\s", containerfile, flags=re.MULTILINE))
-    for required in ("skills", "scripts", "evals", "knowledge", "chemclaw", "agents", "service"):
+    for required in ("skills", "knowledge", "infra"):
         assert required in copied, f"Containerfile never COPYs {required}/"
 
 

@@ -30,6 +30,7 @@ COPY infra ./infra
 COPY kg ./kg
 COPY memory ./memory
 COPY sources ./sources
+COPY safety ./safety
 # Not optional extras: `skills/` IS the agent's judgment layer (an image without it advertises no
 # skills at all), `scripts/` owns the Temporal Schedules that fire every periodic job, and `evals/`
 # carries the committed case-set + baseline the drift job scores against. `knowledge/` seeds the
