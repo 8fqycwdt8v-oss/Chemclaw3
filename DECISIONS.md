@@ -1865,3 +1865,163 @@ ceremony without a caller.
 a spec reusing a built-in registry key (which `make_data_source` resolves first, silently shadowing
 the spec) is a loud error in `build_data_source`, not a sync-time surprise. RBAC/audit/PR-gate are
 untouched — the seam only changes how a `DataSource` is *built*, never how its ingest is gated.
+
+## D-077 — The turn stream emits its plan and its job launches (F2/F3 deferred item closed)
+
+**Context.** `service/events.py` defines seven turn events; the web surface renders all seven; two —
+`PlanEvent` and `JobStartedEvent` — were emitted by nothing since F2-T3 (ADR D-042 recorded the
+deferral). The practical effect: a chemist who asked for a QM calculation saw silence between their
+message and the answer, learning about the job only when its completion pushed back (F3-T3, possibly
+a turn later); and the harness's plan — the whole point of an autonomous plan/execute backbone — was
+invisible while it executed. Dead types also violate the repo's "no 'for later' stubs" rule: the
+choice was emit or delete.
+
+**Decision — emit.** Both inputs now exist offline, so emitting is the smaller diff than deleting a
+contract two surfaces already render.
+
+- **`JobStartedEvent`** — `agents/job_events.py`: a per-turn contextvar sink (`set_job_sink` /
+  `announce_job_started` / `drain_started_jobs`), the same carrier and rationale as
+  `agents/session_context` (task-local, so concurrent turns never cross; absent off the request path,
+  where announcing to nobody is a no-op). `submit_qm_job` announces right where it already marks the
+  awaiting todo; `run_turn` drains between streamed updates and once after the stream, so a launch in
+  the closing update is not lost. A plain list, not a queue: the runner drains synchronously and
+  nothing ever awaits it.
+- **`PlanEvent`** — `agents.harness_todo.todo_titles` renders the todo store as `[x]`/`[ ]` lines
+  (the read side beside the two existing mutators, so all todo-store access stays in one module);
+  `run_turn` emits it only when the list *changed* since the last emission, so an unchanged plan does
+  not flood the transcript.
+
+**Only a genuine launch is announced.** The idempotent re-submit branch (`WorkflowAlreadyStartedError`)
+returns an existing — possibly already completed — job id, which will never emit a matching
+`job_completed` push-back; announcing it would leave a permanently "running" row in the UI. This is
+the same reasoning that already governs the awaiting todo, kept consistent.
+
+**A plan is a view, never a risk to the turn.** Off the harness path `_current_plan` returns `None`
+rather than `[]` (an empty checklist reads as "the agent has no plan", not "this agent does not
+plan"), and a malformed todo state is logged and skipped. No plan read can fail a turn.
+
+**Not addressed (still open).** Resuming the *same* streamed turn mid-flight when a job completes
+(the D-032/D-035 durable-approval seam) is untouched — this ADR makes the launch visible, not the
+turn resumable.
+
+## D-078 — Memory notes are retired when their cluster merges or shrinks
+
+**Context.** `memory.ids.stable_id` anchors a campaign/playbook/optimization note on its cluster's
+*smallest* member id (D-070). That is exactly right for **growth** — a grown cluster re-mints the
+same id, so periodic re-synthesis updates the note in place through the idempotent PR-gate branch —
+and silently wrong for two other transitions. On a **merge**, two clusters become one whose anchor
+is one of the two old anchors, leaving the *loser's* note in the graph as a current account of a
+subset that no longer exists. On a **shrink** (the anchor member drops out), a new id is minted and
+the pre-shrink note stays current beside it. Either way retrieval can serve a stale note as fact,
+with nothing linking it to what replaced it — the failure the bi-temporal fields exist to prevent.
+
+**Decision.** `memory/supersede.py::supersede_updates(new_notes, existing, as_of)` — pure — returns
+retired copies of merged notes this run replaced: same type as the run's output, an id the run no
+longer mints, no `valid_to` yet, and at least one cited member now covered by a new note. Each copy
+gets `valid_to = as_of` (`Note.is_current` then drops it from current-evidence sweeps; the note is
+never deleted — it stays in Git, reachable by id) and a body line naming its successors.
+
+**Applied in the builders, not at the publish sites.** `memory/jobs.py::_with_supersedes` wraps all
+three `build_*_notes` functions, so the in-process job and the durable activity both get it and
+neither can forget; the retirement then travels the *same* PR-gate/fan-out path as every other
+memory note — no second write path.
+
+**Overlap, not equality, and `valid_to`, not `is_current`.** Overlap catches merges (all members to
+one successor) and splits (members to several) alike. Testing `valid_to is None` rather than
+`is_current(as_of)` makes the job idempotent — a second run cannot re-close, and re-append its
+marker line to, a note it already closed — and still covers a note whose validity begins in the
+future (closed at its own `valid_from`, never before it, so the F10-G2 window check holds).
+
+**The successor is plain text, not a `[[wikilink]]`.** The successor is an unmerged proposal from
+the same run, so a link would dangle and fail `kg-validate` if a reviewer merged the supersede PR
+first — an ordering trap for a human, in exchange for an edge nothing traverses (a non-current note
+is already out of retrieval).
+
+**Side effect that closes a manual chore.** BACKLOG recorded a one-time hand-cleanup for notes
+minted under the older set-derived ids. Such a note intersects its successor's members under a
+different id, so the first run after this ships retires it automatically.
+
+## D-079 — Workflow versioning is a deploy checklist, not a CI guard
+
+**Context.** Temporal replays workflow code against recorded history, so a control-flow change
+deployed while a run is in flight fails that run with a nondeterminism error — surfacing after the
+fact, on an unattended workflow, pointing at the new code rather than at the deploy. The 2026-07
+campaign changed workflow logic (fan_out's local activity, `ElnSyncWorkflow`'s chunk loop, BO
+activity seed args) with no `workflow.patched()` gates, which is safe only because no live cluster
+holds Chemclaw histories yet. That safety expires at the first production deploy.
+
+**Decision.** `docs/workflow-versioning.md` states the policy: what counts as a logic change (the
+replayed command stream — activity/child calls, their arguments, type names, timers, loop bounds
+and branch conditions) versus what does not (activity *bodies*, docstrings, logging, code no
+workflow calls); the two sanctioned responses (`workflow.patched()` with a stable id and a planned
+`deprecate_patch` retirement, or pausing the Schedules and draining in-flight runs as an explicit
+deploy step); and a checklist for the release ticket. Cross-linked from `deploy/README.md` and the
+runbook. Today's un-gated changes need **no retroactive patches** — gating them would add permanent
+branches for a case that cannot occur without histories.
+
+**Consequence, already applied.** The deferred `QMJobWorkflow` → `CalculationWorkflow` rename is
+**dropped**, not deferred: a workflow type name is part of history, so renaming a class in place is
+exactly the change this policy forbids — a cosmetic gain for a migration window.
+
+**No CI guard, deliberately.** A check that fails a PR touching `workflows/*.py` without a
+`workflow.patched()` call cannot distinguish a docstring edit from a reordered activity call, so it
+would fire on nearly every PR; a check that is wrong most of the time trains its own bypass and
+takes the real signal with it. `InteractionApprovalWorkflow`'s 7-day human hold is the concrete
+reason draining is not always available, so the patch path stays the default. Revisit only if a real
+incident shows the checklist being skipped.
+
+## D-080 — Chemical safety: a deterministic, advisory structural screen (never a clearance)
+
+**Context.** The last remaining capability gap the user had parked *for a decision* rather than
+deferred. Its own precondition — "decide scope before any capability phase that could propose a
+hazardous route or procedure" — was already past: BO recommendations (1d.5) and development reports
+(5b) publish agent-authored procedures today, and no hazard logic existed anywhere in the tree (only
+prose cautions in two `SKILL.md` files). Unlike every other open capability item, this one is not
+infra-gated: it can be built and proven offline.
+
+**Decision — the minimum viable slice, deliberately advisory.**
+
+- `safety/rules.yaml` — a committed, citation-carrying SMARTS table (organic/acyl azide, diazo,
+  diazonium, peroxide, nitrate ester, polynitroaromatic, perchlorate, hydrazine, N-halamine) plus
+  one pairwise incompatibility (strong oxidizer with strong reductant). **Data, not code**: a
+  process-safety chemist maintains it without touching Python.
+- `safety/screen.py` — `screen_structure` / `screen_reaction` returning `HazardFlag`s (rule, severity,
+  explanation, citation, what matched), worst first. Deterministic, offline, no model.
+- `agents/safety_tools.py::screen_hazards` — registered through the D-075 `@tool` seam, so the agent
+  gained a capability with no orchestration edit. The system prompt tells the agent to screen before
+  proposing chemistry; `skills/safety-screening/SKILL.md` holds the judgment for acting on a flag.
+- `safety/notes.py` + `kg/validate.py` — an **agent-authored note carrying a `## Procedure`** whose
+  structures raise a flag at or above `safety_gate_severity` must document it in a `## Hazards`
+  section, or `kg-validate` fails the PR. The warning reaches the reviewer before the merge, in the
+  gate that already runs in CI — no new enforcement path.
+- `hazard_flag_recall` (`@metric`, D-009 seam) over a committed case pinning one reference molecule
+  per rule, gated at `eval_hazard_recall_min` = 1.0 — because a SMARTS that stops matching fails
+  *silently*: the screen simply reports nothing, which reads as "no hazard".
+
+**The invariant: the system flags, it never certifies.** `ScreenResult.verdict` renders an empty
+result as "No rule in the hazard table matched. This is not a safety assessment." The tool docstring,
+the skill, and the module docstring all repeat it, and a test asserts no clearance-like phrasing can
+appear. An over-trusted screen is *more* dangerous than none: it converts an absence of knowledge
+into apparent assurance, and a chemist told "no hazards" three times stops reading the fourth answer.
+
+**Explicit non-goals** (each a separate decision, none smuggled in): no GHS/SDS database (licensing),
+no toxicity/ADMET prediction, no route-level safety verdict, no regulatory or transport
+classification, no thermal-stability data, no scale or engineering controls. The skill names these
+as the boundary and points at the SDS, EHS, and process-safety review.
+
+**Scoping choices that keep the gate credible.** Agent-authored notes only (a human writing up their
+own procedure has made their own judgment); procedure notes only (a record that merely mentions a
+structure is not an instruction); high severity only by default. A gate that fires on the wrong notes
+is a gate somebody switches off. `safety_gate_enabled` exists for a deployment migrating a legacy
+corpus, not as a routine escape hatch.
+
+**Rule-table discipline.** Each rule keeps its SMARTS as specific as the motif allows and is pinned
+by a test with one molecule that must match and (across the benign set) molecules that must not —
+nitrobenzene must not read as polynitro, acetohydrazide must not read as free hydrazine. Perchlorate
+and permanganate match with `~` bonds because RDKit sanitizes them to charge-separated forms; a
+double-bond pattern would never fire on a parsed molecule (found by testing, not by reading).
+
+**Open for the user (asked in `docs/backlog-plan.md` §5, implemented under stated defaults).**
+Advisory-only scope, a committed table rather than an external hazard database, and a hard-failing
+`kg-validate` rule are the defaults shipped; the gate's severity and its on/off switch are config, so
+reversing any of them is an env change, not a code change.

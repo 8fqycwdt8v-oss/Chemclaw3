@@ -16,6 +16,7 @@ from temporalio.service import RPCError
 
 from agents.authz import authorize_trigger, require_actor
 from agents.harness_todo import mark_awaiting_job
+from agents.job_events import announce_job_started
 from agents.session_context import get_current_session, get_current_session_id
 from agents.tool_registry import tool
 from chemclaw.config import settings
@@ -75,6 +76,11 @@ async def submit_qm_job(molecule_smiles: str, method: str, basis_set: str) -> st
         # push-back event, so a fresh awaiting todo for it would never be flipped and would block
         # `todos_remaining` forever.
         return f"qm-{qm_job_key(job)}"
+    # Tell the streaming turn a job is now running (D-042), so the surface shows the launch instead
+    # of silence until the push-back. Only on a genuine start: the re-submit branch above returns an
+    # existing (possibly already completed) job, which will never emit a matching `job_completed`
+    # event — announcing it would leave a permanently "running" row in the UI.
+    announce_job_started(handle.id)
     await _mark_awaiting_if_harness(handle.id, molecule_smiles=molecule_smiles, method=method)
     return handle.id
 

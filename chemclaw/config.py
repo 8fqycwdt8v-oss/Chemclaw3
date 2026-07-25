@@ -858,6 +858,11 @@ class EvalSettings(BaseSettings):
     # score in well under this, but a dedicated knob keeps the two jobs' timeouts independent.
     eval_drift_timeout_seconds: float = Field(default=300.0, gt=0)
     eval_baseline_path: str = "evals/baseline.json"
+    # Minimum share of the pinned hazard rules that must still fire on their reference
+    # molecules (`hazard_flag_recall`, D-080). 1.0: the rule table is small enough that one
+    # silently-broken SMARTS means a whole hazard class goes unflagged, which the screen
+    # reports as "nothing matched" — exactly the failure the metric exists to catch.
+    eval_hazard_recall_min: float = Field(default=1.0, ge=0.0, le=1.0)
     # Retrieval-quality gate (audit KM-13). A gold query→expected-source set scores
     # `GraphRetriever` over this fixed corpus fixture (a small versioned set of notes, NOT the
     # live `knowledge_dir`, so the score is reproducible). `retrieval_recall_min` is the floor
@@ -906,6 +911,15 @@ class FingerprintSettings(BaseSettings):
     # could pin the server. Real pharmacophore/functional-group SMARTS run tens to a few
     # hundred characters; 500 leaves generous headroom while rejecting degenerate input.
     substructure_query_max_length: int = Field(default=500, gt=0)
+    # Wall-clock bound on one substructure scan's matching work (SEC-4, completing the guard above).
+    # Length and record caps bound the *inputs*, but a short adversarial recursive SMARTS can still
+    # run for minutes, and the scan is invoked from the async front door — so the matching loop runs
+    # in a worker thread under this timeout and the caller is released with a clear error instead of
+    # every other session's stream stalling behind it. Honest limit: the timeout frees the event
+    # loop and the caller, it cannot kill the RDKit thread (RDKit offers no interruption hook), so
+    # one CPU stays busy until that pattern finishes. Killing the work outright would need a
+    # subprocess — over-engineering until a real abuse case is measured. Seconds; normally ms.
+    substructure_match_timeout_seconds: float = Field(default=5.0, gt=0.0)
 
 
 class ElnSettings(BaseSettings):
@@ -1085,6 +1099,27 @@ class ReportSettings(BaseSettings):
     orchestrator_max_parallel_children: int = Field(default=8, ge=1)
 
 
+class SafetySettings(BaseSettings):
+    """Structural hazard screening of proposed chemistry (D-080).
+
+    Grouped because both knobs govern one advisory gate: which rule table is
+    screened against, and how serious a flag must be before a proposed
+    procedure note is required to document it.
+    """
+
+    # The committed, cited SMARTS rule table (`safety/screen.py`). A path, not inline rules: a
+    # process-safety chemist maintains it as data, and a deployment can point at its own table.
+    safety_rules_path: str = "safety/rules.yaml"
+    # The minimum flag severity that makes a `## Hazards` section mandatory in an agent-proposed
+    # procedure note (enforced by `kg-validate`, so it gates the PR rather than the runtime).
+    # "high" only, by default: the gate must fire rarely enough that a firing means something.
+    safety_gate_severity: Literal["high", "medium", "low"] = "high"
+    # Whether `kg-validate` enforces that gate at all. On by default — the corpus holds no
+    # procedure notes yet, so it costs nothing today and is the conservative direction for a
+    # safety check; a deployment migrating a legacy corpus can turn it off while it catches up.
+    safety_gate_enabled: bool = True
+
+
 class Settings(
     ObservabilitySettings,
     TemporalSettings,
@@ -1104,6 +1139,7 @@ class Settings(
     MemorySettings,
     RetrievalSettings,
     ReportSettings,
+    SafetySettings,
 ):
     """Environment configuration, loaded from process env then a local `.env`.
 

@@ -7,20 +7,26 @@ the reaction schema, the note model), no new infrastructure.
 """
 
 import asyncio
+from datetime import date
+from pathlib import Path
 
 import pytest
 
+from chemclaw.config import settings
 from eln.ord import Component, OrdReaction, Role
+from kg.note import Note
+from kg.render import render_note
 from memory.campaign import campaign_note_from_chain
 from memory.chains import detect_chains
 from memory.ids import stable_id
 from memory.interaction import note_from_confirmed_answer
-from memory.jobs import distill_playbooks, synthesize_campaigns
+from memory.jobs import build_campaign_notes, distill_playbooks, synthesize_campaigns
 from memory.playbook import (
     PlaybookError,
     find_playbook_candidates,
     playbook_note,
 )
+from memory.supersede import supersede_updates
 from tests.conftest import FakeSubmitter
 
 
@@ -139,6 +145,114 @@ def test_growing_cluster_keeps_its_note_id() -> None:
     assert stable_id("optimization", ["r2", "r1"]) == stable_id("optimization", ["r1", "r2", "r3"])
     assert stable_id("optimization", ["r1", "r2"]) != stable_id("optimization", ["r4", "r5"])
     assert stable_id("optimization", ["r1"]) != stable_id("playbook", ["r1"])  # prefix separates
+
+
+# --- supersede on merge / shrink (D-078) ----------------------------------------------
+
+
+def _memory_note(
+    note_id: str,
+    member_ids: list[str],
+    *,
+    valid_from: date | None = None,
+    valid_to: date | None = None,
+) -> Note:
+    """A merged campaign-style note citing its members, as the corpus would hold it."""
+    citations = "\n".join(f"- [[reaction-{rid}]]" for rid in member_ids)
+    return Note(
+        id=note_id,
+        type="campaign",
+        body=f"Campaign.\n\n{citations}\n",
+        valid_from=valid_from,
+        valid_to=valid_to,
+    )
+
+
+def test_merged_cluster_retires_the_losing_note() -> None:
+    """When two clusters merge, the note the merge orphaned stops being current knowledge.
+
+    The winner keeps its anchor id and updates in place; without this the loser stayed in the
+    graph as a *current* account of experiments it no longer describes.
+    """
+    winner = _memory_note("campaign-aaa", ["r1", "r2"])  # the merged cluster's note
+    loser = _memory_note("campaign-bbb", ["r2"])  # the pre-merge note for a subset
+    today = date(2026, 7, 25)
+
+    retired = supersede_updates([winner], [winner, loser], today)
+
+    assert [n.id for n in retired] == ["campaign-bbb"]
+    assert retired[0].valid_to == today  # excluded from current-evidence sweeps from tomorrow
+    assert "Superseded by campaign-aaa" in retired[0].body
+    assert "[[campaign-aaa]]" not in retired[0].body  # plain text: the successor is not merged yet
+    assert "[[reaction-r2]]" in retired[0].body  # the original record is kept, not rewritten
+
+
+def test_shrunk_cluster_retires_the_pre_shrink_note() -> None:
+    """Losing the anchor member mints a new id, so the pre-shrink note must be retired too."""
+    before = _memory_note("campaign-old", ["r1", "r2", "r3"])
+    after = _memory_note("campaign-new", ["r2", "r3"])  # r1 (the anchor) dropped out
+    retired = supersede_updates([after], [before, after], date(2026, 7, 25))
+    assert [n.id for n in retired] == ["campaign-old"]
+
+
+def test_growing_cluster_is_not_retired() -> None:
+    """Ordinary growth re-mints the same id and updates in place — nothing is superseded.
+
+    This is the case anchoring on the smallest member was designed for; retiring here would
+    close a note's validity on every routine ELN sync.
+    """
+    grown = _memory_note("campaign-aaa", ["r1", "r2", "r3"])
+    previous = _memory_note("campaign-aaa", ["r1", "r2"])
+    assert supersede_updates([grown], [previous], date(2026, 7, 25)) == []
+
+
+def test_unrelated_and_already_retired_notes_are_left_alone() -> None:
+    """No member overlap, a different type, or an already-closed window: all untouched.
+
+    The already-retired case is what makes the job idempotent — a second run must not re-close a
+    note it already closed, which would append the marker line again on every single run.
+    """
+    new = _memory_note("campaign-aaa", ["r1"])
+    unrelated = _memory_note("campaign-zzz", ["r9"])
+    other_type = Note(id="playbook-p", type="playbook", body="- [[reaction-r1]]\n")
+    already = _memory_note("campaign-old", ["r1"], valid_to=date(2026, 1, 1))
+    retired = supersede_updates([new], [unrelated, other_type, already], date(2026, 7, 25))
+    assert retired == []
+
+
+def test_retiring_a_not_yet_valid_note_keeps_a_legal_window() -> None:
+    """A note whose validity starts in the future closes at its start, never before it (F10-G2)."""
+    future = _memory_note("campaign-future", ["r1"], valid_from=date(2027, 1, 1))
+    retired = supersede_updates([_memory_note("campaign-new", ["r1"])], [future], date(2026, 7, 25))
+    assert retired[0].valid_to == date(2027, 1, 1)  # == valid_from, a legal (single-day) window
+
+
+def test_synthesis_publishes_supersedes_alongside_new_notes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """End to end: a merge in the corpus makes the builder emit the retirement note too.
+
+    Proves the retirement travels the *same* PR-gate path as every other memory note — no second
+    write path — and that both the in-process job and the durable activity get it, since both go
+    through this builder.
+    """
+    knowledge = tmp_path / "knowledge" / "campaign"
+    knowledge.mkdir(parents=True)
+    a = _reaction("a", ["CCO"], ["CC=O"])
+    b = _reaction("b", ["CC=O"], ["CC(O)O"])
+    # The corpus already holds the note for the "b"-only cluster, from before "a" was ingested.
+    stale_id = stable_id("campaign", ["b"])
+    (knowledge / f"{stale_id}.md").write_text(
+        render_note(_memory_note(stale_id, ["b"])), encoding="utf-8"
+    )
+    monkeypatch.setattr(settings, "knowledge_dir", str(tmp_path / "knowledge"))
+
+    notes = build_campaign_notes([a, b])
+
+    by_id = {n.id: n for n in notes}
+    merged_id = stable_id("campaign", ["a", "b"])
+    assert merged_id in by_id and by_id[merged_id].valid_to is None  # the live note
+    assert stale_id in by_id and by_id[stale_id].valid_to == date.today()  # retired in the same run
 
 
 # --- playbook (5.4) -------------------------------------------------------------------

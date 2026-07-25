@@ -7,6 +7,7 @@ and testable with the in-memory store. Defaults (top_k, threshold) come from con
 capability surfaces them; the `reaction-search` skill decides how to set them (G6).
 """
 
+import asyncio
 import logging
 
 from pydantic import BaseModel
@@ -75,6 +76,14 @@ async def find_substructure_matches(store: FingerprintStore, query: str) -> list
     would flood the model context); hitting either cap logs a warning so a truncated
     result is never silent. A pattern-fingerprint prefilter is a later optimization for
     large corpora (ECFP bits cannot screen substructures soundly).
+
+    The matching itself runs **off the event loop** in a worker thread, bounded by
+    `substructure_match_timeout_seconds`. Bounding the inputs is not enough: a short but
+    adversarial recursive SMARTS can still match for minutes, and this call is served by the
+    async front door, so an in-loop scan would stall *every* session's stream, not just its
+    own. On timeout the caller gets a `FingerprintError` naming the bound. Honest limit: the
+    timeout releases the event loop and the caller — it cannot kill the RDKit thread, which
+    holds one CPU until the pattern completes (RDKit exposes no interruption hook).
     """
     max_length = settings.substructure_query_max_length
     if len(query) > max_length:
@@ -95,6 +104,26 @@ async def find_substructure_matches(store: FingerprintStore, query: str) -> list
             "(raise CHEMCLAW_SUBSTRUCTURE_SCAN_MAX_RECORDS or narrow the corpus)",
             cap,
         )
+    timeout = settings.substructure_match_timeout_seconds
+    try:
+        return await asyncio.wait_for(
+            asyncio.to_thread(_scan_for_matches, records, pattern), timeout=timeout
+        )
+    except TimeoutError as exc:
+        raise FingerprintError(
+            f"substructure match for {query!r} exceeded {timeout}s over {len(records)} molecules; "
+            "narrow the pattern (or raise CHEMCLAW_SUBSTRUCTURE_MATCH_TIMEOUT_SECONDS)"
+        ) from exc
+
+
+def _scan_for_matches(records: list[FingerprintRecord], pattern: Chem.Mol) -> list[SubstructureHit]:
+    """Match `pattern` against each record, stopping at the result cap (the CPU-bound half).
+
+    Split out as a plain synchronous function so it can run in a worker thread: it is the only
+    part of the search that burns CPU, and keeping it separate makes the async wrapper's one
+    responsibility — bounding it — obvious. A record whose stored SMILES no longer parses is
+    skipped rather than aborting the scan (one bad row must not hide every real hit).
+    """
     max_matches = settings.fingerprint_max_top_k
     matches: list[SubstructureHit] = []
     for record in records:

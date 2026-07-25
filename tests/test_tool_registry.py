@@ -31,6 +31,7 @@ _EXPECTED_INPROCESS_TOOLS = {
     "suggest_next_experiment",
     "propose_knowledge_note",
     "record_confirmed_answer",
+    "screen_hazards",
 }
 
 

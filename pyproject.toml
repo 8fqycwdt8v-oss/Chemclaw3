@@ -71,6 +71,7 @@ packages = [
     "mcp_servers",
     "memory",
     "report",
+    "safety",
     "scripts",
     "service",
     "sources",
@@ -127,7 +128,7 @@ addopts = "-ra"
 # number (running more tests only covers more). CI runs `make cov` as a gate (BACKLOG P2).
 [tool.coverage.run]
 branch = true
-source = ["agents", "bo", "calc", "chemclaw", "eln", "evals", "kg", "mcp_servers", "memory", "report", "scripts", "service", "sources", "workers", "workflows"]
+source = ["agents", "bo", "calc", "chemclaw", "eln", "evals", "kg", "mcp_servers", "memory", "report", "safety", "scripts", "service", "sources", "workers", "workflows"]
 omit = ["*/__init__.py"]
 
 [tool.coverage.report]

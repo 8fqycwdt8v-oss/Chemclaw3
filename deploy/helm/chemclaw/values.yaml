@@ -29,7 +29,10 @@ workers:
   hpc:
     replicas: 2 # few, heavy (D-006)
   background:
-    replicas: 1 # light: sync / re-index / reports
+    # Keep at 1. Light work (sync / re-index / reports), but this worker also submits PR-gate
+    # notes, and that checkout lock is host-local (D-069) — a second replica can corrupt a
+    # concurrent submitter's checkout. Raising this needs the distributed lock in BACKLOG.md first.
+    replicas: 1
 
 mcp:
   molfp:
