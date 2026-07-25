@@ -1167,6 +1167,19 @@ class RetrievalSettings(BaseSettings):
     # of the note tree (path + mtime + size), so any add/edit/delete of a note busts it — retrieval
     # stays always-live. Off makes every call re-parse (the pre-cache behavior); leave on in prod.
     graph_cache_enabled: bool = True
+    # How long a fingerprint scan may be reused before the note tree is stat'd again (DA-5/D-1).
+    # The fingerprint above is what makes the cache safe, but computing it is itself O(notes) — a
+    # `stat` per file, ~75 ms at 10k notes on local disk and materially worse on a networked
+    # OpenShift PVC — and every query pays it, even a pure cache hit. That scan is the floor on
+    # interactive latency. Within this window the last scan is trusted and skipped, making a warm
+    # query O(1); the cost is that a note changed by something *outside* this process (another
+    # pod, an out-of-band `git pull`) can stay invisible for up to this long.
+    #
+    # Changes made *through* this process do not wait: the PR-gate submitter calls
+    # `kg.graph.invalidate_cache()` after it writes a note, so the authoring loop stays instant.
+    # `0` disables the window — every query re-scans, which is the exact pre-DA-5 behavior and the
+    # setting to choose where any staleness is unacceptable.
+    graph_cache_ttl_seconds: float = Field(default=5.0, ge=0.0)
 
 
 class ReportSettings(BaseSettings):

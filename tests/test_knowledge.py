@@ -117,6 +117,30 @@ def test_git_submitter_pushes_branch(tmp_path: Path) -> None:
     assert ref_again == "note/job-abc"
 
 
+def test_submit_busts_the_graph_cache(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The authoring loop never waits out the TTL window: submitting a note invalidates the cache.
+
+    Without this the `graph_cache_ttl_seconds` window (DA-5) could serve a note the process just
+    wrote as absent — and the submitter's `checkout -B`/`reset --hard` rewrite the tree wholesale,
+    so a stale cached graph could describe a tree that no longer exists.
+    """
+    from kg import graph as kg_graph
+
+    _, work = _make_remote_and_clone(tmp_path)
+    notes_dir = work / "knowledge"
+    notes_dir.mkdir(exist_ok=True)
+    monkeypatch.setattr(settings, "graph_cache_enabled", True)
+    monkeypatch.setattr(settings, "graph_cache_ttl_seconds", 60.0)
+    kg_graph.invalidate_cache()
+    kg_graph.load_notes(notes_dir)  # populate the cache and open the TTL window
+    assert str(notes_dir) in kg_graph._LAST_SCAN
+
+    submitter = GitNoteSubmitter(repo_dir=str(work), base_branch="main", remote="origin")
+    asyncio.run(submitter.submit(_note_submission("job-xyz")))
+
+    assert kg_graph._LAST_SCAN == {}  # the window was closed, so the next read re-scans
+
+
 def test_concurrent_submits_do_not_corrupt_branches(tmp_path: Path) -> None:
     """Two concurrent submits serialize: each remote branch holds exactly its own note.
 

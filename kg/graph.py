@@ -7,6 +7,7 @@ graph traversal (D-004), so this indexer is the substrate the query skill walks
 """
 
 import threading
+import time
 from pathlib import Path
 
 import networkx as nx
@@ -14,9 +15,10 @@ import networkx as nx
 from chemclaw.config import settings
 from kg.note import Note, NoteError, read_note
 
-# A directory's stat fingerprint: (path, mtime_ns, size) per note file. Cheap to compute (stat only,
-# no read/parse) and busts on any add, edit, or delete — so the cache below never serves a stale
-# note while still skipping the expensive parse when nothing changed (KM-14).
+# A directory's stat fingerprint: (path, mtime_ns, size) per note file. Cheap *per file* (stat only,
+# no read/parse) and busts on any add, edit, or delete — so the cache below skips the expensive
+# parse when nothing changed (KM-14). It is still O(notes) in total, which is why
+# `graph_cache_ttl_seconds` bounds how often it runs (DA-5).
 _Fingerprint = frozenset[tuple[str, int, int]]
 
 # Parsed-notes cache, keyed by directory. Guarded by a lock because retrieval offloads `load_notes`
@@ -31,6 +33,33 @@ _NOTES_CACHE: dict[str, tuple[_Fingerprint, list[Note]]] = {}
 # pays it twice per turn. Caching the assembled graph makes a warm interactive query O(1) work plus
 # the stat scan, instead of O(N) node/edge insertion.
 _GRAPH_CACHE: dict[str, tuple[_Fingerprint, nx.DiGraph]] = {}
+
+# When each directory was last stat-scanned (`time.monotonic`), so `graph_cache_ttl_seconds` can
+# skip the scan itself on a warm query — the scan is O(notes) and is paid even on a cache hit, so
+# it is the floor on interactive latency (DA-5). Monotonic, not wall-clock: a clock adjustment
+# must not make a scan look arbitrarily old (harmless) or arbitrarily fresh (a stale read).
+_LAST_SCAN: dict[str, float] = {}
+
+
+def invalidate_cache(notes_dir: Path | None = None) -> None:
+    """Drop cached notes/graph so the next read re-scans immediately (the explicit bust hook).
+
+    The TTL window trades a little freshness for latency, but a change this process *makes* should
+    never wait it out — so every local writer of notes (today: the PR-gate submitter) calls this
+    and the authoring loop stays instant. Clearing every directory by default is deliberate: note
+    writes are rare next to queries, so the cost of over-clearing is one extra scan, while the cost
+    of under-clearing is serving a note the caller just wrote as absent.
+    """
+    with _CACHE_LOCK:
+        if notes_dir is None:
+            _NOTES_CACHE.clear()
+            _GRAPH_CACHE.clear()
+            _LAST_SCAN.clear()
+            return
+        key = str(notes_dir)
+        _NOTES_CACHE.pop(key, None)
+        _GRAPH_CACHE.pop(key, None)
+        _LAST_SCAN.pop(key, None)
 
 
 def _dir_fingerprint(notes_dir: Path) -> _Fingerprint:
@@ -71,8 +100,19 @@ def _cached_notes(notes_dir: Path) -> tuple[_Fingerprint | None, list[Note]]:
     if not settings.graph_cache_enabled:
         return None, _parse_notes(notes_dir)
     key = str(notes_dir)
+    ttl = settings.graph_cache_ttl_seconds
+    now = time.monotonic()
+    if ttl > 0:
+        with _CACHE_LOCK:
+            cached = _NOTES_CACHE.get(key)
+            scanned_at = _LAST_SCAN.get(key)
+            if cached is not None and scanned_at is not None and now - scanned_at < ttl:
+                # Inside the window: trust the last scan and skip it. The cached fingerprint is
+                # returned unchanged so `build_graph` still keys its own cache consistently.
+                return cached[0], cached[1]
     fingerprint = _dir_fingerprint(notes_dir)
     with _CACHE_LOCK:
+        _LAST_SCAN[key] = now
         cached = _NOTES_CACHE.get(key)
         if cached is not None and cached[0] == fingerprint:
             return fingerprint, cached[1]
@@ -91,9 +131,11 @@ def load_notes(notes_dir: Path) -> list[Note]:
     conflict — the indexer stays resilient, the validator stays strict.
 
     The result is cached per directory behind a stat fingerprint (KM-14), so interactive retrieval
-    does not re-parse the whole tree on every query; any change to a note busts the cache, so a read
-    is never stale. A shallow copy is returned so a caller cannot mutate the cached list, and `Note`
-    is frozen, so the shared note instances cannot be mutated either.
+    does not re-parse the whole tree on every query; any change to a note busts the cache. Within
+    `graph_cache_ttl_seconds` the scan itself is skipped too (DA-5), so an externally-made change
+    can lag by up to that window — local writers call `invalidate_cache` to bypass it, and `0`
+    restores always-scan. A shallow copy is returned so a caller cannot mutate the cached list, and
+    `Note` is frozen, so the shared note instances cannot be mutated either.
     """
     return list(_cached_notes(notes_dir)[1])
 
