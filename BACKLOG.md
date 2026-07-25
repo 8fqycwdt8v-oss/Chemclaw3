@@ -8,6 +8,45 @@ Prioritized open action items. Top = next. Keep in sync with `docs/implementatio
 > `tasks/todo.md`). Verdicts: 8 BUILD (waves A/B/C), 14 DEFER, 5 DROP, 12 BLOCKED. The DROP verdicts are
 > corrected in place below, because they were claims about the tree that are no longer true.
 
+## Open — Deep codebase analysis (docs/audit/12-deep-analysis.md)
+
+Seven-track analysis of the dimensions the 2026-07-22 forensic audit under-covered (performance,
+test *effectiveness*, complexity, doc↔code drift, configurability-to-run, feature triage, live-edge
+risk). Four findings fixed in `a96932d`; the rest need a decision or are follow-ups.
+
+- [x] **DA-1 [High] `cp .env.example .env` crashed every entry point.** `extra="forbid"` + two
+      documented-but-nonexistent keys → `Settings()` raised at import. The README quickstart was
+      broken. Fixed at the root: three parity tests now enforce no-stale-key, no-undocumented-field,
+      and file-loads-as-real-`.env`.
+- [x] **DA-2 [Med] 19 Settings fields undocumented** in `.env.example` (all 6 `budget_*`,
+      `service_allow_insecure`, the D-066 clamps, ELN cursor slack) — contradicting the "every field
+      mirrored" promise in `docs/runbook.md`. Fixed; now machine-enforced by DA-1's tests.
+- [x] **DA-3 [Med] `build_graph` reassembled the graph on every query.** KM-14's cache spared only
+      the parse; `find_notes`→`expand_note` paid it twice per turn. Assembled graph now cached behind
+      the same fingerprint and frozen (not copied — same rationale as frozen `Note`).
+      Measured 162ms → 83ms at 10k notes.
+- [x] **DA-4 [Med] `find_notes` was the last unbounded model-context surface.** Now capped by
+      `graph_max_results` (50), sorted-id order, with the D-066 truncation warning.
+- [ ] **DA-5 [Med] Graph query floor is now the stat scan** (~75ms at 10k notes on local disk; worse
+      on a networked OpenShift PVC) — [S]. **Needs a decision (D-1): how stale may a query be?**
+      Recommended: config-gated TTL on the fingerprint check + explicit cache-bust on PR-gate merge,
+      so the authoring loop stays instant.
+- [ ] **DA-7 [Low] Test-to-module locality is weak** — 3 of 5 mutations survived their "obvious" test
+      file and died only under the full suite — [S]. Not a correctness gap (CI runs everything); a
+      developer feedback-loop one.
+- [ ] **DA-10 [Med] Buy down live-edge risk offline** — [M]. **Needs a decision (D-2).** Recommended:
+      `helm template` + `kubeconform` render in CI first; defer Entra/Nextflow contract tests until a
+      real tenant exists.
+- [ ] **Migration rollback is unaddressed** — `infra/sql` migrations are forward-only; a GxP
+      deployment needs a tested down-path or an explicit ADR that forward-only is the policy — [M].
+
+Track F verdict: do **not** re-derive the 29 AG-*/KM-* proposals. Load-bearing few, ranked:
+**KM-13 retrieval evaluation** (everything else in the knowledge layer is unfalsifiable without it,
+and the corpus is the smallest it will ever be), **AG-14 prompt/skill version provenance** (direct GxP
+reproducibility hit), **KM-7 fingerprint re-indexing on mutation**. Recommend **downgrading** AG-12
+(model routing/fallback) and KM-10 (near-dup detection) — ceremony for a single-endpoint,
+Git-curated, human-signed-off system.
+
 ## Open — Config extensibility investigation (docs/audit/10-config-extensibility.md)
 
 Super-extensive investigation of how new skills/MCP-servers/tools/datasources/use-case agent
