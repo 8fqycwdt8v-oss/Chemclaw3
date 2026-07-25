@@ -239,10 +239,12 @@ MAF ships the harness natively (`create_harness_agent` + `TodoProvider`/`AgentMo
       (`agents.session_context.get_current_session`, new). Tests: `test_harness_todo.py`,
       wiring tests in `test_qm_tools.py`/`test_service.py`. ADR **D-058**. Still open: resuming the
       *same* streamed turn mid-flight (vs. picked up next turn) — see the F1 follow-up below.
-- [ ] `PlanEvent`/live `JobStartedEvent` emission (ADR **D-042**) — **scheduled as wave B2**
-      (assessment 2026-07-25): both types are dead code today (defined in `service/events.py`,
-      rendered by `service/static/app.js`, emitted nowhere) and both inputs now exist offline
-      (`agents/harness_todo.py`, `submit_qm_job`). Emit or delete; emitting is the smaller diff.
+- [x] `PlanEvent`/live `JobStartedEvent` emission (ADR **D-042**, closed by **D-077**): a per-turn
+      contextvar sink (`agents/job_events.py`) carries a launch from `submit_qm_job` to the runner,
+      which drains it between updates and after the stream; `PlanEvent` renders the harness todo
+      list (`agents.harness_todo.todo_titles`) and is emitted only when it changes. The idempotent
+      re-submit announces nothing (that job may already be complete and will never push back).
+      Tests: `test_runner.py`, `test_service.py`, `test_qm_tools.py`.
 
 ### Phase F4 — Entra ID identity & RBAC (system-wide)
 - [x] **F4-T1** Front-door user auth (Entra OIDC): `service/auth.py` (`Principal`, `validate_token`
@@ -635,7 +637,16 @@ MAF ships the harness natively (`create_harness_agent` + `TodoProvider`/`AgentMo
 ## Capability gaps to triage (from `docs/research-review.md`) — decide per item
 - [x] **Evaluation / scientific-output metrics layer** → promoted to first-class **Phase 2b**
       (see plan + D-009). No longer a backlog decision.
-- [ ] **Chemical/biological safety layer** — distinct from Entra-ID/RBAC (IT security).
+- [x] **Chemical/biological safety layer** (D-080) — shipped as a deterministic, **advisory**
+      structural screen: committed cited SMARTS table (`safety/rules.yaml`), `screen_structure`/
+      `screen_reaction`, the `screen_hazards` agent tool + `safety-screening` skill, a `kg-validate`
+      gate requiring a `## Hazards` section on flagged agent-proposed procedures, and the
+      `hazard_flag_recall` metric (gated at 1.0) so a silently-broken SMARTS fails `make eval`.
+      Invariant: the system flags, it never certifies — an empty result reads "no rule matched",
+      never "safe". Non-goals (each still open, none implied): GHS/SDS database, toxicity
+      prediction, route-level verdicts, regulatory classification. Config: `safety_rules_path`,
+      `safety_gate_severity`, `safety_gate_enabled`, `eval_hazard_recall_min`. Original entry:
+      distinct from Entra-ID/RBAC (IT security).
       GxP / data-integrity + hazard checks. **Kept in backlog** (user decision); decide scope
       before any capability phase that could propose a hazardous route/procedure. **Assessment
       2026-07-25: that precondition is already past** — BO recommendations (1d.5) and development
@@ -669,32 +680,29 @@ MAF ships the harness natively (`create_harness_agent` + `TodoProvider`/`AgentMo
 - [ ] Phase 2 knowledge-graph core + PR-gate · Phase 3 fingerprint search · Phase 4 ELN
       ingestion · Phase 5 memory layers · Phase 5b report harness · Phase 6 identity/RBAC.
 
-## Post-campaign follow-ups (2026-07-24, D-072)
+## Post-campaign follow-ups (2026-07-24, D-072) — worked off 2026-07-25
 
-Assessed 2026-07-25 (`docs/backlog-plan.md`): four are scheduled — **A1** late-file detection,
-**A2** deployment docs, **A3** drift visibility, **B1** substructure compute bound, **C1** the
-versioning policy — and one, **B3**, was reclassified from polish to a correctness defect.
+Assessed then implemented per `docs/backlog-plan.md` (waves A/B/C); all six are now closed.
 
-- [ ] **ELN late-file detection** — export files older than `eln_sync_overlap_seconds` are still
-      dropped silently; add a file-mtime vs cursor WARN so operators see them (manual backfill via
-      explicit `since` remains the recovery).
-- [ ] **Memory cluster merge/shrink supersede** — anchor ids keep grown clusters stable (D-070),
-      but a cluster *merge* leaves the losing note without a supersede link, and losing the
-      smallest member mints a new id; emit supersedes/valid_to on merge/shrink. NOTE: the
-      set→anchor id switch is itself a one-time migration — any notes minted under old
-      set-derived ids will be re-synthesized under new ids without a supersede link; if any
-      such notes exist before first production sync, clean them up once by hand.
-- [ ] **`system-eval-drift` consumer surface** — eval-drift alerts push to a pseudo-session no UI
-      consumes; give them a consumer (or route to ops notification).
-- [ ] **Deployment docs** — point exposed deployments at `CHEMCLAW_ENTRA_REQUIRED=true` now that
-      unauthenticated+exposed refuses to boot (D-067); note `CHEMCLAW_ENTRA_CLIENT_ID` was removed
-      (startup fails under `extra="forbid"` if still exported).
-- [ ] **Substructure match compute bound** — query length is bounded (`substructure_query_max_length`),
-      but a maximally adversarial recursive SMARTS can still be slow on the event loop; consider
-      `asyncio.to_thread` + wall-clock bound (touches the async tool contract).
-- [ ] **Workflow versioning policy before first live deploy** — the campaign changed workflow
-      logic without `workflow.patched()` gates (fan_out's local activity, ElnSyncWorkflow's
-      chunk loop, BO activities' seed arg). Safe today only because no live Temporal cluster
-      holds in-flight histories (live edges still open). Before the first production deploy,
-      adopt a versioning policy: gate logic changes with `workflow.patched()` or make
-      drain-in-flight-runs an explicit deploy step.
+- [x] **ELN late-file detection** — both file adapters compare a dropped file's mtime against the
+      fetch floor and emit one aggregated WARNING naming the late files plus the backfill recovery
+      (`eln/adapter.py::is_late_arrival`/`warn_late_arrivals`). Runbook §(v). Tests: `test_eln.py`.
+- [x] **Memory cluster merge/shrink supersede** (D-078) — `memory/supersede.py` retires the notes a
+      run's clusters replaced: `valid_to` closed (dropped from current-evidence sweeps, never
+      deleted) plus a plain-text successor line, proposed through the same PR-gate from inside the
+      three `build_*_notes` builders. This also auto-retires notes minted under the old set-derived
+      ids, so the one-time manual cleanup noted here is no longer needed. Tests: `test_memory.py`.
+- [x] **`system-eval-drift` consumer surface** — each alert is logged at WARNING where operators
+      already look (a vanished metric stays distinct from a 0.0 score), and the runbook §(vii)
+      documents the SQL for the durable channel. No UI, by design. Tests: `test_eval_drift.py`.
+- [x] **Deployment docs** — runbook + `deploy/README.md` cover `CHEMCLAW_ENTRA_REQUIRED` (with the
+      exact refuse-to-boot message) and the removed `CHEMCLAW_ENTRA_CLIENT_ID`; `values.yaml`
+      records why the background worker stays at one replica.
+- [x] **Substructure match compute bound** — the match loop runs in a worker thread under
+      `substructure_match_timeout_seconds`, so an adversarial SMARTS no longer stalls every
+      session's stream. Documented limit: the bound frees the event loop, not the CPU.
+      Tests: `test_molfp.py` (incl. loop responsiveness).
+- [x] **Workflow versioning policy before first live deploy** (D-079) —
+      `docs/workflow-versioning.md` + deploy checklist: what counts as a logic change, patch-gate
+      vs drain, and why there is no CI guard. Today's un-gated changes need no retroactive patches
+      (no live histories); binding from the first production deploy.
