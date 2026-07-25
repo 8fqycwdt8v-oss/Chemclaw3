@@ -15,6 +15,7 @@ the Temporal shell: one activity does the file I/O, the workflow delivers each a
 """
 
 import asyncio
+import logging
 from datetime import timedelta
 
 from temporalio import activity, workflow
@@ -37,6 +38,8 @@ from workflows.publish import BAD_DATA_RETRY
 # ids in `scripts/schedules.py` — so it is a constant here, not a config knob.
 DRIFT_ALERT_CHANNEL = "system-eval-drift"
 
+logger = logging.getLogger(__name__)
+
 
 @activity.defn
 async def check_eval_drift() -> list[DriftAlert]:
@@ -46,13 +49,35 @@ async def check_eval_drift() -> list[DriftAlert]:
     activity, so the workflow stays deterministic and this is the single side-effecting step.
     Scoring runs in a worker thread: some case metrics (the KM-13 retrieval gold set) drive a live
     retriever via `asyncio.run`, which cannot nest inside this activity's own event loop.
+
+    Each detected alert is also logged at WARNING here. Delivery to the system channel is
+    guaranteed (must-deliver, see the workflow) but *visibility* is not: nothing consumes that
+    channel today, so without this line a regression is durably recorded where no one looks. The
+    log is the operator's surface until a deployment gives the channel a consumer.
     """
     report = await asyncio.to_thread(
         run_eval, load_eval_cases(settings.eval_case_dir), "drift-check"
     )
     current = aggregate_metrics(report)
     baseline = load_baseline(settings.eval_baseline_path)
-    return detect_drift(baseline, current, settings.eval_drift_epsilon)
+    alerts = detect_drift(baseline, current, settings.eval_drift_epsilon)
+    for alert in alerts:
+        if alert.vanished:
+            logger.warning(
+                "eval drift: metric %r disappeared from the run (baseline %.4f) — its case was "
+                "removed or errored; this is not a score of 0.0",
+                alert.metric,
+                alert.baseline_value,
+            )
+        else:
+            logger.warning(
+                "eval drift: metric %r scored %.4f vs baseline %.4f (delta %+.4f)",
+                alert.metric,
+                alert.current_value,
+                alert.baseline_value,
+                alert.delta,
+            )
+    return alerts
 
 
 @workflow.defn
