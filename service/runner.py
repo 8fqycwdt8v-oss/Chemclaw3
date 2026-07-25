@@ -17,7 +17,9 @@ from typing import Any
 
 from agent_framework import AgentSession
 
+from agents.harness_todo import todo_titles
 from agents.identity_context import reset_current_identity, set_current_identity
+from agents.job_events import drain_started_jobs, reset_job_sink, set_job_sink
 from agents.session_context import (
     reset_current_session,
     reset_current_session_id,
@@ -32,6 +34,8 @@ from service.events import (
     ApprovalRequestEvent,
     ErrorEvent,
     Event,
+    JobStartedEvent,
+    PlanEvent,
     TokenEvent,
     ToolCallEvent,
 )
@@ -82,6 +86,11 @@ async def run_turn(
     live_session_token = set_current_session(session)
     # Stamp the authenticated identity (F4) so audit/authorization/attribution see the user.
     identity_token = set_current_identity(actor, roles) if actor is not None else None
+    # Collect jobs launched by this turn's tools, drained between updates into `JobStartedEvent`s
+    # (D-042) — the launch happens layers below this stream, so it is announced ambiently.
+    job_sink_token = set_job_sink()
+    # Last plan snapshot emitted, so an unchanged todo list is not re-sent on every update.
+    plan: list[str] = []
     try:
         async with AsyncExitStack() as stack:
             # Open each MCP capability server for the duration of the turn, then tear it down — the
@@ -99,6 +108,18 @@ async def run_turn(
                     yield ToolCallEvent(tool=tool_name, arguments=arguments)
                 for request in getattr(update, "user_input_requests", None) or []:
                     yield ApprovalRequestEvent(prompt=_approval_prompt(request))
+                for job_id in drain_started_jobs():
+                    yield JobStartedEvent(job_id=job_id)
+                # Plan after jobs: a submit adds an "awaiting job" todo, so this order shows the
+                # launch and then the plan that reflects it.
+                current_plan = await _current_plan(session)
+                if current_plan is not None and current_plan != plan:
+                    plan = current_plan
+                    yield PlanEvent(todos=plan)
+            # A job launched while the model produced its closing update has no later iteration to
+            # be drained by, so it would otherwise be announced only by its completion push-back.
+            for job_id in drain_started_jobs():
+                yield JobStartedEvent(job_id=job_id)
         yield await _answer_event("".join(answer_parts))
     except Exception:
         # One turn's failure becomes one user-safe event, never a 500 mid-stream or a leaked trace.
@@ -115,10 +136,28 @@ async def run_turn(
     finally:
         if budget is not None:
             budget.record(session.session_id, actor, turn_tokens)
+        reset_job_sink(job_sink_token)
         reset_current_session_id(session_token)
         reset_current_session(live_session_token)
         if identity_token is not None:
             reset_current_identity(identity_token)
+
+
+async def _current_plan(session: AgentSession) -> list[str] | None:
+    """The harness's current todo list for this session, or None when there is no plan to show.
+
+    None (not an empty list) off the harness path: the classic agent has no todo state, and an
+    empty `PlanEvent` would render as an empty checklist — "the agent has no plan" — rather than
+    "this agent does not plan". A malformed todo state degrades to None as well: the plan is a
+    view, and no view is worth failing a turn over.
+    """
+    if not settings.harness_enabled:
+        return None
+    try:
+        return await todo_titles(session)
+    except Exception:
+        logger.exception("could not read the plan for session %s", session.session_id)
+        return None
 
 
 async def _answer_event(answer: str) -> AnswerEvent:

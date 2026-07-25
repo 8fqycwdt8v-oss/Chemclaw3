@@ -99,6 +99,34 @@ def test_message_stream_runs_a_turn_and_opens_mcp_once() -> None:
     assert spy.entered == 1 and spy.exited == 1  # MCP lifecycle handled once, in the service
 
 
+def test_a_launched_job_reaches_the_browser_as_an_sse_event() -> None:
+    """A job announced by a tool is serialized into the turn's SSE stream, before the answer.
+
+    The end-to-end half of D-042: without it the chemist saw nothing between their message and
+    the answer, with the first sign of the job arriving only as the completion push-back.
+    """
+    from agents.job_events import announce_job_started
+
+    class _JobAgent(_FakeAgent):
+        def run(self, message: str, *, stream: bool, session: AgentSession) -> object:
+            async def _gen() -> object:
+                announce_job_started("qm-sse")
+                yield _Update(text="submitted")
+
+            return _gen()
+
+    with _client(_JobAgent()) as client:
+        session_id = client.post("/sessions").json()["session_id"]
+        events = []
+        with client.stream("POST", f"/sessions/{session_id}/messages", json={"message": "go"}) as r:
+            for line in r.iter_lines():
+                if line.startswith("data:"):
+                    events.append(json.loads(line[len("data:") :].strip()))
+
+    assert [e["type"] for e in events] == ["token", "job_started", "answer"]
+    assert events[1]["job_id"] == "qm-sse"
+
+
 def test_turn_is_shed_with_503_at_capacity(monkeypatch) -> None:  # type: ignore[no-untyped-def]
     """A turn that cannot get an admission permit within the timeout is shed with 503 (AG-15)."""
     import asyncio
