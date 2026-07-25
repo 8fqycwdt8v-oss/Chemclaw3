@@ -1,82 +1,71 @@
-# Config-extensibility — implementation of the audit backlog
+# Backlog features — assessment + implementation plan
 
-Source: `docs/audit/10-config-extensibility.md` §9 (prioritized, dependency-ordered backlog).
-Branch: `claude/config-extensibility-plan-0ittcz`. Each item ships green under `make lint type test`
-and is a separate commit. Safety rubric (§7) — GxP audit + per-tool authz + PR-gate + fail-fast
-validation — must be preserved by every change.
+Source: `BACKLOG.md` (every open item) + the open rows of `DEFERRED.md` it points at.
+Plan with the per-item assessment: **`docs/backlog-plan.md`**.
+Branch: `claude/backlog-feature-assessment-dytr10`.
 
-## Items
+## Assessment (done)
 
-- [x] **1. [S] Fix `.env.example` merge conflict** (lines 156/170/173). Both sides were real config
-  fields (`orchestrator_max_parallel_children`, the F10-A retrieval block, `retrieval_default_confidence`)
-  and non-overlapping → keep both. Done.
+- [x] Enumerate every open backlog item (31) and check each claim against the tree, not memory.
+- [x] Assess each against the five questions (trigger held? real defect? offline-verifiable?
+      KISS/Rule of Three? cost vs value) → BUILD / DEFER / DROP / BLOCKED.
+- [x] Write `docs/backlog-plan.md`: verdict table, specs for the survivors, triggers for the rest.
+- [x] Correct the backlog entries whose claims are false today (the DROP verdicts).
 
-- [x] **2. [M] Tool registry (`@tool` + `_TOOL_REGISTRY`).** New `agents/tool_registry.py` mirroring
-  `evals/metric.py`; decorate the 12 in-process capability tools with `@tool` at their definition site;
-  `build_agent._capability_tools()` assembles `[*registered_tools(), *_mcp_capability_tools()]`. Populate
-  the registry via side-effect module imports (the `evals/__init__.py` idiom). Preserve the
-  `[audit, enforce_tool_authz]` middleware (it wraps the assembled list — unchanged). MCP servers stay
-  config-driven. **KISS deviation from Spike 1:** drop the `agent_facing` flag — no hidden in-process tool
-  exists today (Rule of Three); add it only when a second, non-advertised tool appears.
-  - No `make tool-validate`: name-drift is already guarded by
-    `tests/test_agent.py::test_instructions_only_name_available_tools` and duplicate names by the
-    registration guard — a separate CLI gate would be redundant churn.
+Result: **8 BUILD · 14 DEFER · 5 DROP · 12 BLOCKED**. No BUILD item needs live infra.
 
-- [x] **3. [M] `AgentProfile` seam, Stage 1.** New `agents/profiles.py`: `AgentProfile` (pydantic, like
-  `McpServerSpec`) + a one-entry `{name: profile}` registry whose sole `"default"` reproduces today's agent
-  byte-for-byte; `build_agent(profile=…)` resolves (None→default), narrows tools + MCP by name-subsets,
-  picks instructions + harness flags. **Invariant:** a profile *attenuates* (narrows), it never *authorizes*
-  — audit/authz/skill-gates run after narrowing. No front-door change (Stage 2 triggers on a 2nd use case).
+## Stale entries corrected in `BACKLOG.md`
 
-- [x] **4. [M] `DataSourceSpec` discriminated union (scoped), Stage 1.** Add a typed, discriminated
-  (`type`) union for sources that carry per-instance config, **additive** to the comma-string
-  `data_sources` (no regression for keyless sources). Real second-caller found without the deferred
-  Snowflake stub: both ELN adapters already accept a per-instance `export_dir`, so the two genuine
-  config-carrying variants are `JsonElnSourceSpec` (free-text) and `OrdElnSourceSpec` (structured ORD)
-  — delivering the "two instances / different dirs" capability the audit (§2.3) flags as impossible
-  today. **Deviation from audit §5:** dropped the near-empty `RegisteredSourceSpec` bridge variant —
-  it duplicates the comma-string token (the §2.4 "two ways to configure a list" friction) and adds
-  double-build/collision ambiguity; the two real ELN variants already make it a genuine union.
-  Snowflake stays the documented future variant (needs OBO + live connection).
-  - Spec models live in `config.py` beside `McpServerSpec` (the cited precedent); factory dispatch
-    (`build_data_source`) lives in `sources/registry.py` (imports the adapters).
-  - **Temporal boundary unchanged:** `sync_eln_entries(source: str)` still calls `make_data_source(name)`;
-    that resolver now falls through to spec-by-name, so histories stay byte-identical (§5).
-  - Guards: spec names unique across both tokens (config validator); a spec name colliding with a
-    built-in registry key is a loud error in `build_data_source`.
+- [x] F4-T5 "per-request role → skills scoping" — already delivered by D-052
+      (`agents/skill_access.py::RoleScopedSkillsSource`, wired at `agents/chemclaw_agent.py:139`).
+- [x] 1b.5 Temporal lookup/persist activities — folded into 1c.5 by design; checkbox never cleared.
+- [x] `QMJobWorkflow`→`CalculationWorkflow` rename — dropped, not deferred: the workflow type name
+      is durable-history state, so the rename is the exact un-versioned change C1's policy forbids.
+- [x] OKF per-bundle `log.md` — dropped *as designed* (concurrent note branches all append to one
+      file = manufactured merge conflicts); redesign as a generated view recorded with its trigger.
+- [x] Design caution "apply skills/tools selectively, measured per task" — satisfied by `evals/ab.py`
+      (2b.4) + `AgentProfile` (D-075); nothing left to build.
+- [x] F0-T4 stand-in-server variant — dropped (would test the stand-in; the client-wiring half is
+      already proven by `tests/test_harness_execution.py`, D-058). Live-endpoint half stays blocked.
+
+## Build queue (specs in `docs/backlog-plan.md` §3)
+
+### Wave A — silent failures made visible [S]
+- [ ] **A1** ELN late-file detection — aggregated WARNING when a file arrives after the cursor with
+      an older payload timestamp (`eln/adapter.py` helper + both adapters). Tests: `test_eln.py`.
+- [ ] **A2** Deployment docs: `CHEMCLAW_ENTRA_REQUIRED` for exposed deployments, removed
+      `CHEMCLAW_ENTRA_CLIENT_ID`; comment pinning the background worker at `replicas: 1`.
+- [ ] **A3** Eval-drift alert visibility — WARNING at emission + documented read procedure.
+      Tests: `test_eval_drift.py`.
+
+### Wave B — real defects [S]–[M]
+- [ ] **B1** Substructure matching off the event loop (`asyncio.to_thread` + wall-clock bound,
+      `substructure_match_timeout_seconds`). Tests: `test_molfp.py` incl. loop-responsiveness.
+- [ ] **B2** Emit `PlanEvent` + `JobStartedEvent` (both currently dead types; closes D-042).
+      Ambient job sink + changed-only plan emission. Tests: `test_runner.py`/`test_service.py`. ADR D-077.
+- [ ] **B3** Supersede memory notes on cluster merge/shrink (`memory/supersede.py`, bi-temporal
+      `valid_to` + plain-text replacement id). Tests: `test_memory.py`. ADR D-078.
+
+### Wave C — needs a decision first
+- [ ] **C1** Workflow-versioning policy doc + deploy checklist (no CI guard, on purpose). ADR D-079.
+- [ ] **C2** Chemical safety screening, minimum viable slice — **blocked on the §5 scope questions**
+      (advisory-only? committed SMARTS table vs external DB? hard-fail `kg-validate`?). ADR D-080.
 
 ## Verification
-- `make lint type test` green after each item.
-- New tests: registry populates/guards duplicates; `_capability_tools()` set unchanged vs. the old list;
-  profile default == today's agent; profile narrowing attenuates but audit+authz still attach.
+- One commit per item; `make lint type test` green after each.
+- CHECKMATE (G1–G7) after wave B, and again after C2 — B3 and C2 both touch the GxP surface.
+- `BACKLOG.md`/`DEFERRED.md` updated at the end of each wave.
 
 ## Review
 
-Landed items 1–3 of the audit backlog as three scoped commits, each green under
-`make lint type test` (ruff + mypy --strict clean; full suite 606 → 613 passed, only
-offline Postgres/Temporal skips):
+Assessment pass only; no feature code written yet. The three findings worth flagging:
 
-- **1 — `.env.example` conflict** (`b07a2b2`): kept both non-overlapping real-field blocks.
-- **2 — tool registry** (`76c03b2`): `agents/tool_registry.py` (`@tool` + name-keyed registry,
-  mirroring `evals.metric`); 12 tools decorated at their definition sites; `_capability_tools()`
-  now assembles `[*registered_tools(), *_mcp_capability_tools()]`. Audit+authz middleware and the
-  MCP config-driven path unchanged. Dropped Spike 1's `agent_facing` flag (no hidden tool today —
-  Rule of Three); skipped `make tool-validate` (name-drift already test-guarded).
-- **3 — `AgentProfile` seam**: `agents/profiles.py` (spec + one-entry registry) + `build_agent(profile=…)`
-  that resolves `None`→global default, narrows tools/MCP, swaps instructions/harness. Default is
-  byte-identical to today's agent; narrowing fails fast on an unknown name; the
-  *attenuate-not-authorize* invariant is test-proven.
-
-**Deviations from the audit/spikes, with reasons:** (a) `agent_facing` flag dropped per Rule of
-Three; (b) no `make tool-validate` (redundant with existing tests); (c) profile instructions read
-from `default_options["instructions"]` — MAF's `Agent` has no `.instructions` attribute.
-
-- **4 — `DataSourceSpec` union** (D-076): `DataSourceSpec = JsonElnSourceSpec | OrdElnSourceSpec`
-  (discriminated on `type`, in `config.py` beside `McpServerSpec`) + additive `data_source_specs`
-  token + `sources.registry.build_data_source`. Full suite 613 → **624 passed** (11 new tests),
-  ruff + mypy --strict clean over 231 files. **Real second caller without a stub:** both ELN adapters
-  already accept a per-instance `export_dir`, so two instances with different dirs now coexist (audit
-  §2.3) — no Snowflake stub needed. Temporal boundary kept string-keyed (`make_data_source` falls
-  through to spec-by-name). **Deviation from audit §5:** dropped the near-empty `RegisteredSourceSpec`
-  bridge variant — it duplicates the comma token (§2.4 friction) and adds collision ambiguity; the two
-  real ELN variants already make it a genuine union. Snowflake stays deferred as the future variant.
+1. **Six backlog lines were claims about the tree that are no longer true** — the largest being
+   F4-T5's "per-request role scoping" open item, which D-052 delivered. Assessing before building
+   removed more work than it added.
+2. **Two "deferred polish" items are actually defects**, and both were sitting under headings that
+   read as done: the substructure match blocks the shared event loop (B1), and memory cluster
+   merge/shrink leaves stale notes as current knowledge with no supersede link (B3).
+3. **The one genuinely large item (C2, safety screening) is the one the user parked for a decision**,
+   and its own precondition — "decide before a phase that could propose a hazardous procedure" — is
+   already past, since BO recommendations and development reports both publish procedures today.

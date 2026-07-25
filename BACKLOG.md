@@ -3,6 +3,11 @@
 Prioritized open action items. Top = next. Keep in sync with `docs/implementation-plan.md`
 (phase/step numbers) at session end.
 
+> **Every open item below was assessed on 2026-07-25** — trigger held? real defect? offline-verifiable?
+> KISS? — in **`docs/backlog-plan.md`** (verdict table + specs for the survivors + the working queue in
+> `tasks/todo.md`). Verdicts: 8 BUILD (waves A/B/C), 14 DEFER, 5 DROP, 12 BLOCKED. The DROP verdicts are
+> corrected in place below, because they were claims about the tree that are no longer true.
+
 ## Open — Config extensibility investigation (docs/audit/10-config-extensibility.md)
 
 Super-extensive investigation of how new skills/MCP-servers/tools/datasources/use-case agent
@@ -46,10 +51,11 @@ out-of-tree plugin problem this single-repo app does not have.
 Two conventions from Google's Open Knowledge Format, checked against our already-equivalent
 design (D-004/D-005) and queued rather than adopted wholesale — see D-074 for the comparison.
 
-- [ ] **Per-bundle `log.md` changelog.** Today a note's history lives only in git/PR history.
-      Add a per-note-type (or per-bundle-directory) `log.md` that the PR-gate appends one line to
-      on every merge (who/what/when, human-readable) — a changelog view that doesn't require
-      `git log`. Small, additive; no new store (fits `kg/pr_gate.py`).
+- [ ] ~~**Per-bundle `log.md` changelog** appended by the PR-gate~~ — **DROPPED as designed**
+      (assessment 2026-07-25): every note lands on its own branch, so N concurrent proposals all
+      append to the same `log.md` and every one after the first conflicts — manufacturing merge
+      failures to duplicate what git already records. Redesigned as a *generated* view (`git log` →
+      rendered changelog), deferred until a reviewer/auditor actually asks for one.
 - [ ] **External ontology anchoring on notes.** Frontmatter `type`/tags are free strings today —
       no class hierarchy, so an agent can't query by subsumption (e.g. "all electrophilic aromatic
       substitutions" matching a `reaction_class: acetylation` note). Add optional frontmatter
@@ -170,8 +176,10 @@ an internal data pipeline, no vendor**). Full ticket breakdown: `docs/implementa
 - [x] **F0-T3** Streaming + generation params: `Agent(default_options=ChatOptions(temperature,
       max_tokens))` from config. Test: `test_agent.py::test_agent_applies_default_generation_options`.
 - [ ] **F0-T4** Tool-calling capability spike (the H0 risk) — `scripts/spike_toolcalling.py` +
-      `docs/spikes/f0-toolcalling.md` verdict. **Needs the live internal endpoint** (or a stand-in
-      OpenAI-compatible server); run before building on the harness.
+      `docs/spikes/f0-toolcalling.md` verdict. **Needs the live internal endpoint**; run before
+      building on the harness. (The "stand-in OpenAI-compatible server" variant is **dropped** —
+      it would test the stand-in; the client-wiring half is already proven live by
+      `tests/test_harness_execution.py`, D-058. Only the endpoint's own fidelity is still unknown.)
 
 ### Phase F1 — Harness backbone (autonomous plan/execute)
 MAF ships the harness natively (`create_harness_agent` + `TodoProvider`/`AgentModeProvider`/
@@ -231,7 +239,10 @@ MAF ships the harness natively (`create_harness_agent` + `TodoProvider`/`AgentMo
       (`agents.session_context.get_current_session`, new). Tests: `test_harness_todo.py`,
       wiring tests in `test_qm_tools.py`/`test_service.py`. ADR **D-058**. Still open: resuming the
       *same* streamed turn mid-flight (vs. picked up next turn) — see the F1 follow-up below.
-- [ ] Still deferred: `PlanEvent`/live `JobStartedEvent` emission. ADR **D-042** written.
+- [ ] `PlanEvent`/live `JobStartedEvent` emission (ADR **D-042**) — **scheduled as wave B2**
+      (assessment 2026-07-25): both types are dead code today (defined in `service/events.py`,
+      rendered by `service/static/app.js`, emitted nowhere) and both inputs now exist offline
+      (`agents/harness_todo.py`, `submit_qm_job`). Emit or delete; emitting is the smaller diff.
 
 ### Phase F4 — Entra ID identity & RBAC (system-wide)
 - [x] **F4-T1** Front-door user auth (Entra OIDC): `service/auth.py` (`Principal`, `validate_token`
@@ -250,8 +261,9 @@ MAF ships the harness natively (`create_harness_agent` + `TodoProvider`/`AgentMo
       (config `entra_expensive_actions`/`entra_privileged_roles`) called by `submit_qm_job` before the
       durable job; ambient identity via `agents/identity_context.py` (contextvar, stamped by the
       runner from the `Principal`); `make_audit_middleware` records the ambient Entra oid over its
-      build-time default. Tests: `test_authz.py`, `test_audit.py`. Remaining in T5:
-      roles→`RoleFilteredSkillsSource` per request (needs per-user agent or an ambient skills filter).
+      build-time default. Tests: `test_authz.py`, `test_audit.py`. T5's "roles→skills per request"
+      remainder is **done** — delivered by D-052 as the ambient skills filter
+      (`agents/skill_access.py::RoleScopedSkillsSource`, wired at `agents/chemclaw_agent.py:139`).
 - [x] **F4-T2** Workload identity federation: `agents/identity/workload.py::WorkloadTokenProvider`
       (SA-JWT→Entra client-credentials exchange, per-scope cache). ADR D-045. `test_workload_identity.py`.
 - [x] **F4-T4** OBO exchange: `agents/identity/obo.py::exchange_obo` (wired, dormant). ADR D-046.
@@ -261,12 +273,14 @@ MAF ships the harness natively (`create_harness_agent` + `TodoProvider`/`AgentMo
       `test_hpc_bridge.py`.
 - [ ] **F4 live edges** (need a real tenant/broker/cluster; code + fake-endpoint tests already green):
       real Entra token validation against a live JWKS, real federation/OBO exchanges, live Temporal
-      mTLS handshake. Also open: per-request role→`RoleFilteredSkillsSource` scoping.
+      mTLS handshake. (Per-request role→skills scoping is **not** open — done in D-052, see F4-T5.)
 - [x] **F5** Real HPC path behind the QM activities: `workflows/hpc/nextflow.py` (Tower REST adapter
       `launch_run`/`poll_run`/`fetch_artifacts`, fake-HTTP tested), dispatched by `hpc_launch_interface`
       (mock kept for CI). `hpc_pipeline_version` in the cache key when set (F5-T3). Worker unchanged
       (F5-T4). ADR D-048. `test_nextflow_adapter.py`.
-- [ ] **F5 deferred**: `QMJobWorkflow→CalculationWorkflow` rename (cosmetic, high-churn); real `cclib`
+- [ ] **F5 deferred**: ~~`QMJobWorkflow→CalculationWorkflow` rename~~ — **DROPPED** (assessment
+      2026-07-25): the workflow type name is durable-history state, so the rename is exactly the
+      un-versioned change the workflow-versioning policy below exists to forbid; real `cclib`
       parsing once a live QM output format is fixed; live-cluster durability spike (needs a cluster).
 - [x] **F6** OpenShift delivery: one rootless multi-target image (`deploy/Containerfile` +
       `entrypoint.sh`), Helm chart (`deploy/helm/chemclaw/`: ConfigMap/Secret, SA with federation,
@@ -557,7 +571,8 @@ MAF ships the harness natively (`create_harness_agent` + `TodoProvider`/`AgentMo
 - [x] 1b.1 Store interface `get/put` (Protocol); 1b.2 versioned key `(calc_type, calc_version, input_hash, params_hash)`.
 - [x] 1b.3 In-memory backend (tests) + Postgres backend (`calculation_results` table) + `make db-migrate` + CI DB.
 - [x] 1b.4 One `cached_compute()` path (lookup-before-compute, DRY); returns was_cached for hit/miss metric.
-- [ ] 1b.5 Temporal lookup/persist activities — fold into 1c.5 (generic CalculationWorkflow) to avoid a stub.
+- [x] 1b.5 Temporal lookup/persist activities — folded into 1c.5 by design (no stub); checkbox was
+      stale, cleared 2026-07-25.
 
 ### Phase 1c — Fast predictors + semiempirical (first *real* calculations)
 - [x] 1c.2 **xTB / GFN2** calculator via `tblite` (real single-point energy, RDKit 3D embed, CPU) —
@@ -622,12 +637,20 @@ MAF ships the harness natively (`create_harness_agent` + `TodoProvider`/`AgentMo
       (see plan + D-009). No longer a backlog decision.
 - [ ] **Chemical/biological safety layer** — distinct from Entra-ID/RBAC (IT security).
       GxP / data-integrity + hazard checks. **Kept in backlog** (user decision); decide scope
-      before any capability phase that could propose a hazardous route/procedure.
+      before any capability phase that could propose a hazardous route/procedure. **Assessment
+      2026-07-25: that precondition is already past** — BO recommendations (1d.5) and development
+      reports (5b) publish agent-authored procedures today with no hazard awareness anywhere in the
+      tree. Promoted to **wave C2** with a proposed advisory-only, deterministic slice (committed
+      SMARTS rule table + `@tool` + skill + `kg-validate` hazard-section rule + a recall metric);
+      three scope questions await the user — `docs/backlog-plan.md` §3/§5.
 - [ ] Retrosynthesis + reaction prediction · DoE/Bayesian optimization · lab automation/SiLA2
       closed-loop · process flowsheet synthesis · multimodal analytical data · domain foundation
       models — all currently in `DEFERRED.md` with triggers; confirm or pull forward.
-- [ ] Design cautions to bake in: apply Skills/tools **selectively + measured per task** (not
-      universally); design the CoALA memory layer against DMR/LongMemEval, not by assumption.
+- [x] Design caution "apply Skills/tools **selectively + measured per task**" — **satisfied**:
+      `evals/ab.py` (2b.4) measures per-task tool utility including where tooling hurts, and
+      `AgentProfile` (D-075) narrows the toolset per use case. Nothing left to build.
+- [ ] Design caution: evaluate the CoALA memory layer against DMR/LongMemEval, not by assumption —
+      deferred with AG-13 (needs an external benchmark + a live LLM to score it).
 
 ## Open questions / awaiting input (see `docs/research-review.md`)
 - [ ] **"pKs models"** — interpreted as **pKa** prediction; confirm (could mean PK/ADMET). The
@@ -647,6 +670,10 @@ MAF ships the harness natively (`create_harness_agent` + `TodoProvider`/`AgentMo
       ingestion · Phase 5 memory layers · Phase 5b report harness · Phase 6 identity/RBAC.
 
 ## Post-campaign follow-ups (2026-07-24, D-072)
+
+Assessed 2026-07-25 (`docs/backlog-plan.md`): four are scheduled — **A1** late-file detection,
+**A2** deployment docs, **A3** drift visibility, **B1** substructure compute bound, **C1** the
+versioning policy — and one, **B3**, was reclassified from polish to a correctness defect.
 
 - [ ] **ELN late-file detection** — export files older than `eln_sync_overlap_seconds` are still
       dropped silently; add a file-mtime vs cursor WARN so operators see them (manual backfill via
