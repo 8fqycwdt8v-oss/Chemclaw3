@@ -307,3 +307,45 @@ real document format; IDEA-6 depends on AGT-3), and two are genuinely large enou
 own design note (IDEA-2 calibration, IDEA-1 standing queries). Building TOOL-6 against a guessed API
 or IDEA-6 over a parser that does not exist would have produced confident-looking stubs — worse than
 an honest boundary.
+
+## Continuation 2 — the five blocked items (same session)
+
+- [x] **IDEA-2** calibration ledger (migration 016, `calc/calibration.py`, two agent tools).
+- [x] **IDEA-1** standing queries (migration 017, `agents/subscriptions.py`, `workflows/digest.py`).
+- [x] **AGT-3** file ingress (`agents/attachments.py`, upload route, two agent tools).
+- [x] **IDEA-6** corpus backfill (`scripts/backfill_corpus.py`, reusing AGT-3's parsers).
+- [x] **TOOL-6** external literature (`report/literature.py`, via the F7 registry).
+
+## Review (continuation 2)
+
+Gate green: 755 → 774 passing, ruff + `mypy --strict` clean, all four validators pass. ADR **D-076**.
+
+I had recorded these five as blocked. Asked to implement them anyway, the correct move was the one
+D-057 already established here: **make the blocking decision explicitly and record it, rather than
+defer a second time.** Each decision now lives in the module that embodies it.
+
+**The decisions, and what made each defensible rather than arbitrary:**
+
+- *Literature source → PubChem.* Not "an API I picked" but the only option clearing every constraint
+  this repo actually has: licence-clean, credential-free, and structure-keyed so a hit joins on the
+  key the fingerprint index already uses. Reaxys/SciFinder are not excluded — they are one sibling
+  class each, which is what the F7 seam was built to buy.
+- *Upload formats → a closed allowlist that refuses.* The refusal is the load-bearing half. A PDF
+  "read" by scraping text-like bytes produces confident nonsense a chemist cannot tell from a real
+  reading — worse than the gap it would close.
+- *Backfill → verbatim, never summarized.* An LLM-summarized backfill would put thousands of
+  unreviewed paraphrases into the corpus, which is the fastest way to make a graph untrustworthy.
+- *Calibration → three figures.* Uncertainty coverage is the one a mean error cannot show, and the
+  one distinguishing "imprecise but honest" from "precise-looking and misleading".
+- *Digest watermark → advances after delivery.* A crash must re-report, never silently skip.
+
+**A pre-existing test earned its keep.** `test_every_session_scoped_route_is_ownership_gated`
+enumerates session-scoped routes rather than hardcoding them, and failed the instant the attachments
+route appeared — forcing both an inventory update and a behavioural non-owner sweep over the new
+route. That inventory-assertion pattern is worth copying to other route families.
+
+**Phase F11 is complete.** Every finding in the analysis is implemented or explicitly closed, with
+three (AGT-1, TOOL-7, AGT-6) withdrawn after assessment and recorded so they are not re-opened
+blindly. What genuinely remains is unchanged and outside this environment: the live edges needing a
+real tenant/broker/cluster, and the audit-trail archive-then-reseal design, which needs an ADR with
+QA sign-off rather than a cleanup job.

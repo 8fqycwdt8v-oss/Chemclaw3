@@ -13,6 +13,7 @@ from collections.abc import Callable
 from chemclaw.config import settings
 from eln.json_adapter import JsonExportAdapter
 from eln.ord_adapter import OrdJsonAdapter
+from report.literature import PubChemLiteratureRetriever
 from report.retrievers import GraphRetriever, LexicalRetriever, VectorRetriever
 from report.vector_index import default_note_index
 from sources.base import DataSource, IngestHalf, RetrieveHalf, SourceSpec
@@ -31,6 +32,10 @@ DATA_SOURCES: dict[str, Callable[[], DataSource]] = {
     # The ELN adapters are ingest-only: reactions flow in and become graph notes, which the `graph`
     # source then retrieves — so the ELN source does not also carry the graph retriever (no double
     # count). They re-host the existing adapters verbatim.
+    # External literature (gap TOOL-6), retrieve-only. Off until a deployment opts in by adding
+    # `literature` to `data_sources` — the only source here that leaves the cluster, so opting in
+    # is also an explicit acceptance of that egress.
+    "literature": lambda: SourceSpec(name="literature", retrieve=PubChemLiteratureRetriever()),
     "eln-json": lambda: SourceSpec(name="eln-json", ingest=JsonExportAdapter()),
     "eln-ord": lambda: SourceSpec(name="eln-ord", ingest=OrdJsonAdapter()),
 }

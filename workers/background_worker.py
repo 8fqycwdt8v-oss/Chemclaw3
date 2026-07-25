@@ -24,6 +24,7 @@ from workflows.bo_activities import (
 )
 from workflows.bo_campaign import BoCampaignWorkflow
 from workflows.bo_knowledge import write_campaign_node
+from workflows.digest import DigestWorkflow, acknowledge_digest, collect_digests
 from workflows.eln_sync import (
     ElnSyncWorkflow,
     list_ingest_sources,
@@ -76,6 +77,7 @@ BACKGROUND_WORKFLOWS: list[type] = [
     NoteReindexWorkflow,
     RetentionWorkflow,
     AuditChainVerifyWorkflow,
+    DigestWorkflow,
 ]
 BACKGROUND_ACTIVITIES: Sequence[Callable[..., Any]] = [
     propose_initial,
@@ -97,6 +99,8 @@ BACKGROUND_ACTIVITIES: Sequence[Callable[..., Any]] = [
     reindex_notes_activity,
     prune_expired_rows,
     check_audit_chain,
+    collect_digests,
+    acknowledge_digest,
     record_session_event_activity,
     check_eval_drift,
     resolve_fan_out_limit,

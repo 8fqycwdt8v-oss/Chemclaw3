@@ -128,30 +128,48 @@ everything below is built, tested, and green under `make lint type test` (688+ p
 - [x] **AGT-4** `agents/preferences.py` + migration `015` — per-user working preferences,
       deliberately *not* graph notes (the PR-gate protects shared knowledge, not personal trivia).
 
-### Open — the W4 remainder, each with why it is not built
+### Done — the W4 remainder (each previously blocked; the blocking decision is now made explicitly)
 
-- [ ] **TOOL-6 external literature/patent retriever** — blocked on a *decision*, not on work: which
-      source (PubChem / Reaxys / SciFinder / an internal mirror), under which licence and
-      credential. The F7 registry means it is one adapter once that is answered; building against a
-      guessed API would be the wrong integration shipped confidently.
-- [ ] **AGT-3 file/attachment ingress** — the upload route is small; the *parsing* is open-ended
-      (spectra, CoAs, PDFs, CSVs each need their own mapper) and is the gated OCR/vision item in
-      `docs/parity-plan.md`. Needs a first real document format to aim at.
-- [ ] **IDEA-2 predicted-vs-actual calibration** — the most valuable remaining item. Needs a
-      predictions table plus a reconciliation job that matches a stored prediction to the ELN
-      result that later lands. Sizeable and worth its own design note.
-- [ ] **IDEA-1 standing queries / digest** — needs a subscription store plus a Schedule; the
-      push-back channel it would ride already exists.
-- [ ] **IDEA-6 corpus backfill** — needs AGT-3's document parsing first; a backfill driver over a
-      parser that does not exist would be a stub.
-- [ ] **TOOL-7 units at the LLM boundary** — *assessed and deliberately closed as not-a-gap*: units
-      are carried in field names (`temperature_c`, `mass_g`, `moles_mmol`) throughout, including
-      every model added in F11. A `Quantity` type would be an abstraction with no second caller.
-- [ ] **AGT-6 structured final output** — *assessed and largely satisfied*: the tools added in W1
-      (`request_development_report`, `start_optimization_campaign`) take typed pydantic arguments,
-      so MAF already forces a validated payload at exactly the machine-consumed call site whose
-      absence was the reason for the original deferral. A second `response_format` mechanism on the
-      prose answer would add a path with no consumer.
+- [x] **IDEA-2 predicted-vs-actual calibration** — `calc/calibration.py` + migration `016`. Three
+      figures, not one: **bias** (a reliable offset is correctable, the same MAE scattered is not),
+      **MAE**, and **uncertainty coverage** — the one a mean error cannot show, because a calculator
+      whose error bars never contain the truth is misleading precisely where it claims confidence.
+      `calculator_trust` and `report_measurement` expose it, so "how far to trust this" is measured
+      rather than asserted in prose. Off until `calibration_enabled`.
+- [x] **IDEA-1 standing queries** — `agents/subscriptions.py` + `workflows/digest.py` + migration
+      `017`. The watermark advances *after* delivery: a crash must re-report, never silently skip.
+      Rides the existing push-back channel — no second notification system.
+- [x] **AGT-3 file ingress** — `agents/attachments.py` + `POST /sessions/{id}/attachments`.
+      **Decision made:** a closed allowlist of formats parseable completely and deterministically
+      offline (markdown/plain text, CSV/TSV). Binary scientific formats are **refused with a message
+      naming what is supported**, never half-parsed — a PDF "read" by scraping text-like bytes
+      produces confident nonsense a chemist cannot distinguish from a real reading. Attachments are
+      session-scoped working material; anything worth keeping still goes through the PR-gate.
+- [x] **IDEA-6 corpus backfill** — `scripts/backfill_corpus.py`, reusing AGT-3's parsers verbatim.
+      One note per document, **verbatim**, through the PR-gate. Deliberately no summarizing: a
+      backfill makes documents *reachable*; an LLM-summarized one would put thousands of unreviewed
+      paraphrases into the corpus. Content-derived ids, so a rename does not mint a duplicate.
+- [x] **TOOL-6 external literature** — `report/literature.py`, attached via the F7 registry.
+      **Decision made: PubChem PUG-REST** — the only option clearing every constraint this repo
+      actually has (public and licence-clean, no credential, and structure-keyed, which is what this
+      system already speaks). Reaxys/SciFinder/an internal mirror remain one sibling class each.
+      Off until a deployment adds `literature` to `data_sources` (it is the only source that leaves
+      the cluster, so opting in is also an explicit acceptance of that egress), and any failure
+      degrades to *empty* rather than failing the sweep.
+
+### Closed as not-gaps after assessment (do not re-open blindly)
+- [x] **TOOL-7 units** — carried in field names throughout (`temperature_c`, `mass_g`,
+      `moles_mmol`), including every model added in F11. A `Quantity` type would be an abstraction
+      with no second caller.
+- [x] **AGT-6 structured outputs** — the W1 tools take typed pydantic arguments, so MAF already
+      forces a validated payload at the machine-consumed call site whose absence was the original
+      reason to defer.
+- [x] **AGT-1 turn cancellation** — verified correct as of `4bc9b04`; now measured by
+      `tests/test_turn_cancellation.py`.
+
+**Phase F11 is complete.** Remaining open items are the pre-existing live edges (a real Entra
+tenant / Temporal broker / OpenShift cluster) plus the audit-trail archive-then-reseal design, which
+is recorded in `DEFERRED.md` as needing its own ADR with QA sign-off rather than a cleanup job.
 
 ## Next — Platform-parity hardening (docs/parity-plan.md, Phase F10)
 

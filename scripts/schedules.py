@@ -36,6 +36,7 @@ from chemclaw.ids import stable_hash
 from chemclaw.logging import configure_logging
 from chemclaw.temporal_client import connect
 from workflows.audit_verify import AuditChainVerifyWorkflow
+from workflows.digest import DigestWorkflow
 from workflows.eln_sync import ElnSyncWorkflow
 from workflows.eval_drift import EvalDriftWorkflow
 from workflows.memory_jobs import (
@@ -72,6 +73,7 @@ OWNED_SCHEDULE_IDS = frozenset(
         "note-reindex",
         "retention",
         "audit-verify",
+        "digest",
     }
 )
 
@@ -105,6 +107,11 @@ def planned_schedules() -> list[PlannedSchedule]:
     if settings.audit_verify_enabled:
         verify_every = timedelta(minutes=settings.audit_verify_schedule_minutes)
         schedules.append(PlannedSchedule("audit-verify", AuditChainVerifyWorkflow, verify_every))
+    # Digests only earn a Schedule where someone has subscribed (gap IDEA-1); otherwise the job
+    # would sweep the corpus daily to deliver nothing.
+    if settings.digest_enabled:
+        digest_every = timedelta(minutes=settings.digest_schedule_minutes)
+        schedules.append(PlannedSchedule("digest", DigestWorkflow, digest_every))
     # Retention only earns a Schedule where the deployment has stated a policy (gap SCH-1); an
     # unconfigured deployment must never start deleting records on a default it did not choose.
     if settings.retention_enabled:

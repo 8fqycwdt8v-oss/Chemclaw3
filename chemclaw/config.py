@@ -1012,6 +1012,28 @@ class MemorySettings(BaseSettings):
     # bounds the whole streamed turn regardless.
     mid_turn_resume_enabled: bool = False
     mid_turn_resume_timeout_seconds: float = Field(default=60.0, gt=0)
+    # Predicted-vs-actual calibration ledger (gap IDEA-2). Off by default: it needs the
+    # `predictions` table (migration 016), and a deployment without it must not log warnings on
+    # every prediction. `calibration_min_observations` is the floor below which the figures are
+    # reported as not-yet-meaningful — a bias from three points is not a bias.
+    calibration_enabled: bool = False
+    calibration_min_observations: int = Field(default=8, ge=1)
+    # Standing-query digests (gap IDEA-1). Off by default: it needs the `subscriptions` table
+    # (migration 017), and a deployment nobody has subscribed on would just run an empty sweep.
+    digest_enabled: bool = False
+    digest_schedule_minutes: float = Field(default=1440.0, gt=0)
+    digest_timeout_seconds: float = Field(default=300.0, gt=0)
+    # Uploaded working files (gap AGT-3). Bounded in both directions: one oversized upload must not
+    # blow a pod's memory, and a chemist uploading all morning must not either. Attachments are
+    # session-scoped working material, so they are lost with the pod by design.
+    attachment_max_bytes: int = Field(default=2_000_000, gt=0)
+    attachment_max_per_session: int = Field(default=10, ge=1)
+    # External literature retriever (gap TOOL-6). PubChem PUG-REST: public, licence-clean, needs no
+    # credential, and answers by structure — the key this system already speaks. Attaches only when
+    # a deployment adds `literature` to `data_sources` (registry membership is the enable switch,
+    # D-018), so CI and offline runs never reach the network.
+    literature_base_url: str = "https://pubchem.ncbi.nlm.nih.gov/rest/pug"
+    literature_timeout_seconds: float = Field(default=10.0, gt=0)
 
 
 class RetrievalSettings(BaseSettings):

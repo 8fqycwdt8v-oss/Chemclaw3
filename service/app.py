@@ -19,7 +19,7 @@ from collections.abc import AsyncIterator, Callable
 from pathlib import Path
 from typing import Any, Protocol
 
-from fastapi import Depends, FastAPI, HTTPException
+from fastapi import Depends, FastAPI, HTTPException, UploadFile
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, field_validator
 from sse_starlette.sse import EventSourceResponse
@@ -28,6 +28,8 @@ from starlette.middleware.cors import CORSMiddleware
 from starlette.requests import Request
 from starlette.responses import Response
 
+from agents.attachments import STORE as ATTACHMENTS
+from agents.attachments import AttachmentError, AttachmentSummary, parse_attachment
 from agents.chemclaw_agent import build_agent
 from agents.durable_tools import request_note_reindex
 from agents.harness_todo import complete_awaiting_job
@@ -478,6 +480,39 @@ def create_app(
             raise HTTPException(status_code=404, detail="no such approval hold") from exc
         if owner and owner != principal.oid:
             raise HTTPException(status_code=404, detail="no such approval hold")
+
+    @app.post("/sessions/{session_id}/attachments")
+    async def upload_attachment(
+        session_id: str,
+        file: UploadFile,
+        principal: Principal = Depends(require_principal),
+    ) -> AttachmentSummary:
+        """Attach a working file to a conversation (gap AGT-3).
+
+        The only way data entered the system was the scheduled ELN sync, so a chemist could not
+        hand over a CSV of runs or an SOP — the highest-frequency real request for a lab assistant.
+
+        Session-scoped and in-memory by design: an attachment is working material for a
+        conversation, not knowledge. Anything in it worth keeping goes through the PR-gate like
+        every other machine-touched write; routing uploads into the graph would bypass the GxP line.
+
+        Unsupported formats are refused with a message naming what *is* supported (422), never
+        silently half-parsed — a PDF "read" by scraping whatever bytes look like text would produce
+        confident nonsense a chemist could not tell from a real reading.
+        """
+        await _resolve_session(session_id, principal)
+        raw = await file.read()
+        try:
+            attachment = parse_attachment(file.filename or "upload", raw, file.content_type)
+        except AttachmentError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        ATTACHMENTS.add(session_id, attachment)
+        return AttachmentSummary(
+            name=attachment.name,
+            content_type=attachment.content_type,
+            rows=attachment.rows,
+            excerpt=attachment.text[: settings.note_excerpt_chars],
+        )
 
     @app.post("/events/knowledge-merged", status_code=202)
     async def knowledge_merged(

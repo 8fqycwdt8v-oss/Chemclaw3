@@ -36,9 +36,16 @@ from agent_framework import (
 # package top level, so it is imported from its (experimental) home here.
 from agent_framework._harness._loop import todos_remaining
 
+from agents.attachments import list_attachments, read_attachment
 from agents.audit import AuditSink, make_audit_middleware
 from agents.bo_tools import suggest_next_experiment
-from agents.calc_tools import compute_xtb_energy, predict_pka, predict_solubility
+from agents.calc_tools import (
+    calculator_trust,
+    compute_xtb_energy,
+    predict_pka,
+    predict_solubility,
+    report_measurement,
+)
 from agents.chem_tools import (
     green_metrics,
     render_structure,
@@ -64,6 +71,7 @@ from agents.preferences import forget_preference, recall_preferences, remember_p
 from agents.qm_tools import get_qm_job_status, submit_qm_job
 from agents.research_tools import gather_evidence
 from agents.skill_access import RoleScopedSkillsSource
+from agents.subscriptions import list_watches, stop_watching, watch_for
 from agents.tool_authz import enforce_tool_authz
 from chemclaw.config import McpServerSpec, settings
 
@@ -254,12 +262,16 @@ def _capability_tools() -> list[Any]:
         compute_xtb_energy,
         predict_solubility,
         predict_pka,
+        calculator_trust,
+        report_measurement,
         submit_qm_job,
         get_qm_job_status,
         find_notes,
         expand_note,
         find_knowledge_gaps,
         gather_evidence,
+        list_attachments,
+        read_attachment,
         *_mcp_capability_tools(),
         suggest_next_experiment,
         request_development_report,
@@ -269,6 +281,9 @@ def _capability_tools() -> list[Any]:
         recall_preferences,
         remember_preference,
         forget_preference,
+        watch_for,
+        list_watches,
+        stop_watching,
         propose_knowledge_note,
         record_confirmed_answer,
     ]
