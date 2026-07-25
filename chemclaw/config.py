@@ -22,28 +22,91 @@ finds everything about one concern in one place — while the composed class
 keeps every attribute flat (`settings.postgres_dsn`) and every env name
 unprefixed-by-section (`CHEMCLAW_POSTGRES_DSN`), exactly as before the split.
 A cross-field validator lives in the section that owns the relationship.
+
+House rule for a *collection* field — pick by what the elements are, not by taste:
+
+- **Typed JSON list** (`mcp_servers`, `data_source_specs`) when each element *carries its own
+  config*. The element gets a pydantic model, so it is validated, documented by its type, and
+  can grow fields without a parsing change. Where the elements vary by kind, discriminate them
+  (`Field(discriminator=...)` / `Discriminator`) rather than widening one model with optional
+  fields that only apply sometimes.
+- **Delimited string** (`skills_dir`, `data_sources`, `skills_enabled`, `entra_expensive_actions`)
+  when the elements are *bare keys* — names resolved against a registry, or paths. An admin sets
+  these like `PATH`, with no JSON quoting, and a bare key has nothing to validate beyond
+  resolving. Expose the parsed value through a derived `*_list`/`*_dirs` property and read that,
+  never the raw string.
+
+The two idioms coexist on purpose (a bare-key source should not pay the JSON-spec tax); existing
+fields are **not** migrated to match — that would be churn without a defect to fix.
 """
 
 import os
 import sys
 from typing import Annotated, Literal, Self
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Discriminator, Field, Tag, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
-class McpServerSpec(BaseModel):
-    """Launch spec for one stdio MCP server the agent attaches as a capability (D-029).
+class StdioMcpServerSpec(BaseModel):
+    """Launch spec for one **stdio** MCP server the agent attaches as a capability (D-029).
 
     `command` + `args` are how MAF's `MCPStdioTool` spawns the server as a subprocess;
     `allowed_tools` restricts which of that server's tools the conversational agent may call
     (the write/index tools are excluded — ingestion writes go through the PR-gate, not chat).
     """
 
+    model_config = ConfigDict(extra="forbid")
+
+    transport: Literal["stdio"] = "stdio"
     name: str
     command: str
     args: list[str]
     allowed_tools: list[str] | None = None
+
+
+class HttpMcpServerSpec(BaseModel):
+    """Connection spec for one **remote HTTP** MCP server (MAF's `MCPStreamableHTTPTool`).
+
+    The remote counterpart of `StdioMcpServerSpec`: instead of spawning a local subprocess, the
+    agent reaches an already-running server over Streamable HTTP at `url`. `allowed_tools` means
+    exactly what it means for stdio — the agent-facing subset — so the PR-gate boundary is
+    transport-independent. `request_timeout` (whole seconds, as MAF types it) is the one knob a
+    remote transport genuinely needs that a local subprocess does not — an unreachable host must
+    not hang a turn; `None` defers to MAF's own default rather than inventing a number here.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    transport: Literal["http"] = "http"
+    name: str
+    url: str
+    allowed_tools: list[str] | None = None
+    request_timeout: int | None = Field(default=None, gt=0)
+
+
+def _mcp_transport_tag(value: object) -> str:
+    """Read a spec's transport tag, defaulting to `"stdio"` when it is absent.
+
+    A *callable* discriminator (rather than `Field(discriminator="transport")`) exists purely for
+    backwards compatibility: every config shipped before the union — `.env.example`, the Helm
+    values, any deployment's `CHEMCLAW_MCP_SERVERS` JSON — predates the tag, and a plain
+    discriminator would reject all of them. Defaulting an absent tag to the only transport that
+    existed then keeps every such config valid, while a new server still tags itself explicitly.
+    """
+    if isinstance(value, dict):
+        return str(value.get("transport", "stdio"))
+    return str(getattr(value, "transport", "stdio"))
+
+
+# One MCP capability server, discriminated on `transport`. Keeping the public name `McpServerSpec`
+# for the union means every existing annotation and import stays valid — only the set of shapes it
+# admits grew. A new transport (websocket, if one is ever needed) is one variant here plus one
+# branch in `agents.chemclaw_agent._mcp_tool`.
+McpServerSpec = Annotated[
+    Annotated[StdioMcpServerSpec, Tag("stdio")] | Annotated[HttpMcpServerSpec, Tag("http")],
+    Discriminator(_mcp_transport_tag),
+]
 
 
 class JsonElnSourceSpec(BaseModel):
@@ -461,26 +524,36 @@ class AgentSettings(BaseSettings):
     # directory without code changes. Read it through the `skills_dirs` property, never raw.
     agent_model: str = "claude-sonnet-5"
     skills_dir: str = "skills"
+    # Which discovered skills are actually advertised — discovery is not enablement. Empty (the
+    # default) means every skill found under `skills_dir` is active, i.e. today's behavior. A
+    # non-empty pathsep list narrows to exactly those names, so a deployment can ship the whole
+    # skills tree and turn on the subset it has validated, without deleting folders. This only
+    # *attenuates*: it cannot advertise a skill that no directory provides, and the role gates
+    # below still apply on top. `make skill-validate` reports a name here that no dir provides.
+    skills_enabled: str = ""
     # Role-scoped skill visibility (plan step 6.2): map a skill name to the Entra app-roles allowed
     # to see it. A skill not listed is ungated (advertised to everyone); a listed skill is hidden
     # from a caller (the turn's ambient identity) holding none of its roles. Empty default = every
     # skill visible (today's behavior). ENV override is JSON, e.g.
     # CHEMCLAW_SKILL_ROLE_GATES='{"deep-research": ["process-chemist"]}'.
     skill_role_gates: dict[str, list[str]] = Field(default_factory=dict)
-    # MCP capability servers the agent attaches over stdio (the plan's capability layer, D-029):
-    # the agent calls the fingerprint search over the MCP protocol rather than importing it
-    # in-process, so a capability is a running server, not agent code. Adding one is an entry
-    # here (ENV-overridable as JSON), never a change to `build_agent`. Each runs as its own
-    # subprocess launched from the repo root; `allowed_tools` keeps the agent to the read/search
-    # tools (index/write stays in the PR-gated ingestion path, off the conversational agent).
+    # MCP capability servers the agent attaches (the plan's capability layer, D-029): the agent
+    # calls the fingerprint search over the MCP protocol rather than importing it in-process, so a
+    # capability is a running server, not agent code. Adding one is an entry here (ENV-overridable
+    # as JSON), never a change to `build_agent`. Each spec is discriminated on `transport`:
+    # `stdio` (the default, and what both built-ins use) runs the server as a subprocess launched
+    # from the repo root; `http` reaches an already-running remote server by URL. An entry with no
+    # `transport` key is read as stdio, so configs written before the union keep working.
+    # `allowed_tools` keeps the agent to the read/search tools on either transport (index/write
+    # stays in the PR-gated ingestion path, off the conversational agent).
     mcp_servers: list[McpServerSpec] = [
-        McpServerSpec(
+        StdioMcpServerSpec(
             name="mcp-molfp",
             command=sys.executable,
             args=["-m", "mcp_servers.molfp.server"],
             allowed_tools=["similar_molecules", "substructure_matches"],
         ),
-        McpServerSpec(
+        StdioMcpServerSpec(
             name="mcp-rxnfp",
             command=sys.executable,
             args=["-m", "mcp_servers.rxnfp.server"],
@@ -532,6 +605,15 @@ class AgentSettings(BaseSettings):
         team-skills` the same way they set `PATH`, no JSON quoting.
         """
         return [d for d in self.skills_dir.split(os.pathsep) if d]
+
+    @property
+    def skills_enabled_list(self) -> list[str]:
+        """The explicitly enabled skill names; empty means "every discovered skill" (the default).
+
+        A bare-key set, so it uses the delimited-string idiom (like `skills_dir`/`data_sources`)
+        rather than JSON — these are names, not config-carrying objects.
+        """
+        return [s for s in self.skills_enabled.split(os.pathsep) if s]
 
 
 class ServiceSettings(BaseSettings):
@@ -774,6 +856,12 @@ class KgSettings(BaseSettings):
     # model; an unbounded value would traverse the whole graph. 1–2 is typical; clamp to this so a
     # large value is bounded rather than rejected.
     graph_max_hops: int = Field(default=3, ge=1)
+    # Upper bound on how many notes `find_notes` returns. It is a substring sweep over every
+    # current note, so a broad needle (a single letter, a common element symbol) matches most of
+    # the corpus and an uncapped hit list would flood the model context — the same failure mode
+    # `fingerprint_max_top_k` bounds for substructure search. Hitting the cap logs a warning, so a
+    # truncated result is never silent (D-066 #4).
+    graph_max_results: int = Field(default=50, ge=1)
     # PR-gate git settings (plan steps 2.7, 2.8): agent notes branch off this base
     # branch on this remote before a human merges.
     note_base_branch: str = "main"
