@@ -8,22 +8,23 @@ Those decisions are what these tests pin: the decision, not the plumbing, carrie
   miscalibrated in a way a mean error cannot show.
 - **IDEA-1** digests: the watermark advances *after* delivery, so a crash re-reports rather than
   silently skipping.
-- **AGT-3** uploads: a closed format allowlist that *refuses* what it cannot parse, rather than
-  half-parsing a PDF into confident nonsense.
+- **AGT-3** uploads: a closed format allowlist that *refuses* what it cannot parse. PDF/PPTX/DOCX/
+  XLSX are now in scope and parsed properly (`tests/test_document_formats.py`); what survives from
+  the original decision is the refusal itself — see that module for the scanned-PDF case.
 - **IDEA-6** backfill: one note per document, verbatim, through the PR-gate — never a summary.
-- **TOOL-6** literature: PubChem (public, licence-clean, credential-free, structure-keyed), off by
-  default, and degrading to empty rather than failing a sweep.
+
+**TOOL-6 (external literature) is gone, not merely off**: the decision was reversed to *no external
+sources at all*, so there is nothing left here to pin. `tests/test_no_egress.py` enforces the
+reversal, which prose in `DEFERRED.md` could not.
 """
 
 from pathlib import Path
 
-import httpx
 import pytest
 
 from agents.attachments import AttachmentError, AttachmentStore, parse_attachment
 from calc.calibration import Calibration, summarize
 from chemclaw.config import settings
-from report.literature import PubChemLiteratureRetriever
 from scripts.backfill_corpus import note_for_document
 
 # --- IDEA-2: predicted-vs-actual calibration -------------------------------------------------
@@ -104,18 +105,6 @@ def test_an_sop_is_kept_verbatim() -> None:
     assert "Charge 1.2 equiv DIPEA." in attachment.text
 
 
-def test_an_unsupported_format_is_refused_by_name_not_half_parsed() -> None:
-    """A PDF "read" by scraping text-like bytes produces confident nonsense (the whole reason).
-
-    The refusal must also say what *is* supported, or the chemist is left guessing.
-    """
-    with pytest.raises(AttachmentError) as caught:
-        parse_attachment("spectrum.pdf", b"%PDF-1.7 ...", "application/pdf")
-    message = str(caught.value)
-    assert "not a supported format" in message
-    assert "text/csv" in message and "OCR" in message
-
-
 def test_an_oversized_upload_is_refused() -> None:
     """One upload must not be able to blow a pod's memory."""
     with pytest.raises(AttachmentError, match="limit"):
@@ -163,84 +152,3 @@ def test_an_unparseable_document_raises_so_the_driver_can_skip_it(tmp_path: Path
     """One PDF must not abort a backfill of ten thousand files."""
     with pytest.raises(AttachmentError):
         note_for_document(tmp_path / "scan.pdf", b"%PDF-1.7", tags=[])
-
-
-# --- TOOL-6: external literature ---------------------------------------------------------------
-
-
-def _client(handler: object) -> httpx.AsyncClient:
-    """An httpx client backed by a fake transport — no network in any test."""
-    return httpx.AsyncClient(transport=httpx.MockTransport(handler))  # type: ignore[arg-type]
-
-
-def test_a_structure_query_returns_external_chunks() -> None:
-    """Retrieval is by structure — the reliable join key this system already speaks."""
-
-    def handler(request: httpx.Request) -> httpx.Response:
-        return httpx.Response(
-            200,
-            json={
-                "PropertyTable": {
-                    "Properties": [
-                        {
-                            "CID": 702,
-                            "IUPACName": "ethanol",
-                            "MolecularFormula": "C2H6O",
-                            "MolecularWeight": "46.07",
-                        }
-                    ]
-                }
-            },
-        )
-
-    import asyncio
-
-    retriever = PubChemLiteratureRetriever(_client(handler))
-    chunks = asyncio.run(retriever.retrieve("CCO", {}))
-    assert len(chunks) == 1
-    assert chunks[0].source_note_id == "pubchem-cid-702"
-    assert chunks[0].retriever == "literature"
-
-
-def test_an_external_hit_is_visibly_not_an_internal_note() -> None:
-    """A reader must never mistake external context for a merged, reviewed internal note."""
-
-    def handler(request: httpx.Request) -> httpx.Response:
-        return httpx.Response(200, json={"PropertyTable": {"Properties": [{"CID": 702}]}})
-
-    import asyncio
-
-    chunk = asyncio.run(PubChemLiteratureRetriever(_client(handler)).retrieve("CCO", {}))[0]
-    assert chunk.source_note_id.startswith("pubchem-")  # not a note id
-    assert "External reference" in chunk.content
-    assert chunk.score < 0.5  # ranks below internal evidence by default
-
-
-def test_a_query_with_no_structure_returns_nothing_rather_than_guessing() -> None:
-    """Free-text search over a chemistry question returns noise; the same conservatism as TOOL-2."""
-    import asyncio
-
-    def handler(request: httpx.Request) -> httpx.Response:
-        raise AssertionError("no structure in the query, so no request should be made")
-
-    retriever = PubChemLiteratureRetriever(_client(handler))
-    assert asyncio.run(retriever.retrieve("what did we get on the Suzuki", {})) == []
-
-
-def test_an_external_failure_degrades_to_empty_rather_than_failing_the_sweep() -> None:
-    """External evidence must never sink an answer the internal corpus could already give."""
-    import asyncio
-
-    def handler(request: httpx.Request) -> httpx.Response:
-        return httpx.Response(503)
-
-    retriever = PubChemLiteratureRetriever(_client(handler))
-    assert asyncio.run(retriever.retrieve("CCO", {})) == []
-
-
-def test_literature_is_off_until_a_deployment_opts_in() -> None:
-    """It is the only source that leaves the cluster, so opting in accepts that egress."""
-    assert "literature" not in settings.data_sources
-    from sources.registry import DATA_SOURCES
-
-    assert "literature" in DATA_SOURCES  # available, just not active
