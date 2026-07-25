@@ -28,22 +28,69 @@ import os
 import sys
 from typing import Annotated, Literal, Self
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Discriminator, Field, Tag, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
-class McpServerSpec(BaseModel):
-    """Launch spec for one stdio MCP server the agent attaches as a capability (D-029).
+class StdioMcpServerSpec(BaseModel):
+    """Launch spec for one **stdio** MCP server the agent attaches as a capability (D-029).
 
     `command` + `args` are how MAF's `MCPStdioTool` spawns the server as a subprocess;
     `allowed_tools` restricts which of that server's tools the conversational agent may call
     (the write/index tools are excluded — ingestion writes go through the PR-gate, not chat).
     """
 
+    model_config = ConfigDict(extra="forbid")
+
+    transport: Literal["stdio"] = "stdio"
     name: str
     command: str
     args: list[str]
     allowed_tools: list[str] | None = None
+
+
+class HttpMcpServerSpec(BaseModel):
+    """Connection spec for one **remote HTTP** MCP server (MAF's `MCPStreamableHTTPTool`).
+
+    The remote counterpart of `StdioMcpServerSpec`: instead of spawning a local subprocess, the
+    agent reaches an already-running server over Streamable HTTP at `url`. `allowed_tools` means
+    exactly what it means for stdio — the agent-facing subset — so the PR-gate boundary is
+    transport-independent. `request_timeout` (whole seconds, as MAF types it) is the one knob a
+    remote transport genuinely needs that a local subprocess does not — an unreachable host must
+    not hang a turn; `None` defers to MAF's own default rather than inventing a number here.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    transport: Literal["http"] = "http"
+    name: str
+    url: str
+    allowed_tools: list[str] | None = None
+    request_timeout: int | None = Field(default=None, gt=0)
+
+
+def _mcp_transport_tag(value: object) -> str:
+    """Read a spec's transport tag, defaulting to `"stdio"` when it is absent.
+
+    A *callable* discriminator (rather than `Field(discriminator="transport")`) exists purely for
+    backwards compatibility: every config shipped before the union — `.env.example`, the Helm
+    values, any deployment's `CHEMCLAW_MCP_SERVERS` JSON — predates the tag, and a plain
+    discriminator would reject all of them. Defaulting an absent tag to the only transport that
+    existed then keeps every such config valid, while a new server still tags itself explicitly.
+    """
+    if isinstance(value, dict):
+        return str(value.get("transport", "stdio"))
+    return str(getattr(value, "transport", "stdio"))
+
+
+# One MCP capability server, discriminated on `transport`. Keeping the public name `McpServerSpec`
+# for the union means every existing annotation and import stays valid — only the set of shapes it
+# admits grew. A new transport (websocket, if one is ever needed) is one variant here plus one
+# branch in `agents.chemclaw_agent._mcp_tool`.
+McpServerSpec = Annotated[
+    Annotated[StdioMcpServerSpec, Tag("stdio")] | Annotated[HttpMcpServerSpec, Tag("http")],
+    Discriminator(_mcp_transport_tag),
+]
 
 
 class JsonElnSourceSpec(BaseModel):
@@ -467,20 +514,23 @@ class AgentSettings(BaseSettings):
     # skill visible (today's behavior). ENV override is JSON, e.g.
     # CHEMCLAW_SKILL_ROLE_GATES='{"deep-research": ["process-chemist"]}'.
     skill_role_gates: dict[str, list[str]] = Field(default_factory=dict)
-    # MCP capability servers the agent attaches over stdio (the plan's capability layer, D-029):
-    # the agent calls the fingerprint search over the MCP protocol rather than importing it
-    # in-process, so a capability is a running server, not agent code. Adding one is an entry
-    # here (ENV-overridable as JSON), never a change to `build_agent`. Each runs as its own
-    # subprocess launched from the repo root; `allowed_tools` keeps the agent to the read/search
-    # tools (index/write stays in the PR-gated ingestion path, off the conversational agent).
+    # MCP capability servers the agent attaches (the plan's capability layer, D-029): the agent
+    # calls the fingerprint search over the MCP protocol rather than importing it in-process, so a
+    # capability is a running server, not agent code. Adding one is an entry here (ENV-overridable
+    # as JSON), never a change to `build_agent`. Each spec is discriminated on `transport`:
+    # `stdio` (the default, and what both built-ins use) runs the server as a subprocess launched
+    # from the repo root; `http` reaches an already-running remote server by URL. An entry with no
+    # `transport` key is read as stdio, so configs written before the union keep working.
+    # `allowed_tools` keeps the agent to the read/search tools on either transport (index/write
+    # stays in the PR-gated ingestion path, off the conversational agent).
     mcp_servers: list[McpServerSpec] = [
-        McpServerSpec(
+        StdioMcpServerSpec(
             name="mcp-molfp",
             command=sys.executable,
             args=["-m", "mcp_servers.molfp.server"],
             allowed_tools=["similar_molecules", "substructure_matches"],
         ),
-        McpServerSpec(
+        StdioMcpServerSpec(
             name="mcp-rxnfp",
             command=sys.executable,
             args=["-m", "mcp_servers.rxnfp.server"],

@@ -16,12 +16,17 @@ import pytest
 from agent_framework import MCPStdioTool
 
 from agents.chemclaw_agent import _mcp_tool
-from chemclaw.config import McpServerSpec, settings
+from chemclaw.config import StdioMcpServerSpec, settings
+
+# Only stdio servers can be spawned here; an HTTP server would need a live remote endpoint. The
+# built-in capability servers are both stdio, so this covers every server the repo ships.
+_STDIO_SERVERS = [s for s in settings.mcp_servers if isinstance(s, StdioMcpServerSpec)]
 
 
-async def _discovered_tools(spec: McpServerSpec) -> set[str]:
+async def _discovered_tools(spec: StdioMcpServerSpec) -> set[str]:
     """Spawn the server for `spec`, connect over stdio, and return the tool names it exposes."""
-    tool: MCPStdioTool = _mcp_tool(spec)
+    tool = _mcp_tool(spec)
+    assert isinstance(tool, MCPStdioTool)  # a stdio spec must build a stdio tool
     try:
         async with tool:
             return {f.name for f in tool.functions}
@@ -33,8 +38,8 @@ async def _discovered_tools(spec: McpServerSpec) -> set[str]:
         pytest.skip(f"MCP server toolchain unavailable in this environment: {exc}")
 
 
-@pytest.mark.parametrize("spec", settings.mcp_servers, ids=lambda s: s.name)
-def test_server_exposes_only_its_allowed_tools(spec: McpServerSpec) -> None:
+@pytest.mark.parametrize("spec", _STDIO_SERVERS, ids=lambda s: s.name)
+def test_server_exposes_only_its_allowed_tools(spec: StdioMcpServerSpec) -> None:
     """Each configured server connects and advertises exactly its `allowed_tools`.
 
     The `allowed_tools` restriction is what keeps the write/index tools (`index_molecule`,
