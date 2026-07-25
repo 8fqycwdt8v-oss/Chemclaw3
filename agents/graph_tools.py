@@ -16,8 +16,9 @@ from pydantic import BaseModel, Field
 from agents.framing import frame_untrusted
 from agents.turn_signals import record_proposal
 from chemclaw.config import settings
+from kg.analytics import GraphGaps, analyze
 from kg.git_submitter import default_submitter
-from kg.graph import build_graph, neighborhood
+from kg.graph import build_graph, load_notes, neighborhood
 from kg.note import Note
 from kg.pr_gate import propose_note
 
@@ -124,6 +125,24 @@ async def expand_note(note_id: str, hops: int = 1) -> NoteView:
     return NoteView(
         note=_ref(note), body=frame_untrusted(note.body, note_id=note.id), neighbors=neighbors
     )
+
+
+async def find_knowledge_gaps() -> GraphGaps:
+    """Report where the knowledge graph is thin, unreachable, or load-bearing (gap KNW-5).
+
+    Use this for "what don't we know?" questions — which area has the least evidence, which project
+    has runs but no distilled playbook, which notes nothing links to. Ordinary retrieval walks
+    *outward from a hit*, so it can only ever answer "what do we know about X"; this is the
+    complement, and it is the right input to a "what should we run next?" conversation.
+
+    Returns:
+        Counts per note type, isolated (unlinked) notes, projects with evidence but no
+        distillation, the most-cited hub notes, and any dangling links in the served graph.
+    """
+    directory = Path(settings.knowledge_dir)
+    graph = await asyncio.to_thread(build_graph, directory)
+    notes = await asyncio.to_thread(load_notes, directory)
+    return analyze(graph, notes)
 
 
 async def propose_knowledge_note(

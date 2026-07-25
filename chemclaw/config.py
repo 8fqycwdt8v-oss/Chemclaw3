@@ -1011,6 +1011,13 @@ class RetrievalSettings(BaseSettings):
     retrieval_top_k: int = Field(default=8, gt=0)
     retrieval_mode: Literal["graph", "hybrid"] = "graph"
     retrieval_fusion_k: int = Field(default=60, gt=0)
+    # Per-retriever weight in the hybrid fusion (gap IDEA-5). RRF is score-agnostic, which is right
+    # for combining heterogeneous *rankers* and wrong for combining heterogeneous *evidence
+    # classes*: a validated internal ELN entry and a transferred analogy otherwise fuse identically.
+    # Keys are retriever names as they appear on `EvidenceChunk.retriever`; an absent retriever
+    # weighs 1.0, and an empty map (the default) is exactly today's uniform behavior.
+    # ENV override is JSON, e.g. CHEMCLAW_RETRIEVAL_SOURCE_WEIGHTS='{"graph": 1.5, "vector": 0.8}'.
+    retrieval_source_weights: dict[str, float] = Field(default_factory=dict)
     # How much of a source note's body an excerpt carries — shared by the report harness's
     # evidence excerpts and the memory layer's procedure excerpts (one note-excerpt budget,
     # neutral name since both consume it), so the two cannot drift.
@@ -1029,6 +1036,12 @@ class RetrievalSettings(BaseSettings):
     # of the note tree (path + mtime + size), so any add/edit/delete of a note busts it — retrieval
     # stays always-live. Off makes every call re-parse (the pre-cache behavior); leave on in prod.
     graph_cache_enabled: bool = True
+
+    @property
+    def retrieval_source_weights_map(self) -> dict[str, float] | None:
+        """The fusion weights, or `None` when unset — so the fusion keeps its uniform fast path."""
+        return self.retrieval_source_weights or None
+
     # The derived note index is only as good as its last rebuild (gap SCH-2). The graph changes on
     # every merged PR, and RRF fusion is score-agnostic, so a stale dense/lexical entry would rank
     # confidently beside live graph hits with no staleness signal. `NoteReindexWorkflow` runs on

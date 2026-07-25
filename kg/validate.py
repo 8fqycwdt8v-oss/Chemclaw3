@@ -10,7 +10,7 @@ import sys
 from pathlib import Path
 
 from chemclaw.config import settings
-from kg.note import NoteError, read_note
+from kg.note import KNOWN_NOTE_TYPES, Note, NoteError, read_note
 
 
 def validate(notes_dir: Path) -> list[str]:
@@ -38,7 +38,24 @@ def validate(notes_dir: Path) -> list[str]:
         for target in note.outgoing_links():
             if target not in known:
                 problems.append(f"note {note.id!r} links to unknown note {target!r}")
+    problems.extend(_unknown_types(notes, id_to_path))
     return problems
+
+
+def _unknown_types(notes: list[Note], id_to_path: dict[str, Path]) -> list[str]:
+    """Flag any note whose `type` is not in the registry (gap KNW-6).
+
+    A typo previously minted a new type in silence, and every retrieval filter keyed on type then
+    missed without an error. Checked here rather than in the schema so the agent can still *propose*
+    a genuinely new type — the PR-gate puts a human on it, and this gate runs on that same PR, so an
+    unintended type cannot reach the graph while an intended one costs one line in the registry.
+    """
+    return [
+        f"note {note.id!r} in {id_to_path.get(note.id, Path('?'))} has unknown type "
+        f"{note.type!r} (add it to kg.note.KNOWN_NOTE_TYPES if intended)"
+        for note in notes
+        if note.type not in KNOWN_NOTE_TYPES
+    ]
 
 
 def main() -> int:

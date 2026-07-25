@@ -34,7 +34,15 @@ from pydantic import ValidationError
 
 from chemclaw.config import settings
 from eln.adapter import ElnMappingError, RawEntry, parse_iso_utc
-from eln.ord import Component, Impurity, OrdReaction, ReactionStep, Role, StepKind
+from eln.ord import (
+    Component,
+    Impurity,
+    OrdReaction,
+    OutcomeClass,
+    ReactionStep,
+    Role,
+    StepKind,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -166,6 +174,8 @@ class JsonExportAdapter:
             # The entry's own timestamp is the date the experiment was run (gap KNW-1); it already
             # drives the sync cursor, it was simply never carried onto the record.
             performed_at=raw.created_at.date(),
+            outcome_class=_outcome_class(payload),
+            failure_reason=payload.get("failure_reason"),
             provenance=f"eln:{payload.get('operator', 'unknown')}",
             project=payload.get("project"),
             steps=_segment_steps(procedure),
@@ -270,6 +280,22 @@ def _product_number(payload: dict[str, Any], field: str) -> float | None:
         raise ElnFormatError(f"product is not an object: {first!r}")
     value = first.get(field)
     return float(value) if value is not None else None
+
+
+def _outcome_class(payload: dict[str, Any]) -> OutcomeClass:
+    """Read the entry's outcome, defaulting to success (gap KNW-3).
+
+    Defaulting to success preserves the meaning of every record written before the field existed —
+    silence has always meant "an ordinary run", and reinterpreting it as unknown would retroactively
+    weaken the whole corpus.
+    """
+    raw = payload.get("outcome")
+    if raw is None:
+        return OutcomeClass.SUCCESS
+    try:
+        return OutcomeClass(str(raw).strip().lower())
+    except ValueError as exc:
+        raise ElnFormatError(f"unknown outcome {raw!r}") from exc
 
 
 def _impurities(payload: dict[str, Any]) -> list[Impurity]:

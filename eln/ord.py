@@ -77,6 +77,25 @@ class ReactionStep(BaseModel):
     duration_h: float | None = Field(default=None, ge=0.0)
 
 
+class OutcomeClass(StrEnum):
+    """How an experiment turned out (gap KNW-3).
+
+    Nothing previously marked an experiment as failed, and the distillation is structurally biased
+    against failures: `find_playbook_candidates` distils what *recurs* across projects, and failures
+    do not recur — they get abandoned after one attempt. So "don't try X, we did, it decomposed on
+    scale" — the most valuable and most systematically lost knowledge in process development — had
+    nowhere to live.
+
+    `INCONCLUSIVE` is deliberately distinct from `FAILURE`: a run that was aborted, mis-charged, or
+    never assayed carries no evidence about the chemistry, and collapsing it into "failure" would
+    teach the corpus something untrue.
+    """
+
+    SUCCESS = "success"
+    FAILURE = "failure"
+    INCONCLUSIVE = "inconclusive"
+
+
 class Impurity(BaseModel):
     """One identified or observed impurity in a reaction outcome (gap KNW-2).
 
@@ -130,6 +149,24 @@ class OrdReaction(BaseModel):
     # fingerprint: they are *outcomes*, not structure.
     purity_percent: float | None = Field(default=None, ge=0.0, le=100.0)
     impurities: list[Impurity] = Field(default_factory=list)
+    # How the experiment turned out, and (for a failure) why in the chemist's own words. Defaults
+    # to SUCCESS so every existing record and every source that does not report it keeps today's
+    # meaning — the field adds the ability to say "this failed", it does not reinterpret silence.
+    outcome_class: OutcomeClass = OutcomeClass.SUCCESS
+    failure_reason: str | None = None
+
+    @model_validator(mode="after")
+    def _failure_is_explained(self) -> "OrdReaction":
+        """A recorded failure needs its reason, or it teaches nothing worth keeping.
+
+        The entire value of a negative result is *why* it failed; an unexplained one would enter
+        the corpus as an unactionable "someone tried this once", which is worse than absent because
+        it looks like evidence.
+        """
+        if self.outcome_class is OutcomeClass.FAILURE and not (self.failure_reason or "").strip():
+            raise ValueError("a reaction recorded as a failure must carry a failure_reason")
+        return self
+
     # The project/campaign this experiment belongs to — the grouping key for the semantic
     # memory layer (a playbook distils patterns that recur across >=2 projects, plan 5.4).
     project: str | None = None

@@ -147,6 +147,57 @@ async def stoichiometry_table(
     return table
 
 
+class GreenMetrics(BaseModel):
+    """Green-chemistry mass metrics for one batch, with the masses they were derived from."""
+
+    total_input_kg: float
+    product_kg: float
+    waste_kg: float
+    e_factor: float
+    pmi: float
+
+
+async def green_metrics(input_masses_g: list[float], product_mass_g: float) -> GreenMetrics:
+    """Compute the E-factor and PMI of a set of conditions (gap IDEA-3).
+
+    Use this to compare routes or condition sets on waste, not only on yield — "comparable yield at
+    half the PMI" is a real process-development goal and the agent had no way to answer it. Pair it
+    with `stoichiometry_table`, whose `mass_g` column is exactly this input.
+
+    E-factor is kg waste per kg product (Sheldon); PMI is total input mass per kg product, and the
+    two differ by exactly 1 by construction. Lower is better for both.
+
+    Args:
+        input_masses_g: Every charged species' mass in grams — reagents, catalyst, and solvent.
+            Omitting solvent is the usual way these numbers get flattered; include it.
+        product_mass_g: Isolated product mass in grams. Must be positive.
+
+    Returns:
+        Both metrics plus the masses behind them, so the number can be checked rather than trusted.
+    """
+    if product_mass_g <= 0:
+        raise ValueError("product_mass_g must be positive")
+    if any(mass < 0 for mass in input_masses_g):
+        raise ValueError("input masses must not be negative")
+    total = sum(input_masses_g)
+    if total < product_mass_g:
+        # Mass cannot appear from nowhere; a total below the product is a data error, and silently
+        # reporting a negative E-factor would read as an implausibly green process (the same
+        # unsound-mass-balance trap CHECKMATE 2b fixed in the eval metric).
+        raise ValueError(
+            f"total input {total:g} g is below the product mass {product_mass_g:g} g — "
+            "the mass balance is unsound (is a reagent or the solvent missing?)"
+        )
+    waste = total - product_mass_g
+    return GreenMetrics(
+        total_input_kg=total / 1000.0,
+        product_kg=product_mass_g / 1000.0,
+        waste_kg=waste / 1000.0,
+        e_factor=waste / product_mass_g,
+        pmi=total / product_mass_g,
+    )
+
+
 async def render_structure(smiles: str) -> str:
     """Draw a molecule or reaction as an SVG the chat surface can show inline.
 

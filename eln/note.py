@@ -9,7 +9,7 @@ carries no `[[wikilink]]` (a dangling link would fail `kg.validate` on the very 
 opens); compound cross-links are a later step once compound notes exist.
 """
 
-from eln.ord import Impurity, OrdReaction, ReactionStep
+from eln.ord import Impurity, OrdReaction, OutcomeClass, ReactionStep
 from kg.note import Note
 
 
@@ -49,6 +49,13 @@ def _conditions_block(reaction: OrdReaction) -> str:
         conditions.append(f"purity: {reaction.purity_percent}%")
     if reaction.performed_at is not None:
         conditions.append(f"performed: {reaction.performed_at.isoformat()}")
+    if reaction.outcome_class is not OutcomeClass.SUCCESS:
+        # Stated first-class in the body, not implied by a missing yield: a reader (and retrieval)
+        # must be able to tell "this did not work" from "nobody recorded the number" (gap KNW-3).
+        outcome = f"outcome: {reaction.outcome_class.value}"
+        if reaction.failure_reason:
+            outcome += f" — {reaction.failure_reason}"
+        conditions.append(outcome)
     return "".join(f"- {c}\n" for c in conditions)
 
 

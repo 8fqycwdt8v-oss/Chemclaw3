@@ -39,6 +39,7 @@ from agents.audit import AuditSink, make_audit_middleware
 from agents.bo_tools import suggest_next_experiment
 from agents.calc_tools import compute_xtb_energy, predict_pka, predict_solubility
 from agents.chem_tools import (
+    green_metrics,
     render_structure,
     resolve_compound,
     screen_hazards,
@@ -49,7 +50,12 @@ from agents.durable_tools import (
     request_development_report,
     start_optimization_campaign,
 )
-from agents.graph_tools import expand_note, find_notes, propose_knowledge_note
+from agents.graph_tools import (
+    expand_note,
+    find_knowledge_gaps,
+    find_notes,
+    propose_knowledge_note,
+)
 from agents.llm_provider import build_chat_client
 from agents.memory_tools import record_confirmed_answer
 from agents.qm_tools import get_qm_job_status, submit_qm_job
@@ -240,6 +246,7 @@ def _capability_tools() -> list[Any]:
         resolve_compound,
         screen_hazards,
         stoichiometry_table,
+        green_metrics,
         render_structure,
         compute_xtb_energy,
         predict_solubility,
@@ -248,6 +255,7 @@ def _capability_tools() -> list[Any]:
         get_qm_job_status,
         find_notes,
         expand_note,
+        find_knowledge_gaps,
         gather_evidence,
         *_mcp_capability_tools(),
         suggest_next_experiment,
