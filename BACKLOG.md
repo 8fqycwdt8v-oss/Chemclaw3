@@ -268,13 +268,11 @@ everything below is built, tested, and green under `make lint type test` (688+ p
       One note per document, **verbatim**, through the PR-gate. Deliberately no summarizing: a
       backfill makes documents *reachable*; an LLM-summarized one would put thousands of unreviewed
       paraphrases into the corpus. Content-derived ids, so a rename does not mint a duplicate.
-- [x] **TOOL-6 external literature** — `report/literature.py`, attached via the F7 registry.
-      **Decision made: PubChem PUG-REST** — the only option clearing every constraint this repo
-      actually has (public and licence-clean, no credential, and structure-keyed, which is what this
-      system already speaks). Reaxys/SciFinder/an internal mirror remain one sibling class each.
-      Off until a deployment adds `literature` to `data_sources` (it is the only source that leaves
-      the cluster, so opting in is also an explicit acceptance of that egress), and any failure
-      degrades to *empty* rather than failing the sweep.
+- [x] **TOOL-6 external literature — built, then REMOVED (D-089).** The PubChem retriever was
+      implemented and reviewed, and the scope decision came back: **no external sources at all.**
+      `report/literature.py` and the registry entry are deleted; `tests/test_no_egress.py` now
+      fails on any first-party module naming a third-party data host, because the prose form of
+      this constraint had already existed in `DEFERRED.md` and did not prevent the build.
 
 ### Closed as not-gaps after assessment (do not re-open blindly)
 - [x] **TOOL-7 units** — carried in field names throughout (`temperature_c`, `mass_g`,
