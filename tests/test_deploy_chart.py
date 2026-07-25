@@ -147,3 +147,16 @@ def test_schedules_are_applied_by_a_post_install_hook() -> None:
 def test_push_credential_is_declared() -> None:
     """Every agent-authored note fails at push without a git credential in the chart (DEP-2)."""
     assert "knowledgeRepoToken" in _values()["secrets"]["keys"]
+
+
+def test_mcp_deployments_become_meaningful_once_the_transport_is_networked() -> None:
+    """DEP-3's guard is now satisfiable rather than a permanent off switch (gap TOOL-1).
+
+    Before the streamable-HTTP client existed, `transport: http` was a flag with nothing behind it.
+    The agent can now attach a server it does not spawn, which is what the MCP Deployments were
+    written in anticipation of.
+    """
+    from chemclaw.config import McpServerSpec
+
+    networked = McpServerSpec(name="mcp-molfp", url="http://chemclaw-mcp-molfp:8080/mcp")
+    assert networked.url and not networked.command

@@ -29,6 +29,7 @@ from starlette.requests import Request
 from starlette.responses import Response
 
 from agents.chemclaw_agent import build_agent
+from agents.durable_tools import request_note_reindex
 from agents.harness_todo import complete_awaiting_job
 from agents.interaction_tools import (
     PendingApproval,
@@ -472,6 +473,24 @@ def create_app(
             raise HTTPException(status_code=404, detail="no such approval hold") from exc
         if owner and owner != principal.oid:
             raise HTTPException(status_code=404, detail="no such approval hold")
+
+    @app.post("/events/knowledge-merged", status_code=202)
+    async def knowledge_merged(
+        principal: Principal = Depends(require_principal),
+    ) -> dict[str, str]:
+        """Tell the deployment a note merged, so freshness stops being bounded by a timer (SCH-6).
+
+        The whole system was poll-on-a-timer: there was no inbound event path at all, so the
+        worst-case staleness of a merged note was the slowest configured interval, everywhere. A
+        git host's post-merge webhook (or an operator) calls this, and the derived note index is
+        rebuilt now rather than at the next scheduled sweep — collapsing gap SCH-2's staleness
+        window from an interval to seconds.
+
+        Idempotent and cheap to over-call: the reindex is an upsert, and a duplicate delivery just
+        rebuilds an already-current index. Authenticated like every other non-health route.
+        """
+        started = await request_note_reindex()
+        return {"status": "accepted", "workflow_id": started}
 
     @app.get("/metrics")
     async def metrics() -> Response:

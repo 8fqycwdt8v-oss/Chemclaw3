@@ -15,6 +15,8 @@ Why one module for both: they are the same three-line adapter over two workflows
 would duplicate the id-derivation and status-mapping helpers for no gain (DRY, Rule of Three).
 """
 
+from datetime import UTC, datetime
+
 from temporalio.client import WorkflowExecutionStatus
 from temporalio.common import WorkflowIDReusePolicy
 from temporalio.exceptions import WorkflowAlreadyStartedError
@@ -28,6 +30,7 @@ from chemclaw.ids import stable_hash
 from chemclaw.temporal_client import connect
 from report.harness import ReportRequest, ReportSection
 from workflows.bo_campaign import BoCampaignWorkflow
+from workflows.note_index import NoteReindexWorkflow
 from workflows.report_workflow import DevelopmentReportWorkflow
 
 # Terminal Temporal statuses map to one word the model can act on, so a tool result never leaks
@@ -166,3 +169,29 @@ async def get_durable_job_status(job_id: str) -> str:
         One word: running, completed, failed, cancelled, terminated, or timed_out.
     """
     return await _status_of(job_id, "durable job")
+
+
+async def request_note_reindex() -> str:
+    """Start a note-index rebuild now, returning the workflow id (gap SCH-6).
+
+    Deliberately **not** an agent tool: this is an operational trigger for a merge webhook, not a
+    capability the model should reach for mid-conversation. A deterministic id per calendar minute
+    collapses a burst of merge notifications into one rebuild — a git host can deliver several
+    within seconds, and rebuilding the whole index once per merge would be pure waste.
+    """
+    client = await connect()
+    # `workflow.now()` is unavailable outside a workflow, and the id must be stable within a short
+    # window rather than unique per call, so the minute bucket comes from the Temporal-independent
+    # clock here at the (non-durable) entry point.
+    bucket = datetime.now(UTC).strftime("%Y%m%d%H%M")
+    workflow_id = f"note-reindex-{bucket}"
+    try:
+        handle = await client.start_workflow(
+            NoteReindexWorkflow.run,
+            id=workflow_id,
+            task_queue=settings.background_task_queue,
+            id_reuse_policy=WorkflowIDReusePolicy.ALLOW_DUPLICATE_FAILED_ONLY,
+        )
+    except WorkflowAlreadyStartedError:
+        return workflow_id  # a rebuild for this minute is already running or done
+    return handle.id

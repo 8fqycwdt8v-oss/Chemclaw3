@@ -33,17 +33,38 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class McpServerSpec(BaseModel):
-    """Launch spec for one stdio MCP server the agent attaches as a capability (D-029).
+    """Attach spec for one MCP server the agent uses as a capability (D-029, gap TOOL-1).
 
-    `command` + `args` are how MAF's `MCPStdioTool` spawns the server as a subprocess;
+    Two transports, selected by which fields are set:
+
+    - **stdio** (`command` + `args`): MAF's `MCPStdioTool` spawns the server as a subprocess in the
+      agent's own pod. The original and still the right shape for a local, cheap capability.
+    - **streamable HTTP** (`url`): MAF's `MCPStreamableHTTPTool` connects to a server running
+      somewhere else. This is what makes D-029's promise — "adding a capability is a config entry"
+      — true at *org* level rather than only within one pod: a shared internal MCP service, a
+      third-party server, a capability written in another language, or one that scales
+      independently of the front door. It is also what the Helm chart's MCP Deployments were
+      written in anticipation of (they were unreachable without it — gap DEP-3).
+
     `allowed_tools` restricts which of that server's tools the conversational agent may call
     (the write/index tools are excluded — ingestion writes go through the PR-gate, not chat).
     """
 
     name: str
-    command: str
-    args: list[str]
+    command: str = ""
+    args: list[str] = Field(default_factory=list)
+    url: str = ""
     allowed_tools: list[str] | None = None
+
+    @model_validator(mode="after")
+    def _exactly_one_transport(self) -> "McpServerSpec":
+        """Exactly one transport must be configured — neither is dead config, both is ambiguous."""
+        if bool(self.command) == bool(self.url):
+            raise ValueError(
+                f"MCP server {self.name!r} must set exactly one of `command` (stdio) or "
+                "`url` (streamable HTTP)"
+            )
+        return self
 
 
 class ObservabilitySettings(BaseSettings):
@@ -735,6 +756,10 @@ class KgSettings(BaseSettings):
     # Edge length of a rendered structure depiction (gap TOOL-5). Config, not a magic number, so a
     # deployment whose surface renders larger cards can change it without a code edit.
     structure_render_size_px: int = Field(default=320, gt=0)
+    # Request timeout for a *networked* MCP capability server (gap TOOL-1). A stdio server is a
+    # local subprocess and fails fast; an HTTP one is a network hop that must be bounded, or a
+    # hung capability would consume the whole turn's deadline.
+    mcp_request_timeout_seconds: int = Field(default=30, gt=0)
     # PR-gate git settings (plan steps 2.7, 2.8): agent notes branch off this base
     # branch on this remote before a human merges.
     note_base_branch: str = "main"

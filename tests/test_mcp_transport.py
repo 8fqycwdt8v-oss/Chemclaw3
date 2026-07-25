@@ -21,7 +21,10 @@ from chemclaw.config import McpServerSpec, settings
 
 async def _discovered_tools(spec: McpServerSpec) -> set[str]:
     """Spawn the server for `spec`, connect over stdio, and return the tool names it exposes."""
-    tool: MCPStdioTool = _mcp_tool(spec)
+    # `_mcp_tool` now dispatches on transport (gap TOOL-1); this suite exercises the stdio path,
+    # so the narrowing is asserted rather than assumed.
+    tool = _mcp_tool(spec)
+    assert isinstance(tool, MCPStdioTool)
     try:
         async with tool:
             return {f.name for f in tool.functions}

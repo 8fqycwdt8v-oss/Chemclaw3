@@ -24,6 +24,7 @@ from agent_framework import (
     HistoryProvider,
     InMemoryHistoryProvider,
     MCPStdioTool,
+    MCPStreamableHTTPTool,
     SkillsProvider,
     SlidingWindowStrategy,
     TokenBudgetComposedStrategy,
@@ -267,7 +268,7 @@ def _capability_tools() -> list[Any]:
     ]
 
 
-def _mcp_capability_tools() -> list[MCPStdioTool]:
+def _mcp_capability_tools() -> list[MCPStdioTool | MCPStreamableHTTPTool]:
     """Build one `MCPStdioTool` per configured MCP capability server (unconnected).
 
     These realise the plan's capability layer: the agent reaches the fingerprint search over
@@ -279,8 +280,21 @@ def _mcp_capability_tools() -> list[MCPStdioTool]:
     return [_mcp_tool(spec) for spec in settings.mcp_servers]
 
 
-def _mcp_tool(spec: McpServerSpec) -> MCPStdioTool:
-    """Construct one MCP stdio tool from its config spec."""
+def _mcp_tool(spec: McpServerSpec) -> MCPStdioTool | MCPStreamableHTTPTool:
+    """Construct one MCP tool from its config spec, on whichever transport it declares (TOOL-1).
+
+    The spec validator guarantees exactly one of `command`/`url`, so this is a total dispatch with
+    no "neither configured" branch to get wrong. `load_prompts=False` on both: the servers advertise
+    none, and prompt loading from a *networked* server would be a route for injected instructions.
+    """
+    if spec.url:
+        return MCPStreamableHTTPTool(
+            name=spec.name,
+            url=spec.url,
+            allowed_tools=spec.allowed_tools,
+            load_prompts=False,
+            request_timeout=settings.mcp_request_timeout_seconds,
+        )
     return MCPStdioTool(
         name=spec.name,
         command=spec.command,
