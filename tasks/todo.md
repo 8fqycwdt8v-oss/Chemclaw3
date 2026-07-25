@@ -162,3 +162,58 @@ deferrals recorded in BACKLOG.md / DEFERRED.md.
 **Lesson captured.** Long-running parallel fix batches survive session usage limits cleanly when
 each agent's scope is disjoint and committed independently — resumed agents (SendMessage) and the
 workflow journal cache made both interruptions lossless.
+
+---
+
+# Task — deep capability-gap analysis (missing features), 2026-07-25
+
+**Ask:** find features that are *missing* and would benefit the infrastructure — agent capability,
+knowledge, tool integration, scheduling — across the whole codebase, not only the named areas, plus
+free ideation on topics not yet on any plan.
+
+## Plan
+
+- [x] Read the persistent memory (`BACKLOG`/`DEFERRED`/`docs/audit/00`,`08`,`09`) first, to establish
+      what is already catalogued — so the analysis adds signal instead of restating AG-*/KM-*.
+- [x] Sweep the code by dimension, grounding every claim in a file/symbol: reachability (workflow ↔
+      caller), deployment (Helm vs. runtime assumptions), scheduling + data lifecycle, agent/turn
+      lifecycle, tool surface, knowledge schema.
+- [x] Ideate beyond the mapped areas (topics no plan document mentions).
+- [x] Write `docs/audit/12-capability-gap-analysis.md` — 34 findings, severity + effort + proposed
+      shape each, sequenced into waves; plus an explicit "deliberately not flagged" section so the
+      document cannot be read as contradicting `DEFERRED.md`.
+- [x] Point `BACKLOG.md` at it (Proposals section, mirroring the Phase 8/9 convention: proposals,
+      not executed work).
+
+## Review
+
+Analysis only — no behavior change, no source touched, so `make lint type test` is unaffected.
+Verification was per-finding: every claim is a grep/read against the tree at `d77302e`, and the
+document cites the file (and line, where it pins a specific statement) so a reader can falsify it
+directly. Line citations were re-checked against the tree after drafting; two were off by a few
+lines and corrected.
+
+**The load-bearing result is a reframe.** The prior gap docs concluded the *engine* is sound and the
+residue is about operating it at scale. That still holds — but the sharpest gaps are not in the
+engine, they are at the seams around it:
+
+1. Three built subsystems have no caller at all (`DevelopmentReportWorkflow`, `BoCampaignWorkflow`,
+   the human side of the approval hold). All three read as finished — the backlog marks their phases
+   complete — which is why nothing caught it.
+2. The Helm chart cannot run the knowledge layer in either direction (no volume, no git-sync, no
+   push credential). F6's "offline-verified" gate checked the chart is well-formed, not sufficient.
+
+Those outrank every "add a capability" idea, because they are capability already paid for and
+unusable.
+
+**One pattern worth keeping.** Two independent findings turned out to be the same defect class —
+prose naming capability the code lacks (`experiment-design/SKILL.md` → `BoCampaignWorkflow`;
+`_INSTRUCTIONS` → impurity answers with no schema field). Invisible to mypy, to pytest, and to
+`make skill-validate` (frontmatter only). IDEA-7 proposes the ~50-line CI check that catches it, and
+notes it is the *deterministic* half of the AG-13 behavior eval — the half that does not need the
+live LLM the deferral is waiting on.
+
+**Method note for next time.** The reachability sweep (grep every `@workflow.defn` for a non-worker,
+non-test caller) and the deployment sweep (grep every runtime filesystem/credential assumption
+against the chart) both found Crit/High items in minutes and neither is in any existing checklist.
+Both are cheap enough to run each phase; worth adding to the CHECKMATE G1–G7 routine.

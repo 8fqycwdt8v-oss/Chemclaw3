@@ -25,6 +25,41 @@ durable job execution (Temporal) already covered; three residual gaps closed, ea
       *mid-flight same-turn* resume stays open (see the harness follow-ups below) — distinct from the
       front-door restart-reattach closed here.
 
+## Proposals — Capability gap analysis (2026-07-25, `docs/audit/12-capability-gap-analysis.md`)
+
+Whole-codebase sweep for **missing capability** (absences, not defects), complementing the AG-*/KM-*
+gap docs. 34 findings with severity/effort/proposed shape, sequenced into waves. **None are built** —
+each is a proposal needing sign-off, like the Phase 8/9 tables. Headline results:
+
+- [ ] **Wave 0 — the target deployment cannot run the knowledge layer.** The Helm chart mounts no
+      volume for `knowledge_dir`, runs no git-sync, and ships no git push credential — so in-cluster
+      the graph is baked-at-build (reads) and fails at push (writes). Plus: the MCP Deployments are
+      default-on but stdio-only (crash-loop), and the derived `note_index` has no reindex Schedule
+      (hybrid retrieval ranks a stale index confidently). `DEP-1`, `DEP-2`, `DEP-3`, `SCH-2`, `RCH-3`.
+- [ ] **Wave 1 — three finished subsystems have no caller.** `DevelopmentReportWorkflow`,
+      `BoCampaignWorkflow`, and the human side of `InteractionApprovalWorkflow` are built, tested and
+      worker-registered but unreachable from any tool/route/schedule/UI control (and
+      `skills/experiment-design/SKILL.md` already points the agent at one of them). Plus no turn
+      cancellation. `RCH-1`, `RCH-2`, `RCH-5`, `RCH-4`, `AGT-1`.
+- [ ] **Wave 2 — chemistry the prompt already promises.** `_INSTRUCTIONS` advertises purity/impurity
+      answers with no schema field; `OrdReaction` has no experiment date (silently starving F10-G2's
+      bi-temporal fields); no name→SMILES resolution; no hazard screen in front of protocol
+      proposals. `KNW-2`, `KNW-1`, `TOOL-2`, `TOOL-3`, `TOOL-4`, `TOOL-5`.
+- [ ] **Wave 3 — operate it.** No data retention anywhere (and `audit_events` is hash-chained, so
+      retention must be designed, not bolted on); schedule specs carry no overlap policy/jitter; no
+      schedule-health or RED metrics surface; mid-turn durable-job resume still open. `SCH-1`,
+      `SCH-3`, `SCH-4`, `SCH-5`, `DEP-4`, `AGT-2`.
+- [ ] **Wave 4 — depth + ideation.** Graph analytics / "what don't we know" gap queries (`KNW-5`),
+      live predicted-vs-actual calibration (`IDEA-2`), negative-result capture (`KNW-3`), networked
+      MCP transport (`TOOL-1`), source-tier weighting in RRF fusion (`IDEA-5`), and a CI check that
+      prose (skills/instructions) only names tools that exist (`IDEA-7` — S-effort, the
+      deterministic half of the AG-13 deferral, and it would have caught two findings above).
+- [ ] **Two deferrals proposed for reopening** (stated triggers have fired): external
+      literature/patent retrievers — "after Phase 5b core", which is done and the registry seam is
+      finished and empty (`TOOL-6`); and compound notes, whose trigger is self-referential and which
+      `TOOL-2`/`KNW-4` would satisfy (`KNW-7`). Everything else in `DEFERRED.md` was re-examined and
+      confirmed correctly deferred (see the doc's "Deliberately not flagged" section).
+
 ## Next — Platform-parity hardening (docs/parity-plan.md, Phase F10)
 
 Closes the platform-capability deltas found against a commercial pharma-agent platform. Full
