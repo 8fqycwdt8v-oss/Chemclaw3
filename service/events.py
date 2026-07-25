@@ -54,6 +54,10 @@ class ApprovalRequestEvent(BaseModel):
 
     type: Literal["approval_request"] = "approval_request"
     prompt: str
+    # The durable hold's handle (`InteractionApprovalWorkflow` id), so a surface can actually
+    # answer it via `POST /approvals/{id}/decision` (gap RCH-3). Empty for a plan-approval
+    # prompt, which is answered by the next turn rather than by a durable hold.
+    approval_id: str = ""
 
 
 class AnswerEvent(BaseModel):

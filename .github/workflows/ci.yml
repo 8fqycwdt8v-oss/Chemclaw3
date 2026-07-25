@@ -57,3 +57,6 @@ jobs:
 
       - name: Validate skills
         run: make skill-validate
+
+      - name: Validate the prose/tool contract
+        run: make prose-validate

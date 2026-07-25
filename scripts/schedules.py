@@ -38,6 +38,7 @@ from workflows.memory_jobs import (
     OptimizationCampaignWorkflow,
     PlaybookDistillationWorkflow,
 )
+from workflows.note_index import NoteReindexWorkflow
 
 logger = logging.getLogger(__name__)
 
@@ -62,6 +63,7 @@ OWNED_SCHEDULE_IDS = frozenset(
         "playbook-distillation",
         "optimization-campaign",
         "eval-drift",
+        "note-reindex",
     }
 )
 
@@ -85,6 +87,11 @@ def planned_schedules() -> list[PlannedSchedule]:
     if settings.eval_drift_enabled:
         drift_every = timedelta(minutes=settings.eval_drift_schedule_minutes)
         schedules.append(PlannedSchedule("eval-drift", EvalDriftWorkflow, drift_every))
+    # The derived note index only earns a Schedule where a hybrid retrieval leg actually reads it
+    # (gap SCH-2). A graph-only deployment would otherwise pay to rebuild an index nothing queries.
+    if settings.note_reindex_enabled:
+        reindex_every = timedelta(minutes=settings.note_reindex_schedule_minutes)
+        schedules.append(PlannedSchedule("note-reindex", NoteReindexWorkflow, reindex_every))
     return schedules
 
 

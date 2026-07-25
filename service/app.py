@@ -30,6 +30,13 @@ from starlette.responses import Response
 
 from agents.chemclaw_agent import build_agent
 from agents.harness_todo import complete_awaiting_job
+from agents.interaction_tools import (
+    PendingApproval,
+    approval_owner,
+    approval_status,
+    decide_approval,
+    list_pending_approvals,
+)
 from agents.session_events import stream_new_events
 from chemclaw.config import settings
 from service.auth import Principal, require_principal
@@ -130,6 +137,19 @@ class SessionOut(BaseModel):
     """The identifier of a freshly created session."""
 
     session_id: str
+
+
+class ApprovalDecisionIn(BaseModel):
+    """The human Yes/No posted to a pending approval hold."""
+
+    approved: bool
+
+
+class ApprovalStatusOut(BaseModel):
+    """A hold's handle and current state, for a polling review surface."""
+
+    approval_id: str
+    status: str
 
 
 def create_app(
@@ -414,6 +434,69 @@ def create_app(
             # must return the slot, or the user's stream budget leaks toward a permanent 429.
             if not handed_off:
                 _release_stream_slot()
+
+    async def _owned_approval(approval_id: str, principal: Principal) -> None:
+        """Authorize the caller against a hold's owner, or 404 (no existence leak either way).
+
+        Mirrors `_resolve_session`: an unknown hold and someone else's hold are indistinguishable
+        from outside. The dev path (`entra_required` off) has no real actor, so an unowned hold
+        stays answerable — matching how every other route degrades in dev.
+        """
+        try:
+            owner = await approval_owner(approval_id)
+        except ValueError as exc:
+            raise HTTPException(status_code=404, detail="no such approval hold") from exc
+        if owner and owner != principal.oid:
+            raise HTTPException(status_code=404, detail="no such approval hold")
+
+    @app.get("/approvals")
+    async def list_approvals(
+        principal: Principal = Depends(require_principal),
+    ) -> list[PendingApproval]:
+        """The caller's open approval holds — the review queue (gap RCH-3).
+
+        Without this route the durable Yes/No hold (D-032) was a dead end: a hold could be
+        started, but its id was only ever returned into a turn that then ended, and the thin UI
+        rendered the request as an inert trace line. A hold that nobody can find or answer can
+        only time out, which silently drops the knowledge it was holding.
+
+        Scoped to the caller: a hold authorizes a knowledge write, so it is answerable only by
+        the chemist whose turn raised it.
+        """
+        return await list_pending_approvals(owner=principal.oid)
+
+    @app.get("/approvals/{approval_id}")
+    async def get_approval(
+        approval_id: str,
+        principal: Principal = Depends(require_principal),
+    ) -> ApprovalStatusOut:
+        """One hold's current state (`pending`/`approved`/`rejected`/`expired`)."""
+        await _owned_approval(approval_id, principal)
+        try:
+            return ApprovalStatusOut(
+                approval_id=approval_id, status=await approval_status(approval_id)
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=404, detail="no such approval hold") from exc
+
+    @app.post("/approvals/{approval_id}/decision", status_code=204)
+    async def decide(
+        approval_id: str,
+        body: ApprovalDecisionIn,
+        principal: Principal = Depends(require_principal),
+    ) -> Response:
+        """Deliver the human Yes/No to a pending hold — the button click, finally wired.
+
+        Deliberately an HTTP route and **not** an agent tool: the agent proposes, a human signs
+        off (D-005). A tool would let the agent approve its own candidate and collapse the GxP
+        line the whole PR-gate exists to draw.
+        """
+        await _owned_approval(approval_id, principal)
+        try:
+            await decide_approval(approval_id, body.approved)
+        except ValueError as exc:
+            raise HTTPException(status_code=404, detail="no such approval hold") from exc
+        return Response(status_code=204)
 
     if _STATIC_DIR.is_dir():
         app.mount("/", StaticFiles(directory=str(_STATIC_DIR), html=True), name="static")

@@ -29,6 +29,7 @@ from workflows.memory_jobs import (
     OptimizationCampaignWorkflow,
     PlaybookDistillationWorkflow,
 )
+from workflows.note_index import NoteReindexWorkflow
 
 
 class _FakeHandle:
@@ -95,6 +96,24 @@ def test_drift_schedule_is_added_only_when_enabled(monkeypatch: pytest.MonkeyPat
     assert drift.schedule_id == "eval-drift"
     assert drift.interval == timedelta(minutes=720)
     assert len({p.schedule_id for p in plan}) == len(plan)  # still unique
+
+
+def test_reindex_schedule_is_added_only_when_enabled(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The derived note index gets a Schedule only where a hybrid leg reads it (gap SCH-2).
+
+    Before this existed, `note_index` was refreshed only by a manual `make reindex`, so hybrid
+    retrieval served whatever the last human run captured — ranked confidently beside live graph
+    hits, because RRF fusion carries no staleness signal.
+    """
+    monkeypatch.setattr(settings, "note_reindex_enabled", False)
+    assert NoteReindexWorkflow not in {p.workflow for p in planned_schedules()}
+    monkeypatch.setattr(settings, "note_reindex_enabled", True)
+    monkeypatch.setattr(settings, "note_reindex_schedule_minutes", 30)
+    plan = planned_schedules()
+    reindex = next(p for p in plan if p.workflow is NoteReindexWorkflow)
+    assert reindex.schedule_id == "note-reindex"
+    assert reindex.interval == timedelta(minutes=30)
+    assert len({p.schedule_id for p in plan}) == len(plan)
 
 
 def test_planned_ids_stay_inside_owned_namespace(monkeypatch: pytest.MonkeyPatch) -> None:

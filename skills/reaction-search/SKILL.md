@@ -9,8 +9,9 @@ description: >-
 # Reaction / structure search
 
 Holds the *judgment* for the fingerprint capabilities: `mcp-molfp` (`similar_molecules`,
-`substructure_matches`, `index_molecule`) over ECFP4 molecule fingerprints, and `mcp-rxnfp`
-(`similar_reactions`, `index_reaction`) over DRFP reaction fingerprints. The tools compute
+`substructure_matches`) over ECFP4 molecule fingerprints, and `mcp-rxnfp` (`similar_reactions`)
+over DRFP reaction fingerprints. Each server also exposes an index/write tool, which is
+deliberately kept off the agent's allowlist — indexing happens on ingest, not from chat. The tools compute
 fingerprints and rank by Tanimoto (or match a substructure) — deterministically and without
 opinion. This skill decides *when and how* to use them, so the agent doesn't just call them
 correctly but uses them well (G6).

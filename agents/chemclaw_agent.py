@@ -38,6 +38,11 @@ from agent_framework._harness._loop import todos_remaining
 from agents.audit import AuditSink, make_audit_middleware
 from agents.bo_tools import suggest_next_experiment
 from agents.calc_tools import compute_xtb_energy, predict_pka, predict_solubility
+from agents.durable_tools import (
+    get_durable_job_status,
+    request_development_report,
+    start_optimization_campaign,
+)
 from agents.graph_tools import expand_note, find_notes, propose_knowledge_note
 from agents.llm_provider import build_chat_client
 from agents.memory_tools import record_confirmed_answer
@@ -236,6 +241,9 @@ def _capability_tools() -> list[Any]:
         gather_evidence,
         *_mcp_capability_tools(),
         suggest_next_experiment,
+        request_development_report,
+        start_optimization_campaign,
+        get_durable_job_status,
         propose_knowledge_note,
         record_confirmed_answer,
     ]

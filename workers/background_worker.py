@@ -46,6 +46,7 @@ from workflows.memory_jobs import (
     build_playbook_notes_activity,
     publish_memory_note_activity,
 )
+from workflows.note_index import NoteReindexWorkflow, reindex_notes_activity
 from workflows.notify import record_session_event_activity
 from workflows.orchestrator import resolve_fan_out_limit
 from workflows.report_workflow import (
@@ -70,6 +71,7 @@ BACKGROUND_WORKFLOWS: list[type] = [
     ReportSectionWorkflow,
     InteractionApprovalWorkflow,
     EvalDriftWorkflow,
+    NoteReindexWorkflow,
 ]
 BACKGROUND_ACTIVITIES: Sequence[Callable[..., Any]] = [
     propose_initial,
@@ -88,6 +90,7 @@ BACKGROUND_ACTIVITIES: Sequence[Callable[..., Any]] = [
     retrieve_section,
     propose_report,
     propose_confirmed_answer_activity,
+    reindex_notes_activity,
     record_session_event_activity,
     check_eval_drift,
     resolve_fan_out_limit,

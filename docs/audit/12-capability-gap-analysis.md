@@ -260,17 +260,31 @@ give DEP-1's sync a trigger, and is the natural notification hook for RCH-4.
 
 ## D. Agent and turn lifecycle
 
-### AGT-1 — no turn cancellation · **High** · **M**
+### ~~AGT-1 — no turn cancellation~~ · **WITHDRAWN — verified false**
 
-There is no `CancelledError` handling and no disconnect check anywhere in `service/`
-(`grep CancelledError|is_disconnected` over `service/`, `agents/`: zero hits). A chemist who closes
-the tab or hits stop leaves the turn running to completion: it holds one of the process's admission
-permits for its full duration, keeps calling the shared internal LLM endpoint, and keeps consuming
-the budget it was metered against (`service/budget.py`).
+**Original claim:** that no `CancelledError` handling existed, so an abandoned turn held its
+admission permit and never booked its tokens.
 
-This is the direct amplifier of the saturation scenario AG-15's admission control was built to
-prevent — abandoned turns are exactly the load you most want to shed, and they are the only load the
-system *cannot* shed. Under a burst, users retrying a slow page make it monotonically worse.
+**Verified wrong during implementation.** The claim rested on a `grep` for `CancelledError` /
+`is_disconnected` returning nothing, which was true but not load-bearing: the handling is
+structural rather than by name. `sse-starlette` closes the streaming generator on disconnect, which
+raises `GeneratorExit` at the suspended `yield`; the front door's `finally`
+(`service/app.py`, `_turn_events`) releases the semaphore permit and discards the active-turn slot,
+and `run_turn`'s own `finally` (`service/runner.py`) books the metered tokens against the budget.
+`except Exception` deliberately does not swallow the `BaseException`, and no `await` sits in the
+runner's `finally` (which would raise "async generator ignored GeneratorExit"). This was hardened
+in `4bc9b04` ("cancellation-safe counters"); the analysis missed it.
+
+Measured, not argued: `tests/test_turn_cancellation.py` drives a turn, abandons it after three
+events, and asserts both that the permit and turn slot come back and that the ~30 metered tokens
+are booked. Those tests are **kept** — nothing previously proved this behavior, so a plausible
+future refactor (an `await` added to the runner's `finally`, an `except Exception` widened to
+`BaseException`) would silently reintroduce exactly the leak this finding alleged.
+
+What remains genuinely absent is smaller and not what was claimed: there is no *explicit* stop
+control — a client can only abandon a turn by dropping the connection — and an abandoned turn is
+not logged, so it is invisible in operations. Both are **Low**, and the second is subsumed by
+DEP-4's metrics.
 
 ### AGT-2 — no mid-turn resume for durable jobs · **High** · **M**
 
@@ -574,9 +588,9 @@ Without these the target deployment cannot read the knowledge graph, cannot writ
 two pods by default, serves stale hybrid retrieval, and asks for approvals nobody can give. Nothing
 below matters until this wave is closed.
 
-**Wave 1 — reach the capability already built.** RCH-1, RCH-2, RCH-5, RCH-4, AGT-1.
-Four small tools/routes and one cancellation path unlock two complete subsystems and close the
-admission-control loop. Highest value-per-line in the document by a wide margin.
+**Wave 1 — reach the capability already built.** RCH-1, RCH-2, RCH-5, RCH-4. (AGT-1 was withdrawn
+as a false finding — see above.) Four small tools/routes unlock two complete subsystems. Highest
+value-per-line in the document by a wide margin.
 
 **Wave 2 — the chemistry the prompt already promises.** KNW-2, KNW-1, TOOL-2, TOOL-3, TOOL-4, TOOL-5.
 Two schema fields, a resolver, a hazard screen, and two repackagings. TOOL-3's *scope* is a user

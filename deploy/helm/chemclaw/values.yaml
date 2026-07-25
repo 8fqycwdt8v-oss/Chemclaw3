@@ -31,13 +31,41 @@ workers:
   background:
     replicas: 1 # light: sync / re-index / reports
 
+# The knowledge graph is a Git-backed Markdown tree that every reader resolves as a plain local
+# directory, so a pod only sees a merged note once something writes it to that pod's filesystem
+# (gap DEP-1). `sync` is that something: an init container fills the tree before the pod serves
+# traffic, and a sidecar refreshes it on `intervalSeconds` so merges land without a redeploy.
+# Leave `repoUrl` empty to run against whatever corpus the image shipped (dev / read-only).
+knowledge:
+  sync:
+    enabled: true
+    repoUrl: ""
+    # Refresh cadence for the sidecar. Also the worst-case staleness of a merged note.
+    intervalSeconds: 300
+    # Where the sidecar keeps its clone. Distinct from the published tree so a failed fetch can
+    # never leave the directory the app reads in a half-written state.
+    checkoutPath: /app/knowledge-repo
+  # The directory the application reads. Must match CHEMCLAW_KNOWLEDGE_DIR resolved against the
+  # image WORKDIR (/app) — the default `knowledge` resolves to exactly this.
+  publishPath: /app/knowledge
+  # The background worker's own writable clone, which the PR-gate submitter branches and
+  # force-pushes from (gap DEP-2). Deliberately NOT the published tree: `git checkout -B` switches
+  # a whole working tree, so the submitter needs a checkout nothing else is reading.
+  noteRepoPath: /var/lib/chemclaw/note-repo
+
+# MCP capability servers. The agent spawns these as **stdio subprocesses in its own pod**
+# (`MCPStdioTool`), so standalone Deployments are only meaningful once a networked MCP transport
+# exists — until then they would be pods running a stdio server with no stdin, i.e. a crash loop
+# (gap DEP-3). Enabling one therefore requires `transport: http`, which the template enforces.
 mcp:
   molfp:
-    enabled: true
+    enabled: false
     replicas: 1
   rxnfp:
-    enabled: true
+    enabled: false
     replicas: 1
+  # "stdio" = the agent spawns them in-process; "http" = standalone Deployments are meaningful.
+  transport: stdio
 
 resources:
   service:
@@ -87,6 +115,9 @@ secrets:
     llmApiKey: "CHEMCLAW_LLM_API_KEY"
     hpcApiToken: "CHEMCLAW_HPC_API_TOKEN"
     postgresDsn: "CHEMCLAW_POSTGRES_DSN"
+    # Push credential for the knowledge repo (gap DEP-2). Without it the PR-gate cannot open a
+    # branch for any agent-authored note, so every knowledge write fails at push in-cluster.
+    knowledgeRepoToken: "CHEMCLAW_KNOWLEDGE_REPO_TOKEN"
   # Temporal mTLS is mounted as files; the env points at the mount paths.
   temporalTls:
     secretName: "chemclaw-temporal-tls"

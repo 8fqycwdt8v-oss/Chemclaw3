@@ -998,6 +998,15 @@ class RetrievalSettings(BaseSettings):
     # of the note tree (path + mtime + size), so any add/edit/delete of a note busts it — retrieval
     # stays always-live. Off makes every call re-parse (the pre-cache behavior); leave on in prod.
     graph_cache_enabled: bool = True
+    # The derived note index is only as good as its last rebuild (gap SCH-2). The graph changes on
+    # every merged PR, and RRF fusion is score-agnostic, so a stale dense/lexical entry would rank
+    # confidently beside live graph hits with no staleness signal. `NoteReindexWorkflow` runs on
+    # this cadence; the interval is therefore also the worst-case staleness of the derived legs.
+    # Only earns its Schedule when a hybrid leg is actually attached (registry membership, D-018),
+    # so `note_reindex_enabled` keeps a graph-only deployment from running an index it never reads.
+    note_reindex_enabled: bool = False
+    note_reindex_schedule_minutes: float = Field(default=60.0, gt=0)
+    note_reindex_timeout_seconds: float = Field(default=600.0, gt=0)
 
 
 class ReportSettings(BaseSettings):
