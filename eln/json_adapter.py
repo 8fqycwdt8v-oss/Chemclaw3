@@ -34,7 +34,7 @@ from pydantic import ValidationError
 
 from chemclaw.config import settings
 from eln.adapter import ElnMappingError, RawEntry, parse_iso_utc
-from eln.ord import Component, OrdReaction, ReactionStep, Role, StepKind
+from eln.ord import Component, Impurity, OrdReaction, ReactionStep, Role, StepKind
 
 logger = logging.getLogger(__name__)
 
@@ -160,7 +160,12 @@ class JsonExportAdapter:
             outcomes=outcomes,
             temperature_c=_condition(payload, "temperature_c", _TEMPERATURE, procedure),
             time_h=_condition(payload, "time_h", _TIME_HOURS, procedure),
-            yield_percent=_yield(payload),
+            yield_percent=_product_number(payload, "yield_percent"),
+            purity_percent=_product_number(payload, "purity_percent"),
+            impurities=_impurities(payload),
+            # The entry's own timestamp is the date the experiment was run (gap KNW-1); it already
+            # drives the sync cursor, it was simply never carried onto the record.
+            performed_at=raw.created_at.date(),
             provenance=f"eln:{payload.get('operator', 'unknown')}",
             project=payload.get("project"),
             steps=_segment_steps(procedure),
@@ -252,17 +257,50 @@ def _condition(
     return _search(pattern, text)
 
 
-def _yield(payload: dict[str, Any]) -> float | None:
-    """Take the yield from the first product's structured field (per-product in this ELN).
+def _product_number(payload: dict[str, Any], field: str) -> float | None:
+    """Take a numeric outcome field from the first product (per-product in this ELN).
 
-    `_build` already guarantees `products` is a non-empty list, but not that its items
-    are objects — a bare string here must be a mapping error, not an AttributeError.
+    Generalized from the yield-only reader so purity rides the identical path (DRY): both are
+    per-product outcome numbers and must fail the same way. `_build` already guarantees
+    `products` is a non-empty list, but not that its items are objects — a bare string here must
+    be a mapping error, not an AttributeError.
     """
     first = _require_list(payload, "products")[0]
     if not isinstance(first, dict):
         raise ElnFormatError(f"product is not an object: {first!r}")
-    value = first.get("yield_percent")
+    value = first.get(field)
     return float(value) if value is not None else None
+
+
+def _impurities(payload: dict[str, Any]) -> list[Impurity]:
+    """Map the first product's impurity profile, skipping entries that identify nothing.
+
+    An impurity row with neither a name nor a structure records nothing an chemist could act on,
+    so it is dropped rather than rejected: one unusable row must not cost the whole reaction, and
+    the surrounding rows are still real data (the reject-and-continue discipline, applied within
+    an entry).
+    """
+    first = _require_list(payload, "products")[0]
+    if not isinstance(first, dict):
+        raise ElnFormatError(f"product is not an object: {first!r}")
+    rows = first.get("impurities") or []
+    if not isinstance(rows, list):
+        raise ElnFormatError(f"impurities is not a list: {rows!r}")
+    profile: list[Impurity] = []
+    for row in rows:
+        if not isinstance(row, dict):
+            raise ElnFormatError(f"impurity is not an object: {row!r}")
+        name, smiles = row.get("name"), row.get("smiles")
+        if not name and not smiles:
+            logger.warning("skipped an impurity row with neither name nor smiles: %r", row)
+            continue
+        area = row.get("area_percent")
+        profile.append(
+            Impurity(
+                name=name, smiles=smiles, area_percent=float(area) if area is not None else None
+            )
+        )
+    return profile
 
 
 def _parse_timestamp(value: Any, path: Path) -> datetime:

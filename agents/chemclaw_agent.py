@@ -38,6 +38,12 @@ from agent_framework._harness._loop import todos_remaining
 from agents.audit import AuditSink, make_audit_middleware
 from agents.bo_tools import suggest_next_experiment
 from agents.calc_tools import compute_xtb_energy, predict_pka, predict_solubility
+from agents.chem_tools import (
+    render_structure,
+    resolve_compound,
+    screen_hazards,
+    stoichiometry_table,
+)
 from agents.durable_tools import (
     get_durable_job_status,
     request_development_report,
@@ -231,6 +237,10 @@ def _capability_tools() -> list[Any]:
     from the MCP capability servers, not in-process; the rest are the in-process function tools.
     """
     return [
+        resolve_compound,
+        screen_hazards,
+        stoichiometry_table,
+        render_structure,
         compute_xtb_energy,
         predict_solubility,
         predict_pka,

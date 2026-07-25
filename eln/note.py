@@ -9,7 +9,7 @@ carries no `[[wikilink]]` (a dangling link would fail `kg.validate` on the very 
 opens); compound cross-links are a later step once compound notes exist.
 """
 
-from eln.ord import OrdReaction, ReactionStep
+from eln.ord import Impurity, OrdReaction, ReactionStep
 from kg.note import Note
 
 
@@ -18,6 +18,7 @@ def note_from_ord_reaction(reaction: OrdReaction) -> Note:
     body = (
         f"Reaction `{reaction.reaction_smiles()}` from ELN entry {reaction.reaction_id}.\n\n"
         f"{_conditions_block(reaction)}"
+        f"{_impurity_block(reaction)}"
         f"{_procedure_block(reaction)}"
     )
     return Note(
@@ -25,6 +26,12 @@ def note_from_ord_reaction(reaction: OrdReaction) -> Note:
         type="reaction",
         created_by="agent",
         source=reaction.provenance,
+        # The experiment's own date is what makes the note time-scopable (gap KNW-1). F10-G2 added
+        # `valid_from`/`valid_to` to answer "what did we know at time T", and for the largest note
+        # class nothing populated them — a reaction became valid-since-forever. A run is evidence
+        # from the day it was run; `valid_to` stays open (a result does not expire on its own, it
+        # is superseded, which is a separate edit).
+        valid_from=reaction.performed_at,
         body=body,
     )
 
@@ -38,7 +45,35 @@ def _conditions_block(reaction: OrdReaction) -> str:
         conditions.append(f"time: {reaction.time_h} h")
     if reaction.yield_percent is not None:
         conditions.append(f"yield: {reaction.yield_percent}%")
+    if reaction.purity_percent is not None:
+        conditions.append(f"purity: {reaction.purity_percent}%")
+    if reaction.performed_at is not None:
+        conditions.append(f"performed: {reaction.performed_at.isoformat()}")
     return "".join(f"- {c}\n" for c in conditions)
+
+
+def _impurity_block(reaction: OrdReaction) -> str:
+    """Render the impurity profile, the half of the outcome yield alone never captures.
+
+    Rendered into the note body (not only frontmatter) because retrieval reads bodies: an
+    impurity-driven question — "what did we see besides product on that route?" — has to be able
+    to match here.
+    """
+    if not reaction.impurities:
+        return ""
+    lines = "".join(f"- {_impurity_line(imp)}\n" for imp in reaction.impurities)
+    return f"\n## Impurities\n\n{lines}"
+
+
+def _impurity_line(impurity: Impurity) -> str:
+    """One impurity: whatever the source actually recorded, never a fabricated identity."""
+    label = impurity.name or impurity.smiles or "unidentified"
+    detail = []
+    if impurity.smiles and impurity.name:
+        detail.append(f"`{impurity.smiles}`")
+    if impurity.area_percent is not None:
+        detail.append(f"{impurity.area_percent}% area")
+    return f"{label} ({', '.join(detail)})" if detail else label
 
 
 def _procedure_block(reaction: OrdReaction) -> str:
