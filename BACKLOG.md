@@ -27,16 +27,22 @@ risk). Four findings fixed in `a96932d`; the rest need a decision or are follow-
       Measured 162ms → 83ms at 10k notes.
 - [x] **DA-4 [Med] `find_notes` was the last unbounded model-context surface.** Now capped by
       `graph_max_results` (50), sorted-id order, with the D-066 truncation warning.
-- [ ] **DA-5 [Med] Graph query floor is now the stat scan** (~75ms at 10k notes on local disk; worse
-      on a networked OpenShift PVC) — [S]. **Needs a decision (D-1): how stale may a query be?**
-      Recommended: config-gated TTL on the fingerprint check + explicit cache-bust on PR-gate merge,
-      so the authoring loop stays instant.
+- [x] **DA-5 [Med] Graph query floor is now the stat scan** — [S]. **Decided (D-1) and done**
+      (D-082): `graph_cache_ttl_seconds` (default 5.0) skips the scan inside the window — measured
+      **164ms → 0.52ms** on a warm query at 10k notes. Cost, stated: a change made *outside* this
+      process can lag by up to the window. `kg.graph.invalidate_cache()` is the bust hook and the
+      PR-gate submitter calls it, so the authoring loop never waits; `0` restores scan-every-query
+      for deployments where no staleness is acceptable.
 - [ ] **DA-7 [Low] Test-to-module locality is weak** — 3 of 5 mutations survived their "obvious" test
       file and died only under the full suite — [S]. Not a correctness gap (CI runs everything); a
       developer feedback-loop one.
-- [ ] **DA-10 [Med] Buy down live-edge risk offline** — [M]. **Needs a decision (D-2).** Recommended:
-      `helm template` + `kubeconform` render in CI first; defer Entra/Nextflow contract tests until a
-      real tenant exists.
+- [x] **DA-10 [Med] Buy down live-edge risk offline** — [M]. **Decided (D-2) and done** (D-082):
+      `make helm-validate` (`helm template` | `kubeconform -strict`) runs in CI, plus
+      `tests/test_helm_chart.py` for the gap a schema check cannot see — a chart key that is not a
+      `Settings` field (silently ignored as an env var, unlike the `.env` path that broke DA-1) and a
+      malformed value on a real field (crashes every pod at import). Both mutation-verified.
+      Entra/Nextflow contract tests still deferred until a real tenant exists — recorded-response
+      tests written against a guessed shape assert one's own assumptions, not correctness.
 - [ ] **Migration rollback is unaddressed** — `infra/sql` migrations are forward-only; a GxP
       deployment needs a tested down-path or an explicit ADR that forward-only is the policy — [M].
 

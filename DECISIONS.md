@@ -2080,7 +2080,75 @@ complete the backlog. Both are honest rather than speculative: item 6 is a real 
 a working dispatch, and item 5's dependency check has four real declaring skills today. The parts
 that would have been speculative stayed out — no HTTP server is configured, and profile Stage 3
 (filesystem-discovered profiles) is still deferred.
-## D-074
+
+## D-082 — Graph-cache TTL (DA-5 / decision D-1) and the Helm render gate (DA-10 / decision D-2)
+
+**Context.** `docs/audit/12-deep-analysis.md` left two findings explicitly unresolved because each
+needed a judgement call rather than an engineering one. Both were signed off; this records what was
+built and, more importantly, what was traded.
+
+### D-1 — Graph freshness vs. interactive latency (DA-5)
+
+**The problem.** The note cache is keyed by a stat fingerprint of the note tree. The fingerprint is
+cheap *per file* but O(notes) in total, and it is computed on **every** query — including a pure
+cache hit. After DA-3 removed the reassembly cost, that scan *is* the floor on interactive latency:
+~75 ms at 10k notes on local disk in the audit, and materially worse on the networked OpenShift PVC
+production actually reads.
+
+**Decision.** Add `graph_cache_ttl_seconds` (default **5.0**): within the window the last scan is
+trusted and skipped entirely. Measured effect on a warm query at 10k notes: **164 ms → 0.52 ms**.
+
+**What this costs, stated plainly.** A note changed by something *outside* this process — another
+pod, an out-of-band `git pull` — can remain invisible for up to the window. That is a real change to
+freshness semantics, and it takes effect on upgrade. Two things bound it:
+
+- **Local writes never wait.** `kg.graph.invalidate_cache()` is the explicit bust hook, and the
+  PR-gate submitter calls it after writing a note. The authoring loop — the one place a human
+  *expects* their own change to appear at once — is unaffected. (It is also required for
+  correctness there: the submitter's `checkout -B`/`reset --hard` rewrite the tree wholesale, so a
+  cached graph could otherwise describe a tree that no longer exists.)
+- **`0` restores the old behavior exactly** — scan every query — for any deployment where no
+  staleness is acceptable. This is the setting to choose if the GxP posture demands it.
+
+**Why a TTL and not an invalidation signal.** A merge hook or `inotify` avoids staleness entirely,
+but only catches changes through the paths it hooks; an out-of-band `git pull` still slips past, so
+it buys complexity without closing the hole. The TTL bounds *every* path uniformly.
+
+**Honest note on blast radius.** Two existing tests had to pin `graph_cache_ttl_seconds = 0`,
+because they assert fingerprint-based busting and that needs the scan to run. That is the change
+being visible where it should be — not test churn to be papered over.
+
+### D-2 — Buying down live-edge risk offline (DA-10)
+
+**Decision.** Do the cheapest, highest-probability item now and defer the rest, as recommended:
+
+1. **`make helm-validate` in CI** — `helm template` piped to `kubeconform -strict` against the
+   Kubernetes schemas (plus the CRD catalog, for the OpenShift `Route`). The chart is the one
+   artifact no test exercises; a broken chart is discovered at `helm install`, in production, on
+   the worst day. No cluster needed.
+2. **`tests/test_helm_chart.py` — the gap a schema check cannot see.** kubeconform validates
+   *Kubernetes* shape; it has no idea whether `CHEMCLAW_FOO` is a real setting. Two failure modes
+   live in that gap and both were unguarded:
+   - *A key that is not a field.* pydantic-settings **tolerates** an unknown prefixed environment
+     variable — unlike an unknown key in a `.env` file, which is precisely what broke the
+     quickstart in DA-1. So the operator gets no error and no effect: a setting they believe they
+     enabled is silently ignored. In a GxP deployment that is worse than a crash.
+   - *A malformed value on a real field.* This one does crash — at import, in every pod at once.
+
+   Both are now caught offline against the same `Settings` the pods construct, and both were
+   mutation-verified (inject each fault, watch the suite go red).
+
+**Deferred, deliberately.** Entra/Nextflow contract tests against recorded responses wait for a
+real tenant. Recorded-response tests written against a *guess* at the response shape mostly assert
+one's own assumptions back; they would buy confidence, not correctness.
+
+**Finding surfaced while doing this.** `CHEMCLAW_COMPONENT` is set on every Deployment but is not a
+`Settings` field and nothing in the app reads it. It is harmless (unknown prefixed env vars are
+ignored) and plausibly useful to an operator reading `kubectl describe`, so it is allow-listed by
+name in the parity test rather than deleted or the check loosened — any *other* non-field key is a
+real finding.
+
+## D-083 — F11 waves 0–3: closing the capability gaps (deployment, reachability, chemistry)
 
 **Phase F11 wave 0–3: closing the capability gaps found in `docs/audit/12-capability-gap-analysis.md`.**
 
@@ -2158,11 +2226,11 @@ CI gate (`make prose-validate`), and the chart is deployable. W3's remainder (me
 health, mid-turn resume) and all of W4 stay open and are listed in `BACKLOG.md` — scaling the work
 down mid-wave is the user's call, so the boundary is recorded rather than blurred.
 
-## D-075
+## D-084 — F11 waves 3–4: operating the system; the knowledge model reasoning about itself
 
 **Phase F11 waves 3–4: operating the system, and the knowledge model reasoning about itself.**
 
-**Context.** D-074 closed the deployment and reachability gaps. This completes the phase: the
+**Context.** D-083 closed the deployment and reachability gaps. This completes the phase: the
 operational surfaces the system had no way to expose, and the knowledge-model capabilities it had no
 way to ask for.
 
@@ -2226,11 +2294,11 @@ two are genuinely sizeable and warrant their own design note (IDEA-2 predicted-v
 calibration, IDEA-1 standing queries). Stopping on those boundaries rather than half-building them
 is the deliberate call.
 
-## D-076
+## D-085 — F11 completion: the five items blocked on a decision or a prerequisite
 
 **Phase F11 completion: the five items that were blocked on a decision or a prerequisite.**
 
-**Context.** D-075 closed W3–W4 except five items I had recorded as blocked. Asked to implement them
+**Context.** D-084 closed W3–W4 except five items I had recorded as blocked. Asked to implement them
 anyway, the right move was the one D-057 already established for this repo: **make the blocking
 decision explicitly and record it, rather than defer a second time.** Each decision below is stated
 in the module that embodies it, so a future reader sees the reasoning at the point of use.
@@ -2285,9 +2353,7 @@ things remain genuinely out of reach here and are unchanged: the live edges need
 tenant/broker/cluster, and the audit-trail archive-then-reseal design, which needs an ADR with QA
 sign-off rather than a cleanup job.
 
-## D-081
-
-**Reconciling the F11 gap-closure branch with `main`'s independently-landed overlapping work.**
+## D-086 — First reconciliation with `main` (PRs #17–#20): hazard screen, event sink, tool registry
 
 **Context.** While this branch built F11, `main` merged PRs #17–#20, three commits of which solved
 problems this branch had also solved, independently and differently: hazard screening (`744c265`,
@@ -2341,9 +2407,7 @@ instead of silent drift. That pattern is worth applying to further families.
 `skill-validate` / `prose-validate` / `eln-validate` all green — with one hazard screen, one event
 sink, and one tool registry.
 
-## D-082
-
-**Second reconciliation with `main` (PR #21): the MCP transport union.**
+## D-087 — Second reconciliation with `main` (PR #21): the MCP transport union
 
 `main` landed its own transport discrimination while this branch's networked-MCP work (gap TOOL-1)
 was in flight. **`main`'s wins outright.** It is a proper discriminated union
@@ -2361,3 +2425,58 @@ Three guards caught the fallout rather than letting it drift: `mypy --strict` on
 from the resolution, `test_env_example_documents_only_real_fields` on the now-nonexistent env key,
 and the chart test on the superseded constructor. That is three independent gates on one merge
 mistake, which is the point of having them.
+
+## D-088 — Third reconciliation with `main` (PR #23): ADR renumbering, and the chart's env parity guard
+
+`main` landed the graph-cache TTL and the Helm render gate while this branch was in review. Two
+resolutions were mechanical (both CI steps and both `make` targets are additive; the `tasks/todo.md`
+logs are append-only and both kept). Three were not.
+
+**The ADR numbers had collided head-on, and this is the fix.** This branch appended its ADRs as
+D-074…D-076 and D-081…D-082 while `main` had independently allocated the *same* numbers for
+different decisions — a defect this branch introduced in the first reconciliation and that nobody
+caught, because nothing checks the log for uniqueness. `main`'s allocation keeps the numbers (it
+merged first and its numbers are already cited from `BACKLOG.md`, `docs/backlog-plan.md` and
+`DEFERRED.md`); this branch's five renumber to **D-083…D-087**, and the seven references that
+pointed at them — `tasks/todo.md`, `docs/gap-closure-plan.md`, `DEFERRED.md`, `agents/chem_tools.py`,
+`tests/test_safety_pairs.py` — move with them. An append-only log with duplicate ids is not an
+audit trail, so the collision is fixed rather than annotated.
+
+**`main`'s new chart test caught a real defect in this branch, and the fix widened the guard.**
+`test_chart_config_keys_are_real_settings` asserts every `CHEMCLAW_*` env the chart injects names a
+real `Settings` field — the point being that pydantic-settings *silently ignores* an unknown
+prefixed environment variable, so an operator who sets it gets no error and no effect. This branch's
+knowledge-sync work added five such keys (`…_REPO_TOKEN`, `…_REPO_URL`, `…_SYNC_DIR`,
+`…_PUBLISH_DIR`, `…_SYNC_INTERVAL_SECONDS`), and only one of them was even visible to the test.
+
+The naive resolution — exempt them — would have thrown away the guard. The premise it encodes is
+slightly too narrow rather than wrong: the real invariant is not "every key is a `Settings` field"
+but **"every key is read by something"**, and `deploy/knowledge-sync.sh` and `deploy/entrypoint.sh`
+are first-party consumers that happen to be shell. So the check now (a) reads the `_helpers.tpl`
+env block as well as `values.yaml`, closing the half of the surface it could not see, and (b)
+*discovers* the shell-consumed names by scanning `deploy/*.sh` instead of listing them. Discovery,
+not a list: the earlier lesson on this branch was that a guard which enumerates catches drift while
+one that hardcodes only catches what someone already thought of. Mutation-verified by adding a
+`CHEMCLAW_TYPO_SETTING` key to `values.yaml` — the guard names it.
+
+The knowledge-repo push credential is therefore a *fourth* declared secret, against the
+three-secret model (D-047). Recorded rather than waved through: the PR-gate submitter shells out to
+`git push` and a git host authenticates that push with a token — there is no federated exchange for
+it the way there is for the Entra-fronted APIs. The alternative is a knowledge layer that cannot
+write.
+
+A companion test asserting shell-consumed keys are never *also* `Settings` fields was written and
+then deleted: every overlap it found (`CHEMCLAW_SERVICE_HOST`/`_PORT`, which `entrypoint.sh` passes
+to uvicorn) was shared by design, so its exemption list equalled its finding list. A guard with no
+possible signal is decoration.
+
+**`service/runner.py` had absorbed two of everything.** Both branches had independently built a
+per-turn signal sink and a "last plan emitted" variable, and the auto-merge kept all four. The
+consequences were live, not cosmetic: `begin_turn()` and `set_job_sink()` are the *same* contextvar,
+so calling both nested one buffer inside the other and the teardown reset them out of LIFO order;
+and two `_current_plan` definitions meant the second silently shadowed the first. Consolidated to
+one sink and one plan variable. `main`'s `_current_plan` is the one kept — its `None` return
+distinguishes "this agent has no plan" from "this agent does not plan", which an empty list cannot
+express — with this branch's reason-for-existing (gap RCH-5) folded into its docstring. The
+post-resume drain now takes the whole signal buffer rather than only job ids, so a note proposed
+during a mid-turn resume still reaches the stream.

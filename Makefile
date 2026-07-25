@@ -2,7 +2,11 @@
 # CLAUDE.md and CI both go through them, so behavior stays identical everywhere.
 # `uv run` executes inside the project venv without a manual activate step.
 
-.PHONY: install lint type test cov check chat db-migrate schedules-apply kg-validate eval eln-validate skill-validate prose-validate audit-verify reindex up down
+# Kubernetes API version the rendered chart is validated against. OpenShift 4.16 ships Kubernetes
+# 1.29; override (`make helm-validate KUBE_VERSION=1.30.0`) when the target cluster moves.
+KUBE_VERSION ?= 1.29.0
+
+.PHONY: install lint type test cov check chat db-migrate schedules-apply kg-validate eval eln-validate skill-validate prose-validate helm-validate audit-verify reindex up down
 
 install:  ## Sync the venv with runtime + dev dependencies.
 	uv sync
@@ -45,6 +49,14 @@ skill-validate:  ## Validate SKILL.md frontmatter (name/description present, nam
 
 prose-validate:  ## Check the agent's prose only names tools that exist (gap IDEA-7).
 	uv run python -m scripts.validate_prose_contract
+
+helm-validate:  ## Render the Helm chart and validate it against the Kubernetes schemas.
+	@command -v helm >/dev/null || { echo "helm not installed - see docs/runbook.md"; exit 1; }
+	@command -v kubeconform >/dev/null || { echo "kubeconform not installed - see docs/runbook.md"; exit 1; }
+	helm template chemclaw deploy/helm/chemclaw \
+	  | kubeconform -strict -summary -kubernetes-version $(KUBE_VERSION) \
+	      -schema-location default -schema-location \
+	      'https://raw.githubusercontent.com/datreeio/CRDs-catalog/main/{{.Group}}/{{.ResourceKind}}_{{.ResourceAPIVersion}}.json'
 
 audit-verify:  ## Verify the tamper-evident hash chain over the GxP audit trail (F10-G1).
 	uv run python -m scripts.verify_audit_chain

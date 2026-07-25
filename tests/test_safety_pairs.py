@@ -1,4 +1,4 @@
-"""The named-substance incompatibility pairs this branch contributed to the rule table (D-081).
+"""The named-substance incompatibility pairs this branch contributed to the rule table (D-086).
 
 `main` shipped structural hazard screening (D-080) with a citation-carrying SMARTS table and one
 generic oxidizer/reductant pair rule. This branch had independently built a parallel screen keyed on

@@ -6,7 +6,7 @@ them already existed somewhere in the repo:
 - `resolve_compound` — every other chemistry tool takes SMILES; chemists write names (TOOL-2).
 - hazard screening (TOOL-3) — landed independently on `main` as `safety/` + `agents.safety_tools`;
   this branch's named-substance and named-pair knowledge was contributed to `safety/rules.yaml`
-  rather than kept as a second screen (see D-081).
+  rather than kept as a second screen (see D-086).
 - `stoichiometry_table` — mass balance exists in `eln.validate` (for validation) and E-factor/PMI
   in `evals.metrics` (for scoring), but the agent could not answer "what do I weigh out?" (TOOL-4).
 - `render_structure` — RDKit is already a dependency and the UI showed SMILES strings (TOOL-5).

@@ -7,7 +7,7 @@
 > second real caller** (Rule of Three). A step is done when its tests pass **and** `make lint type
 > test` is green.
 
-Phase label: **F11**. ADRs are appended to `DECISIONS.md` as D-074…D-081, one per wave.
+Phase label: **F11**. ADRs are appended to `DECISIONS.md` as D-083…D-085, one per wave.
 
 ---
 

@@ -162,7 +162,7 @@ in `BACKLOG.md`. Three entries here changed state, and one deferral is newly rec
 | Newly deferred | Why not now | Trigger to revisit |
 |---|---|---|
 | **Hazard screening beyond structural alerts** (D-080) — GHS/SDS data, toxicity/ADMET prediction, thermal-stability data, regulatory/transport classification, route-level safety verdicts | The shipped screen is deliberately a *structural alert* layer: deterministic, offline, citable, and honest about being advisory. Each excluded capability needs either a licensed data source, a predictive model with its own validation burden, or a claim the system must not make (a route-level "safe" verdict). Bolting any of them onto an advisory screen would blur the one invariant that makes it usable — the system flags, it never certifies. | A named, licensed hazard data source is procured (GHS/SDS), or a regulated deliverable requires a documented hazard assessment — then design it as its own layer with its own review, not as more rules in `safety/rules.yaml` |
-## F11 gap-closure outcomes (2026-07-25, D-074/D-075)
+## F11 gap-closure outcomes (2026-07-25, D-083/D-084)
 
 Implementing `docs/audit/12-capability-gap-analysis.md` resolved several long-standing deferrals and
 changed the status of others. Recorded here so the table above is not read as still current:

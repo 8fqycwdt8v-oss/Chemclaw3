@@ -34,10 +34,7 @@ from agents.turn_signals import (
     QuestionSignal,
     begin_turn,
     drain,
-    drain_started_jobs,
     end_turn,
-    reset_job_sink,
-    set_job_sink,
 )
 from agents.verifier import verify_turn_answer
 from chemclaw.config import settings
@@ -113,11 +110,6 @@ async def run_turn(
     # The harness's todo list as last rendered, so a plan is emitted when it first appears and
     # again whenever it changes — not once per update (which would spam an unchanged plan).
     last_plan: list[str] = []
-    # Collect jobs launched by this turn's tools, drained between updates into `JobStartedEvent`s
-    # (D-042) — the launch happens layers below this stream, so it is announced ambiently.
-    job_sink_token = set_job_sink()
-    # Last plan snapshot emitted, so an unchanged todo list is not re-sent on every update.
-    plan: list[str] = []
     try:
         async with AsyncExitStack() as stack:
             # Open each MCP capability server for the duration of the turn, then tear it down — the
@@ -169,18 +161,17 @@ async def run_turn(
                         if isinstance(event, TokenEvent):
                             answer_parts.append(event.text)
                         yield event
-                for job_id in drain_started_jobs():
-                    yield JobStartedEvent(job_id=job_id)
+                # The resume can itself launch jobs or propose notes, so drain the full signal
+                # buffer rather than only the job ids — a proposal made during the resume would
+                # otherwise never reach the stream.
+                for signal in drain():
+                    yield _signal_event(signal)
                 # Plan after jobs: a submit adds an "awaiting job" todo, so this order shows the
                 # launch and then the plan that reflects it.
                 current_plan = await _current_plan(session)
-                if current_plan is not None and current_plan != plan:
-                    plan = current_plan
-                    yield PlanEvent(todos=plan)
-            # A job launched while the model produced its closing update has no later iteration to
-            # be drained by, so it would otherwise be announced only by its completion push-back.
-            for job_id in drain_started_jobs():
-                yield JobStartedEvent(job_id=job_id)
+                if current_plan is not None and current_plan != last_plan:
+                    last_plan = current_plan
+                    yield PlanEvent(todos=last_plan)
         yield await _answer_event("".join(answer_parts))
     except Exception:
         # One turn's failure becomes one user-safe event, never a 500 mid-stream or a leaked trace.
@@ -199,7 +190,6 @@ async def run_turn(
             budget.record(session.session_id, actor, turn_tokens)
         end_turn(signals_token)
         reset_dry_run(dry_run_token)
-        reset_job_sink(job_sink_token)
         reset_current_session_id(session_token)
         reset_current_session(live_session_token)
         if identity_token is not None:
@@ -208,6 +198,12 @@ async def run_turn(
 
 async def _current_plan(session: AgentSession) -> list[str] | None:
     """The harness's current todo list for this session, or None when there is no plan to show.
+
+    Why this is emitted at all (gap RCH-5): `PlanEvent` has been in the typed contract and rendered
+    by the UI since F2, but nothing ever produced one — so `plan_only` autonomy, which the Helm
+    chart ships as the production default, asked a human to approve a plan the surface could never
+    show them. Titles are read from the harness's own `TodoProvider` state, the same store
+    `agents.harness_todo` mutates, so there is no second representation of the plan to drift.
 
     None (not an empty list) off the harness path: the classic agent has no todo state, and an
     empty `PlanEvent` would render as an empty checklist — "the agent has no plan" — rather than
@@ -281,27 +277,6 @@ def _signal_event(signal: JobSignal | ProposalSignal | QuestionSignal) -> Event:
     if isinstance(signal, QuestionSignal):
         return QuestionEvent(question=signal.question, options=signal.options)
     return NoteProposedEvent(note_id=signal.note_id, reference=signal.reference)
-
-
-async def _current_plan(session: Any) -> list[str]:
-    """The harness's todo titles for this session, or `[]` when the harness is off (gap RCH-5).
-
-    `PlanEvent` has been in the typed contract and rendered by the UI since F2, but nothing emitted
-    one — so `plan_only` autonomy, which the Helm chart ships as the production default, asked a
-    human to approve a plan the surface could never show. The titles are read from the harness's own
-    `TodoProvider` state, the same store `agents.harness_todo` mutates, so there is no second
-    representation of the plan to drift.
-
-    Best-effort by design: a plan is a *display* concern, and a failure to read it must never sink a
-    turn that is otherwise working.
-    """
-    if not settings.harness_enabled:
-        return []
-    try:
-        return await todo_titles(session)
-    except Exception:  # pragma: no cover - display-only path
-        logger.debug("could not read the harness plan for session %s", session.session_id)
-        return []
 
 
 def _usage_tokens(update: Any) -> int:

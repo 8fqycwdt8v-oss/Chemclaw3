@@ -168,6 +168,58 @@ remains deferred.
 **Still open, deliberately:** the deep-analysis items DA-5 and DA-10 are marked "needs a decision"
 (cache staleness policy; how much live-edge risk to buy down offline) — those are judgement calls
 for sign-off, not implementation work, per the audit's do-not-self-resolve convention.
+
+---
+
+# DA-5 + DA-10 — the two decision-gated findings, signed off and implemented
+
+Source: `docs/audit/12-deep-analysis.md` §"Decisions needed" (D-1, D-2). ADR **D-082**.
+
+- [x] **D-1 / DA-5 — graph-cache TTL.** `graph_cache_ttl_seconds` (default 5.0) skips the O(notes)
+  stat scan inside the window; `kg.graph.invalidate_cache()` is the bust hook and the PR-gate
+  submitter calls it. Measured **164 ms → 0.52 ms** warm query at 10k notes (this sandbox's disk;
+  the audit measured 75 ms scan on faster storage — same shape).
+- [x] **D-2 / DA-10 — Helm render gate.** `make helm-validate` (`helm template` | `kubeconform
+  -strict`, OpenShift `Route` via the CRD catalog) wired into CI, plus `tests/test_helm_chart.py`
+  for the gap a schema check cannot see.
+
+## Review
+
+Gate green: ruff + `mypy --strict` clean over 242 files, full suite **710 → 719 passed** (9 new tests), 41 offline skips.
+
+**The TTL's cost is real and was measured, not assumed.** Four existing tests had to pin
+`graph_cache_ttl_seconds = 0`: two assert fingerprint-based busting, two assert *disk-authoritative*
+reads (a deleted note must not be cited; an on-disk corpus edit must invalidate the eval memo).
+That is the change being visible exactly where it should be. I considered special-casing deletions
+so a retracted note could never be served from cache, and rejected it: it would close the delete
+case but not the *edit* case (a corrected note is cached just the same), giving an inconsistent
+guarantee and false comfort. The uniform window is the honest contract. It also does not weaken the
+stale-index guard in production — that guard compensates for a derived index rebuilt by a
+background job, whose staleness is minutes-to-hours, so seconds are noise against it.
+
+**DA-10's real find was the gap kubeconform cannot cover.** A schema check validates *Kubernetes*
+shape; it cannot know whether `CHEMCLAW_FOO` is a real setting. Two failure modes lived there:
+a key that is not a field (pydantic-settings **tolerates** an unknown prefixed *env var* — unlike
+an unknown key in a `.env` file, which is what broke the quickstart in DA-1 — so it is silently
+ignored, which in a GxP deployment is worse than a crash), and a malformed value on a real field
+(crashes every pod at import). Both are now caught offline and both were **mutation-verified** —
+inject the fault, watch the suite go red, restore.
+
+**Verified, not assumed:** I checked empirically whether an unknown `CHEMCLAW_*` environment
+variable crashes `Settings()` before designing around it. It does not — the `extra="forbid"` bite
+is specific to `.env` files and kwargs. Had I assumed symmetry with DA-1, the parity test would
+have asserted a crash that never happens and the *actual* defect (silent no-op) would have stayed
+uncovered.
+
+**Incidental finding:** `CHEMCLAW_COMPONENT` is set on every Deployment, is not a `Settings` field,
+and nothing in the app reads it. Harmless, plausibly useful for `kubectl describe`, so it is
+allow-listed **by name** in the parity test rather than the check being loosened — any other
+non-field key is a real finding.
+
+**Not verifiable here:** `make helm-validate` itself cannot run in this sandbox (no `helm`,
+no `kubeconform`, no network to fetch them). It will execute for the first time on CI. The offline
+chart tests are what I could and did prove.
+
 ## Token-efficiency rules (bind all agents)
 
 - Reviewers/verifiers return structured findings only (file:line, claim, concrete
@@ -279,7 +331,7 @@ Sequenced by *dependency* rather than the analysis's *value* ordering: config an
 ## Review
 
 Gate green throughout: ruff + `mypy --strict` clean, test count 601 → 700+, no test weakened or
-skipped to pass. Four commits, one per wave, each independently green. ADR **D-074**.
+skipped to pass. Four commits, one per wave, each independently green. ADR **D-083**.
 
 **What implementing changed about the analysis.** Two corrections, both recorded rather than
 quietly dropped:
@@ -320,7 +372,7 @@ listed in `BACKLOG.md` with their original severity, unchanged.
 ## Review (continuation)
 
 Gate green throughout: 696 → 755 passing, ruff + `mypy --strict` clean, `kg-validate`,
-`skill-validate` and `prose-validate` all pass. Five commits. ADR **D-075**.
+`skill-validate` and `prose-validate` all pass. Five commits. ADR **D-084**.
 
 **The pattern that kept recurring, and is worth naming.** Three separate findings resolved into the
 same rule: *a capability that cannot cover something must say so, or its silence reads as a
@@ -352,7 +404,7 @@ an honest boundary.
 
 ## Review (continuation 2)
 
-Gate green: 755 → 774 passing, ruff + `mypy --strict` clean, all four validators pass. ADR **D-076**.
+Gate green: 755 → 774 passing, ruff + `mypy --strict` clean, all four validators pass. ADR **D-085**.
 
 I had recorded these five as blocked. Asked to implement them anyway, the correct move was the one
 D-057 already established here: **make the blocking decision explicitly and record it, rather than
@@ -383,3 +435,38 @@ three (AGT-1, TOOL-7, AGT-6) withdrawn after assessment and recorded so they are
 blindly. What genuinely remains is unchanged and outside this environment: the live edges needing a
 real tenant/broker/cluster, and the audit-trail archive-then-reseal design, which needs an ADR with
 QA sign-off rather than a cleanup job.
+
+---
+
+# Third reconciliation with `main` (PR #23)
+
+`main` landed the graph-cache TTL + Helm render gate (D-082) while this branch was in review.
+Four conflicts, three real. ADR **D-088**.
+
+- [x] **CI / Makefile** — additive on both sides; `prose-validate` and `helm-validate` both kept.
+- [x] **ADR id collision, fixed at the root.** This branch's D-074/075/076/081/082 collided with
+  `main`'s same-numbered decisions. `main` keeps the numbers; this branch renumbers to
+  **D-083…D-087**, and the seven citations move with them. `tests/test_decision_log.py` now pins
+  uniqueness and "newest is last" — mutation-verified by reintroducing the collision.
+- [x] **`main`'s chart test found a real defect here.** Five `CHEMCLAW_*` keys the knowledge-sync
+  work added are read by `deploy/*.sh`, not by `Settings`. Widened the guard to the real invariant
+  ("every key has a consumer") + the `_helpers.tpl` half of the env surface it could not see, with
+  shell consumers *discovered* rather than listed. Mutation-verified with a bogus key.
+  A companion overlap test was written and deleted: every overlap it found was shared by design.
+- [x] **`service/runner.py` had two of everything.** Two signal sinks over the same contextvar
+  (nested, reset out of LIFO order) and two `_current_plan` definitions (the second shadowing the
+  first). One of each now; `main`'s `_current_plan` kept for its `None` semantics, this branch's
+  RCH-5 rationale folded in. The post-resume drain takes the whole buffer, not just job ids.
+
+## Review
+
+Gate green: **894 → 896 passed**, 41 offline skips, ruff + `mypy --strict` clean over 278 files,
+`kg-validate` / `skill-validate` / `prose-validate` / `eln-validate` all pass.
+
+**Lesson.** Two of the three real conflicts were *duplicated state*, not contested logic — both
+branches solving the same problem, and `git` merging both solutions cleanly because they touched
+different lines. A clean auto-merge is the dangerous case, not the conflicted one: the conflict
+markers are where `git` admits it does not know, and everything else it merges silently. After a
+merge with a long-lived parallel branch, the thing to grep for is *two implementations of one
+idea*, which is what `mypy`'s no-redef caught here and what nothing would have caught in the
+contextvar sink.
