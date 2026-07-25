@@ -217,3 +217,56 @@ live LLM the deferral is waiting on.
 non-test caller) and the deployment sweep (grep every runtime filesystem/credential assumption
 against the chart) both found Crit/High items in minutes and neither is in any existing checklist.
 Both are cheap enough to run each phase; worth adding to the CHECKMATE G1–G7 routine.
+
+---
+
+# Task — implement the gap-closure plan (2026-07-25)
+
+**Ask:** write an implementation plan for all findings in `docs/audit/12-capability-gap-analysis.md`
+and implement it.
+
+## Plan → `docs/gap-closure-plan.md` (phase F11, waves W0–W4)
+
+Sequenced by *dependency* rather than the analysis's *value* ordering: config and schema first
+(later waves read them), reachability before the capabilities it exposes.
+
+- [x] **W0 deployment truth** — DEP-1 knowledge sync, DEP-2 push credential, DEP-3 MCP default,
+      DEP-5 (found during implementation: image completeness + git + a Schedules Job), SCH-2 note
+      reindex, RCH-3 the approval decision surface.
+- [x] **W1 reachability** — RCH-1/RCH-2 durable tools, RCH-4/RCH-5 plan + job + proposal events,
+      IDEA-7 the prose↔code CI gate. AGT-1 investigated and **withdrawn as false**.
+- [x] **W2 chemistry** — KNW-1 date, KNW-2 purity/impurities, TOOL-2 identity resolution,
+      TOOL-3 hazard screen + `process-safety` skill, TOOL-4 stoichiometry, TOOL-5 rendering.
+- [x] **W3 (partial)** — SCH-3 overlap policy + deterministic jitter, SCH-1 retention.
+- [ ] **W3 remainder** — SCH-4 schedule health, SCH-5 scheduled audit-chain verify, DEP-4 metrics,
+      AGT-2 mid-turn resume.
+- [ ] **W4** — the depth/ideation set (KNW-3…7, TOOL-1/6/7, AGT-3…6, SCH-6, IDEA-1…6).
+
+## Review
+
+Gate green throughout: ruff + `mypy --strict` clean, test count 601 → 700+, no test weakened or
+skipped to pass. Four commits, one per wave, each independently green. ADR **D-074**.
+
+**What implementing changed about the analysis.** Two corrections, both recorded rather than
+quietly dropped:
+
+1. **AGT-1 was wrong.** "No turn cancellation" rested on a grep for `CancelledError` finding
+   nothing. The handling is structural, not by name, and was already correct. I verified by
+   measurement before writing a fix, which is the only reason no time went into fixing a
+   non-problem. The test that proves it is kept.
+2. **DEP-5 was missed entirely.** Reading the Containerfile to implement DEP-1 revealed that
+   `skills/`, `scripts/` and `evals/` were never in the image and `git` was never installed — a
+   strictly worse finding than the one I went looking for (the agent had *no skills* in-cluster).
+   The analysis had checked the chart against the code and never checked the image against either.
+
+**The pattern worth keeping.** Both the reachability sweep (grep every `@workflow.defn` for a
+non-worker, non-test caller) and the deployment sweep (grep every runtime filesystem/credential
+assumption against the chart *and the image*) found Crit/High items in minutes, and neither is in
+any existing checklist. `make prose-validate` is the same idea made permanent: it found a live bug
+within a minute of first running. Worth adding all three to the CHECKMATE G1–G7 routine.
+
+**Where I stopped, and why.** W3's remainder and W4 are ~25 items, several of them M/L (graph
+analytics, networked MCP transport, file ingress, mid-turn resume). I implemented complete,
+tested waves rather than starting a fifth and leaving it half-built — a half-wired metrics endpoint
+or a partial compound-note migration would be worse than an honest boundary. The open items are
+listed in `BACKLOG.md` with their original severity, unchanged.

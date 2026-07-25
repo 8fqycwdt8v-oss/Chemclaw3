@@ -13,12 +13,20 @@ from types import SimpleNamespace
 from typing import cast
 
 import pytest
-from temporalio.client import Client, Schedule, ScheduleAlreadyRunningError, ScheduleUpdate
+from temporalio.client import (
+    Client,
+    Schedule,
+    ScheduleAlreadyRunningError,
+    ScheduleOverlapPolicy,
+    ScheduleUpdate,
+)
 
 from chemclaw.config import settings
 from scripts.schedules import (
     OWNED_SCHEDULE_IDS,
     PlannedSchedule,
+    _build_schedule,
+    _jitter,
     apply_schedules,
     planned_schedules,
 )
@@ -30,6 +38,7 @@ from workflows.memory_jobs import (
     PlaybookDistillationWorkflow,
 )
 from workflows.note_index import NoteReindexWorkflow
+from workflows.retention import RetentionWorkflow
 
 
 class _FakeHandle:
@@ -149,3 +158,52 @@ def test_intervals_come_from_config() -> None:
     assert by_workflow[CampaignSynthesisWorkflow] == timedelta(
         minutes=settings.memory_synthesis_schedule_minutes
     )
+
+
+def test_every_schedule_skips_an_overrunning_run(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Overlap is SKIP, not the default BUFFER_ONE (gap SCH-3).
+
+    Every scheduled job here is a full re-scan or a full reindex, so a run that overruns its
+    interval must finish rather than have the next fire queue behind it. Buffering would let a slow
+    corpus scan accumulate a backlog it can never drain — and the buffered run is redundant anyway,
+    because the next fire re-scans everything. The ELN sync is cursored, so a skipped fire loses
+    nothing either.
+    """
+    for job in planned_schedules():
+        schedule = _build_schedule(job)
+        assert schedule.policy is not None
+        assert schedule.policy.overlap is ScheduleOverlapPolicy.SKIP, job.schedule_id
+
+
+def test_co_scheduled_jobs_are_spread_deterministically() -> None:
+    """The three memory jobs share one cadence; without an offset they fire together (SCH-3).
+
+    Deterministic (a stable hash of the schedule id), not random, so re-applying the plan stays a
+    reconcile rather than a reshuffle — and the offsets stay inside the interval.
+    """
+    memory_jobs = [
+        job
+        for job in planned_schedules()
+        if job.workflow
+        in {CampaignSynthesisWorkflow, PlaybookDistillationWorkflow, OptimizationCampaignWorkflow}
+    ]
+    offsets = [_jitter(job) for job in memory_jobs]
+    assert len(set(offsets)) == len(offsets), "co-scheduled jobs would fire simultaneously"
+    for job, offset in zip(memory_jobs, offsets, strict=True):
+        assert timedelta(0) <= offset < job.interval
+    # Stable across calls: applying the plan twice must not move a job.
+    assert [_jitter(job) for job in memory_jobs] == offsets
+
+
+def test_retention_schedule_is_added_only_when_a_policy_is_stated(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A deployment must choose to delete records; it must never inherit that from a default."""
+    monkeypatch.setattr(settings, "retention_enabled", False)
+    assert RetentionWorkflow not in {p.workflow for p in planned_schedules()}
+    monkeypatch.setattr(settings, "retention_enabled", True)
+    monkeypatch.setattr(settings, "retention_schedule_minutes", 60)
+    plan = planned_schedules()
+    retention = next(p for p in plan if p.workflow is RetentionWorkflow)
+    assert retention.schedule_id == "retention"
+    assert retention.interval == timedelta(minutes=60)

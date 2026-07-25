@@ -25,40 +25,81 @@ durable job execution (Temporal) already covered; three residual gaps closed, ea
       *mid-flight same-turn* resume stays open (see the harness follow-ups below) — distinct from the
       front-door restart-reattach closed here.
 
-## Proposals — Capability gap analysis (2026-07-25, `docs/audit/12-capability-gap-analysis.md`)
+## Phase F11 — Gap closure (docs/gap-closure-plan.md; analysis: docs/audit/12-capability-gap-analysis.md)
 
-Whole-codebase sweep for **missing capability** (absences, not defects), complementing the AG-*/KM-*
-gap docs. 34 findings with severity/effort/proposed shape, sequenced into waves. **None are built** —
-each is a proposal needing sign-off, like the Phase 8/9 tables. Headline results:
+Implementing the whole-codebase capability gap analysis. **Waves 0–2 complete and W3 partial**;
+everything below is built, tested, and green under `make lint type test` (688+ passing).
 
-- [ ] **Wave 0 — the target deployment cannot run the knowledge layer.** The Helm chart mounts no
-      volume for `knowledge_dir`, runs no git-sync, and ships no git push credential — so in-cluster
-      the graph is baked-at-build (reads) and fails at push (writes). Plus: the MCP Deployments are
-      default-on but stdio-only (crash-loop), and the derived `note_index` has no reindex Schedule
-      (hybrid retrieval ranks a stale index confidently). `DEP-1`, `DEP-2`, `DEP-3`, `SCH-2`, `RCH-3`.
-- [ ] **Wave 1 — three finished subsystems have no caller.** `DevelopmentReportWorkflow`,
-      `BoCampaignWorkflow`, and the human side of `InteractionApprovalWorkflow` are built, tested and
-      worker-registered but unreachable from any tool/route/schedule/UI control (and
-      `skills/experiment-design/SKILL.md` already points the agent at one of them). Plus no turn
-      cancellation. `RCH-1`, `RCH-2`, `RCH-5`, `RCH-4`, `AGT-1`.
-- [ ] **Wave 2 — chemistry the prompt already promises.** `_INSTRUCTIONS` advertises purity/impurity
-      answers with no schema field; `OrdReaction` has no experiment date (silently starving F10-G2's
-      bi-temporal fields); no name→SMILES resolution; no hazard screen in front of protocol
-      proposals. `KNW-2`, `KNW-1`, `TOOL-2`, `TOOL-3`, `TOOL-4`, `TOOL-5`.
-- [ ] **Wave 3 — operate it.** No data retention anywhere (and `audit_events` is hash-chained, so
-      retention must be designed, not bolted on); schedule specs carry no overlap policy/jitter; no
-      schedule-health or RED metrics surface; mid-turn durable-job resume still open. `SCH-1`,
-      `SCH-3`, `SCH-4`, `SCH-5`, `DEP-4`, `AGT-2`.
-- [ ] **Wave 4 — depth + ideation.** Graph analytics / "what don't we know" gap queries (`KNW-5`),
-      live predicted-vs-actual calibration (`IDEA-2`), negative-result capture (`KNW-3`), networked
-      MCP transport (`TOOL-1`), source-tier weighting in RRF fusion (`IDEA-5`), and a CI check that
-      prose (skills/instructions) only names tools that exist (`IDEA-7` — S-effort, the
-      deterministic half of the AG-13 deferral, and it would have caught two findings above).
-- [ ] **Two deferrals proposed for reopening** (stated triggers have fired): external
-      literature/patent retrievers — "after Phase 5b core", which is done and the registry seam is
-      finished and empty (`TOOL-6`); and compound notes, whose trigger is self-referential and which
-      `TOOL-2`/`KNW-4` would satisfy (`KNW-7`). Everything else in `DEFERRED.md` was re-examined and
-      confirmed correctly deferred (see the doc's "Deliberately not flagged" section).
+### Done — W0 deployment truth
+- [x] **DEP-1** knowledge sync: `deploy/knowledge-sync.sh` (clone-or-refresh replica; `once` /
+      `loop` / `checkout` modes) as an init container + refresh sidecar on the service and both
+      workers, so a merged note reaches a live pod instead of needing a rebuild. Refresh is
+      `fetch`+`reset --hard`, never `pull` — a replica must not be able to land on a conflict.
+- [x] **DEP-2** push credential: `knowledgeRepoToken` secret + a full writable submitter clone on
+      every component that calls `propose_note` (the front door too — `propose_knowledge_note` is
+      an agent tool), on a *different* volume from the read replica (`checkout -B` switches a whole
+      working tree). Token via a credential helper, never in `.git/config` or a log line.
+- [x] **DEP-3** the MCP Deployments were default-on but stdio-only (a server with no stdin =
+      crash loop, while the agent spawned its own subprocess anyway). Defaulted off; the template
+      guard now also requires a networked transport, matching its own stated intent.
+- [x] **DEP-5 (found while implementing)** the image never COPYed `skills/`, `scripts/`, `evals/`
+      or `knowledge/` and never installed `git`. In-cluster: the agent advertised **no skills**, no
+      Schedule could ever be created, and the PR-gate could not shell out to git. Fixed, plus a
+      post-install hook Job that applies the Schedules.
+- [x] **SCH-2** `NoteReindexWorkflow` + Schedule (`note_reindex_enabled`). Stale hybrid entries
+      previously ranked confidently beside live graph hits — RRF carries no staleness signal.
+- [x] **RCH-3** the durable approval hold finally has a human: `GET /approvals`,
+      `GET /approvals/{id}`, `POST /approvals/{id}/decision` (owner-scoped; someone else's hold is
+      a 404, no existence leak) + Yes/No buttons in the chat UI. Deliberately **not** an agent
+      tool — that would let the agent approve its own candidate. A test pins it.
+- [x] `tests/test_deploy_chart.py` — the offline half of `helm template | kubeconform`.
+
+### Done — W1 reachability
+- [x] **RCH-1/RCH-2** `agents/durable_tools.py`: `request_development_report`,
+      `start_optimization_campaign`, `get_durable_job_status` on the `qm_tools` seam. Both
+      subsystems were built, tested, worker-registered and unreachable.
+- [x] **RCH-4/RCH-5** `agents/turn_signals.py` + runner wiring: `PlanEvent` (from the harness's own
+      todo store), `JobStartedEvent`, and a new `NoteProposedEvent` so a chemist sees their
+      contribution open a branch. All three were contracted and UI-rendered but never emitted.
+- [x] **IDEA-7** `make prose-validate` gates that agent-facing prose only names tools that exist.
+      It immediately found a second live instance: `deep-research/SKILL.md` taught the agent three
+      tool names (`find_similar_*`) that would have failed at call time.
+- [x] **AGT-1 WITHDRAWN** — verified false. Cancellation was already correct (4bc9b04); the claim
+      rested on a grep. `tests/test_turn_cancellation.py` measures it and is kept.
+
+### Done — W2 chemistry
+- [x] **KNW-1** `OrdReaction.performed_at` → `Note.valid_from`, finally feeding F10-G2's
+      bi-temporal fields for the largest note class.
+- [x] **KNW-2** `purity_percent` + `Impurity` list; both adapters map them, the note renders them.
+      A test pins that none of it touches `reaction_smiles()` — that would have invalidated every
+      DRFP fingerprint.
+- [x] **TOOL-2** `chemclaw/reagents.py` — 87 spellings → canonical structure. Uses
+      `require_canonical_smiles`; the lenient variant would have resolved every miss to itself.
+- [x] **TOOL-3** `chemclaw/hazard.py` + `screen_hazards` + the `process-safety` skill. SMARTS
+      motifs (catches a novel acyl azide), a substance table, and a symmetric incompatible-pair
+      table (NaN3+DCM). Advisory by design; `unresolved` is as load-bearing as `findings`.
+- [x] **TOOL-4/TOOL-5** `stoichiometry_table` and `render_structure`.
+
+### Done — W3 (partial)
+- [x] **SCH-3** `ScheduleOverlapPolicy.SKIP` + a deterministic per-job phase offset, so the three
+      memory jobs stop firing simultaneously against one background worker.
+- [x] **SCH-1** `workflows/retention.py` + Schedule. Prunes only spent operational rows and
+      **refuses** `audit_events` (deleting from a hash chain is indistinguishable from tampering —
+      needs archive-then-reseal in an ADR) and `calculation_results` (age is the wrong axis for a
+      cache; D-011 makes eviction a recomputation). Off until a deployment states a policy.
+
+### Open — W3 remainder and W4
+- [ ] **SCH-4** schedule health (last run/last failure per Schedule) — pairs with DEP-4.
+- [ ] **SCH-5** `make audit-verify` on a cadence, alerting via the must-deliver notify seam.
+- [ ] **DEP-4** `GET /metrics`: turn rate/latency/error, shed turns (503), budget refusals (429),
+      audit-sink failures, schedule health. The HPA currently scales on CPU, a poor proxy for an
+      SSE/LLM-latency-bound service.
+- [ ] **AGT-2** mid-turn durable-job resume (both halves — D-032 hold, D-058 todo flip — exist).
+- [ ] **W4**: `KNW-3` negative results · `KNW-4` conditions vocabulary · `KNW-5` graph analytics /
+      "what don't we know" gap queries · `KNW-6` note-type registry · `KNW-7` compound notes ·
+      `TOOL-1` networked MCP transport · `TOOL-6` literature retriever · `TOOL-7` units ·
+      `AGT-3` file ingress · `AGT-4` user preferences · `AGT-5` clarifying questions ·
+      `AGT-6` structured outputs · `SCH-6` inbound events · `IDEA-1`–`IDEA-6`.
 
 ## Next — Platform-parity hardening (docs/parity-plan.md, Phase F10)
 

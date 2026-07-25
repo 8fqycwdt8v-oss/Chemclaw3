@@ -24,11 +24,14 @@ from temporalio.client import (
     ScheduleActionStartWorkflow,
     ScheduleAlreadyRunningError,
     ScheduleIntervalSpec,
+    ScheduleOverlapPolicy,
+    SchedulePolicy,
     ScheduleSpec,
     ScheduleUpdate,
 )
 
 from chemclaw.config import settings
+from chemclaw.ids import stable_hash
 from chemclaw.logging import configure_logging
 from chemclaw.temporal_client import connect
 from workflows.eln_sync import ElnSyncWorkflow
@@ -39,6 +42,7 @@ from workflows.memory_jobs import (
     PlaybookDistillationWorkflow,
 )
 from workflows.note_index import NoteReindexWorkflow
+from workflows.retention import RetentionWorkflow
 
 logger = logging.getLogger(__name__)
 
@@ -64,6 +68,7 @@ OWNED_SCHEDULE_IDS = frozenset(
         "optimization-campaign",
         "eval-drift",
         "note-reindex",
+        "retention",
     }
 )
 
@@ -92,7 +97,33 @@ def planned_schedules() -> list[PlannedSchedule]:
     if settings.note_reindex_enabled:
         reindex_every = timedelta(minutes=settings.note_reindex_schedule_minutes)
         schedules.append(PlannedSchedule("note-reindex", NoteReindexWorkflow, reindex_every))
+    # Retention only earns a Schedule where the deployment has stated a policy (gap SCH-1); an
+    # unconfigured deployment must never start deleting records on a default it did not choose.
+    if settings.retention_enabled:
+        retention_every = timedelta(minutes=settings.retention_schedule_minutes)
+        schedules.append(PlannedSchedule("retention", RetentionWorkflow, retention_every))
     return schedules
+
+
+def _jitter(job: PlannedSchedule) -> timedelta:
+    """A deterministic per-job offset inside its interval, so co-scheduled jobs do not collide.
+
+    The three memory-synthesis jobs share one configured cadence and each re-scans the whole
+    corpus, so without an offset they fire simultaneously against a single background worker
+    (`replicas: 1`) and contend for the same reads (gap SCH-3). Temporal jitter is a *random*
+    delay drawn per fire; this is instead a fixed per-schedule phase offset derived from the
+    schedule id, which is stable across re-applies (so `apply_schedules` stays a reconcile, not a
+    reshuffle) and spreads the jobs deterministically.
+
+    Bounded to a fraction of the interval so a job never drifts into the next window.
+    """
+    span = job.interval * settings.schedule_jitter_fraction
+    if not span:
+        return timedelta(0)
+    # A stable hash of the id, mapped into [0, span). `stable_hash` is the repo's one hashing
+    # scheme (D-033), so this cannot drift from the ids it is derived from.
+    bucket = int(stable_hash(job.schedule_id, chars=8), 16) % 10_000
+    return span * (bucket / 10_000)
 
 
 def _build_schedule(job: PlannedSchedule) -> Schedule:
@@ -103,7 +134,15 @@ def _build_schedule(job: PlannedSchedule) -> Schedule:
             id=f"{job.schedule_id}-scheduled",
             task_queue=settings.background_task_queue,
         ),
-        spec=ScheduleSpec(intervals=[ScheduleIntervalSpec(every=job.interval)]),
+        spec=ScheduleSpec(
+            intervals=[ScheduleIntervalSpec(every=job.interval, offset=_jitter(job))],
+        ),
+        # SKIP, not the default BUFFER_ONE: every job here is a full re-scan or a full reindex, so
+        # a run that overruns its interval must be allowed to finish rather than have the next fire
+        # queue behind it. Buffering would let a slow corpus scan accumulate a backlog it can never
+        # drain — the run it would buffer is redundant anyway, since the next fire re-scans
+        # everything (gap SCH-3). The ELN sync is cursored, so a skipped fire loses nothing either.
+        policy=SchedulePolicy(overlap=ScheduleOverlapPolicy.SKIP),
     )
 
 

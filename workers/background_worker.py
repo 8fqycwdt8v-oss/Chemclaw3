@@ -55,6 +55,7 @@ from workflows.report_workflow import (
     propose_report,
     retrieve_section,
 )
+from workflows.retention import RetentionWorkflow, prune_expired_rows
 
 logger = logging.getLogger(__name__)
 
@@ -72,6 +73,7 @@ BACKGROUND_WORKFLOWS: list[type] = [
     InteractionApprovalWorkflow,
     EvalDriftWorkflow,
     NoteReindexWorkflow,
+    RetentionWorkflow,
 ]
 BACKGROUND_ACTIVITIES: Sequence[Callable[..., Any]] = [
     propose_initial,
@@ -91,6 +93,7 @@ BACKGROUND_ACTIVITIES: Sequence[Callable[..., Any]] = [
     propose_report,
     propose_confirmed_answer_activity,
     reindex_notes_activity,
+    prune_expired_rows,
     record_session_event_activity,
     check_eval_drift,
     resolve_fan_out_limit,

@@ -959,6 +959,21 @@ class MemorySettings(BaseSettings):
     # Temporal Schedule cadence for the memory-synthesis jobs (`scripts/schedules.py`): they
     # re-scan the whole corpus, so they run less often than the cursor-driven ELN sync.
     memory_synthesis_schedule_minutes: float = Field(default=1440.0, gt=0)
+    # Fraction of a Schedule's interval used as a deterministic per-job phase offset (gap SCH-3).
+    # The memory jobs share one cadence and each re-scans the whole corpus, so without an offset
+    # they fire together against one background worker. 0 disables the spread.
+    schedule_jitter_fraction: float = Field(default=0.2, ge=0.0, lt=1.0)
+    # Retention windows in days (gap SCH-1). Nothing in the system deleted anything before this, so
+    # every durable table grew for the deployment's lifetime. 0 disables pruning for that table,
+    # which is the default: a retention period is a *policy* decision (GxP: keep for N years, then
+    # dispose, provably), so a deployment must state it rather than inherit a number from code.
+    # `audit_events` and `calculation_results` are deliberately absent — see workflows/retention.py
+    # for why each needs its own design rather than an age cutoff.
+    retention_enabled: bool = False
+    retention_schedule_minutes: float = Field(default=1440.0, gt=0)
+    retention_timeout_seconds: float = Field(default=600.0, gt=0)
+    retention_session_events_days: int = Field(default=0, ge=0)
+    retention_session_messages_days: int = Field(default=0, ge=0)
 
 
 class RetrievalSettings(BaseSettings):
