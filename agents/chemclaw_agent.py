@@ -50,7 +50,7 @@ from agents import safety_tools as _safety_tools  # noqa: F401
 from agents.audit import AuditSink, make_audit_middleware
 from agents.llm_provider import build_chat_client
 from agents.profiles import AgentProfile, get_profile
-from agents.skill_access import RoleScopedSkillsSource
+from agents.skill_access import EnabledSkillsSource, RoleScopedSkillsSource
 from agents.tool_authz import enforce_tool_authz
 from agents.tool_registry import registered_tools
 from chemclaw.config import (
@@ -149,10 +149,17 @@ def build_agent(
         settings.harness_enabled if prof.harness_enabled is None else prof.harness_enabled
     )
     client = chat_client if chat_client is not None else build_chat_client()
-    # Advertised skills are role-scoped by `settings.skill_role_gates` against the turn's ambient
-    # identity (`agents.identity_context`); an empty gate map (the default) shows every skill.
+    # Advertised skills are narrowed twice, both only ever removing: `settings.skills_enabled`
+    # picks which discovered skills this deployment turns on (empty = all, today's behavior), then
+    # `settings.skill_role_gates` hides gated ones from callers lacking the roles, against the
+    # turn's ambient identity (`agents.identity_context`; an empty gate map shows every skill).
     skills = SkillsProvider(
-        RoleScopedSkillsSource(FileSkillsSource(settings.skills_dirs), settings.skill_role_gates)
+        RoleScopedSkillsSource(
+            EnabledSkillsSource(
+                FileSkillsSource(settings.skills_dirs), settings.skills_enabled_list
+            ),
+            settings.skill_role_gates,
+        )
     )
     history = _history_provider()
     audit = make_audit_middleware(

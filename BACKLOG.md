@@ -76,10 +76,23 @@ Prioritized, dependency-ordered follow-ups (each ADR-ready, none needs live infr
       near-empty `RegisteredSourceSpec` bridge (duplicates the comma token). **Snowflake connector still
       deferred** — it joins as one more variant (nesting connection/auth/mapping; first `exchange_obo`
       caller) when a real tenant/cluster exists (DEFERRED.md).
-- [ ] **Per-extension manifest + explicit enable-list** (steal from Django; keep discovery ≠
-      auto-enable) — [S]. Trigger: skills needing to declare capability deps, or profile authoring.
-- [ ] **MCP transport `type` union** (stdio/HTTP discriminator on `McpServerSpec`) — [S]. Trigger:
-      first remote/HTTP MCP server.
+- [x] **Per-extension manifest + explicit enable-list** — [S]. Done (D-081): `SkillManifest`
+      (pydantic `SKILL.md` frontmatter, `extra="forbid"`, optional `tools`/`mcp_servers`/`tags`) +
+      `EnabledSkillsSource` + `skills_enabled`. `make skill-validate` now checks declared deps against
+      the live registries — a skill teaching a renamed/deleted tool fails CI instead of surviving as
+      stale prose (only possible because of D-075's tool registry). Four shipped skills declare real
+      deps. Empty enable-list = every discovered skill (no regression); role gates still apply on top.
+      Profile Stage 3 (filesystem-discovered profiles) remains deferred.
+- [x] **MCP transport `type` union** — [S]. Done (D-081): `StdioMcpServerSpec | HttpMcpServerSpec`
+      discriminated on `transport`; `_mcp_tool` dispatches to `MCPStdioTool`/`MCPStreamableHTTPTool`,
+      exhaustively. A **callable** `Discriminator` reads a missing tag as `stdio`, so every config
+      written before the union (`.env.example`, Helm values, deployments) keeps working untouched.
+      `allowed_tools` — the boundary keeping write/index tools off the agent — is transport-independent.
+- [x] **Config idiom convergence (doc, not churn)** — [S]. Done (D-081): the house rule is recorded in
+      `chemclaw/config.py`'s module docstring — *typed JSON list when elements carry their own config
+      (discriminate when they vary by kind); delimited string when elements are bare keys resolved
+      against a registry, read via a derived `*_list` property*. Existing fields deliberately **not**
+      migrated (churn without a defect); the two idioms coexist by design.
 
 Substrate verdict: **evolve the flat `pydantic-settings` singleton additively** (nested sections +
 discriminated unions); do **not** adopt entry-points/pluggy/Django-apps — all target the

@@ -22,6 +22,22 @@ finds everything about one concern in one place — while the composed class
 keeps every attribute flat (`settings.postgres_dsn`) and every env name
 unprefixed-by-section (`CHEMCLAW_POSTGRES_DSN`), exactly as before the split.
 A cross-field validator lives in the section that owns the relationship.
+
+House rule for a *collection* field — pick by what the elements are, not by taste:
+
+- **Typed JSON list** (`mcp_servers`, `data_source_specs`) when each element *carries its own
+  config*. The element gets a pydantic model, so it is validated, documented by its type, and
+  can grow fields without a parsing change. Where the elements vary by kind, discriminate them
+  (`Field(discriminator=...)` / `Discriminator`) rather than widening one model with optional
+  fields that only apply sometimes.
+- **Delimited string** (`skills_dir`, `data_sources`, `skills_enabled`, `entra_expensive_actions`)
+  when the elements are *bare keys* — names resolved against a registry, or paths. An admin sets
+  these like `PATH`, with no JSON quoting, and a bare key has nothing to validate beyond
+  resolving. Expose the parsed value through a derived `*_list`/`*_dirs` property and read that,
+  never the raw string.
+
+The two idioms coexist on purpose (a bare-key source should not pay the JSON-spec tax); existing
+fields are **not** migrated to match — that would be churn without a defect to fix.
 """
 
 import os
@@ -508,6 +524,13 @@ class AgentSettings(BaseSettings):
     # directory without code changes. Read it through the `skills_dirs` property, never raw.
     agent_model: str = "claude-sonnet-5"
     skills_dir: str = "skills"
+    # Which discovered skills are actually advertised — discovery is not enablement. Empty (the
+    # default) means every skill found under `skills_dir` is active, i.e. today's behavior. A
+    # non-empty pathsep list narrows to exactly those names, so a deployment can ship the whole
+    # skills tree and turn on the subset it has validated, without deleting folders. This only
+    # *attenuates*: it cannot advertise a skill that no directory provides, and the role gates
+    # below still apply on top. `make skill-validate` reports a name here that no dir provides.
+    skills_enabled: str = ""
     # Role-scoped skill visibility (plan step 6.2): map a skill name to the Entra app-roles allowed
     # to see it. A skill not listed is ungated (advertised to everyone); a listed skill is hidden
     # from a caller (the turn's ambient identity) holding none of its roles. Empty default = every
@@ -582,6 +605,15 @@ class AgentSettings(BaseSettings):
         team-skills` the same way they set `PATH`, no JSON quoting.
         """
         return [d for d in self.skills_dir.split(os.pathsep) if d]
+
+    @property
+    def skills_enabled_list(self) -> list[str]:
+        """The explicitly enabled skill names; empty means "every discovered skill" (the default).
+
+        A bare-key set, so it uses the delimited-string idiom (like `skills_dir`/`data_sources`)
+        rather than JSON — these are names, not config-carrying objects.
+        """
+        return [s for s in self.skills_enabled.split(os.pathsep) if s]
 
 
 class ServiceSettings(BaseSettings):
