@@ -16,6 +16,7 @@ import logging
 import uuid
 from collections import OrderedDict
 from collections.abc import AsyncIterator, Callable
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Protocol
 
@@ -108,6 +109,12 @@ class SessionOwners(Protocol):
         """Return `(found, owner)` for a session id — `(False, None)` when unknown."""
         ...
 
+    async def list_for_owner(
+        self, owner: str | None, *, limit: int
+    ) -> list[tuple[str, datetime, str]]:
+        """Return the owner's sessions newest-first as `(session_id, created_at, title)`."""
+        ...
+
 
 def _default_owner_store() -> SessionOwners | None:
     """The durable session-ownership store, but only when durable sessions are on (else None).
@@ -150,6 +157,22 @@ class SessionOut(BaseModel):
     """The identifier of a freshly created session."""
 
     session_id: str
+
+
+class SessionSummary(BaseModel):
+    """One of the caller's sessions, as a conversation list renders it."""
+
+    session_id: str
+    created_at: datetime
+    # The opening message, truncated. Empty for a session created but never used.
+    title: str = ""
+
+
+class TranscriptMessage(BaseModel):
+    """One turn of a session's stored conversation, projected for display."""
+
+    role: str
+    text: str
 
 
 class ApprovalDecisionIn(BaseModel):
@@ -298,6 +321,67 @@ def create_app(
             session_id, _agent().create_session(session_id=session_id), principal.oid
         )
         return SessionOut(session_id=session_id)
+
+    @app.get("/sessions")
+    async def list_sessions(
+        principal: Principal = Depends(require_principal),
+    ) -> list[SessionSummary]:
+        """The caller's sessions, newest first — the conversation list.
+
+        A session id was returned once at creation and never listed again, so a client that lost
+        it (a new browser, a cleared cache, a different device) could only start over, orphaning
+        durable history that was sitting right there. This is the index that makes that history
+        reachable.
+
+        Empty — not an error — under the in-memory session store: there is nothing durable to
+        enumerate, and a surface that degrades to "no earlier conversations" is more useful than
+        one that fails.
+        """
+        owners: SessionOwners | None = app.state.session_owners
+        if owners is None:
+            return []
+        rows = await owners.list_for_owner(principal.oid, limit=settings.service_session_list_limit)
+        return [
+            SessionSummary(session_id=session_id, created_at=created_at, title=title)
+            for session_id, created_at, title in rows
+        ]
+
+    @app.get("/sessions/{session_id}/messages")
+    async def get_messages(
+        session_id: str,
+        principal: Principal = Depends(require_principal),
+    ) -> list[TranscriptMessage]:
+        """This session's stored conversation, oldest first — so a reload can restore the thread.
+
+        The durable history was already there (`session_messages`) and the agent resumed from it,
+        but no client could read it back: refreshing the page lost the visible transcript of a
+        conversation the service had not forgotten. This closes that asymmetry.
+
+        Two things it deliberately is not. It is **not an audit log** — compaction rewrites this
+        history to keep the model's context small (`agents.audit_store` is the immutable record).
+        And it is not the turn trace: only user and assistant text is projected, because stored
+        messages also carry tool calls and their results, which can hold whole evidence payloads
+        that have no business being shipped to a surface wholesale.
+
+        Owner-gated through `_resolve_session`, so an unknown session and someone else's are
+        indistinguishable from outside. Empty under the in-memory store, which has no durable
+        history to read.
+        """
+        await _resolve_session(session_id, principal)
+        if settings.session_store != "postgres":
+            return []
+        from agents.session_store import PostgresHistoryProvider
+
+        stored = await PostgresHistoryProvider().get_messages(session_id)
+        transcript: list[TranscriptMessage] = []
+        for message in stored:
+            role = getattr(message.role, "value", None) or str(message.role)
+            if role not in ("user", "assistant"):
+                continue
+            text = (message.text or "").strip()
+            if text:
+                transcript.append(TranscriptMessage(role=role, text=text))
+        return transcript
 
     @app.post("/sessions/{session_id}/messages")
     async def post_message(

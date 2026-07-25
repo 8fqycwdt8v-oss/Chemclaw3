@@ -9,6 +9,7 @@ per turn via a spy tool.
 import asyncio
 import json
 from collections.abc import Callable
+from datetime import UTC, datetime
 
 from agent_framework import AgentSession
 from fastapi.testclient import TestClient
@@ -333,6 +334,91 @@ class _FakeOwnerStore:
         if session_id in self.owners:
             return (True, self.owners[session_id])
         return (False, None)
+
+    async def list_for_owner(
+        self, owner: str | None, *, limit: int
+    ) -> list[tuple[str, datetime, str]]:
+        return [
+            (session_id, datetime(2026, 1, 1, tzinfo=UTC), "")
+            for session_id, session_owner in self.owners.items()
+            if session_owner == owner
+        ][:limit]
+
+
+def test_session_listing_is_owner_scoped() -> None:
+    """`GET /sessions` returns the caller's own conversations and nobody else's.
+
+    The listing is an index over durable ownership, so it inherits the same rule as every
+    session-scoped route: a session is a conversation, and conversations are not shared.
+    """
+    from service.auth import Principal, require_principal
+
+    owners = _FakeOwnerStore()
+    app = create_app(agent_factory=lambda: _FakeAgent(), owner_store=owners)
+    client = TestClient(app)
+
+    app.dependency_overrides[require_principal] = lambda: Principal(
+        oid="alice", upn="a@corp", roles=frozenset()
+    )
+    alice_session = client.post("/sessions").json()["session_id"]
+
+    app.dependency_overrides[require_principal] = lambda: Principal(
+        oid="bob", upn="b@corp", roles=frozenset()
+    )
+    bob_session = client.post("/sessions").json()["session_id"]
+
+    listed = client.get("/sessions").json()
+    ids = [row["session_id"] for row in listed]
+    assert ids == [bob_session]
+    assert alice_session not in ids
+
+
+def test_session_listing_is_empty_without_a_durable_store() -> None:
+    """Under the in-memory session store there is nothing durable to enumerate — `[]`, not a 500.
+
+    A surface that degrades to "no earlier conversations" stays usable; one that errors does not.
+    """
+    app = create_app(agent_factory=lambda: _FakeAgent())
+    assert app.state.session_owners is None
+    with TestClient(app) as client:
+        client.post("/sessions")
+        res = client.get("/sessions")
+        assert res.status_code == 200
+        assert res.json() == []
+
+
+def test_transcript_read_back_is_owner_scoped() -> None:
+    """A non-owner cannot read a session's transcript (404, no existence leak).
+
+    The route reads durable history, which is the whole conversation — so it needs the same gate
+    as posting a turn, not a weaker one.
+    """
+    from service.auth import Principal, require_principal
+
+    app = create_app(agent_factory=lambda: _FakeAgent())
+    client = TestClient(app)
+
+    app.dependency_overrides[require_principal] = lambda: Principal(
+        oid="alice", upn="a@corp", roles=frozenset()
+    )
+    session_id = client.post("/sessions").json()["session_id"]
+    assert client.get(f"/sessions/{session_id}/messages").status_code == 200  # the owner may read
+
+    app.dependency_overrides[require_principal] = lambda: Principal(
+        oid="bob", upn="b@corp", roles=frozenset()
+    )
+    assert client.get(f"/sessions/{session_id}/messages").status_code == 404
+
+
+def test_transcript_read_back_is_empty_under_the_memory_store() -> None:
+    """With no durable history there is nothing to read back, so the owner gets an empty list."""
+    app = create_app(agent_factory=lambda: _FakeAgent())
+    with TestClient(app) as client:
+        session_id = client.post("/sessions").json()["session_id"]
+        client.post(f"/sessions/{session_id}/messages", json={"message": "hi"})
+        res = client.get(f"/sessions/{session_id}/messages")
+        assert res.status_code == 200
+        assert res.json() == []
 
 
 def test_session_rehydrates_after_a_restart() -> None:
@@ -711,6 +797,7 @@ def test_every_session_scoped_route_is_ownership_gated() -> None:
     }
     assert inventory == {
         ("/sessions/{session_id}/messages", "POST"),
+        ("/sessions/{session_id}/messages", "GET"),
         ("/sessions/{session_id}/events", "GET"),
         ("/sessions/{session_id}/attachments", "POST"),
     }, (

@@ -83,3 +83,62 @@ def test_session_owner_records_null_owner() -> None:
         assert await store.lookup("sess-owner-null") == (True, None)
 
     asyncio.run(_run())
+
+
+def test_listing_returns_only_the_owners_sessions_newest_first() -> None:
+    """`list_for_owner` is the index behind `GET /sessions` — owner-scoped, ordered, labelled.
+
+    A session id was returned once at creation and never listed again, so a client that lost it
+    could only start over, orphaning durable history. This is the query that makes it reachable,
+    and it must not leak anyone else's conversations while doing so.
+    """
+
+    async def _run() -> None:
+        await migrated_db_or_skip()
+        history = PostgresHistoryProvider()
+        owners = SessionOwnerStore()
+
+        await owners.record("list-alice-used", "list-alice")
+        await owners.record("list-alice-empty", "list-alice")
+        await owners.record("list-bob", "list-bob")
+        await history.save_messages(
+            "list-alice-used", [Message(role="user", contents=["what is the pKa of phenol?"])]
+        )
+
+        alice = await owners.list_for_owner("list-alice", limit=50)
+        assert {session_id for session_id, _, _ in alice} == {
+            "list-alice-used",
+            "list-alice-empty",
+        }
+
+        titles = {session_id: title for session_id, _, title in alice}
+        assert "pKa of phenol" in titles["list-alice-used"]
+        # Created but never used: no opening message, so no label — not an error.
+        assert titles["list-alice-empty"] == ""
+
+        stamps = [created_at for _, created_at, _ in alice]
+        assert stamps == sorted(stamps, reverse=True)  # newest first
+
+        assert len(await owners.list_for_owner("list-alice", limit=1)) == 1
+
+    asyncio.run(_run())
+
+
+def test_listing_matches_a_null_owner_on_the_dev_path() -> None:
+    """A NULL owner (the shared dev principal) lists its own sessions.
+
+    `owner = NULL` is never true in SQL, so an `=` comparison would return nothing and the
+    listing would be silently empty exactly where `entra_required` is off — i.e. in development,
+    where it would look like the feature simply does not work. `IS NOT DISTINCT FROM` is what
+    makes the dev path behave like every other.
+    """
+
+    async def _run() -> None:
+        await migrated_db_or_skip()
+        owners = SessionOwnerStore()
+        await owners.record("list-devnull", None)
+
+        listed = await owners.list_for_owner(None, limit=50)
+        assert "list-devnull" in {session_id for session_id, _, _ in listed}
+
+    asyncio.run(_run())

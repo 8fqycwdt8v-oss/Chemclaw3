@@ -470,3 +470,29 @@ markers are where `git` admits it does not know, and everything else it merges s
 merge with a long-lived parallel branch, the thing to grep for is *two implementations of one
 idea*, which is what `mypy`'s no-redef caught here and what nothing would have caught in the
 contextvar sink.
+
+## Front-door session history + answerable approvals (D-089)
+
+Driven by building a React chat client (`8fqycwdt8v-oss/Chemclaw3_ui`) against this service: three
+things a real surface needs that the API held but did not expose.
+
+- [x] `GET /sessions` — the caller's conversations, newest first, labelled from the opening message.
+      New `SessionOwnerStore.list_for_owner`; `IS NOT DISTINCT FROM` so the dev path's NULL owner
+      is not silently empty. Bounded by `service_session_list_limit` (+ `.env.example` entry).
+- [x] `GET /sessions/{id}/messages` — transcript read-back, so a reload restores the thread.
+      Owner-gated via `_resolve_session`; user/assistant text only (stored messages also carry tool
+      results, which can be whole evidence payloads); empty under the in-memory store.
+- [x] `ApprovalSignal` → `ApprovalRequestEvent.approval_id` is finally populated, so a surface can
+      answer a durable hold via `POST /approvals/{id}/decision`. Plan approvals keep `""` on
+      purpose — no hold exists, they are answered by the next turn.
+- [x] Route-inventory tripwire updated (not weakened) + behavioural non-owner sweep covers the new
+      GET. Listing/read-back/approval-handle tests added.
+
+Verification: `make lint type test` green — 906 passed, 41 offline skips, ruff + mypy --strict
+clean. The two new Postgres-backed tests skip in the offline sandbox (its pgvector is 0.6.0; the
+migration chain needs >= 0.7 for `bit_jaccard_ops`), so `list_for_owner` was additionally verified
+directly against a real Postgres 16: owner scoping, NULL-owner matching, title derivation, newest-
+first ordering and the limit all confirmed. CI runs the full chain on `pgvector/pgvector:pg16`.
+
+Deferred, deliberately: per-session **plan** approval. Mode lives on one `AgentModeProvider` for one
+process-wide agent, so scoping it per session is an architecture change, not a route.

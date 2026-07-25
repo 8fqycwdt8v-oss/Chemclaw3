@@ -666,6 +666,10 @@ class ServiceSettings(BaseSettings):
     # history survives in the session store, only the in-process handle is dropped. Sized generously
     # for concurrent chemists; raise it for a busier front door.
     service_max_live_sessions: int = Field(default=1000, gt=0)
+    # Cap on how many of a caller's sessions `GET /sessions` returns (newest first).
+    # `session_owners` has no retention policy, so an unbounded listing degrades quietly as a
+    # deployment ages.
+    service_session_list_limit: int = Field(default=50, gt=0)
     # Admission control on concurrent agent turns (AG-15). Each turn holds one permit for its whole
     # streamed run, so at most this many turns hit the shared internal LLM endpoint at once; a turn
     # that cannot get a permit within the admission timeout is shed with 503 (retry) rather than

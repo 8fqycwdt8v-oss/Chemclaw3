@@ -171,6 +171,14 @@ everything below is built, tested, and green under `make lint type test` (688+ p
       `GET /approvals/{id}`, `POST /approvals/{id}/decision` (owner-scoped; someone else's hold is
       a 404, no existence leak) + Yes/No buttons in the chat UI. Deliberately **not** an agent
       tool — that would let the agent approve its own candidate. A test pins it.
+      **Finished in D-089:** the routes existed but the *handle* never reached a surface —
+      `ApprovalRequestEvent.approval_id` was always `""`, so a client could render an approval
+      request and had no id to answer it with. Now carried by an `ApprovalSignal` on the per-turn
+      signal buffer, recorded by the tool that opens the hold.
+- [x] **Conversation listing + transcript read-back (D-089).** `GET /sessions` and
+      `GET /sessions/{id}/messages`. Durable history existed and the agent resumed from it, but no
+      client could enumerate its sessions or read one back, so a lost session id orphaned the
+      conversation. Both owner-gated; both empty (not erroring) under the in-memory store.
 - [x] `tests/test_deploy_chart.py` — the offline half of `helm template | kubeconform`.
 
 ### Done — W1 reachability

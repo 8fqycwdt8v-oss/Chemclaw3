@@ -29,9 +29,10 @@ from agents.session_context import (
     set_current_session_id,
 )
 from agents.turn_signals import (
+    ApprovalSignal,
     JobSignal,
-    ProposalSignal,
     QuestionSignal,
+    Signal,
     begin_turn,
     drain,
     end_turn,
@@ -270,12 +271,18 @@ async def _resume(
             yield ToolCallEvent(tool=tool_name, arguments=arguments)
 
 
-def _signal_event(signal: JobSignal | ProposalSignal | QuestionSignal) -> Event:
+def _signal_event(signal: Signal) -> Event:
     """Map one out-of-band turn signal to its stream event (one place, so the two cannot drift)."""
     if isinstance(signal, JobSignal):
         return JobStartedEvent(job_id=signal.job_id, kind=signal.kind)
     if isinstance(signal, QuestionSignal):
         return QuestionEvent(question=signal.question, options=signal.options)
+    if isinstance(signal, ApprovalSignal):
+        # Carries the durable hold's handle, so a surface can answer it via
+        # POST /approvals/{id}/decision. The `user_input_requests` path below emits the *other*
+        # kind of approval — a plan prompt, which has no hold and is answered by the next turn —
+        # and deliberately leaves `approval_id` empty to mark that difference.
+        return ApprovalRequestEvent(prompt=signal.prompt, approval_id=signal.approval_id)
     return NoteProposedEvent(note_id=signal.note_id, reference=signal.reference)
 
 

@@ -2480,3 +2480,60 @@ distinguishes "this agent has no plan" from "this agent does not plan", which an
 express — with this branch's reason-for-existing (gap RCH-5) folded into its docstring. The
 post-resume drain now takes the whole signal buffer rather than only job ids, so a note proposed
 during a mid-turn resume still reaches the stream.
+
+## D-089
+
+**The front door can read a conversation back, and an approval carries the handle that answers it.**
+
+Three gaps had the same shape: the service already held the state a surface needed, and had no route
+that returned it.
+
+*Listing and read-back.* A session id was handed out once by `POST /sessions` and never mentioned
+again. There was no `GET /sessions` and no way to read a session's messages, so a client that lost
+the id — a different browser, a cleared cache, a colleague's machine — could only start over, while
+its durable history sat in `session_messages` and the agent went on resuming from it. The
+asymmetry was the bug: the *service* remembered the conversation and the *client* could not. Added
+`GET /sessions` (owner-scoped, newest first) and `GET /sessions/{id}/messages`, both gated through
+the existing `_resolve_session`, both returning empty rather than erroring under the in-memory store
+where there is genuinely nothing durable to read.
+
+Two things the read-back deliberately is not. It is **not an audit log** — compaction rewrites this
+history to keep the model's context small, so it is lossy by design; `agents/audit_store.py` remains
+the immutable record. And it is not the turn trace: only user and assistant text is projected,
+because stored messages also carry tool calls and their results, and those can hold whole evidence
+payloads that have no business being shipped to a surface wholesale.
+
+The session *title* is derived from the opening stored message rather than kept in a column. A
+column would have meant a migration plus a second representation of the conversation that could
+drift from the messages themselves; deriving it means there is only ever one. It is decoded through
+`Message.from_dict(...).text`, not by indexing the JSON from SQL, so the store keeps its "never
+interpret MAF's message shape" property — a MAF version bump stays a value change rather than a
+broken query.
+
+The owner filter is `IS NOT DISTINCT FROM`, not `=`. `owner = NULL` is never true, so `=` would
+return nothing for the shared dev principal and the listing would be silently empty *exactly* in
+development, where it would read as "the feature does not work" rather than as a bug.
+
+*The unanswerable approval.* `ApprovalRequestEvent.approval_id` has carried a docstring since it was
+added saying it is the handle a surface posts to `POST /approvals/{id}/decision` — and nothing ever
+populated it. `start_approval` returns the id into the *model's* context, and the runner sees only
+the model's streamed updates, so every approval reached every surface with `approval_id == ""`:
+renderable, and unanswerable. The durable hold, the decision route, and the review queue were all
+built and reachable only by a client that already knew an id it was never told.
+
+Fixed with the mechanism already there for exactly this class of problem: an `ApprovalSignal` on the
+per-turn signal buffer, recorded by the tool that opens the hold and mapped to its event in
+`_signal_event` alongside `JobSignal` and `ProposalSignal`. A turn signal rather than a return value
+for the same reason as those two — the handle must come from the tool, never from anything the model
+can author, which would let the agent fabricate an approval.
+
+Plan approvals keep `approval_id == ""`, and that emptiness is now load-bearing rather than
+incidental: they have no durable hold and are answered by the next turn, so a handle there would
+point a surface at a workflow that does not exist. The two kinds are genuinely different and the
+field is what distinguishes them.
+
+**Not done: per-session plan approval.** `plan_only` autonomy stops the agent for human sign-off,
+but the mode lives on a single `AgentModeProvider` built once per process for one shared agent, so
+"approve this plan" cannot be scoped to one session without making agents or mode providers
+per-session. That is an architecture change, not a route, and it is deferred rather than half-built
+behind an endpoint that would appear to work.

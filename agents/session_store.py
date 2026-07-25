@@ -15,6 +15,7 @@ never interprets message shape — a MAF change is a value change, not a schema 
 """
 
 from collections.abc import Sequence
+from datetime import datetime
 from typing import Any, ClassVar
 
 import psycopg
@@ -32,6 +33,52 @@ _OWNER_INSERT = (
     "ON CONFLICT (session_id) DO NOTHING"
 )
 _OWNER_SELECT = "SELECT owner FROM session_owners WHERE session_id = %s"
+
+# The caller's sessions, newest first, each carrying its earliest stored message so the caller can
+# label it.
+#
+# The label is derived from that message rather than kept in a column, so listing needs no
+# migration and no second representation of the conversation that could drift from the messages
+# themselves. The message is returned as its raw `Message.to_dict()` blob and decoded in Python via
+# `Message.from_dict(...).text`, exactly as the history provider does — the store deliberately does
+# not reach into MAF's message shape from SQL, which would turn a MAF version bump into a broken
+# query instead of a value change.
+#
+# `IS NOT DISTINCT FROM` rather than `=`, so the dev path's NULL owner matches NULL — `=` never
+# does, which would make the listing silently empty exactly where `entra_required` is off.
+_OWNER_LIST = """
+    SELECT o.session_id,
+           o.created_at,
+           (SELECT m.message
+              FROM session_messages m
+             WHERE m.session_id = o.session_id
+             ORDER BY m.id
+             LIMIT 1) AS first_message
+      FROM session_owners o
+     WHERE o.owner IS NOT DISTINCT FROM %s
+     ORDER BY o.created_at DESC
+     LIMIT %s
+"""
+
+
+# How much of the opening message becomes a session's label in a listing.
+_TITLE_CHARS = 80
+
+
+def _title_of(blob: Any) -> str:
+    """Label a session from its opening message blob (empty when there is nothing usable).
+
+    Decoded through `Message.from_dict` rather than by indexing the JSON, so the store keeps its
+    "never interpret MAF's message shape" property: a MAF change stays a value change.
+    """
+    if not blob:
+        return ""
+    try:
+        text = Message.from_dict(blob).text or ""
+    except Exception:
+        return ""
+    text = " ".join(text.split())
+    return text[:_TITLE_CHARS]
 
 
 class PostgresHistoryProvider(HistoryProvider):
@@ -130,3 +177,27 @@ class SessionOwnerStore:
                 await cur.execute(_OWNER_SELECT, (session_id,))
                 row = await cur.fetchone()
         return (row is not None, row[0] if row is not None else None)
+
+    async def list_for_owner(
+        self, owner: str | None, *, limit: int
+    ) -> list[tuple[str, datetime, str]]:
+        """The owner's sessions, newest first, as `(session_id, created_at, title)` triples.
+
+        The front door had no way to enumerate a chemist's conversations: a session id was
+        returned once at creation and never listed again, so a client that lost it — a new
+        browser, a cleared cache — could only start over, orphaning durable history that was
+        sitting right there. Scoped to the caller for the same reason `_resolve_session` is:
+        a session is a conversation, and conversations are not shared.
+
+        The title is the opening message's text, truncated; empty when the session has no stored
+        messages yet (created but never used) or when the blob cannot be decoded — a listing is a
+        convenience, and no label is worth failing it over.
+
+        Bounded by `limit` because `session_owners` grows without a retention policy and an
+        unbounded listing would degrade quietly as a deployment ages.
+        """
+        async with await self._connect() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(_OWNER_LIST, (owner, limit))
+                rows = await cur.fetchall()
+        return [(row[0], row[1], _title_of(row[2])) for row in rows]
