@@ -1175,12 +1175,6 @@ class MemorySettings(BaseSettings):
     # session-scoped working material, so they are lost with the pod by design.
     attachment_max_bytes: int = Field(default=2_000_000, gt=0)
     attachment_max_per_session: int = Field(default=10, ge=1)
-    # External literature retriever (gap TOOL-6). PubChem PUG-REST: public, licence-clean, needs no
-    # credential, and answers by structure — the key this system already speaks. Attaches only when
-    # a deployment adds `literature` to `data_sources` (registry membership is the enable switch,
-    # D-018), so CI and offline runs never reach the network.
-    literature_base_url: str = "https://pubchem.ncbi.nlm.nih.gov/rest/pug"
-    literature_timeout_seconds: float = Field(default=10.0, gt=0)
 
 
 class RetrievalSettings(BaseSettings):

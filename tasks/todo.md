@@ -471,7 +471,83 @@ merge with a long-lived parallel branch, the thing to grep for is *two implement
 idea*, which is what `mypy`'s no-redef caught here and what nothing would have caught in the
 contextvar sink.
 
-## Front-door session history + answerable approvals (D-089)
+---
+
+# Task — no external sources; document formats in scope (2026-07-25)
+
+**Ask.** Three decisions from the PR #22 review, now made:
+1. **PubChem out of scope. No external sources at all.**
+2. **PDF is in scope, and pptx etc. as well.**
+3. **Audit-trail archive-then-reseal stays in the backlog.** (Already recorded in `BACKLOG.md`
+   and `DEFERRED.md` — no action, verified only.)
+
+## Plan
+
+### 1. Remove the external literature retriever entirely
+- [ ] Delete `report/literature.py` (the `PubChemLiteratureRetriever`).
+- [ ] Drop the `literature` entry from `sources/registry.py`.
+- [ ] Drop `literature_base_url` / `literature_timeout_seconds` from `chemclaw/config.py` and
+      `.env.example` (the config-parity test would catch a leftover, but they are removed by hand
+      so the change is deliberate rather than gate-driven).
+- [ ] Remove the four PubChem tests from `tests/test_remaining_gaps.py`.
+- [ ] Move TOOL-6 from "done" to a recorded *rejection* in `DEFERRED.md` — the reason changes from
+      "blocked on choosing a source" to **"out of scope: no external sources"**, which is a
+      different and stronger statement, and the old wording invites someone to re-open it.
+- [ ] Add a guard: **no first-party module may reach a non-local host.** This is the durable form
+      of the decision — a prose note in `DEFERRED.md` cannot stop the next connector from landing.
+
+### 2. PDF / PPTX / DOCX / XLSX ingest
+- [ ] Add `pypdf`, `python-pptx`, `python-docx` (`openpyxl` is already a dependency). All parse
+      **locally**; nothing leaves the pod, so this is consistent with decision 1.
+- [ ] Extend `_PARSERS` / `_EXTENSIONS` in `agents/attachments.py` with one parser per format.
+- [ ] **The honesty rule survives the scope change.** The old refusal existed because a PDF
+      "parsed" by scraping text-like bytes yields confident nonsense. Real extraction removes that
+      risk for a PDF *with a text layer* — it does not remove it for a **scanned** one, which
+      yields empty or near-empty text. So: extract properly where there is a text layer, and
+      **refuse explicitly** where there is not, naming the reason. Silence must never read as
+      "the document was empty".
+- [ ] Keep the allowlist closed: an unknown type is still refused with a message naming what is
+      supported.
+- [ ] Tests build each format with its own library and assert round-trip text, page/slide/sheet
+      structure, and the scanned-PDF refusal.
+
+## Verification plan
+- Every parser tested against a file the test itself constructs (not a fixture blob), so the
+  assertion is about *our* parsing, not about a checked-in file.
+- The no-egress guard mutation-verified by adding a URL to a first-party module.
+- `make lint type test` + all validators green.
+
+## Review
+
+**Done.** ADR **D-089**.
+
+1. **External sources removed, and enforced.** `report/literature.py`, the registry entry, two
+   config fields, three `.env.example` lines and five tests are gone. The load-bearing addition is
+   `tests/test_no_egress.py`: the constraint had *already* been written in `DEFERRED.md` as "blocked
+   on choosing a source", which is what invited the build. Both `DEFERRED.md` rows now say
+   "rejected" rather than "not yet". Mutation-verified by planting a PubChem URL in
+   `report/retrievers.py` — the guard names the file and host.
+
+2. **PDF/PPTX/DOCX/XLSX in scope.** Four parsers, each through the format's own document model,
+   all local. 18 tests, every fixture built by the format's own writer inside the test (the PDF one
+   assembled by hand, since `pypdf` cannot typeset and a renderer would be a dependency the shipped
+   code never uses).
+
+3. **Audit trail** — no change, `BACKLOG.md`/`DEFERRED.md` already correct. Verified only.
+
+**The one real mistake, caught before it shipped.** The scanned-PDF refusal was first written as a
+32-character floor on extracted text. That would have refused a legitimate one-line CoA — i.e.
+reproduced the exact false reading the refusal exists to prevent, in the opposite direction. The
+property that actually distinguishes a scan is *zero* extractable characters, not few; the
+threshold was a magic number standing in for a real test. `test_a_short_pdf_is_accepted_because_
+the_scan_test_is_zero_text_not_a_length` pins it so the check cannot drift back into a size check.
+
+**Lesson.** A refusal is a claim about capability, and it can be wrong in both directions. The
+original PDF refusal was over-broad (it rejected documents that could be read perfectly well); its
+first replacement was over-broad in a subtler way. When a rule refuses something, the test worth
+writing is the one that pins what it must *accept*.
+
+## Front-door session history + answerable approvals (D-090)
 
 Driven by building a React chat client (`8fqycwdt8v-oss/Chemclaw3_ui`) against this service: three
 things a real surface needs that the API held but did not expose.
