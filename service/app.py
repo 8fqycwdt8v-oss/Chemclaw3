@@ -39,9 +39,11 @@ from agents.interaction_tools import (
 )
 from agents.session_events import stream_new_events
 from chemclaw.config import settings
+from scripts.schedules import ScheduleHealth, describe_schedules
 from service.auth import Principal, require_principal
 from service.budget import BudgetExceeded, BudgetTracker
 from service.events import ErrorEvent, JobCompletedEvent
+from service.metrics import CONTENT_TYPE, METRICS
 from service.runner import run_turn
 
 logger = logging.getLogger(__name__)
@@ -67,6 +69,10 @@ class _LiveSessions:
         """Create a registry holding at most `capacity` live sessions."""
         self._capacity = capacity
         self._entries: OrderedDict[str, tuple[Any, str | None]] = OrderedDict()
+
+    def __len__(self) -> int:
+        """How many live sessions are held — the source for the `live_sessions` gauge (DEP-4)."""
+        return len(self._entries)
 
     def add(self, session_id: str, session: Any, owner: str | None) -> None:
         """Register a live session (most-recently-used), evicting the oldest past capacity."""
@@ -209,6 +215,14 @@ def create_app(
     # session and per user, refusing a turn (429) that would exceed a configured cap. In-process and
     # off unless `budget_enabled`; the missing ceiling above the per-turn loop cap.
     app.state.budget = BudgetTracker()
+    # Gauges read the live structures rather than a mirrored counter, so there is nothing to keep
+    # in sync (gap DEP-4). In-flight turns against the cap is the saturation signal the HPA should
+    # scale on — CPU is close to noise for a stream-bound, model-latency-dominated service.
+    METRICS.bind_gauge("chemclaw_turns_in_flight", lambda: float(len(app.state.active_turns)))
+    METRICS.bind_gauge(
+        "chemclaw_turn_capacity", lambda: float(settings.service_max_concurrent_turns)
+    )
+    METRICS.bind_gauge("chemclaw_live_sessions", lambda: float(len(app.state.live_sessions)))
 
     async def _resolve_session(session_id: str, principal: Principal) -> Any:
         """Return the caller's session — from the live cache, or rehydrated from durable ownership.
@@ -298,6 +312,7 @@ def create_app(
         session = await _resolve_session(session_id, principal)
         active_turns: set[str] = app.state.active_turns
         if session_id in active_turns:
+            METRICS.increment("chemclaw_turns_conflict_total")
             raise HTTPException(
                 status_code=409, detail="a turn is already running for this session"
             )
@@ -325,8 +340,11 @@ def create_app(
                             roles=principal.roles,
                             budget=app.state.budget,
                         ):
+                            if event.type == "error":
+                                METRICS.increment("chemclaw_turns_failed_total")
                             yield {"event": event.type, "data": event.model_dump_json()}
                 except TimeoutError:
+                    METRICS.increment("chemclaw_turn_timeouts_total")
                     logger.warning(
                         "turn timed out after %ss for session %s",
                         settings.service_turn_timeout_seconds,
@@ -352,16 +370,21 @@ def create_app(
             try:
                 app.state.budget.check(session_id, principal.oid)
             except BudgetExceeded as exc:
+                METRICS.increment("chemclaw_turns_refused_budget_total")
                 raise HTTPException(status_code=429, detail=str(exc)) from exc
             try:
                 await asyncio.wait_for(
                     semaphore.acquire(), timeout=settings.service_turn_admission_timeout_seconds
                 )
             except TimeoutError as exc:
+                # Shedding is the admission control working as designed — and was completely
+                # invisible from outside until this counter existed.
+                METRICS.increment("chemclaw_turns_shed_total")
                 raise HTTPException(
                     status_code=503, detail="server at capacity; retry shortly"
                 ) from exc
             acquired = True
+            METRICS.increment("chemclaw_turns_started_total")
             response = EventSourceResponse(_turn_events())
             handed_off = True
             return response
@@ -391,6 +414,7 @@ def create_app(
         await _resolve_session(session_id, principal)
         streams: dict[str, int] = app.state.event_streams
         if streams.get(principal.oid, 0) >= settings.service_max_event_streams_per_user:
+            METRICS.increment("chemclaw_event_streams_rejected_total")
             raise HTTPException(
                 status_code=429, detail="too many concurrent event streams; close one and retry"
             )
@@ -448,6 +472,32 @@ def create_app(
             raise HTTPException(status_code=404, detail="no such approval hold") from exc
         if owner and owner != principal.oid:
             raise HTTPException(status_code=404, detail="no such approval hold")
+
+    @app.get("/metrics")
+    async def metrics() -> Response:
+        """Prometheus exposition for this pod (gap DEP-4).
+
+        Unauthenticated on purpose, like `/healthz` and `/readyz`: a scrape happens before and
+        independently of user identity, and the NetworkPolicy is what keeps it inside the cluster.
+        It exposes counts and capacity only — never a session id, a user, or any turn content.
+        """
+        return Response(content=METRICS.render(), media_type=CONTENT_TYPE)
+
+    @app.get("/schedules")
+    async def schedules(
+        principal: Principal = Depends(require_principal),
+    ) -> list[ScheduleHealth]:
+        """Health of every periodic job: when it last ran, and whether it succeeded (gap SCH-4).
+
+        Nothing reported this, so an ELN sync failing every run advanced no cursor and raised no
+        alarm — it surfaced weeks later as "the agent doesn't know about recent experiments", the
+        hardest class of problem to attribute.
+
+        Read from Temporal's own schedule state rather than a second table: Temporal is already the
+        authority on when a Schedule fired and how the run ended, and a mirrored table could only
+        ever drift from it.
+        """
+        return await describe_schedules()
 
     @app.get("/approvals")
     async def list_approvals(

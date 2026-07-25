@@ -16,8 +16,9 @@ import asyncio
 import logging
 from collections.abc import Sequence
 from dataclasses import dataclass
-from datetime import timedelta
+from datetime import datetime, timedelta
 
+from pydantic import BaseModel
 from temporalio.client import (
     Client,
     Schedule,
@@ -34,6 +35,7 @@ from chemclaw.config import settings
 from chemclaw.ids import stable_hash
 from chemclaw.logging import configure_logging
 from chemclaw.temporal_client import connect
+from workflows.audit_verify import AuditChainVerifyWorkflow
 from workflows.eln_sync import ElnSyncWorkflow
 from workflows.eval_drift import EvalDriftWorkflow
 from workflows.memory_jobs import (
@@ -69,6 +71,7 @@ OWNED_SCHEDULE_IDS = frozenset(
         "eval-drift",
         "note-reindex",
         "retention",
+        "audit-verify",
     }
 )
 
@@ -97,6 +100,11 @@ def planned_schedules() -> list[PlannedSchedule]:
     if settings.note_reindex_enabled:
         reindex_every = timedelta(minutes=settings.note_reindex_schedule_minutes)
         schedules.append(PlannedSchedule("note-reindex", NoteReindexWorkflow, reindex_every))
+    # The integrity check only earns a Schedule where a durable audit sink exists to verify
+    # (gap SCH-5); an offline/dev deployment has no chain and would alert on an empty table.
+    if settings.audit_verify_enabled:
+        verify_every = timedelta(minutes=settings.audit_verify_schedule_minutes)
+        schedules.append(PlannedSchedule("audit-verify", AuditChainVerifyWorkflow, verify_every))
     # Retention only earns a Schedule where the deployment has stated a policy (gap SCH-1); an
     # unconfigured deployment must never start deleting records on a default it did not choose.
     if settings.retention_enabled:
@@ -192,6 +200,62 @@ async def apply_schedules(client: Client, jobs: Sequence[PlannedSchedule] | None
             job.workflow.__name__,
         )
     await _prune(client, {job.schedule_id for job in plan})
+
+
+class ScheduleHealth(BaseModel):
+    """One periodic job's operational state, as an admin surface renders it (gap SCH-4).
+
+    Read from Temporal's own schedule state rather than a mirrored table: Temporal is already the
+    authority on when a Schedule fired and how often, and a second copy could only ever drift.
+
+    `skipped_overlap` is the load signal worth watching — it counts fires dropped because the
+    previous run was still going (the SKIP policy from gap SCH-3). A steadily climbing value means
+    the job no longer fits inside its interval, which is the early warning that a corpus has
+    outgrown its cadence.
+    """
+
+    schedule_id: str
+    interval_seconds: float
+    paused: bool = False
+    last_run: datetime | None = None
+    runs_total: int = 0
+    skipped_overlap: int = 0
+    running_now: int = 0
+    note: str = ""
+
+
+async def describe_schedules(client: Client | None = None) -> list[ScheduleHealth]:
+    """Report every planned Schedule's health, in plan order.
+
+    A planned Schedule that does not exist in Temporal is reported with a note, never omitted:
+    "the job was never created" is precisely the failure this surface exists to show, and a silent
+    omission is indistinguishable from a healthy quiet job.
+    """
+    connection = client if client is not None else await connect()
+    health: list[ScheduleHealth] = []
+    for job in planned_schedules():
+        entry = ScheduleHealth(
+            schedule_id=job.schedule_id,
+            interval_seconds=job.interval.total_seconds(),
+        )
+        try:
+            description = await connection.get_schedule_handle(job.schedule_id).describe()
+        except Exception as exc:  # noqa: BLE001 - a lookup failure is reported, never raised
+            entry.note = f"not found in Temporal ({type(exc).__name__}) — was it ever applied?"
+            health.append(entry)
+            continue
+        info = description.info
+        entry.paused = description.schedule.state.paused
+        entry.runs_total = info.num_actions
+        entry.skipped_overlap = info.num_actions_skipped_overlap
+        entry.running_now = len(list(info.running_actions or []))
+        recent = list(info.recent_actions or [])
+        if recent:
+            entry.last_run = recent[-1].started_at
+        else:
+            entry.note = "no run recorded yet"
+        health.append(entry)
+    return health
 
 
 async def main() -> None:

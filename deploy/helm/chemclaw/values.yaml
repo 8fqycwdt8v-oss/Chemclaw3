@@ -19,6 +19,10 @@ service:
   port: 8080
   replicas: 2
   # Horizontal autoscaling for the stateless front door only (workers scale by queue, not HPA).
+  # NOTE (gap DEP-4): CPU is a poor proxy here — a pod blocked on the model uses almost no CPU
+  # while being completely full. The service now exposes `chemclaw_turns_in_flight` and
+  # `chemclaw_turn_capacity` at /metrics; scale on their ratio via a Prometheus-adapter external
+  # metric once one is available in the cluster. CPU stays the fallback until then.
   autoscaling:
     enabled: true
     minReplicas: 2

@@ -16,6 +16,7 @@ from temporalio.worker import Worker
 from chemclaw.config import settings
 from chemclaw.logging import configure_logging, configure_telemetry
 from chemclaw.temporal_client import connect
+from workflows.audit_verify import AuditChainVerifyWorkflow, check_audit_chain
 from workflows.bo_activities import (
     evaluate_candidates,
     propose_initial,
@@ -74,6 +75,7 @@ BACKGROUND_WORKFLOWS: list[type] = [
     EvalDriftWorkflow,
     NoteReindexWorkflow,
     RetentionWorkflow,
+    AuditChainVerifyWorkflow,
 ]
 BACKGROUND_ACTIVITIES: Sequence[Callable[..., Any]] = [
     propose_initial,
@@ -94,6 +96,7 @@ BACKGROUND_ACTIVITIES: Sequence[Callable[..., Any]] = [
     propose_confirmed_answer_activity,
     reindex_notes_activity,
     prune_expired_rows,
+    check_audit_chain,
     record_session_event_activity,
     check_eval_drift,
     resolve_fan_out_limit,

@@ -17,8 +17,10 @@ from typing import Any
 
 from agent_framework import AgentSession
 
+from agents.framing import frame_untrusted
 from agents.harness_todo import todo_titles
 from agents.identity_context import reset_current_identity, set_current_identity
+from agents.job_results import await_job_results
 from agents.session_context import (
     reset_current_session,
     reset_current_session_id,
@@ -90,6 +92,8 @@ async def run_turn(
     # Buffer for what tools learn mid-turn that the stream must surface (started jobs, PR-gate
     # proposals) — the runner only sees the model's updates, so tools hand these over out of band.
     signals_token = begin_turn()
+    # Durable jobs this turn launched, for the optional mid-turn resume below.
+    started_jobs: list[str] = []
     # The harness's todo list as last rendered, so a plan is emitted when it first appears and
     # again whenever it changes — not once per update (which would spam an unchanged plan).
     last_plan: list[str] = []
@@ -106,6 +110,8 @@ async def run_turn(
                 # producing this update ran before the text it then produced, so emitting the
                 # signal first is the truthful transcript order (RCH-4/RCH-5).
                 for signal in drain():
+                    if isinstance(signal, JobSignal):
+                        started_jobs.append(signal.job_id)
                     yield _signal_event(signal)
                 text = getattr(update, "text", "") or ""
                 if text:
@@ -123,7 +129,25 @@ async def run_turn(
             # it, so drain once more before the answer — otherwise the last job started or note
             # proposed in a turn would be silently dropped.
             for signal in drain():
+                if isinstance(signal, JobSignal):
+                    started_jobs.append(signal.job_id)
                 yield _signal_event(signal)
+
+            # Mid-turn resume (gap AGT-2): if this turn launched durable jobs, optionally wait for
+            # them and continue the *same* turn with their results, so "compute this, then reason
+            # about the result" is one exchange rather than two. Off by default; bounded by config
+            # and, above it, by the front door's whole-turn deadline.
+            if started_jobs and settings.mid_turn_resume_enabled:
+                results = await await_job_results(
+                    session.session_id,
+                    started_jobs,
+                    timeout_seconds=settings.mid_turn_resume_timeout_seconds,
+                )
+                if results:
+                    async for event in _resume(agent, session, results):
+                        if isinstance(event, TokenEvent):
+                            answer_parts.append(event.text)
+                        yield event
         yield await _answer_event("".join(answer_parts))
     except Exception:
         # One turn's failure becomes one user-safe event, never a 500 mid-stream or a leaked trace.
@@ -170,6 +194,32 @@ async def _answer_event(answer: str) -> AnswerEvent:
         unsupported_claims=[claim.text for claim in result.unsupported],
         review_required=result.confidence < settings.verifier_confidence_threshold,
     )
+
+
+async def _resume(
+    agent: Any, session: Any, results: dict[str, dict[str, Any]]
+) -> AsyncIterator[Event]:
+    """Continue the turn with completed job results, streaming the continuation's events.
+
+    The results are handed to the model as *framed data*, not as an instruction: they arrive from a
+    workflow, and the same injection discipline that applies to retrieved notes applies here
+    (`agents.framing`). Anything the continuation itself starts is surfaced too, but a resume is
+    deliberately not recursive — a second wait would let one chemist turn chain durable jobs
+    indefinitely inside a single request.
+    """
+    summary = "\n".join(f"- {job_id}: {payload}" for job_id, payload in results.items())
+    message = (
+        "The durable job(s) you started have completed. Their results follow as data; continue "
+        "your answer using them.\n" + frame_untrusted(summary, note_id="job-results")
+    )
+    async for update in agent.run(message, stream=True, session=session):
+        for signal in drain():
+            yield _signal_event(signal)
+        text = getattr(update, "text", "") or ""
+        if text:
+            yield TokenEvent(text=text)
+        for tool_name, arguments in _tool_calls_in(update):
+            yield ToolCallEvent(tool=tool_name, arguments=arguments)
 
 
 def _signal_event(signal: JobSignal | ProposalSignal) -> Event:

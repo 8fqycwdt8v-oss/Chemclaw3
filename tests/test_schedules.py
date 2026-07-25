@@ -8,7 +8,7 @@ surface, since a live Temporal server is unavailable offline.
 
 import asyncio
 from collections.abc import AsyncIterator, Callable
-from datetime import timedelta
+from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from typing import cast
 
@@ -28,8 +28,10 @@ from scripts.schedules import (
     _build_schedule,
     _jitter,
     apply_schedules,
+    describe_schedules,
     planned_schedules,
 )
+from workflows.audit_verify import AuditChainVerifyWorkflow
 from workflows.eln_sync import ElnSyncWorkflow
 from workflows.eval_drift import EvalDriftWorkflow
 from workflows.memory_jobs import (
@@ -207,3 +209,70 @@ def test_retention_schedule_is_added_only_when_a_policy_is_stated(
     retention = next(p for p in plan if p.workflow is RetentionWorkflow)
     assert retention.schedule_id == "retention"
     assert retention.interval == timedelta(minutes=60)
+
+
+def test_audit_verify_schedule_is_added_only_when_a_sink_exists(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A chain checked only by a manual `make audit-verify` is not a control (gap SCH-5).
+
+    Gated because an offline/dev deployment has no durable sink and would alert on an empty table.
+    """
+    monkeypatch.setattr(settings, "audit_verify_enabled", False)
+    assert AuditChainVerifyWorkflow not in {p.workflow for p in planned_schedules()}
+    monkeypatch.setattr(settings, "audit_verify_enabled", True)
+    monkeypatch.setattr(settings, "audit_verify_schedule_minutes", 360)
+    verify = next(p for p in planned_schedules() if p.workflow is AuditChainVerifyWorkflow)
+    assert verify.schedule_id == "audit-verify"
+    assert verify.interval == timedelta(minutes=360)
+
+
+def test_schedule_health_reports_a_planned_job_that_was_never_created() -> None:
+    """A planned job missing from Temporal is the failure this surface exists to show (gap SCH-4).
+
+    Omitting it would make a never-created Schedule indistinguishable from a healthy quiet one —
+    which is exactly how a silently failing ELN sync stays invisible for weeks.
+    """
+
+    class _MissingHandle:
+        async def describe(self) -> object:
+            raise RuntimeError("schedule not found")
+
+    class _Client:
+        def get_schedule_handle(self, schedule_id: str) -> _MissingHandle:
+            return _MissingHandle()
+
+    health = asyncio.run(describe_schedules(cast(Client, _Client())))
+    assert {h.schedule_id for h in health} == {p.schedule_id for p in planned_schedules()}
+    assert all("not found in Temporal" in h.note for h in health)
+    assert all(h.interval_seconds > 0 for h in health)
+
+
+def test_schedule_health_surfaces_overlap_skips_and_the_last_run() -> None:
+    """`skipped_overlap` is the early warning that a job no longer fits inside its interval."""
+    when = datetime(2026, 7, 25, 6, 0, tzinfo=UTC)
+
+    class _Handle:
+        async def describe(self) -> object:
+            return SimpleNamespace(
+                schedule=SimpleNamespace(state=SimpleNamespace(paused=True)),
+                info=SimpleNamespace(
+                    num_actions=12,
+                    num_actions_skipped_overlap=3,
+                    running_actions=[object()],
+                    recent_actions=[SimpleNamespace(started_at=when)],
+                ),
+            )
+
+    class _Client:
+        def get_schedule_handle(self, schedule_id: str) -> _Handle:
+            return _Handle()
+
+    health = asyncio.run(describe_schedules(cast(Client, _Client())))
+    first = health[0]
+    assert first.runs_total == 12
+    assert first.skipped_overlap == 3
+    assert first.running_now == 1
+    assert first.paused is True
+    assert first.last_run == when
+    assert first.note == ""

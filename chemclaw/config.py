@@ -974,6 +974,19 @@ class MemorySettings(BaseSettings):
     retention_timeout_seconds: float = Field(default=600.0, gt=0)
     retention_session_events_days: int = Field(default=0, ge=0)
     retention_session_messages_days: int = Field(default=0, ge=0)
+    # Scheduled verification of the tamper-evident audit chain (gap SCH-5). A chain checked only by
+    # a manual `make audit-verify` detects tampering only when someone remembers to look. Only
+    # earns a Schedule where a durable audit sink is actually configured.
+    audit_verify_enabled: bool = False
+    audit_verify_schedule_minutes: float = Field(default=1440.0, gt=0)
+    audit_verify_timeout_seconds: float = Field(default=600.0, gt=0)
+    # Mid-turn durable-job resume (gap AGT-2): when a turn launches a durable job, wait this long
+    # for its result and continue the *same* turn with it, so "compute this, then reason about the
+    # result" is one exchange. Off by default — holding a turn open holds an admission permit, so
+    # a deployment opts in deliberately. Must stay below `service_turn_timeout_seconds`, which
+    # bounds the whole streamed turn regardless.
+    mid_turn_resume_enabled: bool = False
+    mid_turn_resume_timeout_seconds: float = Field(default=60.0, gt=0)
 
 
 class RetrievalSettings(BaseSettings):
