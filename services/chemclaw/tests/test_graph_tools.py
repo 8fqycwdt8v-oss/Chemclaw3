@@ -8,6 +8,7 @@ import pytest
 import agents.graph_tools as graph_tools
 from agents.graph_tools import expand_note, find_notes, propose_knowledge_note
 from chemclaw.config import settings
+from chemclaw.errors import ChemclawError
 from tests.conftest import FakeSubmitter
 
 
@@ -67,10 +68,17 @@ def test_expand_note_returns_neighbors(tmp_path: Path, monkeypatch: pytest.Monke
 
 
 def test_expand_unknown_note_raises(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Expanding an unknown id is a clear error (G4)."""
+    """Expanding an unknown id is a clear error (G4), and a `ChemclawError` specifically.
+
+    `ChemclawError` (a `ValueError` subclass) is chemclaw's own always-safe "bad input"
+    contract, so `agents.tool_authz.surface_domain_errors` surfaces this message to the model
+    verbatim instead of MAF's opaque generic failure — the common real cause is a citation to a
+    note still pending PR-gate review, which the chemist can otherwise not distinguish from a
+    typo or a deleted note.
+    """
     _seed(tmp_path)
     monkeypatch.setattr(settings, "knowledge_dir", str(tmp_path))
-    with pytest.raises(ValueError, match="no note with id"):
+    with pytest.raises(ChemclawError, match="no note with id"):
         asyncio.run(expand_note("ghost"))
 
 

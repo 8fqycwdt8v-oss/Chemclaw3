@@ -15,8 +15,13 @@ from agent_framework import FunctionInvocationContext
 
 from agents.authz import AuthorizationError, authorize_tool
 from agents.identity_context import reset_current_identity, set_current_identity
-from agents.tool_authz import enforce_tool_authz, surface_authorization_denials
+from agents.tool_authz import (
+    enforce_tool_authz,
+    surface_authorization_denials,
+    surface_domain_errors,
+)
 from chemclaw.config import settings
+from chemclaw.errors import ChemclawError
 
 
 def _enforced(monkeypatch: pytest.MonkeyPatch, **overrides: object) -> None:
@@ -274,4 +279,55 @@ def test_surfacing_passes_a_successful_call_through_unchanged() -> None:
         ctx.result = "6.51"
 
     _drive_surfacing(ctx, _ok)
+    assert ctx.result == "6.51"
+
+
+def _drive_domain_errors(
+    ctx: FunctionInvocationContext, call_next: Callable[[], Awaitable[None]]
+) -> None:
+    """Run `surface_domain_errors` over a stand-in context to completion."""
+
+    async def _run() -> None:
+        await surface_domain_errors(ctx, call_next)
+
+    asyncio.run(_run())
+
+
+def test_domain_errors_convert_a_chemclaw_error_into_the_tool_s_own_result() -> None:
+    """A `ChemclawError` becomes the call's own safe, readable result — not a re-raised exception.
+
+    Regression guard for a live e2e finding: `expand_note` citing a reaction note still pending
+    PR-gate review failed with MAF's opaque "Error: Function failed.", so the model could not
+    tell "pending review" apart from "typo'd id" and could only guess. `ChemclawError` is
+    chemclaw's own always-safe "bad input" contract (`chemclaw.errors`), so its message is safe
+    to surface verbatim, exactly like `AuthorizationError`.
+    """
+
+    async def _not_found() -> None:
+        raise ChemclawError("no note with id 'reaction-ghost'")
+
+    ctx = _ctx("expand_note")
+    _drive_domain_errors(ctx, _not_found)  # must not raise
+    assert ctx.result == "Error: no note with id 'reaction-ghost'"
+
+
+def test_domain_errors_leave_other_exceptions_untouched() -> None:
+    """Only `ChemclawError` is caught — an unrelated failure still propagates as-is."""
+
+    async def _boom() -> None:
+        raise RuntimeError("unrelated failure")
+
+    with pytest.raises(RuntimeError, match="unrelated failure"):
+        _drive_domain_errors(_ctx("predict_pka"), _boom)
+
+
+def test_domain_errors_pass_a_successful_call_through_unchanged() -> None:
+    """A call that succeeds is unaffected — no result override, no swallowed exception."""
+    ctx = _ctx("predict_pka")
+    ctx.result = None
+
+    async def _ok() -> None:
+        ctx.result = "6.51"
+
+    _drive_domain_errors(ctx, _ok)
     assert ctx.result == "6.51"

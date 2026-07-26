@@ -51,7 +51,11 @@ from agents.audit import AuditSink, make_audit_middleware
 from agents.llm_provider import build_chat_client
 from agents.profiles import AgentProfile, get_profile
 from agents.skill_access import EnabledSkillsSource, RoleScopedSkillsSource
-from agents.tool_authz import enforce_tool_authz, surface_authorization_denials
+from agents.tool_authz import (
+    enforce_tool_authz,
+    surface_authorization_denials,
+    surface_domain_errors,
+)
 from agents.tool_registry import registered_tools
 from chemclaw.config import (
     HttpMcpServerSpec,
@@ -184,16 +188,23 @@ def build_agent(
         actor=actor,
         sink=audit_sink,
     )
-    # Three function middlewares over every tool call, outermost first: `surface_authorization_
-    # denials` turns a denial into its own clear, safe result (instead of MAF's opaque "Function
-    # failed."); audit records the call underneath it, so a denial is still logged as an `error`
-    # outcome exactly as before — the outer layer only changes what the *model* sees afterward;
-    # per-tool authorization (F10-C) gates it innermost, closest to the tool body. All three are
-    # no-ops on the dev path (log-only sink; authz open until `entra_required`), so the classic
-    # path is unchanged by default. They are attached unconditionally, *after* the profile narrows
-    # the toolset — so a profile attenuates capability but can never bypass audit or authorization
+    # Four function middlewares over every tool call, outermost first: `surface_authorization_
+    # denials` and `surface_domain_errors` each turn one known-safe exception type (an
+    # authorization refusal; chemclaw's own `ChemclawError` bad-input contract) into its own
+    # clear, safe result instead of MAF's opaque "Function failed." — audit records the call
+    # underneath both, so a denial or bad-input error is still logged as an `error` outcome
+    # exactly as before; per-tool authorization (F10-C) gates it innermost, closest to the tool
+    # body. All four are no-ops on the dev path (log-only sink; authz open until
+    # `entra_required`; no ChemclawError raised on a happy path), so the classic path is
+    # unchanged by default. They are attached unconditionally, *after* the profile narrows the
+    # toolset — so a profile attenuates capability but can never bypass audit or authorization
     # (the safety rubric, audit §7).
-    middleware = [surface_authorization_denials, audit, enforce_tool_authz]
+    middleware = [
+        surface_authorization_denials,
+        surface_domain_errors,
+        audit,
+        enforce_tool_authz,
+    ]
     # Default generation params from config (F0.3), applied to every turn unless a run overrides
     # them — so temperature/length are a deployment setting, not a per-call literal.
     options = ChatOptions(

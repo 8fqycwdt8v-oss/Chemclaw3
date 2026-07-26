@@ -20,6 +20,7 @@ from safety.screen import SafetyRulesError, at_least, screen_reaction, screen_st
 # One textbook example per structural rule — the same molecules the eval case pins.
 _HAZARDOUS = {
     "organic-azide": "CCCN=[N+]=[N-]",  # 1-azidopropane
+    "inorganic-azide": "[Na+].[N-]=[N+]=[N-]",  # sodium azide
     "acyl-azide": "CC(=O)N=[N+]=[N-]",  # acetyl azide
     "diazo": "CC(=[N+]=[N-])C(=O)OC",  # methyl diazoacetate
     "diazonium": "c1ccccc1[N+]#N",  # benzenediazonium
@@ -55,6 +56,21 @@ def test_each_rule_fires_on_its_reference_molecule(rule_id: str, smiles: str) ->
     """
     result = screen_structure(smiles)
     assert rule_id in {flag.rule_id for flag in result.flags}
+
+
+def test_organic_and_inorganic_azide_rules_are_disjoint() -> None:
+    """`organic-azide` and `inorganic-azide` never both fire on the same structure.
+
+    Regression guard for a live e2e finding: the bare azide anion (as in sodium azide) went
+    unflagged entirely, because `organic-azide`'s SMARTS requires the azide's terminal nitrogen
+    to be attached to a carbon. The new `inorganic-azide` rule is written to match only the free
+    ionic form (both terminal nitrogens unsubstituted) so it complements rather than duplicates
+    the existing rule.
+    """
+    organic = screen_structure(_HAZARDOUS["organic-azide"])
+    inorganic = screen_structure(_HAZARDOUS["inorganic-azide"])
+    assert {f.rule_id for f in organic.flags} == {"organic-azide"}
+    assert {f.rule_id for f in inorganic.flags} == {"inorganic-azide"}
 
 
 @pytest.mark.parametrize("smiles", _BENIGN)

@@ -18,6 +18,7 @@ from collections.abc import Awaitable, Callable
 from agent_framework import FunctionInvocationContext, function_middleware
 
 from agents.authz import AuthorizationError, authorize_tool
+from chemclaw.errors import ChemclawError
 
 
 @function_middleware
@@ -64,3 +65,33 @@ async def surface_authorization_denials(
         await call_next()
     except AuthorizationError as exc:
         context.result = f"Refused: {exc}"
+
+
+@function_middleware
+async def surface_domain_errors(
+    context: FunctionInvocationContext,
+    call_next: Callable[[], Awaitable[None]],
+) -> None:
+    """Turn a tool's own bad-input error into its own clear result, not MAF's generic failure.
+
+    Same gap as `surface_authorization_denials`, a second known-safe exception type: every
+    `ChemclawError` (`chemclaw.errors`) is chemclaw's own established "this input/data is
+    invalid" contract, raised only with a deliberately-worded, caller-safe message (e.g.
+    `expand_note`'s "no note with id 'X'" — it echoes back the id the model itself supplied,
+    never internal state). A live e2e finding: `expand_note` citing a reaction whose note is a
+    pending, unmerged PR-gate submission (an expected, recurring scenario — D-018) failed with
+    MAF's opaque "Error: Function failed.", so the model could not tell "pending review" apart
+    from "typo'd id" apart from "deleted note," and could only guess at what happened.
+    `ChemclawError`'s many subclasses (`InvalidSmilesError`, `FingerprintError`, `NoteError`,
+    ...) get the same treatment for free — every one of them is written to this same safe
+    contract. Every other exception is left untouched, still falling through to MAF's generic
+    (safe-by-omission) handling.
+
+    Attach this alongside `surface_authorization_denials`, outside the audit middleware, for
+    the same reason: the exception must still reach audit unchanged (recorded as an `error`
+    outcome) before this layer converts it into what the model sees.
+    """
+    try:
+        await call_next()
+    except ChemclawError as exc:
+        context.result = f"Error: {exc}"

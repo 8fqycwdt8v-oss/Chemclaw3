@@ -80,3 +80,23 @@ def test_accepts_plain_dicts_as_maf_actually_delivers_them() -> None:
     assert len(candidates) == 1
     temperature = candidates[0].params["temperature"]
     assert isinstance(temperature, float) and 20.0 <= temperature <= 120.0
+
+
+def test_accepts_observations_json_encoded_as_a_string() -> None:
+    """Regression: on a large call, the model sometimes emits `observations` JSON-encoded.
+
+    A single string instead of a real array — a live e2e finding on a 6-parameter problem. MAF's
+    schema validation rejected the whole call before this function ever ran, with no detail
+    reaching the model to self-correct from ("Error: Argument parsing failed.", no exception
+    text). Accepting the string here and decoding it makes the tool robust to that formatting
+    slip instead of relying on the model to notice and retry blind.
+    """
+    problem = _problem()
+    observations_json = (
+        '[{"params": {"temperature": 40.0, "solvent": "THF"}, "value": 55.0}, '
+        '{"params": {"temperature": 80.0, "solvent": "THF"}, "value": 78.0}]'
+    )
+    candidates = asyncio.run(suggest_next_experiment(problem, observations_json, count=1))
+    assert len(candidates) == 1
+    temperature = candidates[0].params["temperature"]
+    assert isinstance(temperature, float) and 20.0 <= temperature <= 120.0

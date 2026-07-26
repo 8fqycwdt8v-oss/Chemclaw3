@@ -32,6 +32,18 @@ structural:
       simple alkyl azide. Generate and consume in situ; do not concentrate or store.
     citation: "Bräse et al., Angew. Chem. Int. Ed. 2005, 44, 5188"
 
+  - id: inorganic-azide
+    # Both terminal nitrogens X1 (no substituent beyond the azide chain itself) is what
+    # distinguishes the free/ionic azide (e.g. sodium azide's anion) from `organic-azide` above,
+    # whose attached terminal nitrogen is X2 (bonded to carbon) — the two patterns are disjoint.
+    smarts: "[N;X1-]=[N;X2+]=[N;X1-]"
+    severity: high
+    explanation: >-
+      Inorganic/ionic azide (e.g. sodium azide): energetic, forms shock-sensitive heavy-metal
+      azides on contact with lead or copper plumbing/fittings, and releases toxic HN3 gas on
+      acidification. Never dispose of down a metal drain; use a dedicated aqueous waste stream.
+    citation: "Bretherick's Handbook of Reactive Chemical Hazards, 8th ed., azides (inorganic)"
+
   - id: diazo
     smarts: "[#6;!$(C=O)]=[N;X2+]=[N;X1-]"
     severity: high

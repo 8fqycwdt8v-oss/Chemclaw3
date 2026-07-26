@@ -16,6 +16,7 @@ from pydantic import BaseModel, Field
 from agents.framing import frame_untrusted
 from agents.tool_registry import tool
 from chemclaw.config import settings
+from chemclaw.errors import ChemclawError
 from kg.git_submitter import default_submitter
 from kg.graph import build_graph, neighborhood
 from kg.note import Note
@@ -127,10 +128,21 @@ async def expand_note(note_id: str, hops: int = 1) -> NoteView:
 
     Returns:
         The note's body plus its neighborhood as references.
+
+    Raises:
+        ChemclawError: When `note_id` names no current note. A `ChemclawError` is chemclaw's
+            own always-safe "bad input" contract (`chemclaw.errors`), so `agents.tool_authz`
+            surfaces this message to the model verbatim instead of MAF's opaque generic
+            failure — the common real cause is a citation to a note still pending PR-gate
+            review (D-018: a fingerprint-indexed reaction whose note has not yet been merged),
+            which the chemist can otherwise not distinguish from a typo or a deleted note.
     """
     graph = await asyncio.to_thread(build_graph, settings.knowledge_path)
     if note_id not in graph or graph.nodes[note_id].get("note") is None:
-        raise ValueError(f"no note with id {note_id!r}")
+        raise ChemclawError(
+            f"no note with id {note_id!r} — it may not exist, or it may be a citation to a "
+            "reaction that has been indexed but whose note is still pending human review"
+        )
     note = graph.nodes[note_id]["note"]
     # `hops` comes from the model; clamp it to [0, graph_max_hops] so a large value is bounded
     # rather than traversing the whole graph (SEC-4).

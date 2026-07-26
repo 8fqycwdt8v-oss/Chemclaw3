@@ -16,6 +16,7 @@ cross this boundary.
 """
 
 import asyncio
+import json
 
 from agents.tool_registry import tool
 from bo.engine import initial_candidates, propose_candidates
@@ -25,7 +26,7 @@ from bo.problem import Candidate, Observation, OptimizationProblem
 @tool
 async def suggest_next_experiment(
     problem: OptimizationProblem,
-    observations: list[Observation] | None = None,
+    observations: list[Observation] | str | None = None,
     count: int = 1,
 ) -> list[Candidate]:
     """Suggest the next experiment(s) to run for an optimization problem (Bayesian optimization).
@@ -60,6 +61,14 @@ async def suggest_next_experiment(
     # (`model_validate` short-circuits on an exact-type match), so this is transparent to every
     # direct/test caller that already passes real model instances.
     problem = OptimizationProblem.model_validate(problem)
+    # On a large batch of observations the model occasionally emits the array JSON-encoded as a
+    # single string instead of a real array (a live e2e finding on a 6-parameter problem) — MAF's
+    # schema validation would otherwise reject the whole call before this function ever runs, with
+    # no detail reaching the model to self-correct from. Accepting the string here and decoding it
+    # is strictly more permissive than before (a real list is untouched), so this is pure
+    # robustness, not a behavior change for the common case.
+    if isinstance(observations, str):
+        observations = json.loads(observations)
     history = [Observation.model_validate(o) for o in observations] if observations else []
     if history:
         return await asyncio.to_thread(propose_candidates, problem, history, count)
