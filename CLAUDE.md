@@ -43,6 +43,12 @@ developed separately:
   server that stands in for external MCP tools and data sources, plus a mock HOC, so the system
   can be live-tested end-to-end without real integrations.
 
+If a task requires changing or fixing code that lives in `Chemclaw3_ui` or `Chemclaw3_mock`
+(not this repo), add that repo to the session (`add_repo`) and open a PR directly against it —
+do not proxy the change through this repo, and do not just describe the fix here and stop.
+Each repo gets its own branch/commit/PR, scoped to that repo's own conventions. Only pause to
+ask first if the required change is destructive, ambiguous, or outside what was asked.
+
 ## Architecture (the one thing to internalize)
 
 Four layers, each with a single responsibility. **Never merge their concerns.**
