@@ -2719,3 +2719,44 @@ exactly (D-002's thin-adapter shape).
 `bo/engine.py`'s docstring is updated (still "the only module that touches BoFire") to note
 `factorial_design` as a second BoFire-touching adapter alongside the BO strategies, not a
 boundary violation — it lives in the same file specifically to keep that claim true.
+
+## D-093 — `fan_out`'s unbounded child retry hung CI on every run
+
+CI's own `ci.yml` comment already named the symptom: `tests/test_orchestrator.py::test_fan_out_runs_children_in_order_and_isolates_failures`
+"skips wherever the Temporal test-server binary cannot be fetched and hangs where it can" —
+discovered while investigating a PR's CI run that was cancelled at the job's 30-minute
+`timeout-minutes` bound (added earlier the same day specifically because, before it, every recent
+`ci` run on `main` had instead been cancelled at GitHub's 6-hour absolute ceiling: runs #207,
+#218–#221 all ran the full six hours before being killed). **This was not new, not caused by that
+PR, and not fixed by the timeout bound alone** — the bound only converts a silent 6-hour hang into
+a bounded, visibly-failing one.
+
+**Root cause.** `workflows/orchestrator.py::fan_out` starts each child via
+`workflow.execute_child_workflow(..., retry_policy=retry_policy)`, where `retry_policy` defaults to
+`None` — and neither of the two real callers (`report_workflow.py`, `memory_jobs.py`) ever pass one
+either. `None` does not mean "no retry"; it means Temporal's own default `RetryPolicy()`, which is
+`maximum_attempts=0` (unlimited) with no `non_retryable_error_types`. The test's `_DoublerWorkflow`
+deliberately raises a plain `ValueError` on its poison input (13) to exercise the fan-out's
+documented "a child that fails after its retries is logged and omitted" contract — but with the
+default policy that child retries *forever*. Against the time-skipping test server this is not a
+slow hang; it is a genuine infinite loop that only manifests once a real server is reachable (an
+offline sandbox never gets that far — it skips first), matching the reported symptom exactly.
+
+This is a real production gap, not merely a test artifact: `PublishNoteWorkflow` (the memory-jobs
+fan-out unit) does *not* catch its activity's exhausted-retries error, so once `note_publish_retry()`
+gives up, the unhandled error propagates out of the child workflow's own `run` — straight into this
+same unbounded child-retry default. `report_workflow.py`'s `ReportSectionWorkflow` was never at
+risk (it catches `ActivityError` itself and its `run` never raises), which is exactly why this had
+gone unnoticed: the one caller whose child method *can* raise sits behind a code path (a
+permanently-failing note write) rare enough not to have hit it yet, while the test forces it.
+
+**Fix.** `fan_out` now defaults an unset `retry_policy` to `BAD_DATA_RETRY` (bounded
+`maximum_attempts`, and immediate failure for the already-catalogued bad-data exception types)
+instead of passing `None` straight through — the same policy already used for the sibling
+`resolve_fan_out_limit` local activity in the same function, so no new retry idiom is introduced.
+This restores the fan-out's own documented isolate-and-drop contract for both existing callers, at
+the cost of nothing (`ReportSectionWorkflow` never raises, so the default never engages there) or
+of a small bounded number of retries before a genuinely-poison note is correctly dropped (the
+`PublishNoteWorkflow` case). Verified offline: `tests/test_orchestrator.py`'s non-server tests pass
+(the server-backed fan-out test itself still skips offline, as intended — the fix is confirmed
+against the real time-skipping server via CI, which is reachable there).
