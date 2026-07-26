@@ -370,6 +370,17 @@ class CalculatorSettings(BaseSettings):
     # reproducible; it is part of the cache key so changing it recomputes.
     xtb_method: str = "GFN2-xTB"
     xtb_embed_seed: int = 42
+    # Decimal places coordinates are rounded to before a `calc.structure.Structure` is
+    # hashed. 4 decimals = 0.1 pm, far below any chemical significance, so run-to-run
+    # float noise cannot fork the cache; it is part of the structure id, so changing it
+    # re-addresses every structure and therefore recomputes.
+    xtb_geometry_decimals: int = 4
+    # Wiberg bond order above which a pair of atoms is reported as bonded. 0.5 keeps
+    # real bonds (a single bond is ~1.0) and drops the long-range tail.
+    xtb_bond_order_threshold: float = 0.5
+    # Default number of atoms a site-reactivity ranking reports. Enough to see the
+    # ordering of a ring plus its substituents without flooding the agent's context.
+    xtb_fukui_top_n: int = 15
 
     # xTB-based pKa predictor (plan step 1c.4): pKa from the GFN2-xTB solvated
     # (ALPB) deprotonation energy via a linear calibration pKa = slope*dE + intercept.

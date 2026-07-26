@@ -640,6 +640,20 @@ MAF ships the harness natively (`create_harness_agent` + `TodoProvider`/`AgentMo
 - [x] 1c.4 **pKa via xTB** (`calc/pka.py`): GFN2-xTB ALPB-solvated deprotonation energy of the most
       acidic O-H/S-H site + linear calibration (R²0.93 over 10 acids). Agent tool `predict_pka`. Real tests.
 - [x] 1c.5/1c.6 xTB exposed to the MAF agent as tool `compute_xtb_energy` + `calculation-selection` skill.
+- [x] **X1 xTB capability seams** (`docs/xtb-tools-proposal.md`, D-082): `calc/structure.py`
+      (content-addressed `Structure`) + `calc/xtb_spec.py` (`XtbSpec`, the one cache-key derivation);
+      `calc/xtb.py` ported onto them with its public API and energies unchanged.
+- [x] **X2 properties + site reactivity** (`calc/xtb_props.py`): `compute_electronic_properties`
+      (HOMO/LUMO/gap, dipole, Mulliken charges, Wiberg bond orders — all read from the SCF the energy
+      calculator already ran) and `predict_site_reactivity` (condensed Fukui indices, three single
+      points) + the `reactivity-descriptors` skill. No new dependency.
+- [ ] **X3 geometries + thermochemistry** — `optimize_geometry`, `compute_thermochemistry`,
+      `scan_coordinate`. Adds `ase` (or a scipy L-BFGS over the tblite gradient) and the structure
+      *store* that X1 deliberately left out. The proposal's "main event": the first tools that answer
+      "what does it look like" and "what is ΔG".
+- [ ] **X4–X7** — reaction energies, the `xtb`/`crest` binaries, conformer ensembles, the typed
+      expert escape hatch. See `docs/xtb-tools-proposal.md` §12; X5/X6 are gated on the licensing and
+      image-size decisions in §14, which are the user's, not engineering's.
 - [x] 1c.5b calculator contract landed (see 1c.1); name-registry consciously deferred (D-015).
 - [ ] 1c.7 optional graph note via PR-gate for a *fast* calc result — deferred: the QM path already
       publishes (2.8) and BO recommendations now publish (1d.5); a fast-calc publish waits for a real

@@ -5,6 +5,8 @@ description: >-
   (semiempirical energy vs. predicted property) and reading the result honestly.
 tools:
   - compute_xtb_energy
+  - compute_electronic_properties
+  - predict_site_reactivity
   - predict_pka
   - predict_solubility
 ---
@@ -26,6 +28,12 @@ question and how far to trust it.
   deprotonation energy + calibration; ~1.6 pKa-unit uncertainty). Only O-H/S-H
   acids (carboxylic acids, phenols, alcohols, thiols); it errors on molecules with
   no such site, and N-H/C-H acids are out of scope for now.
+- **Which atom reacts (regioselectivity)** → `predict_site_reactivity` (condensed
+  Fukui indices; three fast single points). Load the `reactivity-descriptors` skill
+  before interpreting the ranking — it ranks sites *within* one molecule only.
+- **Frontier orbitals, dipole, partial charges, bond orders** →
+  `compute_electronic_properties` (one single point). Best used to *compare* related
+  molecules; also covered by `reactivity-descriptors`.
 
 ## Reading results honestly
 
@@ -37,3 +45,7 @@ question and how far to trust it.
 - If a property predictor reports an uncertainty, state it; if the question needs
   higher accuracy than a fast method gives, say so rather than over-claiming (the
   heavier QM/DFT path is deferred and would be the escalation).
+- All of these run on a **single embedded conformer** at a force-field geometry, not
+  a GFN2-optimized one. That is fine for ranking and for comparing related structures;
+  it is not a substitute for an optimized geometry when the question is about a
+  specific conformation or an absolute energy.

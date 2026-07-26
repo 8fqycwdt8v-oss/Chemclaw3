@@ -10,7 +10,9 @@ from importlib.metadata import version
 import pytest
 
 from calc.store import InMemoryStore
-from calc.xtb import XtbInput, _calc_version, run_cached_xtb, run_xtb
+from calc.structure import structure_from_smiles
+from calc.xtb import XtbInput, run_cached_xtb, run_xtb
+from calc.xtb_spec import XtbSpec
 
 
 def test_water_energy_is_physical() -> None:
@@ -104,4 +106,17 @@ def test_calc_version_embeds_rdkit_build() -> None:
     Embedding changes across RDKit releases, so an upgrade must be a cache
     miss, not a silent stale hit.
     """
-    assert version("rdkit") in _calc_version()
+    key = XtbSpec(task="sp").cache_key(structure_from_smiles("CCO"))
+    assert version("rdkit") in key.calc_version
+
+
+def test_energy_key_is_addressed_by_geometry_not_by_seed() -> None:
+    """The single-point key names the structure, so it has no free parameters (X1).
+
+    The embedding seed used to appear in `params`; it is now inside the geometry the
+    key already names, so `params` is empty — the honest statement that a single point
+    is fully determined by its structure and method.
+    """
+    key = XtbSpec(task="sp").cache_key(structure_from_smiles("CCO"))
+    assert key.calc_type == "xtb.sp"
+    assert key.params_hash == XtbSpec(task="sp").cache_key(structure_from_smiles("OCC")).params_hash

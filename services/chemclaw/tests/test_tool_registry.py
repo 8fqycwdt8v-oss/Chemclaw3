@@ -17,10 +17,14 @@ from agents.tool_registry import (
     tool,
 )
 
-# The exact in-process capability tools the old hardcoded list advertised — the registry must
-# reproduce this set, no more and no less (the MCP servers are advertised separately).
+# Every in-process capability tool, spelled out: the registry must reproduce this set, no more and
+# no less (the MCP servers are advertised separately). It started as the old hardcoded list and now
+# grows with each new `@tool`, so adding one is a deliberate, reviewed edit here rather than a
+# silent widening of what the agent can do.
 _EXPECTED_INPROCESS_TOOLS = {
     "compute_xtb_energy",
+    "compute_electronic_properties",
+    "predict_site_reactivity",
     "predict_solubility",
     "predict_pka",
     "submit_qm_job",
