@@ -38,9 +38,18 @@ def test_batches_splits_in_order() -> None:
     assert _batches([1], 3) == [[1]]
 
 
-@workflow.defn
+@workflow.defn(failure_exception_types=[Exception])
 class _DoublerWorkflow:
-    """A trivial child: doubles its input, or raises on the poison value 13."""
+    """A trivial child: doubles its input, or raises on the poison value 13.
+
+    `failure_exception_types=[Exception]` is required (D-093), not decoration: by default the
+    Temporal SDK treats a raw (non-`FailureError`) exception raised in workflow code as a possible
+    *bug* and suspends the workflow via an internal task-failure retry loop that ignores any
+    `RetryPolicy` entirely and never gives up — so the poison input's plain `ValueError` would hang
+    the workflow forever instead of producing the `WorkflowExecutionFailed` the `fan_out` isolation
+    contract (and `orchestrator.BAD_DATA_RETRY` default) actually depends on. This is exactly the
+    CI-only hang `ci.yml`'s own comment described.
+    """
 
     @workflow.run
     async def run(self, value: int) -> int:

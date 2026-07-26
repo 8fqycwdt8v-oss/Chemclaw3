@@ -2654,3 +2654,138 @@ Helm/kubeconform steps (the restructure's Makefile removed the target, and the c
 of the Replit deployment) and `make eval`, whose case-set has three gated failures that predate
 all of this — a gate that is red on arrival trains people to ignore it, and those cases deserve
 their own fix rather than a permanently-failing check.
+
+## D-092 — Process/analytical-development capability research: quick wins, one durable big win, and what was rejected
+
+A deep survey of open-source ML/cheminformatics and fast-ab-initio packages for chemical and
+analytical process development (data-source connectors like LIMS explicitly out of scope), asking
+specifically what could be added through the **existing** connector seams — a fast calculator
+(`calc/` + the calculation store), an MCP capability server, or a Temporal workflow — with no new
+ad hoc wiring. Landed as five additions, all through those exact seams, plus two candidates
+researched and deliberately **not** built.
+
+**Quick wins (fast, cached calculators/tools, zero new dependencies):**
+
+- `predict_developability_profile` (`calc/descriptors.py`) — an RDKit-only physicochemical panel
+  (MW, LogP, TPSA, H-bond counts, rotatable bonds, Fsp3, QED) plus Lipinski/Veber flags. Every
+  descriptor is already computed by RDKit (already a dependency); the only gap was that nothing
+  exposed the panel itself, versus the four descriptors buried inside the ESOL solubility model.
+- `predict_logd` (`calc/logd.py`) — pH-dependent lipophilicity, composing the existing cached
+  `predict_pka` with Crippen LogP via Henderson-Hasselbalch. No new cache entry (the expensive
+  half, xTB pKa, is already memoized); inherits `calc.pka`'s neutral-O-H/S-H-acid domain limit.
+- `estimate_reaction_energy` (`calc/reaction_energy.py`) — a reaction electronic-energy /
+  exotherm screen from cached per-species GFN2-xTB single points, weighted by stoichiometry.
+  Advisory, like the structural hazard screen (D-080) — a flag, never a safety certification.
+- `generate_screening_design` (`bo/engine.py::factorial_design` + `bo/problem.py::ScreeningDesign`)
+  — a full-factorial **categorical** screening design (e.g. every catalyst x solvent x base
+  combination), via BoFire's `FractionalFactorialStrategy` on an all-categorical domain (the
+  non-deprecated replacement for the now-deprecated `FactorialStrategy`). Distinct from
+  `suggest_next_experiment`'s adaptive one-batch-at-a-time proposals. Rejects a continuous
+  parameter outright (gate G4) rather than silently dropping/fractionating it.
+
+**Big win (durable Temporal workflow, zero new dependencies):** `ConformerEnsembleWorkflow`
+(`workflows/conformer_job.py` + `conformer_activities.py` + `conformer_models.py`, pure algorithm
+in `calc/conformer_ensemble.py`) — an RDKit ETKDG conformer ensemble, MMFF-pruned, then
+Boltzmann-weighted over per-conformer GFN2-xTB energies. `calc.xtb` approximates each molecule as
+one rigid seeded geometry; a flexible molecule's solution-phase behavior is more honestly read
+from a population of conformers. An ensemble (tens of xTB single points) is materially heavier
+than the inline fast-calculator's sub-second budget but is pure local CPU work, not a remote HPC
+submission — so it follows `BoCampaignWorkflow`'s shape (local activities on the light
+`background-jobs` queue), not `QMJobWorkflow`'s submit/poll shape. `calc/xtb_engine.py` gained one
+shared primitive (`positions_bohr`, factored out of `geometry`) so the ensemble reads a specific
+already-embedded conformer instead of re-embedding one each time — a DRY refactor, not new science.
+Agent tools `submit_conformer_ensemble_job`/`get_conformer_job_status` mirror `agents.qm_tools`
+exactly (D-002's thin-adapter shape).
+
+**Researched and deliberately not built**, both for the same reason:
+
+- **ML interatomic potentials as a fast-ab-initio surrogate** (ANI-2x/TorchANI, MACE-OFF/MACE-MP).
+  `torchani` was installed and inspected directly in this environment: current releases pull in
+  `huggingface-hub`/`hf-xet`, and `torchani.models.ANI2x()` fetches its pretrained weights from the
+  Hugging Face Hub on first use rather than shipping them in the wheel (this changed from older
+  releases that did bundle weights). That is a runtime external-data dependency, which is exactly
+  what D-089 says this system does not have — `tests/test_no_egress.py` enforces the source-literal
+  form of that rule, but the principle is broader than what a host-literal grep can catch. Revisit
+  only if a deployment vendors the weight files into the container image at build time as an
+  explicit, reviewed infrastructure decision (D-089's own escalation path) — not as a quiet runtime
+  fetch.
+- **Retrosynthesis (AiZynthFinder)**. The `DEFERRED.md` trigger — "after the spine + graph +
+  fingerprint layers exist" — is now met (ECFP4/DRFP fingerprint search shipped in F11). It still
+  is not built: AiZynthFinder's pretrained USPTO models and stock file are fetched via a
+  `download_public_data` step from a public host, the same runtime/deploy-time external-fetch
+  problem as the ML potentials above, for the same reason not solved here. `DEFERRED.md` updated
+  to record the sharpened blocker (not "no fingerprint layer yet", but "no vendoring story").
+
+`bo/engine.py`'s docstring is updated (still "the only module that touches BoFire") to note
+`factorial_design` as a second BoFire-touching adapter alongside the BO strategies, not a
+boundary violation — it lives in the same file specifically to keep that claim true.
+
+## D-093 — A raw exception in a fan-out child suspends as a task failure, not a workflow failure
+
+CI's own `ci.yml` comment already named the symptom: `tests/test_orchestrator.py::test_fan_out_runs_children_in_order_and_isolates_failures`
+"skips wherever the Temporal test-server binary cannot be fetched and hangs where it can" —
+investigated after a PR's CI run was cancelled at the job's 30-minute `timeout-minutes` bound
+(added earlier the same day specifically because, before it, every recent `ci` run on `main` had
+instead been cancelled at GitHub's 6-hour absolute ceiling: runs #207, #218–#221 all ran the full
+six hours before being killed). **This was not new, not caused by that PR, and not fixed by the
+timeout bound alone** — the bound only converts a silent 6-hour hang into a bounded, visibly-failing
+one. Two distinct issues stacked, and only fixing both cleared the hang.
+
+**Issue 1 — the real root cause.** The Temporal Python SDK's safety default: a raw exception raised
+directly in workflow code (not already one of the SDK's own `FailureError` subclasses, e.g. plain
+`raise ValueError(...)`) is *not* treated as a workflow failure by default. It "suspends the
+workflow via task failure" instead (`temporalio.workflow.defn`'s own docstring) — an internal retry
+loop the *worker*, not the server's `RetryPolicy`, drives, with no bound and no
+`non_retryable_error_types` check, on the theory that an unclassified exception might be a code bug
+that a redeploy will fix, not a legitimate business failure. `_DoublerWorkflow` in the fan-out test
+deliberately raises a plain `ValueError` on its poison input (13) — exactly the shape this default
+swallows into an unbounded suspend-and-retry loop, invisible to any `retry_policy` passed to
+`execute_child_workflow` at all. Against the time-skipping test server this is not a slow hang; it
+is a genuine infinite loop (an offline sandbox never gets far enough to hit it — it skips first
+when the test-server binary can't be fetched), matching the reported symptom exactly. Fixed by
+declaring `_DoublerWorkflow` with `@workflow.defn(failure_exception_types=[Exception])`, which is
+what the poison-input test was always implicitly assuming.
+
+**Issue 2 — `fan_out`'s own retry default, found while investigating Issue 1.**
+`workflows/orchestrator.py::fan_out` starts each child via
+`workflow.execute_child_workflow(..., retry_policy=retry_policy)`, where `retry_policy` defaults to
+`None` — and neither real caller (`report_workflow.py`, `memory_jobs.py`) ever passes one either.
+`None` does not mean "no retry"; it means Temporal's own default `RetryPolicy()`
+(`maximum_attempts=0`, unlimited, no `non_retryable_error_types`). Once Issue 1's fix makes the
+poison child's `ValueError` a genuine `WorkflowExecutionFailed`, *this* default is what would make
+the fan-out retry it forever anyway rather than isolating and dropping it as documented. Neither
+production caller was actually at risk from this specific default (`ReportSectionWorkflow` catches
+its activity's error and never raises; `PublishNoteWorkflow`'s uncaught error is an `ActivityError`,
+already a `FailureError`, so Issue 1 doesn't apply to it) — but the default was still wrong relative
+to the fan-out's own stated contract, so it is fixed regardless: an unset `retry_policy` now
+defaults to `BAD_DATA_RETRY` (bounded `maximum_attempts`, immediate failure for the
+already-catalogued bad-data exception types) instead of passing `None` straight through — the same
+policy already used for the sibling `resolve_fan_out_limit` local activity in the same function, so
+no new retry idiom is introduced.
+
+**Verification.** Offline: `tests/test_orchestrator.py`'s non-server tests pass; mypy/ruff clean
+across both changed files. The server-backed fan-out test itself cannot run in this sandbox (the
+Temporal test-server binary host is egress-blocked here) — confirmed instead against the real
+time-skipping server via this repo's own CI, which is reachable there. `fan_out`'s docstring now
+calls out the `failure_exception_types` gotcha directly, since any future child workflow that
+raises a raw exception (rather than an already-wrapped `FailureError`) would reintroduce Issue 1.
+
+## D-094 — CI's `kg-validate` step needs a real (even empty) `knowledge` directory
+
+Found immediately after D-093's fix cleared the fan-out hang: `make kg-validate` then failed
+fast (`notes directory does not exist: knowledge`, exit 1) on the very next CI run. `knowledge` is
+a git-tracked symlink (mode 120000) to `/home/runner/workspace/services/chemclaw-notes-repo/knowledge`
+— an absolute path specific to the Replit workspace layout, deliberately kept as one of the "six
+Replit-only additions" (D-091). It does not resolve on a GitHub Actions runner, or on any other
+checkout; `Path.exists()` on a symlink follows it to the target, so `kg.validate.main()` correctly
+reports the directory as missing and refuses to validate.
+
+Not touched: the committed symlink itself — it is a real, deliberate deployment decision for
+Replit (D-091), and rewriting or removing it here would be an unrelated, out-of-scope change to
+that target. Instead, `.github/workflows/ci.yml` gained one step before `Validate knowledge graph`
+that replaces the broken symlink with a real empty directory *in that checkout only*: `kg-validate`
+against zero notes is a legitimate, already-documented state (BACKLOG.md: "the corpus holds no
+procedure notes yet"), not a special case to work around. Verified locally by reproducing the exact
+CI condition (removing the tracked symlink, recreating an empty directory, running
+`python -m kg.validate`) — exits 0, "OK: knowledge is a valid knowledge graph" — then restored the
+symlink in the working tree before committing, since only the CI step changes, not the tracked path.

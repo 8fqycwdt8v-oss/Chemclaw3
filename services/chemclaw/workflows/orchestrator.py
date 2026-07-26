@@ -54,7 +54,7 @@ async def _run_child(
     id_prefix: str,
     parent_id: str,
     task_queue: str,
-    retry_policy: RetryPolicy | None,
+    retry_policy: RetryPolicy,
 ) -> Any:
     """Start and await one child workflow with a deterministic, unique id."""
     return await workflow.execute_child_workflow(
@@ -77,6 +77,15 @@ async def fan_out(
 ) -> list[Any]:
     """Run each of `inputs` as a `child` workflow, bounded-parallel, returning successful results.
 
+    `child` must actually be able to *fail* for the isolation contract below to mean anything
+    (D-093): the Temporal SDK by default treats a raw exception raised in workflow code as a
+    possible bug and suspends the workflow via an internal task-failure retry loop that ignores
+    `retry_policy` entirely and never gives up, rather than producing a real
+    `WorkflowExecutionFailed`. A child whose own failures are already SDK `FailureError`s (e.g. an
+    uncaught `ActivityError` from its own `execute_activity`, as in `PublishNoteWorkflow`) is fine
+    as-is; a child that raises a plain exception directly needs
+    `@workflow.defn(failure_exception_types=[...])` or it will hang instead of being dropped.
+
     Args:
         child: The child workflow class to start (its `run` method is invoked with one input).
         inputs: One payload per child, run in input order; each must be serializable by the pydantic
@@ -84,8 +93,13 @@ async def fan_out(
         id_prefix: A short, caller-chosen tag for the child ids (`<parent>-<prefix>-<i>`), so a
             child in the Temporal UI reads as e.g. `...-section-2`. Required — ids must be clear.
         task_queue: Queue the children run on; defaults to the light `background-jobs` queue.
-        retry_policy: Per-child retry policy (durability + bounded attempts). None uses Temporal's
-            default child retry.
+        retry_policy: Per-child retry policy. None defaults to `BAD_DATA_RETRY` — *not* Temporal's
+            own default, which has `maximum_attempts=0` (unlimited) and no non-retryable types, so
+            a child that fails deterministically (a bad-data error, or any other exception once its
+            own bounded activity retries are exhausted) would retry forever and the fan-out could
+            never isolate-and-drop it as documented below (D-093: `_DoublerWorkflow`'s poison input
+            hung the fan-out test indefinitely against a real server — the bug this default fixes).
+            Pass an explicit policy only when a child genuinely needs a different bound.
         max_parallel: Concurrency bound; defaults to `orchestrator_max_parallel_children`,
             resolved via a local activity so the recorded value — not a live settings read —
             shapes the batches, keeping replay deterministic across config changes.
@@ -95,6 +109,9 @@ async def fan_out(
         retries is logged and omitted (D-030: reject-and-continue), never restarting its siblings.
     """
     queue = task_queue if task_queue is not None else settings.background_task_queue
+    # Bounded by default (D-093) — see the `retry_policy` arg doc for why Temporal's own
+    # unlimited-retry default would break the isolate-and-drop contract below.
+    child_retry_policy = retry_policy if retry_policy is not None else BAD_DATA_RETRY
     if max_parallel is not None:
         limit = max_parallel
     else:
@@ -121,7 +138,7 @@ async def fan_out(
                     id_prefix=id_prefix,
                     parent_id=parent_id,
                     task_queue=queue,
-                    retry_policy=retry_policy,
+                    retry_policy=child_retry_policy,
                 )
                 for index, payload in batch
             ),
