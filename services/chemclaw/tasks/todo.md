@@ -63,9 +63,14 @@ filled it from a snapshot of `16b63c2`, dropping everything merged in
 
 Three of the five reported issues were real in the repo they were filed against.
 Issue 2 was real but filed against the UI when the missing code was the backend's,
-and issue 3 was already fixed — both established by reading `server/routes.ts`
-against `service/app.py` rather than taking the reports at face value. Net effect:
-the UI needed one line changed, and three of the four code changes landed here.
+and issue 3 read as stale — both established by reading `server/routes.ts` against
+`service/app.py` rather than taking the reports at face value.
+
+Issue 3 then changed answer underneath the task. The approvals routes *did* exist
+when I checked, so the report was wrong when filed; the restructure landed mid-task
+and removed them, so it is right against `main` as it stands. The restore brings
+them back. Worth recording as a lesson: "already fixed" is a claim about a specific
+tree, and it expires.
 
 The azide fix went wider than the report. The reported symptom was the bare anion,
 but the cause is that `organic-azide` and `acyl-azide` both require a carbon
@@ -95,6 +100,23 @@ and the naive `owner = NULL` form was confirmed to return nothing — the bug th
 the change and re-running: identical on the clean baseline. `hazard_flag_recall`
 stays 1.0, now 11/11 with the new rule pinned.
 
-Found but not fixed (outside the reported scope): `package.json` in the UI declares
-`check:openapi` -> `scripts/check-openapi.mjs`, and that file does not exist, so the
-script fails for anyone who runs it.
+The UI fix was also only half of issue 1. `main` there had removed `happy-dom` *and*
+`vitest` as a Replit workaround, so pinning happy-dom alone would have left `npm test`
+failing on a missing binary. Both are restored, and the lockfile is taken from the
+npmjs-resolved side — `main`'s was regenerated behind Replit's package firewall (157
+`resolved` URLs at `package-firewall.replit.local`, 116 integrity hashes differing
+from the npmjs tarballs) and cannot install anywhere else.
+
+Left deliberately undone, and flagged rather than silently skipped:
+
+- `deploy.yml` (image build, Helm gate, credentialed rollout) is restored *in tree*
+  under `services/chemclaw/.github/` but not re-enabled at the repo root. Its rollout
+  job pushes to a registry with secrets; turning that back on is not a call to make
+  unprompted while reconciling a regression.
+- `make eval`'s three pre-existing gated failures (`pharma-solvent-heavy`
+  e_factor/pmi, `retrieval-cross-coupling-literal-miss` recall) are left failing and
+  kept out of the root CI gate. They predate all of this — confirmed by stashing and
+  re-running on the clean baseline — and deserve their own fix rather than a check
+  that is red on arrival.
+- `package.json` in the UI declares `check:openapi` -> `scripts/check-openapi.mjs`,
+  and that file does not exist, so the script fails for anyone who runs it.
