@@ -98,3 +98,37 @@ correction rather than an accommodation. The good sign afterwards: **no skill ch
 **Rule:** before relocating a capability, grep for every layer that refers to it *by name*
 (validators, profiles, registries, docs, examples) and ask whether that layer should care where it
 lives. Usually it should not, and the migration is the moment that assumption becomes visible.
+
+
+## A bad fit can be a real finding — split the class before recalibrating (2026-07-26, X11)
+
+The task was "make basic amines work". The first fit over 20 amines gave R² 0.50 and ρ 0.28, and
+the reflex was to reach for a better calibration. Splitting the set by nitrogen class instead gave
+ρ **1.000** for aromatic/aryl N and ρ **−0.17** for aliphatic — one class the most accurate thing
+in this system, the other carrying no information at all. A single fit had been averaging those
+into a mediocre number that would have shipped for both.
+
+The diagnosis is what made the refusal defensible rather than cautious: gas-phase GFN2 reproduces
+the experimental proton affinity order exactly, ALPB reverses it, and the true aqueous order is
+non-monotonic — so no linear recalibration can recover it, and the ceiling is the solvation model
+rather than the fit. That also disproved the plan's stated route (a CREST protomer search), which
+addresses structure and would not have touched a solvation failure.
+
+**Rule:** when a calibration fits poorly across a chemical class, look for a sub-class boundary
+before looking for a better functional form, and drive the failing half to a *mechanism* rather
+than a residual. A refusal you can explain is a deliverable; a mediocre number for everything is
+not. And check whether the diagnosis invalidates the plan's proposed fix before building it.
+
+## Symmetric physics does not make a function symmetric (2026-07-26, X11)
+
+`run_cached_interaction` keyed on a combined two-molecule structure, and its docstring asserted
+that A-with-B and B-with-A "build the same arrangement" and share one cache entry. They do not:
+`_combine` holds the first monomer at the origin and offsets the second along +x, so swapping the
+arguments negates the intermolecular vector while leaving each monomer's own orientation alone —
+not a rigid motion, so a different geometry and a different key. Two minutes-long searches for one
+number. I had written the claim from the physics (the interaction of A and B is symmetric) rather
+than from the code, and only a test that asserted it caught it.
+
+**Rule:** when a quantity is symmetric in its inputs, do not assume the function computing it is.
+Assert the invariant in a test at the cheapest layer that carries it — and if it fails, canonicalize
+the input at the entry point rather than weakening the docstring to match the bug.

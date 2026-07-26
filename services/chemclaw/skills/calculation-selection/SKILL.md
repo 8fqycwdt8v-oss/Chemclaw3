@@ -33,12 +33,14 @@ calculation; this skill assumes that decision is already made.
   comparisons of related structures.
 - **Aqueous solubility** → `predict_solubility` (fast property model; reports an
   uncertainty — surface it).
-- **pKa of an acidic O-H/S-H site** → `predict_pka` (GFN2-xTB solvated
-  deprotonation energy + calibration; ~1.6 pKa-unit uncertainty). Only O-H/S-H
-  acids (carboxylic acids, phenols, alcohols, thiols); it errors on molecules with
-  no such site, and N-H/C-H acids are out of scope for now. Load
-  `ionization-and-partitioning` before using the value for anything — basic amines are
-  unsupported, and individual predictions miss by up to two units.
+- **pKa** → `predict_pka` (GFN2-xTB solvated protonation/deprotonation energy +
+  calibration). Two domains with different accuracy, and the tool says which one it
+  used: **O-H/S-H acids** (carboxylic acids, phenols, alcohols, thiols; ~1.6-unit
+  uncertainty) and the **conjugate-acid pKa of aromatic or aryl nitrogen** (pyridines,
+  azoles, anilines; ±1.0, and the more accurate half). It **refuses aliphatic amines**
+  and errors on a molecule with neither site; N-H/C-H acids are out of scope. Load
+  `ionization-and-partitioning` before using the value for anything — an acid site wins
+  silently over a basic one, and individual predictions miss by up to two units.
 - **Which atom reacts (regioselectivity)** → `predict_site_reactivity` (condensed
   Fukui indices; three fast single points). Load the `reactivity-descriptors` skill
   before interpreting the ranking — it ranks sites *within* one molecule only.

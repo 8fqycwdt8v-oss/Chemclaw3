@@ -6,15 +6,16 @@ flexible molecule that is a shape, not the molecule. CREST searches the conforma
 space by metadynamics and returns the ensemble with its populations, which is what turns
 "the free energy of a conformer" into "the free energy of a compound".
 
-Three searches, one binary:
+Four searches, one binary:
 
 - **conformers** — the ensemble and its Boltzmann populations. Measured on n-butane: two
   unique conformers, the anti at 59% — the textbook answer.
 - **tautomers** — enumerate and rank tautomers, which is the one question in this system
   where getting it wrong silently invalidates *every* downstream number, because a pKa,
   a Fukui ranking and a reaction energy all describe whichever tautomer was drawn.
-- **protomers** — where a molecule protonates or deprotonates, ranked. The structural
-  half of the pKa question that the current O-H/S-H-only calibration cannot reach.
+- **protomers** — where a molecule protonates or deprotonates, ranked.
+- **complex** (`--nci`) — how *two* molecules associate. The only route in this system to
+  a question about a pair rather than a species (`calc.complexes`).
 
 **Licensing, stated once because it is a real decision and not an engineering one.**
 CREST is GPL-3.0. It is invoked here as a separate process over files, never linked, so
@@ -43,12 +44,20 @@ from calc.xtb_cli import CliError, _from_xyz, _safe, _to_xyz
 from chemclaw.config import settings
 
 # What to search for. Each is a different CREST run mode over the same machinery.
-CrestSearch = Literal["conformers", "tautomers", "protomers", "deprotomers"]
+# Searches over **one** molecule. Separate from the union below because the agent-facing
+# ensemble tool takes exactly these — a complex search needs a second molecule, so it is a
+# different tool rather than a fifth option on this one.
+EnsembleSearch = Literal["conformers", "tautomers", "protomers", "deprotomers"]
+CrestSearch = Literal["conformers", "tautomers", "protomers", "deprotomers", "complex"]
 _SEARCH_FLAGS: dict[CrestSearch, list[str]] = {
     "conformers": [],
     "tautomers": ["--tautomerize"],
     "protomers": ["--protonate"],
     "deprotomers": ["--deprotonate"],
+    # Non-covalent mode: adds a logfermi wall potential around the pair, without which a
+    # metadynamics search simply lets two molecules drift apart instead of sampling how
+    # they bind (`calc.complexes`).
+    "complex": ["--nci"],
 }
 
 # How hard to search. `quick` trades completeness for wall clock and is the right default
@@ -75,6 +84,7 @@ _ENSEMBLE_FILES: dict[CrestSearch, tuple[str, ...]] = {
     "tautomers": ("tautomers.xyz", "crest_conformers.xyz"),
     "protomers": ("protomers.xyz", "crest_conformers.xyz"),
     "deprotomers": ("deprotonated.xyz", "crest_conformers.xyz"),
+    "complex": ("crest_conformers.xyz",),
 }
 
 

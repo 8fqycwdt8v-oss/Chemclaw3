@@ -26,6 +26,7 @@ _EXPECTED_INPROCESS_TOOLS = {
     "compute_reaction_energy",
     "compare_solvents",
     "sample_conformers",
+    "compute_interaction_energy",
     "run_xtb_task",
     "submit_qm_job",
     "get_job_status",

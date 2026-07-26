@@ -194,3 +194,50 @@ The one non-mechanical change was the validator, and it was a correction rather 
 accommodation: a skill declaring `predict_pka` is declaring a capability, and it should not care
 which process answers. Widening the lookup without weakening it (an invented name still fails) is
 what makes the transport a deployment decision.
+
+## X11 — two molecules together, and the amine question the measurement re-scoped
+
+Goal (the user's, stated directly): "leave X10 to backlog. However implement the fix for basic
+amine and NCI, make it fully operational." Both were the two halves of the X11 backlog entry.
+
+### Build
+
+- [x] `calc/complexes.py` — `ComplexSpec`/`InteractionResult`/`compute_interaction`, over CREST
+      `--nci` plus three optimizations. Interaction energy as a difference of **relaxed** species,
+      so the deformation cost of binding is included rather than defined away.
+- [x] `calc/pka.py` extended for bases: protomer enumeration in RDKit, most stable cation defines
+      the conjugate acid, separate calibration, `site: "acid" | "base"` on the result.
+- [x] `compute_interaction_energy` in `agents/calc_tools.py`, with the same cost routing as the
+      other minute-scale tools (D-087) — it defers to Temporal above the inline budget.
+- [x] `ComplexJobSpec` through `workflows/models.py` + `xtb_activities.py`, so it is durable.
+- [x] `skills/molecular-association/SKILL.md`; `ionization-and-partitioning` rewritten around the
+      measured two-class result; `calculation-selection` and `degradation-liabilities` corrected.
+- [x] Tests: `tests/test_complexes.py` (CCSD(T)/CBS references, pair ordering, cache) and the base
+      half of `tests/test_pka.py` (in-sample, held-out, the refusal, acid precedence).
+
+### What the measurement changed about the plan
+
+The plan said `--protonate`/`--deprotonate` was how U2 (basic amines) gets solved. It was not.
+Fitting 20 experimental amines split the class in two, and the split is electronic rather than
+structural: **aromatic and aryl nitrogen calibrates to Spearman 1.000** (RMSE 0.17 — better than
+this system's acid calibration), while **aliphatic amines rank at -0.17**, which is no ranking
+ability at all. A protomer *search* would not have moved that, because the failure is solvation:
+gas-phase GFN2 gets the proton affinity order exactly right, ALPB reverses it, and the truth is
+non-monotonic. So half the goal shipped and half is a refusal with a diagnosis (D-091), and the
+CREST structural route was left unbuilt rather than built because the plan named it.
+
+Two things the build itself taught, both caught by tests rather than by review:
+
+- **Geometry policy is not free for bases.** MMFF geometries give ρ 0.893, GFN2-optimized ones
+  1.000. Protonation pyramidalizes a nitrogen; relaxing it is doing real work, not polishing. The
+  acid path keeps its own validated policy — refitting it is a separate decision.
+- **`_combine` is not symmetric**, so A-with-B and B-with-A keyed to different cache entries and
+  ran the same minutes-long search twice. `_ordered` canonicalizes the pair at the entry points;
+  both the asymmetry and the invariant it forces are pinned by tests.
+
+### X11 review
+
+Green. The honest summary of the result is that the interesting half is the part that does *not*
+ship: refusing aliphatic amines is worth more than a number would have been, because ρ = -0.17
+carries no information while looking exactly like a value that does. The skill says so in the
+same terms, so the agent declines rather than reaching for a substitute.

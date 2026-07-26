@@ -117,12 +117,23 @@ decision while looking entirely plausible. So the honest rule is: **rank with it
 set a pH with it.** Both halves are now asserted in `tests/test_pka.py`, so a future
 recalibration cannot quietly break the claim the skill rests on.
 
-**The gap worth naming.** Most pharmaceutical APIs are **basic amines**, and pKa v1
-covers only neutral O-H/S-H acids. The tool fails loudly rather than guessing (good),
-but it means the single most common pKa question in pharma is currently unanswerable.
-Extending to N-H acids and to protonated bases is a bigger value step than most of §3 —
-it is a calibration and domain question, not a new capability, and it is not currently on
-the roadmap. **Recommend raising its priority.**
+**The gap worth naming — half closed by X11 (D-091).** Most pharmaceutical APIs are
+**basic amines**, and pKa v1 covered only neutral O-H/S-H acids. Extending to protonated
+bases was recommended here as a calibration question rather than a new capability. It was
+done, and the calibration answered it in two halves rather than one:
+
+- **Aromatic and aryl nitrogen** (pyridines, imidazoles, azoles, anilines) predicts at
+  Spearman **1.000**, R² 0.993, RMSE 0.17 over pKa 1.0–6.95 — *better* than the acid
+  calibration this section describes — and ships with ±1.0.
+- **Aliphatic amines** rank at **−0.17** and are refused. The cause is the solvation
+  model, not the fit: gas-phase GFN2 reproduces the experimental proton affinity order
+  exactly, ALPB reverses it, and the true aqueous order is non-monotonic because it is set
+  by the ammonium ion's hydrogen bonding to water. No linear recalibration recovers that.
+
+So the most common pharma pKa question is now partly answerable and, where it is not,
+declined with a reason. Closing the remaining half needs explicit-solvent or
+cluster-continuum treatment — a genuine new capability, not a recalibration. N-H acids
+remain out of scope.
 
 ---
 

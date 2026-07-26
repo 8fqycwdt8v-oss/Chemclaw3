@@ -55,7 +55,8 @@ def backend_version(backend: Backend) -> str:
 # minimum; `hess` is the finite-difference Hessian and the thermochemistry over it;
 # `scan` is a relaxed scan along one internal coordinate.
 # `conformers` is a CREST ensemble search (plan X6, `calc.conformers`).
-XtbTask = Literal["sp", "properties", "fukui", "opt", "hess", "scan", "conformers"]
+# `complex` is a CREST non-covalent search over two molecules (plan X11).
+XtbTask = Literal["sp", "properties", "fukui", "opt", "hess", "scan", "conformers", "complex"]
 
 
 class XtbSpec(BaseModel):

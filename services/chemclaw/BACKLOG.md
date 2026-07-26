@@ -683,12 +683,16 @@ MAF ships the harness natively (`create_harness_agent` + `TodoProvider`/`AgentMo
       X5-X7. There is no saddle-point search, so every "how fast" question is unanswerable and a
       relaxed-scan maximum is a sketch of a barrier rather than one. `xtb --path` (the reaction-path
       finder) and CREST's transition-state tooling are the obvious routes.
-- [ ] **X11 CREST's unexploited searches** — `--protonate`/`--deprotonate` is the structural half
-      of the pKa question and the way **U2 (basic amines) actually gets solved**, rather than by
-      re-fitting the O-H calibration; `--nci` samples *complexes*, the only route in the system to
-      a question about two molecules together (API + excipient, substrate + catalyst). Both are
-      wired at the CLI layer already; neither has a calculator or a skill.
-      See `docs/xtb-skill-catalogue.md` §9 for the seven skills these unlock.
+- [x] **X11 CREST's unexploited searches** (D-091): `--nci` is now `calc.complexes` +
+      `compute_interaction_energy` + the `molecular-association` skill — the only route in the
+      system to a question about two molecules together, validated against CCSD(T)/CBS to a few
+      tenths of a kcal/mol. **U2 (basic amines) is half solved and half refused**, which the
+      measurement decided rather than the plan: aromatic/aryl nitrogen calibrates to Spearman
+      **1.000** (RMSE 0.17, better than the acid path) and ships; aliphatic amines rank at
+      **-0.17** and are refused, because a continuum solvent cannot represent the ammonium ion's
+      hydrogen bonding to water and no linear recalibration recovers a non-monotonic relationship.
+      The `--protonate`/`--deprotonate` *structural* route was not needed for that split and is
+      left unbuilt. See `docs/xtb-skill-catalogue.md` §9 for the skills these unlock.
 
 ### Ranked out of the xTB use-case review (`docs/xtb-use-cases.md`) — above X3 in value
 

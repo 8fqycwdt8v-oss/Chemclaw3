@@ -10,6 +10,7 @@ from typing import Annotated, Literal
 
 from pydantic import BaseModel, Field
 
+from calc.complexes import InteractionResult
 from calc.conformers import ConformerEnsemble
 from calc.reaction import ReactionEnergyResult, SolventComparisonResult
 from calc.xtb_scan import ScanResult
@@ -151,12 +152,22 @@ class EnsembleJobSpec(BaseModel):
     effort: Literal["quick", "normal", "extensive"] = "quick"
 
 
+class ComplexJobSpec(BaseModel):
+    """A durable non-covalent complex search over two molecules (xTB plan X11)."""
+
+    kind: Literal["complex"] = "complex"
+    smiles_a: str = Field(min_length=1)
+    smiles_b: str = Field(min_length=1)
+    solvent: str | None = None
+    effort: Literal["quick", "normal", "extensive"] = "quick"
+
+
 # What an xTB job may be asked to do, discriminated on `kind`. A closed, typed union
 # rather than a free-form request is the same boundary rule the proposal sets for the
 # expert escape hatch: a model-authored payload can select among calculations we
 # defined, and can never describe one we did not.
 XtbJobSpec = Annotated[
-    ReactionJobSpec | SolventScreenJobSpec | ScanJobSpec | EnsembleJobSpec,
+    ReactionJobSpec | SolventScreenJobSpec | ScanJobSpec | EnsembleJobSpec | ComplexJobSpec,
     Field(discriminator="kind"),
 ]
 
@@ -202,6 +213,7 @@ class XtbJobResult(BaseModel):
     solvents: SolventComparisonResult | None = None
     scan: ScanResult | None = None
     ensemble: ConformerEnsemble | None = None
+    interaction: InteractionResult | None = None
 
 
 class JobStatus(BaseModel):

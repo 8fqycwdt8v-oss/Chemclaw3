@@ -16,8 +16,9 @@ import numpy as np
 
 from agents.tool_registry import tool
 from agents.xtb_job_tools import DeferredJob, defer_to_job
+from calc.complexes import ComplexSpec, InteractionResult, run_cached_interaction
 from calc.conformers import ConformerEnsemble, ConformerSpec, run_cached_ensemble
-from calc.crest_cli import CrestEffort, CrestSearch
+from calc.crest_cli import CrestEffort, EnsembleSearch
 from calc.postgres_store import default_store
 from calc.reaction import (
     ReactionEnergyResult,
@@ -35,7 +36,13 @@ from calc.xtb_cost import (
 )
 from calc.xtb_scan import ScanResult, ScanSpec, run_cached_scan
 from chemclaw.config import settings
-from workflows.models import EnsembleJobSpec, ReactionJobSpec, ScanJobSpec, SolventScreenJobSpec
+from workflows.models import (
+    ComplexJobSpec,
+    EnsembleJobSpec,
+    ReactionJobSpec,
+    ScanJobSpec,
+    SolventScreenJobSpec,
+)
 
 
 @tool
@@ -199,9 +206,63 @@ async def compare_solvents(
 
 
 @tool
+async def compute_interaction_energy(
+    smiles_a: str,
+    smiles_b: str,
+    solvent: str | None = None,
+    effort: CrestEffort = "quick",
+) -> InteractionResult | DeferredJob:
+    """Find how two molecules bind to each other, and how strongly (GFN2-xTB + CREST).
+
+    The only tool here that answers a question about **two molecules together**. Use it
+    for an API with an excipient, a substrate with a catalyst or additive, a solute with
+    a solvent molecule, a host with a guest — anything where the question is association
+    rather than reaction. It searches binding modes rather than assuming one, so the
+    answer describes how the pair actually arranges itself.
+
+    Read the number with three limits. It is an **energy, not a free energy**: two
+    molecules becoming one costs entropy, and that term is not included — a favourable
+    interaction energy does not by itself mean the complex exists at room temperature,
+    and for weak pairs the missing term is comparable to the whole interaction. The
+    search is **stochastic**, so a mode that was not sampled is not reported. And it is
+    one isolated pair in a continuum: no bulk, no competing solvent, no stoichiometry
+    beyond two.
+
+    Validated against high-level reference values: the water dimer comes out at −4.97
+    against a reference −5.0 kcal/mol, ammonia dimer −2.9 against −3.1, methane dimer
+    −0.4 against −0.5. Treat magnitudes of a few kcal/mol as meaningful and differences
+    below ~0.5 as noise.
+
+    Args:
+        smiles_a: The first molecule as a SMILES string.
+        smiles_b: The second molecule as a SMILES string.
+        solvent: Optional implicit solvent name; omit for gas phase.
+        effort: "quick" for screening; raise it when a missed binding mode matters.
+
+    Returns:
+        The interaction energy in kcal/mol (negative = bound), how many binding modes
+        were found, and the geometry of the best one.
+    """
+    # Priced on the *pair*, not on the two monomers summed. The search runs over the
+    # combined system, and the cost model's exponent is ~3 (D-087) — so two 30-atom
+    # partners cost 60^3, roughly four times the 2 x 30^3 that summing them predicts.
+    # Under-pricing here would run a minutes-long search inline instead of deferring it.
+    predicted = ensemble_seconds(f"{smiles_a}.{smiles_b}")
+    if exceeds_inline_budget(predicted):
+        return await defer_to_job(
+            ComplexJobSpec(smiles_a=smiles_a, smiles_b=smiles_b, solvent=solvent, effort=effort),
+            predicted,
+        )
+    result, _ = await run_cached_interaction(
+        default_store(), smiles_a, smiles_b, ComplexSpec(solvent=solvent, effort=effort)
+    )
+    return result
+
+
+@tool
 async def sample_conformers(
     smiles: str,
-    search: CrestSearch = "conformers",
+    search: EnsembleSearch = "conformers",
     solvent: str | None = None,
     effort: CrestEffort = "quick",
 ) -> ConformerEnsemble | DeferredJob:

@@ -41,7 +41,7 @@ from typing import Literal
 from pydantic import BaseModel, Field
 
 from calc import crest_cli
-from calc.crest_cli import CrestEffort, CrestSearch
+from calc.crest_cli import CrestEffort, EnsembleSearch
 from calc.store import ResultStore, run_cached
 from calc.structure import Structure
 from calc.xtb_spec import XtbSpec
@@ -60,7 +60,7 @@ class ConformerSpec(XtbSpec):
     """
 
     task: Literal["conformers"] = "conformers"
-    search: CrestSearch = "conformers"
+    search: EnsembleSearch = "conformers"
     effort: CrestEffort = Field(default_factory=lambda: settings.crest_effort)
     temperature_k: float = Field(default_factory=lambda: settings.xtb_thermo_temperature_k, gt=0)
     # How many members to report. The search commonly finds dozens; the ones that matter
@@ -93,7 +93,7 @@ class ConformerEnsemble(BaseModel):
 
     smiles: str | None
     method: str
-    search: CrestSearch
+    search: EnsembleSearch
     effort: CrestEffort
     solvent: str | None
     temperature_k: float

@@ -514,6 +514,14 @@ class CalculatorSettings(BaseSettings):
     pka_calibration_slope: float = 0.28733
     pka_calibration_intercept: float = -29.3116
     pka_uncertainty: float = 1.6
+    # Conjugate-acid pKa of a **base**, its own calibration (X11). Fitted over seven
+    # aromatic/aryl-nitrogen references spanning pKa 1.0-6.95: Spearman 1.000, R^2 0.993,
+    # in-sample RMSE 0.17. The reported uncertainty is deliberately far above that RMSE —
+    # a two-parameter fit on seven points does not support a tighter out-of-sample claim.
+    # Aliphatic amines are refused rather than calibrated; see `calc.pka`.
+    pka_base_calibration_slope: float = 0.241396
+    pka_base_calibration_intercept: float = -22.1843
+    pka_base_uncertainty: float = 1.0
     # Reported log-S RMSE of the Reizman-descriptor solubility model (calc step 1c.3):
     # model uncertainty attached to every prediction, config like `pka_uncertainty`.
     solubility_rmse_log: float = 0.75

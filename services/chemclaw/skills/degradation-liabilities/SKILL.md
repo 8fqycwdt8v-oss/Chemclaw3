@@ -38,7 +38,7 @@ for and the conditions can be chosen to provoke it.
   charges can indicate how electrophilic a given carbonyl is, which helps *rank* several
   candidates within one molecule. `predict_pka` matters here because ionization changes both
   the rate and the mechanism — but read `ionization-and-partitioning` first, and remember it
-  does not cover basic amines.
+  refuses aliphatic amines (aromatic nitrogen it does cover).
 - **Photolysis and thermal degradation.** Largely outside what these tools describe. Say so and
   point at the study rather than guessing.
 
