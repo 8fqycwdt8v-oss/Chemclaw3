@@ -77,6 +77,15 @@ async def fan_out(
 ) -> list[Any]:
     """Run each of `inputs` as a `child` workflow, bounded-parallel, returning successful results.
 
+    `child` must actually be able to *fail* for the isolation contract below to mean anything
+    (D-093): the Temporal SDK by default treats a raw exception raised in workflow code as a
+    possible bug and suspends the workflow via an internal task-failure retry loop that ignores
+    `retry_policy` entirely and never gives up, rather than producing a real
+    `WorkflowExecutionFailed`. A child whose own failures are already SDK `FailureError`s (e.g. an
+    uncaught `ActivityError` from its own `execute_activity`, as in `PublishNoteWorkflow`) is fine
+    as-is; a child that raises a plain exception directly needs
+    `@workflow.defn(failure_exception_types=[...])` or it will hang instead of being dropped.
+
     Args:
         child: The child workflow class to start (its `run` method is invoked with one input).
         inputs: One payload per child, run in input order; each must be serializable by the pydantic
