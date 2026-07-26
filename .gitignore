@@ -47,3 +47,13 @@ Thumbs.db
 # Replit
 .cache/
 .local/
+
+# Python — the repo hosts a Python service (services/chemclaw/), and this file was
+# written for the Node side only, so bytecode and virtualenvs showed up as untracked
+# noise at any path outside that service's own .gitignore.
+__pycache__/
+*.py[cod]
+.venv/
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/

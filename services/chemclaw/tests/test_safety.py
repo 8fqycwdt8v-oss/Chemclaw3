@@ -20,7 +20,7 @@ from safety.screen import SafetyRulesError, at_least, screen_reaction, screen_st
 # One textbook example per structural rule — the same molecules the eval case pins.
 _HAZARDOUS = {
     "organic-azide": "CCCN=[N+]=[N-]",  # 1-azidopropane
-    "inorganic-azide": "[Na+].[N-]=[N+]=[N-]",  # sodium azide
+    "non-carbon-azide": "[Na+].[N-]=[N+]=[N-]",  # sodium azide
     "acyl-azide": "CC(=O)N=[N+]=[N-]",  # acetyl azide
     "diazo": "CC(=[N+]=[N-])C(=O)OC",  # methyl diazoacetate
     "diazonium": "c1ccccc1[N+]#N",  # benzenediazonium
@@ -58,21 +58,6 @@ def test_each_rule_fires_on_its_reference_molecule(rule_id: str, smiles: str) ->
     assert rule_id in {flag.rule_id for flag in result.flags}
 
 
-def test_organic_and_inorganic_azide_rules_are_disjoint() -> None:
-    """`organic-azide` and `inorganic-azide` never both fire on the same structure.
-
-    Regression guard for a live e2e finding: the bare azide anion (as in sodium azide) went
-    unflagged entirely, because `organic-azide`'s SMARTS requires the azide's terminal nitrogen
-    to be attached to a carbon. The new `inorganic-azide` rule is written to match only the free
-    ionic form (both terminal nitrogens unsubstituted) so it complements rather than duplicates
-    the existing rule.
-    """
-    organic = screen_structure(_HAZARDOUS["organic-azide"])
-    inorganic = screen_structure(_HAZARDOUS["inorganic-azide"])
-    assert {f.rule_id for f in organic.flags} == {"organic-azide"}
-    assert {f.rule_id for f in inorganic.flags} == {"inorganic-azide"}
-
-
 @pytest.mark.parametrize("smiles", _BENIGN)
 def test_ordinary_chemistry_raises_no_flag(smiles: str) -> None:
     """Common solvents, reagents and products stay quiet — a screen that cries wolf is ignored."""
@@ -86,6 +71,39 @@ def test_a_flag_carries_its_explanation_and_citation() -> None:
     assert "azide" in flag.explanation.lower()
     assert flag.citation  # every rule rests on a citable source, like every graph claim
     assert flag.matched == _HAZARDOUS["organic-azide"]
+
+
+@pytest.mark.parametrize(
+    ("smiles", "reagent"),
+    [
+        ("[N-]=[N+]=[N-]", "bare azide anion"),
+        ("[Na+].[N-]=[N+]=[N-]", "sodium azide"),
+        ("[K+].[N-]=[N+]=[N-]", "potassium azide"),
+        ("[NH4+].[N-]=[N+]=[N-]", "ammonium azide"),
+        ("N=[N+]=[N-]", "hydrazoic acid"),
+        ("C[Si](C)(C)N=[N+]=[N-]", "trimethylsilyl azide"),
+        ("O=P(OC1=CC=CC=C1)(OC1=CC=CC=C1)N=[N+]=[N-]", "diphenylphosphoryl azide"),
+    ],
+)
+def test_azide_not_bonded_to_carbon_is_flagged(smiles: str, reagent: str) -> None:
+    """Every azide that is not carbon-bound flags, not just the organic ones.
+
+    Sodium azide is one of the most-reached-for reagents in the building, and it screened *clean*:
+    `organic-azide` and `acyl-azide` both open on `[#6]`, so a salt matched neither and the screen
+    reported nothing — which a reader takes as "no hazard found" on a compound that is acutely
+    toxic and liberates explosive HN3 on contact with acid. The same hole swallowed hydrazoic acid
+    and the silyl/phosphoryl azide transfer reagents, so each is pinned here by name.
+    """
+    flags = {flag.rule_id for flag in screen_structure(smiles).flags}
+    assert "non-carbon-azide" in flags, f"{reagent} screened clean"
+
+
+@pytest.mark.parametrize("smiles", ["CCCN=[N+]=[N-]", "CC(=O)N=[N+]=[N-]"])
+def test_carbon_bound_azides_do_not_also_fire_the_non_carbon_rule(smiles: str) -> None:
+    """The new rule stays off carbon-bound azides — two flags for one motif is noise, not safety."""
+    flags = {flag.rule_id for flag in screen_structure(smiles).flags}
+    assert "non-carbon-azide" not in flags
+    assert flags & {"organic-azide", "acyl-azide"}  # still caught by the rule that owns them
 
 
 def test_an_empty_result_never_says_safe() -> None:

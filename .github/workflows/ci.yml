@@ -1,0 +1,67 @@
+# CI gate: lint + type + test on every push and PR. A red run blocks merge —
+# this is the automated half of the CLAUDE.md "green before done" rule.
+#
+# Lives at the repository root because that is the only place GitHub Actions reads
+# workflows from. The Python service moved under `services/chemclaw/` in the Replit
+# restructure, which left its workflow at `services/chemclaw/.github/workflows/ci.yml`
+# where nothing executes it — so the repo had no CI at all. This runs that same gate
+# from the service directory; the in-service copy stays as the service's own record.
+name: ci
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+
+defaults:
+  run:
+    working-directory: services/chemclaw
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    # A hung test must fail this job, not occupy a runner until GitHub's 6-hour ceiling. The suite
+    # currently has one such test — tests/test_orchestrator.py::test_fan_out_runs_children_in_order
+    # _and_isolates_failures, which skips wherever the Temporal test-server binary cannot be fetched
+    # and hangs where it can — so without a bound the very first run of this workflow would never
+    # report. The whole gate takes minutes, so this ceiling only ever trips on a genuine hang.
+    timeout-minutes: 30
+    # Real Postgres so the calculation-store and session-store integration tests run (not skip).
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_USER: chemclaw
+          POSTGRES_PASSWORD: chemclaw
+          POSTGRES_DB: chemclaw
+        ports:
+          - "5432:5432"
+        options: >-
+          --health-cmd "pg_isready -U chemclaw"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      CHEMCLAW_POSTGRES_DSN: postgresql://chemclaw:chemclaw@localhost:5432/chemclaw
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.11"
+
+      - name: Sync dependencies
+        run: uv sync
+
+      - name: Apply database migrations
+        run: make db-migrate
+
+      - name: Lint + type + test
+        run: make lint type test
+
+      - name: Validate knowledge graph
+        run: make kg-validate
+
+      - name: Validate skills
+        run: make skill-validate

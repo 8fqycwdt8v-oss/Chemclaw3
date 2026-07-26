@@ -11,7 +11,7 @@ revisit it. Default is "off-the-shelf, defer until measured".
 | Second queue system (pg-boss) | Temporal already runs; a second task queue covers small jobs | — (decided against, see D-006) |
 | MAF Durable Extension for jobs | Temporal owns durability; Azure-Functions-native and job-inappropriate | Only very long *conversation* pauses (days awaiting human input) |
 | Universal ELN abstraction | Individuality of each ELN can't be abstracted away up front | At the third real ELN source, generalize shared adapter bits |
-| External literature/patent retrievers | Internal knowledge+data harness comes first | After Phase 5b core; add as one more retriever behind the same interface |
+| ~~External literature/patent retrievers~~ | **Rejected (D-089), see the TOOL-6 row below** — no external sources at all, not "later" | — |
 | Tabular Foundation Model (TabPFN/TabICL) tool | The "which experiment next" question is now answered by BoFire inline (`suggest_next_experiment`, D-024); a tabular FM is a *different*, non-critical capability (few-shot numeric prediction from a table) and needs a model download + license check | When few-shot numeric-trend prediction over historic tables is a real need; check the model version's license first |
 | ~~Conversation-history trimming in the agent~~ | **Done (D-025):** MAF `CompactionProvider` — token-budget-triggered tool-result collapse + sliding window, LLM-free | — |
 | LLM *summarization* of compacted history (`SummarizationStrategy`) | The deterministic collapse+window (D-025) reclaims context without an LLM call, and MAF flags an untrusted summarizer as an indirect-prompt-injection risk that persists in history | Token-frugal collapse proves insufficient (essential older context lost) **and** a trusted summarization client is available — then add it as the first strategy in the composed budget |
@@ -162,3 +162,30 @@ in `BACKLOG.md`. Three entries here changed state, and one deferral is newly rec
 | Newly deferred | Why not now | Trigger to revisit |
 |---|---|---|
 | **Hazard screening beyond structural alerts** (D-080) — GHS/SDS data, toxicity/ADMET prediction, thermal-stability data, regulatory/transport classification, route-level safety verdicts | The shipped screen is deliberately a *structural alert* layer: deterministic, offline, citable, and honest about being advisory. Each excluded capability needs either a licensed data source, a predictive model with its own validation burden, or a claim the system must not make (a route-level "safe" verdict). Bolting any of them onto an advisory screen would blur the one invariant that makes it usable — the system flags, it never certifies. | A named, licensed hazard data source is procured (GHS/SDS), or a regulated deliverable requires a documented hazard assessment — then design it as its own layer with its own review, not as more rules in `safety/rules.yaml` |
+## F11 gap-closure outcomes (2026-07-25, D-083/D-084)
+
+Implementing `docs/audit/12-capability-gap-analysis.md` resolved several long-standing deferrals and
+changed the status of others. Recorded here so the table above is not read as still current:
+
+**No longer deferred — implemented.** Compound notes (the trigger was self-referential; TOOL-2's
+identity table satisfied it), per-step species linking's blocker (a name→SMILES tool now exists),
+and the conditions-vocabulary half of the ranking problem.
+
+**Still deferred, with the reason sharpened by implementation:**
+
+| Item | Why not now | Trigger to revisit |
+|---|---|---|
+| ~~**External literature/patent retriever** (TOOL-6)~~ | **Rejected on scope, not deferred (D-089): this system takes no external sources.** It was built against PubChem, reviewed, and removed. The old wording here — "blocked on choosing a source" — is what invited the build, so it is corrected rather than left: there is no source to choose. `tests/test_no_egress.py` enforces it, because prose in this file demonstrably did not. | Nothing. A future need for external data is a new architectural decision, not a resumption of this one |
+| ~~**File/attachment ingress** (AGT-3)~~ | **Done.** Text/CSV/TSV, then PDF/PPTX/DOCX/XLSX (D-089), each read through the format's own document model. What remains deferred is narrower and unchanged: **spectra and images**, which need OCR/vision — the gated item in `docs/parity-plan.md`. A scanned PDF is refused by name for the same reason. | OCR/vision is adopted |
+| **Predicted-vs-actual calibration** (IDEA-2) | The most valuable remaining item, and genuinely sizeable: a predictions table plus a reconciliation job matching a stored prediction to the ELN result that later lands. Warrants its own design note rather than being wedged into a wave. | Taken as its own phase |
+| **Standing queries / digest** (IDEA-1) | Needs a subscription store plus a Schedule. The push-back channel it would ride already exists, so this is bounded work — just not started. | A user asks to be notified rather than to poll |
+| **Corpus backfill** (IDEA-6) | Depends on AGT-3: a backfill driver over a document parser that does not exist would be a stub. | AGT-3 lands |
+| **Audit-trail retention (archive-then-reseal)** | `workflows/retention.py` deliberately refuses to prune `audit_events`: deleting from a hash chain is indistinguishable from the tampering it detects. Safe disposal needs an out-of-band genesis anchor the verifier accepts — a GxP design decision with QA consequences, not a cleanup job. | A regulated deployment needs provable disposal; then ADR it |
+| **PMI/E-factor as a BO objective** (IDEA-3, second half) | The *tool* half shipped (`green_metrics`). An objective would need a real formulation/solvent dataset this repo does not have; inventing a problem space to host it would be a one-caller abstraction over fabricated chemistry. | A real formulation case with mass data |
+
+**Closed as not-gaps after assessment** (do not re-open blindly): **TOOL-7** units — carried in
+field names throughout, including every model added in F11; a `Quantity` type would be an
+abstraction with no second caller. **AGT-6** structured outputs — the W1 tools take typed pydantic
+arguments, so MAF already forces a validated payload at the machine-consumed call site whose absence
+was the original reason to defer. **AGT-1** turn cancellation — verified correct as of `4bc9b04`
+and now measured by `tests/test_turn_cancellation.py`.

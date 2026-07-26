@@ -7,8 +7,10 @@ store durable and adds job→session push-back). The agent factory is injectable
 whole app with a fake streaming agent and no live model or credentials.
 
 Routes: `GET /healthz` (liveness), `GET /readyz` (readiness), `POST /sessions` (start a session),
-`POST /sessions/{id}/messages` (send a turn, Server-Sent-Events stream of `service.events`), and the
-static chat UI at `/`. Identity (Entra OIDC on every non-health route) is layered on in F4.
+`GET /sessions` (the caller's conversation list), `POST /sessions/{id}/messages` (send a turn,
+Server-Sent-Events stream of `service.events`), `GET /sessions/{id}/messages` (read the transcript
+back), and the static chat UI at `/`. Identity (Entra OIDC on every non-health route) is layered on
+in F4.
 """
 
 import asyncio
@@ -16,10 +18,11 @@ import logging
 import uuid
 from collections import OrderedDict
 from collections.abc import AsyncIterator, Callable
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Protocol
 
-from fastapi import Depends, FastAPI, HTTPException
+from fastapi import Depends, FastAPI, HTTPException, UploadFile
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, field_validator
 from sse_starlette.sse import EventSourceResponse
@@ -28,13 +31,25 @@ from starlette.middleware.cors import CORSMiddleware
 from starlette.requests import Request
 from starlette.responses import Response
 
-from agents.chemclaw_agent import build_agent
+from agents.attachments import STORE as ATTACHMENTS
+from agents.attachments import AttachmentError, AttachmentSummary, parse_attachment
+from agents.chemclaw_agent import build_agent, history_provider
+from agents.durable_tools import request_note_reindex
 from agents.harness_todo import complete_awaiting_job
+from agents.interaction_tools import (
+    PendingApproval,
+    approval_owner,
+    approval_status,
+    decide_approval,
+    list_pending_approvals,
+)
 from agents.session_events import stream_new_events
 from chemclaw.config import settings
+from scripts.schedules import ScheduleHealth, describe_schedules
 from service.auth import Principal, require_principal
 from service.budget import BudgetExceeded, BudgetTracker
 from service.events import ErrorEvent, JobCompletedEvent
+from service.metrics import CONTENT_TYPE, METRICS
 from service.runner import run_turn
 
 logger = logging.getLogger(__name__)
@@ -60,6 +75,10 @@ class _LiveSessions:
         """Create a registry holding at most `capacity` live sessions."""
         self._capacity = capacity
         self._entries: OrderedDict[str, tuple[Any, str | None]] = OrderedDict()
+
+    def __len__(self) -> int:
+        """How many live sessions are held — the source for the `live_sessions` gauge (DEP-4)."""
+        return len(self._entries)
 
     def add(self, session_id: str, session: Any, owner: str | None) -> None:
         """Register a live session (most-recently-used), evicting the oldest past capacity."""
@@ -92,6 +111,10 @@ class SessionOwners(Protocol):
         """Return `(found, owner)` for a session id — `(False, None)` when unknown."""
         ...
 
+    async def list_for_owner(self, owner: str | None) -> list[tuple[str, datetime]]:
+        """The owner's sessions as `(session_id, created_at)`, newest first."""
+        ...
+
 
 def _default_owner_store() -> SessionOwners | None:
     """The durable session-ownership store, but only when durable sessions are on (else None).
@@ -112,6 +135,10 @@ class MessageIn(BaseModel):
     """One turn's user message posted to the messages endpoint."""
 
     message: str
+    # Plan the turn without launching anything expensive (gap IDEA-4). Every expensive path is
+    # idempotent and cached, but there was no way to ask "what would you do, what would it cost"
+    # without doing it — a natural primitive for a deployment whose default autonomy is `plan_only`.
+    dry_run: bool = False
 
     @field_validator("message")
     @classmethod
@@ -130,6 +157,37 @@ class SessionOut(BaseModel):
     """The identifier of a freshly created session."""
 
     session_id: str
+
+
+class SessionSummary(BaseModel):
+    """One of the caller's sessions, for the conversation list."""
+
+    session_id: str
+    created_at: datetime
+
+
+class TranscriptMessage(BaseModel):
+    """One stored message of a session's transcript, flattened to what a chat surface renders.
+
+    Role plus text rather than the MAF `Message` shape: the durable row is a MAF serialization, and
+    exposing it would make a MAF version bump a breaking change to the HTTP contract.
+    """
+
+    role: str
+    text: str
+
+
+class ApprovalDecisionIn(BaseModel):
+    """The human Yes/No posted to a pending approval hold."""
+
+    approved: bool
+
+
+class ApprovalStatusOut(BaseModel):
+    """A hold's handle and current state, for a polling review surface."""
+
+    approval_id: str
+    status: str
 
 
 def create_app(
@@ -167,6 +225,11 @@ def create_app(
     # a returning client reattaches to its session instead of being forced onto a new one. None with
     # the in-memory session store (nothing durable to reattach to — a cache miss stays a 404).
     app.state.session_owners = owner_store if owner_store is not None else _default_owner_store()
+    # The same history provider the agent writes turns through, used read-only to serve a
+    # transcript back. Shared rather than re-derived per request: the Postgres provider holds only
+    # a DSN and the in-memory one holds nothing at all (its messages live in `session.state`), so
+    # one instance is correct for both and neither carries per-session state.
+    app.state.history = history_provider()
     # Admission control on concurrent turns (AG-15): a bounded permit set caps how many turns hit
     # the shared LLM endpoint at once. A permit is held for a turn's whole streamed run; a turn that
     # cannot get one within the admission timeout is shed with 503. Built here so it binds to the
@@ -189,6 +252,14 @@ def create_app(
     # session and per user, refusing a turn (429) that would exceed a configured cap. In-process and
     # off unless `budget_enabled`; the missing ceiling above the per-turn loop cap.
     app.state.budget = BudgetTracker()
+    # Gauges read the live structures rather than a mirrored counter, so there is nothing to keep
+    # in sync (gap DEP-4). In-flight turns against the cap is the saturation signal the HPA should
+    # scale on — CPU is close to noise for a stream-bound, model-latency-dominated service.
+    METRICS.bind_gauge("chemclaw_turns_in_flight", lambda: float(len(app.state.active_turns)))
+    METRICS.bind_gauge(
+        "chemclaw_turn_capacity", lambda: float(settings.service_max_concurrent_turns)
+    )
+    METRICS.bind_gauge("chemclaw_live_sessions", lambda: float(len(app.state.live_sessions)))
 
     async def _resolve_session(session_id: str, principal: Principal) -> Any:
         """Return the caller's session — from the live cache, or rehydrated from durable ownership.
@@ -258,6 +329,51 @@ def create_app(
         )
         return SessionOut(session_id=session_id)
 
+    @app.get("/sessions")
+    async def list_sessions(
+        principal: Principal = Depends(require_principal),
+    ) -> list[SessionSummary]:
+        """The caller's own sessions, newest first — the conversation list.
+
+        Without this a client that lost its local state (a new browser, cleared storage, a second
+        device) could not find sessions it still owns: ids are minted server-side and returned once
+        into the response that created them, so an id the client forgot was unreachable forever
+        while its durable history sat in the store.
+
+        Read from the durable ownership registry, which is the same record `_resolve_session`
+        authorizes against — so this can never list a session the caller would then be refused.
+        Empty under the in-memory session store: there is no durable registry to enumerate, and
+        reporting the process's live LRU instead would answer a question about the deployment with
+        a partial, eviction-dependent guess.
+        """
+        owners: SessionOwners | None = app.state.session_owners
+        if owners is None:
+            return []
+        return [
+            SessionSummary(session_id=session_id, created_at=created_at)
+            for session_id, created_at in await owners.list_for_owner(principal.oid)
+        ]
+
+    @app.get("/sessions/{session_id}/messages")
+    async def get_messages(
+        session_id: str,
+        principal: Principal = Depends(require_principal),
+    ) -> list[TranscriptMessage]:
+        """One session's stored transcript, in order — what a client reads back after a reload.
+
+        Ownership-gated by the same `_resolve_session` the turn route uses, so a transcript is
+        readable only by the chemist whose session it is (a non-owner gets the same 404 as an
+        unknown id, leaking nothing about which ids exist).
+
+        Read through the agent's own history provider rather than by querying `session_messages`:
+        one reader means the write path and the read path cannot drift, and the route works
+        unchanged under either store — the in-memory provider keeps its messages in `session.state`,
+        which is exactly what `_resolve_session` just returned.
+        """
+        session = await _resolve_session(session_id, principal)
+        stored = await app.state.history.get_messages(session_id, state=session.state)
+        return [TranscriptMessage(role=message.role, text=message.text) for message in stored]
+
     @app.post("/sessions/{session_id}/messages")
     async def post_message(
         session_id: str,
@@ -278,6 +394,7 @@ def create_app(
         session = await _resolve_session(session_id, principal)
         active_turns: set[str] = app.state.active_turns
         if session_id in active_turns:
+            METRICS.increment("chemclaw_turns_conflict_total")
             raise HTTPException(
                 status_code=409, detail="a turn is already running for this session"
             )
@@ -304,9 +421,13 @@ def create_app(
                             actor=principal.oid,
                             roles=principal.roles,
                             budget=app.state.budget,
+                            dry_run=body.dry_run,
                         ):
+                            if event.type == "error":
+                                METRICS.increment("chemclaw_turns_failed_total")
                             yield {"event": event.type, "data": event.model_dump_json()}
                 except TimeoutError:
+                    METRICS.increment("chemclaw_turn_timeouts_total")
                     logger.warning(
                         "turn timed out after %ss for session %s",
                         settings.service_turn_timeout_seconds,
@@ -332,16 +453,21 @@ def create_app(
             try:
                 app.state.budget.check(session_id, principal.oid)
             except BudgetExceeded as exc:
+                METRICS.increment("chemclaw_turns_refused_budget_total")
                 raise HTTPException(status_code=429, detail=str(exc)) from exc
             try:
                 await asyncio.wait_for(
                     semaphore.acquire(), timeout=settings.service_turn_admission_timeout_seconds
                 )
             except TimeoutError as exc:
+                # Shedding is the admission control working as designed — and was completely
+                # invisible from outside until this counter existed.
+                METRICS.increment("chemclaw_turns_shed_total")
                 raise HTTPException(
                     status_code=503, detail="server at capacity; retry shortly"
                 ) from exc
             acquired = True
+            METRICS.increment("chemclaw_turns_started_total")
             response = EventSourceResponse(_turn_events())
             handed_off = True
             return response
@@ -371,6 +497,7 @@ def create_app(
         await _resolve_session(session_id, principal)
         streams: dict[str, int] = app.state.event_streams
         if streams.get(principal.oid, 0) >= settings.service_max_event_streams_per_user:
+            METRICS.increment("chemclaw_event_streams_rejected_total")
             raise HTTPException(
                 status_code=429, detail="too many concurrent event streams; close one and retry"
             )
@@ -414,6 +541,146 @@ def create_app(
             # must return the slot, or the user's stream budget leaks toward a permanent 429.
             if not handed_off:
                 _release_stream_slot()
+
+    async def _owned_approval(approval_id: str, principal: Principal) -> None:
+        """Authorize the caller against a hold's owner, or 404 (no existence leak either way).
+
+        Mirrors `_resolve_session`: an unknown hold and someone else's hold are indistinguishable
+        from outside. The dev path (`entra_required` off) has no real actor, so an unowned hold
+        stays answerable — matching how every other route degrades in dev.
+        """
+        try:
+            owner = await approval_owner(approval_id)
+        except ValueError as exc:
+            raise HTTPException(status_code=404, detail="no such approval hold") from exc
+        if owner and owner != principal.oid:
+            raise HTTPException(status_code=404, detail="no such approval hold")
+
+    @app.post("/sessions/{session_id}/attachments")
+    async def upload_attachment(
+        session_id: str,
+        file: UploadFile,
+        principal: Principal = Depends(require_principal),
+    ) -> AttachmentSummary:
+        """Attach a working file to a conversation (gap AGT-3).
+
+        The only way data entered the system was the scheduled ELN sync, so a chemist could not
+        hand over a CSV of runs or an SOP — the highest-frequency real request for a lab assistant.
+
+        Session-scoped and in-memory by design: an attachment is working material for a
+        conversation, not knowledge. Anything in it worth keeping goes through the PR-gate like
+        every other machine-touched write; routing uploads into the graph would bypass the GxP line.
+
+        Unsupported formats are refused with a message naming what *is* supported (422), never
+        silently half-parsed — a PDF "read" by scraping whatever bytes look like text would produce
+        confident nonsense a chemist could not tell from a real reading.
+        """
+        await _resolve_session(session_id, principal)
+        raw = await file.read()
+        try:
+            attachment = parse_attachment(file.filename or "upload", raw, file.content_type)
+        except AttachmentError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        ATTACHMENTS.add(session_id, attachment)
+        return AttachmentSummary(
+            name=attachment.name,
+            content_type=attachment.content_type,
+            rows=attachment.rows,
+            excerpt=attachment.text[: settings.note_excerpt_chars],
+        )
+
+    @app.post("/events/knowledge-merged", status_code=202)
+    async def knowledge_merged(
+        principal: Principal = Depends(require_principal),
+    ) -> dict[str, str]:
+        """Tell the deployment a note merged, so freshness stops being bounded by a timer (SCH-6).
+
+        The whole system was poll-on-a-timer: there was no inbound event path at all, so the
+        worst-case staleness of a merged note was the slowest configured interval, everywhere. A
+        git host's post-merge webhook (or an operator) calls this, and the derived note index is
+        rebuilt now rather than at the next scheduled sweep — collapsing gap SCH-2's staleness
+        window from an interval to seconds.
+
+        Idempotent and cheap to over-call: the reindex is an upsert, and a duplicate delivery just
+        rebuilds an already-current index. Authenticated like every other non-health route.
+        """
+        started = await request_note_reindex()
+        return {"status": "accepted", "workflow_id": started}
+
+    @app.get("/metrics")
+    async def metrics() -> Response:
+        """Prometheus exposition for this pod (gap DEP-4).
+
+        Unauthenticated on purpose, like `/healthz` and `/readyz`: a scrape happens before and
+        independently of user identity, and the NetworkPolicy is what keeps it inside the cluster.
+        It exposes counts and capacity only — never a session id, a user, or any turn content.
+        """
+        return Response(content=METRICS.render(), media_type=CONTENT_TYPE)
+
+    @app.get("/schedules")
+    async def schedules(
+        principal: Principal = Depends(require_principal),
+    ) -> list[ScheduleHealth]:
+        """Health of every periodic job: when it last ran, and whether it succeeded (gap SCH-4).
+
+        Nothing reported this, so an ELN sync failing every run advanced no cursor and raised no
+        alarm — it surfaced weeks later as "the agent doesn't know about recent experiments", the
+        hardest class of problem to attribute.
+
+        Read from Temporal's own schedule state rather than a second table: Temporal is already the
+        authority on when a Schedule fired and how the run ended, and a mirrored table could only
+        ever drift from it.
+        """
+        return await describe_schedules()
+
+    @app.get("/approvals")
+    async def list_approvals(
+        principal: Principal = Depends(require_principal),
+    ) -> list[PendingApproval]:
+        """The caller's open approval holds — the review queue (gap RCH-3).
+
+        Without this route the durable Yes/No hold (D-032) was a dead end: a hold could be
+        started, but its id was only ever returned into a turn that then ended, and the thin UI
+        rendered the request as an inert trace line. A hold that nobody can find or answer can
+        only time out, which silently drops the knowledge it was holding.
+
+        Scoped to the caller: a hold authorizes a knowledge write, so it is answerable only by
+        the chemist whose turn raised it.
+        """
+        return await list_pending_approvals(owner=principal.oid)
+
+    @app.get("/approvals/{approval_id}")
+    async def get_approval(
+        approval_id: str,
+        principal: Principal = Depends(require_principal),
+    ) -> ApprovalStatusOut:
+        """One hold's current state (`pending`/`approved`/`rejected`/`expired`)."""
+        await _owned_approval(approval_id, principal)
+        try:
+            return ApprovalStatusOut(
+                approval_id=approval_id, status=await approval_status(approval_id)
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=404, detail="no such approval hold") from exc
+
+    @app.post("/approvals/{approval_id}/decision", status_code=204)
+    async def decide(
+        approval_id: str,
+        body: ApprovalDecisionIn,
+        principal: Principal = Depends(require_principal),
+    ) -> Response:
+        """Deliver the human Yes/No to a pending hold — the button click, finally wired.
+
+        Deliberately an HTTP route and **not** an agent tool: the agent proposes, a human signs
+        off (D-005). A tool would let the agent approve its own candidate and collapse the GxP
+        line the whole PR-gate exists to draw.
+        """
+        await _owned_approval(approval_id, principal)
+        try:
+            await decide_approval(approval_id, body.approved)
+        except ValueError as exc:
+            raise HTTPException(status_code=404, detail="no such approval hold") from exc
+        return Response(status_code=204)
 
     if _STATIC_DIR.is_dir():
         app.mount("/", StaticFiles(directory=str(_STATIC_DIR), html=True), name="static")

@@ -39,6 +39,9 @@ class JobStartedEvent(BaseModel):
 
     type: Literal["job_started"] = "job_started"
     job_id: str
+    # What kind of durable job this is ("qm", "report", "campaign"), so a surface can label it
+    # without parsing the id. Defaulted so the field is additive for any existing consumer.
+    kind: str = "job"
 
 
 class JobCompletedEvent(BaseModel):
@@ -49,11 +52,44 @@ class JobCompletedEvent(BaseModel):
     summary: dict[str, object] = {}
 
 
+class QuestionEvent(BaseModel):
+    """The agent needs the chemist to disambiguate before it can answer well (gap AGT-5).
+
+    `_INSTRUCTIONS` tells the agent to "say plainly when the data is silent", but there was no
+    contract for it to *ask*. An ambiguous question ("what did we get on the Suzuki?") therefore
+    produced a best-guess sweep across every matching campaign — both worse and more expensive than
+    asking which one. `options` are concrete choices when the agent can enumerate them, so a
+    surface can render buttons instead of free text.
+    """
+
+    type: Literal["question"] = "question"
+    question: str
+    options: list[str] = []
+
+
+class NoteProposedEvent(BaseModel):
+    """A note was opened on a branch for human review through the PR-gate (gap RCH-4).
+
+    The GxP "AI proposes, human signs off" line is the architecture's spine, but it lived only in
+    a git host's UI: `propose_note` returned its reference into the model's context and the chemist
+    never learned their contribution landed. This carries the branch reference back to the surface
+    that produced it.
+    """
+
+    type: Literal["note_proposed"] = "note_proposed"
+    note_id: str
+    reference: str
+
+
 class ApprovalRequestEvent(BaseModel):
     """The turn is waiting on a human decision (plan approval or an interaction approval)."""
 
     type: Literal["approval_request"] = "approval_request"
     prompt: str
+    # The durable hold's handle (`InteractionApprovalWorkflow` id), so a surface can actually
+    # answer it via `POST /approvals/{id}/decision` (gap RCH-3). Empty for a plan-approval
+    # prompt, which is answered by the next turn rather than by a durable hold.
+    approval_id: str = ""
 
 
 class AnswerEvent(BaseModel):
@@ -91,6 +127,8 @@ Event = (
     | JobStartedEvent
     | JobCompletedEvent
     | ApprovalRequestEvent
+    | NoteProposedEvent
+    | QuestionEvent
     | AnswerEvent
     | ErrorEvent
 )

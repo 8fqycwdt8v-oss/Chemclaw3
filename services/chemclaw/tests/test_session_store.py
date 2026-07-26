@@ -9,7 +9,7 @@ import asyncio
 
 from agent_framework import InMemoryHistoryProvider, Message
 
-from agents.chemclaw_agent import _history_provider
+from agents.chemclaw_agent import history_provider
 from agents.session_store import PostgresHistoryProvider, SessionOwnerStore
 from chemclaw.config import settings
 from tests.pg import migrated_db_or_skip
@@ -18,9 +18,9 @@ from tests.pg import migrated_db_or_skip
 def test_history_provider_selected_by_config(monkeypatch) -> None:  # type: ignore[no-untyped-def]
     """`session_store` picks the durable Postgres provider or the in-memory default."""
     monkeypatch.setattr(settings, "session_store", "memory")
-    assert isinstance(_history_provider(), InMemoryHistoryProvider)
+    assert isinstance(history_provider(), InMemoryHistoryProvider)
     monkeypatch.setattr(settings, "session_store", "postgres")
-    assert isinstance(_history_provider(), PostgresHistoryProvider)
+    assert isinstance(history_provider(), PostgresHistoryProvider)
 
 
 async def _provider_or_skip() -> PostgresHistoryProvider:
@@ -69,6 +69,49 @@ def test_session_owner_records_and_reattaches() -> None:
         reader = SessionOwnerStore()  # a restarted pod would build a fresh instance
         assert await reader.lookup("sess-owner-1") == (True, "alice")
         assert await reader.lookup("sess-never-created") == (False, None)
+
+    asyncio.run(_run())
+
+
+def test_session_owner_lists_only_its_own_sessions_newest_first() -> None:
+    """Listing is owner-scoped and newest-first — what `GET /sessions` renders as the sidebar.
+
+    A dedicated owner string per test: the table is shared across this module's cases, so scoping
+    to a real owner is also what keeps the assertion independent of the other rows in there.
+    """
+
+    async def _run() -> None:
+        await migrated_db_or_skip()
+        store = SessionOwnerStore()
+        await store.record("sess-list-a", "owner-list-test")
+        await store.record("sess-list-b", "owner-list-test")
+        await store.record("sess-list-other", "someone-else")
+
+        listed = await store.list_for_owner("owner-list-test")
+        assert {session_id for session_id, _ in listed} == {"sess-list-a", "sess-list-b"}
+        # created_at defaults to now(), so newest-first is a descending sort on it.
+        assert [created for _, created in listed] == sorted(
+            (created for _, created in listed), reverse=True
+        )
+        assert await store.list_for_owner("owner-with-no-sessions") == []
+
+    asyncio.run(_run())
+
+
+def test_session_owner_lists_the_null_owner_sessions() -> None:
+    """A NULL owner matches itself when listing — `owner = NULL` would silently return nothing.
+
+    The shared dev principal records a real SQL NULL, and three-valued logic makes `= %s` false for
+    every row, so the dev/no-Entra deployment would show an empty conversation list with sessions
+    sitting right there in the table. `IS NOT DISTINCT FROM` is what makes this row come back.
+    """
+
+    async def _run() -> None:
+        await migrated_db_or_skip()
+        store = SessionOwnerStore()
+        await store.record("sess-list-null", None)
+        listed = await store.list_for_owner(None)
+        assert "sess-list-null" in {session_id for session_id, _ in listed}
 
     asyncio.run(_run())
 

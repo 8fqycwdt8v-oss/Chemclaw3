@@ -31,6 +31,21 @@ from chemclaw.config import settings
 logger = logging.getLogger(__name__)
 
 
+def _count_sink_failure() -> None:
+    """Increment the audit-sink failure counter, tolerating an unimportable metrics registry.
+
+    `agents` must not hard-depend on `service`: the workers import this module and never build the
+    front door. A missing registry means "no scrape target in this process", which is fine — the
+    ERROR log remains the record either way.
+    """
+    try:
+        from service.metrics import METRICS
+
+        METRICS.increment("chemclaw_audit_sink_failures_total")
+    except Exception:  # pragma: no cover - defensive; metrics must never break the audit path
+        pass
+
+
 class AuditEvent(BaseModel):
     """One recorded tool invocation — the row an `AuditSink` persists."""
 
@@ -166,6 +181,10 @@ async def _emit(sink: AuditSink, event: AuditEvent) -> None:
     try:
         await sink.record(event)
     except Exception as exc:  # a broken audit store must not fail a tool call
+        # Counted as well as logged (gap DEP-4): the ERROR marker is alertable only if something
+        # is watching the logs, whereas an incomplete GxP trail should be visible on the same
+        # dashboard as everything else.
+        _count_sink_failure()
         # Swallow-and-continue keeps availability, but a lost GxP audit record must be ALERTABLE,
         # not a generic warning (SEC-3): log at ERROR with a stable `audit_sink_failure` marker and
         # the trail identifiers, so monitoring can fire on the marker and name the affected trail.

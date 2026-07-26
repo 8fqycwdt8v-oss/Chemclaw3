@@ -38,6 +38,40 @@ async function ensureSession() {
   return sessionId;
 }
 
+// Render an approval request. When the event carries a durable hold id, the prompt gets real
+// Yes/No controls wired to POST /approvals/{id}/decision — before this the request rendered as an
+// inert trace line, so a hold could only ever expire unanswered (gap RCH-3).
+function addApproval(evt) {
+  const el = add("trace", `⏸ ${evt.prompt}`);
+  if (!evt.approval_id) return;
+  const controls = document.createElement("div");
+  controls.className = "approval-controls";
+  const decide = async (approved) => {
+    controls.querySelectorAll("button").forEach((b) => (b.disabled = true));
+    try {
+      const res = await fetch(`/approvals/${encodeURIComponent(evt.approval_id)}/decision`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ approved }),
+      });
+      if (!res.ok) throw await httpError(res, "recording the decision");
+      controls.textContent = approved ? "✓ saved for review" : "✗ discarded";
+    } catch (err) {
+      // Re-enable so a transient failure is retryable rather than losing the decision.
+      controls.querySelectorAll("button").forEach((b) => (b.disabled = false));
+      add("error", err.message);
+    }
+  };
+  for (const [label, approved] of [["Yes", true], ["No", false]]) {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.textContent = label;
+    button.addEventListener("click", () => decide(approved));
+    controls.appendChild(button);
+  }
+  el.appendChild(controls);
+}
+
 // Apply one decoded event to the transcript; `answerEl` accumulates streamed tokens.
 function applyEvent(evt, answerEl) {
   switch (evt.type) {
@@ -53,10 +87,16 @@ function applyEvent(evt, answerEl) {
       transcript.scrollTop = transcript.scrollHeight;
       return answerEl;
     case "job_started":
-      add("trace", `job started (${evt.job_id})`);
+      add("trace", `⏳ ${evt.kind || "job"} started (${evt.job_id})`);
+      return answerEl;
+    case "question":
+      add("trace", `❓ ${evt.question}` + ((evt.options || []).length ? `\n   options: ${evt.options.join(" | ")}` : ""));
+      return answerEl;
+    case "note_proposed":
+      add("trace", `📝 proposed ${evt.note_id} for review — ${evt.reference}`);
       return answerEl;
     case "approval_request":
-      add("trace", `⏸ approval requested: ${evt.prompt}`);
+      addApproval(evt);
       return answerEl;
     case "answer":
       if (!answerEl) add("assistant", evt.text);
