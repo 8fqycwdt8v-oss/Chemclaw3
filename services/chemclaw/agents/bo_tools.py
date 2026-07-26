@@ -51,7 +51,16 @@ async def suggest_next_experiment(
     Returns:
         The proposed candidate point(s), each a mapping of parameter name to value.
     """
-    history = observations or []
+    # MAF validates a tool call's arguments against the JSON schema derived from this
+    # signature, then invokes the function with that validated payload `model_dump()`-ed back
+    # to plain dicts/lists — never with `OptimizationProblem`/`Observation` instances (the JSON
+    # tool-call wire format has no model concept, only object/array/string/number). This is the
+    # one registered tool with a nested-model parameter, so it is the one boundary that needs
+    # bridging back into typed objects; re-validating an already-correct instance is a no-op
+    # (`model_validate` short-circuits on an exact-type match), so this is transparent to every
+    # direct/test caller that already passes real model instances.
+    problem = OptimizationProblem.model_validate(problem)
+    history = [Observation.model_validate(o) for o in observations] if observations else []
     if history:
         return await asyncio.to_thread(propose_candidates, problem, history, count)
     return await asyncio.to_thread(initial_candidates, problem, count)

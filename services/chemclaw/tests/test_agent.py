@@ -59,6 +59,34 @@ def test_agent_has_skills_history_and_compaction() -> None:
     assert {"SkillsProvider", "InMemoryHistoryProvider", "CompactionProvider"} <= provider_types
 
 
+def test_skills_load_and_read_without_an_unanswerable_approval() -> None:
+    """`load_skill`/`read_skill_resource` never stall on approval — the front door cannot answer.
+
+    MAF registers both with `approval_mode="always_require"` by default. Nothing in the front
+    door wires a `ToolApprovalMiddleware` or exposes a decision endpoint, so a turn that reached
+    for a skill would emit an unanswerable `approval_request` and never produce an answer
+    (regression: every skill-using turn stalled this way through the whole front door). Skills
+    are always the deployer-configured, first-party `skills_dir` tree — never tenant/user-
+    uploaded content — so disabling approval for these two read-only tools is the documented
+    "trusted source" case, not a broadened attack surface. `run_skill_script` is intentionally
+    left requiring approval (chemclaw wires no `script_runner`, so a call fails fast instead).
+    """
+    agent = build_agent(chat_client=object())
+    skills_provider = next(
+        p for p in agent.context_providers if type(p).__name__ == "SkillsProvider"
+    )
+    # `next(...)` types this as the `ContextProvider` base, which does not declare
+    # `_create_tools`; the concrete `SkillsProvider` does (checked at runtime by the isinstance
+    # filter above), so this is a deliberate reach past the base type, not a real type error.
+    tools_by_name = {
+        tool.name: tool
+        for tool in skills_provider._create_tools([])  # type: ignore[attr-defined]
+    }
+    assert tools_by_name["load_skill"].approval_mode == "never_require"
+    assert tools_by_name["read_skill_resource"].approval_mode == "never_require"
+    assert tools_by_name["run_skill_script"].approval_mode == "always_require"
+
+
 def test_agent_audits_and_authorizes_every_tool_call() -> None:
     """Two tool middlewares are attached: the GxP audit trail, then per-tool authz (F10-C)."""
     from agents.tool_authz import enforce_tool_authz

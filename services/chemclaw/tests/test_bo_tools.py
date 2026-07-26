@@ -53,3 +53,30 @@ def test_proposes_from_observations() -> None:
     temperature = candidates[0].params["temperature"]
     assert isinstance(temperature, float) and 20.0 <= temperature <= 120.0
     assert candidates[0].params["solvent"] in {"THF", "toluene"}
+
+
+def test_accepts_plain_dicts_as_maf_actually_delivers_them() -> None:
+    """Regression: MAF calls this tool with plain dicts, not `OptimizationProblem`/`Observation`.
+
+    The agent-framework function-tool boundary validates a call's arguments against the JSON
+    schema derived from this signature, then invokes the function with that payload
+    `model_dump()`-ed back to plain dicts/lists (the tool-call wire format has no model concept)
+    — never with reconstructed instances. Every direct/test caller above passes real model
+    instances and would not have caught a regression here; this reproduces the actual shape a
+    live turn delivers.
+    """
+    problem = {
+        "parameters": [
+            {"kind": "continuous", "name": "temperature", "lower": 20.0, "upper": 120.0},
+            {"kind": "categorical", "name": "solvent", "categories": ["THF", "toluene"]},
+        ],
+        "objective": {"name": "yield", "direction": "maximize"},
+    }
+    observations = [
+        {"params": {"temperature": 40.0, "solvent": "THF"}, "value": 55.0},
+        {"params": {"temperature": 80.0, "solvent": "THF"}, "value": 78.0},
+    ]
+    candidates = asyncio.run(suggest_next_experiment(problem, observations))  # type: ignore[arg-type]
+    assert len(candidates) == 1
+    temperature = candidates[0].params["temperature"]
+    assert isinstance(temperature, float) and 20.0 <= temperature <= 120.0

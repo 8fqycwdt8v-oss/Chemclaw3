@@ -117,6 +117,30 @@ def test_git_submitter_pushes_branch(tmp_path: Path) -> None:
     assert ref_again == "note/job-abc"
 
 
+def test_submit_leaves_the_shared_checkout_on_base(tmp_path: Path) -> None:
+    """After a submission, `note_repo_dir` is back on `base` — not stuck on the note branch.
+
+    `note_repo_dir` is also where readers (`kg.graph.load_notes` et al.) resolve
+    `settings.knowledge_path`, so a checkout left on `note/<id>` would make every reader
+    see one proposed note's isolated content instead of the merged knowledge base until
+    the next submission happened to switch branches again first (the bug this proves fixed).
+    """
+    _, work = _make_remote_and_clone(tmp_path)
+    submitter = GitNoteSubmitter(repo_dir=str(work), base_branch="main", remote="origin")
+    asyncio.run(submitter.submit(_note_submission("job-abc")))
+
+    current_branch = subprocess.run(
+        ["git", "-C", str(work), "branch", "--show-current"],
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.strip()
+    assert current_branch == "main"
+    # The note this submission wrote is not on `main`'s working tree — only merging the PR
+    # puts it there — so a reader pointed at this checkout right now sees no proposed notes.
+    assert not (work / "knowledge" / "job-result" / "job-abc.md").exists()
+
+
 def test_concurrent_submits_do_not_corrupt_branches(tmp_path: Path) -> None:
     """Two concurrent submits serialize: each remote branch holds exactly its own note.
 
@@ -307,7 +331,9 @@ def test_symlinked_directory_on_base_is_refused(tmp_path: Path) -> None:
     """
     remote, work = _make_remote_and_clone(tmp_path)
     submitter = GitNoteSubmitter(repo_dir=str(work), base_branch="main", remote="origin")
-    # A prior submission leaves the clone on a note branch where knowledge/ is real.
+    # An unrelated prior submission — its own fetch+checkout below ignores whatever branch
+    # `work` is left on (it now returns to `base`, but even the old stuck-on-`note/job-a`
+    # behavior made no difference here either way).
     asyncio.run(submitter.submit(_note_submission("job-a", content="note a\n")))
 
     outside = tmp_path / "outside"

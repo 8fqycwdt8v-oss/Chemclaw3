@@ -10,7 +10,6 @@ it runs off the event loop.
 import asyncio
 import logging
 from datetime import date
-from pathlib import Path
 
 from pydantic import BaseModel, Field
 
@@ -78,7 +77,7 @@ async def find_notes(text: str) -> list[NoteRef]:
     Returns:
         Matching note references (id + type + smiles + tags), body omitted.
     """
-    graph = await asyncio.to_thread(build_graph, Path(settings.knowledge_dir))
+    graph = await asyncio.to_thread(build_graph, settings.knowledge_path)
     needle = text.lower()
     today = date.today()
     # A broad needle matches most of the corpus, and the whole hit list goes into the model's
@@ -122,7 +121,7 @@ async def expand_note(note_id: str, hops: int = 1) -> NoteView:
     Returns:
         The note's body plus its neighborhood as references.
     """
-    graph = await asyncio.to_thread(build_graph, Path(settings.knowledge_dir))
+    graph = await asyncio.to_thread(build_graph, settings.knowledge_path)
     if note_id not in graph or graph.nodes[note_id].get("note") is None:
         raise ValueError(f"no note with id {note_id!r}")
     note = graph.nodes[note_id]["note"]

@@ -159,7 +159,18 @@ def build_agent(
                 FileSkillsSource(settings.skills_dirs), settings.skills_enabled_list
             ),
             settings.skill_role_gates,
-        )
+        ),
+        # MAF registers `load_skill`/`read_skill_resource` with `approval_mode="always_require"`
+        # by default, and nothing here answers an approval (no `ToolApprovalMiddleware`, no
+        # front-door decision endpoint) — so every turn that reaches for a skill would otherwise
+        # stall on an unanswerable `user_input_requests` entry. `settings.skills_dirs` is always a
+        # deployer-configured, first-party path (the shipped `skills/` tree, never tenant/user-
+        # uploaded content), the same trust boundary the in-process tool registry already assumes
+        # — so these two read-only tools are the "trusted source" case the flags exist for.
+        # `run_skill_script` is left at its default (still gated): no `script_runner` is wired to
+        # `FileSkillsSource`, so a call fails fast with a clear error instead of running anything.
+        disable_load_skill_approval=True,
+        disable_read_skill_resource_approval=True,
     )
     history = _history_provider()
     audit = make_audit_middleware(

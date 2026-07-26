@@ -297,6 +297,25 @@ def test_relative_knowledge_dir_is_accepted() -> None:
     assert Settings(_env_file=None, knowledge_dir="knowledge").knowledge_dir == "knowledge"  # type: ignore[call-arg]
 
 
+def test_knowledge_path_joins_note_repo_dir_and_knowledge_dir() -> None:
+    """`knowledge_path` is where notes actually live: readers must agree with the PR-gate.
+
+    The PR-gate writes at `note_repo_dir/knowledge_dir/...`; a reader that resolved
+    `knowledge_dir` alone (relative to the process CWD) would look at a different tree
+    whenever `note_repo_dir` pointed elsewhere — the bug `knowledge_path` exists to close.
+    """
+    settings = Settings(  # type: ignore[call-arg]
+        _env_file=None, note_repo_dir="/clones/kg", knowledge_dir="knowledge"
+    )
+    assert settings.knowledge_path == Path("/clones/kg/knowledge")
+
+
+def test_knowledge_path_matches_todays_default_when_note_repo_dir_is_unset() -> None:
+    """With the dev default (`note_repo_dir="."`), `knowledge_path` is unchanged from before."""
+    settings = Settings(_env_file=None)  # type: ignore[call-arg]
+    assert settings.knowledge_path == Path(settings.knowledge_dir)
+
+
 def test_env_example_documents_only_real_fields() -> None:
     """Every `CHEMCLAW_*` key in `.env.example` names a real `Settings` field.
 

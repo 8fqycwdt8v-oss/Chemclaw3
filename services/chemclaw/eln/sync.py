@@ -13,7 +13,6 @@ import asyncio
 import logging
 import re
 from datetime import UTC, datetime, timedelta
-from pathlib import Path
 
 from pydantic import BaseModel, Field, ValidationError
 
@@ -193,7 +192,7 @@ def _merged_note_ids() -> set[str]:
     no-op. Reads through the graph loader's stat-fingerprint cache, so a run where nothing
     merged costs a directory stat, and each replayed entry costs one set lookup.
     """
-    knowledge = Path(settings.knowledge_dir)
+    knowledge = settings.knowledge_path
     if not knowledge.is_dir():
         return set()
     return {note.id for note in load_notes(knowledge)}

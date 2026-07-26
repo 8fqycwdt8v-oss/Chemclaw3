@@ -47,7 +47,7 @@ def validate(notes_dir: Path) -> list[str]:
 
 def main() -> int:
     """CLI entry point: validate the notes dir; print problems; return exit code."""
-    notes_dir = Path(sys.argv[1]) if len(sys.argv) > 1 else Path(settings.knowledge_dir)
+    notes_dir = Path(sys.argv[1]) if len(sys.argv) > 1 else settings.knowledge_path
     if not notes_dir.exists():
         print(f"notes directory does not exist: {notes_dir}")
         return 1
