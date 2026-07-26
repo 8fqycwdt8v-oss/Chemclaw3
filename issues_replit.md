@@ -218,6 +218,55 @@ directives for sandboxed dev environments, leaving production (`msal` auth mode)
 
 ---
 
+### ISSUE-B-10: Interrupted turn leaves `tool_use` without `tool_result` in history → next turn crashes with Anthropic 400
+
+**Severity:** High (any client disconnect mid-tool-call permanently poisons the session)
+
+**Symptom:** After the agent emits an approval prompt and the connection is interrupted (user
+navigates, tab goes background, or connection drops), the next message to the same session
+returns: `The turn could not be completed due to an internal error`.
+
+**Backend log:**
+```
+anthropic.BadRequestError: messages.6: `tool_use` ids were found without `tool_result` blocks
+immediately after: toolu_vrtx_013a5LhG5zZEnTkZRoGawjLE. Each `tool_use` block must have a
+corresponding `tool_result` block in the next message.
+```
+
+**Root cause:** `runner.py` `run_turn` catches `GeneratorExit` (client disconnect) but the
+agent framework has already appended the `tool_use` block to the session's message history
+without the corresponding `tool_result`. The partial history is committed. The next `POST
+/sessions/{id}/messages` replays the corrupt history to Anthropic → 400.
+
+**Fix:** On `GeneratorExit` / client disconnect, the session history must be rolled back to the
+last clean state (before the interrupted turn's `tool_use` block). The agent framework's
+`create_session` likely exposes a rollback or checkpoint API; if not, the runner must snapshot
+the history length before each turn and truncate on interrupt.
+
+---
+
+### ISSUE-B-11: `reset_job_sink` raises `ValueError` on `GeneratorExit` — ContextVar token cross-context
+
+**Severity:** Medium (noisy; masks the real error in logs and may leave job tracking in a dirty state)
+
+**Symptom:** Every client disconnect during a turn that started a job logs:
+
+```
+ValueError: <Token var=<ContextVar name='chemclaw_started_jobs'> at 0x...> was created in a
+different Context
+```
+
+**Root cause:** `runner.py` line ~139 calls `reset_job_sink(job_sink_token)` in the `finally`
+block. When `GeneratorExit` fires, the coroutine's `contextvars.Context` is different from the
+one that called `set_job_sink`, so `_started_jobs.reset(token)` raises. The `Token` was captured
+in the request context but is being reset in the generator's teardown context.
+
+**Fix:** Guard with `try/except ValueError: pass` in `reset_job_sink`, or store the context
+explicitly with `contextvars.copy_context()` and run the reset inside that context:
+`ctx.run(reset_job_sink, job_sink_token)`.
+
+---
+
 ## Repo: Chemclaw3_ui
 
 ### ISSUE-U-1: `happy-dom@^16.0.0` blocked by Replit package security policy
