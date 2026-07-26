@@ -56,6 +56,22 @@ def require_closed_shell(mol: Chem.Mol, charge: int) -> None:
         )
 
 
+def positions_bohr(mol: Chem.Mol, conf_id: int = -1) -> tuple[np.ndarray, np.ndarray]:
+    """Extract (atomic numbers, positions in Bohr) from an already-embedded conformer on `mol`.
+
+    Shared by the single-conformer `geometry` (below) and the multi-conformer ensemble
+    (`calc.conformer_ensemble`), which embeds many conformers up front via
+    `AllChem.EmbedMultipleConfs` and then reads each one out by id rather than re-embedding.
+    """
+    conformer = mol.GetConformer(conf_id)
+    numbers = np.array([atom.GetAtomicNum() for atom in mol.GetAtoms()])
+    positions = (
+        np.array([list(conformer.GetAtomPosition(i)) for i in range(mol.GetNumAtoms())])
+        * _ANGSTROM_TO_BOHR
+    )
+    return numbers, positions
+
+
 def geometry(mol: Chem.Mol, seed: int, optimize: bool = False) -> tuple[np.ndarray, np.ndarray]:
     """Embed a deterministic 3D geometry and return (atomic numbers, positions in Bohr).
 
@@ -69,13 +85,7 @@ def geometry(mol: Chem.Mol, seed: int, optimize: bool = False) -> tuple[np.ndarr
             raise ValueError("could not embed a 3D geometry")
     if optimize and AllChem.MMFFHasAllMoleculeParams(work):
         AllChem.MMFFOptimizeMolecule(work)
-    conformer = work.GetConformer()
-    numbers = np.array([atom.GetAtomicNum() for atom in work.GetAtoms()])
-    positions = (
-        np.array([list(conformer.GetAtomPosition(i)) for i in range(work.GetNumAtoms())])
-        * _ANGSTROM_TO_BOHR
-    )
-    return numbers, positions
+    return positions_bohr(work)
 
 
 def gfn2_energy(

@@ -3,6 +3,23 @@
 Prioritized open action items. Top = next. Keep in sync with `docs/implementation-plan.md`
 (phase/step numbers) at session end.
 
+## Done — Process/analytical-development capability research (2026-07-26, D-092)
+
+A survey of open-source ML/cheminformatics and fast-ab-initio packages for chemical and analytical
+process development (new data-source connectors like LIMS out of scope), landed through the
+existing connector seams only (fast calculator, BoFire adapter, Temporal workflow — no ad hoc
+wiring). Full rationale, including two researched-and-rejected candidates (ML interatomic
+potentials, retrosynthesis — both blocked on a runtime external-data fetch D-089 rejects, not on a
+missing prerequisite), in D-092.
+
+- [x] `predict_developability_profile` — RDKit-only Ro5/Veber descriptor panel (`calc/descriptors.py`).
+- [x] `predict_logd` — pH-dependent logD from the existing cached pKa + Crippen LogP (`calc/logd.py`).
+- [x] `estimate_reaction_energy` — reaction exotherm screen from cached per-species GFN2-xTB (`calc/reaction_energy.py`).
+- [x] `generate_screening_design` — full-factorial categorical DoE screen (`bo/engine.py::factorial_design`).
+- [x] `ConformerEnsembleWorkflow` — durable Boltzmann-weighted GFN2-xTB conformer ensemble
+      (`workflows/conformer_job.py`, `calc/conformer_ensemble.py`), agent tools
+      `submit_conformer_ensemble_job`/`get_conformer_job_status`.
+
 > **Every open item below was assessed on 2026-07-25** — trigger held? real defect? offline-verifiable?
 > KISS? — in **`docs/backlog-plan.md`** (verdict table + specs for the survivors + the working queue in
 > `tasks/todo.md`). Verdicts: 8 BUILD (waves A/B/C), 14 DEFER, 5 DROP, 12 BLOCKED. The DROP verdicts are
