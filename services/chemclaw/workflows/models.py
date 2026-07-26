@@ -10,6 +10,7 @@ from typing import Annotated, Literal
 
 from pydantic import BaseModel, Field
 
+from calc.conformers import ConformerEnsemble
 from calc.reaction import ReactionEnergyResult, SolventComparisonResult
 from calc.xtb_scan import ScanResult
 from chemclaw.chem import require_canonical_smiles
@@ -116,7 +117,7 @@ class ReactionJobSpec(BaseModel):
     products: list[str] = Field(min_length=1)
     solvent: str | None = None
     temperature_k: float | None = None
-    level: Literal["quick", "standard"] = "standard"
+    level: Literal["quick", "standard", "thorough"] = "standard"
 
 
 class SolventScreenJobSpec(BaseModel):
@@ -127,7 +128,7 @@ class SolventScreenJobSpec(BaseModel):
     products: list[str] = Field(min_length=1)
     solvents: list[str] = Field(min_length=1)
     temperature_k: float | None = None
-    level: Literal["quick", "standard"] = "standard"
+    level: Literal["quick", "standard", "thorough"] = "standard"
 
 
 class ScanJobSpec(BaseModel):
@@ -140,12 +141,23 @@ class ScanJobSpec(BaseModel):
     solvent: str | None = None
 
 
+class EnsembleJobSpec(BaseModel):
+    """A durable conformer/tautomer/protomer search request (xTB plan X6)."""
+
+    kind: Literal["ensemble"] = "ensemble"
+    smiles: str = Field(min_length=1)
+    search: Literal["conformers", "tautomers", "protomers", "deprotomers"] = "conformers"
+    solvent: str | None = None
+    effort: Literal["quick", "normal", "extensive"] = "quick"
+
+
 # What an xTB job may be asked to do, discriminated on `kind`. A closed, typed union
 # rather than a free-form request is the same boundary rule the proposal sets for the
 # expert escape hatch: a model-authored payload can select among calculations we
 # defined, and can never describe one we did not.
 XtbJobSpec = Annotated[
-    ReactionJobSpec | SolventScreenJobSpec | ScanJobSpec, Field(discriminator="kind")
+    ReactionJobSpec | SolventScreenJobSpec | ScanJobSpec | EnsembleJobSpec,
+    Field(discriminator="kind"),
 ]
 
 
@@ -189,6 +201,7 @@ class XtbJobResult(BaseModel):
     reaction: ReactionEnergyResult | None = None
     solvents: SolventComparisonResult | None = None
     scan: ScanResult | None = None
+    ensemble: ConformerEnsemble | None = None
 
 
 class JobStatus(BaseModel):

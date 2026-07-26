@@ -21,11 +21,13 @@ which is the standard Temporal split the QM job already follows.
 
 from temporalio import activity
 
+from calc.conformers import ConformerSpec, run_cached_ensemble
 from calc.postgres_store import default_store
 from calc.reaction import compare_solvent_effects, compute_reaction_energy
 from calc.structure import structure_from_smiles
 from calc.xtb_scan import ScanSpec, run_cached_scan
 from workflows.models import (
+    EnsembleJobSpec,
     ReactionJobSpec,
     ScanJobSpec,
     SolventScreenJobSpec,
@@ -103,5 +105,20 @@ async def run_xtb_calculation(job: XtbJobInput) -> XtbJobResult:
                 f"{scan.maximum_relative_kcal:.1f} kcal/mol above it"
             ),
             scan=scan,
+        )
+    if isinstance(spec, EnsembleJobSpec):
+        structure = structure_from_smiles(spec.smiles, multiplicity=None, optimize=True)
+        ensemble, _ = await run_cached_ensemble(
+            store,
+            structure,
+            ConformerSpec(search=spec.search, solvent=spec.solvent, effort=spec.effort),
+        )
+        return XtbJobResult(
+            kind=spec.kind,
+            summary=(
+                f"{spec.search} of {spec.smiles}: {ensemble.total_found} found, lowest at "
+                f"{ensemble.conformers[0].population:.0%} population"
+            ),
+            ensemble=ensemble,
         )
     raise ValueError(f"unsupported xTB job kind: {spec!r}")

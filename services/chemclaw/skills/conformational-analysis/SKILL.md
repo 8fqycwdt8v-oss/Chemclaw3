@@ -5,6 +5,7 @@ description: >-
   is enough and when it silently invalidates every other number in an answer, and knowing
   what a relaxed scan can and cannot see.
 tools:
+  - sample_conformers
   - scan_coordinate
   - optimize_geometry
   - compute_thermochemistry
@@ -18,11 +19,16 @@ how high is a rotational barrier, how much strain a ring closure costs. The seco
 quieter and matters more: **deciding whether the single conformer under every other
 calculation is good enough**, because when it is not, nothing downstream is right.
 
-## The standing caveat, stated once
+## The standing caveat, and what now lifts it
 
 Every number this system produces — an energy, a pKa, a dipole, a Fukui ranking, a
-reaction ΔG — describes **one** conformer: whatever geometry was embedded and relaxed.
-There is no ensemble and no Boltzmann average anywhere yet.
+reaction ΔG — describes **one** conformer: whatever geometry was embedded and relaxed,
+*unless* an ensemble was asked for. `sample_conformers` searches the space properly and
+returns the populated shapes with their Boltzmann populations, and
+`compute_reaction_energy` at `level="thorough"` uses it.
+
+So the caveat is now a choice rather than a limitation, and the judgment is about when to
+spend the search — it is by far the most expensive calculation available here.
 
 When that is fine:
 
@@ -81,17 +87,23 @@ to take from it:
   produce, and a molecule whose shape is set by two dihedrals together is not answered by
   scanning either one.
 
-## Finding a better conformer
+## Running and reading an ensemble
 
-There is no conformer search here (it arrives with plan X6). What you can do:
+`sample_conformers` returns the members with relative energies, populations, and the
+**conformational entropy** — the term every single-conformer free energy is missing, and
+one that grows with flexibility, so it does not cancel in a reaction that changes it.
 
-- Scan the rotatable bond you suspect, take `minimum_structure`, and note that it is
-  lower than what you started with — evidence that the original number described a
-  strained shape.
-- `optimize_geometry` reports `relaxation_kcal`. A large value means the starting
-  geometry was poor, which is itself worth reporting.
-- For a molecule with several rotatable bonds, say plainly that a proper conformer search
-  is what the question needs and that this system does not do one yet.
+- **Populations are sampled, not enumerated.** The search is metadynamics from a random
+  seed: two runs differ slightly, and a conformer that was not found cannot be reported.
+  Read a 60/40 split as real and a 58/42-versus-60/40 difference as noise. Results are
+  cached, so a given molecule stays consistent once computed.
+- **Degeneracy is included and matters.** n-butane's gauche stands for two mirror-image
+  rotamers; ignoring that would put the anti at 73% instead of the correct ~59%.
+- **`effort` is a real trade-off.** "quick" is right for screening; raise it when a
+  missed conformer would change the answer, and say which you used.
+- **Cheaper alternatives, when a search is not worth it:** scan the rotatable bond you
+  suspect and take `minimum_structure`; or note `optimize_geometry`'s `relaxation_kcal`,
+  where a large value already says the starting geometry was poor.
 
 ## Presenting it
 

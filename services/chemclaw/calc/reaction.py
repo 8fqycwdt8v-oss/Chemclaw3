@@ -33,6 +33,7 @@ from typing import Literal
 from pydantic import BaseModel, Field
 from rdkit import Chem
 
+from calc.conformers import ConformerSpec, run_cached_ensemble
 from calc.progress import Progress, no_progress
 from calc.store import ResultStore
 from calc.structure import structure_from_smiles
@@ -43,11 +44,11 @@ from chemclaw.config import settings
 
 _HARTREE_TO_KCAL = 627.5094740631
 
-# How far the ladder is climbed per species. `quick` optimizes and differences
-# electronic energies; `standard` adds a Hessian and gives enthalpies and free
-# energies. The proposal's third tier, a Boltzmann-weighted conformer ensemble, is
-# plan X6 — it is not offered rather than offered and refused.
-ReactionLevel = Literal["quick", "standard"]
+# How far the ladder is climbed per species. `quick` optimizes and differences electronic
+# energies; `standard` adds a Hessian and gives enthalpies and free energies; `thorough`
+# first searches conformational space, works from the lowest member, and adds the
+# conformational entropy that a single-conformer free energy is missing (plan X6).
+ReactionLevel = Literal["quick", "standard", "thorough"]
 
 
 class SpeciesEnergy(BaseModel):
@@ -64,6 +65,9 @@ class SpeciesEnergy(BaseModel):
     enthalpy_hartree: float | None
     gibbs_free_energy_hartree: float | None
     is_minimum: bool | None
+    # The -T*S_conf term the ensemble contributed, present only at `thorough`. Positive
+    # flexibility lowers a free energy, so this is negative when it is present at all.
+    conformational_entropy_kcal: float | None = None
     was_cached: bool
 
 
@@ -171,6 +175,7 @@ async def _species_energy(
     role: Literal["reactant", "product"],
     opt_spec: OptSpec,
     thermo_spec: ThermoSpec | None,
+    conformer_spec: ConformerSpec | None = None,
 ) -> SpeciesEnergy:
     """Optimize one species and, above `quick`, run its Hessian.
 
@@ -179,6 +184,11 @@ async def _species_energy(
     argument to be computable.
     """
     structure = structure_from_smiles(smiles, multiplicity=None, optimize=True)
+    ensemble_correction = 0.0
+    if conformer_spec is not None:
+        ensemble, _ = await run_cached_ensemble(store, structure, conformer_spec)
+        structure = ensemble.lowest
+        ensemble_correction = ensemble.ensemble_correction_kcal
     if thermo_spec is None:
         optimization, opt_cached = await run_cached_optimization(store, structure, opt_spec)
         return SpeciesEnergy(
@@ -192,13 +202,16 @@ async def _species_energy(
             was_cached=opt_cached,
         )
     minimum, thermo, cached = await relax_to_minimum(store, structure, opt_spec, thermo_spec)
+    # The conformational entropy is a free-energy term only: it changes G, never H.
+    gibbs = thermo.gibbs_free_energy_hartree + ensemble_correction / _HARTREE_TO_KCAL
     return SpeciesEnergy(
         smiles=smiles,
         role=role,
         multiplicity=structure.multiplicity,
         electronic_energy_hartree=minimum.energy_hartree,
         enthalpy_hartree=thermo.enthalpy_hartree,
-        gibbs_free_energy_hartree=thermo.gibbs_free_energy_hartree,
+        gibbs_free_energy_hartree=gibbs,
+        conformational_entropy_kcal=round(ensemble_correction, 3) or None,
         is_minimum=thermo.is_minimum,
         was_cached=cached,
     )
@@ -246,7 +259,10 @@ async def compute_reaction_energy(
     temperature = temperature_k or settings.xtb_thermo_temperature_k
     opt_spec = OptSpec(solvent=solvent)
     thermo_spec = (
-        ThermoSpec(solvent=solvent, temperature_k=temperature) if level == "standard" else None
+        ThermoSpec(solvent=solvent, temperature_k=temperature) if level != "quick" else None
+    )
+    conformer_spec = (
+        ConformerSpec(solvent=solvent, temperature_k=temperature) if level == "thorough" else None
     )
 
     roles: tuple[tuple[Literal["reactant", "product"], list[str]], ...] = (
@@ -257,7 +273,9 @@ async def compute_reaction_energy(
     species = []
     for index, (role, smiles) in enumerate(queue, start=1):
         progress(f"species {index}/{len(queue)}: {smiles}")
-        species.append(await _species_energy(store, smiles, role, opt_spec, thermo_spec))
+        species.append(
+            await _species_energy(store, smiles, role, opt_spec, thermo_spec, conformer_spec)
+        )
     warnings = [
         f"{entry.smiles} is not a minimum (imaginary frequency): its free energy is not "
         "a free energy"

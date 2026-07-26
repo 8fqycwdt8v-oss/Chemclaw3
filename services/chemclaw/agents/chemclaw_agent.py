@@ -48,6 +48,7 @@ from agents import memory_tools as _memory_tools  # noqa: F401
 from agents import qm_tools as _qm_tools  # noqa: F401
 from agents import research_tools as _research_tools  # noqa: F401
 from agents import safety_tools as _safety_tools  # noqa: F401
+from agents import xtb_expert_tools as _xtb_expert_tools  # noqa: F401
 from agents.audit import AuditSink, make_audit_middleware
 from agents.llm_provider import build_chat_client
 from agents.profiles import AgentProfile, get_profile

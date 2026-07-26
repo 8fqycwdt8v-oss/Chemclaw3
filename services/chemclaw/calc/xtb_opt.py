@@ -27,6 +27,7 @@ import numpy as np
 from pydantic import BaseModel, Field
 from scipy.optimize import minimize
 
+from calc import xtb_cli
 from calc.store import ResultStore, run_cached
 from calc.structure import Structure
 from calc.xtb_engine import evaluate_point, make_calculator
@@ -76,6 +77,9 @@ class OptimizationResult(BaseModel):
     input_structure_id: str
     structure: Structure
     method: str
+    # Which backend produced this geometry. Recorded because the two do not agree to the
+    # last decimal, so a reader comparing two results needs to know they are comparable.
+    engine: str
     solvent: str | None
     initial_energy_hartree: float
     energy_hartree: float
@@ -105,6 +109,7 @@ class OptimizationSummary(BaseModel):
     smiles: str | None
     structure_id: str
     method: str
+    engine: str
     solvent: str | None
     energy_hartree: float
     relaxation_kcal: float
@@ -119,6 +124,7 @@ class OptimizationSummary(BaseModel):
             smiles=result.smiles,
             structure_id=result.structure.structure_id,
             method=result.method,
+            engine=result.engine,
             solvent=result.solvent,
             energy_hartree=result.energy_hartree,
             relaxation_kcal=result.relaxation_kcal,
@@ -129,11 +135,33 @@ class OptimizationSummary(BaseModel):
 
 
 def optimize_structure(spec: OptSpec, structure: Structure) -> OptimizationResult:
-    """Relax `structure` to a GFN2-xTB minimum, or raise if it does not converge.
+    """Relax `structure` to a minimum, or raise if it does not converge.
+
+    Dispatches on the spec's engine, after `for_structure` has had its say — an
+    open-shell species goes to the in-process backend whatever was configured, because
+    the binary cannot apply the spin-polarization term its energy needs.
+
+    The `xtb` binary optimizes in approximate normal
+    coordinates (ANCopt) and is 9-11x faster on drug-sized molecules than the Cartesian
+    L-BFGS below it — measured, see `calc.xtb_cli`. The in-process path remains the
+    fallback for a deployment without the binary, and the two are separately cached
+    because they do not produce identical geometries.
 
     Raises `ValueError` if the gradient is still above `spec.gradient_tolerance` after
     `spec.max_steps` — with the numbers, so the caller can tell "nearly there" from
     "this geometry is falling apart".
+    """
+    resolved = spec.for_structure(structure)
+    if resolved.engine == "xtb":
+        return _optimize_with_binary(resolved, structure)
+    return _optimize_with_library(resolved, structure)
+
+
+def _optimize_with_library(spec: OptSpec, structure: Structure) -> OptimizationResult:
+    """Relax with tblite's analytic gradient and a bounded Cartesian L-BFGS-B.
+
+    The fallback backend, and the only one that can hold atoms fixed — which is what
+    makes it the relaxed scan's optimizer regardless of what else is installed.
     """
     numbers, positions = structure.arrays()
     frozen = np.zeros(len(numbers), dtype=bool)
@@ -222,6 +250,7 @@ def optimize_structure(spec: OptSpec, structure: Structure) -> OptimizationResul
         input_structure_id=structure.structure_id,
         structure=optimized,
         method=spec.method,
+        engine=spec.engine,
         solvent=spec.solvent,
         initial_energy_hartree=initial_energy,
         energy_hartree=energy,
@@ -231,6 +260,81 @@ def optimize_structure(spec: OptSpec, structure: Structure) -> OptimizationResul
         displacement_rms_angstrom=float(np.sqrt(np.mean((final - positions) ** 2))),
         frozen_atoms=list(spec.frozen_atoms),
     )
+
+
+def _optimize_with_binary(spec: OptSpec, structure: Structure) -> OptimizationResult:
+    """Relax with `xtb --opt` (ANCopt), then verify convergence on our own criterion.
+
+    The convergence check is deliberately *ours*, re-evaluated on the returned geometry
+    rather than trusted from xtb's exit status: the contract of this module is that an
+    `OptimizationResult` satisfies `spec.gradient_tolerance`, and a backend that
+    converged to its own looser threshold must not quietly weaken that. It costs one
+    gradient evaluation.
+
+    Frozen atoms fall back to the Cartesian path — pinning coordinates is expressible as
+    optimizer bounds but not as an xtb flag without writing a control file, which is
+    exactly the input surface `calc.xtb_cli` refuses to have.
+    """
+    if spec.frozen_atoms:
+        return _optimize_with_library(spec, structure)
+    outcome = xtb_cli.run(
+        structure,
+        task="opt",
+        method=spec.method,
+        solvent=spec.solvent,
+        max_cycles=spec.max_steps,
+    )
+    if outcome.structure is None:
+        raise ValueError("xtb --opt produced no optimized geometry")
+    key = spec.cache_key(structure)
+    optimized = outcome.structure.model_copy(update={"origin": key.as_str()})
+    initial, _, _ = _energy_and_gradient(spec, structure, structure)
+    energy, gradient, _ = _energy_and_gradient(spec, structure, optimized)
+    max_gradient = float(np.max(np.abs(gradient)))
+    if max_gradient > spec.gradient_tolerance:
+        raise ValueError(
+            f"geometry optimization did not converge in {outcome.cycles} ANC cycles: "
+            f"max |gradient| {max_gradient:.2e} > {spec.gradient_tolerance:.2e} "
+            "Hartree/Angstrom"
+        )
+    _, positions = structure.arrays()
+    final = np.array(optimized.positions)
+    return OptimizationResult(
+        smiles=structure.smiles,
+        input_structure_id=structure.structure_id,
+        structure=optimized,
+        method=spec.method,
+        engine=spec.engine,
+        solvent=spec.solvent,
+        initial_energy_hartree=initial,
+        energy_hartree=energy,
+        relaxation_kcal=(initial - energy) * _HARTREE_TO_KCAL,
+        steps=outcome.cycles or 0,
+        max_gradient=max_gradient,
+        displacement_rms_angstrom=float(np.sqrt(np.mean((final - positions) ** 2))),
+        frozen_atoms=[],
+    )
+
+
+def _energy_and_gradient(
+    spec: OptSpec, template: Structure, at: Structure
+) -> tuple[float, np.ndarray, np.ndarray]:
+    """Evaluate energy and gradient at `at`, using the in-process engine.
+
+    Used to verify a binary-produced geometry against our own convergence criterion.
+    GFN-FF has no tblite equivalent, so for it the check is skipped and xtb's own
+    convergence stands — stated here rather than silently.
+    """
+    numbers, _ = template.arrays()
+    calc = make_calculator(
+        spec.method if spec.method != "GFN-FF" else "GFN2-xTB",
+        numbers,
+        np.array(at.positions),
+        charge=at.charge,
+        uhf=at.uhf,
+        solvent=spec.solvent,
+    )
+    return evaluate_point(calc, np.array(at.positions))
 
 
 async def run_cached_optimization(

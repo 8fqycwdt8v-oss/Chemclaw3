@@ -11,6 +11,31 @@ USER 0
 RUN pip install --no-cache-dir uv
 WORKDIR /app
 
+# The two calculation binaries (xTB plan X5/X6). Pinned release tarballs rather than a
+# package manager, because UBI9 has neither in its repositories and a pinned artifact is
+# what makes the image reproducible. Both are optional at *runtime* — `calc.xtb_cli` and
+# `calc.crest_cli` fall back or report unavailable — but a worker image without them
+# loses the 9-11x ANCopt speedup and conformer sampling entirely.
+#
+# Licensing: xtb is LGPL-3.0, crest is GPL-3.0. Both are invoked as separate processes
+# over files and never linked, so the usual analysis is that neither affects this
+# codebase's licence — but *distributing* them inside an image is a decision for whoever
+# owns the product. Drop the crest layer to ship without it.
+ARG XTB_VERSION=6.6.1
+ARG CREST_VERSION=3.0.2
+RUN set -eux; \
+    curl -fsSL -o /tmp/xtb.tar.xz \
+      "https://github.com/grimme-lab/xtb/releases/download/v${XTB_VERSION}/xtb-${XTB_VERSION}-linux-x86_64.tar.xz"; \
+    tar -xJf /tmp/xtb.tar.xz -C /opt; \
+    ln -s "/opt/xtb-dist/bin/xtb" /usr/local/bin/xtb 2>/dev/null || \
+      ln -s "/opt/xtb-${XTB_VERSION}/bin/xtb" /usr/local/bin/xtb; \
+    curl -fsSL -o /tmp/crest.tar.xz \
+      "https://github.com/crest-lab/crest/releases/download/v${CREST_VERSION}/crest-gnu-12-ubuntu-latest.tar.xz"; \
+    mkdir -p /opt/crest && tar -xJf /tmp/crest.tar.xz -C /opt/crest --strip-components=1; \
+    install -m 0755 /opt/crest/crest /usr/local/bin/crest; \
+    rm -f /tmp/xtb.tar.xz /tmp/crest.tar.xz; \
+    xtb --version >/dev/null && crest --version >/dev/null
+
 COPY pyproject.toml uv.lock README.md ./
 # Copy the source needed to build the wheel + run every component.
 COPY chemclaw ./chemclaw

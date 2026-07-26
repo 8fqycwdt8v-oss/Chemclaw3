@@ -662,11 +662,29 @@ MAF ships the harness natively (`create_harness_agent` + `TodoProvider`/`AgentMo
       inline-vs-Temporal decision the phase turned out to need. `calc/xtb_cost.py` predicts the cost,
       `XtbJobWorkflow` runs what is over budget on the existing `hpc-jobs` queue, and
       `get_qm_job_status` is generalized to `get_job_status` across both job kinds.
-- [ ] **X5–X7** — the `xtb`/`crest` binaries, conformer ensembles, the typed expert escape hatch.
-      See `docs/xtb-tools-proposal.md` §12; X5/X6 are gated on the licensing and image-size
-      decisions in §14, which are the user's, not engineering's. What remains genuinely missing at
-      the model level is **transition states**: there is no saddle-point search, so every "how fast"
-      question is still unanswerable and a scan maximum is a sketch of a barrier, not one.
+- [x] **X5 the `xtb` binary** (D-088): `calc/xtb_cli.py`, a hardened argv-only subprocess backend
+      selected by `settings.xtb_engine`. ANCopt is **8-11x faster** than the Cartesian optimizer on
+      drug-sized substrates; GFN-FF optimizes 118 atoms in 0.7 s. The binary supplies the Hessian;
+      the validated RRHO stays in `calc.xtb_thermo`, so both backends reproduce water's measured
+      entropy identically.
+- [x] **X6 CREST ensembles** (D-088): `calc/crest_cli.py` + `calc/conformers.py` — conformer,
+      tautomer and protomer searches with degeneracy-weighted populations and the conformational
+      entropy every single-conformer free energy is missing. `compute_reaction_energy` gains
+      `level="thorough"`. The system's first non-deterministic calculator; the store is what makes
+      it stable.
+- [x] **X7 the expert seam** (D-088): `run_xtb_task` over a typed spec, role-gated by default.
+- [x] ~~**X9 internal-coordinate optimizer**~~ — **retired by X5.** ANCopt is exactly this, and it
+      is a process call away; writing one would have reimplemented the reference.
+- [ ] **X10 transition states** — the largest remaining gap at the *model* level, unchanged by
+      X5-X7. There is no saddle-point search, so every "how fast" question is unanswerable and a
+      relaxed-scan maximum is a sketch of a barrier rather than one. `xtb --path` (the reaction-path
+      finder) and CREST's transition-state tooling are the obvious routes.
+- [ ] **X11 CREST's unexploited searches** — `--protonate`/`--deprotonate` is the structural half
+      of the pKa question and the way **U2 (basic amines) actually gets solved**, rather than by
+      re-fitting the O-H calibration; `--nci` samples *complexes*, the only route in the system to
+      a question about two molecules together (API + excipient, substrate + catalyst). Both are
+      wired at the CLI layer already; neither has a calculator or a skill.
+      See `docs/xtb-skill-catalogue.md` §9 for the seven skills these unlock.
 
 ### Ranked out of the xTB use-case review (`docs/xtb-use-cases.md`) — above X3 in value
 

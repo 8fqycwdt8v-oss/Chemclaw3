@@ -365,6 +365,37 @@ class CalculatorSettings(BaseSettings):
     deliberate recompute, never a silent drift.
     """
 
+    # Which backend runs an xTB task (plan X5). "tblite" is the in-process library;
+    # "xtb" is the binary, which brings ANCopt (measured 9-11x faster on drug-sized
+    # molecules) and GFN-FF. "auto" prefers the binary when it is installed and falls
+    # back, so a deployment without it still works — the *resolved* name goes into the
+    # cache key, never "auto", so two deployments never share an entry they disagree on.
+    xtb_engine: Literal["auto", "tblite", "xtb"] = "auto"
+    xtb_binary: str = "xtb"
+    # Numerical accuracy passed to the binary (xtb's `--acc`; lower is tighter) and the
+    # wall-clock ceiling on one invocation.
+    xtb_cli_accuracy: float = 1.0
+    xtb_cli_timeout_seconds: int = 3600
+    # xtb's optimization convergence level. "vtight" (2e-4 Hartree/Bohr) is the first one
+    # that satisfies `xtb_opt_gradient_tolerance`; the default "normal" stops around
+    # 1e-3 and the geometry is then rejected by our own check, which wastes the run.
+    xtb_cli_opt_level: str = "vtight"
+    # Threads for the binary and its OpenMP runtime. 0 leaves xtb's own default, which
+    # uses the machine — correct for a dedicated worker pod running one job at a time,
+    # and worth measuring before changing: pinning to 1 cost a factor of ~4 on a 76-atom
+    # Hessian. Set it to 1 only where many activities share a pod, to stop them
+    # oversubscribing each other.
+    xtb_cli_threads: int = 0
+    # CREST conformer/tautomer/protomer sampling (plan X6). GPL-3.0 and optional: absent,
+    # the ensemble tasks say so and everything else works. `crest_effort` is the default
+    # search depth, `crest_max_members` caps how many members a result reports (the
+    # search finds dozens; only the populated ones are readable), and the timeout is
+    # generous because this is the most expensive calculation in the system.
+    crest_binary: str = "crest"
+    crest_effort: Literal["quick", "normal", "extensive"] = "quick"
+    crest_max_members: int = 20
+    crest_threads: int = 0
+    crest_timeout_seconds: int = 14400
     # xTB semiempirical calculator (plan step 1c.2). Method is the GFN parametrization
     # (latest: GFN2-xTB). `xtb_embed_seed` fixes RDKit 3D embedding so results are
     # reproducible; it is part of the cache key so changing it recomputes.
@@ -415,6 +446,10 @@ class CalculatorSettings(BaseSettings):
     xtb_cost_exponent: float = 3.0
     xtb_cost_optimize_scale: float = 3.0e-4
     xtb_cost_hessian_scale: float = 1.0e-3
+    # A CREST conformer search on top, for the `thorough` level. Measured ~50 s on
+    # 14-atom n-butane, which is already 100x an optimization at that size — a search is
+    # metadynamics plus hundreds of optimizations, and it is never an inline request.
+    xtb_cost_ensemble_scale: float = 2.0e-2
     # Start-to-close budget for one durable xTB job activity. Four hours, because the
     # workload is drug-sized molecules: one 76-atom species takes ~5 minutes to optimize
     # and take a Hessian, so a multi-species reaction at 100+ atoms is genuinely hours.

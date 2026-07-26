@@ -16,3 +16,47 @@
 - **The file that exists only to be copied is the one never tested.** `.env.example` drifted into
   crashing the documented quickstart. Where a doc makes a checkable promise ("every field mirrored"),
   make it a test rather than restating it in prose.
+
+## Do not assert a sampled quantity (2026-07-26, X6/CREST)
+
+CREST is the first non-deterministic calculator in this codebase. My first test asserted
+`total_found == 2` for n-butane — correct chemistry, and it passed twice. The third run
+returned 4, because the metadynamics happened to split methyl-rotor variants differently.
+
+**Rule:** before asserting anything about a stochastic calculator, ask "would this hold on a
+different random seed?". Assert orderings, bounds, invariants (populations sum to 1) and
+signs — never a count, never a population to three figures. A test that pins a sampled
+quantity is a CI flake with a delay fuse, and it will fire on someone else's PR.
+
+## A cost model fitted on toys does not transfer (2026-07-26, X3/X4)
+
+I fitted the inline-vs-durable router on 3-14 atom test molecules, got an exponent of 1.7,
+and shipped it. On the workload the system is actually pointed at (200-800 Da) it
+under-predicted a 76-atom substrate **sevenfold** — the fixed overhead that dominates a small
+molecule is irrelevant at real size, and the true scaling took over.
+
+**Rule:** calibrate against the workload, not against the test fixtures. Before fitting any
+performance model, measure at least one point at the top of the intended range. And when a
+user states their workload ("MW 200-800", "minutes not seconds"), treat it as a
+specification to re-verify against, not as context.
+
+## Trust the output files, not the exit code (2026-07-26, X5)
+
+`xtb --hess` on linear CO2 computes the Hessian correctly — the file holds its textbook
+655/1345/2446 cm^-1 — and then aborts during teardown with SIGABRT. Treating exit != 0 as
+failure would have silently lost every linear molecule.
+
+**Rule:** for a subprocess backend, define success as "produced the outputs the task is
+defined by", check that explicitly, and log when the exit code disagreed. The converse also
+holds: exit 0 is not evidence the outputs exist.
+
+## Two backends must agree on the physics, not just the interface (2026-07-26, X5)
+
+`tblite` enables a spin-polarization term for open shells (without it, triplet O2 came out
+*above* singlet). The `xtb` binary does not by default, and its `--spinpol` is OOM-killed in
+this build. Dispatching a radical to whichever backend was configured would have silently
+reintroduced the exact physics error D-085 removed.
+
+**Rule:** when adding a second implementation behind one interface, enumerate what the first
+one *fixes* and check the second does the same. Where it cannot, route around it explicitly
+and make the cache key record which one actually ran.

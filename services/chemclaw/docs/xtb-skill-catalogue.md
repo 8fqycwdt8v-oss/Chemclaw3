@@ -191,3 +191,46 @@ asked most often:
 
 The distribution is the argument: **19 of the 28 skills in this catalogue are gated on X3 or
 X4.** The judgment layer is not what is missing — the capability under it is.
+
+
+---
+
+## 9. What CREST adds — the skills its searches unlock (X6 shipped)
+
+CREST is a different *kind* of capability from everything else here: the others compute a
+property of a structure you hand them, and CREST decides **which structure** to hand them.
+That makes it upstream of the whole catalogue, and it opens a family of questions no
+amount of judgment over single-point properties could reach.
+
+### Shipped with X6
+
+| Skill | The question CREST answers | Search |
+|---|---|---|
+| **`tautomer-analysis`** | Which structure is this molecule actually in — and therefore what does every other number here refer to? | `--tautomerize` |
+| **`conformational-analysis`** (extended) | Which shapes are populated, in what proportion, and what conformational entropy is every single-conformer free energy missing? | conformer search |
+
+`tautomer-analysis` is the one with the widest blast radius. A pKa, a Fukui ranking, a
+dipole and a reaction free energy all describe whichever tautomer was drawn; if that is
+the minor form, none of them is a number about the compound. It is now askable, and the
+skill's main job is making sure it *gets* asked for the scaffolds where it matters
+(heterocyclic N-H above all).
+
+### Unlocked by capability, not yet written
+
+| Skill | The question | Search | Why it is worth writing |
+|---|---|---|---|
+| **`protomer-and-microspecies`** | Which nitrogen protonates first? Which microspecies dominates at this pH? | `--protonate` | The structural half of the pKa question. The current calibration is O-H/S-H-only, so **basic amines — most pharma pKa questions — are unanswerable**; a ranked protomer search is the missing piece (this is U2, and CREST is how it gets solved rather than by re-fitting). |
+| **`salt-and-cocrystal-screening`** | Which counterion, and will the salt be stable? | `--protonate`/`--deprotonate` | Gated on U2 in §5; the protomer search is what ungates it. |
+| **`conformational-polymorph-risk`** | Does this molecule have many low-energy conformers — i.e. is it a polymorphism risk worth screening hard? | conformer search | A direct readout: `total_found` and a flat population distribution *are* the risk signal. Cheap now that ensembles exist. |
+| **`shape-and-exposure`** | Which face or site is sterically accessible across the populated ensemble, not just in one geometry? | conformer search | The standing "sterics are invisible" caveat in `product-prediction` and `catalyst-ligand-selection` is a *single-conformer* limitation as much as an electronic one. |
+| **`intramolecular-interactions`** | Is there an internal hydrogen bond, and does it hold in the populated ensemble? | conformer search | Worth several kcal/mol and it silently decides many of the comparisons this system makes. Answerable by inspecting the ensemble's geometries rather than one embedding. |
+| **`aggregation-and-noncovalent`** | How do two molecules associate — API with excipient, substrate with catalyst, solute with solvent? | `--nci` | CREST's non-covalent mode samples *complexes*. This is the only route in the whole system to a question about two molecules together, and it is entirely unexploited. |
+| **`ensemble-weighted-properties`** | What is the Boltzmann-averaged dipole, pKa, or descriptor — rather than one conformer's? | conformer search | Mechanical once ensembles exist: re-run any existing property over the members and weight. The BO featurization (U1/D-083) is the most valuable consumer, since a conformer-averaged descriptor is a far better regression feature than one embedding's. |
+
+### The honest constraint on all of it
+
+A CREST search is **the most expensive calculation in this system** — ~50 s for
+14-atom n-butane, and it scales badly — and it is **stochastic**, so it samples
+conformational space rather than enumerating it. Both facts belong in every skill above:
+a population is a sampled quantity, a missing conformer is not evidence of absence, and
+the search is a durable job rather than something a conversation waits for.

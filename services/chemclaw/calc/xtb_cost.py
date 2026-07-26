@@ -62,14 +62,32 @@ def atom_count(smiles: str) -> int:
     return int(parse_molecule(smiles).GetNumAtoms())
 
 
-def reaction_seconds(species: list[str], hessian: bool, repeats: int = 1) -> float:
+def reaction_seconds(
+    species: list[str], hessian: bool, repeats: int = 1, ensemble: bool = False
+) -> float:
     """Predicted seconds for a reaction over `species`, run `repeats` times.
 
     `repeats` is the solvent comparison's multiplier: the same species set is run once
     per solvent plus the gas phase, and that is where a comfortable inline request
-    turns into a durable one.
+    turns into a durable one. `ensemble` is the `thorough` level's conformer search,
+    which is metadynamics plus hundreds of optimizations and therefore dominates
+    everything else — measured at ~50 s for n-butane, so it is never inline.
     """
-    return repeats * sum(species_seconds(atom_count(smiles), hessian) for smiles in species)
+    total = repeats * sum(species_seconds(atom_count(smiles), hessian) for smiles in species)
+    if ensemble:
+        total += sum(
+            settings.xtb_cost_ensemble_scale
+            * float(atom_count(smiles)) ** settings.xtb_cost_exponent
+            for smiles in species
+        )
+    return total
+
+
+def ensemble_seconds(smiles: str) -> float:
+    """Predicted seconds for a CREST ensemble search — always past the inline budget."""
+    return float(
+        settings.xtb_cost_ensemble_scale * float(atom_count(smiles)) ** settings.xtb_cost_exponent
+    )
 
 
 def scan_seconds(smiles: str, points: int) -> float:

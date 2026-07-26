@@ -121,3 +121,30 @@ than running it durably. The caps that remain are practicality limits, not laten
 rates; one conformer everywhere, so no ensembles; and homolysis energies that rank correctly
 while being badly wrong in absolute terms. The first two are X5/X6; the third is carried by
 `bond-strength-and-radicals`.
+
+
+## X5-X7 (added after "continue with all remaining x")
+
+- [x] **X5 the `xtb` binary** — `calc/xtb_cli.py`. The measurement that justified it: 8.3x on a
+      76-atom substrate, 10.9x on 118 atoms, because ANCopt optimizes in normal coordinates
+      (39 and 94 cycles against 177 and 232 Cartesian steps).
+- [x] **X6 CREST** — `calc/crest_cli.py` + `calc/conformers.py`, conformer/tautomer/protomer
+      searches, degeneracy-weighted populations, conformational entropy, `level="thorough"`.
+- [x] **X7 the expert seam** — `run_xtb_task` over a typed spec, role-gated.
+- [x] Both binaries pinned into the container image; every new setting in `.env.example`.
+- [x] Skills: `tautomer-analysis`; `conformational-analysis` extended for ensembles;
+      `docs/xtb-skill-catalogue.md` §9 ideates the seven further skills CREST's searches unlock.
+- [x] ~~X9~~ retired: ANCopt *is* the internal-coordinate optimizer.
+- [ ] **X8 (MCP)** — answered, not built. It is an either/or migration of the agent's advertised
+      surface, not an addition, and it touches skill frontmatter, the registry test and the
+      in-process `bo/` callers. Scoped in `BACKLOG.md`.
+- [ ] **X10 transition states** — the largest remaining gap at the model level; unchanged by X5-X7.
+
+### What the binaries changed about the earlier phases
+
+Two X3/X4 decisions are now obsolete and were removed rather than left as dead weight: the
+hand-written internal-coordinate optimizer (X9) is unnecessary, and the Cartesian trust-region
+loop is demoted to the fallback path. Two are unchanged and were re-validated across backends:
+the shared RRHO (both reproduce water's 45.10 cal/(mol K)) and the cost router (still the right
+answer — with the binary, drug-sized work is minutes instead of tens of minutes, which is *still*
+past any inline budget).

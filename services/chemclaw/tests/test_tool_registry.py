@@ -30,6 +30,8 @@ _EXPECTED_INPROCESS_TOOLS = {
     "scan_coordinate",
     "compute_reaction_energy",
     "compare_solvents",
+    "sample_conformers",
+    "run_xtb_task",
     "predict_solubility",
     "predict_pka",
     "submit_qm_job",

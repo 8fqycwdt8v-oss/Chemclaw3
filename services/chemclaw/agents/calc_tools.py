@@ -11,6 +11,8 @@ import numpy as np
 
 from agents.tool_registry import tool
 from agents.xtb_job_tools import DeferredJob, defer_to_job
+from calc.conformers import ConformerEnsemble, ConformerSpec, run_cached_ensemble
+from calc.crest_cli import CrestEffort, CrestSearch
 from calc.pka import PkaInput, PkaResult, run_cached_pka
 from calc.postgres_store import default_store
 from calc.reaction import (
@@ -23,7 +25,12 @@ from calc.reaction import compute_reaction_energy as _compute_reaction_energy
 from calc.solubility import SolubilityInput, SolubilityResult, run_cached_solubility
 from calc.structure import structure_from_smiles
 from calc.xtb import XtbInput, XtbResult, run_cached_xtb
-from calc.xtb_cost import exceeds_inline_budget, reaction_seconds, scan_seconds
+from calc.xtb_cost import (
+    ensemble_seconds,
+    exceeds_inline_budget,
+    reaction_seconds,
+    scan_seconds,
+)
 from calc.xtb_opt import OptimizationSummary, OptSpec, run_cached_optimization
 from calc.xtb_props import (
     ElectronicProperties,
@@ -35,7 +42,7 @@ from calc.xtb_props import (
 from calc.xtb_scan import ScanResult, ScanSpec, run_cached_scan
 from calc.xtb_thermo import ThermochemistryResult, ThermoSpec, relax_to_minimum
 from chemclaw.config import settings
-from workflows.models import ReactionJobSpec, ScanJobSpec, SolventScreenJobSpec
+from workflows.models import EnsembleJobSpec, ReactionJobSpec, ScanJobSpec, SolventScreenJobSpec
 
 
 @tool
@@ -290,7 +297,9 @@ async def compute_reaction_energy(
         The deltas in kcal/mol, the per-species breakdown, how many species were served
         from cache, the method uncertainty, and any warnings about the calculation.
     """
-    predicted = reaction_seconds(reactants + products, hessian=level == "standard")
+    predicted = reaction_seconds(
+        reactants + products, hessian=level != "quick", ensemble=level == "thorough"
+    )
     if exceeds_inline_budget(predicted):
         return await defer_to_job(
             ReactionJobSpec(
@@ -340,7 +349,10 @@ async def compare_solvents(
         spread across them and a warning when that spread is inside the uncertainty.
     """
     predicted = reaction_seconds(
-        reactants + products, hessian=level == "standard", repeats=len(solvents) + 1
+        reactants + products,
+        hessian=level != "quick",
+        repeats=len(solvents) + 1,
+        ensemble=level == "thorough",
     )
     if exceeds_inline_budget(predicted):
         return await defer_to_job(
@@ -356,6 +368,56 @@ async def compare_solvents(
     return await compare_solvent_effects(
         default_store(), reactants, products, solvents, temperature_k or None, level
     )
+
+
+@tool
+async def sample_conformers(
+    smiles: str,
+    search: CrestSearch = "conformers",
+    solvent: str | None = None,
+    effort: CrestEffort = "quick",
+) -> ConformerEnsemble | DeferredJob:
+    """Search a molecule's conformers, tautomers or protonation sites (CREST).
+
+    Every other calculation here describes **one** shape of the molecule. This searches
+    the space properly by metadynamics and returns what is actually populated, with
+    Boltzmann populations at room temperature.
+
+    Choose `search` by the question:
+    - "conformers": which 3D shapes the molecule adopts, and in what proportion. Also
+      gives the conformational entropy that every single-conformer free energy is missing.
+    - "tautomers": which tautomer dominates. Worth asking *first* about any molecule with
+      an amide, an enol, or a heterocyclic N-H, because every other number — a pKa, a
+      reactivity ranking, a reaction energy — describes whichever tautomer was drawn.
+    - "protomers" / "deprotomers": where the molecule protonates or deprotonates, ranked.
+
+    Two things to read carefully. The search is **stochastic**: it samples rather than
+    enumerates, so populations are approximate and two runs differ slightly (results are
+    cached, so a given molecule stays consistent once computed). And it is by far the
+    most expensive calculation available here — minutes for a small molecule, longer for
+    a real substrate — so it will usually return a job id rather than a result.
+
+    Args:
+        smiles: The molecule as a SMILES string.
+        search: Which space to sample.
+        solvent: Optional implicit solvent name; omit for gas phase.
+        effort: "quick" for screening, "normal" or "extensive" when a missed conformer
+            would change the answer.
+
+    Returns:
+        The populated members with their relative energies and populations, the
+        conformational entropy, and how many were found in total.
+    """
+    predicted = ensemble_seconds(smiles)
+    if exceeds_inline_budget(predicted):
+        return await defer_to_job(
+            EnsembleJobSpec(smiles=smiles, search=search, solvent=solvent, effort=effort),
+            predicted,
+        )
+    structure = structure_from_smiles(smiles, multiplicity=None, optimize=True)
+    spec = ConformerSpec(search=search, solvent=solvent, effort=effort)
+    result, _ = await run_cached_ensemble(default_store(), structure, spec)
+    return result
 
 
 @tool
