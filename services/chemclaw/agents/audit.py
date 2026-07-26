@@ -1,0 +1,184 @@
+"""GxP tool-audit trail: record every agent tool call once, from one place.
+
+Why this exists: in a pharma/GxP setting "who ran what, with which inputs, when, did it
+succeed, and to what effect" must be answerable, and it is the first thing needed to
+troubleshoot an agent turn. Rather than sprinkle logging into each of the ~13 tools
+(duplication that would drift), one MAF **function middleware** wraps *every* registered
+tool uniformly — the audit trail is a single reusable piece (DRY), like the PR-gate.
+
+It is observe-only: it never alters the arguments or the result. Each call records the
+correlation id (which conversation), the actor (who — a Phase-6 seam, the configured
+`service_actor_id` until Entra identity lands), the tool name, its truncated arguments, the
+outcome and a short effect summary (e.g. the PR ref a `propose_*` tool returned), and the latency.
+Records go to the stdlib log always, and additionally to a durable `AuditSink` when one is
+supplied (the Postgres append-only trail) — the log is the floor, the sink is the GxP record.
+
+Note: tool arguments and confirmed-answer payloads are user free text, so audit records may
+contain PII. `agent_audit_max_arg_chars` bounds what is stored; treat the trail accordingly.
+"""
+
+import logging
+import time
+from collections.abc import Awaitable, Callable
+from typing import Protocol, runtime_checkable
+
+from agent_framework import FunctionInvocationContext, function_middleware
+from pydantic import BaseModel
+
+from agents.identity_context import get_current_actor
+from chemclaw.config import settings
+
+logger = logging.getLogger(__name__)
+
+
+class AuditEvent(BaseModel):
+    """One recorded tool invocation — the row an `AuditSink` persists."""
+
+    correlation_id: str
+    actor: str
+    tool: str
+    arguments: str
+    outcome: str  # "ok" | "error"
+    detail: str = ""  # result summary on success, exception text on failure
+    latency_ms: float
+    # The deployment revision (Git SHA / image digest) in effect for this call (AG-14): ties a past
+    # result to the exact prompt/skill/config version that produced it. "unknown" until a deployment
+    # sets `deployment_revision`.
+    revision: str = "unknown"
+
+
+@runtime_checkable
+class AuditSink(Protocol):
+    """Durable destination for audit events. Backends implement this (append-only)."""
+
+    async def record(self, event: AuditEvent) -> None:
+        """Persist one audit event. Must not raise into the tool call path."""
+        ...
+
+
+class NullAuditSink:
+    """The default sink: the stdlib log is the only record (no durable store wired)."""
+
+    async def record(self, event: AuditEvent) -> None:
+        """Discard the event — logging in the middleware already recorded it."""
+        return None
+
+
+def _truncate(value: object) -> str:
+    """Render a value as a single-line string bounded by the configured budget.
+
+    A tool argument or result can be a large object (a full optimization problem, an
+    evidence sweep); truncating keeps one audit record from ballooning while still
+    identifying the call and its effect.
+    """
+    text = repr(value)
+    limit = settings.agent_audit_max_arg_chars
+    return text if len(text) <= limit else text[:limit] + "…"
+
+
+def make_audit_middleware(
+    *,
+    correlation_id: str,
+    actor: str,
+    sink: AuditSink | None = None,
+) -> Callable[[FunctionInvocationContext, Callable[[], Awaitable[None]]], Awaitable[None]]:
+    """Build the tool-audit middleware bound to one conversation's identity.
+
+    `correlation_id` ties every event to a single agent conversation; `actor` is the fallback
+    identity used when no authenticated user is ambient — the turn's real Entra user
+    (`agents.identity_context`) takes precedence per call (F4-T5). `sink` is the durable trail —
+    omitted (or `NullAuditSink`) means log-only. A sink failure is logged and swallowed: the audit
+    store must never break a tool call.
+    """
+    audit_sink: AuditSink = sink if sink is not None else NullAuditSink()
+    # The revision in effect for this process, captured once at build time (AG-14) — every event
+    # this middleware records carries it, so a result ties to the exact version that produced it.
+    revision = settings.deployment_revision
+
+    @function_middleware
+    async def audit_tool_calls(
+        context: FunctionInvocationContext,
+        call_next: Callable[[], Awaitable[None]],
+    ) -> None:
+        """Record one audit event per tool invocation (observe-only)."""
+        name = context.function.name
+        args = _truncate(context.arguments)
+        # The real actor is the turn's authenticated Entra user (F4-T5); fall back to the static
+        # `actor` bound at build time when there is none (tests, the non-service caller).
+        event_actor = get_current_actor() or actor
+        start = time.perf_counter()
+        try:
+            await call_next()
+        except Exception as exc:
+            elapsed_ms = (time.perf_counter() - start) * 1000.0
+            logger.warning(
+                "tool %s failed after %.0f ms [cid=%s actor=%s]: %s (args=%s)",
+                name,
+                elapsed_ms,
+                correlation_id,
+                event_actor,
+                exc,
+                args,
+            )
+            await _emit(
+                audit_sink,
+                AuditEvent(
+                    correlation_id=correlation_id,
+                    actor=event_actor,
+                    tool=name,
+                    arguments=args,
+                    outcome="error",
+                    detail=_truncate(exc),
+                    latency_ms=elapsed_ms,
+                    revision=revision,
+                ),
+            )
+            raise
+        elapsed_ms = (time.perf_counter() - start) * 1000.0
+        detail = _truncate(context.result) if context.result is not None else ""
+        logger.info(
+            "tool %s ok in %.0f ms [cid=%s actor=%s] (args=%s)",
+            name,
+            elapsed_ms,
+            correlation_id,
+            event_actor,
+            args,
+        )
+        await _emit(
+            audit_sink,
+            AuditEvent(
+                correlation_id=correlation_id,
+                actor=event_actor,
+                tool=name,
+                arguments=args,
+                outcome="ok",
+                detail=detail,
+                latency_ms=elapsed_ms,
+                revision=revision,
+            ),
+        )
+
+    return audit_tool_calls
+
+
+async def _emit(sink: AuditSink, event: AuditEvent) -> None:
+    """Persist an event, never letting a sink failure escape into the tool path."""
+    try:
+        await sink.record(event)
+    except Exception as exc:  # a broken audit store must not fail a tool call
+        # Swallow-and-continue keeps availability, but a lost GxP audit record must be ALERTABLE,
+        # not a generic warning (SEC-3): log at ERROR with a stable `audit_sink_failure` marker and
+        # the trail identifiers, so monitoring can fire on the marker and name the affected trail.
+        logger.error(
+            "audit_sink_failure: sink failed to record tool %s (correlation_id=%s actor=%s): %s",
+            event.tool,
+            event.correlation_id,
+            event.actor,
+            exc,
+            extra={
+                "event": "audit_sink_failure",
+                "tool": event.tool,
+                "correlation_id": event.correlation_id,
+                "actor": event.actor,
+            },
+        )

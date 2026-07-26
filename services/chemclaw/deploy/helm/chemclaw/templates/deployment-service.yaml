@@ -1,0 +1,58 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "chemclaw.name" . }}-service
+  labels:
+    {{- include "chemclaw.labels" . | nindent 4 }}
+    app.kubernetes.io/component: service
+spec:
+  {{- if not .Values.service.autoscaling.enabled }}
+  replicas: {{ .Values.service.replicas }}
+  {{- end }}
+  selector:
+    matchLabels:
+      {{- include "chemclaw.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: service
+  template:
+    metadata:
+      labels:
+        {{- include "chemclaw.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: service
+        azure.workload.identity/use: "true"
+    spec:
+      serviceAccountName: {{ .Values.serviceAccount.name }}
+      containers:
+        - name: service
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          env:
+            - name: CHEMCLAW_COMPONENT
+              value: "service"
+            {{- include "chemclaw.env" . | nindent 12 }}
+          envFrom:
+            {{- include "chemclaw.envFrom" . | nindent 12 }}
+          ports:
+            - containerPort: {{ .Values.service.port }}
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: {{ .Values.service.port }}
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: {{ .Values.service.port }}
+            initialDelaySeconds: 10
+            periodSeconds: 20
+          resources:
+            {{- toYaml .Values.resources.service | nindent 12 }}
+          volumeMounts:
+            - name: temporal-tls
+              mountPath: {{ .Values.secrets.temporalTls.mountPath }}
+              readOnly: true
+      volumes:
+        - name: temporal-tls
+          secret:
+            secretName: {{ .Values.secrets.temporalTls.secretName }}
+            optional: true

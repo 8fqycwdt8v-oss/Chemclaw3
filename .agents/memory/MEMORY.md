@@ -1,0 +1,1 @@
+- [Chemclaw Python deployment](chemclaw-deployment.md) — Python FastAPI service in services/chemclaw/ with specific pip/venv and port constraints on Replit.

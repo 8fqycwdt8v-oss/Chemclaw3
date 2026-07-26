@@ -1,0 +1,251 @@
+"""The per-turn run lifecycle (plan step F2-T1): the missing caller that actually runs the agent.
+
+`run_turn` owns exactly what the agent's own docstring says a caller must own: it opens the MCP tool
+contexts for the turn (`async with *agent.mcp_tools`), runs the turn against the session's thread,
+and translates the model's streamed updates into the typed `service.events` the surfaces render.
+When the harness is enabled the *same* call drives its completion loop (MAF's loop middleware runs
+inside `agent.run`), so plan/execute autonomy needs no separate driver here.
+
+Errors are turned into a single `ErrorEvent` with a user-safe message rather than propagating a
+stack trace to the browser — a failed turn must not take down the stream or leak internals.
+"""
+
+import copy
+import logging
+from collections.abc import AsyncIterator, Mapping
+from contextlib import AsyncExitStack
+from typing import Any
+
+from agent_framework import AgentSession
+
+from agents.harness_todo import todo_titles
+from agents.identity_context import reset_current_identity, set_current_identity
+from agents.job_events import drain_started_jobs, reset_job_sink, set_job_sink
+from agents.session_context import (
+    reset_current_session,
+    reset_current_session_id,
+    set_current_session,
+    set_current_session_id,
+)
+from agents.verifier import verify_turn_answer
+from chemclaw.config import settings
+from service.budget import BudgetTracker
+from service.events import (
+    AnswerEvent,
+    ApprovalRequestEvent,
+    ErrorEvent,
+    Event,
+    JobStartedEvent,
+    PlanEvent,
+    TokenEvent,
+    ToolCallEvent,
+)
+
+logger = logging.getLogger(__name__)
+
+# How many characters of a tool call's arguments the trace event carries — enough to see *what* was
+# called without streaming a whole evidence payload to the UI (mirrors the audit trail truncation).
+_ARG_PREVIEW_CHARS = 200
+
+
+async def run_turn(
+    agent: Any,
+    session: AgentSession,
+    user_message: str,
+    *,
+    actor: str | None = None,
+    roles: frozenset[str] = frozenset(),
+    budget: BudgetTracker | None = None,
+) -> AsyncIterator[Event]:
+    """Run one turn and yield its events (tokens, tool calls, approvals, then the answer).
+
+    Args:
+        agent: A built Chemclaw agent (classic or harness). Injected by the app; injectable so tests
+            drive it with a fake streaming agent and no live model.
+        session: The caller's conversation session (per user+thread), so the turn resumes context.
+        user_message: The chemist's message for this turn.
+        actor: The authenticated user's Entra oid (F4), made ambient so the audit trail, the
+            authorization gate, and job attribution see it. `None` off the authenticated path.
+        roles: The user's app roles, made ambient for the authorization gate.
+        budget: The runaway-cost meter. When set, this turn's reported token usage and its turn
+            count are booked against the session/user when the turn ends (the front-door admission
+            check reads those counters before the *next* turn). `None` disables metering (test/CLI).
+
+    Yields:
+        `service.events.Event` values in the order the model produced them, ending with an
+        `AnswerEvent` on success or an `ErrorEvent` on failure.
+    """
+    answer_parts: list[str] = []
+    # Metered across the turn's updates and booked once on teardown (even on failure — a failed turn
+    # still spent tokens up to the point it broke, so its cost must count toward the next check).
+    turn_tokens = 0
+    # Snapshot the session state before the turn so we can roll it back on GeneratorExit
+    # (client disconnect). Without this, a mid-tool-call disconnect leaves a `tool_use` block in
+    # the history with no matching `tool_result`, poisoning every subsequent turn with an Anthropic
+    # 400 "tool_use ids found without tool_result blocks" (ISSUE-B-10).
+    _state_snapshot = copy.deepcopy(session.state)
+    # Stamp the turn's session so a job-launching tool (submit_qm_job) records push-back to the
+    # right session (F3-T3) — ambient, never a model-supplied argument. Reset on turn teardown.
+    session_token = set_current_session_id(session.session_id)
+    # The live session object too, so a job-launching tool can mark the harness todo it's waiting
+    # on (`agents.harness_todo`) — the id alone cannot reach the session's own todo-list state.
+    live_session_token = set_current_session(session)
+    # Stamp the authenticated identity (F4) so audit/authorization/attribution see the user.
+    identity_token = set_current_identity(actor, roles) if actor is not None else None
+    # Collect jobs launched by this turn's tools, drained between updates into `JobStartedEvent`s
+    # (D-042) — the launch happens layers below this stream, so it is announced ambiently.
+    job_sink_token = set_job_sink()
+    # Last plan snapshot emitted, so an unchanged todo list is not re-sent on every update.
+    plan: list[str] = []
+    try:
+        async with AsyncExitStack() as stack:
+            # Open each MCP capability server for the duration of the turn, then tear it down — the
+            # lifecycle the agent constructor deliberately leaves to its caller.
+            for tool in getattr(agent, "mcp_tools", None) or []:
+                await stack.enter_async_context(tool)
+            stream = agent.run(user_message, stream=True, session=session)
+            async for update in stream:
+                turn_tokens += _usage_tokens(update)
+                text = getattr(update, "text", "") or ""
+                if text:
+                    answer_parts.append(text)
+                    yield TokenEvent(text=text)
+                for tool_name, arguments in _tool_calls_in(update):
+                    yield ToolCallEvent(tool=tool_name, arguments=arguments)
+                for request in getattr(update, "user_input_requests", None) or []:
+                    yield ApprovalRequestEvent(prompt=_approval_prompt(request))
+                for job_id in drain_started_jobs():
+                    yield JobStartedEvent(job_id=job_id)
+                # Plan after jobs: a submit adds an "awaiting job" todo, so this order shows the
+                # launch and then the plan that reflects it.
+                current_plan = await _current_plan(session)
+                if current_plan is not None and current_plan != plan:
+                    plan = current_plan
+                    yield PlanEvent(todos=plan)
+            # A job launched while the model produced its closing update has no later iteration to
+            # be drained by, so it would otherwise be announced only by its completion push-back.
+            for job_id in drain_started_jobs():
+                yield JobStartedEvent(job_id=job_id)
+        yield await _answer_event("".join(answer_parts))
+    except GeneratorExit:
+        # Client disconnected mid-turn. Roll the session state back to the pre-turn snapshot so
+        # that the next message does not replay a dangling `tool_use` block to the model
+        # (ISSUE-B-10). Re-raise so the async generator closes normally.
+        logger.warning(
+            "client disconnected during turn for session %s; rolling back session state",
+            session.session_id,
+        )
+        session.state.clear()
+        session.state.update(_state_snapshot)
+        raise
+    except Exception:
+        # One turn's failure becomes one user-safe event, never a 500 mid-stream or a leaked trace.
+        # The exception detail (DB hosts, SMILES, workflow ids, driver errors) stays server-side in
+        # the log; the client gets a generic message keyed by the session id it already knows, so an
+        # operator can correlate the report to the logged stack trace without leaking internals.
+        logger.exception("turn failed for session %s", session.session_id)
+        yield ErrorEvent(
+            message=(
+                "The turn could not be completed due to an internal error "
+                f"(session {session.session_id})."
+            )
+        )
+    finally:
+        if budget is not None:
+            budget.record(session.session_id, actor, turn_tokens)
+        reset_job_sink(job_sink_token)
+        reset_current_session_id(session_token)
+        reset_current_session(live_session_token)
+        if identity_token is not None:
+            reset_current_identity(identity_token)
+
+
+async def _current_plan(session: AgentSession) -> list[str] | None:
+    """The harness's current todo list for this session, or None when there is no plan to show.
+
+    None (not an empty list) off the harness path: the classic agent has no todo state, and an
+    empty `PlanEvent` would render as an empty checklist — "the agent has no plan" — rather than
+    "this agent does not plan". A malformed todo state degrades to None as well: the plan is a
+    view, and no view is worth failing a turn over.
+    """
+    if not settings.harness_enabled:
+        return None
+    try:
+        return await todo_titles(session)
+    except Exception:
+        logger.exception("could not read the plan for session %s", session.session_id)
+        return None
+
+
+async def _answer_event(answer: str) -> AnswerEvent:
+    """Assemble the turn's final `AnswerEvent`, scoring it when verification is enabled (F10-B).
+
+    When `verifier_enabled`, the assembled answer is checked for citation faithfulness against the
+    notes it cites, the aggregate confidence + any unsupported claims are stamped on the event, and
+    `review_required` is set when `confidence < verifier_confidence_threshold` — the routing signal
+    a surface (or a future D-032 hold) uses to flag a low-confidence answer for review rather than
+    presenting it as authoritative. When disabled (the default) this is today's plain answer. A
+    verifier failure must never sink the turn — it degrades to the unscored answer.
+    """
+    if not settings.verifier_enabled:
+        return AnswerEvent(text=answer)
+    try:
+        result = await verify_turn_answer(answer)
+    except Exception:
+        logger.exception("answer verification failed; returning the unscored answer")
+        return AnswerEvent(text=answer)
+    return AnswerEvent(
+        text=answer,
+        confidence=result.confidence,
+        unsupported_claims=[claim.text for claim in result.unsupported],
+        review_required=result.confidence < settings.verifier_confidence_threshold,
+    )
+
+
+def _usage_tokens(update: Any) -> int:
+    """Best-effort total tokens reported in a streamed update's usage content (0 if none).
+
+    MAF emits usage as a content carrying a `UsageDetails` mapping (`input_token_count`/
+    `output_token_count`/`total_token_count`). Duck-typed on the mapping so a provider or version
+    that reports no usage — or the fake agent in tests — simply meters 0; the turn caps still bind.
+    """
+    total = 0
+    for content in getattr(update, "contents", None) or []:
+        details = getattr(content, "usage_details", None)
+        if not isinstance(details, Mapping):
+            continue
+        tokens = details.get("total_token_count")
+        if tokens is None:
+            tokens = (details.get("input_token_count") or 0) + (
+                details.get("output_token_count") or 0
+            )
+        total += int(tokens or 0)
+    return total
+
+
+def _tool_calls_in(update: Any) -> list[tuple[str, str]]:
+    """Best-effort extract (tool_name, arg_preview) for any function call in a streamed update.
+
+    Duck-typed on purpose: MAF's function-call content class is not a stable top-level export and
+    its shape varies by version, so we match by structure (a named content carrying arguments/a call
+    id) rather than importing a concrete type. Plain-text content has no `name` and is skipped.
+    """
+    calls: list[tuple[str, str]] = []
+    for content in getattr(update, "contents", None) or []:
+        name = getattr(content, "name", None)
+        if not name:
+            continue
+        if not (hasattr(content, "arguments") or hasattr(content, "call_id")):
+            continue
+        arguments = str(getattr(content, "arguments", "") or "")[:_ARG_PREVIEW_CHARS]
+        calls.append((str(name), arguments))
+    return calls
+
+
+def _approval_prompt(request: Any) -> str:
+    """Render a user-input/approval request as a short prompt string for the UI."""
+    for attr in ("prompt", "message", "text", "description"):
+        value = getattr(request, attr, None)
+        if value:
+            return str(value)
+    return "Approval requested."

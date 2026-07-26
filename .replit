@@ -1,0 +1,147 @@
+modules = ["nodejs-24", "postgresql-16", "python-3.11"]
+
+[deployment]
+router = "application"
+deploymentTarget = "autoscale"
+
+[deployment.postBuild]
+args = ["pnpm", "store", "prune"]
+env = { "CI" = "true" }
+
+[workflows]
+runButton = "Project"
+
+[[workflows.workflow]]
+name = "Project"
+mode = "parallel"
+author = "agent"
+
+[[workflows.workflow.tasks]]
+task = "workflow.run"
+args = "Chemclaw Temporal Dev Server"
+
+[[workflows.workflow.tasks]]
+task = "workflow.run"
+args = "Chemclaw API Service"
+
+[[workflows.workflow.tasks]]
+task = "workflow.run"
+args = "Chemclaw Mock Backend"
+
+[[workflows.workflow.tasks]]
+task = "workflow.run"
+args = "Chemclaw Mock MCP Vendor"
+
+[[workflows.workflow.tasks]]
+task = "workflow.run"
+args = "artifacts/chemclaw-ui: web"
+
+[[workflows.workflow.tasks]]
+task = "workflow.run"
+args = "Chemclaw Background Worker"
+
+[[workflows.workflow]]
+name = "Chemclaw Temporal Dev Server"
+author = "agent"
+
+[[workflows.workflow.tasks]]
+task = "shell.exec"
+args = "bash services/chemclaw/start-temporal.sh"
+
+[workflows.workflow.metadata]
+outputType = "console"
+
+[[workflows.workflow]]
+name = "Chemclaw API Service"
+author = "agent"
+
+[workflows.workflow.metadata]
+outputType = "console"
+
+[[workflows.workflow.tasks]]
+task = "shell.exec"
+args = "bash services/chemclaw/start.sh"
+waitForPort = 8000
+
+[[workflows.workflow]]
+name = "Chemclaw Mock Backend"
+author = "agent"
+
+[[workflows.workflow.tasks]]
+task = "shell.exec"
+args = "bash services/chemclaw-mock/start.sh"
+waitForPort = 8090
+
+[workflows.workflow.metadata]
+outputType = "console"
+
+[[workflows.workflow]]
+name = "Chemclaw Mock MCP Vendor"
+author = "agent"
+
+[[workflows.workflow.tasks]]
+task = "shell.exec"
+args = "bash services/chemclaw-mock/start-mcp.sh"
+waitForPort = 8091
+
+[workflows.workflow.metadata]
+outputType = "console"
+
+[[workflows.workflow]]
+name = "Chemclaw Background Worker"
+author = "agent"
+
+[[workflows.workflow.tasks]]
+task = "shell.exec"
+args = "bash services/chemclaw/start-background-worker.sh"
+
+[workflows.workflow.metadata]
+outputType = "console"
+
+[agent]
+stack = "PNPM_WORKSPACE"
+expertMode = true
+
+[postMerge]
+path = "scripts/post-merge.sh"
+timeoutMs = 20000
+
+[nix]
+channel = "stable-25_05"
+
+[userenv]
+
+[userenv.shared]
+CHEMCLAW_AGENT_MODEL = "claude-haiku-4-5"
+CHEMCLAW_DEPLOYMENT_REVISION = "replit-dev"
+CHEMCLAW_ENTRA_REQUIRED = "false"
+CHEMCLAW_LLM_PROVIDER = "anthropic"
+CHEMCLAW_LOG_LEVEL = "INFO"
+CHEMCLAW_SERVICE_ALLOW_INSECURE = "true"
+CHEMCLAW_SERVICE_HOST = "0.0.0.0"
+CHEMCLAW_SERVICE_PORT = "8000"
+CHEMCLAW_TEMPORAL_ADDRESS = "localhost:7233"
+CHEMCLAW_TEMPORAL_NAMESPACE = "default"
+CHEMCLAW_API_URL = "http://127.0.0.1:8000"
+CHEMCLAW_DATA_SOURCES = "graph,eln-json,eln-ord"
+CHEMCLAW_ELN_EXPORT_DIR = "/home/runner/workspace/services/chemclaw-mock/data/eln/exports"
+CHEMCLAW_HPC_API_BASE_URL = "http://localhost:8090"
+CHEMCLAW_HPC_API_TOKEN = "mock-hpc-token"
+CHEMCLAW_HPC_ARTIFACT_STORE_URL = "http://localhost:8090/artifacts"
+CHEMCLAW_HPC_LAUNCH_INTERFACE = "nextflow"
+CHEMCLAW_HPC_PIPELINE_NAME = "qm-pipeline"
+CHEMCLAW_HPC_PIPELINE_VERSION = "mock-1"
+CHEMCLAW_MCP_SERVERS = "[{\"transport\":\"http\",\"name\":\"mock-vendor\",\"url\":\"http://localhost:8091/mcp\",\"allowed_tools\":[\"search_building_blocks\",\"get_price\"]}]"
+CHEMCLAW_ORD_EXPORT_DIR = "/home/runner/workspace/services/chemclaw-mock/data/eln/exports/ord"
+CHEMCLAW_SESSION_STORE = "postgres"
+CHEMCLAW_UI_PORT = "8099"
+MOCK_ELN_EXPORT_DIR = "/home/runner/workspace/services/chemclaw-mock/data/eln/exports"
+MOCK_ELN_SEED_ON_STARTUP = "true"
+MOCK_HPC_API_TOKEN = "mock-hpc-token"
+MOCK_HPC_ENFORCE_AUTH = "true"
+MOCK_HPC_POLLS_UNTIL_DONE = "2"
+MOCK_MCP_VENDOR_HOST = "0.0.0.0"
+MOCK_MCP_VENDOR_PORT = "8091"
+MOCK_ORD_EXPORT_DIR = "/home/runner/workspace/services/chemclaw-mock/data/eln/exports/ord"
+MOCK_SERVER_PORT = "8090"
+CHEMCLAW_NOTE_REPO_DIR = "/home/runner/workspace/services/chemclaw-notes-repo"

@@ -1,0 +1,87 @@
+{{- /* The two Temporal workers: hpc-jobs (few, heavy) and background-jobs (light). Same image, */ -}}
+{{- /* different CHEMCLAW_COMPONENT. No probe HTTP port — liveness is the Temporal poll itself. */ -}}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "chemclaw.name" . }}-hpc-worker
+  labels:
+    {{- include "chemclaw.labels" . | nindent 4 }}
+    app.kubernetes.io/component: hpc-worker
+spec:
+  replicas: {{ .Values.workers.hpc.replicas }}
+  selector:
+    matchLabels:
+      {{- include "chemclaw.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: hpc-worker
+  template:
+    metadata:
+      labels:
+        {{- include "chemclaw.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: hpc-worker
+        azure.workload.identity/use: "true"
+    spec:
+      serviceAccountName: {{ .Values.serviceAccount.name }}
+      containers:
+        - name: hpc-worker
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          env:
+            - name: CHEMCLAW_COMPONENT
+              value: "hpc-worker"
+            {{- include "chemclaw.env" . | nindent 12 }}
+          envFrom:
+            {{- include "chemclaw.envFrom" . | nindent 12 }}
+          resources:
+            {{- toYaml .Values.resources.worker | nindent 12 }}
+          volumeMounts:
+            - name: temporal-tls
+              mountPath: {{ .Values.secrets.temporalTls.mountPath }}
+              readOnly: true
+      volumes:
+        - name: temporal-tls
+          secret:
+            secretName: {{ .Values.secrets.temporalTls.secretName }}
+            optional: true
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "chemclaw.name" . }}-background-worker
+  labels:
+    {{- include "chemclaw.labels" . | nindent 4 }}
+    app.kubernetes.io/component: background-worker
+spec:
+  replicas: {{ .Values.workers.background.replicas }}
+  selector:
+    matchLabels:
+      {{- include "chemclaw.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: background-worker
+  template:
+    metadata:
+      labels:
+        {{- include "chemclaw.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: background-worker
+        azure.workload.identity/use: "true"
+    spec:
+      serviceAccountName: {{ .Values.serviceAccount.name }}
+      containers:
+        - name: background-worker
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          env:
+            - name: CHEMCLAW_COMPONENT
+              value: "background-worker"
+            {{- include "chemclaw.env" . | nindent 12 }}
+          envFrom:
+            {{- include "chemclaw.envFrom" . | nindent 12 }}
+          resources:
+            {{- toYaml .Values.resources.worker | nindent 12 }}
+          volumeMounts:
+            - name: temporal-tls
+              mountPath: {{ .Values.secrets.temporalTls.mountPath }}
+              readOnly: true
+      volumes:
+        - name: temporal-tls
+          secret:
+            secretName: {{ .Values.secrets.temporalTls.secretName }}
+            optional: true

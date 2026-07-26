@@ -1,0 +1,760 @@
+# BACKLOG
+
+Prioritized open action items. Top = next. Keep in sync with `docs/implementation-plan.md`
+(phase/step numbers) at session end.
+
+> **Every open item below was assessed on 2026-07-25** — trigger held? real defect? offline-verifiable?
+> KISS? — in **`docs/backlog-plan.md`** (verdict table + specs for the survivors + the working queue in
+> `tasks/todo.md`). Verdicts: 8 BUILD (waves A/B/C), 14 DEFER, 5 DROP, 12 BLOCKED. The DROP verdicts are
+> corrected in place below, because they were claims about the tree that are no longer true.
+
+## Open — Deep codebase analysis (docs/audit/12-deep-analysis.md)
+
+Seven-track analysis of the dimensions the 2026-07-22 forensic audit under-covered (performance,
+test *effectiveness*, complexity, doc↔code drift, configurability-to-run, feature triage, live-edge
+risk). Four findings fixed in `a96932d`; the rest need a decision or are follow-ups.
+
+- [x] **DA-1 [High] `cp .env.example .env` crashed every entry point.** `extra="forbid"` + two
+      documented-but-nonexistent keys → `Settings()` raised at import. The README quickstart was
+      broken. Fixed at the root: three parity tests now enforce no-stale-key, no-undocumented-field,
+      and file-loads-as-real-`.env`.
+- [x] **DA-2 [Med] 19 Settings fields undocumented** in `.env.example` (all 6 `budget_*`,
+      `service_allow_insecure`, the D-066 clamps, ELN cursor slack) — contradicting the "every field
+      mirrored" promise in `docs/runbook.md`. Fixed; now machine-enforced by DA-1's tests.
+- [x] **DA-3 [Med] `build_graph` reassembled the graph on every query.** KM-14's cache spared only
+      the parse; `find_notes`→`expand_note` paid it twice per turn. Assembled graph now cached behind
+      the same fingerprint and frozen (not copied — same rationale as frozen `Note`).
+      Measured 162ms → 83ms at 10k notes.
+- [x] **DA-4 [Med] `find_notes` was the last unbounded model-context surface.** Now capped by
+      `graph_max_results` (50), sorted-id order, with the D-066 truncation warning.
+- [ ] **DA-5 [Med] Graph query floor is now the stat scan** (~75ms at 10k notes on local disk; worse
+      on a networked OpenShift PVC) — [S]. **Needs a decision (D-1): how stale may a query be?**
+      Recommended: config-gated TTL on the fingerprint check + explicit cache-bust on PR-gate merge,
+      so the authoring loop stays instant.
+- [ ] **DA-7 [Low] Test-to-module locality is weak** — 3 of 5 mutations survived their "obvious" test
+      file and died only under the full suite — [S]. Not a correctness gap (CI runs everything); a
+      developer feedback-loop one.
+- [ ] **DA-10 [Med] Buy down live-edge risk offline** — [M]. **Needs a decision (D-2).** Recommended:
+      `helm template` + `kubeconform` render in CI first; defer Entra/Nextflow contract tests until a
+      real tenant exists.
+- [ ] **Migration rollback is unaddressed** — `infra/sql` migrations are forward-only; a GxP
+      deployment needs a tested down-path or an explicit ADR that forward-only is the policy — [M].
+
+Track F verdict: do **not** re-derive the 29 AG-*/KM-* proposals. Load-bearing few, ranked:
+**KM-13 retrieval evaluation** (everything else in the knowledge layer is unfalsifiable without it,
+and the corpus is the smallest it will ever be), **AG-14 prompt/skill version provenance** (direct GxP
+reproducibility hit), **KM-7 fingerprint re-indexing on mutation**. Recommend **downgrading** AG-12
+(model routing/fallback) and KM-10 (near-dup detection) — ceremony for a single-endpoint,
+Git-curated, human-signed-off system.
+
+## Open — Config extensibility investigation (docs/audit/10-config-extensibility.md)
+
+Super-extensive investigation of how new skills/MCP-servers/tools/datasources/use-case agent
+workflows are added, plus a substrate challenge and three passing offline spikes. Full analysis,
+options matrices, and the two worked designs (datasource-*type*; `AgentProfile`) live in the doc.
+Prioritized, dependency-ordered follow-ups (each ADR-ready, none needs live infra):
+
+- [x] **Fix `.env.example` merge conflict** (unresolved markers at lines 156/170/173) — [S]. Done
+      (both sides were real, non-overlapping Settings fields → kept both). Commit `b07a2b2`.
+- [x] **Tool registry** (`@tool` + `_TOOL_REGISTRY`, mirror `evals/metric.py`) so a new tool is a
+      decorator, not an edit to the hardcoded `_capability_tools()` list — [M]. Done: `agents/tool_registry.py`,
+      12 tools decorated, `_capability_tools()` assembles from the registry, audit+authz middleware
+      unchanged. Commit `76c03b2`. **KISS deviation:** Spike 1's `agent_facing` flag dropped (no hidden
+      in-process tool exists — Rule of Three). **No `make tool-validate`:** name-drift is already guarded
+      by `tests/test_agent.py::test_instructions_only_name_available_tools` + the registration guard; a
+      separate CLI gate would be redundant.
+- [x] **`AgentProfile` seam, Stage 1** (`agents/profiles.py` + one `"default"` entry ==
+      today's agent + `build_agent(profile=…)` narrowing) — [M]. Done: default reproduces today's agent
+      byte-for-byte; a profile narrows tools/MCP + swaps instructions/harness; unknown tool names fail
+      fast; the *attenuate-not-authorize* invariant is test-proven (audit+authz attach regardless of
+      profile). Stage 2 (front-door selection) triggers on a **second real use case**.
+- [x] **`DataSourceSpec` discriminated union (scoped), Stage 1** — [M]. Done (D-076):
+      `DataSourceSpec = JsonElnSourceSpec | OrdElnSourceSpec` (discriminated on `type`, in `config.py`)
+      + additive `data_source_specs` token + `sources.registry.build_data_source`. Real second caller
+      without a stub — both ELN adapters already take a per-instance `export_dir`, so two instances with
+      different dirs now coexist (audit §2.3). Temporal boundary kept string-keyed. Dropped the audit's
+      near-empty `RegisteredSourceSpec` bridge (duplicates the comma token). **Snowflake connector still
+      deferred** — it joins as one more variant (nesting connection/auth/mapping; first `exchange_obo`
+      caller) when a real tenant/cluster exists (DEFERRED.md).
+- [x] **Per-extension manifest + explicit enable-list** — [S]. Done (D-081): `SkillManifest`
+      (pydantic `SKILL.md` frontmatter, `extra="forbid"`, optional `tools`/`mcp_servers`/`tags`) +
+      `EnabledSkillsSource` + `skills_enabled`. `make skill-validate` now checks declared deps against
+      the live registries — a skill teaching a renamed/deleted tool fails CI instead of surviving as
+      stale prose (only possible because of D-075's tool registry). Four shipped skills declare real
+      deps. Empty enable-list = every discovered skill (no regression); role gates still apply on top.
+      Profile Stage 3 (filesystem-discovered profiles) remains deferred.
+- [x] **MCP transport `type` union** — [S]. Done (D-081): `StdioMcpServerSpec | HttpMcpServerSpec`
+      discriminated on `transport`; `_mcp_tool` dispatches to `MCPStdioTool`/`MCPStreamableHTTPTool`,
+      exhaustively. A **callable** `Discriminator` reads a missing tag as `stdio`, so every config
+      written before the union (`.env.example`, Helm values, deployments) keeps working untouched.
+      `allowed_tools` — the boundary keeping write/index tools off the agent — is transport-independent.
+- [x] **Config idiom convergence (doc, not churn)** — [S]. Done (D-081): the house rule is recorded in
+      `chemclaw/config.py`'s module docstring — *typed JSON list when elements carry their own config
+      (discriminate when they vary by kind); delimited string when elements are bare keys resolved
+      against a registry, read via a derived `*_list` property*. Existing fields deliberately **not**
+      migrated (churn without a defect); the two idioms coexist by design.
+
+Substrate verdict: **evolve the flat `pydantic-settings` singleton additively** (nested sections +
+discriminated unions); do **not** adopt entry-points/pluggy/Django-apps — all target the
+out-of-tree plugin problem this single-repo app does not have.
+
+## Open — OKF-inspired graph polish (D-074)
+
+Two conventions from Google's Open Knowledge Format, checked against our already-equivalent
+design (D-004/D-005) and queued rather than adopted wholesale — see D-074 for the comparison.
+
+- [ ] ~~**Per-bundle `log.md` changelog** appended by the PR-gate~~ — **DROPPED as designed**
+      (assessment 2026-07-25): every note lands on its own branch, so N concurrent proposals all
+      append to the same `log.md` and every one after the first conflicts — manufacturing merge
+      failures to duplicate what git already records. Redesigned as a *generated* view (`git log` →
+      rendered changelog), deferred until a reviewer/auditor actually asks for one.
+- [ ] **External ontology anchoring on notes.** Frontmatter `type`/tags are free strings today —
+      no class hierarchy, so an agent can't query by subsumption (e.g. "all electrophilic aromatic
+      substitutions" matching a `reaction_class: acetylation` note). Add optional frontmatter
+      fields carrying **existing** external ontology IDs — ChEBI for compounds, RXNO for reaction
+      classes — rather than building an in-house OWL/RDF ontology (no second caller yet; KISS).
+      Needs: which notes get which field, whether resolution is validated at `kg-validate` time or
+      left as an unchecked reference.
+
+## Done — Resilience hardening (D-066, four-failure-mode review)
+
+Reviewed Chemclaw against four failure modes from another agent system (no memory on restart, no
+idempotency, no budget, unbounded DB queries). Idempotency (D-011 cache + workflow-id dedup) and
+durable job execution (Temporal) already covered; three residual gaps closed, each config-gated:
+
+- [x] **DB clamps (#4).** `find_matches` clamps model-supplied `top_k` to `[1, fingerprint_max_top_k]`
+      (mirrors the `graph_max_hops` clamp); `all_records(limit)` + `substructure_scan_max_records`
+      bound the substructure scan with a truncation **warning** (no silent cap). `mcp_servers/fpstore.py`,
+      `mcp_servers/molfp/search.py`, `chemclaw/config.py`. Tests: `test_molfp.py`.
+- [x] **Session reattach (#1).** `session_owners` table (migration `013`) + `SessionOwnerStore`
+      persist one owner row per session; the front door rehydrates a live handle over durable history
+      on a cache miss (owner-scoped, gated on `session_store="postgres"`). `agents/session_store.py`,
+      `service/app.py`. Tests: `test_service.py` (reattach + owner-scope), `test_session_store.py` (PG).
+- [x] **Turn/token budgets (#3).** `service/budget.py::BudgetTracker` meters token usage + counts
+      turns per session/user; front door refuses over-budget turns with 429 (`budget_*` config, off by
+      default). `service/runner.py` (`_usage_tokens` + `record`). Tests: `test_budget.py`, `test_service.py`.
+- [ ] **Deferred (DEFERRED.md):** durable/rolling-window budget quota (survives restart/multi-pod);
+      substructure pattern-fingerprint prefilter (sound screening past ~10⁴ molecules). The deeper
+      *mid-flight same-turn* resume stays open (see the harness follow-ups below) — distinct from the
+      front-door restart-reattach closed here.
+
+## Next — Platform-parity hardening (docs/parity-plan.md, Phase F10)
+
+Closes the platform-capability deltas found against a commercial pharma-agent platform. Full
+tickets + disposition table: `docs/parity-plan.md`.
+
+- [x] **F10-E** per-task model routing: `build_chat_client(task)` consults `model_routes`
+      (task→model) in the one provider seam; empty map = today's single model. Test:
+      `test_llm_provider.py`, `test_config.py`.
+- [x] **F10-C** per-tool authorization: `agents/authz.py::authorize_tool` (`tool_role_gates` +
+      `tool_authz_default`) enforced by one middleware `agents/tool_authz.py::enforce_tool_authz`,
+      wired into `build_agent` after audit; default-allow, active only under `entra_required`. The
+      coarse expensive-trigger gate now shares `_has_required_role` (DRY). Tests:
+      `test_tool_authz.py`, `test_agent.py`, `test_config.py`.
+- [x] **F10-G1** tamper-evident audit hash-chain: migration `011_audit_hash_chain.sql`
+      (`prev_hash`/`row_hash`), `audit_store.chain_hash` + advisory-lock-serialized chained insert,
+      `scripts/verify_audit_chain.py` + `make audit-verify`. Tests: `test_audit_chain.py` (offline
+      tamper/deletion detection; PG round-trip skips offline).
+- [x] **F10-G2** bi-temporal note validation: `kg/note.py` rejects `valid_to < valid_from` (fields
+      already existed); surfaced by the parser + `kg-validate`. Test: `test_note.py`.
+- [x] **F10-A** hybrid retrieval (executes/extends F8-T2): embedding provider seam
+      (`agents/embedding_provider.py`, `hash` offline / `openai_compatible` prod); derived
+      `note_index` (`infra/sql/012`, `report/vector_index.py` — `NoteIndex` with in-memory +
+      pgvector/FTS backends, `reindex_notes` + `make reindex`); `VectorRetriever` + `LexicalRetriever`
+      attached via the F7 registry (`vector`/`lexical` keys — registry membership is the enable
+      switch, D-018); RRF fusion (`report/hybrid.py`) under `retrieval_mode="hybrid"` in
+      `gather_evidence`, graph flat-union default unchanged. Graph traversal stays the reasoning path
+      (D-004). Config: `embedding_*`, `retrieval_top_k`/`_mode`/`_fusion_k`. Tests:
+      `test_embedding_provider`, `test_vector_index`, `test_hybrid_retrieval`, `test_config`.
+      Deferred (follow-up): a scheduled `background-jobs` reindex activity (today `make reindex` /
+      the CLI populates the index); the enable-flag booleans were intentionally folded into registry
+      membership rather than added.
+- [x] **F10-B** answer verification + confidence routing: `agents/verifier.py` — `verify_answer`
+      scores citation faithfulness, LLM-as-judge (structured output on the routed `verifier` model,
+      F10-E) when `verifier_enabled`, else the deterministic `verify_claims` gate (DRY, offline).
+      `verify_turn_answer` resolves an answer's `[[wikilink]]` citations (shared `kg.note.cited_ids`)
+      to the notes it cites; the runner stamps `AnswerEvent.confidence` + `unsupported_claims` and
+      sets `review_required` when `confidence < verifier_confidence_threshold` (the routing signal a
+      surface/future hold keys off — the durable D-032 hold is deferred, DEFERRED.md). Default-off =
+      today's plain answer. Config: `verifier_enabled`, `verifier_confidence_threshold`. Tests:
+      `test_verifier`, `test_runner`, `test_config`. (F10-B3 — LLM faithfulness of *report* prose —
+      deferred: the durable report path has no in-workflow prose to judge, only citations, which
+      `verify_claims` already gates. See DEFERRED.md.)
+- [x] **F10-F** quality metrics — P/R/F1 + drift: `evals/metrics.py` adds `precision`/`recall`/`f1`
+      (pure `precision_recall_f1` over predicted vs `expected_note_ids`; report/drift metrics, no
+      per-case gate); `evals/retrieval.py` scores a live retriever's P/R/F1 (`run_retrieval_eval`,
+      reuses `run_eval`); `evals/baseline.py` (`aggregate_metrics`/`detect_drift`, committed
+      `evals/baseline.json`) + `workflows/eval_drift.py` (`EvalDriftWorkflow` on background-jobs,
+      alerts via the *must-deliver* notify seam so a dropped alert fails the run). `detect_drift`
+      uses a *relative* band (`_epsilon` × baseline) so one knob fits metrics of different scales;
+      `DriftAlert.vanished` distinguishes an absent metric from a 0.0 score. Config:
+      `eval_drift_enabled`/`_schedule_minutes`/`_epsilon`/`_timeout_seconds`, `eval_baseline_path`.
+      Committed pinned case `retrieval-precision-recall.md`. Tests: `test_metrics_classification`,
+      `test_retrieval_eval`, `test_eval_drift` (incl. a baseline-matches-case-set guard),
+      `test_schedules`, `test_config`. (Over the deterministic committed case-set the scheduled job
+      is a deployment-consistency tripwire; live-retriever drift is deployment-local — DEFERRED.md.)
+- [x] **F10-D** sub-agent orchestration via Temporal child workflows: `workflows/orchestrator.py`
+      `fan_out(child, inputs)` runs N sub-tasks as bounded-parallel child workflows with per-child
+      retry + D-030 isolation (a poison child is dropped, siblings unaffected; results in input
+      order). Adopted by two real callers (Rule of Three): the report workflow (`ReportSectionWorkflow`
+      per section) and the memory jobs (pure `build_*_notes` extracted in `memory/jobs.py`, each note
+      published by a shared `PublishNoteWorkflow` child). Config `orchestrator_max_parallel_children`.
+      Tests: `test_orchestrator` (`_batches` offline + a Temporal-env fan-out isolation test),
+      `test_memory` (builder is behavior-preserving), `test_report_workflow`/`test_workers`
+      registration. A failed report section degrades to a visible `retrieval_failed` marker in the
+      draft (not silently dropped, GxP); `fan_out` re-raises `CancelledError` and carries no
+      redundant child-level retry. Conversational multi-agent mesh stays gated (single agent + skills
+      is KISS).
+- [ ] Gate-until-trigger (documented, not built): OCR/vision ingestion, vendor connectors
+      (Veeva/SAP/LIMS), GAMP-5 validation artifacts, conversational multi-agent mesh — each with its
+      trigger recorded in `docs/parity-plan.md`.
+
+## Now — Foundation build (docs/foundation-plan.md + docs/implementation-tickets.md)
+
+The target-stack foundation: MAF harness experience on OpenShift + HPC/Nextflow, internal
+OpenAI-compatible LLM (generic credential), Entra everywhere with every backend workflow
+user-specific, a generic data-source seam (first source ELN — a **custom Snowflake connector via
+an internal data pipeline, no vendor**). Full ticket breakdown: `docs/implementation-tickets.md`.
+
+### Phase F0 — LLM provider seam + tool-calling spike
+- [x] **F0-T1** LLM provider config block (`llm_provider`/`llm_base_url`/`llm_model`/`llm_api_key`/
+      `llm_tls_ca_bundle`/`llm_timeout_seconds`/`llm_max_retries`/`llm_temperature`/`llm_max_tokens`
+      + `_llm_provider_config` validator). Test: `test_config.py`.
+- [x] **F0-T2** Provider adapter `agents/llm_provider.py::build_chat_client` — the one place a client
+      class is imported; `openai_compatible` → MAF `OpenAIChatClient` over an `AsyncOpenAI`
+      (base_url + generic key + CA/timeout/retries), `anthropic` dev path retained. `build_agent`
+      rewired off `_default_chat_client`. Dep added: `agent-framework-openai`. Test:
+      `test_llm_provider.py`, `test_agent.py`.
+- [x] **F0-T3** Streaming + generation params: `Agent(default_options=ChatOptions(temperature,
+      max_tokens))` from config. Test: `test_agent.py::test_agent_applies_default_generation_options`.
+- [ ] **F0-T4** Tool-calling capability spike (the H0 risk) — `scripts/spike_toolcalling.py` +
+      `docs/spikes/f0-toolcalling.md` verdict. **Needs the live internal endpoint**; run before
+      building on the harness. (The "stand-in OpenAI-compatible server" variant is **dropped** —
+      it would test the stand-in; the client-wiring half is already proven live by
+      `tests/test_harness_execution.py`, D-058. Only the endpoint's own fidelity is still unknown.)
+
+### Phase F1 — Harness backbone (autonomous plan/execute)
+MAF ships the harness natively (`create_harness_agent` + `TodoProvider`/`AgentModeProvider`/
+`todos_remaining`), so F1 is *wiring* it, not reimplementing providers.
+- [x] **F1-T1** Harness config (`harness_enabled`/`harness_autonomy`/`harness_max_loop_iterations`).
+      Test: `test_config.py`.
+- [x] **F1-T2** `build_agent` branch → `_build_harness_agent` wires `create_harness_agent` over the
+      full shared `_capability_tools()` + `RoleFilteredSkillsSource` + audit + shared
+      `_compaction_strategy()`, generic batteries off. Classic path is the fallback. Test:
+      `test_agent.py` (todo/mode providers added; full toolset kept; audit kept; classic has no
+      harness providers).
+- [x] **F1-T3** Plan→approve→execute: `AgentModeProvider(default_mode=plan|execute)` +
+      `todos_remaining(looping_modes=["execute"])` → plan_only stops for approval, execute loops
+      (capped). Test: `test_agent.py::test_harness_autonomy_sets_start_mode`.
+- [x] ADR **D-020** finalized + **D-A1** (F0) — written in DECISIONS.md (D-020, and D-039 = foundation
+      D-A1, D-040 = foundation D-020). Checkbox was stale; confirmed present.
+- [x] **F1-T4** The loop proven live, not just constructed: `test_harness_execution.py` drives
+      `build_agent`'s real harness path with a scripted-but-real `BaseChatClient`/
+      `FunctionInvocationLayer` chat client — genuine multi-iteration execute-mode looping,
+      plan-mode's loop actually not continuing, and the iteration cap actually capping. ADR **D-058**.
+
+### Phase F2 — Front door + run service (the agent finally runs)
+- [x] **F2-T1** `service/app.py::create_app` (FastAPI) + `service/runner.py::run_turn` — builds/holds
+      one agent, per-session `AgentSession`, opens the MCP lifecycle once per turn (`AsyncExitStack`
+      over `agent.mcp_tools`), runs `agent.run(stream=True)`, streams events. Routes: `/healthz`,
+      `/readyz`, `POST /sessions`, `POST /sessions/{id}/messages` (SSE). Config: `service_host`/
+      `service_port`/`service_cors_origins`. Test: `test_service.py`.
+- [x] **F2-T2** Thin web chat surface `service/static/{index.html,app.js}` (vanilla + fetch-stream SSE;
+      renders plan/tool-trace/tokens/approval/answer). Served at `/`. Test: `test_service.py`.
+- [x] **F2-T3** Typed event contract `service/events.py` (discriminated union on `type`:
+      plan/tool_call/token/job_started/approval_request/answer/error). Test: `test_service_events.py`.
+- [ ] Deferred within F2: emit `PlanEvent` from harness todo state, and real `JobStartedEvent` when a
+      tool starts a Temporal job (wired in F3 with job→session push-back). ADR **D-A2** (front door).
+
+### Phase F3 — Durable session + job→session push-back
+- [x] **F3-T1** Postgres session history: `agents/session_store.py::PostgresHistoryProvider`
+      (overrides get/save_messages, `Message.to_dict/from_dict` → `session_messages`), migration
+      `infra/sql/008_sessions.sql`, config `session_store`/`session_store_dsn`, `build_agent` selects
+      via `_history_provider()`. Tests: `test_session_store.py` (unit selection + PG round-trip that
+      skips offline), `test_config.py`.
+- [x] **F3-T2** Session-events push-back channel: `infra/sql/009_session_events.sql`,
+      `agents/session_events.py` (`SessionEvent` + `record_session_event`/`fetch_unconsumed`/
+      `mark_consumed` + dependency-injected `stream_new_events` tailer), `workflows/notify.py`
+      (`record_session_event_activity` + `SessionEventInput`), config `session_event_poll_seconds`.
+      Tests: `test_session_events.py` (tailer loop + model + activity forwarding as unit; PG
+      round-trip skips offline).
+- [x] **F3-T3** job→session push-back wiring: ambient session id (`agents/session_context.py`
+      contextvar, stamped by the runner); `QMJobInput.session_id` (excluded from `qm_job_key`);
+      `submit_qm_job` stamps it; QM workflow calls `notify_session_best_effort` on completion (activity
+      on the background queue, registered on the worker); front-door `GET /sessions/{id}/events` SSE
+      streams `job_completed` push-back (`JobCompletedEvent`). Tests: `test_session_context.py`,
+      `test_service.py` (all offline with fakes); the workflow-emit + DB round-trip prove live.
+- [x] Deferred-within-F3-T3 item resolved: flipping the harness `awaiting` todo on completion.
+      `agents/harness_todo.py` (`mark_awaiting_job`/`complete_awaiting_job`, direct
+      `TodoSessionStore` mutation); `submit_qm_job` marks on a fresh submit, `/sessions/{id}/events`
+      flips on `job_completed`. Gated on `harness_enabled` + the ambient live session
+      (`agents.session_context.get_current_session`, new). Tests: `test_harness_todo.py`,
+      wiring tests in `test_qm_tools.py`/`test_service.py`. ADR **D-058**. Still open: resuming the
+      *same* streamed turn mid-flight (vs. picked up next turn) — see the F1 follow-up below.
+- [x] `PlanEvent`/live `JobStartedEvent` emission (ADR **D-042**, closed by **D-077**): a per-turn
+      contextvar sink (`agents/job_events.py`) carries a launch from `submit_qm_job` to the runner,
+      which drains it between updates and after the stream; `PlanEvent` renders the harness todo
+      list (`agents.harness_todo.todo_titles`) and is emitted only when it changes. The idempotent
+      re-submit announces nothing (that job may already be complete and will never push back).
+      Tests: `test_runner.py`, `test_service.py`, `test_qm_tools.py`.
+
+### Phase F4 — Entra ID identity & RBAC (system-wide)
+- [x] **F4-T1** Front-door user auth (Entra OIDC): `service/auth.py` (`Principal`, `validate_token`
+      with RS256 + audience + issuer checks, `require_principal` FastAPI dep), config
+      `entra_required`/`entra_tenant_id`/`entra_audience` + derived
+      `entra_jwks_endpoint`/`entra_issuer_url`; guards all non-health routes; dev stand-in when
+      `entra_required` is off. Dep `pyjwt[crypto]`; ruff allows `fastapi.Depends` (B008). Tests:
+      `test_auth.py` (local-RSA token validation, 401 gate, dev mode), `test_config.py`.
+- [x] **F4-T3** The core rule as one reusable guard: `agents/authz.py::require_actor()` returns the
+      turn's ambient Entra oid and, under `entra_required`, **rejects** a user-triggered workflow with
+      no user before any durable work (dev → `service_actor_id`). Wired into `submit_qm_job`
+      (`requested_by = require_actor()`); `requested_by` stays out of `qm_job_key` (D-011). BO/report
+      inputs adopt the same guard when they gain live triggers (no dead field now); scheduled
+      ELN-sync/memory jobs run as the service by design. ADR D-044. Tests: `test_authz.py`.
+- [x] **F4-T5** Authorize at one point + actor into audit: `agents/authz.py::authorize_trigger`
+      (config `entra_expensive_actions`/`entra_privileged_roles`) called by `submit_qm_job` before the
+      durable job; ambient identity via `agents/identity_context.py` (contextvar, stamped by the
+      runner from the `Principal`); `make_audit_middleware` records the ambient Entra oid over its
+      build-time default. Tests: `test_authz.py`, `test_audit.py`. T5's "roles→skills per request"
+      remainder is **done** — delivered by D-052 as the ambient skills filter
+      (`agents/skill_access.py::RoleScopedSkillsSource`, wired at `agents/chemclaw_agent.py:139`).
+- [x] **F4-T2** Workload identity federation: `agents/identity/workload.py::WorkloadTokenProvider`
+      (SA-JWT→Entra client-credentials exchange, per-scope cache). ADR D-045. `test_workload_identity.py`.
+- [x] **F4-T4** OBO exchange: `agents/identity/obo.py::exchange_obo` (wired, dormant). ADR D-046.
+      `test_obo.py`.
+- [x] **F4-T6** Non-Entra bridges: `chemclaw/temporal_client.py::connect_options` (mTLS/api-key) +
+      `agents/identity/hpc_bridge.py::map_to_hpc_identity` (logs every mapping). ADR D-047.
+      `test_hpc_bridge.py`.
+- [ ] **F4 live edges** (need a real tenant/broker/cluster; code + fake-endpoint tests already green):
+      real Entra token validation against a live JWKS, real federation/OBO exchanges, live Temporal
+      mTLS handshake. (Per-request role→skills scoping is **not** open — done in D-052, see F4-T5.)
+- [x] **F5** Real HPC path behind the QM activities: `workflows/hpc/nextflow.py` (Tower REST adapter
+      `launch_run`/`poll_run`/`fetch_artifacts`, fake-HTTP tested), dispatched by `hpc_launch_interface`
+      (mock kept for CI). `hpc_pipeline_version` in the cache key when set (F5-T3). Worker unchanged
+      (F5-T4). ADR D-048. `test_nextflow_adapter.py`.
+- [ ] **F5 deferred**: ~~`QMJobWorkflow→CalculationWorkflow` rename~~ — **DROPPED** (assessment
+      2026-07-25): the workflow type name is durable-history state, so the rename is exactly the
+      un-versioned change the workflow-versioning policy below exists to forbid; real `cclib`
+      parsing once a live QM output format is fixed; live-cluster durability spike (needs a cluster).
+- [x] **F6** OpenShift delivery: one rootless multi-target image (`deploy/Containerfile` +
+      `entrypoint.sh`), Helm chart (`deploy/helm/chemclaw/`: ConfigMap/Secret, SA with federation,
+      service/route/HPA, both workers, MCP, NetworkPolicy, pre-deploy migrate hook), `deploy.yml` CI
+      (build + `helm template | kubeconform`), `deploy/README.md`. Config `otel_endpoint`. ADR D-049
+      (D-A6/D-A6a: Temporal self-hosted). Offline-verified: YAML parse + brace-balance + Settings map.
+- [ ] **F6 live edges** (CI/cluster-gated): actual image build+push, `helm template`/`kubeconform`,
+      dry-run rollout to a dev namespace, OTel collector wiring, ExternalSecret wiring.
+- [x] **F7** Generic data-source seam: `sources/base.py` (`DataSource` composes the existing
+      `ElnAdapter`+`SourceRetriever` halves, `SourceSpec` rejects neither-half), `sources/registry.py`
+      (`data_sources` config → `active_ingest_sources()`/`active_retrieve_sources()`). Re-hosted with
+      no behavior change: `gather_evidence` fans out over the registry; `eln_sync` ingests active
+      sources. All existing ELN/research tests pass unchanged. ADR D-050. `test_datasource_seam.py`.
+- [ ] **F7 deferred (the first live connector)**: custom Snowflake ELN source — one registry entry
+      (ingest half over the internal data pipeline) + per-source pipeline cursor over Snowflake's
+      load-timestamp; Snowflake specifics stay inside that one adapter, nothing Snowflake-shaped above
+      the seam. Also: LIMS/MES/analytical/literature adapters.
+
+## Later — Phase 6 items now folded into F4 above (infra-gated pieces need live Entra/Temporal)
+
+### Done — role-scoped skill visibility (D-052)
+- [x] `RoleScopedSkillsSource` + `settings.skill_role_gates` gate advertised skills by the turn's
+      ambient Entra roles, replacing F4's dead `allowed_skills` placeholder. Salvaged (the one
+      superior, non-redundant piece) from the parallel `phase6-authz` branch; its duplicate
+      `Principal` and second tool-authz path were dropped as already covered better by F4.
+      `test_skill_access.py`.
+
+- [x] Testing CLI (`agents/cli.py`, `make chat` / `uv run chemclaw`): interactive REPL + `-m`
+      one-shot over the same `build_agent`. Identity is the Phase-6 seam — `resolve_identity`
+      returns `(actor, allowed_skills)`; `--admin` bypasses the (unimplemented) Entra auth
+      (all skills, `CHEMCLAW_CLI_ADMIN_ACTOR`), and the non-admin branch (Entra resolution)
+      raises until 6.1/6.2 land. When Entra auth is built, wire it as that branch and gate the
+      admin bypass off in hardened deployments. Tests: `test_cli.py`.
+
+## Deep-review follow-ups (D-030)
+
+### Done — robustness/correctness fixes (D-030)
+- [x] Bounded `BAD_DATA_RETRY` (`maximum_attempts=CHEMCLAW_ACTIVITY_MAX_ATTEMPTS`) so an
+      unclassified deterministic failure gives up instead of retrying forever; added
+      `ValidationError`/`OrdFormatError`/`EvalCaseError` to the non-retryable names; shared the
+      list with `note_publish_retry`. Test: `test_publish.py`.
+- [x] Slug rejects trailing `.` and `.lock` (git-invalid `note/<id>` refs). Test: `test_note.py`.
+- [x] Git subprocess timeout + kill (`CHEMCLAW_GIT_COMMAND_TIMEOUT_SECONDS`). Test:
+      `test_knowledge.py::test_git_command_timeout_kills_the_child_and_raises`.
+- [x] Solubility/pKa cache keys version on the reported uncertainty.
+- [x] `test_mcp_transport.py` skip narrowed to a missing toolchain (won't mask a CI regression).
+
+### Done — deferred items worked off (D-031)
+- [x] Fingerprint-definition guard: each `*_fingerprints` row records its definition
+      (`ecfp:r{radius}:b{bits}` / `drfp:b{bits}`); similarity search filters to the store's
+      current definition so a changed radius/width + re-index can't rank incomparable bits.
+      Migration `004`; runbook (vi). Guard tested in-sandbox via the in-memory store.
+- [x] ELN reject re-drive: `RejectedEntry.created_at` + the WARNING log give the exact `since`
+      to re-run the (idempotent) sync from after fixing a source record. Runbook (v). No
+      automatic dead-letter by design (KISS).
+- [x] KISS cleanups: inlined the `SolubilityModel` seam (removed Protocol + dead `model=` param);
+      deleted `report.harness.gather_report` (tests assemble via `gather_section`); wired
+      `note_from_confirmed_answer` into the `record_confirmed_answer` agent tool (completes plan
+      5.5). Kept `StoredResult.provenance` as GxP audit metadata (docstring clarified — not read
+      into logic, but a legitimate audit column + the `measured` seam).
+
+## Admin-experience audit (configurability / error-handling / logging)
+
+### Done — P0 observability floor (D-026)
+- [x] Config-driven logging: `chemclaw/logging.py::configure_logging()` + `CHEMCLAW_LOG_LEVEL`/
+      `_LOG_FORMAT`, called at both workers' entrypoints. Worker startup logs (address/namespace/
+      queue/registered workflows). ELN sync logs `ingested/rejected` + a WARNING per rejection;
+      both adapters log skipped broken files. Shared `chemclaw/db.py::connect` → `ConnectionError`
+      "Postgres unreachable at <host>" with the DSN password redacted (not a retry-blocking
+      `ChemclawError`). Tests: `test_logging.py`, `test_db.py`, ELN caplog assertions.
+
+### Done — P1 pluggability & docs (D-028)
+- [x] Cache hit-vs-compute log at the `calc/store.py` decision point (DEBUG) — the "why did this
+      recompute?" trail, behind the D-026 log-level switch.
+- [x] ELN adapter registry (`eln/registry.py`): `CHEMCLAW_ELN_SYNC_ADAPTER` selects the durable
+      sync's source; memory jobs read `all_eln_adapters()`. Replaced the hardcoded adapter classes
+      in `eln_sync.py` and `memory_jobs.py`.
+- [x] `skills_dir` → OS-path-separator list via the `skills_dirs` property (add a second skills
+      directory with no code change) + SKILL.md front-matter schema/template in `skills/README.md`.
+- [x] MCP-attach the agent's fingerprint search (D-029): `build_agent` attaches config-driven
+      `MCPStdioTool` servers (`CHEMCLAW_MCP_SERVERS`), so structural search runs over MCP and
+      adding a capability is a config entry. `allowed_tools` keeps write/index tools off the
+      agent. Transport verified in-sandbox (`test_mcp_transport.py`). `docs/runbook.md` (iv)
+      rewritten for the MCP procedure.
+- [x] `make skill-validate` (D-037): `scripts/validate_skills.py` checks every SKILL.md's
+      frontmatter (name/description present, name matches directory) and gates in CI, like
+      kg-validate. Migrating the in-process agent tools (calculators/graph/BO) to MCP stays
+      unplanned — local RDKit/BoFire functions are simpler in-process (KISS).
+
+### Open — P2 polish
+- [x] `docs/runbook.md`: the four admin tasks (add skill / add-repoint DB / add-or-switch ELN
+      source / add capability), the log switch, the Temporal UI at :8080, DB-unreachable message.
+- [x] Startup preflight for `ANTHROPIC_API_KEY` presence (D-037): `_default_chat_client` fails
+      with a clear message at agent build, not on the first turn.
+- [x] Migration-status visibility (D-034): `schema_migrations` ledger records each applied file
+      by name + checksum; an edited applied file is flagged as drift.
+- [x] Coverage threshold in CI (D-037): `[tool.coverage.report] fail_under = 80` and CI runs
+      `make lint type cov` as its gate. Floor set safely below the measured offline baseline (86%,
+      Postgres/Temporal skipped; CI runs those and is higher). Ratchet upward as coverage climbs.
+
+### MAF out-of-the-box features (analysis done)
+- [x] **Function middleware** (`@function_middleware`) — one DRY GxP tool-audit trail
+      (`agents/audit.py::make_audit_middleware`: name/args/outcome/latency, observe-only) over all
+      agent tools, on the logging floor. Attached via `Agent(..., middleware=[...])` (D-027).
+- [x] **OpenTelemetry** — opt-in `chemclaw.logging.configure_telemetry()` gated on
+      `CHEMCLAW_OTEL_ENABLED`; calls MAF's `configure_otel_providers` at each worker's entrypoint.
+      Ships as a config toggle (default off) because the OTel SDK/OTLP exporter extras are not
+      installed and are only useful with a collector — enabling it requires adding those extras
+      (D-027).
+- [ ] **Structured outputs** (`response_format` + `resp.value`) — force validated pydantic
+      payloads for agent proposals instead of parsing prose. Deferred to the first call site that
+      needs a validated payload (changes call sites, not startup wiring).
+- Do-not-adopt / defer: Redis/mem0 history (durability belongs to Temporal, and neither extra is
+      installed), the MAF `_harness` providers (duplicate the memory layer + background queue),
+      the wholesale MAF eval harness (have `evals/`; cherry-pick only its tool-call checks). FIDES
+      security layer is `@experimental` → a DEFERRED candidate for untrusted ELN/literature text.
+
+
+## Done — Whole-repo production-readiness review (post-5b; commit d51f0b5, D-021)
+- [x] 4 adversarial review agents over all packages; ~45 verified findings fixed with regression
+      tests (134 → 169 passing). Criticals: PR-gate submitter concurrency/checkout corruption
+      (lock + `note_repo_dir` config + slug-validated note ids + path containment + fetch before
+      `--force-with-lease`); ELN sync poison pill (one `ChemclawError` bad-data base, sync
+      catches it → reject-and-continue actually holds). Majors: temperature range mis-parse
+      (`60-80 °C` → -80), stoichiometry-unsound mass balance → element subsumption, per-file
+      fetch robustness, BoFire off-thread, pKa cache key engine-versioned, QM tool no longer
+      recomputes completed jobs, report publish got the bounded retry discipline
+      (`workflows/publish.py`), vacuous-green eval gate fails loudly. Cross-cutting: CLAUDE.md
+      status un-falsified, `.env.example` complete, CI runs eval+eln-validate, dependency hygiene.
+- [x] Test-helper dedup pass: one `FakeSubmitter` in conftest (replaced ~10 local fakes),
+      QM tests use `tests/temporal_env.py` (inline copies + cross-test private imports gone),
+      shared `tests/pg.py` Postgres bootstrap, redundant `fast_mock` fixtures deleted.
+- [ ] Multi-process note-submit serialization (lock is per-process; per-submission worktrees or
+      a distributed lock) — revisit when >1 background worker replica exists.
+
+## Done — Phase 5b: report / deep-research harness (no new store — D-020)
+- [x] 5b.1/5b.2 Source-agnostic harness core (`report/harness.py`) over the `SourceRetriever`
+      contract + mandatory-citation `EvidenceChunk` (`report/evidence.py`).
+- [x] 5b.3 Two concrete retrievers (`report/retrievers.py`): `GraphRetriever` (Phase 2) +
+      `FingerprintReactionRetriever` (Phase 3) — thin adapters, no new store.
+- [x] 5b.4 Adversarial verify (`verify_claims`): a claim survives only if it cites retrieved
+      evidence; uncited/fabricated claims discarded. Unsupported sections marked, not invented.
+- [x] 5b.5/5b.6 Durable `DevelopmentReportWorkflow` (per-section activities = resumable long runs),
+      each section declares its memory layer (structural provenance separation). Registered on bg worker.
+- [x] 5b.7 Draft is a PR-gated `report` note citing every source. `development-report` skill (judgment:
+      decompose, write only what evidence supports, keep evidenced vs analogy apart).
+- [x] CHECKMATE 5b (G1–G7 + citation fidelity): core correct (verify_claims guards the `all([])`
+      trap; every chunk cited), no new store. 4 fixes — (F1/F2) report id is now ref-safe + unique
+      (slug + title hash) instead of a raw slug that broke git branches and collided across titles;
+      (F3) fingerprint-retriever citation honesty documented (PR-gate catches a pending-note link);
+      (F4) `load_notes` resilient to a malformed note (no longer aborts retrieval); + docstring
+      honesty on substring matching and the verify gate. **Phase 5b complete.**
+
+## Done — Agent-harness backbone core (MAF Agent Harness — D-038, docs/harness-konzept.md)
+- [x] H0 spike: verified `create_harness_agent` in the installed `agent-framework-core` 1.11
+      constructs with no LLM call; providers reduce to `TodoProvider`+`AgentModeProvider` when the
+      generic batteries are off; default modes are `plan`/`execute`; `todos_remaining(looping_modes=
+      ["execute"])` binds the loop to execute mode natively.
+- [x] H1/H2/H3(loop): `build_agent` wires the harness behind `harness_enabled` over the *same*
+      tools/skills, classic `Agent` fallback stays default; file-memory/file-access/shell/web
+      batteries disabled (§6, G6); `harness_autonomy` gates the loop (`plan_only` interactive /
+      `execute` looped-in-execute-mode), hard-capped by `harness_max_loop_iterations`. Config in
+      `chemclaw/config.py` + `.env.example`; 8 tests in `tests/test_agent.py` (backbone select,
+      provider set, same tools, batteries off, loop present/absent + bounded). `make lint type test`
+      green (133 passed, 15 offline-skipped).
+- [x] Evaluation: the agent harness does **not** replace Temporal or graph-based flows — Phase 5b's
+      report pipeline is a deterministic core + Temporal workflow, no MAF graph-workflow code exists;
+      complementary third backbone (see D-038, harness-konzept §11).
+- [x] Re-integrated onto the post-5b/D-037 main: harness branch now reuses main's history,
+      deterministic compaction (D-025, passed as last context provider), GxP audit middleware
+      (D-027), role-filtered skills, and MCP capability tools (D-029). ADR renumbered D-020→D-038
+      (D-020 was taken by the report harness on main).
+- [x] The awaiting-todo half of the resume follow-up: flipping the todo on job completion, closed —
+      see F3-T3 above and `agents/harness_todo.py` (D-058).
+- [ ] **Follow-ups (still open):** resuming the *same* streamed turn mid-flight (vs. picked up on the
+      session's next turn) via the durable-approval seam (D-032/D-035) · plan/loop metrics for Phase
+      2b · plan-mode approval + finer autonomy behind RBAC (Phase 6, authz in the MCP server) ·
+      agent-harness ↔ report-pipeline interplay (open research per section vs. fixed synthesis flow).
+
+## Done — Phase 5: memory layers (episodic + semantic, no new infra — D-019)
+- [x] 5.1/5.2/5.3 episodic: `memory/chains.py` (chain detection — product A = reactant B via the
+      canonical-SMILES compound identity, Phase 3) + `memory/campaign.py` (`campaign` note citing each
+      member reaction via wikilinks) + `memory/jobs.py::synthesize_campaigns` + Temporal workflow.
+      `campaign-narrative-synthesis` skill (judgment; every claim cites a member reaction).
+- [x] 5.4 semantic: `memory/playbook.py` (`find_playbook_candidates` — DRFP similarity across ≥2
+      projects; `playbook_note` with mandatory evidence refs) + `distill_playbooks` job + workflow.
+      `playbook-distillation` skill (transferable-only, process-chemist approval).
+- [x] 5.5 user interaction as a 4th source: `memory/interaction.py` (`interaction` note via the same
+      PR-gate); reachable via the `record_confirmed_answer` agent tool (synchronous) and the durable
+      `InteractionApprovalWorkflow` (async Yes/No hold — D-032). 5.6 retrieval separation: judgment in
+      the playbook skill (evidenced vs analogy kept visibly separate; experiment outranks analogy).
+- [x] Jobs registered on the background worker; `project` field added to `OrdReaction`/adapter.
+- [x] CHECKMATE 5 (G1–G7 + no-new-infra check confirmed): 3 findings fixed — (F1, G4) a degenerate
+      reaction is skipped in `find_playbook_candidates` instead of aborting the whole distillation;
+      (F2) a cyclic chain is flagged `ordered=False` and the campaign note says so, not a fake causal
+      sequence; (F3) the merged-reaction-notes precondition for citations is documented (kg-validate
+      enforces it). Also stabilized a pre-existing flaky BO test by seeding BoFire (`bo_seed` config).
+      **Phase 5 complete.**
+
+## Done — Phase 4: ELN ingestion (adapter pattern) — COMPLETE
+- [x] 4.1 Stable ORD-subset schema (`eln/ord.py`: `OrdReaction`/`Component`/`Role`) — ELN-agnostic;
+      `reaction_smiles()` for DRFP, role consistency validated.
+- [x] 4.2 Adapter contract (`eln/adapter.py`: `RawEntry` + `ElnAdapter` Protocol —
+      `fetch_new_entries`/`map_to_ord`). Only the contract is fixed (G6).
+- [x] 4.3 One concrete adapter (`eln/json_adapter.py`, JSON-export ELN): structured mapping +
+      deterministic free-text regex (temperature/time). No universal abstraction (D-018).
+- [x] 4.4 `eln-reaction-extraction` skill (judgment: structured-first, per-field LLM fallback,
+      validation gate) + `eln/validate.py` (RDKit parse + atom/mass balance) + `make eln-validate`
+      / `scripts/validate_ord.py`. LLM-per-field wiring deferred (D-018).
+- [x] 4.5 Durable ELN sync (`eln/sync.py` core + `workflows/eln_sync.py` activity/workflow on the
+      background queue): fetch → map → validate → **index reaction+compound fingerprints** (Phase 3)
+      + **PR-gated `reaction` note** (Phase 2). Reject-and-continue; idempotent. Registered on the
+      bg worker. Seed corpus in `eln/exports/`. Server test in CI; full chain tested in-memory.
+- [x] CHECKMATE 4 (G1–G7 + deep review over Phase 3+4): end-to-end chain sound; 3 real bugs fixed —
+      (F1) mapping failures (unknown role / schema violation) now raise a contract-level
+      `ElnMappingError` so the batch sync rejects-and-continues instead of aborting (also removes a
+      G6 leak); (F2) structured `temperature_c`/`time_h` of `0` no longer discarded as falsy by the
+      `or` fallthrough (ice-bath 0 °C preserved); (F3) temperature regex now requires the degree sign
+      so `13C NMR`/`pH 7 C` can't fabricate a temperature; + dead-param cleanup. **Phase 4 complete.**
+
+## Done — Phase 3: fingerprint search (molecules + reactions) — COMPLETE
+- [x] 3.1 `mcp-molfp` capability: ECFP4 (Morgan r2, 2048-bit) via RDKit (`mcp_servers/molfp/
+      fingerprint.py`), config-sized, deterministic. Thin FastMCP `server.py` advertises the tools.
+      (Dir is `mcp_servers/`, not `mcp/` — the `mcp` name is the SDK's, D-016.)
+- [x] 3.2 Postgres `bit(2048)` table + HNSW `bit_jaccard_ops` index (`infra/sql/002_...sql`) +
+      `PostgresFingerprintStore` (Tanimoto in SQL). In-memory backend proves the ranking everywhere.
+- [x] 3.3 `find_similar_molecules(smiles, top_k)` (Tanimoto, threshold+top_k from config) +
+      `find_substructure_matches` (exact RDKit match), backend-agnostic (`mcp_servers/molfp/search.py`).
+- [x] 3.5 `reaction-search` skill: the judgment (similarity vs substructure, what Tanimoto counts as
+      precedent, combine with metadata/graph) — thresholds in config, not code (G6).
+- [x] 3.4 `mcp-rxnfp` (DRFP reaction fingerprints, `mcp_servers/rxnfp/`) + `find_similar_reactions`
+      + thin FastMCP server + `infra/sql/003`. Reactions are the 2nd fingerprint domain, so the
+      Tanimoto store is now the **generic** `mcp_servers/fpstore.py` shared by molfp+rxnfp (D-017,
+      DRY); molfp refactored onto it (molecule tests still green = no regression). `reaction-search`
+      skill covers both molecule and reaction search.
+- [x] CHECKMATE 3 (G1–G7 + deep review): core correct, MCP/skill split clean, threshold configurable.
+      4 fixes — (F1) docstrings no longer overclaim exact HNSW ordering (approximate NN, up to recall);
+      (F2) `bit(N)` width derived from `ecfp_bits` (single source; mismatch fails loud, not silent pad);
+      (F3) substructure docstring clarified (SMARTS-first); (F4) all-zero-fp guard noted. **Molecule
+      path complete.**
+
+
+
+## Done — Phase 2b: evaluation & metric layer (cross-cutting)
+- [x] 2b.1 Metric interface: pure `Metric = (EvalCase) -> MetricResult` + registry
+      (`evals/metric.py`, `@metric` decorator = the 2b.5 extension seam). Thresholds from config (G3).
+- [x] 2b.2 Eval harness (`evals/harness.py`): `run_eval` over a versioned case-set +
+      `render_report` (citable Markdown, case id + provenance per row) + `load_eval_cases`
+      (frontmatter files) + `make eval` CLI. Cases versioned in `evals/cases/` (D-014).
+- [x] 2b.3 Seed metrics (`evals/metrics.py`): green-chemistry **E-factor** + **PMI** (mass balance),
+      **prediction_error** (vs held-out reference), **bo_regret** (1d.6). All pure, config-gated.
+- [x] 2b.4 Per-task tool-utility A/B (`evals/ab.py`): direction-aware delta, buckets help/hurt/
+      no-effect over a task set — proves ≥1 case where tooling does NOT help (F8/F9 steering).
+- [x] 2b.5 Wiring: each later capability phase registers ≥1 metric via `@metric`; regressions are
+      pinned by the test suite (expected pass/fail per case), not a CI hard-gate (the seed set
+      deliberately holds a failing case to prove gating).
+- [x] CHECKMATE 2b (G1–G7 + deep review): 5 robustness findings fixed — (F1) `EvalCase`
+      `extra="forbid"` so a misspelled frontmatter key can't silently drop and mis-score;
+      (F2) unknown metric name wrapped as case-named `EvalCaseError`, not a raw traceback;
+      (F3) mass coercion routes through the guarded `_scalar` (no escaping `TypeError`);
+      (F4) mass-balance violation (product > input) rejected, not a negative-E gate pass;
+      (F5) `bo_regret` provenance/docstring corrected (signed, not `|abs|`). **Phase 2b complete.**
+
+## Prior — Phase 2: knowledge graph + PR-gate
+- [x] 2.1 Note schema (`kg/note.py`, one pydantic model); 2.2 parser (frontmatter → Note, clear errors).
+- [x] 2.3 Wikilink extraction + NetworkX indexer (`kg/graph.py`, `neighborhood` 1–2 hop traversal).
+- [x] 2.4 Validation CLI (`kg/validate.py`, `make kg-validate`) — broken links / dup ids / bad notes; in CI.
+- [x] 2.5/2.6 skills `knowledge-graph-query` + `knowledge-graph-write` (judgment).
+- [x] 2.7 **PR-gate** built once (`kg/pr_gate.py` `propose_note` + `NoteSubmitter` seam + `kg/render.py`);
+      agent-only, notes land at `<knowledge_dir>/<type>/<id>.md` on a per-note branch. Tested with a fake.
+- [x] 2.6b real `NoteSubmitter`: `kg/git_submitter.py` `GitNoteSubmitter` (branch off base, write, commit,
+      push) — tested against a local bare remote. PR-object creation is the git platform's step.
+- [x] 2.8 Temporal activity `write_knowledge_node` (`workflows/knowledge.py`): QM result → agent
+      `job-result` note (links to a method-independent compound id) → PR-gate. Registered on the bg worker.
+- [x] Agent tools for graph query/write (`agents/graph_tools.py`: find_notes, expand_note,
+      propose_knowledge_note) registered on the MAF agent; shared `default_submitter` (DRY).
+- [x] Wire `write_knowledge_node` into a workflow caller: `QMJobWorkflow` gains opt-in
+      `publish_to_graph`, routing the note write to the background-jobs queue (best-effort). Server test.
+- [x] CHECKMATE 2 (G1–G7 + deep review over Phase 1+2): 5 findings fixed — (F1) bounded retry so
+      best-effort publish gives up instead of hanging; (F2) job-result note no longer dangling-links a
+      non-existent compound note (would fail kg-validate); (F3) git submitter idempotent on identical
+      re-submit; (F4) stray `body:` frontmatter key no longer crashes the parser; (F5) dedicated
+      note-write timeout/attempts config. **Phase 2 complete.**
+
+## Later compute items (reprioritized; HPC/DFT deferred — D-010)
+
+### Phase 1b — Result store / calc cache (first-class; "never compute twice") — DONE
+- [x] 1b.1 Store interface `get/put` (Protocol); 1b.2 versioned key `(calc_type, calc_version, input_hash, params_hash)`.
+- [x] 1b.3 In-memory backend (tests) + Postgres backend (`calculation_results` table) + `make db-migrate` + CI DB.
+- [x] 1b.4 One `cached_compute()` path (lookup-before-compute, DRY); returns was_cached for hit/miss metric.
+- [x] 1b.5 Temporal lookup/persist activities — folded into 1c.5 by design (no stub); checkbox was
+      stale, cleared 2026-07-25.
+
+### Phase 1c — Fast predictors + semiempirical (first *real* calculations)
+- [x] 1c.2 **xTB / GFN2** calculator via `tblite` (real single-point energy, RDKit 3D embed, CPU) —
+      `calc/xtb.py`, cached through the store (`run_cached_xtb`). Real GFN2 tests run everywhere.
+- [x] 1c.1 Calculator **contract**: `calc.store.run_cached` (offload blocking compute → store dict →
+      reconstruct typed model) — each `run_cached_*` now only derives its key and delegates (DRY,
+      Rule of Three across xTB/solubility/pKa). Name→calculator **registry deferred** (no dispatch
+      consumer yet; would be a one-caller abstraction — D-015).
+- [ ] 1c.3 GNN solubility model (inference only; value + uncertainty) — **needs model choice** (see open Qs).
+      **Blocked on user input** (which GNN + weights/license); the calculator contract makes the swap cheap.
+- [x] 1c.4 **pKa via xTB** (`calc/pka.py`): GFN2-xTB ALPB-solvated deprotonation energy of the most
+      acidic O-H/S-H site + linear calibration (R²0.93 over 10 acids). Agent tool `predict_pka`. Real tests.
+- [x] 1c.5/1c.6 xTB exposed to the MAF agent as tool `compute_xtb_energy` + `calculation-selection` skill.
+- [x] 1c.5b calculator contract landed (see 1c.1); name-registry consciously deferred (D-015).
+- [ ] 1c.7 optional graph note via PR-gate for a *fast* calc result — deferred: the QM path already
+      publishes (2.8) and BO recommendations now publish (1d.5); a fast-calc publish waits for a real
+      need (avoids a third near-identical mapper before it is asked for). CHECKMATE 1c: G1–G7 met.
+- Note: fast calcs run **without** a Temporal workflow (sub-second) — the store gives "never twice";
+  durability (Temporal) is reserved for long jobs (BO campaigns 1d, later HPC).
+
+### Phase 1d — Bayesian optimization (BoFire, pulled forward)
+- [x] 1d.1 Domain adapter (`bo/engine.py`, BoFire fully encapsulated behind neutral `bo/problem.py` types).
+- [x] 1d.2 ask/tell: `initial_candidates` (random seed) + `propose_candidates` (SOBO); `optimize()` loop
+      (`bo/campaign.py`) — convergence-tested on known minima/maxima (CHECKMATE 1d spike met).
+- [x] 1d.2b categorical BO support (`CategoricalParameter`) + real reaction benchmark:
+      **Reizman Suzuki–Miyaura** (`bo/benchmarks/reizman_suzuki.py`, data vendored from Summit/MIT),
+      RandomForest yield surrogate → BoFire mixed categorical+continuous campaign beats dataset median.
+- [x] 1d.4 **durable BO campaign**: `BoCampaignWorkflow` (Temporal) + activities (heavy BoFire work
+      isolated) + `bo/objectives.py` name→objective registry + **`workers/background_worker.py`**
+      (first real background-jobs job — retro-satisfies 1.8, no empty stub). Server test runs in CI.
+- [x] 1d.3 **calculator-backed objective**: `solubility_objective(store)` (cached solubility via the
+      store) registered as `solubility_max`, plus `molecule_library_problem`. **Candidate-set BO works**:
+      BoFire drives a pure-categorical domain by exhaustive-discrete acquisition — finds a top molecule
+      without evaluating the whole library (test: best found evaluating 9/14). Constraint: evaluation
+      budget must be < library size, else the unique-candidate pool exhausts.
+- [x] Robustness: `optimize` and the durable BO workflow stop gracefully when a discrete candidate
+      set is exhausted (`discrete_candidate_count`/`distinct_candidate_count` guard) instead of crashing
+      inside BoFire. Tests: budget 2+10 over a 4-molecule library returns cleanly.
+- [x] 1d.5 recommendation PR-gated: `workflows/bo_knowledge.py` (`note_from_campaign_result` +
+      `write_campaign_node`) maps a campaign's best point to an agent `bo-candidate` note through the
+      **same** PR-gate the QM path uses (DRY: reuses `propose_note`/`default_submitter`). Opt-in
+      `CampaignSpec.publish_to_graph` routes it to the background queue, best-effort with bounded
+      retry (mirrors QM 2.8). Registered on the bg worker. Pure mapper + PR-gate tests; server test in CI.
+- [x] 1d.6 progress/regret metric: `bo_regret` registered in the Phase 2b metric layer
+      (`evals/metrics.py`, direction-aware, non-negative) — Phase 1d's registered scientific metric.
+- [x] CHECKMATE 1d: G1–G7 met (recommendation publish mirrors the deep-reviewed QM path; best-effort
+      + bounded retry; no dangling wikilink; idempotent note id). **Phase 1d complete.**
+
+## Done
+- [x] **Phase 0** — foundation (tooling, config, infra compose, CI, ADR-0001, layer READMEs). CHECKMATE 0 green.
+- [x] **Phase 1 spine (1.1–1.6, 1.9)** — hpc worker; `QMJobWorkflow` + activities (mock HPC, heartbeat poll,
+      parse); agent tools `submit_qm_job`/`get_qm_job_status`; MAF agent + `qm-job-submission` skill;
+      `requested_by` audit field; shared Temporal client + result models. Server-backed tests run in CI.
+- [x] **Orchestrator** — reconsidered MAF vs LangGraph → keep MAF (D-013).
+- Folded/deferred Phase-1 tails: **1.7** notify callback (defer until an async result must reach a live
+  session); **1.8** background-jobs worker — **DONE** (`workers/background_worker.py`, hosts the BO
+  campaign); **1.10** → generalized into **Phase 1b**. **CHECKMATE 1** (worker-restart durability spike)
+  runs against a live Temporal (`make up`) — pending, needs a live cluster (not runnable in sandbox).
+
+## Capability gaps to triage (from `docs/research-review.md`) — decide per item
+- [x] **Evaluation / scientific-output metrics layer** → promoted to first-class **Phase 2b**
+      (see plan + D-009). No longer a backlog decision.
+- [x] **Chemical/biological safety layer** (D-080) — shipped as a deterministic, **advisory**
+      structural screen: committed cited SMARTS table (`safety/rules.yaml`), `screen_structure`/
+      `screen_reaction`, the `screen_hazards` agent tool + `safety-screening` skill, a `kg-validate`
+      gate requiring a `## Hazards` section on flagged agent-proposed procedures, and the
+      `hazard_flag_recall` metric (gated at 1.0) so a silently-broken SMARTS fails `make eval`.
+      Invariant: the system flags, it never certifies — an empty result reads "no rule matched",
+      never "safe". Non-goals (each still open, none implied): GHS/SDS database, toxicity
+      prediction, route-level verdicts, regulatory classification. Config: `safety_rules_path`,
+      `safety_gate_severity`, `safety_gate_enabled`, `eval_hazard_recall_min`. Original entry:
+      distinct from Entra-ID/RBAC (IT security).
+      GxP / data-integrity + hazard checks. **Kept in backlog** (user decision); decide scope
+      before any capability phase that could propose a hazardous route/procedure. **Assessment
+      2026-07-25: that precondition is already past** — BO recommendations (1d.5) and development
+      reports (5b) publish agent-authored procedures today with no hazard awareness anywhere in the
+      tree. Promoted to **wave C2** with a proposed advisory-only, deterministic slice (committed
+      SMARTS rule table + `@tool` + skill + `kg-validate` hazard-section rule + a recall metric);
+      three scope questions await the user — `docs/backlog-plan.md` §3/§5.
+- [ ] Retrosynthesis + reaction prediction · DoE/Bayesian optimization · lab automation/SiLA2
+      closed-loop · process flowsheet synthesis · multimodal analytical data · domain foundation
+      models — all currently in `DEFERRED.md` with triggers; confirm or pull forward.
+- [x] Design caution "apply Skills/tools **selectively + measured per task**" — **satisfied**:
+      `evals/ab.py` (2b.4) measures per-task tool utility including where tooling hurts, and
+      `AgentProfile` (D-075) narrows the toolset per use case. Nothing left to build.
+- [ ] Design caution: evaluate the CoALA memory layer against DMR/LongMemEval, not by assumption —
+      deferred with AG-13 (needs an external benchmark + a live LLM to score it).
+
+## Open questions / awaiting input (see `docs/research-review.md`)
+- [ ] **"pKs models"** — interpreted as **pKa** prediction; confirm (could mean PK/ADMET). The
+      pluggable calculator registry (1c.1) makes a rename/swap cheap.
+- [ ] **Which models** for solubility (GNN weights + license?) and pKa (tool/model)? xTB binary
+      availability + license in the target runtime.
+- [ ] BoFire scope for v1: which problem (reaction-condition? formulation?) is the first real BO case?
+- [ ] Temporal vs. Restate/DBOS/Prefect/Dapr — no head-to-head source found; our choice stands
+      on maturity/fit. Revisit if operability/cost becomes a concern.
+- [ ] When does Markdown+NetworkX tip to Neo4j/Memgraph + GraphRAG? (deterministic traversal
+      sidesteps the NL-query risk for now.)
+- [ ] Concrete lab-automation/SiLA2 + DoE + retrosynthesis integration wiring.
+- [ ] Domain safety/compliance layer design beyond RBAC.
+
+## Later
+- [ ] Phase 2 knowledge-graph core + PR-gate · Phase 3 fingerprint search · Phase 4 ELN
+      ingestion · Phase 5 memory layers · Phase 5b report harness · Phase 6 identity/RBAC.
+
+## Post-campaign follow-ups (2026-07-24, D-072) — worked off 2026-07-25
+
+Assessed then implemented per `docs/backlog-plan.md` (waves A/B/C); all six are now closed.
+
+- [x] **ELN late-file detection** — both file adapters compare a dropped file's mtime against the
+      fetch floor and emit one aggregated WARNING naming the late files plus the backfill recovery
+      (`eln/adapter.py::is_late_arrival`/`warn_late_arrivals`). Runbook §(v). Tests: `test_eln.py`.
+- [x] **Memory cluster merge/shrink supersede** (D-078) — `memory/supersede.py` retires the notes a
+      run's clusters replaced: `valid_to` closed (dropped from current-evidence sweeps, never
+      deleted) plus a plain-text successor line, proposed through the same PR-gate from inside the
+      three `build_*_notes` builders. This also auto-retires notes minted under the old set-derived
+      ids, so the one-time manual cleanup noted here is no longer needed. Tests: `test_memory.py`.
+- [x] **`system-eval-drift` consumer surface** — each alert is logged at WARNING where operators
+      already look (a vanished metric stays distinct from a 0.0 score), and the runbook §(vii)
+      documents the SQL for the durable channel. No UI, by design. Tests: `test_eval_drift.py`.
+- [x] **Deployment docs** — runbook + `deploy/README.md` cover `CHEMCLAW_ENTRA_REQUIRED` (with the
+      exact refuse-to-boot message) and the removed `CHEMCLAW_ENTRA_CLIENT_ID`; `values.yaml`
+      records why the background worker stays at one replica.
+- [x] **Substructure match compute bound** — the match loop runs in a worker thread under
+      `substructure_match_timeout_seconds`, so an adversarial SMARTS no longer stalls every
+      session's stream. Documented limit: the bound frees the event loop, not the CPU.
+      Tests: `test_molfp.py` (incl. loop responsiveness).
+- [x] **Workflow versioning policy before first live deploy** (D-079) —
+      `docs/workflow-versioning.md` + deploy checklist: what counts as a logic change, patch-gate
+      vs drain, and why there is no CI guard. Today's un-gated changes need no retroactive patches
+      (no live histories); binding from the first production deploy.

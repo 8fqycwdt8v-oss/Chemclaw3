@@ -1,0 +1,44 @@
+# Single multi-target image for every Chemclaw component (plan F6-T1).
+#
+# One image, one dependency closure; the *component* is chosen at runtime by CHEMCLAW_COMPONENT
+# (see deploy/entrypoint.sh), so the service, the two Temporal workers, and the MCP servers all ship
+# the same bits and differ only by entrypoint. UBI9 + a non-root UID keeps it OpenShift-SCC-friendly
+# (arbitrary high UID at runtime); no secret is ever baked in — all config arrives via env/mounts.
+FROM registry.access.redhat.com/ubi9/python-311:latest
+
+# uv drives the install to match local/CI exactly (same lockfile). Copy metadata first for layer reuse.
+USER 0
+RUN pip install --no-cache-dir uv
+WORKDIR /app
+
+COPY pyproject.toml uv.lock README.md ./
+# Copy the source needed to build the wheel + run every component.
+COPY chemclaw ./chemclaw
+COPY agents ./agents
+COPY service ./service
+COPY workflows ./workflows
+COPY workers ./workers
+COPY mcp_servers ./mcp_servers
+COPY report ./report
+COPY bo ./bo
+COPY eln ./eln
+COPY calc ./calc
+COPY infra ./infra
+COPY kg ./kg
+COPY memory ./memory
+COPY sources ./sources
+COPY deploy/entrypoint.sh /usr/local/bin/chemclaw-entrypoint
+
+# Install into a project venv; --frozen fails if the lockfile drifted (reproducible builds).
+RUN uv sync --frozen --no-dev \
+    && chmod +x /usr/local/bin/chemclaw-entrypoint \
+    && chown -R 1001:0 /app \
+    && chmod -R g=u /app
+
+# Non-root by default; OpenShift may override with an arbitrary UID (still in group 0).
+USER 1001
+ENV PATH="/app/.venv/bin:${PATH}" \
+    PYTHONUNBUFFERED=1 \
+    CHEMCLAW_COMPONENT=service
+
+ENTRYPOINT ["/usr/local/bin/chemclaw-entrypoint"]
