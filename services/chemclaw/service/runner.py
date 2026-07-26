@@ -18,14 +18,24 @@ from typing import Any
 
 from agent_framework import AgentSession
 
+from agents.dialogue_tools import reset_dry_run, set_dry_run
+from agents.framing import frame_untrusted
 from agents.harness_todo import todo_titles
 from agents.identity_context import reset_current_identity, set_current_identity
-from agents.job_events import drain_started_jobs, reset_job_sink, set_job_sink
+from agents.job_results import await_job_results
 from agents.session_context import (
     reset_current_session,
     reset_current_session_id,
     set_current_session,
     set_current_session_id,
+)
+from agents.turn_signals import (
+    JobSignal,
+    ProposalSignal,
+    QuestionSignal,
+    begin_turn,
+    drain,
+    end_turn,
 )
 from agents.verifier import verify_turn_answer
 from chemclaw.config import settings
@@ -36,7 +46,9 @@ from service.events import (
     ErrorEvent,
     Event,
     JobStartedEvent,
+    NoteProposedEvent,
     PlanEvent,
+    QuestionEvent,
     TokenEvent,
     ToolCallEvent,
 )
@@ -56,6 +68,7 @@ async def run_turn(
     actor: str | None = None,
     roles: frozenset[str] = frozenset(),
     budget: BudgetTracker | None = None,
+    dry_run: bool = False,
 ) -> AsyncIterator[Event]:
     """Run one turn and yield its events (tokens, tool calls, approvals, then the answer).
 
@@ -67,6 +80,8 @@ async def run_turn(
         actor: The authenticated user's Entra oid (F4), made ambient so the audit trail, the
             authorization gate, and job attribution see it. `None` off the authenticated path.
         roles: The user's app roles, made ambient for the authorization gate.
+        dry_run: Plan the turn without launching anything expensive (IDEA-4). Ambient for the
+            turn rather than a tool argument, so the model can neither set it nor clear it.
         budget: The runaway-cost meter. When set, this turn's reported token usage and its turn
             count are booked against the session/user when the turn ends (the front-door admission
             check reads those counters before the *next* turn). `None` disables metering (test/CLI).
@@ -79,11 +94,6 @@ async def run_turn(
     # Metered across the turn's updates and booked once on teardown (even on failure — a failed turn
     # still spent tokens up to the point it broke, so its cost must count toward the next check).
     turn_tokens = 0
-    # Snapshot the session state before the turn so we can roll it back on GeneratorExit
-    # (client disconnect). Without this, a mid-tool-call disconnect leaves a `tool_use` block in
-    # the history with no matching `tool_result`, poisoning every subsequent turn with an Anthropic
-    # 400 "tool_use ids found without tool_result blocks" (ISSUE-B-10).
-    _state_snapshot = copy.deepcopy(session.state)
     # Stamp the turn's session so a job-launching tool (submit_qm_job) records push-back to the
     # right session (F3-T3) — ambient, never a model-supplied argument. Reset on turn teardown.
     session_token = set_current_session_id(session.session_id)
@@ -92,11 +102,21 @@ async def run_turn(
     live_session_token = set_current_session(session)
     # Stamp the authenticated identity (F4) so audit/authorization/attribution see the user.
     identity_token = set_current_identity(actor, roles) if actor is not None else None
-    # Collect jobs launched by this turn's tools, drained between updates into `JobStartedEvent`s
-    # (D-042) — the launch happens layers below this stream, so it is announced ambiently.
-    job_sink_token = set_job_sink()
-    # Last plan snapshot emitted, so an unchanged todo list is not re-sent on every update.
-    plan: list[str] = []
+    # Buffer for what tools learn mid-turn that the stream must surface (started jobs, PR-gate
+    # proposals) — the runner only sees the model's updates, so tools hand these over out of band.
+    signals_token = begin_turn()
+    # Durable jobs this turn launched, for the optional mid-turn resume below.
+    started_jobs: list[str] = []
+    dry_run_token = set_dry_run(dry_run)
+    # The harness's todo list as last rendered, so a plan is emitted when it first appears and
+    # again whenever it changes — not once per update (which would spam an unchanged plan).
+    last_plan: list[str] = []
+    # Snapshot the session state before the turn so a client disconnect can roll it back
+    # (ISSUE-B-10). A disconnect mid-tool-call otherwise leaves a `tool_use` block in the stored
+    # history with no matching `tool_result`, and every later turn on that session replays it —
+    # the model rejects the thread outright ("tool_use ids found without tool_result blocks"), so
+    # one dropped connection permanently bricks the conversation rather than costing it a turn.
+    state_snapshot = copy.deepcopy(session.state)
     try:
         async with AsyncExitStack() as stack:
             # Open each MCP capability server for the duration of the turn, then tear it down — the
@@ -106,6 +126,13 @@ async def run_turn(
             stream = agent.run(user_message, stream=True, session=session)
             async for update in stream:
                 turn_tokens += _usage_tokens(update)
+                # Drain *before* this update's own content: a tool that ran while the model was
+                # producing this update ran before the text it then produced, so emitting the
+                # signal first is the truthful transcript order (RCH-4/RCH-5).
+                for signal in drain():
+                    if isinstance(signal, JobSignal):
+                        started_jobs.append(signal.job_id)
+                    yield _signal_event(signal)
                 text = getattr(update, "text", "") or ""
                 if text:
                     answer_parts.append(text)
@@ -114,29 +141,56 @@ async def run_turn(
                     yield ToolCallEvent(tool=tool_name, arguments=arguments)
                 for request in getattr(update, "user_input_requests", None) or []:
                     yield ApprovalRequestEvent(prompt=_approval_prompt(request))
-                for job_id in drain_started_jobs():
-                    yield JobStartedEvent(job_id=job_id)
+                plan = await _current_plan(session)
+                if plan and plan != last_plan:
+                    last_plan = plan
+                    yield PlanEvent(todos=plan)
+            # A signal recorded while producing the *final* update has no next iteration to carry
+            # it, so drain once more before the answer — otherwise the last job started or note
+            # proposed in a turn would be silently dropped.
+            for signal in drain():
+                if isinstance(signal, JobSignal):
+                    started_jobs.append(signal.job_id)
+                yield _signal_event(signal)
+
+            # Mid-turn resume (gap AGT-2): if this turn launched durable jobs, optionally wait for
+            # them and continue the *same* turn with their results, so "compute this, then reason
+            # about the result" is one exchange rather than two. Off by default; bounded by config
+            # and, above it, by the front door's whole-turn deadline.
+            if started_jobs and settings.mid_turn_resume_enabled:
+                results = await await_job_results(
+                    session.session_id,
+                    started_jobs,
+                    timeout_seconds=settings.mid_turn_resume_timeout_seconds,
+                )
+                if results:
+                    async for event in _resume(agent, session, results):
+                        if isinstance(event, TokenEvent):
+                            answer_parts.append(event.text)
+                        yield event
+                # The resume can itself launch jobs or propose notes, so drain the full signal
+                # buffer rather than only the job ids — a proposal made during the resume would
+                # otherwise never reach the stream.
+                for signal in drain():
+                    yield _signal_event(signal)
                 # Plan after jobs: a submit adds an "awaiting job" todo, so this order shows the
                 # launch and then the plan that reflects it.
                 current_plan = await _current_plan(session)
-                if current_plan is not None and current_plan != plan:
-                    plan = current_plan
-                    yield PlanEvent(todos=plan)
-            # A job launched while the model produced its closing update has no later iteration to
-            # be drained by, so it would otherwise be announced only by its completion push-back.
-            for job_id in drain_started_jobs():
-                yield JobStartedEvent(job_id=job_id)
+                if current_plan is not None and current_plan != last_plan:
+                    last_plan = current_plan
+                    yield PlanEvent(todos=last_plan)
         yield await _answer_event("".join(answer_parts))
     except GeneratorExit:
-        # Client disconnected mid-turn. Roll the session state back to the pre-turn snapshot so
-        # that the next message does not replay a dangling `tool_use` block to the model
-        # (ISSUE-B-10). Re-raise so the async generator closes normally.
+        # The client went away mid-turn, so this generator is being closed. Roll the session back
+        # to its pre-turn state: a half-written turn is worth less than the conversation it would
+        # otherwise poison (see the snapshot above). Needs its own clause because GeneratorExit
+        # derives from BaseException, not Exception; re-raised so the generator still closes.
         logger.warning(
-            "client disconnected during turn for session %s; rolling back session state",
+            "client disconnected during turn for session %s; rolling session state back",
             session.session_id,
         )
         session.state.clear()
-        session.state.update(_state_snapshot)
+        session.state.update(state_snapshot)
         raise
     except Exception:
         # One turn's failure becomes one user-safe event, never a 500 mid-stream or a leaked trace.
@@ -153,7 +207,8 @@ async def run_turn(
     finally:
         if budget is not None:
             budget.record(session.session_id, actor, turn_tokens)
-        reset_job_sink(job_sink_token)
+        end_turn(signals_token)
+        reset_dry_run(dry_run_token)
         reset_current_session_id(session_token)
         reset_current_session(live_session_token)
         if identity_token is not None:
@@ -162,6 +217,12 @@ async def run_turn(
 
 async def _current_plan(session: AgentSession) -> list[str] | None:
     """The harness's current todo list for this session, or None when there is no plan to show.
+
+    Why this is emitted at all (gap RCH-5): `PlanEvent` has been in the typed contract and rendered
+    by the UI since F2, but nothing ever produced one — so `plan_only` autonomy, which the Helm
+    chart ships as the production default, asked a human to approve a plan the surface could never
+    show them. Titles are read from the harness's own `TodoProvider` state, the same store
+    `agents.harness_todo` mutates, so there is no second representation of the plan to drift.
 
     None (not an empty list) off the harness path: the classic agent has no todo state, and an
     empty `PlanEvent` would render as an empty checklist — "the agent has no plan" — rather than
@@ -200,6 +261,41 @@ async def _answer_event(answer: str) -> AnswerEvent:
         unsupported_claims=[claim.text for claim in result.unsupported],
         review_required=result.confidence < settings.verifier_confidence_threshold,
     )
+
+
+async def _resume(
+    agent: Any, session: Any, results: dict[str, dict[str, Any]]
+) -> AsyncIterator[Event]:
+    """Continue the turn with completed job results, streaming the continuation's events.
+
+    The results are handed to the model as *framed data*, not as an instruction: they arrive from a
+    workflow, and the same injection discipline that applies to retrieved notes applies here
+    (`agents.framing`). Anything the continuation itself starts is surfaced too, but a resume is
+    deliberately not recursive — a second wait would let one chemist turn chain durable jobs
+    indefinitely inside a single request.
+    """
+    summary = "\n".join(f"- {job_id}: {payload}" for job_id, payload in results.items())
+    message = (
+        "The durable job(s) you started have completed. Their results follow as data; continue "
+        "your answer using them.\n" + frame_untrusted(summary, note_id="job-results")
+    )
+    async for update in agent.run(message, stream=True, session=session):
+        for signal in drain():
+            yield _signal_event(signal)
+        text = getattr(update, "text", "") or ""
+        if text:
+            yield TokenEvent(text=text)
+        for tool_name, arguments in _tool_calls_in(update):
+            yield ToolCallEvent(tool=tool_name, arguments=arguments)
+
+
+def _signal_event(signal: JobSignal | ProposalSignal | QuestionSignal) -> Event:
+    """Map one out-of-band turn signal to its stream event (one place, so the two cannot drift)."""
+    if isinstance(signal, JobSignal):
+        return JobStartedEvent(job_id=signal.job_id, kind=signal.kind)
+    if isinstance(signal, QuestionSignal):
+        return QuestionEvent(question=signal.question, options=signal.options)
+    return NoteProposedEvent(note_id=signal.note_id, reference=signal.reference)
 
 
 def _usage_tokens(update: Any) -> int:

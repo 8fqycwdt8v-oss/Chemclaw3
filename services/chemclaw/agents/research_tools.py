@@ -100,7 +100,11 @@ async def gather_evidence(
     if settings.retrieval_mode == "hybrid":
         # RRF already produces the cross-source ranking (best first), so it *is* the order the cap
         # keeps — re-sorting by a single source's raw score would discard the fusion.
-        ranked = reciprocal_rank_fusion(ranked_lists, k=settings.retrieval_fusion_k)
+        ranked = reciprocal_rank_fusion(
+            ranked_lists,
+            k=settings.retrieval_fusion_k,
+            weights=settings.retrieval_source_weights_map,
+        )
     else:
         unique = _flat_dedup(ranked_lists)
         # Rank by score before the cap so a truncated sweep keeps the best-supported evidence, not

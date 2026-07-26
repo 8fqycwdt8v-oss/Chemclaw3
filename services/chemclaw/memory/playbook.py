@@ -13,7 +13,7 @@ from pydantic import BaseModel
 
 from chemclaw.config import settings
 from chemclaw.errors import ChemclawError
-from eln.ord import OrdReaction
+from eln.ord import OrdReaction, OutcomeClass
 from kg.note import Note
 from memory.similarity import cluster_by_similarity, reaction_fingerprints
 
@@ -46,6 +46,10 @@ def find_playbook_candidates(
     escape hatch when that day comes.
     """
     floor = threshold if threshold is not None else settings.playbook_similarity_threshold
+    # A playbook is a rule worth *transferring*, so a failed or inconclusive run must not evidence
+    # one (gap KNW-3). Without this filter a recurring failure across two projects would distil
+    # into a recommendation — the exact inversion of what the record says.
+    reactions = [r for r in reactions if r.outcome_class is OutcomeClass.SUCCESS]
     # Only *projected*, fingerprintable reactions can evidence cross-project recurrence, so
     # scope to those before clustering (a degenerate reaction is dropped by the fingerprinter).
     projected = [r for r in reactions if r.project]

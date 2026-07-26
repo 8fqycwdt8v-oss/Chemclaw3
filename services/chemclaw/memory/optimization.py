@@ -13,6 +13,7 @@ the lever) is the `optimization-campaign-synthesis` skill's judgment, layered on
 from pydantic import BaseModel
 
 from chemclaw.config import settings
+from chemclaw.reagents import resolve_compound_name
 from eln.ord import OrdReaction
 from kg.note import Note
 from memory.similarity import cluster_by_similarity, reaction_fingerprints
@@ -40,6 +41,22 @@ def find_optimization_campaigns(
         for cluster in cluster_by_similarity(fingerprints, floor)
         if len(cluster) >= 2
     ]
+
+
+def canonical_condition(species: str) -> str:
+    """Fold a condition species to one canonical token (gap KNW-4).
+
+    `DMF`, `N,N-dimethylformamide` and `CN(C)C=O` are the same solvent and were three unrelated
+    tokens to every lexical and grouping path, so an optimization campaign could be split in two by
+    spelling alone. Resolution reuses the one identity table (`chemclaw.reagents`), so the
+    vocabulary here cannot drift from the one the hazard screen and the calculators use.
+
+    An unrecognised species folds to its own trimmed, lowercased form rather than being dropped:
+    an unknown reagent is still a real condition, and losing it would silently merge campaigns that
+    genuinely differ.
+    """
+    match = resolve_compound_name(species)
+    return match.smiles if match is not None else species.strip().lower()
 
 
 def optimization_campaign_note(

@@ -9,12 +9,26 @@ while its siblings still return.
 import asyncio
 
 from temporalio import workflow
-from temporalio.client import Client
-from temporalio.worker import Worker
 
-from chemclaw.config import settings
-from tests.temporal_env import pydantic_client, start_env_or_skip
-from workflows.orchestrator import _batches, fan_out
+# This module *defines* a workflow (`_FanOutParent`), so Temporal's sandbox re-imports it — and
+# everything it imports — inside the sandbox when validating that workflow. Two of those imports
+# execute code the sandbox forbids: `chemclaw.config` constructs `Settings()`, whose
+# pydantic-settings `env_file` resolution calls `Path.expanduser()`, and the test-harness/client
+# imports reach `urllib.request`. Either one fails the whole worker with
+# "Failed validating workflow _FanOutParent" — the CI-only failure this guard fixes (it skips
+# offline, where no Temporal test server is available).
+#
+# Passing them through is the established pattern here, not a workaround: every production workflow
+# module already wraps its `chemclaw.config` import exactly this way (`workflows/orchestrator.py`,
+# `audit_verify.py`, `digest.py`, …). None of this is workflow code — it is settings plus the test
+# harness — so none of it needs the sandbox's determinism checks.
+with workflow.unsafe.imports_passed_through():
+    from temporalio.client import Client
+    from temporalio.worker import Worker
+
+    from chemclaw.config import settings
+    from tests.temporal_env import pydantic_client, start_env_or_skip
+    from workflows.orchestrator import _batches, fan_out
 
 
 def test_batches_splits_in_order() -> None:

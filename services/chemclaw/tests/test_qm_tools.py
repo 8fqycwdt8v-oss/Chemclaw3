@@ -191,7 +191,7 @@ def test_fresh_submit_announces_the_job_to_the_streaming_turn(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A genuine launch is announced, so the front door can surface it while the turn streams."""
-    from agents.job_events import drain_started_jobs, reset_job_sink, set_job_sink
+    from agents.turn_signals import drain_started_jobs, reset_job_sink, set_job_sink
 
     class _FakeHandle:
         id = "qm-announced"
@@ -207,7 +207,7 @@ def test_fresh_submit_announces_the_job_to_the_streaming_turn(
     token = set_job_sink()
     try:
         asyncio.run(submit_qm_job("CCO", "B3LYP", "def2-SVP"))
-        assert drain_started_jobs() == ["qm-announced"]
+        assert drain_started_jobs() == ["qm-announced"]  # announced exactly once
     finally:
         reset_job_sink(token)
 
@@ -218,7 +218,7 @@ def test_idempotent_resubmit_announces_nothing(monkeypatch: pytest.MonkeyPatch) 
     The returned id may belong to an already-*completed* job, which will never emit a matching
     `job_completed` push-back — announcing it would leave a permanently "running" row in the UI.
     """
-    from agents.job_events import drain_started_jobs, reset_job_sink, set_job_sink
+    from agents.turn_signals import drain_started_jobs, reset_job_sink, set_job_sink
 
     class _FakeClient:
         async def start_workflow(self, *args: Any, **kwargs: Any) -> Any:

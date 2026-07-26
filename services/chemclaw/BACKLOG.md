@@ -27,16 +27,22 @@ risk). Four findings fixed in `a96932d`; the rest need a decision or are follow-
       Measured 162ms → 83ms at 10k notes.
 - [x] **DA-4 [Med] `find_notes` was the last unbounded model-context surface.** Now capped by
       `graph_max_results` (50), sorted-id order, with the D-066 truncation warning.
-- [ ] **DA-5 [Med] Graph query floor is now the stat scan** (~75ms at 10k notes on local disk; worse
-      on a networked OpenShift PVC) — [S]. **Needs a decision (D-1): how stale may a query be?**
-      Recommended: config-gated TTL on the fingerprint check + explicit cache-bust on PR-gate merge,
-      so the authoring loop stays instant.
+- [x] **DA-5 [Med] Graph query floor is now the stat scan** — [S]. **Decided (D-1) and done**
+      (D-082): `graph_cache_ttl_seconds` (default 5.0) skips the scan inside the window — measured
+      **164ms → 0.52ms** on a warm query at 10k notes. Cost, stated: a change made *outside* this
+      process can lag by up to the window. `kg.graph.invalidate_cache()` is the bust hook and the
+      PR-gate submitter calls it, so the authoring loop never waits; `0` restores scan-every-query
+      for deployments where no staleness is acceptable.
 - [ ] **DA-7 [Low] Test-to-module locality is weak** — 3 of 5 mutations survived their "obvious" test
       file and died only under the full suite — [S]. Not a correctness gap (CI runs everything); a
       developer feedback-loop one.
-- [ ] **DA-10 [Med] Buy down live-edge risk offline** — [M]. **Needs a decision (D-2).** Recommended:
-      `helm template` + `kubeconform` render in CI first; defer Entra/Nextflow contract tests until a
-      real tenant exists.
+- [x] **DA-10 [Med] Buy down live-edge risk offline** — [M]. **Decided (D-2) and done** (D-082):
+      `make helm-validate` (`helm template` | `kubeconform -strict`) runs in CI, plus
+      `tests/test_helm_chart.py` for the gap a schema check cannot see — a chart key that is not a
+      `Settings` field (silently ignored as an env var, unlike the `.env` path that broke DA-1) and a
+      malformed value on a real field (crashes every pod at import). Both mutation-verified.
+      Entra/Nextflow contract tests still deferred until a real tenant exists — recorded-response
+      tests written against a guessed shape assert one's own assumptions, not correctness.
 - [ ] **Migration rollback is unaddressed** — `infra/sql` migrations are forward-only; a GxP
       deployment needs a tested down-path or an explicit ADR that forward-only is the policy — [M].
 
@@ -137,6 +143,150 @@ durable job execution (Temporal) already covered; three residual gaps closed, ea
       substructure pattern-fingerprint prefilter (sound screening past ~10⁴ molecules). The deeper
       *mid-flight same-turn* resume stays open (see the harness follow-ups below) — distinct from the
       front-door restart-reattach closed here.
+
+## Phase F11 — Gap closure (docs/gap-closure-plan.md; analysis: docs/audit/12-capability-gap-analysis.md)
+
+Implementing the whole-codebase capability gap analysis. **Waves 0–2 complete and W3 partial**;
+everything below is built, tested, and green under `make lint type test` (688+ passing).
+
+### Done — W0 deployment truth
+- [x] **DEP-1** knowledge sync: `deploy/knowledge-sync.sh` (clone-or-refresh replica; `once` /
+      `loop` / `checkout` modes) as an init container + refresh sidecar on the service and both
+      workers, so a merged note reaches a live pod instead of needing a rebuild. Refresh is
+      `fetch`+`reset --hard`, never `pull` — a replica must not be able to land on a conflict.
+- [x] **DEP-2** push credential: `knowledgeRepoToken` secret + a full writable submitter clone on
+      every component that calls `propose_note` (the front door too — `propose_knowledge_note` is
+      an agent tool), on a *different* volume from the read replica (`checkout -B` switches a whole
+      working tree). Token via a credential helper, never in `.git/config` or a log line.
+- [x] **DEP-3** the MCP Deployments were default-on but stdio-only (a server with no stdin =
+      crash loop, while the agent spawned its own subprocess anyway). Defaulted off; the template
+      guard now also requires a networked transport, matching its own stated intent.
+- [x] **DEP-5 (found while implementing)** the image never COPYed `skills/`, `scripts/`, `evals/`
+      or `knowledge/` and never installed `git`. In-cluster: the agent advertised **no skills**, no
+      Schedule could ever be created, and the PR-gate could not shell out to git. Fixed, plus a
+      post-install hook Job that applies the Schedules.
+- [x] **SCH-2** `NoteReindexWorkflow` + Schedule (`note_reindex_enabled`). Stale hybrid entries
+      previously ranked confidently beside live graph hits — RRF carries no staleness signal.
+- [x] **RCH-3** the durable approval hold finally has a human: `GET /approvals`,
+      `GET /approvals/{id}`, `POST /approvals/{id}/decision` (owner-scoped; someone else's hold is
+      a 404, no existence leak) + Yes/No buttons in the chat UI. Deliberately **not** an agent
+      tool — that would let the agent approve its own candidate. A test pins it.
+- [x] `tests/test_deploy_chart.py` — the offline half of `helm template | kubeconform`.
+
+### Done — W1 reachability
+- [x] **RCH-1/RCH-2** `agents/durable_tools.py`: `request_development_report`,
+      `start_optimization_campaign`, `get_durable_job_status` on the `qm_tools` seam. Both
+      subsystems were built, tested, worker-registered and unreachable.
+- [x] **RCH-4/RCH-5** `agents/turn_signals.py` + runner wiring: `PlanEvent` (from the harness's own
+      todo store), `JobStartedEvent`, and a new `NoteProposedEvent` so a chemist sees their
+      contribution open a branch. All three were contracted and UI-rendered but never emitted.
+- [x] **IDEA-7** `make prose-validate` gates that agent-facing prose only names tools that exist.
+      It immediately found a second live instance: `deep-research/SKILL.md` taught the agent three
+      tool names (`find_similar_*`) that would have failed at call time.
+- [x] **AGT-1 WITHDRAWN** — verified false. Cancellation was already correct (4bc9b04); the claim
+      rested on a grep. `tests/test_turn_cancellation.py` measures it and is kept.
+
+### Done — W2 chemistry
+- [x] **KNW-1** `OrdReaction.performed_at` → `Note.valid_from`, finally feeding F10-G2's
+      bi-temporal fields for the largest note class.
+- [x] **KNW-2** `purity_percent` + `Impurity` list; both adapters map them, the note renders them.
+      A test pins that none of it touches `reaction_smiles()` — that would have invalidated every
+      DRFP fingerprint.
+- [x] **TOOL-2** `chemclaw/reagents.py` — 87 spellings → canonical structure. Uses
+      `require_canonical_smiles`; the lenient variant would have resolved every miss to itself.
+- [x] **TOOL-3** `chemclaw/hazard.py` + `screen_hazards` + the `process-safety` skill. SMARTS
+      motifs (catches a novel acyl azide), a substance table, and a symmetric incompatible-pair
+      table (NaN3+DCM). Advisory by design; `unresolved` is as load-bearing as `findings`.
+- [x] **TOOL-4/TOOL-5** `stoichiometry_table` and `render_structure`.
+
+### Done — W3 (partial)
+- [x] **SCH-3** `ScheduleOverlapPolicy.SKIP` + a deterministic per-job phase offset, so the three
+      memory jobs stop firing simultaneously against one background worker.
+- [x] **SCH-1** `workflows/retention.py` + Schedule. Prunes only spent operational rows and
+      **refuses** `audit_events` (deleting from a hash chain is indistinguishable from tampering —
+      needs archive-then-reseal in an ADR) and `calculation_results` (age is the wrong axis for a
+      cache; D-011 makes eviction a recomputation). Off until a deployment states a policy.
+
+### Done — W3 (complete)
+- [x] **SCH-3** `ScheduleOverlapPolicy.SKIP` + a deterministic per-job phase offset.
+- [x] **SCH-1** `workflows/retention.py` + Schedule; **refuses** `audit_events` (deleting from a
+      hash chain is indistinguishable from tampering) and `calculation_results` (age is the wrong
+      axis for a cache — D-011 makes eviction a recomputation). Off until a policy is stated.
+- [x] **DEP-4** `service/metrics.py` + `GET /metrics` (Prometheus text, no new dependency). Counts
+      shed turns, budget refusals, 409s, timeouts, audit-sink failures; gauges read live structures
+      so they cannot drift. Names the HPA problem in `values.yaml`: CPU is noise for a stream-bound
+      service, `turns_in_flight`/`turn_capacity` is the saturation signal.
+- [x] **SCH-4** `GET /schedules` from Temporal's own state (no mirrored table). A planned Schedule
+      missing from Temporal is *reported*, not omitted. Surfaces `skipped_overlap`, the early
+      warning that a job no longer fits its interval.
+- [x] **SCH-5** `AuditChainVerifyWorkflow` on a cadence, alerting via the must-deliver notify seam.
+- [x] **AGT-2** mid-turn durable-job resume: opt-in, bounded, non-recursive, degrading to the
+      previous behavior (result next turn) rather than to an error.
+
+### Done — W4
+- [x] **KNW-5** `kg/analytics.py` + `find_knowledge_gaps`: isolated notes, projects with evidence
+      but no distillation, hubs. The graph could only be walked outward from a hit, so "what don't
+      we know" — the question that steers experiment design — was unaskable.
+- [x] **KNW-6** `KNOWN_NOTE_TYPES` enforced by `kg-validate` (not the schema, so the agent can still
+      propose a new type for a human to review).
+- [x] **KNW-3** `outcome_class` + required `failure_reason`, and failures are filtered out of
+      playbook distillation — without that filter a repeated failure would distil into a
+      recommendation, inverting the record.
+- [x] **KNW-7 + KNW-4** `eln/compound.py` (structure-derived compound notes so a structural hit can
+      cite something) and `memory.canonical_condition` (DMF / N,N-dimethylformamide / CN(C)C=O fold
+      to one token), both reusing the one identity table.
+- [x] **TOOL-1** networked (streamable-HTTP) MCP transport — "adding a capability is a config
+      entry" is now true at org level, and DEP-3's `transport: http` guard is satisfiable.
+- [x] **IDEA-5** optional per-retriever weights in the RRF fusion; ships inert.
+- [x] **IDEA-3 (tool half)** `green_metrics` exposes E-factor/PMI to the agent.
+- [x] **SCH-6** `POST /events/knowledge-merged` — the first inbound event path; collapses SCH-2's
+      staleness window from an interval to seconds.
+- [x] **AGT-5** `QuestionEvent` + `ask_clarifying_question` — the agent can ask instead of guessing.
+- [x] **IDEA-4** dry-run mode: ambient (never a tool argument, so the model can neither set nor
+      clear it), gating all three durable launchers.
+- [x] **AGT-4** `agents/preferences.py` + migration `015` — per-user working preferences,
+      deliberately *not* graph notes (the PR-gate protects shared knowledge, not personal trivia).
+
+### Done — the W4 remainder (each previously blocked; the blocking decision is now made explicitly)
+
+- [x] **IDEA-2 predicted-vs-actual calibration** — `calc/calibration.py` + migration `016`. Three
+      figures, not one: **bias** (a reliable offset is correctable, the same MAE scattered is not),
+      **MAE**, and **uncertainty coverage** — the one a mean error cannot show, because a calculator
+      whose error bars never contain the truth is misleading precisely where it claims confidence.
+      `calculator_trust` and `report_measurement` expose it, so "how far to trust this" is measured
+      rather than asserted in prose. Off until `calibration_enabled`.
+- [x] **IDEA-1 standing queries** — `agents/subscriptions.py` + `workflows/digest.py` + migration
+      `017`. The watermark advances *after* delivery: a crash must re-report, never silently skip.
+      Rides the existing push-back channel — no second notification system.
+- [x] **AGT-3 file ingress** — `agents/attachments.py` + `POST /sessions/{id}/attachments`.
+      **Decision made:** a closed allowlist of formats parseable completely and deterministically
+      offline (markdown/plain text, CSV/TSV). Binary scientific formats are **refused with a message
+      naming what is supported**, never half-parsed — a PDF "read" by scraping text-like bytes
+      produces confident nonsense a chemist cannot distinguish from a real reading. Attachments are
+      session-scoped working material; anything worth keeping still goes through the PR-gate.
+- [x] **IDEA-6 corpus backfill** — `scripts/backfill_corpus.py`, reusing AGT-3's parsers verbatim.
+      One note per document, **verbatim**, through the PR-gate. Deliberately no summarizing: a
+      backfill makes documents *reachable*; an LLM-summarized one would put thousands of unreviewed
+      paraphrases into the corpus. Content-derived ids, so a rename does not mint a duplicate.
+- [x] **TOOL-6 external literature — built, then REMOVED (D-089).** The PubChem retriever was
+      implemented and reviewed, and the scope decision came back: **no external sources at all.**
+      `report/literature.py` and the registry entry are deleted; `tests/test_no_egress.py` now
+      fails on any first-party module naming a third-party data host, because the prose form of
+      this constraint had already existed in `DEFERRED.md` and did not prevent the build.
+
+### Closed as not-gaps after assessment (do not re-open blindly)
+- [x] **TOOL-7 units** — carried in field names throughout (`temperature_c`, `mass_g`,
+      `moles_mmol`), including every model added in F11. A `Quantity` type would be an abstraction
+      with no second caller.
+- [x] **AGT-6 structured outputs** — the W1 tools take typed pydantic arguments, so MAF already
+      forces a validated payload at the machine-consumed call site whose absence was the original
+      reason to defer.
+- [x] **AGT-1 turn cancellation** — verified correct as of `4bc9b04`; now measured by
+      `tests/test_turn_cancellation.py`.
+
+**Phase F11 is complete.** Remaining open items are the pre-existing live edges (a real Entra
+tenant / Temporal broker / OpenShift cluster) plus the audit-trail archive-then-reseal design, which
+is recorded in `DEFERRED.md` as needing its own ADR with QA sign-off rather than a cleanup job.
 
 ## Next — Platform-parity hardening (docs/parity-plan.md, Phase F10)
 

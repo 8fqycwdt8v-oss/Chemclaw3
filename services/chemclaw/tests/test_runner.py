@@ -13,7 +13,7 @@ from agent_framework import AgentSession
 
 import service.runner as runner
 from agents.harness_todo import complete_awaiting_job, mark_awaiting_job
-from agents.job_events import announce_job_started
+from agents.turn_signals import announce_job_started
 from agents.verifier import ClaimCheck, VerificationResult
 from chemclaw.config import settings
 from service.events import AnswerEvent, JobStartedEvent, PlanEvent
