@@ -112,19 +112,25 @@ def test_the_binary_backend_reproduces_the_measured_entropy_of_water() -> None:
 
 
 @needs_xtb
-def test_ancopt_converges_in_far_fewer_steps_than_cartesian_lbfgs() -> None:
-    """The reason this backend exists, asserted rather than described.
+def test_both_backends_reach_the_same_minimum() -> None:
+    """Dispatch happens, and the two optimizers agree on where the minimum is.
 
-    Measured on real substrates the gap is 8-11x in wall clock; on a small molecule it is
-    only a step count, which is what this can afford to check. A change that silently
-    routed back to the Cartesian optimizer would fail here.
+    This test used to assert that ANCopt took fewer *iterations* than the Cartesian
+    optimizer, and the X9 preconditioner disproved it: the preconditioned in-process path
+    now converges in 24 iterations on ibuprofen against xtb's 43 ANC cycles — while xtb
+    remains ~3x faster in wall clock, because each of its cycles is far cheaper than a
+    Python-mediated tblite gradient. Iteration count was measuring the wrong thing.
+
+    Wall clock is what the binary is for and is too machine-dependent to assert, so what
+    is pinned here is what must hold on any machine: the dispatch, and that a change of
+    optimizer is not a change of answer. The speed claim lives in `calc.xtb_cli`'s
+    docstring with the numbers it was measured from.
     """
     structure = structure_from_smiles("CCCCO", optimize=True)
     binary = optimize_structure(OptSpec(engine="xtb"), structure)
     library = optimize_structure(OptSpec(engine="tblite"), structure)
     assert binary.engine == "xtb"
-    assert binary.steps < library.steps
-    # And they agree on where the minimum is, to well inside chemical significance.
+    assert library.engine == "tblite"
     assert binary.energy_hartree == pytest.approx(library.energy_hartree, abs=2e-3)
 
 

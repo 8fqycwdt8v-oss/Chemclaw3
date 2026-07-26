@@ -60,3 +60,26 @@ reintroduced the exact physics error D-085 removed.
 **Rule:** when adding a second implementation behind one interface, enumerate what the first
 one *fixes* and check the second does the same. Where it cannot, route around it explicitly
 and make the cache key record which one actually ran.
+
+
+## An optimizer change is worthless until it is timed (2026-07-26, X9)
+
+The ANC preconditioner was *correct* on its first two attempts and useless on both: version one
+ran every leg to the iteration cap (no stopping criterion), version two stopped every leg
+immediately (threshold converted the wrong way). Both produced right answers. Only wall clock
+showed one was 10x slower than doing nothing.
+
+**Rule:** for anything whose purpose is speed, record the baseline *first* and compare against it
+at every step. "It converges and the energy is right" is not evidence the change did its job —
+and a performance change that is silently a regression is worse than not making it, because it
+looks done.
+
+## Sweep the constant that stands in for the missing physics (2026-07-26, X9)
+
+I set the model Hessian's eigenvalue floor to 0.005 as a numerical safety net. It is not a safety
+net: the pairwise model has no bend or torsion terms, so 37% of directions land on the floor and
+that number *is* their assumed curvature. Measured against the true Hessian (median 0.40) and
+swept, the optimum was 1.0 — two hundred times the "safe" value.
+
+**Rule:** when a constant substitutes for physics the model omits, do not pick it for numerical
+comfort. Measure what it is standing in for, and sweep it against the outcome it affects.

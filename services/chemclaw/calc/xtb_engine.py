@@ -17,6 +17,21 @@ from rdkit import Chem
 from rdkit.Chem import AllChem
 from tblite.interface import Calculator
 
+# Re-exported: `calc.xtb_opt` annotates the calculator it passes between its own helpers,
+# and this module is the single place tblite is imported from (the unit boundary).
+__all__ = [
+    "COMMON_SOLVENTS",
+    "Calculator",
+    "engine_version",
+    "evaluate_point",
+    "geometry",
+    "gfn2_energy",
+    "make_calculator",
+    "parse_molecule",
+    "require_closed_shell",
+    "run_singlepoint",
+]
+
 # tblite works in atomic units; everything above this module is in Angstrom.
 _ANGSTROM_TO_BOHR = 1.8897259886
 

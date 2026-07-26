@@ -673,8 +673,12 @@ MAF ships the harness natively (`create_harness_agent` + `TodoProvider`/`AgentMo
       `level="thorough"`. The system's first non-deterministic calculator; the store is what makes
       it stable.
 - [x] **X7 the expert seam** (D-088): `run_xtb_task` over a typed spec, role-gated by default.
-- [x] ~~**X9 internal-coordinate optimizer**~~ — **retired by X5.** ANCopt is exactly this, and it
-      is a process call away; writing one would have reimplemented the reference.
+- [x] **X9 ANC preconditioning** (D-089): X5 retired the *general* case, not the scope. Relaxed
+      scans (frozen atoms are not an xtb flag) and radicals (the binary cannot spin-polarize) still
+      run the in-process optimizer, and a scan pays that cost once per point. Optimizing in the
+      eigenbasis of a Lindh model Hessian gives a measured **~2x** on both. The remaining headroom
+      is an angle/torsion model with a Wilson B matrix — recorded, not built, because 37% of the
+      pairwise model's directions have no curvature and a floor stands in for them.
 - [ ] **X10 transition states** — the largest remaining gap at the *model* level, unchanged by
       X5-X7. There is no saddle-point search, so every "how fast" question is unanswerable and a
       relaxed-scan maximum is a sketch of a barrier rather than one. `xtb --path` (the reaction-path

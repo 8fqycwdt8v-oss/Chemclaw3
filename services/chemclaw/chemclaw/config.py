@@ -423,6 +423,13 @@ class CalculatorSettings(BaseSettings):
     # single bounded L-BFGS-B leg. Without it the optimizer's first step on a strained
     # geometry is large enough to collapse a bond and leave the SCF unconvergeable.
     xtb_opt_trust_radius: float = 0.35
+    # Curvature (Hartree/Angstrom^2) assumed for the directions the ANC preconditioner's
+    # pairwise model cannot see — bends and torsions, which on ibuprofen is 37% of them
+    # (`calc.anc`). Not a safety floor: it is the stand-in for the missing terms, and the
+    # true Hessian's median curvature is ~0.4. Swept against measured step counts, it
+    # optimizes near 1.0 and turns over by 1.5; at a safety-net 0.005 the preconditioner
+    # is slower than none at all.
+    xtb_anc_curvature_floor: float = 1.0
     # Central-difference step for the Hessian, in Angstrom. Small enough that the
     # harmonic approximation holds, large enough that the gradient difference is well
     # above the SCF's own numerical noise.

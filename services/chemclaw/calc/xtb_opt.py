@@ -25,12 +25,12 @@ from typing import Literal
 
 import numpy as np
 from pydantic import BaseModel, Field
-from scipy.optimize import minimize
+from scipy.optimize import OptimizeResult, minimize
 
-from calc import xtb_cli
+from calc import anc, xtb_cli
 from calc.store import ResultStore, run_cached
 from calc.structure import Structure
-from calc.xtb_engine import evaluate_point, make_calculator
+from calc.xtb_engine import Calculator, evaluate_point, make_calculator
 from calc.xtb_spec import XtbSpec
 from chemclaw.config import settings
 
@@ -157,11 +157,91 @@ def optimize_structure(spec: OptSpec, structure: Structure) -> OptimizationResul
     return _optimize_with_library(resolved, structure)
 
 
-def _optimize_with_library(spec: OptSpec, structure: Structure) -> OptimizationResult:
-    """Relax with tblite's analytic gradient and a bounded Cartesian L-BFGS-B.
+def _preconditioned_leg(
+    calc: Calculator,
+    spec: OptSpec,
+    origin: np.ndarray,
+    free_mask: np.ndarray,
+    vectors: np.ndarray,
+    scale: np.ndarray,
+    max_iterations: int,
+) -> tuple[np.ndarray, int]:
+    """Run L-BFGS-B once in the preconditioned basis; return the geometry and its cost.
 
-    The fallback backend, and the only one that can hold atoms fixed — which is what
-    makes it the relaxed scan's optimizer regardless of what else is installed.
+    A leg rather than the whole optimization, because the model Hessian depends on the
+    interatomic distances and a leg can move them enough that the basis is worth
+    rebuilding. Its own function rather than a closure inside the loop so the basis it
+    uses is an argument — the version that captured the loop variables was correct only
+    by accident of evaluation order.
+    """
+
+    def to_cartesian(step: np.ndarray) -> np.ndarray:
+        full = origin.copy()
+        full[free_mask] += vectors @ (step * scale)
+        return full
+
+    # The convergence promise is about the *Cartesian* gradient, and the optimizer sees a
+    # preconditioned one — so rather than converting a threshold between the two (the
+    # first attempt converted it the wrong way and every leg stopped almost immediately),
+    # the objective records what the promise is actually about and a callback stops the
+    # leg the moment it is met.
+    reached = {"max_gradient": float("inf")}
+
+    def objective(step: np.ndarray) -> tuple[float, np.ndarray]:
+        energy, gradient, _ = evaluate_point(calc, to_cartesian(step).reshape(-1, 3))
+        free_gradient = gradient.ravel()[free_mask]
+        reached["max_gradient"] = float(np.max(np.abs(free_gradient)))
+        # Chain rule through the linear transform: dE/ds = scale * (V^T dE/dx).
+        return energy, scale * (vectors.T @ free_gradient)
+
+    def stop_when_converged(intermediate: OptimizeResult) -> None:
+        """Halt the leg the moment the Cartesian promise is met.
+
+        `StopIteration` is scipy's documented way for a callback to end a minimization;
+        it returns the best point found rather than treating it as a failure.
+        """
+        if reached["max_gradient"] <= spec.gradient_tolerance:
+            raise StopIteration
+
+    # The trust region is a Cartesian distance, so it becomes a per-coordinate bound in
+    # the preconditioned basis by dividing by that coordinate's own scale — a soft
+    # direction is allowed a large `s` because a large `s` moves the atoms little.
+    limit = settings.xtb_opt_trust_radius / np.maximum(scale, 1e-12)
+    # `type: ignore` scoped to one call: scipy-stubs' `minimize` overload for
+    # `jac=True` *with* a callback requires the objective to accept `*args, **kwargs`,
+    # which this one has no use for. The call is correct; the stub is narrow.
+    outcome = minimize(  # type: ignore[call-overload]
+        objective,
+        np.zeros(int(free_mask.sum())),
+        jac=True,
+        method="L-BFGS-B",
+        bounds=list(zip(-limit, limit, strict=True)),
+        callback=stop_when_converged,
+        options={
+            "maxiter": max_iterations,
+            # Both of L-BFGS-B's own stopping tests are disabled: `ftol` fires long
+            # before a tight gradient target is met, and `gtol` is in the preconditioned
+            # units the callback exists to avoid reasoning about.
+            "gtol": 0.0,
+            "ftol": 0.0,
+        },
+    )
+    return to_cartesian(np.asarray(outcome.x, dtype=float)), max(int(outcome.nit), 1)
+
+
+def _optimize_with_library(spec: OptSpec, structure: Structure) -> OptimizationResult:
+    """Relax with tblite's analytic gradient, L-BFGS-B, and an ANC preconditioner.
+
+    The fallback backend, and the only one that can hold atoms fixed or describe an open
+    shell — which makes it the optimizer for relaxed scans and radicals no matter what
+    else is installed, and is why it is worth preconditioning rather than leaving slow
+    (`calc.anc`, plan X9).
+
+    The optimization runs in the eigenbasis of an approximate Hessian, scaled by the
+    square root of its curvature, so the surface L-BFGS sees is nearly isotropic. The
+    transform is linear, so a step in it is an exact Cartesian displacement and there is
+    nothing to back-transform. The trust region and the convergence test both stay in
+    Cartesian space, where they mean something physical.
     """
     numbers, positions = structure.arrays()
     frozen = np.zeros(len(numbers), dtype=bool)
@@ -185,10 +265,6 @@ def _optimize_with_library(spec: OptSpec, structure: Structure) -> OptimizationR
     # not the ones the constraint is holding.
     free_mask = np.repeat(~frozen, 3)
 
-    def objective(flat: np.ndarray) -> tuple[float, np.ndarray]:
-        energy, gradient, _ = evaluate_point(calc, flat.reshape(-1, 3))
-        return energy, np.where(free_mask, gradient.ravel(), 0.0)
-
     initial_energy, _, _ = evaluate_point(calc, positions)
     # Trust region, enforced with bounds. L-BFGS-B's first trial step is scaled by
     # 1/|gradient|, which on a strained starting geometry is wildly too large: measured
@@ -196,32 +272,20 @@ def _optimize_with_library(spec: OptSpec, structure: Structure) -> OptimizationR
     # Angstrom, and a step like that puts the SCF somewhere it does not converge at all.
     # Capping each coordinate's motion per leg and restarting from where it lands is the
     # standard remedy, and costs nothing on a geometry that was already close.
-    trust = settings.xtb_opt_trust_radius
     current = positions.ravel()
     steps = 0
     max_gradient = float("inf")
     while steps < spec.max_steps:
-        outcome = minimize(
-            objective,
-            current,
-            jac=True,
-            method="L-BFGS-B",
-            bounds=[
-                (value - trust, value + trust) if free else (value, value)
-                for value, free in zip(current, free_mask, strict=True)
-            ],
-            options={
-                "maxiter": spec.max_steps - steps,
-                "gtol": spec.gradient_tolerance,
-                # L-BFGS-B also stops when the *energy* stops changing, which for a
-                # tight gradient target fires first and reports success at a geometry
-                # that is not converged by the criterion we promised. Disable it and
-                # let the gradient decide.
-                "ftol": 0.0,
-            },
+        # The basis is rebuilt each leg, from the geometry the last one reached: the
+        # model Hessian depends on the distances, and a leg can move them enough to
+        # matter. It costs one O(N^2) assembly and one eigendecomposition — negligible
+        # against the SCFs the leg is about to run.
+        origin = current.copy()
+        vectors, scale = anc.basis(numbers, origin.reshape(-1, 3), free_mask)
+        current, iterations = _preconditioned_leg(
+            calc, spec, origin, free_mask, vectors, scale, spec.max_steps - steps
         )
-        current = np.asarray(outcome.x, dtype=float)
-        steps += max(int(outcome.nit), 1)
+        steps += iterations
         _, gradient, _ = evaluate_point(calc, current.reshape(-1, 3))
         max_gradient = float(np.max(np.abs(np.where(free_mask, gradient.ravel(), 0.0))))
         if max_gradient <= spec.gradient_tolerance:

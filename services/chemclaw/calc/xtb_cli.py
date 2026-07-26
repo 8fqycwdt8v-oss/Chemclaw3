@@ -7,13 +7,23 @@ that machinery decide this system's economics on real substrates.
 **ANCopt.** xtb optimizes in approximate normal coordinates, not Cartesians. Measured on
 the molecules this system is pointed at:
 
-| molecule                   | atoms | tblite + Cartesian L-BFGS | `xtb --ohess` | speedup |
-|----------------------------|-------|---------------------------|---------------|---------|
-| atorvastatin core (MW 559) |    76 |  315 s (177 steps)        |  35.8 s (39)  |  8.8x   |
-| erythromycin (MW 734)      |   118 | 1560 s (232 steps)        | 141.8 s (94)  | 11.0x   |
+| molecule                   | atoms | in-process | binary | speedup |
+|----------------------------|-------|------------|--------|---------|
+| atorvastatin core (MW 559) |    76 |  ~266 s    | 38.1 s |  ~7x    |
+| erythromycin (MW 734)      |   118 | ~1283 s    |  142 s |  ~9x    |
 
-That retires the internal-coordinate optimizer that was filed as X9: writing one is
-unnecessary when the reference implementation is a process call away.
+(Optimization plus Hessian. The in-process figures are the measured Hessian time plus the
+measured optimization time *after* the X9 preconditioner halved the latter — so they are
+composed from measurements rather than re-timed end to end, and they are the honest
+current comparison rather than the 8.8x/11x the unpreconditioned path gave.)
+
+Most of the remaining gap is the **Hessian**, not the optimizer: preconditioning narrowed
+the optimization component to ~3x and left the second-derivative step untouched, because
+the in-process path takes it by finite differences and xtb does not.
+
+X9 was first retired on the strength of this and then partially reinstated — see
+`calc.anc`. ANCopt covers the general case, but nothing here can freeze an atom or
+spin-polarize, so relaxed scans and radicals never reach this backend at all.
 
 **GFN-FF.** A force field with xTB's parameterization, which optimized the 118-atom
 substrate in **0.7 s**. It is not a quantum method and gives no orbitals, but it makes
