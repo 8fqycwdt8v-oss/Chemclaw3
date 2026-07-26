@@ -84,3 +84,12 @@ A chemistry-native AI agent for pharmaceutical/chemical process R&D. Combines a 
 - Do not use `uv run` in the service workflow — use `.venv/bin/python` directly (Replit's `.pythonlibs` path confuses uv's env detection).
 - Port 8080 is taken by the api-server artifact. Chemclaw uses 8000.
 - Temporal in-memory store loses all workflow history on restart. Run `make up` (docker-compose) for persistent Temporal when you have Docker available.
+
+## User preferences
+
+- **Git workflow**: Push all code changes directly to `main` on the three upstream repos as soon as a
+  batch of work is complete. Do not open pull requests unless explicitly asked. Commit message
+  should summarize the Replit-specific + product changes together. The three repos are:
+  - `services/chemclaw/` → `github.com/8fqycwdt8v-oss/Chemclaw3` (workspace root is the backend repo)
+  - `services/chemclaw-ui/` → `github.com/8fqycwdt8v-oss/Chemclaw3_ui`
+  - `services/chemclaw-mock/` → `github.com/8fqycwdt8v-oss/Chemclaw3_mock`
