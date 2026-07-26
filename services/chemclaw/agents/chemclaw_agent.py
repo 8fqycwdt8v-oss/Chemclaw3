@@ -40,13 +40,19 @@ from agent_framework._harness._loop import todos_remaining
 # (a registration side effect, exactly as `evals/__init__.py` seeds the metric registry). With the
 # registry populated, `_capability_tools` assembles the advertised set from it instead of from a
 # hand-maintained list — so adding a tool is a `@tool` at its definition site, not an edit here.
+from agents import attachments as _attachments  # noqa: F401
 from agents import bo_tools as _bo_tools  # noqa: F401
 from agents import calc_tools as _calc_tools  # noqa: F401
+from agents import chem_tools as _chem_tools  # noqa: F401
+from agents import dialogue_tools as _dialogue_tools  # noqa: F401
+from agents import durable_tools as _durable_tools  # noqa: F401
 from agents import graph_tools as _graph_tools  # noqa: F401
 from agents import memory_tools as _memory_tools  # noqa: F401
+from agents import preferences as _preferences  # noqa: F401
 from agents import qm_tools as _qm_tools  # noqa: F401
 from agents import research_tools as _research_tools  # noqa: F401
 from agents import safety_tools as _safety_tools  # noqa: F401
+from agents import subscriptions as _subscriptions  # noqa: F401
 from agents.audit import AuditSink, make_audit_middleware
 from agents.llm_provider import build_chat_client
 from agents.profiles import AgentProfile, get_profile
@@ -161,7 +167,7 @@ def build_agent(
             settings.skill_role_gates,
         )
     )
-    history = _history_provider()
+    history = history_provider()
     audit = make_audit_middleware(
         correlation_id=correlation_id if correlation_id is not None else uuid.uuid4().hex,
         actor=actor,
@@ -258,13 +264,17 @@ def _build_harness_agent(
     )
 
 
-def _history_provider() -> HistoryProvider:
+def history_provider() -> HistoryProvider:
     """The session-history provider selected by config (F3): durable Postgres or in-memory.
 
     `session_store="postgres"` persists each session's turns so a conversation survives a pod
     restart (the durability requirement); the default `memory` keeps the classic in-process provider
     for dev and tests. Both satisfy the same `HistoryProvider` contract, so `build_agent` — and
     compaction, which reads `history.source_id` — is identical on either path.
+
+    Public because the front door reads transcripts back through it (`GET /sessions/{id}/messages`)
+    rather than querying `session_messages` itself: one reader, so the write path and the read path
+    cannot drift, and the route works unchanged under either store.
     """
     if settings.session_store == "postgres":
         # Imported lazily so the in-memory/dev path never imports psycopg for a store it won't use.

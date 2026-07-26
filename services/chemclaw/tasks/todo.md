@@ -1,170 +1,100 @@
-# Backlog features — assessment + implementation plan
+# Task: five reported issues across Chemclaw3 and Chemclaw3_ui
 
-Source: `BACKLOG.md` (every open item) + the open rows of `DEFERRED.md` it points at.
-Plan with the per-item assessment: **`docs/backlog-plan.md`**.
-Branch: `claude/backlog-feature-assessment-dytr10`.
+Reported 2026-07-26. Each claim verified against the code before being worked.
 
-## Assessment (done)
+## Triage
 
-- [x] Enumerate every open backlog item (31) and check each claim against the tree, not memory.
-- [x] Assess each against the five questions (trigger held? real defect? offline-verifiable?
-      KISS/Rule of Three? cost vs value) → BUILD / DEFER / DROP / BLOCKED.
-- [x] Write `docs/backlog-plan.md`: verdict table, specs for the survivors, triggers for the rest.
-- [x] Correct the backlog entries whose claims are false today (the DROP verdicts).
+| # | Repo | Issue | Verdict |
+|---|------|-------|---------|
+| 1 | ui | `happy-dom@^16` blocked by Replit policy | real — pin to 15.x |
+| 2 | ui→**backend** | `GET /sessions`, `GET /sessions/{id}/messages` whitelisted in BFF, missing upstream | real — fix belongs in **Chemclaw3** |
+| 3 | ui→backend | `GET /approvals`, `POST /approvals/{id}/decision` missing | **stale** — both exist (`service/app.py:561,591`) |
+| 4 | backend | bare azide anion not caught by screener | real — SMARTS gap |
+| 5 | backend | `CHEMCLAW_NOTE_REPO_DIR` undocumented in runbook | real — runbook has zero mentions |
 
-Result: **8 BUILD · 14 DEFER · 5 DROP · 12 BLOCKED**. No BUILD item needs live infra.
+Issue 2's whitelist entries are already annotated "Added by the companion backend
+change" in `server/routes.ts` — the UI pre-registered routes the backend never grew.
 
-## Stale entries corrected in `BACKLOG.md`
+## Chemclaw3 (backend)
 
-- [x] F4-T5 "per-request role → skills scoping" — already delivered by D-052
-      (`agents/skill_access.py::RoleScopedSkillsSource`, wired at `agents/chemclaw_agent.py:139`).
-- [x] 1b.5 Temporal lookup/persist activities — folded into 1c.5 by design; checkbox never cleared.
-- [x] `QMJobWorkflow`→`CalculationWorkflow` rename — dropped, not deferred: the workflow type name
-      is durable-history state, so the rename is the exact un-versioned change C1's policy forbids.
-- [x] OKF per-bundle `log.md` — dropped *as designed* (concurrent note branches all append to one
-      file = manufactured merge conflicts); redesign as a generated view recorded with its trigger.
-- [x] Design caution "apply skills/tools selectively, measured per task" — satisfied by `evals/ab.py`
-      (2b.4) + `AgentProfile` (D-075); nothing left to build.
-- [x] F0-T4 stand-in-server variant — dropped (would test the stand-in; the client-wiring half is
-      already proven by `tests/test_harness_execution.py`, D-058). Live-endpoint half stays blocked.
+- [x] Reproduce the azide gap (NaN3 / KN3 / NH4N3 / HN3 screen clean today)
+- [x] Add a `non-carbon-azide` rule — the root cause is that every azide rule
+      assumes carbon attachment, so the salt, the conjugate acid (HN3) and
+      heteroatom azide reagents (TMSN3, DPPA) all fall through together
+- [x] Pin the new rule in `tests/test_safety.py` + `evals/cases/hazard-rule-recall.md`
+      (the table's convention: one reference molecule per rule)
+- [x] Document `CHEMCLAW_NOTE_REPO_DIR` in `docs/runbook.md` — the default `.` is
+      always wrong in a deployment and `git_submitter` hard-fails on it
+- [x] `GET /sessions` — list the caller's sessions (new `list_for_owner` on the store)
+- [x] `GET /sessions/{session_id}/messages` — read a transcript back after a reload
+- [x] Update the session-scoped route inventory test (it forces this consciously)
+- [x] `make lint type test` green
 
-## Build queue (specs in `docs/backlog-plan.md` §3)
+## Chemclaw3_ui
 
-### Wave A — silent failures made visible [S]
-- [x] **A1** ELN late-file detection — aggregated WARNING when a file arrives after the cursor with
-      an older payload timestamp (`eln/adapter.py` helper + both adapters). Tests: `test_eln.py`.
-- [x] **A2** Deployment docs: `CHEMCLAW_ENTRA_REQUIRED` for exposed deployments, removed
-      `CHEMCLAW_ENTRA_CLIENT_ID`; comment pinning the background worker at `replicas: 1`.
-- [x] **A3** Eval-drift alert visibility — WARNING at emission + documented read procedure.
-      Tests: `test_eval_drift.py`.
-
-### Wave B — real defects [S]–[M]
-- [x] **B1** Substructure matching off the event loop (`asyncio.to_thread` + wall-clock bound,
-      `substructure_match_timeout_seconds`). Tests: `test_molfp.py` incl. loop-responsiveness.
-- [x] **B2** Emit `PlanEvent` + `JobStartedEvent` (both currently dead types; closes D-042).
-      Ambient job sink + changed-only plan emission. Tests: `test_runner.py`/`test_service.py`. ADR D-077.
-- [x] **B3** Supersede memory notes on cluster merge/shrink (`memory/supersede.py`, bi-temporal
-      `valid_to` + plain-text replacement id). Tests: `test_memory.py`. ADR D-078.
-
-### Wave C — needs a decision first
-- [x] **C1** Workflow-versioning policy doc + deploy checklist (no CI guard, on purpose). ADR D-079.
-- [x] **C2** Chemical safety screening, minimum viable slice — implemented under the plan's stated
-      defaults (advisory-only, committed SMARTS table, hard-failing `kg-validate` gate). All three
-      are config, so reversing any of them is an env change. ADR D-080.
+- [x] Pin `happy-dom` to the last 15.x
+- [x] Prove vitest 4 still works on it
 
 ## Verification
-- One commit per item; `make lint type test` green after each.
-- CHECKMATE (G1–G7) after wave B, and again after C2 — B3 and C2 both touch the GxP surface.
-- `BACKLOG.md`/`DEFERRED.md` updated at the end of each wave.
 
-## Review — implementation (all eight items shipped)
+- [x] backend `make lint type test`
+- [x] ui `vitest run` + `tsc -b`
+- [x] azide: salts/HN3/TMSN3/DPPA flag; organic azides unchanged; benign silent
 
-Seven commits, each green under `make lint type test`; the suite went **624 → 684 passing**
-(41 offline skips unchanged). One commit per item, revertable on its own.
+## Mid-task: main was restructured and rewound
 
-| Item | Commit | What landed |
-|---|---|---|
-| A1 | `d23d2fd` | Late-arriving ELN exports warn by name instead of vanishing (`eln/adapter.py` helper, both adapters) |
-| A2+A3 | `7fb9fdb` | Boot-blocking settings documented; drift alerts logged at WARNING; three stale runbook statements corrected |
-| B1 | `cf13334` | Substructure matching moved to a worker thread under `substructure_match_timeout_seconds` |
-| B2 | `f2e083a` | `PlanEvent` + `JobStartedEvent` emitted (D-077) — the two dead event types are now live |
-| B3 | `6d96da2` | Memory notes retired on cluster merge/shrink (D-078) |
-| C1 | `b2ea2d4` | `docs/workflow-versioning.md` + deploy checklist (D-079) |
-| C2 | `744c265` | Advisory hazard screening: rule table, tool, skill, `kg-validate` gate, recall metric (D-080) |
+Discovered while pushing: `49cd44c` moved the tree to `services/chemclaw/` but
+filled it from a snapshot of `16b63c2`, dropping everything merged in
+`16b63c2..2fc903a` (21 commits) — 38 Python files, 20 test modules, 8 routes,
+4 of 5 safety pair rules, 462 lines of `DECISIONS.md`. Confirmed by blob-matching
+`service/app.py` to `16b63c2` and diffing all common paths (338 identical / 14 differ).
 
-**Decisions taken during implementation, not in the plan:**
-
-- **B3's supersede predicate is `valid_to is None`, not `is_current`.** The plan said "still
-  current"; that made the future-`valid_from` clamp unreachable dead code and left the idempotence
-  argument implicit. Testing for an unset end date is simpler, makes re-runs provably idempotent,
-  and covers not-yet-valid notes.
-- **B2 announces only genuine launches.** The idempotent re-submit branch returns a possibly
-  already-completed job that will never push back; announcing it would leave a permanently
-  "running" row in the UI.
-- **C2 shipped under the plan's default answers** to its three open questions rather than blocking,
-  since each is config-reversible and the gate has nothing to break today (no procedure notes in
-  the corpus). Flagged for confirmation below.
-- **Rule-table SMARTS were verified against parsed molecules, not read.** Perchlorate and
-  permanganate needed `~` (any-bond) patterns because RDKit sanitizes them to charge-separated
-  forms — a double-bond pattern would have silently never fired.
-
-**Guards that fired and were fixed properly, not around:** `SafetyRulesError` had to join the
-non-retryable bad-data list (`test_publish.py` walks every `ChemclawError` subclass), and
-`screen_hazards` had to be added to the expected in-process tool set (`test_tool_registry.py`).
-Both existed to catch exactly this kind of omission.
-
-**Still open for the user** (unchanged from the plan's §5): confirm C2's scope defaults; decide
-whether to give the Neo4j tipping point a measurable trigger.
-
-## Review — assessment pass
-
-The three findings worth flagging:
-
-1. **Six backlog lines were claims about the tree that are no longer true** — the largest being
-   F4-T5's "per-request role scoping" open item, which D-052 delivered. Assessing before building
-   removed more work than it added.
-2. **Two "deferred polish" items are actually defects**, and both were sitting under headings that
-   read as done: the substructure match blocks the shared event loop (B1), and memory cluster
-   merge/shrink leaves stale notes as current knowledge with no supersede link (B3).
-3. **The one genuinely large item (C2, safety screening) is the one the user parked for a decision**,
-   and its own precondition — "decide before a phase that could propose a hazardous procedure" — is
-   already past, since BO recommendations and development reports both publish procedures today.
-
-**Method note for next time:** two mutation "survivors" were mis-targeted patches (one replaced a
-docstring, not the guard) and two more only survived because I ran a narrow test file instead of the
-suite. Every survivor was re-verified against the full suite before being reported; nothing went
-into the findings table on the strength of the first run. Worth keeping as the default discipline —
-a false finding costs more than a missed one.
-
----
-
-# Config-extensibility backlog — items 5–7 (completing the audit backlog)
-
-Source: `docs/audit/10-config-extensibility.md` §9. Items 1–4 landed earlier (`b07a2b2`, `76c03b2`,
-`4884024`, `024105d`; ADRs D-075/D-076). Items 5–7 were BACKLOG-gated on triggers that had not
-fired; completed on instruction. ADR **D-081**.
-
-- [x] **6. [S] MCP transport union** (`6390f91`) — `StdioMcpServerSpec | HttpMcpServerSpec`
-  discriminated on `transport`; `_mcp_tool` dispatches to `MCPStdioTool`/`MCPStreamableHTTPTool`,
-  `assert_never`-exhaustive. **Callable `Discriminator`** reads a missing tag as `stdio` so every
-  pre-union config keeps working — a plain `Field(discriminator=…)` would have broken every
-  deployment at startup. `allowed_tools` is transport-independent, so the PR-gate boundary is too.
-- [x] **5. [S] Skill manifest + enable-list** — `agents/skill_manifest.py` (`SkillManifest`,
-  `extra="forbid"`) + `EnabledSkillsSource` + `settings.skills_enabled`. `make skill-validate` now
-  validates frontmatter *and* checks declared `tools`/`mcp_servers` against the live registries;
-  four shipped skills declare their real deps. Empty enable-list = today's behavior.
-- [x] **7. [S] Config idiom house rule** — recorded in `config.py`'s module docstring; no field
-  migration (churn without a defect).
+- [x] Overlay `2fc903a`'s tree onto `services/chemclaw/` (content only — layout kept)
+- [x] Keep the 6 Replit-only additions; restore the `knowledge` symlink `tar` clobbered
+- [x] Hand-merge the one genuinely new Replit fix (`runner.py` ISSUE-B-10 disconnect
+      rollback) — `runner.py` had moved +110/−16 since the snapshot, so no clean patch
+- [x] Pin that fix with a test; verified it fails when the rollback is removed
+- [x] Restore CI at the repo root — Actions only reads root workflows, so `main` has
+      had none since the restructure
+- [x] Re-apply the five-issue fixes at the new paths
+- [x] `make lint type test` green from `services/chemclaw` (924 passed, 43 skipped)
 
 ## Review
 
-Gate green after the cluster: ruff + `mypy --strict` clean over 234 files, `make skill-validate`
-passes, full suite **631 → 650 passed** (19 new tests), 41 offline-only skips.
+Three of the five reported issues were real in the repo they were filed against.
+Issue 2 was real but filed against the UI when the missing code was the backend's,
+and issue 3 was already fixed — both established by reading `server/routes.ts`
+against `service/app.py` rather than taking the reports at face value. Net effect:
+the UI needed one line changed, and three of the four code changes landed here.
 
-**The item-5 payoff is the dependency check, not the schema.** A manifest that merely typed
-`name`/`description` would be ceremony. What earns its place is that a skill can now *declare* the
-capabilities its judgment is written about, and the gate verifies them against the live tool
-registry (D-075) and `settings.mcp_servers`. Verified by deliberately renaming a declared tool:
-the gate fails with the exact name and exits non-zero. That closes a real hole — a skill teaching
-a deleted tool previously survived as plausible, stale prose that nothing could detect.
+The azide fix went wider than the report. The reported symptom was the bare anion,
+but the cause is that `organic-azide` and `acyl-azide` both require a carbon
+neighbour, so one SMARTS ("azide not bonded to carbon") closes the salt, HN3 and
+heteroatom-azide holes together instead of special-casing the one reported input.
 
-**The item-6 risk was backwards compatibility, not the union.** Every shipped config is untagged;
-a textbook `Field(discriminator="transport")` rejects untagged payloads, so the "clean" version of
-this change would have broken `.env.example`, the Helm values, and every deployment at startup. The
-callable discriminator defaulting to `stdio` is the whole reason the change is safe to ship.
+An existing test had to change: `test_an_ordinary_combination_is_not_flagged`
+asserted that sodium azide in MeCN raises *nothing*, which was only true because
+the alert was missing. Its real claim — that swapping DCM for an acceptable solvent
+clears the diazidomethane pair rule — is preserved and still tested; it now asserts
+the pair rule is silent rather than the whole screen.
 
-**Invariant held (audit §7).** Both new narrowings attenuate and neither authorizes: the enable-list
-cannot advertise a skill no directory provides and `RoleScopedSkillsSource` still runs on top; a
-manifest's declared tools are documentation the gate validates, never a grant — `enforce_tool_authz`
-is untouched. Fail-fast was placed by blast radius: an unknown enabled-skill name fails the
-pre-deploy gate rather than raising per turn, since a config typo must not break live conversations.
+`GET /sessions/{id}/messages` reads through `history_provider()` with the live
+session's `state`: one call path serves both stores, because MAF's in-memory
+provider is stateless and keeps messages in `session.state`. No second SQL reader,
+and the route is not Postgres-only.
 
-**Rule-of-Three note.** These two items were trigger-gated and the triggers had not fired; they were
-built on instruction. Both are honest rather than speculative — item 6 is a real second variant with
-working dispatch, item 5's check has four real declaring skills. What *would* have been speculative
-stayed out: no HTTP server is configured, and profile Stage 3 (filesystem-discovered profiles)
-remains deferred.
+Verified beyond the offline suite: a local Postgres 16 was stood up to exercise the
+new `list_for_owner` SQL directly (the full migration chain needs pgvector >= 0.7 for
+`bit_jaccard_ops` and cannot run here, so the table was created from its own
+migration). Owner scoping, newest-first ordering and the NULL-owner case all hold,
+and the naive `owner = NULL` form was confirmed to return nothing — the bug the
+`IS NOT DISTINCT FROM` comment claims to prevent.
 
-**Still open, deliberately:** the deep-analysis items DA-5 and DA-10 are marked "needs a decision"
-(cache staleness policy; how much live-edge risk to buy down offline) — those are judgement calls
-for sign-off, not implementation work, per the audit's do-not-self-resolve convention.
+`make eval` reports 3 gated failures (`pharma-solvent-heavy` e_factor/pmi,
+`retrieval-cross-coupling-literal-miss` recall). Confirmed pre-existing by stashing
+the change and re-running: identical on the clean baseline. `hazard_flag_recall`
+stays 1.0, now 11/11 with the new rule pinned.
+
+Found but not fixed (outside the reported scope): `package.json` in the UI declares
+`check:openapi` -> `scripts/check-openapi.mjs`, and that file does not exist, so the
+script fails for anyone who runs it.

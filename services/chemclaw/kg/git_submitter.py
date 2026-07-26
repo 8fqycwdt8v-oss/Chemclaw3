@@ -24,6 +24,7 @@ from collections.abc import Iterator
 from pathlib import Path
 
 from chemclaw.config import settings
+from kg.graph import invalidate_cache
 from kg.pr_gate import NoteSubmission, NoteSubmitter
 
 # Serializes every submit() in this process — see the module docstring.
@@ -210,6 +211,12 @@ class GitNoteSubmitter:
 
         note_path.parent.mkdir(parents=True, exist_ok=True)
         note_path.write_text(submission.content, encoding="utf-8")
+        # This process just changed the note tree, so do not make a subsequent read wait out the
+        # `graph_cache_ttl_seconds` scan window (DA-5) — the authoring loop must see its own write
+        # immediately. Also needed because the `checkout -B`/`reset --hard` above rewrite the tree
+        # wholesale: where `note_repo_dir` and `knowledge_dir` overlap (a dev checkout), a stale
+        # cached graph would otherwise describe a tree that no longer exists.
+        invalidate_cache()
 
         await self._git("add", submission.path)
         # Idempotent: if the note is byte-identical to what the base already has,

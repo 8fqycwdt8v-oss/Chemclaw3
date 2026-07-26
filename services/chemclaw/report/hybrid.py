@@ -19,7 +19,10 @@ from report.evidence import EvidenceChunk
 
 
 def reciprocal_rank_fusion(
-    ranked_lists: list[list[EvidenceChunk]], *, k: int
+    ranked_lists: list[list[EvidenceChunk]],
+    *,
+    k: int,
+    weights: dict[str, float] | None = None,
 ) -> list[EvidenceChunk]:
     """Fuse per-source ranked chunk lists into one ranking by Reciprocal Rank Fusion.
 
@@ -28,6 +31,13 @@ def reciprocal_rank_fusion(
             note's first (best) position counts, so repeating a note does not inflate it.
         k: The RRF constant (`settings.retrieval_fusion_k`); larger flattens the contribution of
             rank position. Must be positive.
+        weights: Optional per-retriever multipliers (source tier, gap IDEA-5). RRF is deliberately
+            score-agnostic, which is right for combining heterogeneous *rankers* and wrong for
+            combining heterogeneous *evidence classes*: a validated internal ELN entry, an
+            agent-distilled playbook, and a literature analogy otherwise fuse identically. This is
+            the mechanical expression of the architecture's own "keep evidenced history separate
+            from transferred analogy" rule, which is otherwise enforced only by asking the model
+            nicely. Absent or empty = uniform weighting (today's behavior exactly).
 
     Returns:
         The chunks, one per source note, ordered by descending fused score. Ties break by
@@ -44,6 +54,7 @@ def reciprocal_rank_fusion(
             if note_id in seen_in_list:
                 continue  # a source's best position for a note is the only one that counts
             seen_in_list.add(note_id)
-            scores[note_id] = scores.get(note_id, 0.0) + 1.0 / (k + rank)
+            weight = (weights or {}).get(chunk.retriever, 1.0)
+            scores[note_id] = scores.get(note_id, 0.0) + weight / (k + rank)
     ordered = sorted(scores, key=lambda note_id: (-scores[note_id], note_id))
     return [representative[note_id] for note_id in ordered]

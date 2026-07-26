@@ -46,6 +46,20 @@ overridable as `CHEMCLAW_<FIELD>`); this runbook covers the four recurring admin
   opt-out and boots with a loud warning instead.
 - **`CHEMCLAW_ENTRA_CLIENT_ID` was removed.** Settings is `extra="forbid"`, so a stale export of it
   aborts startup with a validation error naming the field — unset it in any inherited environment.
+- **`CHEMCLAW_NOTE_REPO_DIR` must be set on any host that submits notes — the default is always
+  wrong in a deployment.** It ships as `.` (a dev convenience), which resolves to the process CWD.
+  Every submission opens with `git reset --hard` + `git clean -fd`, so pointing it at the checkout
+  the service itself runs from would wipe uncommitted work there — `_require_dedicated_checkout`
+  refuses before any git command runs, with `note_repo_dir '.' resolves to <path> — the checkout
+  this process is running from`. That error is the guard doing its job, not a broken deployment:
+  point the variable at a **dedicated, writable, non-shallow clone** of the knowledge repo, used by
+  nothing else (`git checkout -B note/<id>` switches the whole working tree, and
+  `--force-with-lease` needs real history). The Helm chart already supplies one —
+  `knowledge.noteRepoPath`, default `/var/lib/chemclaw/note-repo`, provisioned by
+  `deploy/knowledge-sync.sh`. Deliberately *not* the read replica the retriever serves from.
+  Leaving it unset outside Helm is the quieter failure: `knowledge-sync.sh` logs
+  `CHEMCLAW_NOTE_REPO_DIR unset — no submitter clone provisioned` and skips the clone, so the
+  first note submission is the thing that discovers it.
 - **Note submission is serialized per host.** Keep the background worker at one replica (see
   `deploy/helm/chemclaw/values.yaml`); the PR-gate's checkout lock is host-local, so a second
   replica needs the distributed lock still open in `BACKLOG.md`.

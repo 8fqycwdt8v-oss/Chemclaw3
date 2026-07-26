@@ -48,6 +48,32 @@ def cited_ids(text: str) -> list[str]:
 _SLUG = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")
 
 
+# Every note type this system mints, with what it means. Previously `type` was an unconstrained
+# slug written from nine different call sites, so a typo minted a *new* type silently and any
+# retrieval filter keyed on type (the committed `retrieval-coupling-playbook-filter` eval case does
+# exactly this) then missed with no error (gap KNW-6).
+#
+# Enforced by `kg-validate` rather than by this schema, and that placement is deliberate: the agent
+# may legitimately propose a genuinely new type, and a hard schema rejection would block that at the
+# tool. The PR-gate is where a new type belongs — a human sees it, and `kg-validate` runs on that
+# same PR, so an unknown type cannot reach the graph unreviewed while an intended one costs one
+# line here.
+KNOWN_NOTE_TYPES: frozenset[str] = frozenset(
+    {
+        "reaction",  # one ELN experiment (eln/note.py)
+        "compound",  # one molecule as a graph citizen
+        "campaign",  # an episodic chain of linked reactions (memory/campaign.py)
+        "optimization-campaign",  # repeated runs of one transformation (memory/optimization.py)
+        "playbook",  # a transferable rule distilled across projects (memory/playbook.py)
+        "interaction",  # a chemist-confirmed answer (memory/interaction.py)
+        "report",  # a drafted development report (report/harness.py)
+        "job-result",  # a durable calculation's result (workflows/knowledge.py)
+        "bo-candidate",  # a BO campaign's recommendation (workflows/bo_knowledge.py)
+        "failure-mode",  # a negative result worth not repeating (gap KNW-3)
+    }
+)
+
+
 class Note(BaseModel):
     """One knowledge-graph note: its frontmatter metadata plus its Markdown body.
 

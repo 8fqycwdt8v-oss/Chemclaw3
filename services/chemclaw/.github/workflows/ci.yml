@@ -57,3 +57,23 @@ jobs:
 
       - name: Validate skills
         run: make skill-validate
+
+      - name: Validate the prose/tool contract
+        run: make prose-validate
+
+      # The deployment gate (DA-10/D-2): the Helm chart is the one artifact no test can exercise
+      # offline, and a broken chart is only discovered at `helm install` — in production, on the
+      # worst day. Rendering it and checking the result against the Kubernetes schemas is the
+      # cheapest live-edge risk to buy down, and needs no cluster.
+      - name: Install Helm
+        uses: azure/setup-helm@v4
+
+      - name: Install kubeconform
+        run: |
+          curl -sSLo /tmp/kubeconform.tar.gz \
+            https://github.com/yannh/kubeconform/releases/download/v0.6.7/kubeconform-linux-amd64.tar.gz
+          tar -xzf /tmp/kubeconform.tar.gz -C /tmp kubeconform
+          sudo install -m 0755 /tmp/kubeconform /usr/local/bin/kubeconform
+
+      - name: Render + validate the Helm chart
+        run: make helm-validate

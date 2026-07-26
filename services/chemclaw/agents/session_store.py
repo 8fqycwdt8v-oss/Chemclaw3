@@ -15,6 +15,7 @@ never interprets message shape — a MAF change is a value change, not a schema 
 """
 
 from collections.abc import Sequence
+from datetime import datetime
 from typing import Any, ClassVar
 
 import psycopg
@@ -32,6 +33,13 @@ _OWNER_INSERT = (
     "ON CONFLICT (session_id) DO NOTHING"
 )
 _OWNER_SELECT = "SELECT owner FROM session_owners WHERE session_id = %s"
+# Newest first: a session list is read as "what was I just working on", and the caller pages from
+# the top. `owner IS NOT DISTINCT FROM %s` rather than `=` so the shared dev principal (a real NULL
+# owner) matches itself instead of dropping every row to SQL's three-valued logic.
+_OWNER_LIST = (
+    "SELECT session_id, created_at FROM session_owners "
+    "WHERE owner IS NOT DISTINCT FROM %s ORDER BY created_at DESC, session_id DESC LIMIT %s"
+)
 
 
 class PostgresHistoryProvider(HistoryProvider):
@@ -130,3 +138,16 @@ class SessionOwnerStore:
                 await cur.execute(_OWNER_SELECT, (session_id,))
                 row = await cur.fetchone()
         return (row is not None, row[0] if row is not None else None)
+
+    async def list_for_owner(self, owner: str | None) -> list[tuple[str, datetime]]:
+        """The owner's sessions as `(session_id, created_at)`, newest first, capped by config.
+
+        This table is already the durable answer to "which sessions exist and who owns them", so
+        listing reads it directly rather than adding a second registry that could disagree with the
+        one `_resolve_session` authorizes against.
+        """
+        async with await self._connect() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(_OWNER_LIST, (owner, settings.service_max_listed_sessions))
+                rows = await cur.fetchall()
+        return [(row[0], row[1]) for row in rows]
