@@ -10,11 +10,21 @@ import asyncio
 
 from temporalio import workflow
 from temporalio.client import Client
+from temporalio.exceptions import ApplicationError
 from temporalio.worker import Worker
 
-from chemclaw.config import settings
-from tests.temporal_env import pydantic_client, start_env_or_skip
 from workflows.orchestrator import _batches, fan_out
+
+# This module defines workflows, so the worker sandbox re-imports it (and everything it imports)
+# when it validates them. Two of those imports are illegal inside the sandbox and abort worker
+# construction: `chemclaw.config` builds its `settings` singleton at import time, and
+# pydantic-settings' dotenv source calls `Path(...).expanduser()`; `tests.temporal_env` pulls in
+# `workflows.activities`, whose httpx import reaches `urllib.request`. Neither is workflow code —
+# they are the harness — so they are passed through, the same discipline `workflows/*.py` applies.
+# `workflows.orchestrator` stays sandboxed on purpose: it is the code under test.
+with workflow.unsafe.imports_passed_through():
+    from chemclaw.config import settings
+    from tests.temporal_env import pydantic_client, start_env_or_skip
 
 
 def test_batches_splits_in_order() -> None:
@@ -26,12 +36,17 @@ def test_batches_splits_in_order() -> None:
 
 @workflow.defn
 class _DoublerWorkflow:
-    """A trivial child: doubles its input, or raises on the poison value 13."""
+    """A trivial child: doubles its input, or fails the execution on the poison value 13."""
 
     @workflow.run
     async def run(self, value: int) -> int:
         if value == 13:
-            raise ValueError("poison input")
+            # `ApplicationError`, not a bare `ValueError`: the SDK fails the *workflow task* on any
+            # non-`FailureError` exception and retries that task forever, so a plain raise would
+            # leave the child Running and hang the parent instead of exercising fan-out isolation.
+            # `non_retryable` then stops the child on its first attempt — the "exhausted its
+            # retries" state whose drop-and-continue handling is what this test asserts.
+            raise ApplicationError("poison input", non_retryable=True)
         return value * 2
 
 
