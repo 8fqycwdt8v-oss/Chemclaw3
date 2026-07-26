@@ -32,6 +32,17 @@ validation, federation/OBO exchanges, live cluster durability + `helm`/`kubeconf
 - `docs/implementation-plan.md` — the original build order; `docs/implementation-tickets.md` — the
   F0–F9 ticket backlog with per-phase status.
 
+## Related repositories
+
+This repo is the backend/orchestration core. Two companion repos complete the system and are
+developed separately:
+
+- [`8fqycwdt8v-oss/Chemclaw3_ui`](https://github.com/8fqycwdt8v-oss/Chemclaw3_ui) — the ChemClaw3
+  frontend.
+- [`8fqycwdt8v-oss/Chemclaw3_mock`](https://github.com/8fqycwdt8v-oss/Chemclaw3_mock) — a mock
+  server that stands in for external MCP tools and data sources, plus a mock HOC, so the system
+  can be live-tested end-to-end without real integrations.
+
 ## Architecture (the one thing to internalize)
 
 Four layers, each with a single responsibility. **Never merge their concerns.**
