@@ -15,7 +15,7 @@ from agent_framework import FunctionInvocationContext
 
 from agents.authz import AuthorizationError, authorize_tool
 from agents.identity_context import reset_current_identity, set_current_identity
-from agents.tool_authz import enforce_tool_authz
+from agents.tool_authz import enforce_tool_authz, surface_authorization_denials
 from chemclaw.config import settings
 
 
@@ -219,3 +219,59 @@ def test_middleware_passes_an_authorized_call_through(monkeypatch: pytest.Monkey
     finally:
         reset_current_identity(token)
     assert ran is True
+
+
+def _drive_surfacing(
+    ctx: FunctionInvocationContext, call_next: Callable[[], Awaitable[None]]
+) -> None:
+    """Run `surface_authorization_denials` over a stand-in context to completion."""
+
+    async def _run() -> None:
+        await surface_authorization_denials(ctx, call_next)
+
+    asyncio.run(_run())
+
+
+def test_surfacing_converts_a_denial_into_the_tool_s_own_result() -> None:
+    """A denial becomes the call's own safe, readable result — not a re-raised exception.
+
+    Without this, MAF's function-invocation executor collapses *any* escaping exception into
+    the same opaque "Error: Function failed." with zero explanation reaching the model
+    (`include_detailed_errors` defaults off) — so a real chemist question ("why didn't that
+    run?") got answered with an invented guess ("a temporary service issue") instead of the
+    true, safe reason.
+    """
+
+    async def _denied() -> None:
+        raise AuthorizationError("u-9 lacks a privileged role for the write tool submit_qm_job")
+
+    ctx = _ctx("submit_qm_job")
+    _drive_surfacing(ctx, _denied)  # must not raise
+    assert ctx.result == "Refused: u-9 lacks a privileged role for the write tool submit_qm_job"
+
+
+def test_surfacing_leaves_other_exceptions_untouched() -> None:
+    """Only `AuthorizationError` is caught — an unrelated failure still propagates as-is.
+
+    Any other exception (a bug, a database error) must keep falling through to MAF's generic,
+    safe-by-omission handling; only chemclaw's own, deliberately-worded denial message is
+    known-safe enough to surface verbatim.
+    """
+
+    async def _boom() -> None:
+        raise ValueError("unrelated failure")
+
+    with pytest.raises(ValueError, match="unrelated failure"):
+        _drive_surfacing(_ctx("predict_pka"), _boom)
+
+
+def test_surfacing_passes_a_successful_call_through_unchanged() -> None:
+    """A call that succeeds is unaffected — no result override, no swallowed exception."""
+    ctx = _ctx("predict_pka")
+    ctx.result = None
+
+    async def _ok() -> None:
+        ctx.result = "6.51"
+
+    _drive_surfacing(ctx, _ok)
+    assert ctx.result == "6.51"

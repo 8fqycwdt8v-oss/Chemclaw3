@@ -88,12 +88,13 @@ def test_skills_load_and_read_without_an_unanswerable_approval() -> None:
 
 
 def test_agent_audits_and_authorizes_every_tool_call() -> None:
-    """Two tool middlewares are attached: the GxP audit trail, then per-tool authz (F10-C)."""
-    from agents.tool_authz import enforce_tool_authz
+    """Three middlewares attach: denial surfacing, the GxP audit trail, then per-tool authz."""
+    from agents.tool_authz import enforce_tool_authz, surface_authorization_denials
 
     agent = build_agent(chat_client=object())
     middleware = list(agent.middleware or [])
-    assert len(middleware) == 2  # audit + per-tool authorization, over all tools
+    assert len(middleware) == 3  # denial surfacing + audit + per-tool authorization, over all tools
+    assert middleware[0] is surface_authorization_denials  # outermost: sees audit's re-raise
     assert enforce_tool_authz in middleware  # the authz gate is wired, not just audit
 
 
