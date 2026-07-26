@@ -93,6 +93,13 @@ base and your change. The bar is "would a staff engineer approve this?" — if n
 **Fix bugs autonomously.** Given a bug report, failing CI, or an error/log, just fix it:
 find the root cause and resolve it without asking for hand-holding or step-by-step direction.
 
+**Ship automatically.** Once a task is fully done and verified (tests pass, `make lint type
+test` green where applicable), do not stop at a pushed branch and wait for a go-ahead: open the
+PR, merge it directly to `main` yourself, and delete the branch once the PR is closed. This
+applies here and in the companion repos (`Chemclaw3_ui`, `Chemclaw3_mock`) — each repo's change
+gets its own PR, auto-merged the same way. Skip the auto-merge only if CI is red, the change is
+destructive/ambiguous, or the user asked to review before merge for this task.
+
 ## Code quality (non-negotiable)
 
 - **Perfection over speed**: when unsure, ask — do not guess.
