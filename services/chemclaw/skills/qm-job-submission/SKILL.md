@@ -24,6 +24,13 @@ evidence is unavailable:
   graph / fingerprint search first, once those layers exist).
 - The question needs electronic-structure information: energies, geometries,
   transition states, regioselectivity, spectra.
+- **The fast semiempirical tier has already been tried and is not enough.** GFN2-xTB
+  answers relative stability, frontier orbitals, partial charges and regioselectivity in
+  under a second (`calculation-selection`, `reactivity-descriptors`). Escalate when the
+  decision turns on a difference smaller than the fast method's error bar, or on
+  something semiempirical methods do not provide — and say which. "The fast answer is
+  good enough for this decision" is the right conclusion more often than it is reached;
+  `computational-evidence` holds that judgment.
 
 For a purely empirical or precedent-based question, answer from existing data
 instead of launching a calculation.

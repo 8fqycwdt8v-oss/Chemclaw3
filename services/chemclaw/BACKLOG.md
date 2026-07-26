@@ -654,6 +654,27 @@ MAF ships the harness natively (`create_harness_agent` + `TodoProvider`/`AgentMo
 - [ ] **X4–X7** — reaction energies, the `xtb`/`crest` binaries, conformer ensembles, the typed
       expert escape hatch. See `docs/xtb-tools-proposal.md` §12; X5/X6 are gated on the licensing and
       image-size decisions in §14, which are the user's, not engineering's.
+
+### Ranked out of the xTB use-case review (`docs/xtb-use-cases.md`) — above X3 in value
+
+- [ ] **U1 xTB descriptors as BO featurization** — BoFire campaigns treat ligand/base/solvent as
+      *categorical*, so the surrogate cannot generalize to an option never tried. Replacing the
+      category with computed electronic descriptors lets it interpolate across the space. Needs **no
+      new xTB capability** — only wiring `calc.xtb_props` into `bo/`. Highest value per unit of work
+      in the review.
+- [ ] **U2 pKa domain extension to bases / N-H acids** — v1 covers neutral O-H/S-H acids only, so
+      the most common pharma pKa question (a basic amine API) is unanswerable; the tool errors out,
+      which is correct but not useful. A calibration + domain problem, not a new capability.
+      **Priority raised** on measured evidence: see U3.
+- [ ] **U3 pKa accuracy characterized** — benchmarked against 12 experimental values spanning
+      pKa 0.2–15.9 (`tests/test_pka.py`): Spearman ρ **0.965**, RMSE 1.25 (so the reported ±1.6 is
+      honest), **worst individual error +2.08**. Conclusion, now enforced by tests and carried by the
+      `ionization-and-partitioning` skill: **rank with it, never set a process pH with it** — a
+      2-unit error inverts a "pKa ± 2" extraction or salt rule. No further action required unless the
+      calibration is revisited; recorded so it is not re-derived.
+- [ ] **U4 descriptor enrichment of ELN-ingested structures** — compute descriptors once per ingested
+      substrate so the graph becomes searchable by electronic character, not just substructure.
+      Cheap (cached forever) and it makes retrieval smarter. Available now; not built.
 - [x] 1c.5b calculator contract landed (see 1c.1); name-registry consciously deferred (D-015).
 - [ ] 1c.7 optional graph note via PR-gate for a *fast* calc result — deferred: the QM path already
       publishes (2.8) and BO recommendations now publish (1d.5); a fast-calc publish waits for a real

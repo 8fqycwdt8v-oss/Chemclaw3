@@ -30,6 +30,20 @@ you hand it, so most of the work is framing, not the call.
    value from a model. With no runs on file, the tool returns space-filling seed points — say
    the campaign is starting cold.
 
+## Narrowing a categorical space before you frame it
+
+When the user brings more candidate options than the campaign can carry — twelve ligands, eight
+bases, a substrate scope — the choice of *which* to put in the design is itself a decision, and
+it is made before the tool is called. A fast electronic ranking
+(`compute_electronic_properties`, `predict_site_reactivity`; judgment in
+`reactivity-descriptors`) is a legitimate way to shortlist, because ranking is what a
+semiempirical method is actually good at and the cost of being wrong is one wasted run.
+
+Two conditions on doing this. Say that the shortlist came from a calculation, not from data, so
+the user can overrule it. And keep at least one option in the design that the ranking did *not*
+favour — a campaign seeded only with what a model already liked cannot discover that the model
+was wrong.
+
 ## Call and present
 
 - `suggest_next_experiment(problem, observations, count)` returns candidate point(s). Ask for a

@@ -103,3 +103,55 @@ beyond its structure and method.
 
 **Not done, deliberately:** X3+ (optimization, Hessian/thermochemistry, reaction energies, CREST).
 The proposal's phase boundaries hold — X3 adds a dependency and is a separate reviewable change.
+
+---
+
+# xTB use-case ideation + the judgment layer
+
+Follow-on to the X1/X2 build. Deliverable: `docs/xtb-use-cases.md` (the *why*, tiered by
+what unlocks each use case) plus the skills that carry the judgment.
+
+## Done
+
+- [x] **Use-case review** — `docs/xtb-use-cases.md`: 6 use cases answerable today, 9 unlocked by
+      X3–X6, 5 cross-cutting integrations that only exist because xTB lives *inside* this system,
+      and an explicit list of what xTB must never be used for here.
+- [x] **Measured the pKa tool before writing judgment about it** — 12 experimental values,
+      pKa 0.2–15.9, four acid classes. ρ 0.965 / RMSE 1.25 / worst error +2.08 / bases unsupported.
+- [x] **Locked both halves of that finding as tests** (`tests/test_pka.py`): the ranking claim the
+      skill rests on, and the worst-case bound that forbids using a value for a pH decision.
+- [x] **`ionization-and-partitioning`** — pKa for ranking, never for a pH; the basic-amine gap; the
+      amphoteric trap (the tool reports the most acidic O-H/S-H site and does not mention the basic
+      centre it ignored); why a predicted pKa must not be composed with predicted solubility.
+- [x] **`computational-evidence`** — the question above `calculation-selection`: should anything be
+      computed at all. Precedent first, the four honest reasons to compute, how to combine computed
+      and measured evidence, recording through the PR-gate, when to escalate to DFT.
+- [x] **Wired the judgment into the existing skills** — `safety-screening` (computation never clears
+      a hazard either), `qm-job-submission` (try the fast tier first), `experiment-design` (descriptor
+      shortlisting before framing a campaign, with the guard to keep one un-favoured option in),
+      `calculation-selection` (routes to both new skills).
+- [x] **`BACKLOG.md` U1–U4** — the items the review ranked *above* X3.
+- [x] `make lint type test` + `make skill-validate` green: **742 passed**, mypy clean over 235 files.
+
+## Review
+
+**The finding that changed the work.** The plan was a pKa skill covering extraction pH and salt
+selection. Benchmarking first turned that into a skill that mostly *forbids* those uses: ranking is
+excellent (ρ 0.97) but individual errors reach 2.1 units, which is precisely the margin the
+"pKa ± 2" process rules turn on. A skill written from the tool's docstring instead of from
+measurement would have taught the agent to give confident, invertible pH advice.
+
+**The second finding was a gap, not a limit.** Most APIs are basic amines; pKa v1 covers neutral
+O-H/S-H acids only. The tool fails loudly (correct), but it means the most common pharma pKa
+question cannot be answered at all — a bigger value step than most of the X3+ roadmap, and it was
+not on the roadmap. Now U2.
+
+**The ideation fed back into the build order.** Two conclusions worth acting on: the highest-value
+integration (U1, descriptors as BO featurization) needs *no new xTB capability*, only wiring; and
+the two top-value X3-tier use cases (tautomer ranking, atropisomer barriers) both need
+thermochemistry rather than geometries, which argues for X3 shipping optimization **and** the
+Hessian/RRHO path together rather than optimization first.
+
+**Skill count held at two new ones.** A `descriptor-guided-screening` skill was considered and
+dropped: it would have overlapped `reactivity-descriptors` and `experiment-design`, so the content
+went into the latter as one section instead. Skills are judgment, and duplicated judgment drifts.

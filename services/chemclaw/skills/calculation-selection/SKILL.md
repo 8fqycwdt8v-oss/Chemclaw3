@@ -17,6 +17,10 @@ Holds the *judgment* about the fast calculators; the mechanics live in the tools
 (e.g. `compute_xtb_energy`). Use this to decide **which** calculator answers the
 question and how far to trust it.
 
+For the prior question — *should anything be computed at all*, and how a computed number
+sits next to retrieved precedent — load `computational-evidence`. Precedent outranks
+calculation; this skill assumes that decision is already made.
+
 ## Which calculator
 
 - **Electronic energy / relative stability / conformer energy** → `compute_xtb_energy`
@@ -27,7 +31,9 @@ question and how far to trust it.
 - **pKa of an acidic O-H/S-H site** → `predict_pka` (GFN2-xTB solvated
   deprotonation energy + calibration; ~1.6 pKa-unit uncertainty). Only O-H/S-H
   acids (carboxylic acids, phenols, alcohols, thiols); it errors on molecules with
-  no such site, and N-H/C-H acids are out of scope for now.
+  no such site, and N-H/C-H acids are out of scope for now. Load
+  `ionization-and-partitioning` before using the value for anything — basic amines are
+  unsupported, and individual predictions miss by up to two units.
 - **Which atom reacts (regioselectivity)** → `predict_site_reactivity` (condensed
   Fukui indices; three fast single points). Load the `reactivity-descriptors` skill
   before interpreting the ranking — it ranks sites *within* one molecule only.

@@ -89,3 +89,64 @@ def test_cached_pka_computes_once() -> None:
         assert first.pka == second.pka
 
     asyncio.run(_run())
+
+
+# Experimental aqueous pKa values (CRC Handbook / standard references), spanning the
+# strongly acidic to the barely acidic end of the v1 domain (carboxylic acids, phenols,
+# thiols, alcohols). Held here rather than in a fixture file: twelve literals are easier
+# to audit against their source than an opaque data file.
+_EXPERIMENTAL_PKA = [
+    ("OC(=O)C(F)(F)F", 0.23),
+    ("OC=O", 3.75),
+    ("OC(=O)CCC(=O)O", 4.21),
+    ("OC(=O)c1ccccc1", 4.20),
+    ("CC(=O)O", 4.76),
+    ("Sc1ccccc1", 6.62),
+    ("Oc1ccc([N+](=O)[O-])cc1", 7.15),
+    ("Oc1ccccc1", 9.99),
+    ("Cc1ccc(O)cc1", 10.26),
+    ("CCS", 10.61),
+    ("CO", 15.50),
+    ("CCO", 15.90),
+]
+
+
+def _spearman(left: list[float], right: list[float]) -> float:
+    """Rank correlation of two equal-length samples, with no ties in either.
+
+    Written out rather than pulled from scipy: the inputs are distinct experimental
+    values and distinct predictions, so the tie-free formula is exact, and a rank
+    correlation is not worth a new dependency.
+    """
+    ranks = [{value: rank for rank, value in enumerate(sorted(sample))} for sample in (left, right)]
+    differences = [ranks[0][a] - ranks[1][b] for a, b in zip(left, right, strict=True)]
+    n = len(left)
+    return 1 - 6 * sum(d * d for d in differences) / (n * (n * n - 1))
+
+
+def test_predicted_pka_ranks_acids_correctly() -> None:
+    """Across four acid classes the prediction reproduces the experimental *ordering*.
+
+    This is the claim the `ionization-and-partitioning` skill rests on — that the
+    predictor is usable for ranking a series and not for setting an absolute pH — so
+    it is asserted rather than assumed. The companion bound below is the other half:
+    ranking is good, individual values are not good enough for a pH decision.
+    """
+    experimental = [value for _, value in _EXPERIMENTAL_PKA]
+    predicted = [predict_pka(PkaInput(smiles=smiles)).pka for smiles, _ in _EXPERIMENTAL_PKA]
+    assert _spearman(experimental, predicted) > 0.9
+
+
+def test_individual_pka_errors_stay_within_the_reported_uncertainty_on_average() -> None:
+    """The reported ~1.6-unit uncertainty is honest: RMSE over the reference set is below it.
+
+    Individual compounds still miss by up to ~2 units (benzoic acid is the worst of
+    this set), which is exactly why the skill forbids using a single predicted value
+    to choose a process pH — a 2-unit error inverts a "pKa +/- 2" extraction rule.
+    """
+    errors = [
+        predict_pka(PkaInput(smiles=smiles)).pka - value for smiles, value in _EXPERIMENTAL_PKA
+    ]
+    rmse = (sum(error * error for error in errors) / len(errors)) ** 0.5
+    assert rmse < 1.6
+    assert max(abs(error) for error in errors) > 1.5  # the reason ranking-only is the rule
