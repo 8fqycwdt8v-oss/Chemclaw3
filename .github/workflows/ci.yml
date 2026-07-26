@@ -20,11 +20,10 @@ defaults:
 jobs:
   check:
     runs-on: ubuntu-latest
-    # A hung test must fail this job, not occupy a runner until GitHub's 6-hour ceiling. The suite
-    # currently has one such test — tests/test_orchestrator.py::test_fan_out_runs_children_in_order
-    # _and_isolates_failures, which skips wherever the Temporal test-server binary cannot be fetched
-    # and hangs where it can — so without a bound the very first run of this workflow would never
-    # report. The whole gate takes minutes, so this ceiling only ever trips on a genuine hang.
+    # A hung test must fail this job, not occupy a runner until GitHub's 6-hour ceiling (D-093:
+    # tests/test_orchestrator.py's fan-out test used to do exactly that before its own fix). The
+    # whole gate takes minutes, so this ceiling only ever trips on a genuine hang; kept as the
+    # general safety net now that the known cause is fixed.
     timeout-minutes: 30
     # Real Postgres so the calculation-store and session-store integration tests run (not skip).
     services:
@@ -59,6 +58,18 @@ jobs:
 
       - name: Lint + type + test
         run: make lint type test
+
+      - name: Ensure a local knowledge directory
+        # `knowledge` is a git-tracked symlink to a Replit-workspace-specific absolute path
+        # (deliberately kept for that deployment, D-091); it does not resolve on this runner, or
+        # on any other checkout. kg-validate needs a real directory to check, and an empty one is
+        # a valid "no notes yet" corpus (BACKLOG.md), so swap the broken link for an empty
+        # directory in this checkout only — the committed symlink itself is untouched.
+        run: |
+          if [ ! -d knowledge ]; then
+            rm -f knowledge
+            mkdir -p knowledge
+          fi
 
       - name: Validate knowledge graph
         run: make kg-validate
