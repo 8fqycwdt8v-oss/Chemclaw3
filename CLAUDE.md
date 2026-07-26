@@ -32,6 +32,23 @@ validation, federation/OBO exchanges, live cluster durability + `helm`/`kubeconf
 - `docs/implementation-plan.md` — the original build order; `docs/implementation-tickets.md` — the
   F0–F9 ticket backlog with per-phase status.
 
+## Related repositories
+
+This repo is the backend/orchestration core. Two companion repos complete the system and are
+developed separately:
+
+- [`8fqycwdt8v-oss/Chemclaw3_ui`](https://github.com/8fqycwdt8v-oss/Chemclaw3_ui) — the ChemClaw3
+  frontend.
+- [`8fqycwdt8v-oss/Chemclaw3_mock`](https://github.com/8fqycwdt8v-oss/Chemclaw3_mock) — a mock
+  server that stands in for external MCP tools and data sources, plus a mock HOC, so the system
+  can be live-tested end-to-end without real integrations.
+
+If a task requires changing or fixing code that lives in `Chemclaw3_ui` or `Chemclaw3_mock`
+(not this repo), add that repo to the session (`add_repo`) and open a PR directly against it —
+do not proxy the change through this repo, and do not just describe the fix here and stop.
+Each repo gets its own branch/commit/PR, scoped to that repo's own conventions. Only pause to
+ask first if the required change is destructive, ambiguous, or outside what was asked.
+
 ## Architecture (the one thing to internalize)
 
 Four layers, each with a single responsibility. **Never merge their concerns.**
@@ -75,6 +92,13 @@ base and your change. The bar is "would a staff engineer approve this?" — if n
 
 **Fix bugs autonomously.** Given a bug report, failing CI, or an error/log, just fix it:
 find the root cause and resolve it without asking for hand-holding or step-by-step direction.
+
+**Ship automatically.** Once a task is fully done and verified (tests pass, `make lint type
+test` green where applicable), do not stop at a pushed branch and wait for a go-ahead: open the
+PR, merge it directly to `main` yourself, and delete the branch once the PR is closed. This
+applies here and in the companion repos (`Chemclaw3_ui`, `Chemclaw3_mock`) — each repo's change
+gets its own PR, auto-merged the same way. Skip the auto-merge only if CI is red, the change is
+destructive/ambiguous, or the user asked to review before merge for this task.
 
 ## Code quality (non-negotiable)
 
