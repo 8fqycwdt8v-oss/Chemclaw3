@@ -12,10 +12,11 @@ from temporalio.common import WorkflowIDReusePolicy
 from temporalio.exceptions import WorkflowAlreadyStartedError
 
 from agents.authz import authorize_trigger, require_actor
+from agents.dialogue_tools import dry_run_notice, is_dry_run
 from agents.harness_todo import mark_awaiting_job
-from agents.job_events import announce_job_started
 from agents.session_context import get_current_session, get_current_session_id
 from agents.tool_registry import tool
+from agents.turn_signals import record_job_started
 from chemclaw.config import settings
 from chemclaw.temporal_client import connect
 from workflows.models import QMJobInput, qm_job_key
@@ -44,6 +45,8 @@ async def submit_qm_job(molecule_smiles: str, method: str, basis_set: str) -> st
     # Authorize the expensive HPC trigger against the turn's user before any durable work (F4-T5),
     # so an autonomously-planned todo can't launch a job outside the user's entitlements.
     authorize_trigger("submit_qm_job")
+    if is_dry_run():
+        return dry_run_notice("submit a QM job", f"{molecule_smiles} at {method}/{basis_set}")
     # Session (to notify on completion) and requested_by (the Entra actor) are ambient to the turn
     # (F3-T3/F4-T3), not model-supplied args. `require_actor` enforces the core rule: under Entra
     # this reject-if-absent guard refuses a job with no authenticated user before any durable work.
@@ -77,8 +80,10 @@ async def submit_qm_job(molecule_smiles: str, method: str, basis_set: str) -> st
     # of silence until the push-back. Only on a genuine start: the re-submit branch above returns an
     # existing (possibly already completed) job, which will never emit a matching `job_completed`
     # event — announcing it would leave a permanently "running" row in the UI.
-    announce_job_started(handle.id)
     await _mark_awaiting_if_harness(handle.id, molecule_smiles=molecule_smiles, method=method)
+    # Surface the launch on the turn's event stream (gap RCH-5). Only on a *fresh* start, for the
+    # same reason the awaiting todo is: a duplicate submit of a finished job never starts anything.
+    record_job_started(handle.id, "qm")
     return handle.id
 
 

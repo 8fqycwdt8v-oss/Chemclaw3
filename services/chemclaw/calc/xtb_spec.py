@@ -91,10 +91,10 @@ class XtbSpec(BaseModel):
         **Open-shell systems fall back to the in-process backend**, whatever was
         configured, and the reason is measured. GFN2 without a spin-polarization term
         does not stabilize an open shell at all — it put triplet O2 *above* singlet
-        (D-085) — so `calc.xtb_engine` enables that contribution whenever there are
+        (D-095) — so `calc.xtb_engine` enables that contribution whenever there are
         unpaired electrons. The `xtb` 6.6.1 binary cannot: its `--spinpol` is killed by
         the OOM killer in this build. Running a radical through it would silently
-        reintroduce exactly the physics error D-085 removed.
+        reintroduce exactly the physics error D-095 removed.
 
         Resolving here rather than at the call site is what keeps the cache honest: the
         key is derived from the *returned* spec, so an entry computed by tblite is

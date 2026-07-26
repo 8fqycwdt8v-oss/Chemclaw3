@@ -7,8 +7,11 @@
 FROM registry.access.redhat.com/ubi9/python-311:latest
 
 # uv drives the install to match local/CI exactly (same lockfile). Copy metadata first for layer reuse.
+# `git` is a hard runtime dependency, not a convenience: the PR-gate submitter shells out to it
+# (`kg/git_submitter.py`) and the knowledge-sync sidecar clones/pulls the note repo with it, so an
+# image without git silently breaks both directions of the knowledge layer.
 USER 0
-RUN pip install --no-cache-dir uv
+RUN dnf install -y git && dnf clean all && pip install --no-cache-dir uv
 WORKDIR /app
 
 # The two calculation binaries (xTB plan X5/X6). Pinned release tarballs rather than a
@@ -52,11 +55,21 @@ COPY infra ./infra
 COPY kg ./kg
 COPY memory ./memory
 COPY sources ./sources
+COPY safety ./safety
+# Not optional extras: `skills/` IS the agent's judgment layer (an image without it advertises no
+# skills at all), `scripts/` owns the Temporal Schedules that fire every periodic job, and `evals/`
+# carries the committed case-set + baseline the drift job scores against. `knowledge/` seeds the
+# note tree so the mount point exists even before the first sync.
+COPY skills ./skills
+COPY scripts ./scripts
+COPY evals ./evals
+COPY knowledge ./knowledge
 COPY deploy/entrypoint.sh /usr/local/bin/chemclaw-entrypoint
+COPY deploy/knowledge-sync.sh /usr/local/bin/chemclaw-knowledge-sync
 
 # Install into a project venv; --frozen fails if the lockfile drifted (reproducible builds).
 RUN uv sync --frozen --no-dev \
-    && chmod +x /usr/local/bin/chemclaw-entrypoint \
+    && chmod +x /usr/local/bin/chemclaw-entrypoint /usr/local/bin/chemclaw-knowledge-sync \
     && chown -R 1001:0 /app \
     && chmod -R g=u /app
 

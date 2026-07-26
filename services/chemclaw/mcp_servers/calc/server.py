@@ -26,6 +26,7 @@ a question, `reactivity-descriptors` how to read a ranking. Run as
 
 from mcp.server.fastmcp import FastMCP
 
+from calc.calibration import PredictionRecord, record_prediction
 from calc.pka import PkaInput, PkaResult, run_cached_pka
 from calc.postgres_store import default_store
 from calc.solubility import SolubilityInput, SolubilityResult, run_cached_solubility
@@ -40,7 +41,9 @@ from calc.xtb_props import (
     run_cached_properties,
 )
 from calc.xtb_thermo import ThermochemistryResult, ThermoSpec, relax_to_minimum
+from chemclaw.chem import canonical_smiles
 from chemclaw.config import settings
+from chemclaw.ids import stable_hash
 
 server = FastMCP("mcp-calc")
 
@@ -210,6 +213,31 @@ async def compute_thermochemistry(
     )
 
 
+async def _log_prediction(
+    calc_type: str, smiles: str, value: float, uncertainty: float | None, unit: str
+) -> None:
+    """Record a prediction for later reconciliation against a measurement (gap IDEA-2).
+
+    Hooked at the *tool* layer rather than inside the calculators, because this is the boundary
+    where a prediction becomes advice a chemist acts on — a cache hit deep in a workflow does not
+    need re-logging, and the ledger is keyed on the input, not on how often it was read.
+
+    The subject key is the canonical SMILES, the same identity the calculation cache uses, so a
+    measurement of the same molecule meets its prediction without a second naming scheme.
+    """
+    canonical = canonical_smiles(smiles)
+    await record_prediction(
+        PredictionRecord(
+            calc_type=calc_type,
+            input_hash=stable_hash(canonical),
+            subject=canonical,
+            predicted_value=value,
+            predicted_uncertainty=uncertainty,
+            unit=unit,
+        )
+    )
+
+
 @server.tool()
 async def predict_solubility(smiles: str) -> SolubilityResult:
     """Predict aqueous solubility (log S, mol/L) of a molecule, with uncertainty.
@@ -225,25 +253,38 @@ async def predict_solubility(smiles: str) -> SolubilityResult:
         The predicted log solubility, its uncertainty, and the model used.
     """
     result, _ = await run_cached_solubility(default_store(), SolubilityInput(smiles=smiles))
+    await _log_prediction(
+        "solubility", smiles, result.log_s_mol_per_l, result.uncertainty_log, "log S"
+    )
     return result
 
 
 @server.tool()
 async def predict_pka(smiles: str) -> PkaResult:
-    """Predict the pKa of a molecule's most acidic O-H/S-H site via GFN2-xTB.
+    """Predict a molecule's pKa via GFN2-xTB — an acid site, or a base's conjugate acid.
 
-    Uses a semiempirical solvated deprotonation-energy method with a linear
-    calibration; the result reports an uncertainty (~1.6 pKa units) that you
-    should pass on. Only O-H/S-H acids (carboxylic acids, phenols, alcohols,
-    thiols) are supported; an error is returned if there is no such site. Cached.
+    Two domains with different accuracy, and `site` on the result says which one ran.
+    **Acids** (`site="acid"`): the most acidic O-H/S-H proton — carboxylic acids, phenols,
+    alcohols, thiols — reported with ~1.6 units of uncertainty. **Bases** (`site="base"`),
+    when there is no acidic proton: the pKa of the *conjugate acid* (pKaH), the number
+    tabulated for amines, reported with +/-1.0. An acid site wins when a molecule has both.
+
+    Base coverage is **aromatic and aryl nitrogen only** — pyridines, imidazoles, azoles,
+    anilines. Aliphatic amines raise instead of returning a value, and that refusal is
+    load-bearing rather than cautious: over 13 reference amines the method ranks them at
+    Spearman -0.17, because a continuum solvent cannot represent the ammonium ion's hydrogen
+    bonding to water. Report that the value is not predictable rather than substituting
+    another tool's output. Cached.
 
     Args:
         smiles: The molecule as a SMILES string.
 
     Returns:
-        The predicted pKa, the deprotonation energy, and the uncertainty.
+        The predicted pKa, which site it describes, the protonation/deprotonation energy,
+        and the uncertainty.
     """
     result, _ = await run_cached_pka(default_store(), PkaInput(smiles=smiles))
+    await _log_prediction("pka", smiles, result.pka, result.uncertainty, "pKa")
     return result
 
 

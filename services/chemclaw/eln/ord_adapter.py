@@ -138,7 +138,7 @@ def _build(raw: RawEntry) -> OrdReaction:
     inputs = [component for _, components in reaction_inputs for component in components]
     if not inputs:
         raise OrdFormatError("ORD reaction has no input components")
-    outcomes, yield_percent = _outcomes(payload)
+    outcomes, yield_percent, purity_percent = _outcomes(payload)
     temperature_c = _temperature(_get(_conditions(payload), "temperature") or {})
     return OrdReaction(
         reaction_id=raw.entry_id,
@@ -146,6 +146,12 @@ def _build(raw: RawEntry) -> OrdReaction:
         outcomes=outcomes,
         temperature_c=temperature_c,
         yield_percent=yield_percent,
+        purity_percent=purity_percent,
+        # The entry's timestamp is when the experiment was run (gap KNW-1). ORD models impurity
+        # profiles only indirectly (as further products or analyses), so `impurities` stays empty
+        # here rather than guessing which co-product was unwanted — a fabricated impurity profile
+        # would be worse than an absent one.
+        performed_at=raw.created_at.date(),
         provenance=_provenance(payload),
         steps=_steps(reaction_inputs, temperature_c, payload),
         procedure_text=_procedure_text(payload),
@@ -238,10 +244,11 @@ def _components(
     return components
 
 
-def _outcomes(payload: dict[str, Any]) -> tuple[list[Component], float | None]:
-    """Map ORD `outcomes[].products[]` to product components + the first YIELD measurement."""
+def _outcomes(payload: dict[str, Any]) -> tuple[list[Component], float | None, float | None]:
+    """Map ORD `outcomes[].products[]` to components + the first YIELD and PURITY measurements."""
     products: list[Component] = []
     yield_percent: float | None = None
+    purity_percent: float | None = None
     for outcome in _optional_list(payload, "outcomes"):
         if not isinstance(outcome, dict):
             raise OrdFormatError(f"outcome is not an object: {outcome!r}")
@@ -249,10 +256,13 @@ def _outcomes(payload: dict[str, Any]) -> tuple[list[Component], float | None]:
             if not isinstance(product, dict):
                 raise OrdFormatError(f"product is not an object: {product!r}")
             products.append(Component(smiles=_smiles(product), role=Role.PRODUCT))
-            yield_percent = yield_percent if yield_percent is not None else _yield(product)
+            if yield_percent is None:
+                yield_percent = _percentage(product, "YIELD")
+            if purity_percent is None:
+                purity_percent = _percentage(product, "PURITY")
     if not products:
         raise OrdFormatError("ORD reaction has no products")
-    return products, yield_percent
+    return products, yield_percent, purity_percent
 
 
 def _smiles(compound: dict[str, Any]) -> str:
@@ -279,10 +289,16 @@ def _role(compound: dict[str, Any], default: Role) -> Role:
     return _ROLES.get(name, Role.REAGENT)
 
 
-def _yield(product: dict[str, Any]) -> float | None:
-    """Read the first YIELD `ProductMeasurement`'s percentage value, if present."""
+def _percentage(product: dict[str, Any], measurement_type: str) -> float | None:
+    """Read the first `ProductMeasurement` of `measurement_type` as a percentage, if present.
+
+    Generalized from the YIELD-only reader so PURITY rides the identical path (gap KNW-2, DRY):
+    ORD models both as a `ProductMeasurement` with a `percentage`, so one reader is correct for
+    both and a third measurement type costs one call site.
+    """
+    wanted = measurement_type.upper()
     for measurement in _as_list(product.get("measurements")):
-        if isinstance(measurement, dict) and str(measurement.get("type", "")).upper() == "YIELD":
+        if isinstance(measurement, dict) and str(measurement.get("type", "")).upper() == wanted:
             percentage = measurement.get("percentage")
             if isinstance(percentage, dict) and percentage.get("value") is not None:
                 return float(percentage["value"])

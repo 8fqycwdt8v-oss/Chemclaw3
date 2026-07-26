@@ -1,21 +1,31 @@
 """Agent tools for the calculations that submit durable jobs (plan 1c.5, xTB X8).
 
-What is left here after the calculators moved to `mcp_servers/calc` (X8): the four tools that
-route to Temporal above a cost threshold. They stay in-process for one reason, and it is not
-chemistry — submitting a durable job needs `require_actor()` and `get_current_session_id()`,
-the turn's authenticated user and the conversation to notify. Both are **ambient**, and the
-F4-T3 rule is that they are never model-supplied; an MCP server has neither and could only
-receive them as arguments, which would make identity a model-authored value.
+What is left here after the calculators moved to `mcp_servers/calc` (X8): the five tools that
+route to Temporal above a cost threshold, plus the prediction ledger (`report_measurement`,
+`calculator_trust`), which records and scores what the calculators claimed rather than computing
+anything itself.
+
+The job-routing five stay in-process for one reason, and it is not chemistry — submitting a
+durable job needs `require_actor()` and `get_current_session_id()`, the turn's authenticated user
+and the conversation to notify. Both are **ambient**, and the F4-T3 rule is that they are never
+model-supplied; an MCP server has neither and could only receive them as arguments, which would
+make identity a model-authored value.
 
 So these are the tools that *decide and delegate* rather than compute: they price the request
 (`calc.xtb_cost`), run it inline when it is cheap, and hand back a job id when it is not. The
 computation itself is the same `calc/` code the MCP server hosts.
+
+**`_log_prediction` went with the calculators.** It hooks `predict_pka` and `predict_solubility`,
+and those are `mcp-calc` tools since X8 — so the hook lives at *that* tool layer
+(`mcp_servers/calc/server.py`), which is still the boundary where a prediction becomes advice.
+It needs no ambient identity: the ledger is keyed on the canonical SMILES, not on who asked.
 """
 
 import numpy as np
 
 from agents.tool_registry import tool
 from agents.xtb_job_tools import DeferredJob, defer_to_job
+from calc.calibration import Calibration, calibration_for, record_observation
 from calc.complexes import ComplexSpec, InteractionResult, run_cached_interaction
 from calc.conformers import ConformerEnsemble, ConformerSpec, run_cached_ensemble
 from calc.crest_cli import CrestEffort, EnsembleSearch
@@ -35,7 +45,9 @@ from calc.xtb_cost import (
     scan_seconds,
 )
 from calc.xtb_scan import ScanResult, ScanSpec, run_cached_scan
+from chemclaw.chem import canonical_smiles
 from chemclaw.config import settings
+from chemclaw.ids import stable_hash
 from workflows.models import (
     ComplexJobSpec,
     EnsembleJobSpec,
@@ -43,6 +55,60 @@ from workflows.models import (
     ScanJobSpec,
     SolventScreenJobSpec,
 )
+
+
+@tool
+async def report_measurement(property_name: str, smiles: str, measured_value: float) -> str:
+    """Record a *measured* property value, so predictions can be scored against reality.
+
+    Call this when a chemist reports an experimental measurement for a property the system also
+    predicts (`solubility` as log S, or `pka`). It closes the prediction loop: `calculator_trust`
+    then reports how far that calculator has actually been off, instead of the agent having to
+    reason about trust from prose.
+
+    Args:
+        property_name: Which predicted property was measured — "solubility" or "pka".
+        smiles: The molecule measured, as SMILES.
+        measured_value: The experimental value, in the property's own unit (log S, or pKa).
+
+    Returns:
+        Whether the measurement matched an existing prediction. "No prediction on file" is a normal
+        answer — say so rather than implying the measurement was scored.
+    """
+    canonical = canonical_smiles(smiles)
+    matched = await record_observation(
+        property_name, stable_hash(canonical), measured_value, source="chemist-reported"
+    )
+    if matched:
+        return f"Recorded; it reconciled {matched} prediction(s) for {canonical}."
+    return (
+        f"Recorded for {canonical}, but nothing had predicted {property_name} for it yet, "
+        "so no prediction was scored."
+    )
+
+
+@tool
+async def calculator_trust(property_name: str) -> Calibration:
+    """Report how far a calculator's predictions have actually been off, measured not asserted.
+
+    Use this before leaning on a predicted value in an answer, and quote it: "the solubility model
+    has run about 0.4 log units low over 18 measurements" is a far more useful caveat than a generic
+    "predictions are uncertain".
+
+    Read `n` first. Below the configured minimum the figures are not yet meaningful — say the
+    calculator has not been calibrated rather than quoting a bias from three points.
+    `uncertainty_coverage` is the subtle one: a low value means the stated error bars are too
+    narrow, so the *uncertainty* is misleading even when the values look close.
+
+    Args:
+        property_name: "solubility" or "pka".
+
+    Returns:
+        Bias, mean absolute error, RMSE, and uncertainty coverage, with the observation count.
+    """
+    return await calibration_for(
+        property_name, unit="log S" if property_name == "solubility" else "pKa"
+    )
 
 
 @tool
@@ -244,7 +310,7 @@ async def compute_interaction_energy(
         were found, and the geometry of the best one.
     """
     # Priced on the *pair*, not on the two monomers summed. The search runs over the
-    # combined system, and the cost model's exponent is ~3 (D-087) — so two 30-atom
+    # combined system, and the cost model's exponent is ~3 (D-097) — so two 30-atom
     # partners cost 60^3, roughly four times the 2 x 30^3 that summing them predicts.
     # Under-pricing here would run a minutes-long search inline instead of deferring it.
     predicted = ensemble_seconds(f"{smiles_a}.{smiles_b}")

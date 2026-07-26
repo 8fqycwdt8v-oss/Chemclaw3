@@ -4,6 +4,7 @@ metrics: [hazard_flag_recall]
 output:
   screened_smiles:
     - "CCCN=[N+]=[N-]"
+    - "[Na+].[N-]=[N+]=[N-]"
     - "CC(=O)N=[N+]=[N-]"
     - "CC(=[N+]=[N-])C(=O)OC"
     - "c1ccccc1[N+]#N"
@@ -16,6 +17,7 @@ output:
 reference:
   expected_rule_ids:
     - organic-azide
+    - non-carbon-azide
     - acyl-azide
     - diazo
     - diazonium
@@ -28,9 +30,9 @@ reference:
 ---
 Rule-table regression case for the structural hazard screen (D-080): one reference
 molecule per rule in `safety/rules.yaml`, each a textbook example of the motif its
-rule names (1-azidopropane, acetyl azide, methyl diazoacetate, benzenediazonium,
-di-*tert*-butyl peroxide, ethyl nitrate, 1,2-dinitrobenzene, perchloric acid,
-hydrazine, N-chlorosuccinimide).
+rule names (1-azidopropane, sodium azide, acetyl azide, methyl diazoacetate,
+benzenediazonium, di-*tert*-butyl peroxide, ethyl nitrate, 1,2-dinitrobenzene,
+perchloric acid, hydrazine, N-chlorosuccinimide).
 
 Why this case exists: the rule table is *data* a process-safety chemist edits, and a
 SMARTS that stops matching fails silently — the screen simply reports nothing, which a

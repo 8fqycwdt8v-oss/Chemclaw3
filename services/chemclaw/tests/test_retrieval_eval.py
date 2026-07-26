@@ -77,6 +77,10 @@ def test_memo_shares_one_retrieval_and_observes_corpus_changes(
     corpus = tmp_path / "corpus"
     shutil.copytree(_CORPUS, corpus)
     monkeypatch.setattr(settings, "eval_retrieval_corpus_dir", str(corpus))
+    # The memo's invalidation keys off the note tree's stat fingerprint, so this asserts
+    # disk-authoritative reads; the TTL window (DA-5) deliberately skips that scan. Pinned to 0 so
+    # an on-disk edit is observed immediately, which is the behavior under test.
+    monkeypatch.setattr(settings, "graph_cache_ttl_seconds", 0.0)
     monkeypatch.setattr(settings, "retrieval_recall_min", 0.75)
     calls: list[str] = []
     real_retrieve = GraphRetriever.retrieve

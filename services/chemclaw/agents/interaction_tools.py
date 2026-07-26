@@ -9,12 +9,22 @@ for that workflow — the seam a chat UI hooks onto: `start_approval` surfaces a
 state (it lives in Temporal) and return immediately.
 """
 
+from pydantic import BaseModel
 from temporalio.exceptions import WorkflowAlreadyStartedError
 from temporalio.service import RPCError
 
+from agents.authz import require_actor
 from chemclaw.config import settings
 from chemclaw.temporal_client import connect
 from workflows.interaction_approval import InteractionApprovalWorkflow, InteractionCandidate
+
+
+class PendingApproval(BaseModel):
+    """One open hold, as a review surface renders it: the handle plus what it is asking."""
+
+    approval_id: str
+    question: str
+    requested_by: str
 
 
 def _approval_id(interaction_id: str) -> str:
@@ -30,10 +40,17 @@ async def start_approval(candidate: InteractionCandidate) -> str:
     """
     client = await connect()
     approval_id = _approval_id(candidate.interaction_id)
+    # Stamp the turn's actor onto the hold if the caller did not, so the decision surface can
+    # scope it to its owner (an unowned hold would be decidable by any authenticated user).
+    owned = (
+        candidate
+        if candidate.requested_by
+        else candidate.model_copy(update={"requested_by": require_actor()})
+    )
     try:
         handle = await client.start_workflow(
             InteractionApprovalWorkflow.run,
-            candidate,
+            owned,
             id=approval_id,
             task_queue=settings.background_task_queue,
         )
@@ -50,6 +67,45 @@ async def decide_approval(approval_id: str, approved: bool) -> None:
         await handle.signal(InteractionApprovalWorkflow.decide, approved)
     except RPCError as exc:  # unknown id → a clear error, not a crash
         raise ValueError(f"no approval hold with id {approval_id!r}") from exc
+
+
+async def approval_owner(approval_id: str) -> str:
+    """The Entra oid a hold belongs to — the scope check the decision route applies."""
+    client = await connect()
+    handle = client.get_workflow_handle(approval_id)
+    try:
+        return await handle.query(InteractionApprovalWorkflow.owner)
+    except RPCError as exc:
+        raise ValueError(f"no approval hold with id {approval_id!r}") from exc
+
+
+async def list_pending_approvals(owner: str | None = None) -> list[PendingApproval]:
+    """Every hold still awaiting a click, optionally narrowed to one owner.
+
+    Without this a hold could be *started* but never found again: the id was returned once, into
+    a turn that has since ended. Listing is a Temporal visibility query over running workflows of
+    this type — no second store, and the hold stays the single source of truth.
+    """
+    client = await connect()
+    pending: list[PendingApproval] = []
+    query = (
+        f'WorkflowType = "{InteractionApprovalWorkflow.__name__}" AND ExecutionStatus = "Running"'
+    )
+    async for execution in client.list_workflows(query):
+        handle = client.get_workflow_handle(execution.id)
+        try:
+            holder = await handle.query(InteractionApprovalWorkflow.owner)
+            question = await handle.query(InteractionApprovalWorkflow.summary)
+        except RPCError:
+            # The hold completed between the visibility listing and the query — a natural race
+            # on an eventually-consistent index, not an error. Drop it from the listing.
+            continue
+        if owner is not None and holder != owner:
+            continue
+        pending.append(
+            PendingApproval(approval_id=execution.id, question=question, requested_by=holder)
+        )
+    return pending
 
 
 async def approval_status(approval_id: str) -> str:

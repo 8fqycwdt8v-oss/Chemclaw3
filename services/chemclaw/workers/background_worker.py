@@ -21,17 +21,21 @@ from chemclaw.temporal_client import connect
 # side-effect pattern `agents.chemclaw_agent` uses for tools). With the registry
 # populated, the sets this worker serves come from it — so adding a durable capability
 # to one of these modules is a decorator at its definition site, not an edit here.
+from workflows import audit_verify as _audit_verify  # noqa: F401
 from workflows import bo_activities as _bo_activities  # noqa: F401
 from workflows import bo_campaign as _bo_campaign  # noqa: F401
 from workflows import bo_knowledge as _bo_knowledge  # noqa: F401
+from workflows import digest as _digest  # noqa: F401
 from workflows import eln_sync as _eln_sync  # noqa: F401
 from workflows import eval_drift as _eval_drift  # noqa: F401
 from workflows import interaction_approval as _interaction_approval  # noqa: F401
 from workflows import knowledge as _knowledge  # noqa: F401
 from workflows import memory_jobs as _memory_jobs  # noqa: F401
+from workflows import note_index as _note_index  # noqa: F401
 from workflows import notify as _notify  # noqa: F401
 from workflows import orchestrator as _orchestrator  # noqa: F401
 from workflows import report_workflow as _report_workflow  # noqa: F401
+from workflows import retention as _retention  # noqa: F401
 from workflows.registry import describe, registered_activities, registered_workflows
 
 logger = logging.getLogger(__name__)

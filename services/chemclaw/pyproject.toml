@@ -26,7 +26,10 @@ dependencies = [
     "psycopg[binary]>=3.2",
     "pydantic-settings>=2.5",
     "pyjwt[crypto]>=2.8",
+    "pypdf>=6.14.2",
+    "python-docx>=1.2.0",
     "python-frontmatter>=1.3.0",
+    "python-pptx>=1.0.2",
     "pyyaml>=6.0",
     "rdkit>=2026.3.4",
     "scikit-learn>=1.9.0",
@@ -115,11 +118,20 @@ strict = true
 warn_unused_configs = true
 warn_redundant_casts = true
 
-# RDKit ships only partial type stubs (e.g. rdkit.Chem.AllChem attrs are dynamic),
-# which produces false attr-defined errors. Skip analysing it so its names are
-# treated as untyped rather than scattering per-call ignores across the codebase.
+# Third-party packages that ship no type stubs, or only partial ones (e.g. rdkit.Chem.AllChem
+# attrs are dynamic, which produces false attr-defined errors). Skip analysing them so their
+# names are treated as untyped rather than scattering per-call ignores across the codebase.
 [[tool.mypy.overrides]]
-module = ["rdkit.*", "bofire.*", "pandas", "sklearn.*", "frontmatter", "networkx.*", "drfp"]
+module = [
+    "rdkit.*",
+    "bofire.*",
+    "pandas",
+    "sklearn.*",
+    "frontmatter",
+    "networkx.*",
+    "drfp",
+    "openpyxl",
+]
 follow_imports = "skip"
 follow_imports_for_stubs = true
 ignore_missing_imports = true

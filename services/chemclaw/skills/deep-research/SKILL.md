@@ -31,11 +31,11 @@ chemistry when that is what answers the question.
    where impurities, observations, and robustness rationale live; read it, don't just read the
    headline numbers.
 4. **Cross-learn by structure**, not only by text:
-   - `find_similar_reactions(reaction_smiles)` — past runs of the *same* transformation (the
+   - `similar_reactions(reaction_smiles)` — past runs of the *same* transformation (the
      history behind "what has been tried" / "what moved the yield").
-   - `find_substructure_matches(smarts)` then `find_notes(smiles)` — reach reactions where a
+   - `substructure_matches(query)` then `find_notes(smiles)` — reach reactions where a
      specific functional group is present (e.g. a free primary amine in a Buchwald–Hartwig).
-   - `find_similar_molecules(smiles)` — analogous substrates when the exact one is absent.
+   - `similar_molecules(smiles)` — analogous substrates when the exact one is absent.
    - An `optimization-campaign` note already lays out one transformation's runs side by side;
      a `playbook` note is the transferable rule across projects — start from these when they
      exist.

@@ -1,8 +1,11 @@
-{{- /* The MCP capability servers. Each is stdio-launched by the agent process today, so in-cluster */ -}}
-{{- /* they run as sidecar-style Deployments only if a networked transport is enabled; kept behind a */ -}}
-{{- /* flag so a stdio-only deployment does not create idle pods. */ -}}
+{{- /* The MCP capability servers. Each is stdio-launched by the agent process today (MCPStdioTool
+       spawns a subprocess in the agent's own pod), so a standalone Deployment is only meaningful
+       once a networked transport exists. Enabling one without that transport would run a stdio
+       server with no stdin — an immediate exit and a crash loop (gap DEP-3), plus two idle pods
+       the agent cannot reach. The guard is therefore BOTH the per-server flag and the transport,
+       which is what this template always intended. */ -}}
 {{- range $name, $cfg := .Values.mcp }}
-{{- if $cfg.enabled }}
+{{- if and (kindIs "map" $cfg) $cfg.enabled (eq $.Values.mcp.transport "http") }}
 apiVersion: apps/v1
 kind: Deployment
 metadata:

@@ -55,7 +55,7 @@ holds: exit 0 is not evidence the outputs exist.
 `tblite` enables a spin-polarization term for open shells (without it, triplet O2 came out
 *above* singlet). The `xtb` binary does not by default, and its `--spinpol` is OOM-killed in
 this build. Dispatching a radical to whichever backend was configured would have silently
-reintroduced the exact physics error D-085 removed.
+reintroduced the exact physics error D-095 removed.
 
 **Rule:** when adding a second implementation behind one interface, enumerate what the first
 one *fixes* and check the second does the same. Where it cannot, route around it explicitly

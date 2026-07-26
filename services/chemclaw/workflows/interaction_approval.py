@@ -29,12 +29,20 @@ from workflows.publish import note_publish_retry
 
 
 class InteractionCandidate(BaseModel):
-    """The confirmed-answer a human is being asked to save (the held candidate)."""
+    """The confirmed-answer a human is being asked to save (the held candidate).
+
+    `requested_by` is the Entra `oid` of the chemist whose turn surfaced the candidate (F4-T3's
+    `require_actor`). It exists so the decision surface can be *owner-scoped*: a hold is a
+    knowledge-write authorization, and any authenticated user being able to approve someone
+    else's candidate would put an unreviewed note into the graph under the wrong attribution.
+    Empty only on the dev path, where `entra_required` is off and no actor exists.
+    """
 
     interaction_id: str
     question: str
     answer: str
     evidence_note_ids: list[str] = []
+    requested_by: str = ""
 
 
 class ApprovalOutcome(BaseModel):
@@ -74,6 +82,9 @@ class InteractionApprovalWorkflow:
     def __init__(self) -> None:
         """Start with no decision recorded (button not yet clicked)."""
         self._approved: bool | None = None
+        # Mirrored from the candidate at run start so the `owner`/`summary` queries can answer
+        # before any decision — the decision surface needs both to scope and render the hold.
+        self._candidate: InteractionCandidate | None = None
         # Set when the hold times out, so the `status` query can report `expired`
         # after the workflow completes rather than reporting a stale `pending`.
         self._expired: bool = False
@@ -81,6 +92,7 @@ class InteractionApprovalWorkflow:
     @workflow.run
     async def run(self, candidate: InteractionCandidate) -> ApprovalOutcome:
         """Wait (bounded) for the button click; propose the note only on Yes."""
+        self._candidate = candidate
         try:
             await workflow.wait_condition(
                 lambda: self._approved is not None,
@@ -99,6 +111,16 @@ class InteractionApprovalWorkflow:
             retry_policy=note_publish_retry(),
         )
         return ApprovalOutcome(status="approved", reference=reference)
+
+    @workflow.query
+    def owner(self) -> str:
+        """The Entra oid this hold belongs to, so the decision route can scope it to its owner."""
+        return self._candidate.requested_by if self._candidate is not None else ""
+
+    @workflow.query
+    def summary(self) -> str:
+        """The question this hold is asking a human to confirm — what a review list renders."""
+        return self._candidate.question if self._candidate is not None else ""
 
     @workflow.signal
     def decide(self, approved: bool) -> None:

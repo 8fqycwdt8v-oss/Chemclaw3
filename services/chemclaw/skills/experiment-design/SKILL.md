@@ -66,6 +66,11 @@ was wrong.
 
 ## One shot vs. a campaign
 
-This tool is the single, human-in-the-loop suggestion. A fully automated loop that proposes,
-evaluates its own objective, and iterates over many rounds is the durable `BoCampaignWorkflow`
-— reach for that only when the objective can be computed without a human in each round.
+`suggest_next_experiment` is the single, human-in-the-loop suggestion: it answers "what should I
+run next?" inline, from observations you already have.
+
+A fully automated loop that proposes, evaluates its own objective, and iterates over many rounds is
+`start_optimization_campaign` — reach for that only when the objective can be computed without a
+human in each round. It is durable and long-running, so it returns a job id immediately; poll it
+with `get_durable_job_status`. Set `publish_to_graph` when the recommendation should be proposed as
+a PR-gated note rather than only reported in chat.

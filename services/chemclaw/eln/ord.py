@@ -16,6 +16,7 @@ flat headline fields remain the summary every existing consumer reads; `steps` i
 purely additive procedural overlay (it never feeds the reaction SMILES / fingerprints).
 """
 
+from datetime import date
 from enum import StrEnum
 
 from pydantic import BaseModel, Field, model_validator
@@ -76,6 +77,50 @@ class ReactionStep(BaseModel):
     duration_h: float | None = Field(default=None, ge=0.0)
 
 
+class OutcomeClass(StrEnum):
+    """How an experiment turned out (gap KNW-3).
+
+    Nothing previously marked an experiment as failed, and the distillation is structurally biased
+    against failures: `find_playbook_candidates` distils what *recurs* across projects, and failures
+    do not recur — they get abandoned after one attempt. So "don't try X, we did, it decomposed on
+    scale" — the most valuable and most systematically lost knowledge in process development — had
+    nowhere to live.
+
+    `INCONCLUSIVE` is deliberately distinct from `FAILURE`: a run that was aborted, mis-charged, or
+    never assayed carries no evidence about the chemistry, and collapsing it into "failure" would
+    teach the corpus something untrue.
+    """
+
+    SUCCESS = "success"
+    FAILURE = "failure"
+    INCONCLUSIVE = "inconclusive"
+
+
+class Impurity(BaseModel):
+    """One identified or observed impurity in a reaction outcome (gap KNW-2).
+
+    For late-stage *process* development, impurity control is usually the point — the agent is
+    instructed to answer about "yield, purity, impurities", but the canonical record carried only
+    `yield_percent`, so every purity question could only ever be answered "the data is silent".
+
+    All three descriptors are optional because ELNs report impurities inconsistently: sometimes a
+    structure, often only a chromatographic name/RRT, usually an area%. Requiring any one of them
+    would silently drop the rest at ingest, which is the failure this field exists to prevent.
+    """
+
+    name: str | None = None
+    smiles: str | None = None
+    # Chromatographic area percent (HPLC/GC) — the number a process chemist actually tracks.
+    area_percent: float | None = Field(default=None, ge=0.0, le=100.0)
+
+    @model_validator(mode="after")
+    def _identifiable(self) -> "Impurity":
+        """An impurity with neither a name nor a structure is not a record of anything."""
+        if not self.name and not self.smiles:
+            raise ValueError("an impurity needs at least a name or a SMILES")
+        return self
+
+
 class OrdReaction(BaseModel):
     """A canonical reaction record: inputs, outcomes, headline conditions, provenance.
 
@@ -92,6 +137,36 @@ class OrdReaction(BaseModel):
     time_h: float | None = Field(default=None, ge=0.0)
     yield_percent: float | None = Field(default=None, ge=0.0, le=100.0)
     provenance: str = Field(min_length=1)
+    # When the experiment was actually run (gap KNW-1). Without it the largest note class in the
+    # system has no time axis at all: reaction evidence cannot be recency-ranked, F10-G2's
+    # bi-temporal note fields have nothing to be populated from, and `memory.chains` has no
+    # fallback ordering when the product->reactant graph is cyclic. Optional because a source may
+    # genuinely not record it, never because we do not care.
+    performed_at: date | None = None
+    # Outcome quality beyond yield (gap KNW-2). `purity_percent` is the headline assay/area figure
+    # for the product; `impurities` is the profile behind it. Both optional — an early-route entry
+    # may report yield only — and both deliberately excluded from the reaction SMILES and every
+    # fingerprint: they are *outcomes*, not structure.
+    purity_percent: float | None = Field(default=None, ge=0.0, le=100.0)
+    impurities: list[Impurity] = Field(default_factory=list)
+    # How the experiment turned out, and (for a failure) why in the chemist's own words. Defaults
+    # to SUCCESS so every existing record and every source that does not report it keeps today's
+    # meaning — the field adds the ability to say "this failed", it does not reinterpret silence.
+    outcome_class: OutcomeClass = OutcomeClass.SUCCESS
+    failure_reason: str | None = None
+
+    @model_validator(mode="after")
+    def _failure_is_explained(self) -> "OrdReaction":
+        """A recorded failure needs its reason, or it teaches nothing worth keeping.
+
+        The entire value of a negative result is *why* it failed; an unexplained one would enter
+        the corpus as an unactionable "someone tried this once", which is worse than absent because
+        it looks like evidence.
+        """
+        if self.outcome_class is OutcomeClass.FAILURE and not (self.failure_reason or "").strip():
+            raise ValueError("a reaction recorded as a failure must carry a failure_reason")
+        return self
+
     # The project/campaign this experiment belongs to — the grouping key for the semantic
     # memory layer (a playbook distils patterns that recur across >=2 projects, plan 5.4).
     project: str | None = None

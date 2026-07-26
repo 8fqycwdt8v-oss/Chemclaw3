@@ -850,8 +850,8 @@ answers the regioselectivity question that currently has no answer at all.
 ## 17. Post-implementation addendum (X1–X4 shipped)
 
 Written after building X1–X4, so the proposal does not read as if it were still a plan. Full
-rationale in **D-082** (seams), **D-083** (BO featurization), **D-084** (geometry policy +
-skill catalogue) and **D-085** (X3/X4). Four things this document got wrong or under-called:
+rationale in **D-092** (seams), **D-093** (BO featurization), **D-094** (geometry policy +
+skill catalogue) and **D-095** (X3/X4). Four things this document got wrong or under-called:
 
 **§4.3's `XtbEngine` protocol never appeared, and should not.** There is still exactly one
 backend. What the protocol's `version()` was for is served by `engine_version()`, which now also
