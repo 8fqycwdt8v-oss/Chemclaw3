@@ -11,6 +11,13 @@ on:
 jobs:
   check:
     runs-on: ubuntu-latest
+    # Backstop beneath the runner's own default (360 min): a hung Temporal test previously ran
+    # silently for the full 6 hours with no failing test named and no traceback, burning a full
+    # day's runner budget on one PR. pytest-timeout (see pyproject.toml) is the first line of
+    # defense and should fail the specific hung test in under 3 minutes; this bounds the whole
+    # job in case a hang ever lands somewhere its signal-based interrupt cannot reach. Every
+    # observed green run finishes in a few minutes, so 20 has wide headroom either way.
+    timeout-minutes: 20
     # Real Postgres so the calculation-store integration tests run (not skip).
     services:
       postgres:

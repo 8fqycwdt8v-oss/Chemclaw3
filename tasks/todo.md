@@ -546,3 +546,27 @@ the_scan_test_is_zero_text_not_a_length` pins it so the check cannot drift back 
 original PDF refusal was over-broad (it rejected documents that could be read perfectly well); its
 first replacement was over-broad in a subtler way. When a rule refuses something, the test worth
 writing is the one that pins what it must *accept*.
+
+## CI hang: bound test wall-clock so a stuck test cannot burn the runner's 6h default
+
+`ci`'s "Lint + type + test" step ran silently for the full 6-hour Actions job timeout on both
+`main` @ `d5ed9e3` and a later PR branch — cancelled, zero diagnostic output, no failing test
+named. Cleanup logs on both runs named the same orphaned processes (`pytest`,
+`temporal-test-server-sdk-python-1.30.0`), pointing at `tests/test_orchestrator.py`'s
+time-skipping Temporal fan-out test as the entry point, though the underlying hang itself is
+not diagnosed or fixed here.
+
+- [x] Add `pytest-timeout`, configured `timeout = 180` (`signal` method, the default) in
+      `pyproject.toml`. `signal` rather than `thread` deliberately: it fails only the hung test
+      and lets the session continue, so a hang early in collection order no longer prevents
+      every test after it from running — including any Postgres-backed test that happens to
+      sort later than the hang, which a 6-hour cancellation previously never let execute.
+- [x] Added `timeout-minutes: 20` on the `check` job as a backstop beneath pytest-timeout, in
+      case a hang ever lands somewhere a signal-based interrupt cannot reach.
+- [x] Verified the mechanism end to end with a throwaway hanging test (not committed): it failed
+      at the configured timeout with a named traceback, and the following test still ran in the
+      same session.
+
+Not done here, deliberately: diagnosing or fixing the `test_orchestrator` hang itself. That is a
+Temporal time-skipping / child-workflow question, and mixing it into this test-infra change would
+make neither reviewable.

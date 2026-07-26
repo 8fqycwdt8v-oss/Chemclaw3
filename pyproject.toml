@@ -46,6 +46,7 @@ dev = [
     "mypy>=1.11",
     "pytest>=8.3",
     "pytest-cov>=5.0",
+    "pytest-timeout>=2.3",
     "pre-commit>=3.8",
     "types-pyyaml>=6.0.12.20260518",
 ]
@@ -133,6 +134,16 @@ ignore_missing_imports = true
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-ra"
+# Per-test wall-clock cap (gap: a stuck test previously ran for the full 6h Actions job
+# timeout with zero diagnostic output — "cancelled", no test name, no traceback). 180s
+# leaves real headroom: the slowest real test (a BO campaign in test_reizman.py) takes
+# ~37s locally, and the whole suite of 959 tests — including every Temporal/Postgres test
+# CI does not skip — completes in ~3 minutes end to end. The `signal` default (not
+# `thread`) is deliberate: it fails the ONE hung test and lets the session continue,
+# rather than os._exit()-ing the whole process — which matters because a hang early in
+# test collection order must not prevent every test
+# after it from running.
+timeout = 180
 
 # Coverage is opt-in via `make cov` (not the default `make test`, which stays fast and
 # dependency-light). Measures the first-party packages only; the offline-skipped Temporal/
