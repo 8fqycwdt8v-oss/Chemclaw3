@@ -9,9 +9,8 @@ swap for an in-memory store.
 
 from agents.tool_registry import tool
 from calc.pka import PkaInput, PkaResult, run_cached_pka
-from calc.postgres_store import PostgresStore
+from calc.postgres_store import default_store
 from calc.solubility import SolubilityInput, SolubilityResult, run_cached_solubility
-from calc.store import ResultStore
 from calc.xtb import XtbInput, XtbResult, run_cached_xtb
 from calc.xtb_props import (
     ElectronicProperties,
@@ -21,11 +20,6 @@ from calc.xtb_props import (
     run_cached_properties,
 )
 from chemclaw.config import settings
-
-
-def default_store() -> ResultStore:
-    """Return the production result store (Postgres). Overridden in tests."""
-    return PostgresStore()
 
 
 @tool

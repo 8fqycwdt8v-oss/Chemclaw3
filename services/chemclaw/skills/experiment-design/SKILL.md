@@ -24,6 +24,16 @@ you hand it, so most of the work is framing, not the call.
    time, equivalents, concentration) with realistic bounds, categorical (solvent, catalyst,
    base) with the specific options in play. Do not invent variables the lab cannot set, and
    keep bounds physically sane.
+
+   **When a categorical option is a molecule, give its structure.** Set the parameter's
+   `structures` (category label → SMILES) for ligands, bases, solvents and catalysts. Each
+   option is then described by computed electronic descriptors instead of being an opaque
+   label, which is what lets the model say anything at all about an option nobody has run:
+   without it the surrogate's prediction for an untried ligand is just the average of the
+   ones you did run. It costs one fast calculation per option, cached thereafter. Two limits
+   worth stating to the user: the descriptors are **electronic only** — two ligands differing
+   mainly in bulk look similar — and a wrong SMILES silently describes the wrong molecule, so
+   only supply structures you are sure of.
 3. **Seed with real runs.** Gather the transformation's history (`find_similar_reactions`, an
    `optimization-campaign` note) and turn each run into an observation: its conditions →
    objective value. Mark `provenance` "measured" for lab data, "predicted" if you filled a
