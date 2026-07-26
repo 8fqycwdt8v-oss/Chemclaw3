@@ -2,23 +2,22 @@
 
 Why this exists: the plan forbids magic numbers and second config sources
 (CLAUDE.md "Config, never magic numbers"; plan step 0.3). Every URL, DSN, queue
-name, and timeout that code or infrastructure needs is declared here once, is
-type-checked, and is overridable via environment variables or a local `.env`
-file. `infra/docker-compose.yml` is wired to the same variable names, so the app
-and the dev stack can never drift apart.
+name, and timeout that code or infrastructure needs is declared here once, is type-checked, and is
+overridable via environment variables or a local `.env` file. `infra/docker-compose.yml` is wired to
+the same variable names, so the app and the dev stack can never drift apart.
 
 Usage:
     from chemclaw.config import settings
     client_target = settings.temporal_address
 
 Only fields that are actually consumed (by code or by the compose stack) live
-here — no speculative "for later" settings. New phases add their own fields when
-the first real consumer lands.
+here — no speculative "for later" settings. New phases add their own fields when the first real
+consumer lands.
 
 Structure: the flat `Settings` class is composed from one mixin per domain
 (`class Settings(ObservabilitySettings, TemporalSettings, ...)`). Each mixin
-holds its section's fields, validators, and derived properties, so a reader
-finds everything about one concern in one place — while the composed class
+holds its section's fields, validators, and derived properties, so a reader finds everything about
+one concern in one place — while the composed class
 keeps every attribute flat (`settings.postgres_dsn`) and every env name
 unprefixed-by-section (`CHEMCLAW_POSTGRES_DSN`), exactly as before the split.
 A cross-field validator lives in the section that owns the relationship.
@@ -26,15 +25,15 @@ A cross-field validator lives in the section that owns the relationship.
 House rule for a *collection* field — pick by what the elements are, not by taste:
 
 - **Typed JSON list** (`data_source_specs`, `connector_urls`) when each element *carries its own
-  config*. The element gets a pydantic model, so it is validated, documented by its type, and
-  can grow fields without a parsing change. Where the elements vary by kind, discriminate them
+  config*. The element gets a pydantic model, so it is validated, documented by its type, and can
+  grow fields without a parsing change. Where the elements vary by kind, discriminate them
   (`Field(discriminator=...)` / `Discriminator`) rather than widening one model with optional
   fields that only apply sometimes.
 - **Delimited string** (`skills_dir`, `data_sources`, `skills_enabled`, `entra_expensive_actions`)
   when the elements are *bare keys* — names resolved against a registry, or paths. An admin sets
-  these like `PATH`, with no JSON quoting, and a bare key has nothing to validate beyond
-  resolving. Expose the parsed value through a derived `*_list`/`*_dirs` property and read that,
-  never the raw string.
+  these like `PATH`, with no JSON quoting, and a bare key has nothing to validate beyond resolving.
+  Expose the parsed value through a derived `*_list`/`*_dirs` property and read that, never the raw
+  string.
 
 The two idioms coexist on purpose (a bare-key source should not pay the JSON-spec tax); existing
 fields are **not** migrated to match — that would be churn without a defect to fix.
@@ -81,8 +80,8 @@ class OrdElnSourceSpec(BaseModel):
 
 # A config-carrying data source, discriminated on `type` and built by `sources.registry`'s
 # `build_data_source`. This typed list is the *additive* path (alongside the bare-key `data_sources`
-# comma list) for sources that nest their own per-instance config; keyless/default sources
-# (graph, vector, the global-dir eln-json) stay in the comma list, so there is no regression. A new
+# comma list) for sources that nest their own per-instance config; keyless/default sources (graph,
+# vector, the global-dir eln-json) stay in the comma list, so there is no regression. A new
 # config-carrying type — the deferred Snowflake connector, which would nest its connection /
 # credential-ref / schema-mapping config — joins as one more variant here plus one branch in
 # `build_data_source`, with no edit to any source consumer (D-054's "one entry + one token" story).
@@ -92,9 +91,9 @@ DataSourceSpec = Annotated[JsonElnSourceSpec | OrdElnSourceSpec, Field(discrimin
 class ObservabilitySettings(BaseSettings):
     """Logging, the GxP tool-audit trail, and OpenTelemetry export.
 
-    Grouped because these are the process-wide "what happened" knobs: one
-    config-driven switch for verbosity so an admin can raise it to DEBUG for
-    troubleshooting without touching code, the audit-record shape, and the
+    Grouped because these are the process-wide "what happened" knobs: one config-driven switch for
+    verbosity so an admin can raise it to DEBUG for troubleshooting without touching code, the
+    audit-record shape, and the
     (off-by-default) OTel pipeline. Applied once per process by
     `chemclaw.logging.configure_logging`, called at each worker's entrypoint.
     """
@@ -104,19 +103,19 @@ class ObservabilitySettings(BaseSettings):
     log_format: str = "%(asctime)s %(levelname)s %(name)s: %(message)s"
     # GxP tool-audit trail (agents.audit): every agent tool call is logged once (name, args,
     # outcome, latency) by one MAF function middleware. Arguments are truncated to this many
-    # characters so a large payload (a full optimization problem, an observation list) cannot
-    # flood the log; raise it when a fuller argument record is needed for an audit.
+    # characters so a large payload (a full optimization problem, an observation list) cannot flood
+    # the log; raise it when a fuller argument record is needed for an audit.
     agent_audit_max_arg_chars: int = Field(default=200, ge=0)
-    # The deployment's code/prompt/skill revision stamped onto every audit record (AG-14): the
-    # Git SHA or image digest the running pod was built from, so a past agent result ties to the
-    # exact version that produced it (GxP reproducibility). The deployment sets it (the F6 image
-    # build injects the digest); "unknown" until then, a value change, not a schema change.
+    # The deployment's code/prompt/skill revision stamped onto every audit record (AG-14): the Git
+    # SHA or image digest the running pod was built from, so a past agent result ties to the exact
+    # version that produced it (GxP reproducibility). The deployment sets it (the F6 image build
+    # injects the digest); "unknown" until then, a value change, not a schema change.
     deployment_revision: str = "unknown"
     # OpenTelemetry export (off by default). When enabled, `chemclaw.logging.configure_telemetry`
     # calls MAF's `configure_otel_providers`, which reads the standard `OTEL_EXPORTER_OTLP_*`
     # environment variables for the collector endpoint. Requires the OpenTelemetry SDK + OTLP
-    # exporter extras to be installed; `enable_sensitive_data` controls whether prompts/results
-    # are attached to spans (keep off unless a trusted collector needs them).
+    # exporter extras to be installed; `enable_sensitive_data` controls whether prompts/results are
+    # attached to spans (keep off unless a trusted collector needs them).
     otel_enabled: bool = False
     otel_include_sensitive_data: bool = False
     # The OTLP collector endpoint (plan F6-T5). Exported as `OTEL_EXPORTER_OTLP_ENDPOINT` for MAF's
@@ -128,9 +127,9 @@ class ObservabilitySettings(BaseSettings):
 class TemporalSettings(BaseSettings):
     """Temporal — durable execution of long scientific jobs (plan Phase 1).
 
-    Grouped because everything here shapes how the app reaches and uses the one
-    Temporal cluster: the frontend endpoint, transport security, the two task
-    queues from the architecture, and the shared activity retry bound.
+    Grouped because everything here shapes how the app reaches and uses the one Temporal cluster:
+    the frontend endpoint, transport security, the two task queues from the architecture, and the
+    shared activity retry bound.
     """
 
     # `address` is the frontend gRPC endpoint; `namespace` isolates a team's jobs.
@@ -146,16 +145,16 @@ class TemporalSettings(BaseSettings):
     temporal_tls_ca: str = ""
     temporal_api_key: str = ""
 
-    # The two task queues from the architecture: heavy HPC jobs vs. light
-    # background jobs (sync/re-index/reports). Names are config so a deployment
-    # can shard or rename queues without touching worker code (D-006).
+    # The two task queues from the architecture: heavy HPC jobs vs. light background jobs
+    # (sync/re-index/reports). Names are config so a deployment can shard or rename queues without
+    # touching worker code (D-006).
     hpc_task_queue: str = "hpc-jobs"
     background_task_queue: str = "background-jobs"
 
     # Bound on retries for ordinary activities under the shared bad-data retry policy
-    # (`workflows.publish.BAD_DATA_RETRY`). Bad data is non-retryable by type; this caps
-    # the *transient* retries so an unclassified deterministic failure (a bug, not a
-    # network blip) gives up instead of pinning a worker with unlimited retries.
+    # (`workflows.publish.BAD_DATA_RETRY`). Bad data is non-retryable by type; this caps the
+    # *transient* retries so an unclassified deterministic failure (a bug, not a network blip) gives
+    # up instead of pinning a worker with unlimited retries.
     activity_max_attempts: int = Field(default=5, ge=1)
 
     @model_validator(mode="after")
@@ -173,38 +172,38 @@ class TemporalSettings(BaseSettings):
 class StoreSettings(BaseSettings):
     """Postgres/pgvector — fingerprint store (Phase 3) and QM result cache (plan step 1.10).
 
-    Grouped because these are the database-transport knobs every store connection
-    shares: one DSN for the whole app plus the connect/statement timeouts.
+    Grouped because these are the database-transport knobs every store connection shares: one DSN
+    for the whole app plus the connect/statement timeouts.
     """
 
     postgres_dsn: str = "postgresql://chemclaw:chemclaw@localhost:5432/chemclaw"
-    # Fail fast when the database is unreachable instead of hanging until the
-    # enclosing activity's start-to-close timeout expires (libpq connect_timeout).
+    # Fail fast when the database is unreachable instead of hanging until the enclosing activity's
+    # start-to-close timeout expires (libpq connect_timeout).
     pg_connect_timeout_seconds: int = Field(default=10, gt=0)
-    # Per-statement wall-clock bound for the store connections (libpq
-    # statement_timeout). A hung query is cancelled after this instead of consuming
-    # the whole enclosing activity's start-to-close budget. 0 disables it; migrations
-    # deliberately connect without a statement timeout (an index build may be slow).
+    # Per-statement wall-clock bound for the store connections (libpq statement_timeout). A hung
+    # query is cancelled after this instead of consuming the whole enclosing activity's
+    # start-to-close budget. 0 disables it; migrations deliberately connect without a statement
+    # timeout (an index build may be slow).
     pg_statement_timeout_seconds: float = Field(default=30.0, ge=0)
 
 
 class HpcSettings(BaseSettings):
     """QM job timeouts, the mock-HPC spine, and the real Nextflow launcher (plan 1.2–1.4, F5).
 
-    Grouped because the qm_* and hpc_* knobs describe one execution path — the QM
-    activities and the HPC backend they dispatch to — and the poll/heartbeat
-    relationship between them is validated here, in the section that owns it.
+    Grouped because the qm_* and hpc_* knobs describe one execution path — the QM activities and the
+    HPC backend they dispatch to — and the poll/heartbeat relationship between them is validated
+    here, in the section that owns it.
     """
 
-    # QM job timeouts and mock-HPC timing (plan steps 1.2–1.4). Times are in
-    # seconds. The "mock_*" values only shape the simulated HPC job's duration
-    # so the durable path is observable; they vanish when a real backend lands.
+    # QM job timeouts and mock-HPC timing (plan steps 1.2–1.4). Times are in seconds. The "mock_*"
+    # values only shape the simulated HPC job's duration so the durable path is observable; they
+    # vanish when a real backend lands.
     qm_activity_timeout_seconds: float = Field(default=30.0, gt=0)
-    # Heartbeat timeout for the long-running poll: if a worker dies, Temporal
-    # waits at most this long before retrying the activity on another worker.
+    # Heartbeat timeout for the long-running poll: if a worker dies, Temporal waits at most this
+    # long before retrying the activity on another worker.
     qm_poll_heartbeat_timeout_seconds: float = Field(default=10.0, gt=0)
-    # How often the poll loop heartbeats / re-checks the (mock) scheduler. Must be
-    # positive — a zero interval would make the poll loop never advance.
+    # How often the poll loop heartbeats / re-checks the (mock) scheduler. Must be positive — a zero
+    # interval would make the poll loop never advance.
     hpc_poll_interval_seconds: float = Field(default=2.0, gt=0)
     # Simulated submission latency and total run time of the mock HPC job.
     hpc_mock_submit_seconds: float = Field(default=1.0, gt=0)
@@ -239,10 +238,10 @@ class HpcSettings(BaseSettings):
     # the activity's shared retry budget — the loop just polls again next interval — while a
     # persistently broken launcher still surfaces within roughly this many poll intervals.
     hpc_poll_max_consecutive_errors: int = Field(default=30, ge=1)
-    # Bearer token for the artifact store when it lives on a different origin than the launcher:
-    # the launcher token must never be sent to a third host (F4 three-secret model). Empty means
-    # the artifact fetch is unauthenticated — unless the store shares the launcher's origin, in
-    # which case the launcher token still applies.
+    # Bearer token for the artifact store when it lives on a different origin than the launcher: the
+    # launcher token must never be sent to a third host (F4 three-secret model). Empty means the
+    # artifact fetch is unauthenticated — unless the store shares the launcher's origin, in which
+    # case the launcher token still applies.
     hpc_artifact_store_token: str = ""
     # The HPC/Nextflow identity bridge (plan F4-T6, §7.2): the other non-Entra bridge. HPC is not an
     # Entra relying party, so user jobs run under one service identity while the requesting Entra
@@ -254,10 +253,10 @@ class HpcSettings(BaseSettings):
     def _poll_faster_than_heartbeat(self) -> Self:
         """The poll loop must beat faster than Temporal's heartbeat timeout.
 
-        Otherwise every `poll_hpc_status` activity is declared dead between two
-        heartbeats and retried in a loop — a mis-set interval must fail at startup.
-        The `nextflow` backend heartbeats on the same interval but against its own
-        `hpc_run_heartbeat_timeout_seconds`, so that pair is checked when selected.
+        Otherwise every `poll_hpc_status` activity is declared dead between two heartbeats and
+        retried in a loop — a mis-set interval must fail at startup. The `nextflow` backend
+        heartbeats on the same interval but against its own `hpc_run_heartbeat_timeout_seconds`, so
+        that pair is checked when selected.
         """
         if self.hpc_poll_interval_seconds >= self.qm_poll_heartbeat_timeout_seconds:
             raise ValueError(
@@ -278,8 +277,8 @@ class HpcSettings(BaseSettings):
         """`nextflow` needs the launcher endpoint, pipeline, and artifact store to be set.
 
         Checked at startup (mirroring `_llm_provider_config`) so a half-configured backend
-        fails here with a clear message rather than as an opaque httpx protocol error five
-        retried activity attempts deep in the first QM job. The `mock` dev path needs none.
+        fails here with a clear message rather than as an opaque httpx protocol error five retried
+        activity attempts deep in the first QM job. The `mock` dev path needs none.
         """
         if self.hpc_launch_interface == "nextflow":
             required = (
@@ -298,50 +297,48 @@ class HpcSettings(BaseSettings):
 class CalculatorSettings(BaseSettings):
     """The fast local calculators: xTB, the pKa predictor, and the solubility model.
 
-    Grouped because these knobs define the calculators' scientific parameters,
-    and most of them enter the calculation cache key — changing one is a
-    deliberate recompute, never a silent drift.
+    Grouped because these knobs define the calculators' scientific parameters, and most of them
+    enter the calculation cache key — changing one is a deliberate recompute, never a silent drift.
     """
 
-    # xTB semiempirical calculator (plan step 1c.2). Method is the GFN parametrization
-    # (latest: GFN2-xTB). `xtb_embed_seed` fixes RDKit 3D embedding so results are
-    # reproducible; it is part of the cache key so changing it recomputes.
+    # xTB semiempirical calculator (plan step 1c.2). Method is the GFN parametrization (latest:
+    # GFN2-xTB). `xtb_embed_seed` fixes RDKit 3D embedding so results are reproducible; it is part
+    # of the cache key so changing it recomputes.
     xtb_method: str = "GFN2-xTB"
     xtb_embed_seed: int = 42
 
-    # xTB-based pKa predictor (plan step 1c.4): pKa from the GFN2-xTB solvated
-    # (ALPB) deprotonation energy via a linear calibration pKa = slope*dE + intercept.
-    # Defaults fitted over 10 reference O-H acids (R^2 0.93, residual ~1.6 pKa units);
-    # recalibrate against a proper dataset before production. Changing any of these
-    # invalidates the cache (they are part of the key).
+    # xTB-based pKa predictor (plan step 1c.4): pKa from the GFN2-xTB solvated (ALPB) deprotonation
+    # energy via a linear calibration pKa = slope*dE + intercept. Defaults fitted over 10 reference
+    # O-H acids (R^2 0.93, residual ~1.6 pKa units); recalibrate against a proper dataset before
+    # production. Changing any of these invalidates the cache (they are part of the key).
     pka_solvent: str = "water"
     pka_calibration_slope: float = 0.28733
     pka_calibration_intercept: float = -29.3116
     pka_uncertainty: float = 1.6
-    # Reported log-S RMSE of the Reizman-descriptor solubility model (calc step 1c.3):
-    # model uncertainty attached to every prediction, config like `pka_uncertainty`.
+    # Reported log-S RMSE of the Reizman-descriptor solubility model (calc step 1c.3): model
+    # uncertainty attached to every prediction, config like `pka_uncertainty`.
     solubility_rmse_log: float = 0.75
 
 
 class BoSettings(BaseSettings):
     """Durable BoFire BO campaigns (plan step 1d.4).
 
-    Grouped because these three knobs shape one thing: how a Bayesian-optimization
-    campaign runs durably — its per-round activity budget, reproducibility seed,
-    and the round ceiling that protects Temporal's event-history limit.
+    Grouped because these three knobs shape one thing: how a Bayesian-optimization campaign runs
+    durably — its per-round activity budget, reproducibility seed, and the round ceiling that
+    protects Temporal's event-history limit.
     """
 
-    # A single round (BoFire propose + evaluate) can be slow, so activities get a
-    # generous start-to-close budget.
+    # A single round (BoFire propose + evaluate) can be slow, so activities get a generous
+    # start-to-close budget.
     bo_activity_timeout_seconds: float = Field(default=300.0, gt=0)
     # Seed for BoFire's random design + SOBO strategies, so a campaign is reproducible
     # (deterministic seeding + proposals) rather than flaky run-to-run.
     bo_seed: int = 42
-    # Ceiling on a campaign spec's round count. The observation history is carried as workflow
-    # state and re-sent to the propose activity every round, so history bytes grow quadratically
-    # with rounds and an unbounded spec would hit Temporal's hard event-history limit mid-run,
-    # losing every already-paid evaluation. Generous versus the default of 10 rounds; a spec
-    # beyond it is rejected at build time, not terminated by the server mid-campaign.
+    # Ceiling on a campaign spec's round count. The observation history is carried as workflow state
+    # and re-sent to the propose activity every round, so history bytes grow quadratically with
+    # rounds and an unbounded spec would hit Temporal's hard event-history limit mid-run, losing
+    # every already-paid evaluation. Generous versus the default of 10 rounds; a spec beyond it is
+    # rejected at build time, not terminated by the server mid-campaign.
     bo_max_rounds: int = Field(default=500, ge=1)
 
 
@@ -351,21 +348,21 @@ class LlmSettings(BaseSettings):
     Grouped because these knobs configure the one internal (or dev-Anthropic)
     endpoint and its uses: chat generation, per-task model routing (F10-E), the
     LLM-as-judge verifier (F10-B), and the embedding path (F10-A) — which reuses
-    the LLM base_url/credential/TLS, so its provider knobs and the validator
-    tying it to `llm_base_url` live here, in the section that owns that link.
+    the LLM base_url/credential/TLS, so its provider knobs and the validator tying it to
+    `llm_base_url` live here, in the section that owns that link.
     """
 
     # The agent's chat client is selected by config, so the deployment can point the agent at the
     # internal OpenAI-compatible ("OpenLLM-like") endpoint without any code change, keeping
-    # Anthropic as a local-dev path. `openai_compatible` reaches the endpoint with **one generic
-    # API credential** (`llm_api_key`) — deliberately *not* per-user Entra: the raw inference call
-    # is not a user-scoped resource (see docs/foundation-plan.md §0). `llm_base_url`/`llm_model`
-    # are required for `openai_compatible` (validated below); the TLS CA bundle, timeout, and
-    # retry budget shape the transport so an internal endpoint with a private CA works from config
-    # alone. `llm_temperature`/`llm_max_tokens` are the default generation params threaded into
-    # the agent (F0.3). The default provider is `anthropic` so a fresh checkout config singleton
-    # is valid with no endpoint set; production sets `CHEMCLAW_LLM_PROVIDER=openai_compatible` +
-    # the base_url/model. No provider client class is imported outside `agents/llm_provider.py`.
+    # Anthropic as a local-dev path. `openai_compatible` reaches the endpoint with **one generic API
+    # credential** (`llm_api_key`) — deliberately *not* per-user Entra: the raw inference call is
+    # not a user-scoped resource (see docs/foundation-plan.md §0). `llm_base_url`/`llm_model` are
+    # required for `openai_compatible` (validated below); the TLS CA bundle, timeout, and retry
+    # budget shape the transport so an internal endpoint with a private CA works from config alone.
+    # `llm_temperature`/`llm_max_tokens` are the default generation params threaded into the agent
+    # (F0.3). The default provider is `anthropic` so a fresh checkout config singleton is valid with
+    # no endpoint set; production sets `CHEMCLAW_LLM_PROVIDER=openai_compatible` + the
+    # base_url/model. No provider client class is imported outside `agents/llm_provider.py`.
     llm_provider: Literal["openai_compatible", "anthropic"] = "anthropic"
     llm_base_url: str = ""
     llm_model: str = ""
@@ -385,8 +382,8 @@ class LlmSettings(BaseSettings):
     # CHEMCLAW_MODEL_ROUTES='{"verifier": "internal-small", "agent": "internal-large"}'.
     model_routes: dict[str, str] = Field(default_factory=dict)
     # Answer verification & confidence routing (plan F10-B). When `verifier_enabled`, a drafted
-    # answer is checked for citation faithfulness by an LLM-as-judge on the cheap routed model
-    # (task `"verifier"`, F10-E): each factual claim is scored against the evidence it cites, and an
+    # answer is checked for citation faithfulness by an LLM-as-judge on the cheap routed model (task
+    # `"verifier"`, F10-E): each factual claim is scored against the evidence it cites, and an
     # aggregate `confidence` in [0,1] is returned. An answer scoring below
     # `verifier_confidence_threshold` is flagged for human review (the confidence + the unsupported
     # claims ride on the turn's `AnswerEvent`), reusing the existing D-032 hold — no new gate. When
@@ -395,12 +392,11 @@ class LlmSettings(BaseSettings):
     verifier_enabled: bool = False
     verifier_confidence_threshold: float = Field(default=0.7, ge=0, le=1)
     # Embedding provider (plan F10-A). Selects how a note/query is embedded: `hash` is a
-    # deterministic, offline, dependency-free feature-hash (dev/CI only — token-overlap
-    # similarity, NOT neural-semantic); `openai_compatible` calls the internal endpoint's
-    # `/embeddings` route (`embedding_model`), reusing the LLM base_url/credential/TLS transport.
-    # `embedding_dim` must match both the model's output width and the `note_index.embedding`
-    # column (`vector(N)` in infra/sql/012) — changing it is a new migration, like the fingerprint
-    # bit width.
+    # deterministic, offline, dependency-free feature-hash (dev/CI only — token-overlap similarity,
+    # NOT neural-semantic); `openai_compatible` calls the internal endpoint's `/embeddings` route
+    # (`embedding_model`), reusing the LLM base_url/credential/TLS transport. `embedding_dim` must
+    # match both the model's output width and the `note_index.embedding` column (`vector(N)` in
+    # infra/sql/012) — changing it is a new migration, like the fingerprint bit width.
     embedding_provider: Literal["hash", "openai_compatible"] = "hash"
     embedding_model: str = ""
     embedding_dim: int = Field(default=1536, gt=0)
@@ -409,8 +405,8 @@ class LlmSettings(BaseSettings):
     def _llm_provider_config(self) -> Self:
         """`openai_compatible` needs an endpoint and a model, or the client cannot be built.
 
-        Checked at startup so a half-configured provider fails here with a clear message rather
-        than as an opaque connection/404 error on the first model call. The `anthropic` dev path
+        Checked at startup so a half-configured provider fails here with a clear message rather than
+        as an opaque connection/404 error on the first model call. The `anthropic` dev path
         needs neither (it reads its key/model elsewhere), so the check is provider-scoped.
         """
         if self.llm_provider == "openai_compatible":
@@ -448,26 +444,26 @@ class LlmSettings(BaseSettings):
 class AgentSettings(BaseSettings):
     """The MAF conversational agent: model, skills, capabilities, compaction, harness.
 
-    Grouped because everything here shapes how `build_agent` assembles one agent —
-    which model orchestrates, which skills and MCP capability servers attach,
-    how the conversation context is compacted, and whether the autonomous
+    Grouped because everything here shapes how `build_agent` assembles one agent — which model
+    orchestrates, which skills and MCP capability servers attach, how the conversation context is
+    compacted, and whether the autonomous
     plan/execute harness (Phase F1) wraps it.
     """
 
-    # MAF agent (plan step 1.5). `agent_model` is the orchestration model name
-    # (ENV-overridable); the provider's API key is read by the chat client from
-    # its own env var (e.g. ANTHROPIC_API_KEY), not stored here. `skills_dir` is
-    # where the agent discovers SKILL.md files — one or more directories, delimited by the
-    # OS path separator (like PATH), so an admin can add a second (e.g. team-private) skills
-    # directory without code changes. Read it through the `skills_dirs` property, never raw.
+    # MAF agent (plan step 1.5). `agent_model` is the orchestration model name (ENV-overridable);
+    # the provider's API key is read by the chat client from its own env var (e.g.
+    # ANTHROPIC_API_KEY), not stored here. `skills_dir` is where the agent discovers SKILL.md files
+    # — one or more directories, delimited by the OS path separator (like PATH), so an admin can add
+    # a second (e.g. team-private) skills directory without code changes. Read it through the
+    # `skills_dirs` property, never raw.
     agent_model: str = "claude-sonnet-5"
     skills_dir: str = "skills"
     # Which discovered skills are actually advertised — discovery is not enablement. Empty (the
     # default) means every skill found under `skills_dir` is active, i.e. today's behavior. A
     # non-empty pathsep list narrows to exactly those names, so a deployment can ship the whole
     # skills tree and turn on the subset it has validated, without deleting folders. This only
-    # *attenuates*: it cannot advertise a skill that no directory provides, and the role gates
-    # below still apply on top. `make skill-validate` reports a name here that no dir provides.
+    # *attenuates*: it cannot advertise a skill that no directory provides, and the role gates below
+    # still apply on top. `make skill-validate` reports a name here that no dir provides.
     skills_enabled: str = ""
     # Role-scoped skill visibility (plan step 6.2): map a skill name to the Entra app-roles allowed
     # to see it. A skill not listed is ungated (advertised to everyone); a listed skill is hidden
@@ -476,24 +472,23 @@ class AgentSettings(BaseSettings):
     # CHEMCLAW_SKILL_ROLE_GATES='{"deep-research": ["process-chemist"]}'.
     skill_role_gates: dict[str, list[str]] = Field(default_factory=dict)
     # Conversation context management (MAF compaction). The agent keeps a session thread and
-    # composes tool calls that return large payloads (evidence sweeps, full ELN recipes), so a
-    # long chat would grow unbounded. Compaction runs only when the included context exceeds
-    # `agent_context_token_budget` (measured with a char/4 estimator — no external tokenizer),
-    # then reclaims tokens cheapest-first: collapse stale tool-result dumps to a short trace
-    # (keeping the newest `agent_keep_last_tool_groups` verbatim), then drop older conversation
-    # turns beyond `agent_keep_last_conversation_groups`. System instructions/skills are always
-    # kept. No LLM summarizer — deterministic and credential-free.
+    # composes tool calls that return large payloads (evidence sweeps, full ELN recipes), so a long
+    # chat would grow unbounded. Compaction runs only when the included context exceeds
+    # `agent_context_token_budget` (measured with a char/4 estimator — no external tokenizer), then
+    # reclaims tokens cheapest-first: collapse stale tool-result dumps to a short trace (keeping the
+    # newest `agent_keep_last_tool_groups` verbatim), then drop older conversation turns beyond
+    # `agent_keep_last_conversation_groups`. System instructions/skills are always kept. No LLM
+    # summarizer — deterministic and credential-free.
     agent_context_token_budget: int = Field(default=100_000, ge=1)
     agent_keep_last_tool_groups: int = Field(default=2, ge=0)
     agent_keep_last_conversation_groups: int = Field(default=12, ge=1)
 
-    # Local testing CLI (`agents.cli`). The CLI is a developer affordance for driving the agent
-    # from a terminal; the production ingress is Teams/Copilot with native Entra-ID SSO
-    # (architektur.md §7), not this. Because Entra enforcement defaults off in dev
-    # (`entra_required=False`), the CLI can only run in explicit `--admin` mode, which bypasses
-    # auth for testing and attributes the audit trail to this actor. It is a config value (not a
-    # hardcoded string) so a deployment can label its test runs — e.g. a machine name — rather
-    # than a generic "admin".
+    # Local testing CLI (`agents.cli`). The CLI is a developer affordance for driving the agent from
+    # a terminal; the production ingress is Teams/Copilot with native Entra-ID SSO (architektur.md
+    # §7), not this. Because Entra enforcement defaults off in dev (`entra_required=False`), the CLI
+    # can only run in explicit `--admin` mode, which bypasses auth for testing and attributes the
+    # audit trail to this actor. It is a config value (not a hardcoded string) so a deployment can
+    # label its test runs — e.g. a machine name — rather than a generic "admin".
     cli_admin_actor: str = "admin@localhost"
 
     # MAF Agent Harness (plan Phase F1) — the autonomous plan/execute backbone (the Claude-Code-like
@@ -539,13 +534,13 @@ class ServiceSettings(BaseSettings):
     budgets), and how durable sessions + job push-back reach the browser.
     """
 
-    # The ASGI service that actually *runs* the agent for a chemist: it builds the agent, opens
-    # the MCP tool lifecycle for the turn, streams the response, and serves the browser chat
-    # surface. `service_host`/`service_port` bind the server (the OpenShift Route front-ends it,
-    # F6). `service_cors_origins` is a comma-separated allow-list for browser origins that may
-    # call the API (empty = none, the safe default; a same-origin embedded UI needs none). These
-    # are the only front-door knobs; identity/OIDC is layered on in F4.
-    # Binds all interfaces inside the container; the OpenShift Route + NetworkPolicy gate ingress.
+    # The ASGI service that actually *runs* the agent for a chemist: it builds the agent, opens the
+    # MCP tool lifecycle for the turn, streams the response, and serves the browser chat surface.
+    # `service_host`/`service_port` bind the server (the OpenShift Route front-ends it, F6).
+    # `service_cors_origins` is a comma-separated allow-list for browser origins that may call the
+    # API (empty = none, the safe default; a same-origin embedded UI needs none). These are the only
+    # front-door knobs; identity/OIDC is layered on in F4. Binds all interfaces inside the
+    # container; the OpenShift Route + NetworkPolicy gate ingress.
     service_host: str = "0.0.0.0"
     service_port: int = Field(default=8080, gt=0)
     # Explicit opt-in to boot *unauthenticated on a non-loopback bind* (SEC-2). With
@@ -607,8 +602,8 @@ class ServiceSettings(BaseSettings):
     # `budget_enabled`, the front door meters each turn's reported token usage and counts turns per
     # session and per user, refusing (HTTP 429) a turn that would exceed a cap. Caps are per running
     # process and best-effort — they reset on restart, bounding a live process's runaway (the
-    # missing ceiling above the per-turn loop cap), not a durable rolling-window quota (deferred).
-    # A cap of 0 means unlimited on that dimension, so a deployment can enable just the guard it
+    # missing ceiling above the per-turn loop cap), not a durable rolling-window quota (deferred). A
+    # cap of 0 means unlimited on that dimension, so a deployment can enable just the guard it
     # wants; the defaults are generous for a real chemist but finite against a loop. Token metering
     # reads MAF's usage content, so a provider reporting no usage meters 0 and the turn caps bind.
     # Off by default (today's behavior).
@@ -639,21 +634,21 @@ class ServiceSettings(BaseSettings):
 class EntraSettings(BaseSettings):
     """Azure Entra ID identity and authorization (plan Phase F4, F10-C).
 
-    Grouped because identity is one coherent contract: the OIDC fields, the
-    derived JWKS/issuer URLs, the parsed role/action sets, the tool-authz gates,
-    the workload-federation/OBO bridges, and the enforcement validator that
+    Grouped because identity is one coherent contract: the OIDC fields, the derived JWKS/issuer
+    URLs, the parsed role/action sets, the tool-authz gates, the workload-federation/OBO bridges,
+    and the enforcement validator that
     rejects a half-configured deployment — all in one place (kernel review note).
     """
 
     # User auth at the front door is OIDC with Entra as the IdP: the service is an Entra app
-    # registration, and every non-health request carries an Entra JWT that is validated against
-    # the tenant JWKS with the audience checked (the confused-deputy guard — the service is both
-    # OAuth client and resource). `oid`/`upn` + app-roles are extracted into a `Principal` that
-    # authorizes and attributes every backend action. `entra_required` gates enforcement: True in
-    # any real deployment (a missing/invalid token is 401); False only for local dev, where a
-    # stand-in principal runs the app without a tenant. `entra_jwks_url`/`entra_issuer` default
-    # empty and derive from `entra_tenant_id` when set (the standard v2.0 endpoints), so a
-    # deployment sets just tenant + audience + required.
+    # registration, and every non-health request carries an Entra JWT that is validated against the
+    # tenant JWKS with the audience checked (the confused-deputy guard — the service is both OAuth
+    # client and resource). `oid`/`upn` + app-roles are extracted into a `Principal` that authorizes
+    # and attributes every backend action. `entra_required` gates enforcement: True in any real
+    # deployment (a missing/invalid token is 401); False only for local dev, where a stand-in
+    # principal runs the app without a tenant. `entra_jwks_url`/`entra_issuer` default empty and
+    # derive from `entra_tenant_id` when set (the standard v2.0 endpoints), so a deployment sets
+    # just tenant + audience + required.
     entra_required: bool = False
     entra_tenant_id: str = ""
     entra_audience: str = ""
@@ -675,16 +670,15 @@ class EntraSettings(BaseSettings):
     # (`agents.authz.DEFAULT_WRITE_TOOL_GATES`: job launchers and state-mutating tools require an
     # `entra_privileged_roles` role out of the box — an explicit entry here overrides that). The
     # built-in write gate only narrows `"allow"`; it never widens `"deny"`. Enforced only when
-    # `entra_required` (dev gate is open).
-    # ENV override for the gates is JSON, e.g. CHEMCLAW_TOOL_ROLE_GATES='{"submit_qm_job":
-    # ["process-chemist"]}'. Note: `deny` with an empty `tool_role_gates` blocks *all* tools — a
-    # deliberate lockdown, not a footgun to stumble into.
+    # `entra_required` (dev gate is open). ENV override for the gates is JSON, e.g.
+    # CHEMCLAW_TOOL_ROLE_GATES='{"submit_qm_job": ["process-chemist"]}'. Note: `deny` with an empty
+    # `tool_role_gates` blocks *all* tools — a deliberate lockdown, not a footgun to stumble into.
     tool_role_gates: dict[str, list[str]] = Field(default_factory=dict)
     tool_authz_default: Literal["allow", "deny"] = "allow"
-    # The identity a *user-triggered* workflow records when there is no authenticated user
-    # (plan F4-T3). Only reachable in local dev (`entra_required=False`, no tenant) and for
-    # system-triggered jobs; under enforcement `require_actor` rejects an absent user instead
-    # of falling back. Config, not the old magic `"unknown"` literal.
+    # The identity a *user-triggered* workflow records when there is no authenticated user (plan
+    # F4-T3). Only reachable in local dev (`entra_required=False`, no tenant) and for
+    # system-triggered jobs; under enforcement `require_actor` rejects an absent user instead of
+    # falling back. Config, not the old magic `"unknown"` literal.
     service_actor_id: str = "service-account"
     # Workload identity federation (plan F4-T2): a backend pod mints its *own* short-lived Entra
     # token by exchanging its projected ServiceAccount JWT (at `entra_sa_token_path`) via the OAuth2
@@ -734,9 +728,9 @@ class EntraSettings(BaseSettings):
 
         Two footguns the front-door/authorization code cannot catch at request time:
         - an empty `entra_audience` (or no tenant/issuer/JWKS) makes every token rejected — a
-          deny-all availability outage that should surface at startup, not as mysterious 401s.
-          The issuer and the JWKS endpoint derive independently from the tenant, so each needs
-          its own source: an issuer alone cannot resolve the keys endpoint;
+          deny-all availability outage that should surface at startup, not as mysterious 401s. The
+          issuer and the JWKS endpoint derive independently from the tenant, so each needs its own
+          source: an issuer alone cannot resolve the keys endpoint;
         - declaring privileged roles *or* expensive actions but not the other leaves the role gate
           silently open (an action with no expensive-set entry authorizes every user), so the two
           must be set together — set neither to deliberately gate nothing.
@@ -764,48 +758,47 @@ class KgSettings(BaseSettings):
     """The Markdown knowledge graph and its PR-gate (plan Phase 2).
 
     Grouped because these knobs describe the one Git-backed note repository:
-    where notes live, how the GitNoteSubmitter branches/pushes them through the
-    PR-gate, and how long a human-approval hold may pend.
+    where notes live, how the GitNoteSubmitter branches/pushes them through the PR-gate, and how
+    long a human-approval hold may pend.
     """
 
-    # Directory of note files the indexer reads; retrieval is graph traversal
-    # over their [[wikilinks]] (D-004).
+    # Directory of note files the indexer reads; retrieval is graph traversal over their
+    # [[wikilinks]] (D-004).
     knowledge_dir: str = "knowledge"
     # Upper bound on `expand_note`'s link-expansion depth (SEC-4). The tool takes `hops` from the
     # model; an unbounded value would traverse the whole graph. 1–2 is typical; clamp to this so a
     # large value is bounded rather than rejected.
     graph_max_hops: int = Field(default=3, ge=1)
-    # Upper bound on how many notes `find_notes` returns. It is a substring sweep over every
-    # current note, so a broad needle (a single letter, a common element symbol) matches most of
-    # the corpus and an uncapped hit list would flood the model context — the same failure mode
+    # Upper bound on how many notes `find_notes` returns. It is a substring sweep over every current
+    # note, so a broad needle (a single letter, a common element symbol) matches most of the corpus
+    # and an uncapped hit list would flood the model context — the same failure mode
     # `fingerprint_max_top_k` bounds for substructure search. Hitting the cap logs a warning, so a
     # truncated result is never silent (D-066 #4).
     graph_max_results: int = Field(default=50, ge=1)
     # Edge length of a rendered structure depiction (gap TOOL-5). Config, not a magic number, so a
     # deployment whose surface renders larger cards can change it without a code edit.
     structure_render_size_px: int = Field(default=320, gt=0)
-    # PR-gate git settings (plan steps 2.7, 2.8): agent notes branch off this base
-    # branch on this remote before a human merges.
+    # PR-gate git settings (plan steps 2.7, 2.8): agent notes branch off this base branch on this
+    # remote before a human merges.
     note_base_branch: str = "main"
     git_remote: str = "origin"
-    # The checkout the GitNoteSubmitter mutates (`git checkout -B` switches its whole
-    # working tree). Point it at a dedicated clone of the knowledge repo in production;
-    # the "." default only suits a dev checkout with nothing else running in it.
+    # The checkout the GitNoteSubmitter mutates (`git checkout -B` switches its whole working tree).
+    # Point it at a dedicated clone of the knowledge repo in production; the "." default only suits
+    # a dev checkout with nothing else running in it.
     note_repo_dir: str = "."
-    # Publishing a QM result as a graph note is best-effort: bounded attempts + its
-    # own timeout so a persistent failure gives up instead of retrying forever.
+    # Publishing a QM result as a graph note is best-effort: bounded attempts + its own timeout so a
+    # persistent failure gives up instead of retrying forever.
     note_write_timeout_seconds: float = Field(default=120.0, gt=0)
     note_write_max_attempts: int = Field(default=3, ge=1)
-    # Wall-clock bound on a single git command in the PR-gate submitter. A hung
-    # fetch/push (dead remote, credential prompt) is killed after this, so it can
-    # never deadlock the process-wide submit lock; the failed activity then retries.
+    # Wall-clock bound on a single git command in the PR-gate submitter. A hung fetch/push (dead
+    # remote, credential prompt) is killed after this, so it can never deadlock the process-wide
+    # submit lock; the failed activity then retries.
     git_command_timeout_seconds: float = Field(default=60.0, gt=0)
 
-    # How long a confirmed-answer note is held pending a human Yes/No before the
-    # hold expires unpublished (plan step 5.5, async approval seam). The button click
-    # is a Temporal signal into `InteractionApprovalWorkflow`; this bounds the wait so
-    # an unanswered prompt cannot pin a workflow forever. Default 7 days — generous for
-    # an out-of-band review, still finite.
+    # How long a confirmed-answer note is held pending a human Yes/No before the hold expires
+    # unpublished (plan step 5.5, async approval seam). The button click is a Temporal signal into
+    # `InteractionApprovalWorkflow`; this bounds the wait so an unanswered prompt cannot pin a
+    # workflow forever. Default 7 days — generous for an out-of-band review, still finite.
     interaction_approval_timeout_seconds: float = Field(default=604800.0, gt=0)
 
     @model_validator(mode="after")
@@ -813,9 +806,9 @@ class KgSettings(BaseSettings):
         """`knowledge_dir` must be relative to the note repo, never an absolute path.
 
         The PR-gate builds a note path as `Path(note_repo_dir) / knowledge_dir / …`. An
-        absolute `knowledge_dir` would make `Path.__truediv__` discard `note_repo_dir`,
-        so the write would land outside the repo — the containment check then fails the
-        submit, confusingly. Reject it at startup where the message is clear instead.
+        absolute `knowledge_dir` would make `Path.__truediv__` discard `note_repo_dir`, so the write
+        would land outside the repo — the containment check then fails the submit, confusingly.
+        Reject it at startup where the message is clear instead.
         """
         if os.path.isabs(self.knowledge_dir):
             raise ValueError(
@@ -833,27 +826,25 @@ class EvalSettings(BaseSettings):
     floor, the drift job, and the retrieval-quality gate all live here.
     """
 
-    # A metric is a pure function; the green-chemistry limits are dimensionless (kg waste or
-    # input per kg product) and process-dependent — these defaults are lenient gate values,
-    # tune them per chemistry.
-    # Versioned eval case-set. Its own directory, not under `knowledge_dir`: an eval
-    # case is a structured evaluation payload (output/reference), not a relational
-    # note, so it neither uses the note schema nor passes through kg-validate.
+    # A metric is a pure function; the green-chemistry limits are dimensionless (kg waste or input
+    # per kg product) and process-dependent — these defaults are lenient gate values, tune them per
+    # chemistry. Versioned eval case-set. Its own directory, not under `knowledge_dir`: an eval case
+    # is a structured evaluation payload (output/reference), not a relational note, so it neither
+    # uses the note schema nor passes through kg-validate.
     eval_case_dir: str = "evals/cases"
     eval_efactor_max: float = 50.0
     eval_pmi_max: float = 50.0
-    # Absolute error (in the prediction's own unit, e.g. log S) still counted as an
-    # accurate prediction against a held-out reference.
+    # Absolute error (in the prediction's own unit, e.g. log S) still counted as an accurate
+    # prediction against a held-out reference.
     eval_prediction_tolerance: float = 1.0
-    # Noise floor for the per-task tool-utility A/B (plan step 2b.4): a metric delta
-    # within +/- this magnitude counts as "no effect", so tool augmentation is only
-    # credited (or blamed) for changes above measurement noise. One global scalar —
-    # a comparison does not know which metric produced its scores, so set it to the
-    # noisiest metric's floor (per-metric floors need a per-metric parameter first).
-    # The default is a small floating-point floor so runs differing only by rounding
-    # register as "no effect" (a 0.0 default made *every* non-exact-tie helped/hurt,
-    # defeating the band); raise it to the actual measurement noise of the metric a
-    # given case-set exercises.
+    # Noise floor for the per-task tool-utility A/B (plan step 2b.4): a metric delta within +/- this
+    # magnitude counts as "no effect", so tool augmentation is only credited (or blamed) for changes
+    # above measurement noise. One global scalar — a comparison does not know which metric produced
+    # its scores, so set it to the noisiest metric's floor (per-metric floors need a per-metric
+    # parameter first). The default is a small floating-point floor so runs differing only by
+    # rounding register as "no effect" (a 0.0 default made *every* non-exact-tie helped/hurt,
+    # defeating the band); raise it to the actual measurement noise of the metric a given case-set
+    # exercises.
     eval_ab_epsilon: float = Field(default=1e-6, ge=0.0)
     # Eval drift detection (plan F10-F2). A `background-jobs` workflow re-runs the committed
     # case-set on a cadence and alerts when an aggregate metric moves further than a *relative* band
@@ -868,16 +859,16 @@ class EvalSettings(BaseSettings):
     # score in well under this, but a dedicated knob keeps the two jobs' timeouts independent.
     eval_drift_timeout_seconds: float = Field(default=300.0, gt=0)
     eval_baseline_path: str = "evals/baseline.json"
-    # Minimum share of the pinned hazard rules that must still fire on their reference
-    # molecules (`hazard_flag_recall`, D-080). 1.0: the rule table is small enough that one
-    # silently-broken SMARTS means a whole hazard class goes unflagged, which the screen
-    # reports as "nothing matched" — exactly the failure the metric exists to catch.
+    # Minimum share of the pinned hazard rules that must still fire on their reference molecules
+    # (`hazard_flag_recall`, D-080). 1.0: the rule table is small enough that one silently-broken
+    # SMARTS means a whole hazard class goes unflagged, which the screen reports as "nothing
+    # matched" — exactly the failure the metric exists to catch.
     eval_hazard_recall_min: float = Field(default=1.0, ge=0.0, le=1.0)
-    # Retrieval-quality gate (audit KM-13). A gold query→expected-source set scores
-    # `GraphRetriever` over this fixed corpus fixture (a small versioned set of notes, NOT the
-    # live `knowledge_dir`, so the score is reproducible). `retrieval_recall_min` is the floor
-    # the "did we surface the expected evidence?" recall metric gates against — the seam that
-    # catches a substring-filter or evidence-cap change quietly dropping recall.
+    # Retrieval-quality gate (audit KM-13). A gold query→expected-source set scores `GraphRetriever`
+    # over this fixed corpus fixture (a small versioned set of notes, NOT the live `knowledge_dir`,
+    # so the score is reproducible). `retrieval_recall_min` is the floor the "did we surface the
+    # expected evidence?" recall metric gates against — the seam that catches a substring-filter or
+    # evidence-cap change quietly dropping recall.
     eval_retrieval_corpus_dir: str = "evals/retrieval_corpus"
     retrieval_recall_min: float = Field(default=0.75, ge=0.0, le=1.0)
 
@@ -891,15 +882,15 @@ class FingerprintSettings(BaseSettings):
     """
 
     # ECFP4 = Morgan radius 2, 2048 bits; both are config so the fingerprint definition is a
-    # deliberate choice, not a magic number. The similarity threshold is the Tanimoto floor a
-    # match must clear to count as a structural neighbor — the capability exposes it, the
+    # deliberate choice, not a magic number. The similarity threshold is the Tanimoto floor a match
+    # must clear to count as a structural neighbor — the capability exposes it, the
     # `reaction-search` skill decides how to wield it (G6).
     ecfp_radius: int = Field(default=2, ge=0)
     ecfp_bits: int = Field(default=2048, gt=0)
-    # DRFP reaction fingerprint width (plan step 3.4, mcp-rxnfp). Its own field, not shared
-    # with ecfp_bits — a different fingerprint whose folded length is an independent choice,
-    # though both default to 2048 (matching their bit(N) columns). top_k/threshold below are
-    # shared: they are generic fingerprint-search knobs, not molecule-specific.
+    # DRFP reaction fingerprint width (plan step 3.4, mcp-rxnfp). Its own field, not shared with
+    # ecfp_bits — a different fingerprint whose folded length is an independent choice, though both
+    # default to 2048 (matching their bit(N) columns). top_k/threshold below are shared: they are
+    # generic fingerprint-search knobs, not molecule-specific.
     drfp_bits: int = Field(default=2048, gt=0)
     fingerprint_top_k: int = Field(default=10, ge=1)
     fingerprint_similarity_threshold: float = Field(default=0.3, ge=0.0, le=1.0)
@@ -908,18 +899,18 @@ class FingerprintSettings(BaseSettings):
     # arbitrarily large value would be an unbounded query. Clamp it to this — the fingerprint-search
     # analog of the `graph_max_hops` clamp on `expand_note`. Generous for a real neighbor list.
     fingerprint_max_top_k: int = Field(default=100, ge=1)
-    # Bound on how many stored fingerprints one substructure scan materializes (SEC-4). The scan
-    # has no similarity prefilter, so it loads records and RDKit-matches each; without a cap a
-    # large corpus is a full-table load into the worker heap (the 30s statement_timeout bounds DB
-    # time, not rows returned). The scan takes at most this many rows (deterministic id order) and
-    # logs a warning when it hits the cap so a truncated result is never silent. Raise it for a
-    # larger corpus, or add a pattern-fingerprint prefilter (deferred) when it starts truncating.
+    # Bound on how many stored fingerprints one substructure scan materializes (SEC-4). The scan has
+    # no similarity prefilter, so it loads records and RDKit-matches each; without a cap a large
+    # corpus is a full-table load into the worker heap (the 30s statement_timeout bounds DB time,
+    # not rows returned). The scan takes at most this many rows (deterministic id order) and logs a
+    # warning when it hits the cap so a truncated result is never silent. Raise it for a larger
+    # corpus, or add a pattern-fingerprint prefilter (deferred) when it starts truncating.
     substructure_scan_max_records: int = Field(default=5000, gt=0)
-    # Bound on the length of a model-supplied substructure query string (SEC-4). SMARTS
-    # matching is subgraph isomorphism (worst-case exponential) run in-process over the
-    # scanned corpus with no statement_timeout analog, so a pathological multi-KB pattern
-    # could pin the server. Real pharmacophore/functional-group SMARTS run tens to a few
-    # hundred characters; 500 leaves generous headroom while rejecting degenerate input.
+    # Bound on the length of a model-supplied substructure query string (SEC-4). SMARTS matching is
+    # subgraph isomorphism (worst-case exponential) run in-process over the scanned corpus with no
+    # statement_timeout analog, so a pathological multi-KB pattern could pin the server. Real
+    # pharmacophore/functional-group SMARTS run tens to a few hundred characters; 500 leaves
+    # generous headroom while rejecting degenerate input.
     substructure_query_max_length: int = Field(default=500, gt=0)
     # Wall-clock bound on one substructure scan's matching work (SEC-4, completing the guard above).
     # Length and record caps bound the *inputs*, but a short adversarial recursive SMARTS can still
@@ -935,9 +926,9 @@ class FingerprintSettings(BaseSettings):
 class ElnSettings(BaseSettings):
     """ELN ingestion (plan Phase 4): the export adapters and the durable sync loop.
 
-    Grouped because these knobs shape one ingestion pipeline: where the JSON/ORD
-    exports land, how the cursor-driven sync batches/overlaps/heartbeats, and
-    how often its Temporal Schedule fires. ELN-specific format lives only in the
+    Grouped because these knobs shape one ingestion pipeline: where the JSON/ORD exports land, how
+    the cursor-driven sync batches/overlaps/heartbeats, and how often its Temporal Schedule fires.
+    ELN-specific format lives only in the
     adapter, never in config (G6).
     """
 
@@ -945,37 +936,36 @@ class ElnSettings(BaseSettings):
     # timeout bounds one batch of fetch+validate+index+PR-gate work.
     eln_export_dir: str = "eln/exports"
     eln_sync_timeout_seconds: float = Field(default=300.0, gt=0)
-    # The sync fetches from this far *behind* its high-water cursor, so an export file that
-    # lands late with an older payload timestamp (an upstream export-job retry) is still
-    # picked up instead of being silently dropped forever. Re-fetching the window is safe
-    # and cheap because ingestion is idempotent; one day covers routine export retries —
-    # anything later needs a manual backfill (explicit `since`).
+    # The sync fetches from this far *behind* its high-water cursor, so an export file that lands
+    # late with an older payload timestamp (an upstream export-job retry) is still picked up instead
+    # of being silently dropped forever. Re-fetching the window is safe and cheap because ingestion
+    # is idempotent; one day covers routine export retries — anything later needs a manual backfill
+    # (explicit `since`).
     eln_sync_overlap_seconds: float = Field(default=86400.0, ge=0)
-    # An entry stamped further than this beyond the wall clock is rejected, not ingested: a
-    # typo'd future year would otherwise become the persisted high-water cursor and silently
-    # skip every later real entry (no code path ever lowers a stored cursor). One day
-    # tolerates clock skew and timezone mishaps while catching implausible timestamps.
+    # An entry stamped further than this beyond the wall clock is rejected, not ingested: a typo'd
+    # future year would otherwise become the persisted high-water cursor and silently skip every
+    # later real entry (no code path ever lowers a stored cursor). One day tolerates clock skew and
+    # timezone mishaps while catching implausible timestamps.
     eln_sync_future_tolerance_seconds: float = Field(default=86400.0, ge=0)
-    # Bounds one sync activity attempt's *new* work: at most this many entries newer than the
-    # cursor are ingested per attempt, and the workflow loops chunk by chunk, persisting the
-    # advanced cursor after each one — so an arbitrarily large backlog makes bounded forward
-    # progress instead of timing out one giant attempt forever. Entries inside the overlap
-    # window re-ingest idempotently and do not count against the bound. Sized so a full chunk
-    # of per-entry PR-gate pushes fits comfortably inside `eln_sync_timeout_seconds`.
+    # Bounds one sync activity attempt's *new* work: at most this many entries newer than the cursor
+    # are ingested per attempt, and the workflow loops chunk by chunk, persisting the advanced
+    # cursor after each one — so an arbitrarily large backlog makes bounded forward progress instead
+    # of timing out one giant attempt forever. Entries inside the overlap window re-ingest
+    # idempotently and do not count against the bound. Sized so a full chunk of per-entry PR-gate
+    # pushes fits comfortably inside `eln_sync_timeout_seconds`.
     eln_sync_batch_size: int = Field(default=100, ge=1)
-    # Dead-worker detection for the (long-running) sync activity: it heartbeats while it
-    # ingests, so Temporal notices a dead worker within this window instead of waiting out
-    # the whole `eln_sync_timeout_seconds` start-to-close before retrying elsewhere.
+    # Dead-worker detection for the (long-running) sync activity: it heartbeats while it ingests, so
+    # Temporal notices a dead worker within this window instead of waiting out the whole
+    # `eln_sync_timeout_seconds` start-to-close before retrying elsewhere.
     eln_sync_heartbeat_timeout_seconds: float = Field(default=60.0, gt=0)
-    # A second concrete adapter reads native Open Reaction Database messages (human-readable
-    # ORD JSON) from this directory — the "structured recipe" path, alongside the free-text
-    # JSON export above. Same `ElnAdapter` contract, so both flow through the one sync loop.
+    # A second concrete adapter reads native Open Reaction Database messages (human-readable ORD
+    # JSON) from this directory — the "structured recipe" path, alongside the free-text JSON export
+    # above. Same `ElnAdapter` contract, so both flow through the one sync loop.
     ord_export_dir: str = "eln/exports/ord"
-    # Temporal Schedule cadence for the ELN sync (`scripts/schedules.py`, applied by
-    # `make schedules-apply`). The sync is self-cursoring (loads/stores its high-water mark in
-    # `sync_cursors`), so its Schedule passes no argument. Schedules live in Temporal
-    # (durability there, not host cron); overridable so a deployment tunes cadence without
-    # code change.
+    # Temporal Schedule cadence for the ELN sync (`scripts/schedules.py`, applied by `make
+    # schedules-apply`). The sync is self-cursoring (loads/stores its high-water mark in
+    # `sync_cursors`), so its Schedule passes no argument. Schedules live in Temporal (durability
+    # there, not host cron); overridable so a deployment tunes cadence without code change.
     eln_sync_schedule_minutes: float = Field(default=60.0, gt=0)
 
 
@@ -984,20 +974,20 @@ class SourcesSettings(BaseSettings):
 
     Its own section because the seam is deliberately source-agnostic — adding a
     source (first live one: a custom Snowflake ELN connector) is one registry
-    entry + one key here, zero core edits — so it belongs to neither the ELN
-    section nor the retrieval section alone.
+    entry + one key here, zero core edits — so it belongs to neither the ELN section nor the
+    retrieval section alone.
     """
 
     # A comma list of `sources.registry` keys. `graph` is the knowledge-graph retriever
     # (retrieve-only); `eln-json`/`eln-ord` re-host the ELN adapters (ingest-only).
     # `active_retrieve_sources()` feeds `gather_evidence`, so the default keeps today's
-    # exactly-one-graph-retriever behavior; `active_ingest_sources()` feeds the ELN sync,
-    # defaulting to the JSON adapter as before.
+    # exactly-one-graph-retriever behavior; `active_ingest_sources()` feeds the ELN sync, defaulting
+    # to the JSON adapter as before.
     data_sources: str = "graph,eln-json"
 
-    # Config-carrying data sources (typed, discriminated on `type`), additive to `data_sources`.
-    # A `DataSourceSpec` both names a source and nests its per-instance config (e.g. a JSON/ORD
-    # ELN's own `export_dir`), so two instances of one type with different directories coexist —
+    # Config-carrying data sources (typed, discriminated on `type`), additive to `data_sources`. A
+    # `DataSourceSpec` both names a source and nests its per-instance config (e.g. a JSON/ORD ELN's
+    # own `export_dir`), so two instances of one type with different directories coexist —
     # impossible with the single global `eln_export_dir`. Keyless/default sources stay in the
     # `data_sources` comma list; this list is only for sources that carry their own config. Each
     # name is a registry key and a per-source cursor key, so names are unique across both tokens.
@@ -1092,18 +1082,18 @@ class MemorySettings(BaseSettings):
     jobs' timeout and Schedule cadence.
     """
 
-    # The semantic layer distils a playbook only from reactions whose DRFP similarity clears
-    # this floor and that recur across >=2 projects — higher than the search floor, since a
-    # playbook claims "same transformation", not just "related".
+    # The semantic layer distils a playbook only from reactions whose DRFP similarity clears this
+    # floor and that recur across >=2 projects — higher than the search floor, since a playbook
+    # claims "same transformation", not just "related".
     playbook_similarity_threshold: float = Field(default=0.5, ge=0.0, le=1.0)
     # The episodic layer groups an *optimization campaign* — repeated runs of the **same
-    # transformation** (a screen varying conditions/reagents) — by DRFP similarity. Higher than
-    # the playbook floor: an optimization series is the same reaction re-run, not merely related
+    # transformation** (a screen varying conditions/reagents) — by DRFP similarity. Higher than the
+    # playbook floor: an optimization series is the same reaction re-run, not merely related
     # chemistry, so the grouping must be tight to avoid merging distinct transformations.
     optimization_similarity_threshold: float = Field(default=0.7, ge=0.0, le=1.0)
     memory_job_timeout_seconds: float = Field(default=300.0, gt=0)
-    # Temporal Schedule cadence for the memory-synthesis jobs (`scripts/schedules.py`): they
-    # re-scan the whole corpus, so they run less often than the cursor-driven ELN sync.
+    # Temporal Schedule cadence for the memory-synthesis jobs (`scripts/schedules.py`): they re-scan
+    # the whole corpus, so they run less often than the cursor-driven ELN sync.
     memory_synthesis_schedule_minutes: float = Field(default=1440.0, gt=0)
     # Fraction of a Schedule's interval used as a deterministic per-job phase offset (gap SCH-3).
     # The memory jobs share one cadence and each re-scans the whole corpus, so without an offset
@@ -1121,16 +1111,16 @@ class MemorySettings(BaseSettings):
     retention_session_events_days: int = Field(default=0, ge=0)
     retention_session_messages_days: int = Field(default=0, ge=0)
     # Scheduled verification of the tamper-evident audit chain (gap SCH-5). A chain checked only by
-    # a manual `make audit-verify` detects tampering only when someone remembers to look. Only
-    # earns a Schedule where a durable audit sink is actually configured.
+    # a manual `make audit-verify` detects tampering only when someone remembers to look. Only earns
+    # a Schedule where a durable audit sink is actually configured.
     audit_verify_enabled: bool = False
     audit_verify_schedule_minutes: float = Field(default=1440.0, gt=0)
     audit_verify_timeout_seconds: float = Field(default=600.0, gt=0)
     # Mid-turn durable-job resume (gap AGT-2): when a turn launches a durable job, wait this long
     # for its result and continue the *same* turn with it, so "compute this, then reason about the
-    # result" is one exchange. Off by default — holding a turn open holds an admission permit, so
-    # a deployment opts in deliberately. Must stay below `service_turn_timeout_seconds`, which
-    # bounds the whole streamed turn regardless.
+    # result" is one exchange. Off by default — holding a turn open holds an admission permit, so a
+    # deployment opts in deliberately. Must stay below `service_turn_timeout_seconds`, which bounds
+    # the whole streamed turn regardless.
     mid_turn_resume_enabled: bool = False
     mid_turn_resume_timeout_seconds: float = Field(default=60.0, gt=0)
     # Predicted-vs-actual calibration ledger (gap IDEA-2). Off by default: it needs the
@@ -1156,19 +1146,19 @@ class RetrievalSettings(BaseSettings):
 
     Grouped because these knobs tune how evidence reaches the agent: the hybrid
     (dense/lexical) retrievers' bounds and fusion mode, the sweep's chunk cap
-    and rank-before-truncate scoring, the shared note-excerpt budget, and the
-    parsed-graph cache. The embedding *provider* knobs live in the LLM section
+    and rank-before-truncate scoring, the shared note-excerpt budget, and the parsed-graph cache.
+    The embedding *provider* knobs live in the LLM section
     (they ride the LLM transport); these are the retrieval-behavior knobs.
     """
 
-    # Dense-embedding and lexical (Postgres FTS) retrievers complement the graph/fingerprint
-    # search as *entry points* into graph traversal (D-004: the git-markdown graph stays the
-    # source of truth, embeddings are a derived index). They attach through the F7 data-source
-    # registry (`data_sources`), so the enable switch is registry membership, not a second
-    # boolean. `retrieval_top_k` bounds each new retriever's hits. `retrieval_mode` picks how
+    # Dense-embedding and lexical (Postgres FTS) retrievers complement the graph/fingerprint search
+    # as *entry points* into graph traversal (D-004: the git-markdown graph stays the source of
+    # truth, embeddings are a derived index). They attach through the F7 data-source registry
+    # (`data_sources`), so the enable switch is registry membership, not a second boolean.
+    # `retrieval_top_k` bounds each new retriever's hits. `retrieval_mode` picks how
     # `gather_evidence` combines sources: `graph` (default) keeps today's flat union + dedup;
-    # `hybrid` fuses the per-source rankings by Reciprocal Rank Fusion (`retrieval_fusion_k` is
-    # the RRF constant) so a note surfaced by any single source rises, then graph expansion
+    # `hybrid` fuses the per-source rankings by Reciprocal Rank Fusion (`retrieval_fusion_k` is the
+    # RRF constant) so a note surfaced by any single source rises, then graph expansion
     # (expand_note) remains the reasoning path.
     retrieval_top_k: int = Field(default=8, gt=0)
     retrieval_mode: Literal["graph", "hybrid"] = "graph"
@@ -1177,16 +1167,16 @@ class RetrievalSettings(BaseSettings):
     # for combining heterogeneous *rankers* and wrong for combining heterogeneous *evidence
     # classes*: a validated internal ELN entry and a transferred analogy otherwise fuse identically.
     # Keys are retriever names as they appear on `EvidenceChunk.retriever`; an absent retriever
-    # weighs 1.0, and an empty map (the default) is exactly today's uniform behavior.
-    # ENV override is JSON, e.g. CHEMCLAW_RETRIEVAL_SOURCE_WEIGHTS='{"graph": 1.5, "vector": 0.8}'.
+    # weighs 1.0, and an empty map (the default) is exactly today's uniform behavior. ENV override
+    # is JSON, e.g. CHEMCLAW_RETRIEVAL_SOURCE_WEIGHTS='{"graph": 1.5, "vector": 0.8}'.
     retrieval_source_weights: dict[str, float] = Field(default_factory=dict)
-    # How much of a source note's body an excerpt carries — shared by the report harness's
-    # evidence excerpts and the memory layer's procedure excerpts (one note-excerpt budget,
-    # neutral name since both consume it), so the two cannot drift.
+    # How much of a source note's body an excerpt carries — shared by the report harness's evidence
+    # excerpts and the memory layer's procedure excerpts (one note-excerpt budget, neutral name
+    # since both consume it), so the two cannot drift.
     note_excerpt_chars: int = Field(default=240, gt=0)
-    # Cap on how many evidence chunks `gather_evidence` hands the agent in one sweep, so a
-    # broad question over a large corpus fills only as much context as it needs (the agent
-    # narrows the query or drills in with expand_note when the sweep is truncated).
+    # Cap on how many evidence chunks `gather_evidence` hands the agent in one sweep, so a broad
+    # question over a large corpus fills only as much context as it needs (the agent narrows the
+    # query or drills in with expand_note when the sweep is truncated).
     gather_evidence_max_chunks: int = Field(default=40, ge=1)
     # Rank-before-truncate for the evidence sweep (KM-5): when `gather_evidence` exceeds its cap it
     # keeps the highest-scored chunks, not an arbitrary disk-order slice. Graph hits score by note
@@ -1198,17 +1188,17 @@ class RetrievalSettings(BaseSettings):
     # of the note tree (path + mtime + size), so any add/edit/delete of a note busts it — retrieval
     # stays always-live. Off makes every call re-parse (the pre-cache behavior); leave on in prod.
     graph_cache_enabled: bool = True
-    # How long a fingerprint scan may be reused before the note tree is stat'd again (DA-5/D-1).
-    # The fingerprint above is what makes the cache safe, but computing it is itself O(notes) — a
-    # `stat` per file, ~75 ms at 10k notes on local disk and materially worse on a networked
-    # OpenShift PVC — and every query pays it, even a pure cache hit. That scan is the floor on
-    # interactive latency. Within this window the last scan is trusted and skipped, making a warm
-    # query O(1); the cost is that a note changed by something *outside* this process (another
-    # pod, an out-of-band `git pull`) can stay invisible for up to this long.
+    # How long a fingerprint scan may be reused before the note tree is stat'd again (DA-5/D-1). The
+    # fingerprint above is what makes the cache safe, but computing it is itself O(notes) — a `stat`
+    # per file, ~75 ms at 10k notes on local disk and materially worse on a networked OpenShift PVC
+    # — and every query pays it, even a pure cache hit. That scan is the floor on interactive
+    # latency. Within this window the last scan is trusted and skipped, making a warm query O(1);
+    # the cost is that a note changed by something *outside* this process (another pod, an
+    # out-of-band `git pull`) can stay invisible for up to this long.
     #
     # Changes made *through* this process do not wait: the PR-gate submitter calls
-    # `kg.graph.invalidate_cache()` after it writes a note, so the authoring loop stays instant.
-    # `0` disables the window — every query re-scans, which is the exact pre-DA-5 behavior and the
+    # `kg.graph.invalidate_cache()` after it writes a note, so the authoring loop stays instant. `0`
+    # disables the window — every query re-scans, which is the exact pre-DA-5 behavior and the
     # setting to choose where any staleness is unacceptable.
     graph_cache_ttl_seconds: float = Field(default=5.0, ge=0.0)
 
@@ -1231,39 +1221,38 @@ class RetrievalSettings(BaseSettings):
 class ReportSettings(BaseSettings):
     """The report harness (plan Phase 5b) and sub-agent fan-out (F10-D).
 
-    Grouped because both knobs govern durable fan-out work: a report's
-    per-section activity budget and the concurrency bound on child workflows
+    Grouped because both knobs govern durable fan-out work: a report's per-section activity budget
+    and the concurrency bound on child workflows
     (report sections, memory-synthesis groups).
     """
 
-    # Per-section retrieval budget for the durable development-report workflow — one section is
-    # one activity, so a long report resumes section by section after a worker restart.
+    # Per-section retrieval budget for the durable development-report workflow — one section is one
+    # activity, so a long report resumes section by section after a worker restart.
     report_section_timeout_seconds: float = Field(default=300.0, gt=0)
     # A fan-out job (report sections, memory-synthesis groups) runs its independent sub-tasks as
     # child workflows; this bounds how many run at once so a large report/corpus does not spawn
-    # hundreds of children simultaneously. Per-child retry + durability come from each child's
-    # own retry policy; the bound is on concurrency only.
+    # hundreds of children simultaneously. Per-child retry + durability come from each child's own
+    # retry policy; the bound is on concurrency only.
     orchestrator_max_parallel_children: int = Field(default=8, ge=1)
 
 
 class SafetySettings(BaseSettings):
     """Structural hazard screening of proposed chemistry (D-080).
 
-    Grouped because both knobs govern one advisory gate: which rule table is
-    screened against, and how serious a flag must be before a proposed
-    procedure note is required to document it.
+    Grouped because both knobs govern one advisory gate: which rule table is screened against, and
+    how serious a flag must be before a proposed procedure note is required to document it.
     """
 
     # The committed, cited SMARTS rule table (`safety/screen.py`). A path, not inline rules: a
     # process-safety chemist maintains it as data, and a deployment can point at its own table.
     safety_rules_path: str = "safety/rules.yaml"
     # The minimum flag severity that makes a `## Hazards` section mandatory in an agent-proposed
-    # procedure note (enforced by `kg-validate`, so it gates the PR rather than the runtime).
-    # "high" only, by default: the gate must fire rarely enough that a firing means something.
+    # procedure note (enforced by `kg-validate`, so it gates the PR rather than the runtime). "high"
+    # only, by default: the gate must fire rarely enough that a firing means something.
     safety_gate_severity: Literal["high", "medium", "low"] = "high"
-    # Whether `kg-validate` enforces that gate at all. On by default — the corpus holds no
-    # procedure notes yet, so it costs nothing today and is the conservative direction for a
-    # safety check; a deployment migrating a legacy corpus can turn it off while it catches up.
+    # Whether `kg-validate` enforces that gate at all. On by default — the corpus holds no procedure
+    # notes yet, so it costs nothing today and is the conservative direction for a safety check; a
+    # deployment migrating a legacy corpus can turn it off while it catches up.
     safety_gate_enabled: bool = True
 
 

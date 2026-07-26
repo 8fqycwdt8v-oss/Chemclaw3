@@ -2,25 +2,22 @@
 
 Out-of-process capability makes every connector a network dependency in the tool path, and the
 default MAF behavior for a connector that will not connect is to raise — which turns one dead
-sidecar
-into a dead conversation. That is the wrong trade: losing a capability is a much smaller failure
-than
-losing the turn, and it is the trade decision 7 of `docs/connector-plan.md` records.
+sidecar into a dead conversation. That is the wrong trade: losing a capability is a much smaller
+failure than losing the turn, and it is the trade decision 7 of `docs/connector-plan.md` records.
 
 Making it non-fatal at the *caller* is not possible, and finding that out is what shaped this
 module:
 `Agent.run` re-enters any `mcp_tools` entry that is not connected
 (`agent_framework/_agents.py:1363`),
 so a caller that catches the failure just has it raised again from inside the run. The behavior has
-to
-belong to the tool.
+to belong to the tool.
 
 `connect()` is the one choke point every path funnels through — the context manager calls it, and so
 does MAF's run loop — so overriding it is enough, and it leaves the rest of MAF's lifecycle
-untouched.
-A failed connect leaves `is_connected` False and the loaded tool set empty, which gives exactly the
-semantics wanted: the connector contributes no tools this turn, the turn proceeds without them, and
-the *next* turn tries again — so a connector that comes back needs no restart to be picked up.
+untouched. A failed connect leaves `is_connected` False and the loaded tool set empty, which gives
+exactly the semantics wanted: the connector contributes no tools this turn, the turn proceeds
+without them, and the *next* turn tries again — so a connector that comes back needs no restart to
+be picked up.
 """
 
 import asyncio
@@ -39,16 +36,13 @@ class _DegradeOnConnectFailure:
     family is wide — a refused TCP connection, a DNS miss, a TLS error, a timeout, MAF's own
     `ToolException`, an `anyio` cancel-scope error from a half-finished handshake — and enumerating
     them means the next unlisted one silently restores the fatal behavior. `asyncio.CancelledError`
-    is
-    named explicitly for the same reason MAF names it in its own MCP error handling: an MCP-internal
-    cancel scope is indistinguishable from a real one at this layer, and the alternative is a crash
-    on
-    a connector that is merely absent. Nothing wider is caught, so `KeyboardInterrupt`/`SystemExit`
-    still propagate.
+    is named explicitly for the same reason MAF names it in its own MCP error handling: an
+    MCP-internal cancel scope is indistinguishable from a real one at this layer, and the
+    alternative is a crash on a connector that is merely absent. Nothing wider is caught, so
+    `KeyboardInterrupt`/`SystemExit` still propagate.
 
     Narrow, because it does not retry, back off, or cache the failure: MAF asks again on the next
-    run,
-    which is a natural retry cadence, and a connector that recovers is used again with no extra
+    run, which is a natural retry cadence, and a connector that recovers is used again with no extra
     machinery.
     """
 

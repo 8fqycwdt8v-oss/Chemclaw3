@@ -31,7 +31,14 @@ class _JobLaunchingAgent:
         self._job_id = job_id
         self.messages: list[str] = []
 
-    def run(self, message: str, *, stream: bool, session: AgentSession) -> Any:
+    def run(  # noqa: D102 - a fake agent's run, documented by its class
+        self,
+        message: str,
+        *,
+        stream: bool,
+        session: AgentSession,
+        **_run_options: Any,
+    ) -> Any:
         self.messages.append(message)
         first = len(self.messages) == 1
         job_id = self._job_id
@@ -140,7 +147,14 @@ def test_a_turn_that_starts_no_job_never_waits(
         mcp_tools: list[Any] = []
         messages: list[str] = []
 
-        def run(self, message: str, *, stream: bool, session: AgentSession) -> Any:
+        def run(  # noqa: D102 - a fake agent's run, documented by its class
+            self,
+            message: str,
+            *,
+            stream: bool,
+            session: AgentSession,
+            **_run_options: Any,
+        ) -> Any:
             async def _gen() -> Any:
                 yield SimpleNamespace(text="an answer", contents=[], user_input_requests=[])
 
@@ -170,7 +184,14 @@ def test_the_resume_is_not_recursive(monkeypatch: pytest.MonkeyPatch, enabled: N
         def __init__(self) -> None:
             self.messages: list[str] = []
 
-        def run(self, message: str, *, stream: bool, session: AgentSession) -> Any:
+        def run(  # noqa: D102 - a fake agent's run, documented by its class
+            self,
+            message: str,
+            *,
+            stream: bool,
+            session: AgentSession,
+            **_run_options: Any,
+        ) -> Any:
             self.messages.append(message)
             index = len(self.messages)
 

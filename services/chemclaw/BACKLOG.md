@@ -104,6 +104,45 @@ Substrate verdict: **evolve the flat `pydantic-settings` singleton additively** 
 discriminated unions); do **not** adopt entry-points/pluggy/Django-apps — all target the
 out-of-tree plugin problem this single-repo app does not have.
 
+## Open — the connector seam (D-092, docs/connector-plan.md)
+
+Stages A and B are **done** (the seam, the two reference bundles, the durable path). The rest is
+staged in `docs/connector-plan.md` §9, with the trigger for each recorded here rather than left
+implicit.
+
+- [ ] **Stage C — domain connectors** — [L]. Move the capability tools out to their own bundles:
+      `calc`, `chem`, `safety`, then `kg` (deepest coupling — it needs the knowledge tree and the
+      vector index, so decide first whether it also owns re-indexing). `bo` is the one that proves the
+      decoupling is real: its workflow moves to its own worker and task queue, which is a one-line
+      manifest change if the seam is right. This is also where the four bespoke durable adapters
+      (`submit_qm_job`, `request_development_report`, `start_optimization_campaign`) finally migrate —
+      with their code, so the moved workflow returns the `ConnectorJobResult` envelope directly
+      instead of being wrapped a third time. *Trigger: now — the payoff is taking `tblite`/`bofire`/
+      `rdkit` out of the front-door image.*
+- [ ] **Stage D — agentic workflow configuration** — [M]. `AgentProfile` Stage 3 (profiles discovered
+      from `connectors/<name>/profiles/*.yaml`, on the registry that already exists) plus Stage 2
+      (`profile` on `POST /sessions`, one cached agent per profile, and the per-profile connector set
+      through the `connector_factory` seam the front door now owns). *Trigger: a second real use case
+      — the seam is built and the manifest already carries `profiles:`.*
+- [ ] **Stage E — deterministic step templates** — [L]. A declarative multi-step orchestration
+      (`connectors/<name>/workflows/<t>.yaml`: an ordered list of tool/skill/sub-agent steps run by a
+      core `TemplateWorkflow`). Deliberately **not built**: it is a real execution engine with real
+      obligations — replay determinism, workflow versioning (`docs/workflow-versioning.md`), a resume
+      story, per-step authz — and `docs/harness-konzept.md` §11's decision not to build MAF
+      graph-workflows stands until something forces it. *Trigger: a second real use case that a
+      declarative profile provably cannot express.* Until then, a profile is the answer.
+- [ ] **Entra auth modes for connectors** — [M]. The manifest's auth union ships `none` and `bearer`.
+      `entra_workload` (client credentials over the federated SA assertion) and `entra_obo` are the
+      documented extension point, each one variant plus one branch in `connectors.identity.auth_for`.
+      OBO additionally needs the user's *raw* access token, which `service.auth.Principal` deliberately
+      does not carry — a security-relevant change with no caller today. *Trigger: a real tenant (the
+      same one blocking every other live Entra edge).*
+- [ ] **Concurrent-turn MCP lifecycle, the general case** — [S]. Per-turn connector instances fixed
+      this for connectors (D-092), and the *shape* that caused it — a process-lived tool whose context
+      is entered per turn — should not reappear. A guard test asserting no MCP tool is attached to the
+      process-lived agent would make that structural rather than remembered. *Trigger: next time
+      anything is tempted to put an MCP tool on `build_agent`.*
+
 ## Open — OKF-inspired graph polish (D-074)
 
 Two conventions from Google's Open Knowledge Format, checked against our already-equivalent

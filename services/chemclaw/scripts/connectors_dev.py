@@ -18,6 +18,8 @@ import importlib
 import json
 import logging
 import sys
+from collections.abc import AsyncIterator
+from contextlib import AsyncExitStack, asynccontextmanager
 
 import uvicorn
 from fastapi import FastAPI
@@ -55,12 +57,29 @@ def build_composite() -> tuple[FastAPI, dict[str, str]]:
         The composite app, and the `connector_urls` mapping that points core at it — printed by
         `main` so the value can be copied straight into `.env`.
     """
-    composite = FastAPI(title="chemclaw-connectors-dev")
+    mounted: list[FastAPI] = []
     urls: dict[str, str] = {}
+
+    @asynccontextmanager
+    async def lifespan(_composite: FastAPI) -> AsyncIterator[None]:
+        """Run every mounted app's own lifespan for the composite's lifetime.
+
+        Starlette does **not** run a mounted sub-app's lifespan, and a connector app's lifespan is
+        what starts its MCP session manager — so without this the composite would accept connections
+        and then fail every MCP handshake. Entering them here is the whole reason this function
+        returns an app rather than just mounting onto a bare `FastAPI`.
+        """
+        async with AsyncExitStack() as stack:
+            for app in mounted:
+                await stack.enter_async_context(app.router.lifespan_context(app))
+            yield
+
+    composite = FastAPI(title="chemclaw-connectors-dev", lifespan=lifespan)
     for manifest in enabled():
         app = _local_app(manifest.name)
         if app is None:
             continue
+        mounted.append(app)
         composite.mount(f"/{manifest.name}", app)
         urls[manifest.name] = f"http://{DEV_HOST}:{DEV_PORT}/{manifest.name}/mcp"
     return composite, urls

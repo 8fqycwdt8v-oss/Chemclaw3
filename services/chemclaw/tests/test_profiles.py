@@ -9,7 +9,7 @@ regardless of profile. See `docs/audit/10-config-extensibility.md` §6/§8 (Spik
 
 import pytest
 
-from agents.chemclaw_agent import _INSTRUCTIONS, build_agent
+from agents.chemclaw_agent import _INSTRUCTIONS, build_agent, connector_tools
 from agents.profiles import (
     AgentProfile,
     get_profile,
@@ -29,6 +29,10 @@ def test_default_profile_reproduces_todays_agent() -> None:
         t.name for t in base.default_options["tools"]
     }
     assert {t.name for t in default.mcp_tools} == {t.name for t in base.mcp_tools}
+    # And the default profile's connector set is every enabled connector, as the global agent's is.
+    assert {tool.name for tool in connector_tools()} == {
+        tool.name for tool in connector_tools("default")
+    }
 
 
 def test_profile_narrows_tools_and_swaps_instructions() -> None:
@@ -50,12 +54,13 @@ def test_profile_narrows_tools_and_swaps_instructions() -> None:
 
 
 def test_profile_can_narrow_connectors() -> None:
-    """`mcp_server_names` narrows the attached connectors to the named subset."""
-    agent = build_agent(
-        chat_client=object(),
-        profile=AgentProfile(name="mol-only", mcp_server_names=frozenset({"molfp"})),
-    )
-    assert {t.name for t in agent.mcp_tools} == {"molfp"}
+    """`mcp_server_names` narrows the turn's connectors to the named subset.
+
+    Narrowing moved with the connectors themselves: they are built per turn rather than attached to
+    the agent, so the profile is applied where the set is built (`connector_tools`).
+    """
+    profile = AgentProfile(name="mol-only", mcp_server_names=frozenset({"molfp"}))
+    assert {tool.name for tool in connector_tools(profile)} == {"molfp"}
 
 
 def test_profile_attenuates_but_audit_and_authz_always_attach() -> None:

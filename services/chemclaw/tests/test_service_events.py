@@ -7,6 +7,7 @@ answer — without any live model (a fake streaming agent is injected).
 
 import asyncio
 import json
+from typing import Any
 
 from agent_framework import AgentSession
 
@@ -39,7 +40,14 @@ class _FakeAgent:
     def create_session(self, *, session_id: str) -> AgentSession:
         return AgentSession(session_id=session_id)
 
-    def run(self, message: str, *, stream: bool, session: AgentSession) -> object:
+    def run(  # noqa: D102 - a fake agent's run, documented by its class
+        self,
+        message: str,
+        *,
+        stream: bool,
+        session: AgentSession,
+        **_run_options: Any,
+    ) -> object:
         async def _gen() -> object:
             yield _Update(contents=[_ToolContent("gather_evidence", '{"query": "aldol"}')])
             yield _Update(text="The ")
@@ -78,7 +86,14 @@ def test_run_turn_reports_failure_as_error_event() -> None:
     """A turn whose model call raises yields a single user-safe ErrorEvent, not an exception."""
 
     class _BoomAgent(_FakeAgent):
-        def run(self, message: str, *, stream: bool, session: AgentSession) -> object:
+        def run(  # noqa: D102 - a fake agent's run, documented by its class
+            self,
+            message: str,
+            *,
+            stream: bool,
+            session: AgentSession,
+            **_run_options: Any,
+        ) -> object:
             async def _gen() -> object:
                 raise RuntimeError("model exploded")
                 yield  # pragma: no cover - makes this an async generator

@@ -107,8 +107,8 @@ def _params_model(connector: str, job: JobSpec) -> type[BaseModel]:
     """The pydantic model for one job's launch arguments — referenced, or generated from `params`.
 
     A generated field carries its manifest `description`, so the JSON schema documents every
-    argument for the model reading it. An optional param defaults to `None` and widens to
-    `T | None`, because "the caller may omit this" and "the value may be absent" must agree — a
+    argument for the model reading it. An optional param defaults to `None` and widens to `T |
+    None`, because "the caller may omit this" and "the value may be absent" must agree — a
     required-typed field with a `None` default would validate a payload the workflow cannot use.
     """
     if job.params_model is not None:

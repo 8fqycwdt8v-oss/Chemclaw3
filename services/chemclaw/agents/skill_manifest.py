@@ -1,10 +1,10 @@
 """The validated `SKILL.md` manifest — a skill's frontmatter as a typed contract.
 
-Why this exists: a skill is discovered by its frontmatter, and until now that frontmatter was
-read as a bare dict and spot-checked for two string fields by the validate script. That made two
+Why this exists: a skill is discovered by its frontmatter, and until now that frontmatter was read
+as a bare dict and spot-checked for two string fields by the validate script. That made two
 classes of drift invisible. First, a typo'd or invented key (`descriptions:`, `tool:`) was
-silently ignored — the skill loaded with a missing description rather than failing. Second, and
-the reason this is worth a model rather than a longer checklist: a skill is *judgment about
+silently ignored — the skill loaded with a missing description rather than failing. Second, and the
+reason this is worth a model rather than a longer checklist: a skill is *judgment about
 capabilities* ("call `suggest_next_experiment` like this"), but it had no way to **declare** which
 capabilities it depends on, so a skill could outlive the tool it teaches and nothing would notice.
 
@@ -13,8 +13,8 @@ model reads them to decide when to load a skill), and the optional `tools` decla
 against the live tool surface by `scripts.validate_skills` — the in-process registry
 (`agents.tool_registry`) plus everything the enabled connectors advertise
 (`connectors.registry.connector_tool_names`). That check is the point: it turns "this skill teaches
-a
-tool that no longer exists" from a silent stale-prose problem into a CI failure. `tags` is free-form
+a tool that no longer exists" from a silent stale-prose problem into a CI failure. `tags` is
+free-form
 grouping for humans (and the eventual profile authoring in Stage 3).
 
 Deliberately *not* here: enforcement at load time. A manifest declaring a tool does **not** grant
@@ -41,11 +41,9 @@ class SkillManifest(BaseModel):
     name: str = Field(min_length=1)
     description: str = Field(min_length=1)
     # The capabilities this skill's judgment is written about, by *tool* name — the in-process
-    # tools,
-    # the generated connector job launchers, and the tools an enabled connector's endpoint serves,
-    # all in one list because all three are things the model calls by name. Optional: a skill that
-    # is
-    # pure process guidance depends on nothing. Validated against the live surface
+    # tools, the generated connector job launchers, and the tools an enabled connector's endpoint
+    # serves, all in one list because all three are things the model calls by name. Optional: a
+    # skill that is pure process guidance depends on nothing. Validated against the live surface
     # (`agents.tool_registry` + `connectors.registry.connector_tool_names`), so a renamed or deleted
     # capability surfaces as a CI failure rather than as stale prose in the skill body.
     #

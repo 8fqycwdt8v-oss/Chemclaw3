@@ -87,6 +87,12 @@ restart the agent — discovery is automatic. To add a second skills directory (
 skills), set `CHEMCLAW_SKILLS_DIR` to an OS-path-separator list, like `PATH`
 (`skills:/opt/team-skills`).
 
+A skill that teaches *one capability's* tools belongs in that connector's bundle instead
+(`connectors/<name>/skills/<skill>/`, declared in its `connector.yaml` — see (iv)), so the judgment
+ships and is reviewed with the capability it is about. One that spans several stays in `skills/`.
+Either way `make skill-validate` checks its declared `tools:` against the live surface, in-process
+and out, so a skill cannot outlive the tool it teaches.
+
 ## (ii) Add or repoint a database
 
 Set `CHEMCLAW_POSTGRES_DSN` and run `make db-migrate` (applies `infra/sql/*.sql` in filename
@@ -108,25 +114,60 @@ A *new* ELN source is one new adapter class satisfying the `ElnAdapter` contract
 `DATA_SOURCES` entry in `sources/registry.py` and its key in `CHEMCLAW_DATA_SOURCES`. Validate an
 export with `make eln-validate`.
 
-## (iv) Add a capability/tool the agent can call
+## (iv) Add a capability — a tool, a durable job, and their skills (a **connector**)
 
-The agent reaches the fingerprint search over the **MCP protocol**: each capability is a server
-listed in `CHEMCLAW_MCP_SERVERS` (default `mcp-molfp`, `mcp-rxnfp` in `chemclaw/config.py`), and
-`build_agent` attaches it as an `MCPStdioTool` subprocess. **Adding a capability is a config
-entry**, not agent code:
+A capability is a **connector bundle**: one folder declaring everything it contributes. There is no
+second mechanism — `CHEMCLAW_MCP_SERVERS` is gone (D-092).
 
-1. Write (or reuse) a FastMCP server exposing the tools (see `mcp_servers/molfp/server.py`).
-2. Add `{name, command, args, allowed_tools}` to `CHEMCLAW_MCP_SERVERS` — set `allowed_tools`
-   to the read/search tools the agent may call (keep index/write tools off the chat agent;
-   those writes go through the PR-gate).
-3. Servers are launched from the repo root (`command`/`args`, e.g. `python -m ...`); ensure the
-   process's working directory is the checkout so `-m mcp_servers...` resolves.
+```
+connectors/<name>/
+  connector.yaml      # the manifest — the whole contract
+  server/app.py       # optional: the FastAPI+MCP app, when we own the capability
+  workflows.py        # optional: its Temporal workflow, when the work runs long
+  skills/             # optional: the SKILL.md judgment that belongs to this capability
+  profiles/           # optional: the agent profiles it enables
+```
 
-Some agent tools are still in-process plain functions (calculators, graph, BO) — those are a
-thin wrapper module under `agents/` plus one line in the `build_agent` `tools=[...]` list.
-Troubleshooting: a server that fails to start surfaces in the worker/agent logs; verify it runs
-standalone with `python -m mcp_servers.<name>.server` and that Postgres is reachable (tool
-*discovery* needs no DB, but *invoking* a search does).
+**To add one:**
+
+1. Create the folder with a `connector.yaml`. For an MCP capability, declare an `endpoint:` and the
+   `tools:` the agent may call — read/compute only; `make connector-validate` refuses a mutating
+   name, because mutation belongs on the job path or on a core PR-gate tool.
+2. For a long-running capability, declare a `jobs:` entry naming the Temporal **workflow type** and
+   **task queue** its own worker serves. Its workflow returns a `ConnectorJobResult`
+   (`summary`, `data`, optional `Note`); core's `ConnectorJobWorkflow` supplies the idempotent job
+   id, the actor attribution, the PR-gate publish and the session push-back. A job declares its
+   arguments inline (`params:`) or by reference (`params_model: module:Model`) when the input is a
+   structured domain object.
+3. Run `make connector-validate`. It checks the manifest, that declared skills/profiles exist (and
+   that no undeclared ones are hiding in the bundle), the read-only tool surface, and that every
+   job can actually be built.
+4. Nothing to enable: an empty `CHEMCLAW_CONNECTORS_ENABLED` runs every discovered bundle. Set a
+   pathsep list to narrow (and to fix the order — tool order is part of the prompt); an unknown name
+   there is a startup error, not a silently missing capability.
+
+**Running them.** `make connectors` serves every local bundle in one process and prints the
+`CHEMCLAW_CONNECTOR_URLS` to point the front door at. In a cluster, each bundle is its own
+Deployment + Service (`.Values.connectors.<name>.enabled`), and the chart *computes*
+`CHEMCLAW_CONNECTOR_URLS` from that same block, so addresses cannot drift from the pods that exist.
+
+**Configuration.** `CHEMCLAW_CONNECTORS_DIR` (pathsep, like `PATH` — prepend a private bundle dir to
+override a shipped one), `CHEMCLAW_CONNECTORS_ENABLED`, `CHEMCLAW_CONNECTOR_URLS`,
+`CHEMCLAW_CONNECTORS_REQUIRED`, `CHEMCLAW_CONNECTOR_HEALTH_TIMEOUT_SECONDS`,
+`CHEMCLAW_CONNECTOR_JOB_TIMEOUT_SECONDS`. A connector's request timeout and auth mode are per-manifest
+(`endpoint.request_timeout`, `endpoint.auth`); the `bearer` mode names an env var, so no credential is
+ever written into a bundle.
+
+**Troubleshooting.** `GET /readyz` reports each enabled connector as `healthy`, `unreachable` or
+`unprobed` (no `health_url` declared — honest for a third-party server), and
+`chemclaw_connectors_unhealthy` on `/metrics` counts the unreachable ones. An unreachable connector
+costs its tools for that turn, not the turn itself; set `CHEMCLAW_CONNECTORS_REQUIRED=true` to fail
+startup instead. Verify a bundle standalone with `uvicorn connectors.<name>.server.app:app` and check
+`/healthz`; tool *discovery* needs no database, but *invoking* a search does.
+
+A few tools remain in-process by design, not by omission: the conversation plumbing that reads or
+writes the turn's own state (`ask_clarifying_question`, attachments, preferences, watches) and the two
+PR-gate writers, which are the GxP boundary. Those are a `@tool` in `agents/` and nothing else.
 
 ## (v) Re-ingest a rejected ELN entry (after fixing the source record)
 

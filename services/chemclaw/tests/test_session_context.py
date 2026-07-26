@@ -88,7 +88,14 @@ class _EchoSessionAgent:
     def create_session(self, *, session_id: str) -> AgentSession:
         return AgentSession(session_id=session_id)
 
-    def run(self, message: str, *, stream: bool, session: AgentSession) -> object:
+    def run(  # noqa: D102 - a fake agent's run, documented by its class
+        self,
+        message: str,
+        *,
+        stream: bool,
+        session: AgentSession,
+        **_run_options: Any,
+    ) -> object:
         async def _gen() -> object:
             yield _Update(text=get_current_session_id() or "NONE")
 

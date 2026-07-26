@@ -23,7 +23,7 @@ from agent_framework._compaction import (
     included_token_count,
 )
 
-from agents.chemclaw_agent import _build_compaction, build_agent
+from agents.chemclaw_agent import _build_compaction, build_agent, connector_tools
 from chemclaw.config import settings
 from connectors.registry import connector_tool_names
 
@@ -70,15 +70,16 @@ def test_agent_audits_and_authorizes_every_tool_call() -> None:
     assert enforce_tool_authz in middleware  # the authz gate is wired, not just audit
 
 
-def test_agent_attaches_fingerprint_search_as_mcp_servers() -> None:
-    """Structural search is reached over MCP (servers on `mcp_tools`), not in-process tools.
+def test_fingerprint_search_is_reached_through_connectors_not_in_process_tools() -> None:
+    """Structural search is a connector's capability, not a function tool in the agent's process.
 
-    The in-process search wrappers are no longer registered as function tools; the agent talks
-    to the molfp/rxnfp capability servers over the MCP protocol instead (construction is lazy —
-    no subprocess is spawned here).
+    Connectors are deliberately *not* attached to the agent: a connector's connection belongs to one
+    turn, and an agent is built once per process, so the turn's caller builds and passes them
+    (`connector_tools`). Construction is lazy — nothing is spawned or dialed here.
     """
     agent = build_agent(chat_client=object())
-    assert {t.name for t in agent.mcp_tools} == {"molfp", "rxnfp"}
+    assert agent.mcp_tools == []  # nothing process-lived
+    assert {tool.name for tool in connector_tools()} == {"molfp", "rxnfp"}
     function_tool_names = {f.name for f in agent.default_options["tools"]}
     assert {"find_similar_reactions", "find_similar_molecules"} & function_tool_names == set()
 
@@ -152,7 +153,9 @@ def test_harness_agent_keeps_full_capability_toolset(monkeypatch: pytest.MonkeyP
     harness = build_agent(chat_client=object())
     harness_tools = {t.name for t in harness.default_options["tools"]}
     assert classic <= harness_tools  # every classic capability tool is still present
-    assert {"molfp", "rxnfp"} == {t.name for t in harness.mcp_tools}
+    # The harness reaches the same connectors the classic path does — per turn, from the same
+    # factory.
+    assert {"molfp", "rxnfp"} == {tool.name for tool in connector_tools()}
 
 
 @pytest.mark.parametrize(

@@ -35,7 +35,14 @@ class _AskingAgent:
 
     mcp_tools: list[Any] = []
 
-    def run(self, message: str, *, stream: bool, session: AgentSession) -> Any:
+    def run(  # noqa: D102 - a fake agent's run, documented by its class
+        self,
+        message: str,
+        *,
+        stream: bool,
+        session: AgentSession,
+        **_run_options: Any,
+    ) -> Any:
         async def _gen() -> Any:
             await ask_clarifying_question("Which campaign?", ["proj-x", "proj-y"])
             yield SimpleNamespace(text="", contents=[], user_input_requests=[])
@@ -85,7 +92,14 @@ def test_the_runner_binds_and_clears_the_flag() -> None:
     class _Probe:
         mcp_tools: list[Any] = []
 
-        def run(self, message: str, *, stream: bool, session: AgentSession) -> Any:
+        def run(  # noqa: D102 - a fake agent's run, documented by its class
+            self,
+            message: str,
+            *,
+            stream: bool,
+            session: AgentSession,
+            **_run_options: Any,
+        ) -> Any:
             async def _gen() -> Any:
                 seen.append(is_dry_run())
                 yield SimpleNamespace(text="ok", contents=[], user_input_requests=[])

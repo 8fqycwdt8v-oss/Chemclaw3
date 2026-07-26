@@ -31,7 +31,14 @@ class _FakeAgent:
 
     mcp_tools: list[object] = []
 
-    def run(self, message: str, *, stream: bool, session: AgentSession) -> Any:
+    def run(  # noqa: D102 - a fake agent's run, documented by its class
+        self,
+        message: str,
+        *,
+        stream: bool,
+        session: AgentSession,
+        **_run_options: Any,
+    ) -> Any:
         async def _gen() -> Any:
             yield _Update(text="Yield was 90% ")
             yield _Update(text="[[reaction-a]].")
@@ -122,7 +129,14 @@ class _JobLaunchingAgent:
         self._job_ids = job_ids
         self._on_last = announce_on_last_update
 
-    def run(self, message: str, *, stream: bool, session: AgentSession) -> Any:
+    def run(  # noqa: D102 - a fake agent's run, documented by its class
+        self,
+        message: str,
+        *,
+        stream: bool,
+        session: AgentSession,
+        **_run_options: Any,
+    ) -> Any:
         async def _gen() -> Any:
             if not self._on_last:
                 for job_id in self._job_ids:
@@ -188,7 +202,14 @@ def test_plan_is_emitted_and_only_when_it_changes(monkeypatch: pytest.MonkeyPatc
     class _PlanningAgent:
         mcp_tools: list[object] = []
 
-        def run(self, message: str, *, stream: bool, session: AgentSession) -> Any:
+        def run(  # noqa: D102 - a fake agent's run, documented by its class
+            self,
+            message: str,
+            *,
+            stream: bool,
+            session: AgentSession,
+            **_run_options: Any,
+        ) -> Any:
             async def _gen() -> Any:
                 await mark_awaiting_job(session, "qm-1", title="Await QM job qm-1")
                 yield _Update(text="a")

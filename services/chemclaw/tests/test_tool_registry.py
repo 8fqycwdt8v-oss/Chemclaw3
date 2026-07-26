@@ -59,16 +59,15 @@ def test_registry_holds_exactly_the_inprocess_tools() -> None:
     assert set(registered_tool_names()) == _EXPECTED_INPROCESS_TOOLS
 
 
-def test_capability_tools_match_registry_plus_connectors() -> None:
+def test_capability_tools_are_exactly_the_registry() -> None:
     """`_capability_tools()` is the registered function tools, then the MCP capability tools."""
-    from connectors.registry import mcp_tools
-
     tools = _capability_tools()
     inprocess = registered_tools()
     # The in-process tools appear first, in registration order, unchanged.
     assert tools[: len(inprocess)] == inprocess
     # The tail is exactly the config-driven MCP capability servers.
-    assert len(tools) == len(inprocess) + len(mcp_tools())
+    # Connectors are not in here: they are per-turn (`connector_tools`), not per-process.
+    assert len(tools) == len(inprocess)
 
 
 def test_agent_advertises_the_registered_inprocess_tools() -> None:

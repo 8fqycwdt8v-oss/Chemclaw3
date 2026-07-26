@@ -30,12 +30,12 @@ from agent_framework import (
     create_harness_agent,
 )
 
-# The completion-loop predicate ships in MAF's harness module; it is not re-exported at the
-# package top level, so it is imported from its (experimental) home here.
+# The completion-loop predicate ships in MAF's harness module; it is not re-exported at the package
+# top level, so it is imported from its (experimental) home here.
 from agent_framework._harness._loop import todos_remaining
 
-# Importing each tool module runs its `@tool` decorators, populating the capability-tool registry
-# (a registration side effect, exactly as `evals/__init__.py` seeds the metric registry). With the
+# Importing each tool module runs its `@tool` decorators, populating the capability-tool registry (a
+# registration side effect, exactly as `evals/__init__.py` seeds the metric registry). With the
 # registry populated, `_capability_tools` assembles the advertised set from it instead of from a
 # hand-maintained list — so adding a tool is a `@tool` at its definition site, not an edit here.
 from agents import attachments as _attachments  # noqa: F401
@@ -114,9 +114,9 @@ def build_agent(
 
     Capability comes from the enabled connectors (`connectors/`): each connector's endpoint becomes
     an MCP tool, which MAF stores on `agent.mcp_tools`, and each of its declared durable jobs
-    becomes
-    a generated launch tool. Construction is lazy — no subprocess is spawned and no connection is
-    opened here — so this stays a synchronous, resource-free constructor. The caller that actually
+    becomes a generated launch tool. Construction is lazy — no subprocess is spawned and no
+    connection is opened here — so this stays a synchronous, resource-free constructor. The caller
+    that actually
     *runs* the agent owns the MCP lifecycle: enter each MCP tool's async context (or the agent's)
     before `agent.run`, e.g. `async with *agent.mcp_tools: await agent.run(...)`, so a connector is
     connected for the turn and torn down after.
@@ -191,9 +191,9 @@ def build_agent(
         instructions=instructions,
         default_options=options,
         tools=tools,
-        # Order matters: history loads/stores the thread, then compaction trims it — so
-        # compaction runs last and sees the full context (before the model) and the freshly
-        # stored history (after the run).
+        # Order matters: history loads/stores the thread, then compaction trims it — so compaction
+        # runs last and sees the full context (before the model) and the freshly stored history
+        # (after the run).
         context_providers=[history, skills, compaction],
         # The shared tool middleware chain: GxP audit over every tool call + per-tool authorization.
         middleware=middleware,
@@ -306,10 +306,40 @@ def _capability_tools(profile: AgentProfile | None = None) -> list[Any]:
     inprocess = registered_tools()
     if prof.tool_names is not None:
         inprocess = _narrow(inprocess, prof.tool_names, prof.name, "tool")
-    mcp: list[Any] = list(mcp_tools())
+    return inprocess
+
+
+def connector_tools(profile: str | AgentProfile | None = None) -> list[Any]:
+    """The connector MCP tools for one turn, narrowed by the profile — built fresh on every call.
+
+    **Per turn, deliberately, and it is a correctness requirement rather than a preference.** A
+    connector's MCP tool object owns a connection whose lifetime is a turn (the caller opens and
+    closes it around `agent.run`), so one shared object cannot serve two turns at once: measured
+    against a live server, two concurrent turns entering and leaving the same tool's context
+    **deadlock**, and the second turn's calls would in any case travel over a connection established
+    in the first turn's context — attributing them to the wrong user in the connector's own log.
+    Fresh instances give each turn its own connection, which fixes both at once.
+
+    This is why connectors are *not* attached by `build_agent`: an `Agent` is built once per
+    process,
+    which is exactly the lifetime a connector tool must not have. `Agent.run(tools=…)` appends
+    run-scoped tools to the configured ones, so the turn's caller passes these and the model sees
+    one
+    combined surface (`service.runner.run_turn`).
+
+    Args:
+        profile: The profile whose `mcp_server_names` narrows the set (a name, an `AgentProfile`, or
+            `None` for the default, which advertises every enabled connector).
+
+    Returns:
+        Unconnected MCP tools, one per enabled connector with an endpoint. The caller connects them
+        for the turn (`connectors.registry.open_reachable`).
+    """
+    prof = profile if isinstance(profile, AgentProfile) else get_profile(profile)
+    tools: list[Any] = list(mcp_tools())
     if prof.mcp_server_names is not None:
-        mcp = _narrow(mcp, prof.mcp_server_names, prof.name, "connector")
-    return [*inprocess, *mcp]
+        tools = _narrow(tools, prof.mcp_server_names, prof.name, "connector")
+    return tools
 
 
 def _register_job_tools() -> None:
@@ -350,8 +380,8 @@ def _build_compaction(history_source_id: str) -> CompactionProvider:
     Compaction is triggered only when the included context exceeds the configured token budget
     ("reduce when applicable"), then reclaims tokens cheapest-first without any LLM call:
     collapse older tool-result payloads (the big evidence sweeps and full ELN recipes) into a
-    short cited trace, then slide the conversation window; the composed strategy's built-in
-    fallback drops the oldest groups if still over budget. System instructions and skills are
+    short cited trace, then slide the conversation window; the composed strategy's built-in fallback
+    drops the oldest groups if still over budget. System instructions and skills are
     always preserved. The same strategy runs `before_run` (guard the model input) and
     `after_run` (shrink the persisted history so the next turn starts smaller).
 

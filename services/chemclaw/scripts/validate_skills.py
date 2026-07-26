@@ -13,8 +13,8 @@ prose. The
 configured enable-list (`settings.skills_enabled`) is checked the same way: a name that no
 directory provides would silently advertise nothing at run time, so it is a failure here instead.
 
-This is the `make skill-validate` gate: it exits non-zero listing the problems, so CI catches
-skill drift like `kg-validate` catches note drift. Read-only; touches nothing.
+This is the `make skill-validate` gate: it exits non-zero listing the problems, so CI catches skill
+drift like `kg-validate` catches note drift. Read-only; touches nothing.
 """
 
 import sys
@@ -36,10 +36,10 @@ from connectors.registry import skills_dirs as connector_skills_dirs
 def validate_skills(skills_dirs: list[str]) -> list[str]:
     """Return a list of problems across every skill under `skills_dirs` (empty = all good).
 
-    Walks the skill *directories* rather than globbing `*/SKILL.md`, because the failures
-    this gate exists to catch are invisible to the glob: a skill directory whose SKILL.md
-    is missing or misnamed, and a configured skills dir that does not exist at all. Each
-    configured dir is checked on its own, so one healthy dir cannot mask another's typo.
+    Walks the skill *directories* rather than globbing `*/SKILL.md`, because the failures this gate
+    exists to catch are invisible to the glob: a skill directory whose SKILL.md is missing or
+    misnamed, and a configured skills dir that does not exist at all. Each configured dir is checked
+    on its own, so one healthy dir cannot mask another's typo.
     """
     problems: list[str] = []
     found_names: set[str] = set()
@@ -125,8 +125,8 @@ def _enable_list_problems(found_names: set[str]) -> list[str]:
 
 def main() -> None:
     """Validate every skill; print problems and exit non-zero if any (the CI gate)."""
-    # The same dirs `build_agent` discovers from: the configured tree plus every enabled
-    # connector bundle's own `skills/`, so a bundled skill is validated exactly like a shipped one.
+    # The same dirs `build_agent` discovers from: the configured tree plus every enabled connector
+    # bundle's own `skills/`, so a bundled skill is validated exactly like a shipped one.
     problems = validate_skills([*settings.skills_dirs, *connector_skills_dirs()])
     if problems:
         print("SKILL.md validation failed:")

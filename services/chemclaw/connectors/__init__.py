@@ -2,8 +2,7 @@
 
 A connector is a folder — `connectors/<name>/connector.yaml` plus whatever it needs — declaring
 everything that capability contributes: the MCP tools its own server serves, the durable jobs its
-own
-Temporal worker runs, the skills that teach them, and the agent profiles they enable. It is
+own Temporal worker runs, the skills that teach them, and the agent profiles they enable. It is
 discovered by folder (as skills are), validated by a pydantic manifest (as `SKILL.md` frontmatter
 is), enabled by one config token (as data sources are), and checked by `make connector-validate` in
 CI (as the knowledge graph and the skills are). Adding a tool, a durable job, a skill or an agentic

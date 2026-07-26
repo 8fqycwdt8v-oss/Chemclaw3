@@ -1,0 +1,21 @@
+# A connector bundle that exists only for the test suite, so the durable path can be proven end to
+# end without inventing a production capability to prove it with.
+#
+# It is a *complete* bundle — a manifest, a job, and (in `workflows.py`) a connector-owned Temporal
+# workflow returning the `ConnectorJobResult` envelope — which is what makes it useful: the test
+# exercises the same code path a real connector will, including the PR-gated note and the session
+# push-back, rather than a mock of it.
+name: fixture
+description: >-
+  Test-only connector: one durable job whose workflow returns a summary, structured data, and a
+  knowledge note, so the wrapper's publish and push-back paths are both exercised.
+
+jobs:
+  - name: run_fixture_job
+    workflow: FixtureJobWorkflow
+    task_queue: connector-fixture
+    summary: Run the fixture job and return its job id.
+    description: A test job that echoes its subject back through the result envelope.
+    params:
+      - {name: subject, type: string, description: What the job reports on.}
+    publish_to_graph: true

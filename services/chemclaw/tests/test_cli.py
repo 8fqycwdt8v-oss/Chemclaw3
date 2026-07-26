@@ -54,7 +54,7 @@ def test_converse_returns_the_agent_text() -> None:
     class _Agent:
         mcp_tools: list[object] = []
 
-        async def run(self, prompt: str) -> _Response:
+        async def run(self, prompt: str, **_run_options: object) -> _Response:
             assert prompt == "hi"
             return _Response()
 

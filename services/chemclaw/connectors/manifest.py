@@ -3,20 +3,20 @@
 Why this exists: before connectors, a capability was added in one of four unrelated places — a
 `@tool` function in `agents/`, a `settings.mcp_servers` entry, a bespoke Temporal adapter plus a
 hand-maintained worker list, and a `SKILL.md` folder — three of which are Python edits to
-orchestration code. A capability was a concept the codebase could not name. A `connector.yaml`
-names it: one folder declares the tools it serves, the durable jobs it can run, the skills that
-teach them, and the agent profiles it enables.
+orchestration code. A capability was a concept the codebase could not name. A `connector.yaml` names
+it: one folder declares the tools it serves, the durable jobs it can run, the skills that teach
+them, and the agent profiles it enables.
 
 The manifest is *the whole contract*. Everything a connector contributes is declared here and
 validated by pydantic with `extra="forbid"`, so a misspelled key fails `make connector-validate`
-in CI instead of silently vanishing — the same fail-fast stance `SkillManifest` takes for
-`SKILL.md` frontmatter and the config models take for env values.
+in CI instead of silently vanishing — the same fail-fast stance `SkillManifest` takes for `SKILL.md`
+frontmatter and the config models take for env values.
 
 Two shapes vary by kind and are therefore discriminated unions (the house rule in
 `chemclaw/config.py`'s docstring, already used for `McpServerSpec`/`DataSourceSpec`): the
-transport a connector is reached over, and how we authenticate to it. Adding a transport or an
-auth mode is one variant plus one branch at the single dispatch site, never a widening of one
-model with optional fields that only apply sometimes.
+transport a connector is reached over, and how we authenticate to it. Adding a transport or an auth
+mode is one variant plus one branch at the single dispatch site, never a widening of one model with
+optional fields that only apply sometimes.
 """
 
 from typing import Literal, Self
@@ -26,8 +26,8 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 # A job parameter's declared type, mapped to a Python annotation by `connectors.jobs`. Deliberately
 # a *closed* set: the generated pydantic model becomes the JSON schema the model fills in, and a
 # schema the model can always fill correctly is worth more than an open type language. These cover
-# every launch argument the existing durable jobs take (SMILES strings, method names, counts,
-# flags, lists of either, and one nested spec object).
+# every launch argument the existing durable jobs take (SMILES strings, method names, counts, flags,
+# lists of either, and one nested spec object).
 JobParamType = Literal["string", "integer", "number", "boolean", "string[]", "number[]", "object"]
 
 
@@ -108,9 +108,8 @@ class StdioEndpoint(BaseModel):
 # One connector endpoint, discriminated on `transport`. A new transport is one variant here plus one
 # branch in `connectors.registry._mcp_tool`. Both variants carry `tools` — the agent-facing
 # allow-list — because it is a property of *an endpoint's* surface: nesting it here rather than at
-# the
-# manifest's top level makes "an allow-list with no endpoint to serve it" unrepresentable instead of
-# something a validator has to catch.
+# the manifest's top level makes "an allow-list with no endpoint to serve it" unrepresentable
+# instead of something a validator has to catch.
 Endpoint = HttpEndpoint | StdioEndpoint
 
 
@@ -118,8 +117,8 @@ class JobParam(BaseModel):
     """One launch argument of a durable job, as the model will see it.
 
     `description` is required, not optional: it becomes the argument's schema description, which is
-    the only thing telling the model what to put there. A job whose parameters are undocumented is
-    a job the model will call wrongly, so the manifest refuses to declare one.
+    the only thing telling the model what to put there. A job whose parameters are undocumented is a
+    job the model will call wrongly, so the manifest refuses to declare one.
     """
 
     model_config = ConfigDict(extra="forbid", frozen=True)

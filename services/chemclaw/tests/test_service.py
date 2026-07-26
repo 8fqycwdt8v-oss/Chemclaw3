@@ -10,6 +10,7 @@ import asyncio
 import json
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
+from typing import Any
 
 from agent_framework import AgentSession
 from fastapi.testclient import TestClient
@@ -18,14 +19,21 @@ from service.app import _LiveSessions, create_app
 
 
 class _SpyMcpTool:
-    """An async-context-manager stand-in for an MCP tool that records enter/exit."""
+    """An async-context-manager stand-in for a connector tool that records connect/teardown.
+
+    `is_connected` is what `open_reachable` reads to report which connectors came up, and MAF reads
+    it too — a spy that omitted it would look permanently unreachable.
+    """
 
     def __init__(self) -> None:
         self.entered = 0
         self.exited = 0
+        self.is_connected = False
+        self.name = "spy"
 
     async def __aenter__(self) -> "_SpyMcpTool":
         self.entered += 1
+        self.is_connected = True
         return self
 
     async def __aexit__(self, *exc: object) -> None:
@@ -40,15 +48,22 @@ class _Update:
 
 
 class _FakeAgent:
-    """Fake agent: yields two tokens per turn and exposes one spy MCP tool."""
+    """Fake agent: yields two tokens per turn. Connectors are the front door's business, not its."""
 
     def __init__(self) -> None:
-        self.mcp_tools = [_SpyMcpTool()]
+        self.mcp_tools: list[object] = []
 
     def create_session(self, *, session_id: str) -> AgentSession:
         return AgentSession(session_id=session_id)
 
-    def run(self, message: str, *, stream: bool, session: AgentSession) -> object:
+    def run(  # noqa: D102 - a fake agent's run, documented by its class
+        self,
+        message: str,
+        *,
+        stream: bool,
+        session: AgentSession,
+        **_run_options: Any,
+    ) -> object:
         async def _gen() -> object:
             yield _Update(text="hi ")
             yield _Update(text="there")
@@ -56,8 +71,13 @@ class _FakeAgent:
         return _gen()
 
 
-def _client(agent: _FakeAgent) -> TestClient:
-    return TestClient(create_app(agent_factory=lambda: agent))
+def _client(agent: _FakeAgent, connector_factory: Callable[[], list[Any]] = list) -> TestClient:
+    """The app under test, with no connectors by default.
+
+    Most tests here are not about connectors, and defaulting to the real set would have every one of
+    them dial a connector server that is not running.
+    """
+    return TestClient(create_app(agent_factory=lambda: agent, connector_factory=connector_factory))
 
 
 def test_healthz_is_ok() -> None:
@@ -79,11 +99,11 @@ def test_static_chat_page_is_served() -> None:
         assert "Strict-Transport-Security" in res.headers
 
 
-def test_message_stream_runs_a_turn_and_opens_mcp_once() -> None:
-    """Create a session, post a message, stream the turn's events; MCP opens/closes once."""
+def test_message_stream_runs_a_turn_and_connects_its_connectors_once() -> None:
+    """Create a session, post a message, stream the turn; the turn's connector opens once."""
     agent = _FakeAgent()
-    spy = agent.mcp_tools[0]
-    with _client(agent) as client:
+    spy = _SpyMcpTool()
+    with _client(agent, connector_factory=lambda: [spy]) as client:
         session_id = client.post("/sessions").json()["session_id"]
         events = []
         with client.stream(
@@ -97,7 +117,10 @@ def test_message_stream_runs_a_turn_and_opens_mcp_once() -> None:
     kinds = [e["type"] for e in events]
     assert kinds == ["token", "token", "answer"]
     assert "".join(e["text"] for e in events if e["type"] == "token") == "hi there"
-    assert spy.entered == 1 and spy.exited == 1  # MCP lifecycle handled once, in the service
+    # The connector lifecycle is the service's, and it is per *turn*: one connect and one teardown
+    # for this turn, from the factory the app calls each time (not a set held on the agent, which
+    # would be shared across concurrent turns — see `agents.chemclaw_agent.connector_tools`).
+    assert spy.entered == 1 and spy.exited == 1
 
 
 def test_a_launched_job_reaches_the_browser_as_an_sse_event() -> None:
@@ -109,7 +132,14 @@ def test_a_launched_job_reaches_the_browser_as_an_sse_event() -> None:
     from agents.turn_signals import announce_job_started
 
     class _JobAgent(_FakeAgent):
-        def run(self, message: str, *, stream: bool, session: AgentSession) -> object:
+        def run(  # noqa: D102 - a fake agent's run, documented by its class
+            self,
+            message: str,
+            *,
+            stream: bool,
+            session: AgentSession,
+            **_run_options: Any,
+        ) -> object:
             async def _gen() -> object:
                 announce_job_started("qm-sse")
                 yield _Update(text="submitted")
@@ -573,7 +603,14 @@ def _gated_agent_factory(
     """
 
     class _GatedAgent(_FakeAgent):
-        def run(self, message: str, *, stream: bool, session: AgentSession) -> object:
+        def run(  # noqa: D102 - a fake agent's run, documented by its class
+            self,
+            message: str,
+            *,
+            stream: bool,
+            session: AgentSession,
+            **_run_options: Any,
+        ) -> object:
             async def _gen() -> object:
                 if message == blocked_message:
                     started.set()
@@ -650,7 +687,14 @@ def test_stalled_turn_times_out_and_frees_the_permit(monkeypatch) -> None:  # ty
     from chemclaw.config import settings
 
     class _HungAgent(_FakeAgent):
-        def run(self, message: str, *, stream: bool, session: AgentSession) -> object:
+        def run(  # noqa: D102 - a fake agent's run, documented by its class
+            self,
+            message: str,
+            *,
+            stream: bool,
+            session: AgentSession,
+            **_run_options: Any,
+        ) -> object:
             async def _gen() -> object:
                 import asyncio
 

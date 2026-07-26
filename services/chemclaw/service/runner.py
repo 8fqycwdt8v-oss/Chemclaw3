@@ -1,10 +1,10 @@
 """The per-turn run lifecycle (plan step F2-T1): the missing caller that actually runs the agent.
 
-`run_turn` owns exactly what the agent's own docstring says a caller must own: it opens the MCP tool
-connectors for the turn (`agent.mcp_tools`), runs the turn against the session's thread,
+`run_turn` owns exactly what the agent's own docstring says a caller must own: it opens the MCP
+tool connectors for the turn (`agent.mcp_tools`), runs the turn against the session's thread,
 and translates the model's streamed updates into the typed `service.events` the surfaces render.
-When the harness is enabled the *same* call drives its completion loop (MAF's loop middleware runs
-inside `agent.run`), so plan/execute autonomy needs no separate driver here.
+When the harness is enabled the *same* call drives its completion loop (MAF's loop middleware
+runs inside `agent.run`), so plan/execute autonomy needs no separate driver here.
 
 Errors are turned into a single `ErrorEvent` with a user-safe message rather than propagating a
 stack trace to the browser — a failed turn must not take down the stream or leak internals.
@@ -12,12 +12,13 @@ stack trace to the browser — a failed turn must not take down the stream or le
 
 import copy
 import logging
-from collections.abc import AsyncIterator, Mapping
+from collections.abc import AsyncIterator, Mapping, Sequence
 from contextlib import AsyncExitStack
 from typing import Any
 
 from agent_framework import AgentSession
 
+from agents.chemclaw_agent import connector_tools
 from agents.dialogue_tools import reset_dry_run, set_dry_run
 from agents.framing import frame_untrusted
 from agents.harness_todo import todo_titles
@@ -56,8 +57,9 @@ from service.events import (
 
 logger = logging.getLogger(__name__)
 
-# How many characters of a tool call's arguments the trace event carries — enough to see *what* was
-# called without streaming a whole evidence payload to the UI (mirrors the audit trail truncation).
+# How many characters of a tool call's arguments the trace event carries — enough to see *what*
+# was called without streaming a whole evidence payload to the UI (mirrors the audit trail
+# truncation).
 _ARG_PREVIEW_CHARS = 200
 
 
@@ -70,6 +72,7 @@ async def run_turn(
     roles: frozenset[str] = frozenset(),
     budget: BudgetTracker | None = None,
     dry_run: bool = False,
+    connectors: Sequence[Any] | None = None,
 ) -> AsyncIterator[Event]:
     """Run one turn and yield its events (tokens, tool calls, approvals, then the answer).
 
@@ -83,28 +86,36 @@ async def run_turn(
         roles: The user's app roles, made ambient for the authorization gate.
         dry_run: Plan the turn without launching anything expensive (IDEA-4). Ambient for the
             turn rather than a tool argument, so the model can neither set it nor clear it.
+        connectors: This turn's connector tools. Defaults to every enabled connector
+            (`agents.chemclaw_agent.connector_tools`); a caller that selected an agent profile
+            passes that profile's narrowed set, and a test passes an empty list to run with
+            none.
         budget: The runaway-cost meter. When set, this turn's reported token usage and its turn
-            count are booked against the session/user when the turn ends (the front-door admission
-            check reads those counters before the *next* turn). `None` disables metering (test/CLI).
+            count are booked against the session/user when the turn ends (the front-door
+            admission check reads those counters before the *next* turn). `None` disables
+            metering (test/CLI).
 
     Yields:
         `service.events.Event` values in the order the model produced them, ending with an
         `AnswerEvent` on success or an `ErrorEvent` on failure.
     """
     answer_parts: list[str] = []
-    # Metered across the turn's updates and booked once on teardown (even on failure — a failed turn
-    # still spent tokens up to the point it broke, so its cost must count toward the next check).
+    # Metered across the turn's updates and booked once on teardown (even on failure — a failed
+    # turn still spent tokens up to the point it broke, so its cost must count toward the next
+    # check).
     turn_tokens = 0
     # Stamp the turn's session so a job-launching tool (submit_qm_job) records push-back to the
     # right session (F3-T3) — ambient, never a model-supplied argument. Reset on turn teardown.
     session_token = set_current_session_id(session.session_id)
-    # The live session object too, so a job-launching tool can mark the harness todo it's waiting
-    # on (`agents.harness_todo`) — the id alone cannot reach the session's own todo-list state.
+    # The live session object too, so a job-launching tool can mark the harness todo it's
+    # waiting on (`agents.harness_todo`) — the id alone cannot reach the session's own todo-list
+    # state.
     live_session_token = set_current_session(session)
     # Stamp the authenticated identity (F4) so audit/authorization/attribution see the user.
     identity_token = set_current_identity(actor, roles) if actor is not None else None
     # Buffer for what tools learn mid-turn that the stream must surface (started jobs, PR-gate
-    # proposals) — the runner only sees the model's updates, so tools hand these over out of band.
+    # proposals) — the runner only sees the model's updates, so tools hand these over out of
+    # band.
     signals_token = begin_turn()
     # Durable jobs this turn launched, for the optional mid-turn resume below.
     started_jobs: list[str] = []
@@ -115,16 +126,23 @@ async def run_turn(
     # Snapshot the session state before the turn so a client disconnect can roll it back
     # (ISSUE-B-10). A disconnect mid-tool-call otherwise leaves a `tool_use` block in the stored
     # history with no matching `tool_result`, and every later turn on that session replays it —
-    # the model rejects the thread outright ("tool_use ids found without tool_result blocks"), so
-    # one dropped connection permanently bricks the conversation rather than costing it a turn.
+    # the model rejects the thread outright ("tool_use ids found without tool_result blocks"),
+    # so one dropped connection permanently bricks the conversation rather than costing it a
+    # turn.
     state_snapshot = copy.deepcopy(session.state)
     try:
         async with AsyncExitStack() as stack:
-            # Connect each connector for the duration of the turn, then tear it down — the
-            # lifecycle the agent constructor deliberately leaves to its caller. An unreachable
-            # connector costs its tools, not the turn (`connectors.registry.open_reachable`).
-            await open_reachable(stack, getattr(agent, "mcp_tools", None) or [])
-            stream = agent.run(user_message, stream=True, session=session)
+            # This turn's own connector tools, connected for its duration and torn down after.
+            # Built per turn rather than held on the agent because a connector's connection must
+            # belong to exactly one turn — see `agents.chemclaw_agent.connector_tools`. They are
+            # passed to `agent.run`, which appends run-scoped tools to the agent's configured
+            # ones, so the model sees one combined surface. An unreachable connector costs its
+            # tools, not the turn.
+            turn_connectors = connectors if connectors is not None else connector_tools()
+            await open_reachable(stack, turn_connectors)
+            stream = agent.run(
+                user_message, stream=True, session=session, tools=turn_connectors or None
+            )
             async for update in stream:
                 turn_tokens += _usage_tokens(update)
                 # Drain *before* this update's own content: a tool that ran while the model was
@@ -146,18 +164,18 @@ async def run_turn(
                 if plan and plan != last_plan:
                     last_plan = plan
                     yield PlanEvent(todos=plan)
-            # A signal recorded while producing the *final* update has no next iteration to carry
-            # it, so drain once more before the answer — otherwise the last job started or note
-            # proposed in a turn would be silently dropped.
+            # A signal recorded while producing the *final* update has no next iteration to
+            # carry it, so drain once more before the answer — otherwise the last job started or
+            # note proposed in a turn would be silently dropped.
             for signal in drain():
                 if isinstance(signal, JobSignal):
                     started_jobs.append(signal.job_id)
                 yield _signal_event(signal)
 
-            # Mid-turn resume (gap AGT-2): if this turn launched durable jobs, optionally wait for
-            # them and continue the *same* turn with their results, so "compute this, then reason
-            # about the result" is one exchange rather than two. Off by default; bounded by config
-            # and, above it, by the front door's whole-turn deadline.
+            # Mid-turn resume (gap AGT-2): if this turn launched durable jobs, optionally wait
+            # for them and continue the *same* turn with their results, so "compute this, then
+            # reason about the result" is one exchange rather than two. Off by default; bounded
+            # by config and, above it, by the front door's whole-turn deadline.
             if started_jobs and settings.mid_turn_resume_enabled:
                 results = await await_job_results(
                     session.session_id,
@@ -165,7 +183,7 @@ async def run_turn(
                     timeout_seconds=settings.mid_turn_resume_timeout_seconds,
                 )
                 if results:
-                    async for event in _resume(agent, session, results):
+                    async for event in _resume(agent, session, results, turn_connectors):
                         if isinstance(event, TokenEvent):
                             answer_parts.append(event.text)
                         yield event
@@ -182,10 +200,11 @@ async def run_turn(
                     yield PlanEvent(todos=last_plan)
         yield await _answer_event("".join(answer_parts))
     except GeneratorExit:
-        # The client went away mid-turn, so this generator is being closed. Roll the session back
-        # to its pre-turn state: a half-written turn is worth less than the conversation it would
-        # otherwise poison (see the snapshot above). Needs its own clause because GeneratorExit
-        # derives from BaseException, not Exception; re-raised so the generator still closes.
+        # The client went away mid-turn, so this generator is being closed. Roll the session
+        # back to its pre-turn state: a half-written turn is worth less than the conversation it
+        # would otherwise poison (see the snapshot above). Needs its own clause because
+        # GeneratorExit derives from BaseException, not Exception; re-raised so the generator
+        # still closes.
         logger.warning(
             "client disconnected during turn for session %s; rolling session state back",
             session.session_id,
@@ -194,10 +213,11 @@ async def run_turn(
         session.state.update(state_snapshot)
         raise
     except Exception:
-        # One turn's failure becomes one user-safe event, never a 500 mid-stream or a leaked trace.
-        # The exception detail (DB hosts, SMILES, workflow ids, driver errors) stays server-side in
-        # the log; the client gets a generic message keyed by the session id it already knows, so an
-        # operator can correlate the report to the logged stack trace without leaking internals.
+        # One turn's failure becomes one user-safe event, never a 500 mid-stream or a leaked
+        # trace. The exception detail (DB hosts, SMILES, workflow ids, driver errors) stays
+        # server-side in the log; the client gets a generic message keyed by the session id it
+        # already knows, so an operator can correlate the report to the logged stack trace
+        # without leaking internals.
         logger.exception("turn failed for session %s", session.session_id)
         yield ErrorEvent(
             message=(
@@ -219,11 +239,12 @@ async def run_turn(
 async def _current_plan(session: AgentSession) -> list[str] | None:
     """The harness's current todo list for this session, or None when there is no plan to show.
 
-    Why this is emitted at all (gap RCH-5): `PlanEvent` has been in the typed contract and rendered
-    by the UI since F2, but nothing ever produced one — so `plan_only` autonomy, which the Helm
-    chart ships as the production default, asked a human to approve a plan the surface could never
-    show them. Titles are read from the harness's own `TodoProvider` state, the same store
-    `agents.harness_todo` mutates, so there is no second representation of the plan to drift.
+    Why this is emitted at all (gap RCH-5): `PlanEvent` has been in the typed contract and
+    rendered by the UI since F2, but nothing ever produced one — so `plan_only` autonomy, which
+    the Helm chart ships as the production default, asked a human to approve a plan the surface
+    could never show them. Titles are read from the harness's own `TodoProvider` state, the same
+    store `agents.harness_todo` mutates, so there is no second representation of the plan to
+    drift.
 
     None (not an empty list) off the harness path: the classic agent has no todo state, and an
     empty `PlanEvent` would render as an empty checklist — "the agent has no plan" — rather than
@@ -242,12 +263,13 @@ async def _current_plan(session: AgentSession) -> list[str] | None:
 async def _answer_event(answer: str) -> AnswerEvent:
     """Assemble the turn's final `AnswerEvent`, scoring it when verification is enabled (F10-B).
 
-    When `verifier_enabled`, the assembled answer is checked for citation faithfulness against the
-    notes it cites, the aggregate confidence + any unsupported claims are stamped on the event, and
-    `review_required` is set when `confidence < verifier_confidence_threshold` — the routing signal
-    a surface (or a future D-032 hold) uses to flag a low-confidence answer for review rather than
-    presenting it as authoritative. When disabled (the default) this is today's plain answer. A
-    verifier failure must never sink the turn — it degrades to the unscored answer.
+    When `verifier_enabled`, the assembled answer is checked for citation faithfulness against
+    the notes it cites, the aggregate confidence + any unsupported claims are stamped on the
+    event, and `review_required` is set when `confidence < verifier_confidence_threshold` — the
+    routing signal a surface (or a future D-032 hold) uses to flag a low-confidence answer for
+    review rather than presenting it as authoritative. When disabled (the default) this is
+    today's plain answer. A verifier failure must never sink the turn — it degrades to the
+    unscored answer.
     """
     if not settings.verifier_enabled:
         return AnswerEvent(text=answer)
@@ -265,22 +287,31 @@ async def _answer_event(answer: str) -> AnswerEvent:
 
 
 async def _resume(
-    agent: Any, session: Any, results: dict[str, dict[str, Any]]
+    agent: Any,
+    session: Any,
+    results: dict[str, dict[str, Any]],
+    connectors: Sequence[Any],
 ) -> AsyncIterator[Event]:
     """Continue the turn with completed job results, streaming the continuation's events.
 
-    The results are handed to the model as *framed data*, not as an instruction: they arrive from a
-    workflow, and the same injection discipline that applies to retrieved notes applies here
-    (`agents.framing`). Anything the continuation itself starts is surfaced too, but a resume is
-    deliberately not recursive — a second wait would let one chemist turn chain durable jobs
-    indefinitely inside a single request.
+    The results are handed to the model as *framed data*, not as an instruction: they arrive
+    from a workflow, and the same injection discipline that applies to retrieved notes applies
+    here (`agents.framing`). Anything the continuation itself starts is surfaced too, but a
+    resume is deliberately not recursive — a second wait would let one chemist turn chain
+    durable jobs indefinitely inside a single request.
+
+    The turn's connectors are passed through rather than rebuilt: the resume is part of the same
+    turn, inside the same open connections, so a second set would open a second connection per
+    connector
+    for
+    no reason.
     """
     summary = "\n".join(f"- {job_id}: {payload}" for job_id, payload in results.items())
     message = (
         "The durable job(s) you started have completed. Their results follow as data; continue "
         "your answer using them.\n" + frame_untrusted(summary, note_id="job-results")
     )
-    async for update in agent.run(message, stream=True, session=session):
+    async for update in agent.run(message, stream=True, session=session, tools=connectors or None):
         for signal in drain():
             yield _signal_event(signal)
         text = getattr(update, "text", "") or ""
@@ -303,8 +334,9 @@ def _usage_tokens(update: Any) -> int:
     """Best-effort total tokens reported in a streamed update's usage content (0 if none).
 
     MAF emits usage as a content carrying a `UsageDetails` mapping (`input_token_count`/
-    `output_token_count`/`total_token_count`). Duck-typed on the mapping so a provider or version
-    that reports no usage — or the fake agent in tests — simply meters 0; the turn caps still bind.
+    `output_token_count`/`total_token_count`). Duck-typed on the mapping so a provider or
+    version that reports no usage — or the fake agent in tests — simply meters 0; the turn caps
+    still bind.
     """
     total = 0
     for content in getattr(update, "contents", None) or []:
@@ -323,9 +355,10 @@ def _usage_tokens(update: Any) -> int:
 def _tool_calls_in(update: Any) -> list[tuple[str, str]]:
     """Best-effort extract (tool_name, arg_preview) for any function call in a streamed update.
 
-    Duck-typed on purpose: MAF's function-call content class is not a stable top-level export and
-    its shape varies by version, so we match by structure (a named content carrying arguments/a call
-    id) rather than importing a concrete type. Plain-text content has no `name` and is skipped.
+    Duck-typed on purpose: MAF's function-call content class is not a stable top-level export
+    and its shape varies by version, so we match by structure (a named content carrying
+    arguments/a call id) rather than importing a concrete type. Plain-text content has no `name`
+    and is skipped.
     """
     calls: list[tuple[str, str]] = []
     for content in getattr(update, "contents", None) or []:

@@ -241,17 +241,31 @@ logged, so the audit trail can always answer "which real user drove this".
 **stdio connectors get no headers** — a subprocess of our own pod under our own identity is
 already inside the trust boundary, and there is no request to attach them to.
 
-### 4.2 Verified mechanism (this is why the design works)
-`MCPStreamableHTTPTool` accepts `header_provider: Callable[[dict], dict[str, str]]`, invoked
-**per `call_tool`** and injected via a ContextVar-backed httpx request hook
-(`agent_framework/_mcp.py:3085-3110`). So per-turn identity needs *no* per-turn tool construction
-and has *no* mutation race between concurrent turns — the provider simply reads the ambient
-ContextVars at call time.
+### 4.2 Measured mechanism, and the two findings that shaped it
+The plan originally called for MAF's `header_provider` hook. **It does not work over streamable
+HTTP**, and finding that out changed the design. Measured against a live uvicorn server:
 
-MAF's own `security.py:3425-3431` documents the trap: `header_provider` headers are **not** present
-during `session.initialize()`, so auth passed that way 401s at connect. Therefore **auth goes on the
-`httpx.AsyncClient` (`auth=`), identity goes on `header_provider`.** An `httpx.Auth` applies to every
-request including initialize, and can refresh a token without rebuilding anything.
+- The provider *is* invoked, with the right values, and the server receives **no** headers. MAF
+  passes them through a `ContextVar` set inside `call_tool` (`agent_framework/_mcp.py:3104-3110`),
+  while the HTTP request is issued by the MCP transport's `post_writer` task — created when the
+  connection opened, so it never sees a variable set afterwards.
+- A request hook on **our own** `httpx.AsyncClient` runs *inside* that task and reads the turn's
+  ambient identity correctly. That is what ships (`connectors.identity.stamp_turn_identity`).
+
+The credential half was right for a related reason MAF documents itself
+(`security.py:3425-3431`): provider headers are absent during `session.initialize()`, so auth passed
+that way 401s at connect. Auth is therefore an `httpx.Auth` on the same client, which applies to
+every request including the handshake.
+
+**Second finding — connectors must be per turn, not per process.** The transport's tasks inherit the
+context of whoever opened the connection, so connect-time identity is only truthful if a connection
+belongs to one turn. Probing the shared-object shape (one process-lived tool, `async with` per turn,
+which is what `build_agent` originally produced) showed it is worse than inaccurate: **two concurrent
+turns over one connector tool deadlock**, and this is a pre-existing hazard on the stdio path too, not
+something connectors introduced. So `agents.chemclaw_agent.connector_tools` builds fresh tools per
+turn and the caller passes them to `Agent.run(tools=…)`, which appends run-scoped tools to the
+agent's configured ones. Both problems have one fix, and `tests/test_connector_transport.py` pins it:
+two concurrent turns complete, each with its own identity.
 
 ### 4.3 Auth modes
 A discriminated union on `mode`:

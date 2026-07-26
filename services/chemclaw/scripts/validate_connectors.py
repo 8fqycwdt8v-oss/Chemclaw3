@@ -33,8 +33,7 @@ from connectors.registry import ConnectorError, discovered, enabled, job_tools
 # Name prefixes that mark a tool as mutating. A prefix list rather than an exact allowlist because
 # the rule is about *intent*: a connector author naming a tool `index_*`, `write_*`, `delete_*` or
 # `propose_*` is writing something, and the agent-facing surface is not where that belongs. A
-# genuine
-# read tool that trips this is renamed — which is cheaper than a write path nobody noticed.
+# genuine read tool that trips this is renamed — which is cheaper than a write path nobody noticed.
 _MUTATING_PREFIXES = ("index_", "write_", "delete_", "remove_", "update_", "propose_", "submit_")
 
 
@@ -42,10 +41,9 @@ def _both_ways(kind: str, declared: list[str], present: set[str], where: Path) -
     """Report a declaration with no file *and* a file with no declaration (rule 2, both directions).
 
     One helper for skills and profiles because the asymmetry is the same in both cases and stating
-    it
-    twice would let the two copies drift: a declaration without a file is a promise nothing fulfils,
-    and a file without a declaration is content shipped inside a capability nobody reviewed as part
-    of it.
+    it twice would let the two copies drift: a declaration without a file is a promise nothing
+    fulfils, and a file without a declaration is content shipped inside a capability nobody reviewed
+    as part of it.
     """
     missing = [
         f"{where}: declares {kind} {name!r} but no such {kind} exists in the bundle"
@@ -102,9 +100,8 @@ def validate_connectors() -> list[str]:
     """Return one problem string per violation across every discovered bundle (empty = all good).
 
     Discovery (not just the enabled set) is validated, because a bundle that is broken while
-    disabled
-    is a bundle nobody can enable — and CI is where that should surface, not the day an operator
-    turns it on.
+    disabled is a bundle nobody can enable — and CI is where that should surface, not the day an
+    operator turns it on.
     """
     try:
         found = discovered()
@@ -117,8 +114,8 @@ def validate_connectors() -> list[str]:
         problems.extend(_job_problems(manifest))
     try:
         # Two properties of the enabled *set*, not of any one manifest: `connectors_enabled` naming
-        # a
-        # bundle that exists (rule 1), and no two enabled connectors claiming one job name (rule 4).
+        # a bundle that exists (rule 1), and no two enabled connectors claiming one job name (rule
+        # 4).
         names = [manifest.name for manifest in enabled()]
         job_tools()
     except ConnectorError as exc:

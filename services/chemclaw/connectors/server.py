@@ -65,8 +65,8 @@ def connector_app(server: FastMCP, *, name: str) -> FastAPI:
     Args:
         server: The `FastMCP` instance holding the capability's tools. Its tools are served as-is;
             which of them the agent may call is decided by the manifest's `tools` allow-list in
-            core,
-            not here, so the same server can also expose index/write tools for the ingestion path.
+            core, not here, so the same server can also expose index/write tools for the ingestion
+            path.
         name: The connector's name (must match its bundle folder and manifest `name`), used in the
             health payload and the request log.
 

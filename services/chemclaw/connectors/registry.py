@@ -33,7 +33,7 @@ from pydantic import ValidationError
 
 from agents.tool_registry import CapabilityTool
 from chemclaw.config import settings
-from connectors.identity import auth_for, turn_headers
+from connectors.identity import auth_for, stamp_turn_identity
 from connectors.jobs import build_job_tool
 from connectors.manifest import ConnectorManifest, Endpoint, HttpEndpoint, StdioEndpoint
 from connectors.transport import DegradingHttpConnector, DegradingStdioConnector
@@ -186,19 +186,22 @@ def _mcp_tool(manifest: ConnectorManifest, endpoint: Endpoint) -> ConnectorMcpTo
     context for the duration of a turn and tears it down after.
     """
     if isinstance(endpoint, HttpEndpoint):
-        auth = auth_for(endpoint.auth, manifest.name)
-        # Our credential goes on the client so it is present on *every* request including the MCP
-        # handshake; the turn's identity goes on `header_provider`, which MAF invokes per tool call.
-        # Using header_provider for auth instead would 401 at connect (MAF's security.py documents
-        # this: provider headers are not set during session.initialize()).
+        # One client carries both halves of what travels with a call (`connectors.identity`): our
+        # own credential as `auth`, so it is present on the MCP handshake too, and the turn's
+        # identity as a request hook, which is the only place that can see the turn's ambient
+        # context — MAF's `header_provider` is invoked in the calling task while the request is
+        # issued by the MCP transport's writer task, so its headers never land.
         return DegradingHttpConnector(
             name=manifest.name,
             url=_endpoint_url(manifest, endpoint),
             allowed_tools=endpoint.tools,
             request_timeout=endpoint.request_timeout,
             load_prompts=False,
-            http_client=httpx.AsyncClient(auth=auth, follow_redirects=True) if auth else None,
-            header_provider=turn_headers,
+            http_client=httpx.AsyncClient(
+                auth=auth_for(endpoint.auth, manifest.name),
+                follow_redirects=True,
+                event_hooks={"request": [stamp_turn_identity]},
+            ),
         )
     if isinstance(endpoint, StdioEndpoint):
         # No identity headers: a subprocess of our own process, under our own identity, with no
@@ -233,8 +236,7 @@ async def open_reachable(stack: AsyncExitStack, tools: Iterable[Any]) -> list[st
     (`connectors.transport`), because MAF re-connects an unconnected tool inside `Agent.run` and
     would
     raise there even if this function swallowed the failure. So an unreachable connector simply
-    comes
-    back not-connected, contributes no tools to the turn, and is retried on the next one.
+    comes back not-connected, contributes no tools to the turn, and is retried on the next one.
 
     Args:
         stack: The caller's exit stack, which owns tearing the connections down.
