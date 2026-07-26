@@ -148,3 +148,49 @@ loop is demoted to the fallback path. Two are unchanged and were re-validated ac
 the shared RRHO (both reproduce water's 45.10 cal/(mol K)) and the cost router (still the right
 answer — with the binary, drug-sized work is minutes instead of tens of minutes, which is *still*
 past any inline budget).
+
+## X8 — the calculation capability as an MCP server
+
+Goal (the user's, stated directly): run the calculators in **their own pod**, so the heavy
+chemistry dependencies and the CPU load scale independently of the agent.
+
+### The boundary this forces, discovered before writing any code
+
+Not every calculator tool can move, and the reason is identity rather than chemistry:
+
+- **`compute_reaction_energy`, `compare_solvents`, `scan_coordinate`, `sample_conformers`** route
+  to Temporal above a cost threshold, and submitting a durable job needs `require_actor()` and
+  `get_current_session_id()` — both **turn-ambient** and, by the F4-T3 rule, never model-supplied.
+  An MCP server has neither: it is a separate process with no conversation and no authenticated
+  user. Passing them as tool arguments would make identity a model-authored value, which is
+  exactly the thing that rule exists to prevent.
+- **`run_xtb_task`** is role-gated through `authorize_trigger` for the same reason.
+
+So: **MCP carries capability; identity stays with the agent.** That is the line, and it also
+predicts what can ever move.
+
+### Build
+
+- [x] `mcp_servers/calc/server.py` — FastMCP over the synchronous calculators, thin like
+      `molfp`/`rxnfp`: every tool body already lives in `calc/`.
+- [x] Move (not copy) those tools out of `agents/calc_tools.py`. Two advertisements of one tool
+      is the failure mode to avoid.
+- [x] `settings.mcp_servers` gains `mcp-calc`; `deploy/entrypoint.sh` gains the component.
+- [x] **`scripts/validate_skills.py` must resolve a declared tool against MCP `allowed_tools` too.**
+      Today it checks the in-process registry only, so every skill declaring a moved tool would
+      fail. Fixing that is not a workaround — a skill names a *capability*, and which transport
+      delivers it is a deployment decision the skill should be insulated from.
+- [x] Tests: the transport test already parametrizes over configured stdio servers, so the new
+      server is covered on adding it; plus the registry set, and the validator's new resolution.
+
+### X8 review
+
+Green. The measure of whether the boundary was drawn in the right place: **no skill changed** in
+a migration that moved seven tools out of process, and `test_mcp_transport` needed no edit —
+it already parametrizes over configured servers and proved the new one spawns and advertises
+exactly its allowed set.
+
+The one non-mechanical change was the validator, and it was a correction rather than an
+accommodation: a skill declaring `predict_pka` is declaring a capability, and it should not care
+which process answers. Widening the lookup without weakening it (an invented name still fails) is
+what makes the transport a deployment decision.

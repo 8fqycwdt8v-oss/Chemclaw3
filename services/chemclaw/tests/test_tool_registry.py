@@ -22,18 +22,11 @@ from agents.tool_registry import (
 # grows with each new `@tool`, so adding one is a deliberate, reviewed edit here rather than a
 # silent widening of what the agent can do.
 _EXPECTED_INPROCESS_TOOLS = {
-    "compute_xtb_energy",
-    "compute_electronic_properties",
-    "predict_site_reactivity",
-    "optimize_geometry",
-    "compute_thermochemistry",
     "scan_coordinate",
     "compute_reaction_energy",
     "compare_solvents",
     "sample_conformers",
     "run_xtb_task",
-    "predict_solubility",
-    "predict_pka",
     "submit_qm_job",
     "get_job_status",
     "find_notes",
@@ -73,11 +66,11 @@ def test_agent_advertises_the_registered_inprocess_tools() -> None:
 def test_duplicate_registration_is_a_loud_error() -> None:
     """Registering two tools under one name is a programming error (as in `evals.metric`)."""
 
-    async def compute_xtb_energy() -> None:  # shadows an already-registered name on purpose
+    async def compute_reaction_energy() -> None:  # shadows a registered name on purpose
         return None
 
     with pytest.raises(ValueError, match="already registered"):
-        register_tool(compute_xtb_energy)
+        register_tool(compute_reaction_energy)
 
 
 def test_decorator_registers_and_returns_function_unchanged() -> None:

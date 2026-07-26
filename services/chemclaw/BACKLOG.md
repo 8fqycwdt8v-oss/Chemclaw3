@@ -703,13 +703,11 @@ MAF ships the harness natively (`create_harness_agent` + `TodoProvider`/`AgentMo
       3-5x, which is the single largest speedup available for this workload and compounds through
       every scan point and every species of a reaction. The Cartesian optimizer was the right first
       choice (dependency-free, easy to reason about); it is now the bottleneck.
-- [ ] **X8 xTB capability as an MCP server** — the xTB tools are in-process `@tool` functions;
-      `mcp_servers/` already hosts `molfp`/`rxnfp` over FastMCP and config already admits an `http`
-      transport, so a pod-per-capability deployment is expressible today. All the logic lives in
-      `calc/`, so the server is a thin wrapper — but it is an **either/or** switch (the same tool
-      must not be advertised twice), and it touches skill frontmatter, the registry test, and the
-      in-process callers in `bo/` that import `calc.xtb_props` directly rather than through a tool.
-      Raised by the user as the intended production shape for *all* tools; not yet scoped.
+- [x] **X8 the calculators as an MCP server** (D-090): `mcp_servers/calc` hosts the seven tools
+      that compute; the four that submit durable jobs stay in-process because they need the turn's
+      actor and session. `scripts/validate_skills` now resolves a declared tool against MCP
+      `allowed_tools` too, so a skill names a capability and the transport is a deployment
+      decision — no skill changed in the move.
 - [ ] **U2 pKa domain extension to bases / N-H acids** — v1 covers neutral O-H/S-H acids only, so
       the most common pharma pKa question (a basic amine API) is unanswerable; the tool errors out,
       which is correct but not useful. A calibration + domain problem, not a new capability.

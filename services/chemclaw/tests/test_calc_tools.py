@@ -2,13 +2,18 @@
 
 Uses an in-memory store (swapped in for the production Postgres one) so the tool
 is exercised end-to-end with a real GFN2-xTB calculation and no database.
+
+Since X8 these tools live in `mcp_servers.calc.server` rather than `agents.calc_tools`: they
+compute and need no turn-ambient identity, so they are hosted out of process. The tests are
+unchanged apart from where they import from — which is the point of that move being a
+deployment decision rather than a behavioural one.
 """
 
 import asyncio
 
 import pytest
 
-import agents.calc_tools as calc_tools
+import mcp_servers.calc.server as calc_tools
 from calc.store import InMemoryStore
 from chemclaw.config import settings
 
@@ -57,7 +62,7 @@ def test_site_reactivity_tool_truncates_to_the_configured_default(
     """
     store = InMemoryStore()
     monkeypatch.setattr(calc_tools, "default_store", lambda: store)
-    # The same settings object `calc_tools` bound at import, so patching it takes effect.
+    # The same settings object the server module bound at import, so patching it takes effect.
     monkeypatch.setattr(settings, "xtb_fukui_top_n", 3)
 
     async def _run() -> None:

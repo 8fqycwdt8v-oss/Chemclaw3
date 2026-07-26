@@ -25,6 +25,9 @@ case "${component}" in
   mcp-rxnfp)
     exec python -m mcp_servers.rxnfp.server
     ;;
+  mcp-calc)
+    exec python -m mcp_servers.calc.server
+    ;;
   *)
     echo "unknown CHEMCLAW_COMPONENT=${component}" >&2
     exit 64

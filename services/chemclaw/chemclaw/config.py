@@ -693,6 +693,26 @@ class AgentSettings(BaseSettings):
             args=["-m", "mcp_servers.rxnfp.server"],
             allowed_tools=["similar_reactions"],
         ),
+        # The fast calculators (plan X8). Hosted out of process so the heavy chemistry
+        # closure — RDKit, tblite, scipy, the xtb/crest binaries — and its CPU load scale
+        # on their own pod. Only the tools that *compute*: the ones that submit durable
+        # jobs need the turn's actor and session and so stay in-process (see
+        # `mcp_servers/calc/server.py`). Switch this entry to an `http` spec to point the
+        # agent at a remote deployment instead of a subprocess.
+        StdioMcpServerSpec(
+            name="mcp-calc",
+            command=sys.executable,
+            args=["-m", "mcp_servers.calc.server"],
+            allowed_tools=[
+                "compute_xtb_energy",
+                "compute_electronic_properties",
+                "predict_site_reactivity",
+                "optimize_geometry",
+                "compute_thermochemistry",
+                "predict_solubility",
+                "predict_pka",
+            ],
+        ),
     ]
     # Conversation context management (MAF compaction). The agent keeps a session thread and
     # composes tool calls that return large payloads (evidence sweeps, full ELN recipes), so a

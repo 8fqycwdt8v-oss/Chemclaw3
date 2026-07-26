@@ -32,7 +32,15 @@ def test_default_profile_reproduces_todays_agent() -> None:
 
 
 def test_profile_narrows_tools_and_swaps_instructions() -> None:
-    """A profile advertises only its named tool subset and its own instructions."""
+    """A profile advertises only its named tool subset, across both transports.
+
+    The profile names three capabilities; two of them (`predict_pka`,
+    `predict_solubility`) live on `mcp-calc` since X8 and one is in-process. A profile is
+    a statement about *capabilities*, not about which process hosts them, so naming a
+    calculator must keep working — and the attenuation must be exact: the server is
+    attached with its allowed set intersected down to the two asked for, not with all
+    seven it can serve.
+    """
     agent = build_agent(
         chat_client=object(),
         profile=AgentProfile(
@@ -41,12 +49,30 @@ def test_profile_narrows_tools_and_swaps_instructions() -> None:
             tool_names=frozenset({"predict_pka", "predict_solubility", "gather_evidence"}),
         ),
     )
-    assert {t.name for t in agent.default_options["tools"]} == {
-        "predict_pka",
-        "predict_solubility",
-        "gather_evidence",
-    }
+    assert {t.name for t in agent.default_options["tools"]} == {"gather_evidence"}
+    assert {t.name for t in agent.mcp_tools} == {"mcp-calc"}
+    allowed = agent.mcp_tools[0].allowed_tools
+    assert allowed is not None
+    assert set(allowed) == {"predict_pka", "predict_solubility"}
     assert agent.default_options["instructions"] != _INSTRUCTIONS
+
+
+def test_narrowing_to_one_tool_does_not_attach_the_rest_of_its_server() -> None:
+    """Naming one tool of a server grants that tool, never the server.
+
+    The failure this guards is silent widening: `mcp-calc` serves seven calculators, and a
+    profile scoped to one of them getting all seven would be an attenuation mechanism that
+    quietly does not attenuate. Servers with nothing asked for are not attached at all.
+    """
+    agent = build_agent(
+        chat_client=object(),
+        profile=AgentProfile(name="pka-only", tool_names=frozenset({"predict_pka"})),
+    )
+    assert {t.name for t in agent.mcp_tools} == {"mcp-calc"}
+    allowed = agent.mcp_tools[0].allowed_tools
+    assert allowed is not None
+    assert list(allowed) == ["predict_pka"]
+    assert agent.default_options["tools"] == []
 
 
 def test_profile_can_narrow_mcp_servers() -> None:

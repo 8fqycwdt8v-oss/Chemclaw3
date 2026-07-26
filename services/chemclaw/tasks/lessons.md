@@ -83,3 +83,18 @@ swept, the optimum was 1.0 — two hundred times the "safe" value.
 
 **Rule:** when a constant substitutes for physics the model omits, do not pick it for numerical
 comfort. Measure what it is standing in for, and sweep it against the outcome it affects.
+
+
+## Moving a capability tests every layer that names it (2026-07-26, X8)
+
+Moving seven calculators from in-process to an MCP server broke three things that had nothing to
+do with chemistry: the skill validator (resolved names against the in-process registry only),
+agent profiles (`tool_names` could not name an MCP-hosted tool, and MCP attenuation was
+server-granular), and an example script's imports.
+
+Each was the same latent assumption — *a tool's name implies its transport* — and each fix was a
+correction rather than an accommodation. The good sign afterwards: **no skill changed**.
+
+**Rule:** before relocating a capability, grep for every layer that refers to it *by name*
+(validators, profiles, registries, docs, examples) and ask whether that layer should care where it
+lives. Usually it should not, and the migration is the moment that assumption becomes visible.
