@@ -167,6 +167,57 @@ known systematic offset so users don't treat the absolute values as reliable.
 
 ---
 
+### ISSUE-B-8: `artifacts/api-server` path `/api` intercepts all BFF proxy traffic *(fixed in Replit build)*
+
+**Severity:** Blocker (no API calls reach the Chemclaw BFF — every session create and message POST returns 404)
+
+**Symptom:** Every request to `/api/*` (sessions, messages, approvals, healthz) returns 404 from
+the wrong server. The Chemclaw BFF never receives any request and logs no activity. "unknown
+session" errors appear on every message send, including the first one.
+
+**Root cause:** The pre-existing monorepo `artifacts/api-server` artifact had `paths = ["/api"]`
+in its `artifact.toml`. Replit's path router gives the more-specific `/api` match priority over
+the Chemclaw UI's catch-all `/`. Every `/api/*` request therefore went to port 8080
+(the pre-existing API server) instead of port 19432 (the Chemclaw BFF). The BFF's proxy to the
+FastAPI backend was never reached. Even the session recovery path failed because `POST /sessions`
+itself hit the wrong server.
+
+**Fix applied on Replit:** Changed `artifacts/api-server` `paths` from `["/api"]` to
+`["/api-server"]` (and `previewPath` to `/api-server`). Replit then routes all `/api/*` traffic
+to the Chemclaw UI BFF, which proxies correctly to `http://127.0.0.1:8000`.
+
+**Upstream fix:** Document in the Replit deployment guide that the `artifacts/api-server`
+monorepo artifact must be moved off `/api` before the Chemclaw UI artifact is registered, or
+disabled entirely if only the Chemclaw stack is needed.
+
+---
+
+### ISSUE-B-9: `X-Frame-Options: DENY` + CSP `frame-ancestors 'none'` blocks Replit preview iframe *(fixed in Replit build)*
+
+**Severity:** Blocker for Replit dev (the built-in preview pane is an iframe — with these headers
+the browser refuses to render the page there at all)
+
+**Symptom:** The Replit built-in preview shows a blank page or a "refused to connect" error.
+The external browser URL works but the in-editor preview does not. All "unknown session" errors
+observed in the built-in browser were downstream of the page not loading in the iframe.
+
+**Root cause:** The BFF (`server/index.ts` + `server/config.ts`) sets two iframe-blocking
+directives unconditionally regardless of auth mode:
+- `X-Frame-Options: DENY` on all static assets (including `index.html`)
+- `Content-Security-Policy: frame-ancestors 'none'`
+
+Both are correct for a production deployment behind Entra auth, but block any iframe host
+including Replit's own proxy.
+
+**Fix applied on Replit:** Gated both directives on `authMode !== 'dev'`:
+- `x-frame-options` header omitted entirely in dev mode
+- `frame-ancestors *` in dev mode CSP (allows any embedding origin)
+
+**Upstream fix:** Add a `REPLIT_DEV=true` or `ALLOW_FRAMING=true` env var that relaxes both
+directives for sandboxed dev environments, leaving production (`msal` auth mode) unchanged.
+
+---
+
 ## Repo: Chemclaw3_ui
 
 ### ISSUE-U-1: `happy-dom@^16.0.0` blocked by Replit package security policy
