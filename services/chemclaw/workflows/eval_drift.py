@@ -29,6 +29,7 @@ with workflow.unsafe.imports_passed_through():
         load_baseline,
     )
     from evals.harness import load_eval_cases, run_eval
+    from workflows.registry import durable_activity, durable_workflow
 
 from workflows.notify import notify_session
 from workflows.publish import BAD_DATA_RETRY
@@ -41,6 +42,7 @@ DRIFT_ALERT_CHANNEL = "system-eval-drift"
 logger = logging.getLogger(__name__)
 
 
+@durable_activity("background")
 @activity.defn
 async def check_eval_drift() -> list[DriftAlert]:
     """Score the committed case-set and return the metrics that drifted from the baseline.
@@ -80,6 +82,7 @@ async def check_eval_drift() -> list[DriftAlert]:
     return alerts
 
 
+@durable_workflow("background")
 @workflow.defn
 class EvalDriftWorkflow:
     """Run a drift check and deliver one alert per drifted metric to the system channel."""

@@ -382,6 +382,87 @@ class CalculatorSettings(BaseSettings):
     # ordering of a ring plus its substituents without flooding the agent's context.
     xtb_fukui_top_n: int = 15
 
+    # Geometry optimization (plan X3). Convergence is on the largest absolute gradient
+    # component in Hartree/Angstrom; 5e-4 is ~2.6e-4 Hartree/Bohr, tighter than xtb's
+    # own "normal" setting because the finite-difference Hessian is only as clean as
+    # the stationary point under it. Both enter the cache key.
+    xtb_opt_gradient_tolerance: float = 5e-4
+    xtb_opt_max_steps: int = 1500
+    # Trust radius (Angstrom): the furthest one Cartesian coordinate may move in a
+    # single bounded L-BFGS-B leg. Without it the optimizer's first step on a strained
+    # geometry is large enough to collapse a bond and leave the SCF unconvergeable.
+    xtb_opt_trust_radius: float = 0.35
+    # Central-difference step for the Hessian, in Angstrom. Small enough that the
+    # harmonic approximation holds, large enough that the gradient difference is well
+    # above the SCF's own numerical noise.
+    xtb_hessian_displacement: float = 0.005
+    # Atom-count ceiling for a Hessian. Cost is 6N gradient evaluations of a finite
+    # difference, so this is an absolute practicality limit, not a latency one — the
+    # latency question is answered by the inline budget below, which routes an expensive
+    # request to Temporal instead of refusing it. 150 covers the 200-800 Da range this is
+    # pointed at (an 800 Da molecule is ~120 atoms with hydrogens) with headroom; a
+    # Hessian there is ~40 minutes, which is a job, not a refusal.
+    xtb_hessian_max_atoms: int = 150
+    # Predicted seconds above which an xTB request runs as a durable Temporal job rather
+    # than inline in the agent's turn. Roughly the longest a chat should sit silent.
+    xtb_inline_budget_seconds: float = 10.0
+    # Cost model coefficients (`calc.xtb_cost`): seconds ~ scale * atoms**exponent, with
+    # separate scales for an optimization and for an optimization plus its Hessian.
+    # Fitted to measurements on *drug-sized* molecules (see `calc.xtb_cost`), not on the
+    # small test molecules — an exponent fitted on those came out at 1.7 and
+    # under-predicted a 76-atom substrate sevenfold. Retune rather than recode on faster
+    # hardware.
+    xtb_cost_exponent: float = 3.0
+    xtb_cost_optimize_scale: float = 3.0e-4
+    xtb_cost_hessian_scale: float = 1.0e-3
+    # Start-to-close budget for one durable xTB job activity. Four hours, because the
+    # workload is drug-sized molecules: one 76-atom species takes ~5 minutes to optimize
+    # and take a Hessian, so a multi-species reaction at 100+ atoms is genuinely hours.
+    # The store makes a retry cheap rather than a restart from zero, and the heartbeat
+    # below — not this timeout — is what detects a dead worker.
+    xtb_job_timeout_seconds: int = 14400
+    # How long the durable job may go without a heartbeat before Temporal declares the
+    # worker dead and retries. Comfortably longer than the slowest single unit of work
+    # (one species' optimization plus Hessian on a large molecule), short enough that a
+    # crash is noticed in minutes rather than at the start-to-close budget.
+    xtb_job_heartbeat_timeout_seconds: int = 600
+    # Thermochemistry conditions. 298.15 K and 1 atm are the reference state every
+    # tabulated thermodynamic quantity is quoted at.
+    xtb_thermo_temperature_k: float = 298.15
+    xtb_thermo_pressure_pa: float = 101325.0
+    # Quasi-RRHO damping frequency (cm^-1, Grimme 2012): below it a vibration is treated
+    # as a free rotor for the entropy, because a harmonic oscillator's entropy diverges
+    # as the frequency goes to zero and low modes are exactly where the harmonic
+    # approximation fails. 25 cm^-1 is the published value and what xtb itself uses.
+    xtb_rrho_cutoff_cm: float = 25.0
+    # A negative Hessian eigenvalue below this magnitude (cm^-1) is numerical noise from
+    # the finite differences, not a real imaginary mode. Above it the geometry is a
+    # saddle point and the thermochemistry says so.
+    xtb_imaginary_threshold_cm: float = 25.0
+    # Reported uncertainty on a semiempirical reaction free energy, in kcal/mol.
+    # Attached to every result, like `pka_uncertainty` — GFN2 reaction energies are
+    # useful for comparison and poor as absolute numbers.
+    xtb_reaction_uncertainty_kcal: float = 3.0
+    # Maximum number of points in a relaxed scan. Each point is a constrained geometry
+    # optimization, so this bounds the cost of a single agent call the way
+    # `xtb_hessian_max_atoms` bounds a Hessian.
+    xtb_scan_max_points: int = 24
+    # How many times a geometry that lands on a saddle point may be displaced along its
+    # imaginary mode and re-optimized, and how far (Angstrom, the largest atom's motion).
+    # One attempt clears the ordinary case — a force field's eclipsed methyl held by
+    # symmetry through a Cartesian optimization; more than two means the structure is
+    # saying something real that another kick will not fix. Each attempt costs a full
+    # optimization *and* a full Hessian, which on a 100-atom substrate is tens of
+    # minutes — so on large molecules the refinement, when it triggers, dominates the
+    # job. Measured: sildenafil (63 atoms) does not reach a clean minimum on the first
+    # pass, so this is not a rare path at drug size.
+    xtb_minimum_refinement_attempts: int = 2
+    xtb_imaginary_kick_angstrom: float = 0.3
+    # Default number of IR bands a thermochemistry result reports, strongest first.
+    # A measured spectrum is compared on its strong bands; the weak modes between them
+    # carry no information for that comparison and cost context.
+    xtb_ir_bands_top_n: int = 12
+
     # xTB-based pKa predictor (plan step 1c.4): pKa from the GFN2-xTB solvated
     # (ALPB) deprotonation energy via a linear calibration pKa = slope*dE + intercept.
     # Defaults fitted over 10 reference O-H acids (R^2 0.93, residual ~1.6 pKa units);

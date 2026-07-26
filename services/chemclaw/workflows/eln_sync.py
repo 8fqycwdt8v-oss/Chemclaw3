@@ -35,6 +35,7 @@ with workflow.unsafe.imports_passed_through():
     from mcp_servers.fpstore import default_molecule_store, default_reaction_store
     from sources.base import IngestHalf
     from sources.registry import active_ingest_source_names, make_data_source
+    from workflows.registry import durable_activity, durable_workflow
 
 from workflows.publish import BAD_DATA_RETRY
 
@@ -68,6 +69,7 @@ def _merge(summaries: list[IngestSummary], floor: datetime) -> IngestSummary:
     )
 
 
+@durable_activity("background")
 @activity.defn
 async def list_ingest_sources() -> list[str]:
     """Return the active ingest source names — the set the workflow syncs and cursors per source."""
@@ -135,6 +137,7 @@ async def _heartbeat_forever() -> None:
         await asyncio.sleep(interval)
 
 
+@durable_activity("background")
 @activity.defn
 async def sync_eln_entries(source: str, since: datetime, apply_overlap: bool = True) -> SyncChunk:
     """Ingest a bounded chunk of entries newer than `since` from the one named ingest source.
@@ -168,18 +171,21 @@ async def sync_eln_entries(source: str, since: datetime, apply_overlap: bool = T
     return SyncChunk(summary=summary, has_more=bounded.truncated)
 
 
+@durable_activity("background")
 @activity.defn
 async def load_sync_cursor(source: str) -> datetime:
     """Return the persisted high-water cursor for `source` (epoch if it has never synced)."""
     return await load_cursor(source)
 
 
+@durable_activity("background")
 @activity.defn
 async def store_sync_cursor(source: str, cursor: datetime) -> None:
     """Persist the advanced high-water cursor for `source` after a scheduled run."""
     await store_cursor(source, cursor)
 
 
+@durable_workflow("background")
 @workflow.defn
 class ElnSyncWorkflow:
     """Run one ELN sync durably, returning what was ingested across every active ingest source.

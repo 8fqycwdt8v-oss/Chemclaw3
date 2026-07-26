@@ -6,6 +6,8 @@ description: >-
   flexible molecule), and when the comparison is not valid at all.
 tools:
   - compute_xtb_energy
+  - optimize_geometry
+  - compute_reaction_energy
 ---
 
 # Relative energy comparisons
@@ -26,9 +28,10 @@ Check this first. It is the failure that produces answers wrong by hundreds of k
 looking entirely ordinary.
 
 Valid comparisons: constitutional isomers · tautomers (same formula) · conformers ·
-cis/trans and E/Z pairs · regioisomeric products of one reaction. Everything else needs the
-balanced-reaction treatment, which is not built yet (plan X4) — say so rather than subtracting
-two unrelated energies.
+cis/trans and E/Z pairs · regioisomeric products of one reaction. Everything else needs a
+**balanced reaction**, and `compute_reaction_energy` is the tool for it — it enforces the
+balance rather than trusting it, and gives free energies rather than electronic ones. Reach
+for it rather than subtracting two unrelated `compute_xtb_energy` results.
 
 ## Orderings, not magnitudes
 
@@ -52,13 +55,17 @@ confidence for rigid systems.
 
 **Not an optimized geometry.** MMFF relaxation is a force field, not GFN2. It is enough to make
 the ordering reliable (an unrelaxed geometry is not — it inverted two of those five pairs), but
-it is not a stationary point on the surface the energy is computed on. Genuine optimization and
-free energies arrive with the geometry tasks (plan X3); until then this is a screening tool.
+it is not a stationary point on the surface the energy is computed on. `optimize_geometry` now
+fixes that for almost no cost, and `compute_thermochemistry` turns it into a free energy — so
+this tool is the cheap screen, and those are what an answer that has to hold up uses.
 
 ## Where this sits
 
 Use it to rank isomers, tautomers, or candidate products cheaply, then act on the *ordering*.
 When the decision turns on how big the difference is, on a free energy rather than an
-electronic energy, on a temperature dependence, or on a flexible molecule's real conformational
-population, this method does not answer it — escalate (`qm-job-submission`) or say what
-experiment would. `computational-evidence` holds the judgment on when escalating is worth it.
+electronic energy, or on a temperature dependence, escalate *within* this system first:
+`compute_reaction_energy` at `standard` level gives ΔH and ΔG for a balanced comparison, and
+`reaction-thermodynamics` holds the judgment for reading them. For a flexible molecule's real
+conformational population, or for accuracy beyond semiempirical, neither exists here — say what
+experiment would settle it, or escalate (`qm-job-submission`). `computational-evidence` holds
+the judgment on when escalating is worth it.

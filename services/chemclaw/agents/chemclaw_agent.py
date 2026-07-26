@@ -43,6 +43,7 @@ from agent_framework._harness._loop import todos_remaining
 from agents import bo_tools as _bo_tools  # noqa: F401
 from agents import calc_tools as _calc_tools  # noqa: F401
 from agents import graph_tools as _graph_tools  # noqa: F401
+from agents import job_status as _job_status  # noqa: F401
 from agents import memory_tools as _memory_tools  # noqa: F401
 from agents import qm_tools as _qm_tools  # noqa: F401
 from agents import research_tools as _research_tools  # noqa: F401
@@ -80,7 +81,7 @@ _INSTRUCTIONS = (
     "a hit's SMILES to reach the reactions using it). "
     "(3) For properties use compute_xtb_energy / predict_pka / predict_solubility (inline, "
     "cached); heavy QM goes through submit_qm_job (returns a job id — report it, poll with "
-    "get_qm_job_status). (4) To answer 'which experiment/condition next', call "
+    "get_job_status). (4) To answer 'which experiment/condition next', call "
     "suggest_next_experiment: build the decision space and the runs-so-far from the evidence "
     "you gathered, and it returns the point(s) to try next (proposals a human runs).\n"
     "Be proactive with tools, not just when asked to compute: when a question turns on a "

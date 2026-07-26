@@ -1,18 +1,15 @@
-"""Agent tools that bridge MAF to the Temporal QM job (plan steps 1.5, 1.6).
+"""The agent tool that bridges MAF to the Temporal QM job (plan step 1.5).
 
-These two async functions are the *thin adapter* between the conversation layer
-and durable execution (D-002): they start and query a `QMJobWorkflow` via the
-shared Temporal client and return immediately. The agent never blocks on a job
-and holds no durable state — that lives in Temporal. MAF advertises these
-functions as tools, inferring their schema from the signature and docstring, so
-the docstrings below are also the tool descriptions the model reads.
+A *thin adapter* between the conversation layer and durable execution (D-002): it
+starts a `QMJobWorkflow` via the shared Temporal client and returns immediately.
+Polling moved to `agents.job_status`, which answers for every job kind rather than only
+this one. The agent never blocks on a job and holds no durable state — that lives in
+Temporal. MAF advertises this function as a tool, inferring its schema from the signature
+and docstring, so the docstring below is also the tool description the model reads.
 """
 
-from pydantic import ValidationError
-from temporalio.client import WorkflowExecutionStatus
 from temporalio.common import WorkflowIDReusePolicy
 from temporalio.exceptions import WorkflowAlreadyStartedError
-from temporalio.service import RPCError
 
 from agents.authz import authorize_trigger, require_actor
 from agents.harness_todo import mark_awaiting_job
@@ -21,7 +18,7 @@ from agents.session_context import get_current_session, get_current_session_id
 from agents.tool_registry import tool
 from chemclaw.config import settings
 from chemclaw.temporal_client import connect
-from workflows.models import QMJobInput, QMJobStatus, qm_job_key
+from workflows.models import QMJobInput, qm_job_key
 from workflows.qm_job import QMJobWorkflow
 
 
@@ -30,7 +27,7 @@ async def submit_qm_job(molecule_smiles: str, method: str, basis_set: str) -> st
     """Start a quantum-mechanical calculation and return its job id immediately.
 
     Runs asynchronously as a durable Temporal workflow; use the returned id with
-    `get_qm_job_status` to check progress. Identical requests (same molecule,
+    `get_job_status` to check progress. Identical requests (same molecule,
     method, and basis set) share one job id, so re-submitting is a safe no-op —
     whether the job is still running or already completed — that returns the
     existing id rather than launching a duplicate calculation (D-011: a stored
@@ -100,37 +97,3 @@ async def _mark_awaiting_if_harness(job_id: str, *, molecule_smiles: str, method
     await mark_awaiting_job(
         session, job_id, title=f"Await QM job {job_id} ({molecule_smiles}, {method})"
     )
-
-
-@tool
-async def get_qm_job_status(job_id: str) -> QMJobStatus:
-    """Return the current status of a QM job, and its result once completed.
-
-    Args:
-        job_id: The id returned by `submit_qm_job`.
-
-    Returns:
-        The job's status; the parsed result is included only when it has
-        completed. Raises if no job with this id exists.
-    """
-    client = await connect()
-    handle = client.get_workflow_handle(job_id)
-    try:
-        description = await handle.describe()
-    except RPCError as exc:  # unknown id → surface a clear error, not a crash
-        raise ValueError(f"no QM job with id {job_id!r}") from exc
-
-    status = description.status
-    result = None
-    if status == WorkflowExecutionStatus.COMPLETED:
-        result = await handle.result()
-    try:
-        return QMJobStatus(
-            job_id=job_id,
-            status=status.name if status is not None else "UNKNOWN",
-            result=result,
-        )
-    except ValidationError as exc:
-        # A valid workflow id whose result is not a QMJobResult (a foreign
-        # workflow) → a clear error, not an opaque pydantic crash (G4).
-        raise ValueError(f"workflow {job_id!r} is not a QM job") from exc

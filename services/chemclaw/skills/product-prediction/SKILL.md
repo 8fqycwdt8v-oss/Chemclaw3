@@ -8,6 +8,7 @@ tools:
   - predict_site_reactivity
   - compute_electronic_properties
   - compute_xtb_energy
+  - compute_reaction_energy
   - find_notes
   - gather_evidence
   - screen_hazards
@@ -53,6 +54,11 @@ as you would for the reactants.
 - **Between constitutional isomers of the product**, a relative energy can indicate the
   thermodynamic preference — but read `relative-energy-comparisons` first, and only if the
   reaction is plausibly under thermodynamic control. Most selective reactions are not.
+- **Whether the transformation is favourable at all** is a separate question from which
+  product forms, and `compute_reaction_energy` answers it for a balanced equation
+  (`reaction-thermodynamics`). Worth asking when the proposed chemistry is unusual: a
+  strongly uphill reaction that precedent does not support is a reason to re-examine the
+  proposal rather than to rank its regioisomers.
 - **Kinetic vs. thermodynamic control is a question you must ask explicitly.** Site reactivity
   is a kinetic argument; relative product stability is a thermodynamic one. They frequently
   disagree, and answering the wrong one confidently is the classic failure here. If the
@@ -61,7 +67,8 @@ as you would for the reactants.
 ## What this cannot do
 
 - **No barriers, no rates, no ratios.** You can rank sites; you cannot say "85:15". Never
-  produce a numeric product distribution from these tools.
+  produce a numeric product distribution from these tools. A computed ΔG places an
+  equilibrium and still says nothing about which product forms fastest.
 - **Sterics are invisible.** A site can be electronically preferred and physically blocked.
   Where bulk plausibly decides, say the electronics do not settle it.
 - **One conformer, one geometry.** For a substrate whose conformation controls which face or

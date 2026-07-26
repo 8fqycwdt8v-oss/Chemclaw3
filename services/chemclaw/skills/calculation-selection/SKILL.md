@@ -9,6 +9,11 @@ tools:
   - predict_site_reactivity
   - predict_pka
   - predict_solubility
+  - optimize_geometry
+  - compute_thermochemistry
+  - scan_coordinate
+  - compute_reaction_energy
+  - compare_solvents
 ---
 
 # Calculation selection
@@ -40,6 +45,28 @@ calculation; this skill assumes that decision is already made.
 - **Frontier orbitals, dipole, partial charges, bond orders** →
   `compute_electronic_properties` (one single point). Best used to *compare* related
   molecules; also covered by `reactivity-descriptors`.
+- **A real 3D structure** → `optimize_geometry` (relaxes to a genuine GFN2 minimum).
+  Everything above runs on a force-field geometry; this is the tool that stops that
+  being true.
+- **Free energy, entropy, an IR spectrum, "is this a minimum?"** →
+  `compute_thermochemistry` (optimization + Hessian). The only route to a ΔG here.
+  `computed-spectra-comparison` holds the judgment on the spectrum.
+- **Does this reaction go?** → `compute_reaction_energy` (every species treated
+  identically; balance enforced). Load `reaction-thermodynamics` first — it answers
+  equilibrium and says nothing about rate.
+- **Which solvent?** → `compare_solvents`. Load `solvent-selection` first; the
+  computable criterion is rarely the binding one.
+- **Rotational barrier, torsion profile, ring strain** → `scan_coordinate`
+  (`conformational-analysis`, and `atropisomer-assessment` for the regulatory case).
+
+## The cost ladder, and when a tool hands back a job id
+
+Roughly: a single point is milliseconds; an optimization is under a second for a small
+molecule; a Hessian is 6N of those; a reaction is that per species; a solvent screen is
+that per solvent. The expensive tools estimate their own cost and, above a threshold,
+return a **job id instead of a result** — report it and poll with `get_job_status`
+rather than treating it as a failure. Prefer `level="quick"` when only an ordering of
+electronic energies is needed; it skips every Hessian.
 
 ## Reading results honestly
 
@@ -51,7 +78,10 @@ calculation; this skill assumes that decision is already made.
 - If a property predictor reports an uncertainty, state it; if the question needs
   higher accuracy than a fast method gives, say so rather than over-claiming (the
   heavier QM/DFT path is deferred and would be the escalation).
-- All of these run on a **single embedded conformer** at a force-field geometry, not
-  a GFN2-optimized one. That is fine for ranking and for comparing related structures;
-  it is not a substitute for an optimized geometry when the question is about a
-  specific conformation or an absolute energy.
+- The **fast** calculators (single point, properties, Fukui, pKa) run on a force-field
+  geometry, not a GFN2-optimized one. Fine for ranking and for comparing related
+  structures; when the question is about a specific conformation or needs a real
+  stationary point, `optimize_geometry` is the fix and costs almost nothing.
+- Everything here still describes **one conformer**, optimized or not. That limit does
+  not go away with a better geometry — `conformational-analysis` says when it
+  invalidates an answer rather than merely widening it.

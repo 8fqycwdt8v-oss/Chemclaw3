@@ -1,157 +1,123 @@
-# xTB capability layer — implementation
+# xTB capability layer — X3 (geometries + thermochemistry) and X4 (the composite)
 
-Proposal: `docs/xtb-tools-proposal.md`. Branch: `claude/xtb-chemclaw-tools-proposal-nujp14`.
+Proposal: `docs/xtb-tools-proposal.md` §12. Branch: `claude/xtb-chemclaw-tools-proposal-nujp14`.
 
-Scope of *this* change: **X1 (seams) + X2 (properties from the SCF we already run)** — the two
-phases the proposal recommends approving first (no new dependency, no new science, high payoff).
-X3+ stay proposal-only.
+Scope of *this* change: **X3** — `optimize_geometry`, `compute_thermochemistry`, `scan_coordinate`
+— and **X4** — `compute_reaction_energy`, `compare_solvent_effects`. Together these are the phases
+the skill catalogue says gate 19 of its 28 skills.
 
 ## Design decisions taken during planning (deviations from the proposal, with reasons)
 
-1. **Flat modules in `calc/`, not a `calc/xtb/` package.** A package named `xtb` cannot coexist
-   with the existing `calc/xtb.py`, and `calc/` is flat today (`pka.py`, `solubility.py`,
-   `store.py`). Renaming the shipped module would churn imports for no behavioral gain.
-2. **No `XtbEngine` Protocol yet.** There is exactly one backend (`tblite`); a protocol with one
-   implementation is the speculative abstraction `CLAUDE.md` forbids (Rule of Three). It arrives
-   with the second backend (X3/X5). `engine_version()` already carries the version role the
-   protocol's `version()` would.
-3. **No structure *store* yet.** `Structure` ships as a content-addressed **value type** (the
-   cache-key input and the composition seam). Nothing in X1/X2 *produces* a new geometry, so a
-   persistence layer would have one writer and no reader. It arrives with `optimize_geometry` (X3),
-   which is the first task whose output is a geometry.
-4. **`XtbSpec` does ship.** It has three real callers on day one (`sp`, `properties`, `fukui`) and
-   is the single home of the cache-key derivation — the invariant that makes adding a knob safe.
-5. **Fukui indices reported per atom, un-condensed.** Verified during planning: raw per-atom f⁻ on
-   ring carbons reproduces the textbook ordering for both activating and deactivating substituents
-   (phenol/toluene → *para* > *ortho* > *meta*; nitrobenzene → *meta* > *ortho* > *para*), while
-   summing the attached hydrogens' contributions **degrades** the *ortho*/*meta* separation. Data,
-   not preference.
+1. **No `ase` dependency.** The proposal offered "`ase` (or a scipy L-BFGS over the tblite
+   gradient)". Taking the second: `scipy` is already resident (via `scikit-learn`/`bofire`) and
+   `scipy.optimize.minimize(method="L-BFGS-B", jac=True)` over tblite's *analytic* gradient is a
+   dozen lines. ASE would buy an optimizer we get for free, plus a `Vibrations` class that caches
+   displacements **to a directory on disk** — a side effect that does not belong inside a pure,
+   content-addressed calculator. Its thermochemistry helper is the only real loss, and RRHO is
+   ~80 lines of textbook physics we can pin against water's measured entropy. `scipy` is promoted
+   from transitive to declared, because a first-party module now imports it.
+2. **Spec *subclasses*, not one widening `XtbSpec`.** Thermochemistry has a temperature, a symmetry
+   number and a pressure; optimization has a gradient tolerance and a step cap; a scan has its
+   coordinate. Adding them all to `XtbSpec` would put a `temperature_k` in a *single point's* cache
+   key. `OptSpec`/`ThermoSpec`/`ScanSpec` inherit `cache_key` unchanged — it derives from
+   `model_dump()`, so a subclass field is keyed by construction exactly as a base field is.
+3. **The optimized structure is a field of the cached result, not a new store.** X1 deferred a
+   structure store until something produced a geometry; X3 does. But `OptimizationResult` carrying
+   its `Structure` *is* persistence — the result store already holds it, content-addressed by the
+   optimization's key. A second store with one writer would be the speculative abstraction.
+4. **`compute_thermochemistry` also returns IR intensities.** The Hessian loop displaces every
+   Cartesian and reads the gradient; tblite hands back the **dipole** at the same time, so dipole
+   derivatives — and therefore a computed IR spectrum — cost nothing beyond an array we were
+   already discarding. This is the same "read what the SCF already produced" move as X2, and it is
+   what makes the catalogue's `computed-spectra-comparison` shippable.
+5. **`level="thorough"` is not offered.** The proposal's third tier is a conformer ensemble, which
+   is X6. A `Literal["quick", "standard"]` that refuses to name what it cannot do beats an option
+   that raises.
+6. ~~**A size guard instead of half of X5.**~~ **Reversed during the build.** The original plan
+   was to refuse anything too slow for an inline turn, on the grounds that durable routing is
+   explicitly X5. The measurements said otherwise — 4.6 s for a four-species reaction, ~25 s for a
+   five-solvent screen, minutes for a long scan — and refusing work because it is slow is a worse
+   answer than running it durably. The expensive tools now route by predicted cost
+   (`calc/xtb_cost.py`) onto `XtbJobWorkflow`. The atom and point caps that remain are
+   practicality limits, not latency ones.
+7. **Relaxed scans freeze the atoms that define the coordinate.** RDKit's `rdMolTransforms` sets a
+   bond/angle/dihedral by moving the whole attached fragment; freezing those atoms and relaxing
+   everything else is then exactly a constrained minimization over the free subspace, expressed as
+   equal L-BFGS-B bounds. The approximation (the frozen atoms' own local geometry cannot relax) is
+   stated in the result and in the skill.
 
 ## Build
 
-- [x] **1. `geometry()` returns Angstrom.** Move the Bohr conversion into the engine boundary so
-      `Structure` can hold the interchange unit. Both existing callers pass the tuple straight
-      through, so the change is contained and energy-preserving.
-- [x] **2. `calc/structure.py`** — `Structure` value type: elements, positions (Å, normalized by
-      rounding), charge, multiplicity, optional smiles/origin; `structure_id` = `st_` + stable hash
-      of the chemical content; `from_smiles`/`from_mol`; `uhf` derived from multiplicity;
-      electron-parity validation generalizing today's closed-shell check.
-- [x] **3. `calc/xtb_spec.py`** — `XtbSpec` (task, method, solvent, accuracy, electronic
-      temperature) with the **one** `cache_key(structure)` derivation.
-- [x] **4. `calc/xtb_engine.py`** — `run_singlepoint(...)` returning the full tblite result
-      (energy, gradient, charges, bond orders, dipole, orbital energies); silence tblite's SCF
-      table (`verbosity=0`). `gfn2_energy` stays as the thin energy-only wrapper both existing
-      calculators use.
-- [x] **5. `calc/xtb_props.py`** — two cached calculators:
-      `compute_properties` (HOMO/LUMO/gap, dipole, Mulliken charges, Wiberg bond orders) and
-      `compute_fukui` (f⁻/f⁺/f⁰ by finite difference over the N, N−1, N+1 electron systems).
-- [x] **6. Port `calc/xtb.py`** onto `Structure` + `XtbSpec` without changing its public API or its
-      cached numbers.
-- [x] **7. Tools** — `compute_electronic_properties`, `predict_site_reactivity` in
-      `agents/calc_tools.py` (`@tool`, so audit + authz wrap them with no extra wiring).
-- [x] **8. Config** — `xtb_geometry_decimals`, `xtb_bond_order_threshold`, `xtb_fukui_top_n`.
-- [x] **9. Skills** — extend `calculation-selection`; add `reactivity-descriptors` (how to read a
-      Fukui ranking without over-claiming).
-- [x] **10. Tests** — structure identity/normalization/parity; spec key derivation; properties
-      against known GFN2 values; the two regioselectivity cases above; cache hit/miss;
-      determinism across SMILES spellings.
-- [x] **11. `make lint type test` green**; update `BACKLOG.md`/`DECISIONS.md`.
+- [x] X3.1 `calc/xtb_engine.py`: `make_calculator` + `evaluate_point` (Angstrom in; Hartree,
+      Hartree/Angstrom and the dipole out); friendly failure for an unknown ALPB solvent; the
+      spin-polarization contribution for open shells, versioned into the cache key.
+- [x] X3.5 Durable routing (unplanned, see decision 6): `calc/xtb_cost.py`, `XtbJobWorkflow` +
+      activity, `agents/xtb_job_tools.py`, and `get_qm_job_status` generalized to `get_job_status`.
+- [x] X3.2 `calc/xtb_opt.py`: `OptSpec`, `OptimizationResult`, `optimize_structure`,
+      `run_cached_optimization`. Frozen-atom support (bounds), convergence on max |gradient|.
+- [x] X3.3 `calc/xtb_thermo.py`: finite-difference Hessian + dipole derivatives, Eckart projection,
+      harmonic frequencies, IR intensities, quasi-RRHO thermochemistry, `ThermochemistryResult`.
+- [x] X3.4 `calc/xtb_scan.py`: `ScanSpec`, relaxed scan over a distance/angle/dihedral.
+- [x] X4.1 `calc/reaction.py`: balance check, per-species pipeline, `compute_reaction_energy`.
+- [x] X4.2 `calc/reaction.py`: `compare_solvent_effects` over the same reaction machinery.
+- [x] X4.3 Agent tools + config + `.env.example`.
+- [x] X3/X4 skills: the catalogue entries these unblock.
+- [x] Docs: ADR, `BACKLOG.md`, catalogue status.
 
-## Verification (done)
+## Raised by the user mid-build, and done
 
-`make lint type test` → **740 passed, 41 skipped** (the skips are the offline sandbox's Postgres and
-Temporal suites, unrelated), ruff clean, `mypy --strict` clean across 235 source files,
-`make skill-validate` clean. Every new behavior is proven by a real GFN2 calculation, not a mock.
+- [x] **A structured way to register Temporal capabilities** (D-086). Adding `XtbJobWorkflow`
+      meant editing a hardcoded list in a worker — the one extension seam left that forced an
+      edit to infrastructure code, and a silent one (an unregistered workflow never runs and
+      nothing fails until a job waits forever). `workflows/registry.py` now mirrors
+      `agents.tool_registry`: `@durable_workflow("hpc")` / `@durable_activity("background")` at
+      the definition site, workers read what they serve.
+- [x] **Sized for the real workload: 200-800 Da, minutes not seconds** (D-087). The cost model
+      was fitted on 3-14 atom test molecules and under-predicted a 76-atom substrate
+      **sevenfold**. Refitted on measured drug-sized timings (exponent 1.7 -> 3.0; the 76-atom
+      point now reproduces to 1%). Atom ceiling 120 -> 150, optimizer step cap 400 -> 1500, job
+      budget 1 h -> 4 h, and the activity heartbeats between species/solvents/scan points so a
+      dead worker is caught in minutes rather than at the timeout.
+- [ ] **xTB as an MCP server** — answered, not built. Recorded as X8 in `BACKLOG.md` with the
+      reason it is an either/or switch rather than an addition.
 
-Physics asserted, not assumed:
-- water HOMO/LUMO/dipole against known GFN2 values (dipole 1.8–2.2 D);
-- benzene's 6 aromatic C–C bond orders ≈ 1.4 and its zero dipole;
-- phenol and toluene rank *para* > *ortho* > *meta* for electrophilic attack;
-- nitrobenzene inverts to *meta* > *ortho* > *para* — the deactivating-director case that would
-  pass by luck if the descriptor were merely correlating with something else;
-- f⁻ + f⁺ = 2f⁰ per atom (the definitional identity), and Σf ≈ 1 per Fukui function (normalization);
-- the ported energy path reproduces the pre-change cached numbers exactly.
+## Verification (planned before building)
 
-## Review
-
-**What changed and why it is small.** 3 new + 5 changed source files, 2 new + 3 changed test
-modules, 1 new + 1 changed skill. The seams are additive:
-`XtbInput`/`XtbResult`/`run_xtb`/`run_cached_xtb` keep their signatures and their computed values,
-so nothing downstream moved. The one behavioral change to existing code is `geometry()` returning Å
-instead of Bohr, with the conversion moved one layer down into `run_singlepoint` — both existing
-callers pass the tuple straight through, and `test_pka.py` / `test_xtb.py` prove the energies are
-unchanged.
-
-**One consequence to state plainly:** the energy calculator's cache key changed shape (`xtb` →
-`xtb.sp`, and the inputs now name the geometry), so existing `calculation_results` rows for it are
-orphaned and will recompute once. The *energies* are identical — only the addressing moved. For a
-sub-second calculator this is the cheap, documented kind of invalidation (D-011); recorded in D-082
-rather than hidden.
-
-**The design decision worth re-reading.** Three of the five decisions above are *refusals to build*
-what the proposal describes (the engine protocol, the structure store, a package layout). Each
-would have had one caller today. Building them now would have meant writing the X3 abstraction
-before knowing what X3 needs — the proposal's own Rule-of-Three note argues against exactly that.
-`XtbSpec` shipped because it has three callers on day one; that is the line.
-
-**What the cache key gained, unplanned.** Keying on `structure_id` rather than on
-`(smiles, embed_seed)` turned out to be strictly stronger: the seed's effect is *already* inside
-the geometry, so the key stays correct without naming it, and a geometry that arrives from anywhere
-else later (an optimizer, a file) hits the same cache entry. The `params_hash` for `xtb.sp` is now
-empty by construction, which is the honest statement that a single point has no free parameters
-beyond its structure and method.
-
-**Not done, deliberately:** X3+ (optimization, Hessian/thermochemistry, reaction energies, CREST).
-The proposal's phase boundaries hold — X3 adds a dependency and is a separate reviewable change.
-
----
-
-# xTB use-case ideation + the judgment layer
-
-Follow-on to the X1/X2 build. Deliverable: `docs/xtb-use-cases.md` (the *why*, tiered by
-what unlocks each use case) plus the skills that carry the judgment.
-
-## Done
-
-- [x] **Use-case review** — `docs/xtb-use-cases.md`: 6 use cases answerable today, 9 unlocked by
-      X3–X6, 5 cross-cutting integrations that only exist because xTB lives *inside* this system,
-      and an explicit list of what xTB must never be used for here.
-- [x] **Measured the pKa tool before writing judgment about it** — 12 experimental values,
-      pKa 0.2–15.9, four acid classes. ρ 0.965 / RMSE 1.25 / worst error +2.08 / bases unsupported.
-- [x] **Locked both halves of that finding as tests** (`tests/test_pka.py`): the ranking claim the
-      skill rests on, and the worst-case bound that forbids using a value for a pH decision.
-- [x] **`ionization-and-partitioning`** — pKa for ranking, never for a pH; the basic-amine gap; the
-      amphoteric trap (the tool reports the most acidic O-H/S-H site and does not mention the basic
-      centre it ignored); why a predicted pKa must not be composed with predicted solubility.
-- [x] **`computational-evidence`** — the question above `calculation-selection`: should anything be
-      computed at all. Precedent first, the four honest reasons to compute, how to combine computed
-      and measured evidence, recording through the PR-gate, when to escalate to DFT.
-- [x] **Wired the judgment into the existing skills** — `safety-screening` (computation never clears
-      a hazard either), `qm-job-submission` (try the fast tier first), `experiment-design` (descriptor
-      shortlisting before framing a campaign, with the guard to keep one un-favoured option in),
-      `calculation-selection` (routes to both new skills).
-- [x] **`BACKLOG.md` U1–U4** — the items the review ranked *above* X3.
-- [x] `make lint type test` + `make skill-validate` green: **742 passed**, mypy clean over 235 files.
+- **Optimization**: ethanol's energy drops and the gradient falls below tolerance; a deliberately
+  stretched bond returns to a normal C–O length; optimizing an already-optimized structure is a
+  no-op (idempotence, which is also what makes the cache key honest).
+- **Frequencies**: water gives 3 real modes, no imaginary; a *distorted* (unoptimized) geometry
+  gives at least one imaginary — the `is_minimum=False` case the proposal says must exist.
+- **Thermochemistry against measurement**: water's standard entropy at 298.15 K, σ=2, is
+  45.10 cal/mol/K. Anything that fails to reproduce it within ~2 units has the physics wrong.
+  ZPE against the measured 13.26 kcal/mol.
+- **IR**: water's bend is the strongest of its three fundamentals (measured 53.6 km/mol vs. 2.2 and
+  44.6) — an ordering, which is what a semiempirical intensity supports.
+- **Reaction**: the Fischer esterification of `evals/cases/green-esterification.md` returns
+  ΔE/ΔH/ΔG; an unbalanced equation is rejected; a second reaction sharing a species demonstrably
+  hits the cache (assert hits, not wall clock).
+- **Torsion**: n-butane's C–C–C–C profile has minima at ~180° (anti) and ~±60° (gauche), anti
+  lowest, with a barrier of the right order at 0°.
 
 ## Review
 
-**The finding that changed the work.** The plan was a pKa skill covering extraction pH and salt
-selection. Benchmarking first turned that into a skill that mostly *forbids* those uses: ranking is
-excellent (ρ 0.97) but individual errors reach 2.1 units, which is precisely the margin the
-"pKa ± 2" process rules turn on. A skill written from the tool's docstring instead of from
-measurement would have taught the agent to give confident, invertible pH advice.
+**Built, and green under `make lint type test` + `make skill-validate`.** Five new calculator
+modules, five new agent tools, a durable job path, six new skills and five updated ones.
 
-**The second finding was a gap, not a limit.** Most APIs are basic amines; pKa v1 covers neutral
-O-H/S-H acids only. The tool fails loudly (correct), but it means the most common pharma pKa
-question cannot be answered at all — a bigger value step than most of the X3+ roadmap, and it was
-not on the roadmap. Now U2.
+**Three defects the measurements found, none of which a design review would have.** Open-shell
+energies had no spin-polarization term, so triplet O2 came out *above* singlet — a qualitative
+inversion that would have made every radical number wrong. The optimizer's first step could
+collapse a bond and leave the SCF unconvergeable. And ordinary molecules — ethyl acetate —
+optimize onto rotor saddle points, where a "free energy" is not one. Each is recorded in D-085
+with the number that exposed it, and each is pinned by a test that fails if it returns.
 
-**The ideation fed back into the build order.** Two conclusions worth acting on: the highest-value
-integration (U1, descriptors as BO featurization) needs *no new xTB capability*, only wiring; and
-the two top-value X3-tier use cases (tautomer ranking, atropisomer barriers) both need
-thermochemistry rather than geometries, which argues for X3 shipping optimization **and** the
-Hessian/RRHO path together rather than optimization first.
+**One scope decision reversed mid-build, correctly.** X3/X4 first shipped with an atom cap and a
+point cap: refusing calculations that would block a turn. The user pushed back that these are
+longer-running jobs and belong in Temporal, and the timings agreed — 4.6 s for a reaction, ~25 s
+for a solvent screen, minutes for a long scan. Refusing work because it is slow is a worse answer
+than running it durably. The caps that remain are practicality limits, not latency ones.
 
-**Skill count held at two new ones.** A `descriptor-guided-screening` skill was considered and
-dropped: it would have overlapped `reactivity-descriptors` and `experiment-design`, so the content
-went into the latter as one section instead. Skills are judgment, and duplicated judgment drifts.
+**What is still missing, stated plainly:** no transition-state search, so no barriers and no
+rates; one conformer everywhere, so no ensembles; and homolysis energies that rank correctly
+while being badly wrong in absolute terms. The first two are X5/X6; the third is carried by
+`bond-strength-and-radicals`.

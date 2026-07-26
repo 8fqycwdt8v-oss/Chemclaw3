@@ -647,13 +647,26 @@ MAF ships the harness natively (`create_harness_agent` + `TodoProvider`/`AgentMo
       (HOMO/LUMO/gap, dipole, Mulliken charges, Wiberg bond orders — all read from the SCF the energy
       calculator already ran) and `predict_site_reactivity` (condensed Fukui indices, three single
       points) + the `reactivity-descriptors` skill. No new dependency.
-- [ ] **X3 geometries + thermochemistry** — `optimize_geometry`, `compute_thermochemistry`,
-      `scan_coordinate`. Adds `ase` (or a scipy L-BFGS over the tblite gradient) and the structure
-      *store* that X1 deliberately left out. The proposal's "main event": the first tools that answer
-      "what does it look like" and "what is ΔG".
-- [ ] **X4–X7** — reaction energies, the `xtb`/`crest` binaries, conformer ensembles, the typed
-      expert escape hatch. See `docs/xtb-tools-proposal.md` §12; X5/X6 are gated on the licensing and
-      image-size decisions in §14, which are the user's, not engineering's.
+- [x] **X3 geometries + thermochemistry** (D-085): `calc/xtb_opt.py` (scipy L-BFGS-B over tblite's
+      analytic gradient — no `ase`), `calc/xtb_thermo.py` (finite-difference Hessian, quasi-RRHO
+      thermochemistry, **and IR intensities**, which came free from the dipole the same SCF
+      produced), `calc/xtb_scan.py` (relaxed scans). Validated against measurement: water's entropy
+      45.05 vs 45.10 cal/mol/K. Found and fixed three defects — open-shell energies had no
+      spin-polarization term (triplet O2 came out *above* singlet), the optimizer's first step could
+      collapse a bond, and ordinary molecules optimize onto rotor saddle points.
+- [x] **X4 the composite** (D-085): `calc/reaction.py` — `compute_reaction_energy` (balance
+      enforced, every species treated identically, per-species cache reuse) and
+      `compare_solvent_effects`. Homolysis/BDEs work because multiplicity is read from the SMILES'
+      own radical electrons.
+- [x] **Durable routing for the expensive xTB tasks** (D-085, brought forward from X5): the
+      inline-vs-Temporal decision the phase turned out to need. `calc/xtb_cost.py` predicts the cost,
+      `XtbJobWorkflow` runs what is over budget on the existing `hpc-jobs` queue, and
+      `get_qm_job_status` is generalized to `get_job_status` across both job kinds.
+- [ ] **X5–X7** — the `xtb`/`crest` binaries, conformer ensembles, the typed expert escape hatch.
+      See `docs/xtb-tools-proposal.md` §12; X5/X6 are gated on the licensing and image-size
+      decisions in §14, which are the user's, not engineering's. What remains genuinely missing at
+      the model level is **transition states**: there is no saddle-point search, so every "how fast"
+      question is still unanswerable and a scan maximum is a sketch of a barrier, not one.
 
 ### Ranked out of the xTB use-case review (`docs/xtb-use-cases.md`) — above X3 in value
 
@@ -662,6 +675,19 @@ MAF ships the harness natively (`create_harness_agent` + `TodoProvider`/`AgentMo
       category with computed electronic descriptors lets it interpolate across the space. Needs **no
       new xTB capability** — only wiring `calc.xtb_props` into `bo/`. Highest value per unit of work
       in the review.
+- [ ] **X9 internal-coordinate optimizer** — measured on the stated workload (200-800 Da): the
+      atorvastatin core (76 atoms) needs **177 Cartesian L-BFGS steps** and 97 s to optimize, and
+      the step count grows with size. A redundant-internal-coordinate optimizer typically cuts that
+      3-5x, which is the single largest speedup available for this workload and compounds through
+      every scan point and every species of a reaction. The Cartesian optimizer was the right first
+      choice (dependency-free, easy to reason about); it is now the bottleneck.
+- [ ] **X8 xTB capability as an MCP server** — the xTB tools are in-process `@tool` functions;
+      `mcp_servers/` already hosts `molfp`/`rxnfp` over FastMCP and config already admits an `http`
+      transport, so a pod-per-capability deployment is expressible today. All the logic lives in
+      `calc/`, so the server is a thin wrapper — but it is an **either/or** switch (the same tool
+      must not be advertised twice), and it touches skill frontmatter, the registry test, and the
+      in-process callers in `bo/` that import `calc.xtb_props` directly rather than through a tool.
+      Raised by the user as the intended production shape for *all* tools; not yet scoped.
 - [ ] **U2 pKa domain extension to bases / N-H acids** — v1 covers neutral O-H/S-H acids only, so
       the most common pharma pKa question (a basic amine API) is unanswerable; the tool errors out,
       which is correct but not useful. A calibration + domain problem, not a new capability.

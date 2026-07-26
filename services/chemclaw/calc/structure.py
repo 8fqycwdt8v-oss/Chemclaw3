@@ -143,11 +143,24 @@ def structure_from_mol(
     )
 
 
+def radical_multiplicity(mol: Chem.Mol) -> int:
+    """The spin multiplicity a SMILES' explicit radical electrons imply.
+
+    A SMILES *can* state its open shell: `[CH3]` carries one radical electron, `[O][O]`
+    two. Where it does, the ground-state multiplicity follows (2S+1 with every radical
+    electron unpaired), and there is nothing to guess — which is what makes a homolysis
+    energy computable from two SMILES rather than from a hand-declared spin state.
+    Silent on the cases a SMILES genuinely does not encode: a closed-shell formula whose
+    ground state is a triplet still needs `multiplicity` stated explicitly.
+    """
+    return 1 + sum(int(atom.GetNumRadicalElectrons()) for atom in mol.GetAtoms())
+
+
 def structure_from_smiles(
     smiles: str,
     *,
     charge: int | None = None,
-    multiplicity: int = 1,
+    multiplicity: int | None = 1,
     optimize: bool = False,
 ) -> Structure:
     """Build a `Structure` from a SMILES, canonicalizing first (D-011 determinism).
@@ -162,6 +175,9 @@ def structure_from_smiles(
             value that contradicts it is rejected rather than computed at the wrong
             electron count (gate G4).
         multiplicity: Spin multiplicity 2S+1; validated against the electron count.
+            `None` derives it from the SMILES' explicit radical electrons, which is
+            what a caller wants for a set of species that may include radicals; the
+            default of 1 keeps every existing caller closed-shell-or-error.
         optimize: Pre-optimize with MMFF where the force field has parameters.
 
     Returns:
@@ -180,7 +196,7 @@ def structure_from_smiles(
     return structure_from_mol(
         mol,
         charge=charge,
-        multiplicity=multiplicity,
+        multiplicity=radical_multiplicity(mol) if multiplicity is None else multiplicity,
         smiles=canonical,
         optimize=optimize,
     )

@@ -2238,3 +2238,187 @@ computed IR spectrum is a real discriminator between candidate impurity structur
 bond dissociation energies — radical stability, HAT selectivity, antioxidant strength — are now
 unblocked at the model level, because D-082's `Structure` validates a declared multiplicity
 instead of refusing every open shell. Both need only the X4 reaction composite, not new physics.
+
+## D-085 — X3/X4: geometries, free energies, the reaction composite, and durable routing
+
+**Context.** X1/X2 gave the xTB layer its seams and the properties a single point already
+produces. Everything above that — "what does it look like", "what is ΔG", "does this reaction
+go" — needed a geometry optimizer and a Hessian. The skill catalogue (D-084) had measured the
+gap precisely: **19 of its 28 skills were gated on X3 or X4**.
+
+**Decision.** Build both phases: `calc/xtb_opt.py` (L-BFGS-B over tblite's analytic gradient),
+`calc/xtb_thermo.py` (finite-difference Hessian, quasi-RRHO thermochemistry, IR intensities),
+`calc/xtb_scan.py` (relaxed scans), `calc/reaction.py` (balanced reaction energies and solvent
+comparisons), five agent tools, and — see below — a durable execution path for the expensive
+ones.
+
+**No `ase`.** The proposal offered "`ase` (or a scipy L-BFGS over the tblite gradient)". Taking
+the second: `scipy` was already resident and `minimize(method="L-BFGS-B", jac=True)` over an
+*analytic* gradient is a dozen lines. ASE's `Vibrations` caches displacements **to a directory
+on disk**, a side effect that does not belong inside a content-addressed calculator. `scipy` is
+promoted from transitive to declared, because first-party modules now import it.
+
+**Spec subclasses, not one widening `XtbSpec`.** `OptSpec`/`ThermoSpec`/`ScanSpec` inherit
+`cache_key` unchanged — it derives from `model_dump()`, so a subclass field is keyed by
+construction. Adding `temperature_k` to the base model would have put a temperature in a
+*single point's* cache key.
+
+**The optimized structure is a field of the cached result.** X1 deferred a structure store until
+something produced a geometry; X3 does. It turned out to need one field, not a subsystem: the
+result store already persists it, content-addressed by the optimization's own key, and `origin`
+records the lineage.
+
+**IR intensities came free.** The Hessian loop displaces every Cartesian and reads the gradient;
+tblite returns the dipole from the same SCF, so dipole derivatives — and therefore a computable
+IR spectrum — cost one array that was being discarded. Same move X2 made for charges and bond
+orders. This is what makes `computed-spectra-comparison` shippable.
+
+### Three defects the measurements found
+
+**1. Open-shell energies were silently wrong.** tblite's `uhf` only sets the *occupation*; with
+no spin-dependent term the energy expression does not stabilize an open shell at all. Triplet O2
+came out **1.7 kcal/mol above** singlet O2 — the ground state, inverted. Adding the
+spin-polarization contribution wherever there are unpaired electrons puts the triplet 15.8
+kcal/mol below (experimental gap ~22) and cuts ethane's C–C dissociation error from +42 to +25
+kcal/mol. Measured that this leaves the validated X2 Fukui orderings (phenol, toluene,
+nitrobenzene) unchanged, so it applies uniformly rather than as a special case. Cache impact is
+handled by a new `_HAMILTONIAN_REVISION` tag in `engine_version()`: a change to *how* a
+calculation is set up is otherwise invisible to the key.
+
+**2. The optimizer's first step could destroy the molecule.** L-BFGS-B scales its opening trial
+step by 1/|gradient|, which on a strained geometry is wildly too large — measured on a water
+with a 1.6 Å O–H, its first move collapsed the bond to **0.20 Å** and the SCF then failed to
+converge at all. Fixed with a trust radius enforced through bounds, re-entered per leg.
+
+**3. Ordinary molecules optimize onto saddle points.** A force field hands over an eclipsed
+methyl and a Cartesian optimizer preserves that symmetry all the way down. Ethyl acetate — an
+ordinary ester — settles at a **-42 cm⁻¹** mode, where its "free energy" is not one.
+`relax_to_minimum` displaces along the imaginary mode and re-optimizes; ethyl acetate needs one
+such step and lands 0.016 kcal/mol lower, which confirms the diagnosis (a shallow rotor saddle,
+not a different structure).
+
+A fourth was found by a test rather than a measurement: filtering the x/y/z rotations by
+singular value looks equivalent to a proper linearity test and is not — an optimized CO2 is bent
+by a fraction of a degree, so its "null" rotation survives the cut and eats a real vibration.
+Rotations are now built about the principal axes and kept by moment of inertia, the same
+criterion the entropy uses.
+
+**Validation is against measurement, not against itself.** Water's standard entropy comes out
+**45.05 cal/mol/K against a measured 45.10**; the ZPE, the mode counts (including CO2's 3N−5),
+the n-butane torsion profile (anti lowest, gauche +0.6, syn barrier 5.7) and water's IR band
+ordering are all pinned the same way.
+
+### Temporal, and a stopgap that was the wrong call
+
+X3/X4 were first shipped with an *atom cap and a point cap* — refusing work that would block a
+turn. That was wrong, and the timings say so: a four-species reaction is 4.6 s, a seven-point
+scan 4.2 s, a five-solvent screen ~25 s, and a long scan on a mid-sized molecule is minutes.
+Refusing a calculation because it is slow is a worse answer than running it durably. (X1/X2 were
+genuinely different: a single point is 2.4 ms, where a workflow is pure overhead.)
+
+So the expensive tools now **route by predicted cost** (`calc/xtb_cost.py`, a power law fitted
+to those measurements, used only against a threshold): under the inline budget they compute in
+the turn, over it they submit an `XtbJobWorkflow` on the existing `hpc-jobs` queue and return a
+job id with a push-back. One activity rather than a fan-out, because every expensive part is
+already content-addressed — a retry after a worker restart walks straight through the work it
+already did. The job spec is a **closed, typed union**, the same boundary rule the proposal sets
+for the expert escape hatch.
+
+**`get_qm_job_status` → `get_job_status`.** Generalized rather than duplicated: "how is my
+calculation doing" is one question, and two near-identical tools is a way to have the model
+choose wrong. Dispatch is on the id prefix, so a foreign id is rejected before anything is
+deserialized.
+
+**Skills.** Six new: `reaction-thermodynamics`, `conformational-analysis`,
+`atropisomer-assessment` (the one with a regulatory hook — a computed barrier maps to an
+interconversion half-life and therefore to an ICH class, and the method's error spans two
+classes, which is the whole point of the skill), `computed-spectra-comparison`,
+`solvent-selection`, `bond-strength-and-radicals`. Five existing skills updated for the widened
+ladder.
+
+**The limit carried by skills rather than code, as with pKa (D-084/U3).** GFN2 homolysis
+energies are badly overestimated in absolute terms even with spin polarization, while the
+*orderings* hold (benzylic C–H clearly weaker than methane's). `bond-strength-and-radicals`
+states the rule this implies — rank, never quote — and the reaction result attaches an
+open-shell warning of its own.
+
+## D-086 — Durable capabilities declare their own queue
+
+**Context.** Adding `XtbJobWorkflow` (D-085) meant editing a hardcoded list inside
+`workers/hpc_worker.py`. That was the *one* extension seam left in the system that forced an
+edit to infrastructure code: agent tools declare themselves with `@tool`, metrics with
+`@metric`, skills by folder, MCP servers and data sources by config token — and workflows by
+being remembered. The failure is silent and total: a workflow that is written, tested and
+imported but missing from a worker's list never runs, and nothing fails until a job sits in the
+queue forever.
+
+**Decision.** `workflows/registry.py`, shaped exactly like `agents.tool_registry`: a
+`@durable_workflow("hpc")` / `@durable_activity("background")` decorator at the definition site,
+a dict per queue keyed by the name Temporal will advertise, insertion-ordered, with a duplicate
+guard. Both workers now read what they serve from the registry instead of restating it, and the
+startup log line is derived from it too, so it cannot go stale.
+
+**The queue is a property of the capability, not of the deployment** (D-006): `hpc` for few
+heavy workers, `background` for many light ones. Which one a durable job belongs on follows from
+what it does, so the declaration belongs next to the code that does it.
+
+**Two details the shape forced.** The key is the *Temporal* name, read from the definition
+Temporal attached, not the Python name — the registry's job is catching two capabilities
+claiming one name, so it has to key on the name that actually collides. And re-registering the
+**same** definition is allowed, because Temporal's workflow sandbox re-imports workflow modules
+to run them and would otherwise trip the guard on every workflow task; the guard compares the
+defining module rather than object identity.
+
+**What still requires an edit,** and honestly: a workflow in a *new* module needs one import
+line in the worker, because importing is what triggers registration. That is the same
+side-effect-import contract `agents.chemclaw_agent` has for tools, and it is one line rather
+than two lists.
+
+## D-087 — Sizing for real substrates: the workload is 200-800 Da
+
+**Context.** The X3/X4 cost model was fitted on 3-14 atom test molecules. The actual target is
+process R&D substrates in the 200-800 Da range, where conformer and job work runs in minutes,
+not seconds.
+
+**Measured, on this stack** (optimize + Hessian, one core):
+
+| molecule                   | atoms | optimize (steps) | Hessian  | total   |
+|----------------------------|-------|------------------|----------|---------|
+| ibuprofen (MW 206)         |    33 |   11.6 s ( 71)   |   7.5 s  |  19 s   |
+| sildenafil (MW 475)        |    63 |   66.0 s (154)   | 435.1 s  | 501 s   |
+| atorvastatin core (MW 559) |    76 |   96.6 s (177)   | 218.3 s  | 315 s   |
+| erythromycin (MW 734)      |   118 |  552.6 s (232)   |1007.1 s  |1560 s   |
+
+**The old model predicted 47 s for the 76-atom case — under by a factor of seven**, and 100 s
+for the 118-atom one against a measured 26 minutes. The exponent fitted on small molecules was
+1.7; on real substrates it is ~3, because the fixed overhead that dominates a small molecule is
+irrelevant at 76 atoms and the real scaling takes over.
+
+**And atom count is not the whole story.** Sildenafil at 63 atoms costs *more* than the
+atorvastatin core at 76 — its Hessian alone is twice as expensive — because a heteroatom-dense,
+conjugated system carries more basis functions per atom and converges its SCF harder. No
+function of atom count removes that scatter, so the refitted model (exponent 3.0, set to err
+high) carries a factor of ~2 either way in the drug range. That is fine for its only job —
+comparing against a threshold — and it is why the estimate reported to a user is an order of
+magnitude, never a countdown.
+
+**Consequences, all of them pointing the same way.** Everything in the target range now routes
+to a durable job, which is correct rather than a limitation. `xtb_hessian_max_atoms` goes to 150
+(an 800 Da molecule is ~120 atoms with hydrogens, so 120 was exactly at the ceiling);
+`xtb_opt_max_steps` to 1500 (177 steps at 76 atoms, and the count grows with size, so 400 would
+have failed large substrates *after* doing all the work); the job's start-to-close budget to four
+hours. The activity now **heartbeats** between species, solvents and scan points through a
+`Progress` callback (`calc/progress.py`), so a dead worker is detected in minutes rather than at
+the four-hour timeout — and `calc/` still knows nothing about Temporal.
+
+**A second finding, carried rather than fixed.** Sildenafil does **not** reach a clean minimum on
+the first pass, so `relax_to_minimum`'s displacement-and-reoptimize loop is not a rare path at
+drug size — and each attempt costs a full optimization *and* a full Hessian, which at 100 atoms
+is tens of minutes. When the refinement triggers on a large molecule, it dominates the job. The
+config comment says so; the reaction result already warns when a species is not a minimum.
+
+**The bottleneck this exposes, recorded as X9 rather than fixed.** 177 Cartesian L-BFGS steps for
+one 76-atom molecule (232 for 118 atoms) is the dominant cost, and it compounds through every scan point and every
+species. A redundant-internal-coordinate optimizer typically cuts that 3-5x. The Cartesian
+optimizer was the right first choice — dependency-free and easy to reason about — and it is now
+the single largest speedup available for this workload.

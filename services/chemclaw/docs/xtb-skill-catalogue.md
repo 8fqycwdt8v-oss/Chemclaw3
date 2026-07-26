@@ -149,6 +149,21 @@ written about them.
 
 ## 8. What ships now, and what it is gated on
 
+> **Status update (X3/X4 shipped, D-085).** The distribution below was the argument for
+> building the capability, and the capability is now built: geometry optimization,
+> Hessians with IR intensities, RRHO thermochemistry, relaxed scans, balanced reaction
+> energies and solvent comparisons. Six of the gated skills have shipped —
+> `reaction-thermodynamics`, `conformational-analysis` (absorbing `conformer-hygiene`),
+> `atropisomer-assessment`, `computed-spectra-comparison` (absorbing
+> `structure-elucidation-support`), `solvent-selection`, and `bond-strength-and-radicals`
+> (absorbing `radical-and-HAT-selectivity`). What is still genuinely missing at the model
+> level is a **transition-state search**: `barrier-and-selectivity-estimates` and
+> `mechanism-hypothesis-testing` need one, and a relaxed-scan maximum is a sketch of a
+> barrier rather than a barrier. `tautomer-analysis`, `hydrolytic-liability`,
+> `protecting-group-strategy` and `thermal-hazard-triage` are now unblocked by capability
+> and simply not yet written.
+
+
 **Shipping in this change** — the three that need no new capability and cover the questions
 asked most often:
 

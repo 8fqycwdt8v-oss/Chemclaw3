@@ -20,6 +20,25 @@ from tblite.interface import Calculator
 # tblite works in atomic units; everything above this module is in Angstrom.
 _ANGSTROM_TO_BOHR = 1.8897259886
 
+# ALPB solvents named in the error for an unrecognized one. Not the full parameter
+# set — a curated list of the solvents process chemistry actually asks about, which is
+# what a caller who mistyped one needs to see.
+COMMON_SOLVENTS = (
+    "water",
+    "methanol",
+    "ethanol",
+    "acetonitrile",
+    "acetone",
+    "thf",
+    "dmso",
+    "toluene",
+    "chcl3",
+    "ch2cl2",
+    "hexane",
+    "ether",
+    "ethylacetate",
+)
+
 # The tblite result properties any calculator here reads. Named explicitly rather than
 # taking the whole result: it also carries the density matrix and orbital coefficients,
 # which nothing consumes and which scale as the square of the basis size.
@@ -33,6 +52,14 @@ _CONSUMED_PROPERTIES = (
 )
 
 
+# Revision of the *Hamiltonian settings* this engine applies, independent of the tblite
+# build. Bumped when a change to how a calculation is set up moves numbers — the
+# spin-polarization contribution added for open-shell systems is revision 2. Without a
+# tag like this, such a change is invisible to the cache key and old entries would be
+# served for a physics the current code would not reproduce (D-011).
+_HAMILTONIAN_REVISION = "h2"
+
+
 def engine_version() -> str:
     """The installed tblite and RDKit builds, for embedding in calculation cache keys.
 
@@ -43,7 +70,7 @@ def engine_version() -> str:
     entries; that is correct, as those did not record the geometry stack that
     produced them.
     """
-    return f"tblite-{version('tblite')}/rdkit-{version('rdkit')}"
+    return f"tblite-{version('tblite')}/rdkit-{version('rdkit')}/{_HAMILTONIAN_REVISION}"
 
 
 def parse_molecule(smiles: str) -> Chem.Mol:
@@ -129,14 +156,77 @@ def run_singlepoint(
         atomic units. Deliberately a subset: the full result also carries the density
         matrix and orbital coefficients, which nothing here reads and which are large.
     """
+    calc = make_calculator(method, numbers, positions, charge=charge, uhf=uhf, solvent=solvent)
+    result = calc.singlepoint()
+    return {key: result.get(key) for key in _CONSUMED_PROPERTIES}
+
+
+def make_calculator(
+    method: str,
+    numbers: np.ndarray,
+    positions: np.ndarray,
+    charge: int = 0,
+    uhf: int = 0,
+    solvent: str | None = None,
+) -> Calculator:
+    """Build a configured tblite calculator for one system; `positions` in Angstrom.
+
+    Exists so the tasks that evaluate the *same* system at many geometries — geometry
+    optimization, the finite-difference Hessian, a relaxed scan — set the Hamiltonian
+    up once and then call `energy_and_gradient` per step, instead of reconstructing a
+    calculator per single point. `run_singlepoint` goes through it too, so the
+    verbosity and solvation setup exist once (DRY).
+    """
     calc = Calculator(method, numbers, positions * _ANGSTROM_TO_BOHR, charge=charge, uhf=uhf)
     # tblite prints an SCF iteration table to stdout at its default verbosity, which
     # would pollute every worker log and test run. It affects no numbers.
     calc.set("verbosity", 0)
+    if uhf:
+        # Without this, `uhf` only changes the *occupation*: the energy expression has
+        # no spin-dependent term, so an open-shell state is not stabilized at all.
+        # Measured, and the measurement is decisive — triplet O2 comes out 1.7 kcal/mol
+        # *above* singlet O2 without it (qualitatively wrong; the triplet is the ground
+        # state) and 15.8 kcal/mol below it with (experimental gap ~22). Enabled
+        # wherever there are unpaired electrons, with no scaling, which is what
+        # `xtb --spinpol` does.
+        calc.add("spin-polarization", 1.0)
     if solvent is not None:
-        calc.add("alpb-solvation", solvent)
+        try:
+            calc.add("alpb-solvation", solvent)
+        except RuntimeError as error:
+            # tblite's own message ("String value for epsilon was not found among
+            # database of solvents") names an implementation detail rather than the
+            # mistake, and an unrecognized solvent is the easy typo on every solvated
+            # call. Name the argument and give the common process solvents (G4).
+            raise ValueError(
+                f"unknown ALPB solvent {solvent!r}; common valid names are "
+                f"{', '.join(COMMON_SOLVENTS)}"
+            ) from error
+    return calc
+
+
+def evaluate_point(calc: Calculator, positions: np.ndarray) -> tuple[float, np.ndarray, np.ndarray]:
+    """Move `calc`'s system to `positions` (Angstrom) and evaluate it there.
+
+    Returns `(energy, gradient, dipole)`: the energy in Hartree, the **analytic**
+    gradient in Hartree/Angstrom, and the dipole in atomic units. tblite returns the
+    gradient in Hartree/Bohr; the chain-rule factor for the conversion is the same
+    constant that converts the coordinates, applied in the opposite direction.
+
+    The dipole rides along because the SCF produced it anyway. Optimization discards
+    it; the Hessian loop, which displaces every Cartesian and would otherwise need a
+    second pass for dipole derivatives, gets IR intensities for free (the same move
+    `calc.xtb_props` makes for charges and bond orders).
+
+    An analytic gradient is what makes optimization cheap and puts the
+    finite-difference Hessian at 6N single points rather than 6N^2.
+    """
+    calc.update(positions=positions * _ANGSTROM_TO_BOHR)
     result = calc.singlepoint()
-    return {key: result.get(key) for key in _CONSUMED_PROPERTIES}
+    energy = float(result.get("energy"))
+    gradient = np.asarray(result.get("gradient"), dtype=float) * _ANGSTROM_TO_BOHR
+    dipole = np.asarray(result.get("dipole"), dtype=float)
+    return energy, gradient, dipole
 
 
 def gfn2_energy(

@@ -1,8 +1,9 @@
-"""The `hpc-jobs` worker: hosts the QM workflow and its activities (plan step 1.1).
+"""The `hpc-jobs` worker: hosts the heavy-calculation workflows (plan step 1.1, xTB X3/X4).
 
 Run it with `python -m workers.hpc_worker` (after `make up`). It connects to
-Temporal, registers `QMJobWorkflow` and the QM activities on the configured HPC
-task queue, and polls until interrupted. Kill and restart it mid-job to see a
+Temporal, registers `QMJobWorkflow` (HPC/DFT) and `XtbJobWorkflow` (the xTB tasks
+too slow to run inline) with their activities on the configured HPC task queue, and
+polls until interrupted. Kill and restart it mid-job to see a
 running workflow resume from event history — the CHECKMATE 1 durability spike.
 """
 
@@ -16,29 +17,26 @@ from temporalio.worker import Worker
 from chemclaw.config import settings
 from chemclaw.logging import configure_logging, configure_telemetry
 from chemclaw.temporal_client import connect
-from workflows.activities import (
-    parse_qm_output,
-    poll_hpc_status,
-    prepare_input,
-    submit_to_hpc,
-)
-from workflows.qm_job import QMJobWorkflow
+
+# Importing the modules is what registers their workflows and activities (the same
+# side-effect pattern `agents.chemclaw_agent` uses for tools). With the registry
+# populated, the sets this worker serves come from it — so adding a durable capability
+# to one of these modules is a decorator at its definition site, not an edit here.
+from workflows import activities as _qm_activities  # noqa: F401
+from workflows import qm_job as _qm_job  # noqa: F401
+from workflows import xtb_activities as _xtb_activities  # noqa: F401
+from workflows import xtb_job as _xtb_job  # noqa: F401
+from workflows.registry import describe, registered_activities, registered_workflows
 
 logger = logging.getLogger(__name__)
 
-# The workflow + activities this worker serves on the hpc-jobs queue. Module-level so the
-# registration and the startup log share one source (DRY), mirroring the background worker.
-HPC_WORKFLOWS: list[type] = [QMJobWorkflow]
-HPC_ACTIVITIES: Sequence[Callable[..., Any]] = [
-    prepare_input,
-    submit_to_hpc,
-    poll_hpc_status,
-    parse_qm_output,
-]
+# What this worker serves, read from the registry rather than restated here.
+HPC_WORKFLOWS: list[type] = registered_workflows("hpc")
+HPC_ACTIVITIES: Sequence[Callable[..., Any]] = registered_activities("hpc")
 
 
 async def main() -> None:
-    """Connect, register the QM workflow + activities, and poll the HPC queue."""
+    """Connect, register the heavy-calculation workflows + activities, poll the HPC queue."""
     configure_logging()
     configure_telemetry()
     client = await connect()
@@ -49,12 +47,11 @@ async def main() -> None:
         activities=HPC_ACTIVITIES,
     )
     logger.info(
-        "hpc worker connected: address=%s namespace=%s queue=%s workflows=%s activities=%s",
+        "hpc worker connected: address=%s namespace=%s queue=%s %s",
         settings.temporal_address,
         settings.temporal_namespace,
         settings.hpc_task_queue,
-        [w.__name__ for w in HPC_WORKFLOWS],
-        [a.__name__ for a in HPC_ACTIVITIES],
+        describe("hpc"),
     )
     await worker.run()
 

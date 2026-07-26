@@ -25,8 +25,10 @@ from chemclaw.config import settings
 
 # The xTB tasks this layer can run. `sp` is a plain single point; `properties` reads
 # the same SCF's charges, bond orders, dipole and orbitals; `fukui` runs three single
-# points (N, N-1, N+1 electrons) for the condensed Fukui indices.
-XtbTask = Literal["sp", "properties", "fukui"]
+# points (N, N-1, N+1 electrons) for the condensed Fukui indices; `opt` relaxes to a
+# minimum; `hess` is the finite-difference Hessian and the thermochemistry over it;
+# `scan` is a relaxed scan along one internal coordinate.
+XtbTask = Literal["sp", "properties", "fukui", "opt", "hess", "scan"]
 
 
 class XtbSpec(BaseModel):
@@ -35,6 +37,12 @@ class XtbSpec(BaseModel):
     Defaults come from config via `default_factory` (not a class-definition-time
     snapshot), so an ENV override applies to specs built afterwards, as the rest of
     the settings-driven code expects.
+
+    **Task-specific settings live in subclasses** (`OptSpec`, `ThermoSpec`, `ScanSpec`),
+    not in this model. A subclass inherits `cache_key` unchanged and its fields are
+    keyed automatically, because the key is derived from `model_dump()` — so the
+    invariant survives while a single point's key stays free of a temperature it does
+    not have.
     """
 
     task: XtbTask

@@ -844,3 +844,44 @@ image questions in §14, since those are decisions rather than engineering.
 
 If only one phase ever ships, it should be **X2**: three single points, no new dependency, and it
 answers the regioselectivity question that currently has no answer at all.
+
+---
+
+## 17. Post-implementation addendum (X1–X4 shipped)
+
+Written after building X1–X4, so the proposal does not read as if it were still a plan. Full
+rationale in **D-082** (seams), **D-083** (BO featurization), **D-084** (geometry policy +
+skill catalogue) and **D-085** (X3/X4). Four things this document got wrong or under-called:
+
+**§4.3's `XtbEngine` protocol never appeared, and should not.** There is still exactly one
+backend. What the protocol's `version()` was for is served by `engine_version()`, which now also
+carries a **Hamiltonian revision** tag — a change to *how* a calculation is set up (the
+spin-polarization contribution added in X3) moves numbers without moving any package version, and
+is otherwise invisible to the cache key.
+
+**§4.2's single `XtbSpec` became a small hierarchy.** One flat model would have put a
+`temperature_k` in a single point's cache key. `OptSpec`/`ThermoSpec`/`ScanSpec` subclass it and
+inherit `cache_key` unchanged, so the invariant this document argued for — a new knob is keyed by
+construction — survives intact while each task's key contains only its own settings.
+
+**§6's execution tiering was placed in X5, and that was too late.** The rule itself was right;
+its phase was wrong. X3/X4 are the first tasks that cannot run in a conversation turn (measured:
+4.6 s for a four-species reaction, ~25 s for a five-solvent screen, minutes for a long scan), so
+the routing shipped with them. It also shipped smaller than §6.2 imagined: one activity per
+request rather than a fan-out, because every expensive part is already content-addressed and a
+retry walks straight through the work it already did.
+
+**§5.2's `compute_thermochemistry` understated what a Hessian yields.** The same displacement
+loop that gives frequencies gives **dipole derivatives**, and therefore IR *intensities* — a
+computable spectrum, which is a real discriminator between candidate structures for an unknown
+impurity. That is the X2 move (read what the SCF already produced) applied one level up, and it
+was missed here.
+
+Unchanged and vindicated: the content-addressed `Structure` (§4.1), the one cache-key derivation
+(§4.4), the honesty guards (§8) — `is_minimum` in particular did exactly the job §5.2 predicted,
+on an ordinary ester rather than a contrived example — and the typed-spec security boundary
+(§5.3), which the durable job spec now follows too.
+
+**Still not built, and the largest remaining gap:** there is no transition-state search. Every
+"how fast" question remains unanswerable, and a relaxed-scan maximum is a sketch of a barrier
+rather than a barrier.

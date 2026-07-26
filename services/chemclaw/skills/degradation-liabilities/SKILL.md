@@ -7,6 +7,7 @@ description: >-
 tools:
   - predict_site_reactivity
   - compute_electronic_properties
+  - compute_reaction_energy
   - predict_pka
   - find_notes
   - gather_evidence
@@ -27,7 +28,9 @@ for and the conditions can be chosen to provoke it.
 
 - **Oxidation.** `predict_site_reactivity` in `electrophilic` mode ranks the electron-rich
   sites an oxidant attacks; a high HOMO (`compute_electronic_properties`) says the molecule is
-  globally easy to oxidize. Classic liabilities to check the ranking against: benzylic and
+  globally easy to oxidize. For abstraction chemistry specifically — peroxides, autoxidation,
+  a radical initiator — rank the C-H homolyses instead (`bond-strength-and-radicals`), because
+  a weak C-H and an electron-rich site are not the same liability. Classic liabilities to check the ranking against: benzylic and
   allylic positions, ethers and their α-C–H, amines (especially tertiary), thioethers,
   electron-rich arenes, aldehydes.
 - **Hydrolysis.** Not a Fukui question — it is a functional-group question. Esters, amides,
@@ -50,6 +53,9 @@ peak — it can *filter* the list:
 
 - Does the proposed modification sit at a site the molecule actually exposes? A hydroxylation
   at a position the Fukui ranking puts last is a weaker hypothesis than one at the top.
+- Does a candidate structure's **computed IR spectrum** match the measured one? Where an
+  isomeric assignment is the question, this is often the only computable discriminator —
+  `computed-spectra-comparison` holds how far to trust it.
 - Is the proposed structure even reachable from the parent under the conditions used?
 - If several positions are plausible, say so rather than picking the top-ranked one — the
   descriptor cannot distinguish isomeric hydroxylation products with confidence.
@@ -69,8 +75,12 @@ time.
   moisture drive a great deal of real degradation and appear nowhere in the calculation.
 - **Solid state is invisible.** Everything here is a molecular argument; crystal packing,
   amorphous content and surface effects are not modelled.
-- **No autoxidation chain chemistry.** Real autoxidation runs through radical propagation whose
-  key quantity is a bond dissociation energy, which is not built yet (plan X4).
+- **Autoxidation chain chemistry, only in part.** Real autoxidation runs through radical
+  propagation, whose key quantity is a bond dissociation energy. Those are now computable
+  (`compute_reaction_energy` over a homolysis), and `bond-strength-and-radicals` holds the
+  judgment — including the measured reason they rank sites and must never be quoted as bond
+  strengths. What is still absent is the chain itself: initiation, propagation and termination
+  rates, and therefore whether a weak C-H actually becomes a degradation pathway.
 
 ## Presenting it
 

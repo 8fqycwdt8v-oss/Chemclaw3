@@ -27,10 +27,12 @@ with workflow.unsafe.imports_passed_through():
         propose_next,
     )
     from workflows.bo_knowledge import write_campaign_node
+    from workflows.registry import durable_workflow
 
 from workflows.publish import BAD_DATA_RETRY, publish_note_best_effort
 
 
+@durable_workflow("background")
 @workflow.defn
 class BoCampaignWorkflow:
     """Run a BO campaign durably and return the best point plus the full history."""

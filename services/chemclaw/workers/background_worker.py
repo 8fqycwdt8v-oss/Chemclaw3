@@ -16,82 +16,29 @@ from temporalio.worker import Worker
 from chemclaw.config import settings
 from chemclaw.logging import configure_logging, configure_telemetry
 from chemclaw.temporal_client import connect
-from workflows.bo_activities import (
-    evaluate_candidates,
-    propose_initial,
-    propose_next,
-)
-from workflows.bo_campaign import BoCampaignWorkflow
-from workflows.bo_knowledge import write_campaign_node
-from workflows.eln_sync import (
-    ElnSyncWorkflow,
-    list_ingest_sources,
-    load_sync_cursor,
-    store_sync_cursor,
-    sync_eln_entries,
-)
-from workflows.eval_drift import EvalDriftWorkflow, check_eval_drift
-from workflows.interaction_approval import (
-    InteractionApprovalWorkflow,
-    propose_confirmed_answer_activity,
-)
-from workflows.knowledge import write_knowledge_node
-from workflows.memory_jobs import (
-    CampaignSynthesisWorkflow,
-    OptimizationCampaignWorkflow,
-    PlaybookDistillationWorkflow,
-    PublishNoteWorkflow,
-    build_campaign_notes_activity,
-    build_optimization_notes_activity,
-    build_playbook_notes_activity,
-    publish_memory_note_activity,
-)
-from workflows.notify import record_session_event_activity
-from workflows.orchestrator import resolve_fan_out_limit
-from workflows.report_workflow import (
-    DevelopmentReportWorkflow,
-    ReportSectionWorkflow,
-    propose_report,
-    retrieve_section,
-)
+
+# Importing the modules is what registers their workflows and activities (the same
+# side-effect pattern `agents.chemclaw_agent` uses for tools). With the registry
+# populated, the sets this worker serves come from it — so adding a durable capability
+# to one of these modules is a decorator at its definition site, not an edit here.
+from workflows import bo_activities as _bo_activities  # noqa: F401
+from workflows import bo_campaign as _bo_campaign  # noqa: F401
+from workflows import bo_knowledge as _bo_knowledge  # noqa: F401
+from workflows import eln_sync as _eln_sync  # noqa: F401
+from workflows import eval_drift as _eval_drift  # noqa: F401
+from workflows import interaction_approval as _interaction_approval  # noqa: F401
+from workflows import knowledge as _knowledge  # noqa: F401
+from workflows import memory_jobs as _memory_jobs  # noqa: F401
+from workflows import notify as _notify  # noqa: F401
+from workflows import orchestrator as _orchestrator  # noqa: F401
+from workflows import report_workflow as _report_workflow  # noqa: F401
+from workflows.registry import describe, registered_activities, registered_workflows
 
 logger = logging.getLogger(__name__)
 
-# The workflows and activities this worker serves on the background-jobs queue. Module-level
-# so the registration is one list (and directly assertable in tests), not buried in main().
-BACKGROUND_WORKFLOWS: list[type] = [
-    BoCampaignWorkflow,
-    ElnSyncWorkflow,
-    CampaignSynthesisWorkflow,
-    PlaybookDistillationWorkflow,
-    OptimizationCampaignWorkflow,
-    PublishNoteWorkflow,
-    DevelopmentReportWorkflow,
-    ReportSectionWorkflow,
-    InteractionApprovalWorkflow,
-    EvalDriftWorkflow,
-]
-BACKGROUND_ACTIVITIES: Sequence[Callable[..., Any]] = [
-    propose_initial,
-    propose_next,
-    evaluate_candidates,
-    write_knowledge_node,
-    write_campaign_node,
-    list_ingest_sources,
-    sync_eln_entries,
-    load_sync_cursor,
-    store_sync_cursor,
-    build_campaign_notes_activity,
-    build_playbook_notes_activity,
-    build_optimization_notes_activity,
-    publish_memory_note_activity,
-    retrieve_section,
-    propose_report,
-    propose_confirmed_answer_activity,
-    record_session_event_activity,
-    check_eval_drift,
-    resolve_fan_out_limit,
-]
+# What this worker serves, read from the registry rather than restated here.
+BACKGROUND_WORKFLOWS: list[type] = registered_workflows("background")
+BACKGROUND_ACTIVITIES: Sequence[Callable[..., Any]] = registered_activities("background")
 
 
 async def main() -> None:
@@ -106,11 +53,11 @@ async def main() -> None:
         activities=BACKGROUND_ACTIVITIES,
     )
     logger.info(
-        "background worker connected: address=%s namespace=%s queue=%s workflows=%s",
+        "background worker connected: address=%s namespace=%s queue=%s %s",
         settings.temporal_address,
         settings.temporal_namespace,
         settings.background_task_queue,
-        [w.__name__ for w in BACKGROUND_WORKFLOWS],
+        describe("background"),
     )
     await worker.run()
 
