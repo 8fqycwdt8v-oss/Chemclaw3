@@ -30,6 +30,10 @@ COPY infra ./infra
 COPY kg ./kg
 COPY memory ./memory
 COPY sources ./sources
+# The connector bundles: their manifests, their FastAPI apps, and any skills/profiles they ship.
+# One image serves every component including each connector (the entrypoint dispatches on
+# CHEMCLAW_COMPONENT=connector-<name>), so adding a bundle needs no change here.
+COPY connectors ./connectors
 COPY safety ./safety
 # Not optional extras: `skills/` IS the agent's judgment layer (an image without it advertises no
 # skills at all), `scripts/` owns the Temporal Schedules that fire every periodic job, and `evals/`

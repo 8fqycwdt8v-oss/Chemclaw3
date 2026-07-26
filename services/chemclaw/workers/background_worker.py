@@ -24,6 +24,7 @@ from workflows.bo_activities import (
 )
 from workflows.bo_campaign import BoCampaignWorkflow
 from workflows.bo_knowledge import write_campaign_node
+from workflows.connector_job import ConnectorJobWorkflow
 from workflows.digest import DigestWorkflow, acknowledge_digest, collect_digests
 from workflows.eln_sync import (
     ElnSyncWorkflow,
@@ -78,6 +79,11 @@ BACKGROUND_WORKFLOWS: list[type] = [
     RetentionWorkflow,
     AuditChainVerifyWorkflow,
     DigestWorkflow,
+    # The generic wrapper every connector job runs inside. It keeps the cross-cutting concerns
+    # (idempotency, actor attribution, PR-gate publish, session push-back) in core while the
+    # connector's own worker serves the child workflow — so a new durable capability adds a manifest
+    # entry, never a line in this list.
+    ConnectorJobWorkflow,
 ]
 BACKGROUND_ACTIVITIES: Sequence[Callable[..., Any]] = [
     propose_initial,

@@ -63,7 +63,7 @@ def test_manifest_rejects_an_unknown_key() -> None:
 def test_manifest_declarations_default_to_empty() -> None:
     """A skill that is pure process guidance declares nothing — the deps are optional."""
     manifest = SkillManifest.model_validate({"name": "x", "description": "d"})
-    assert manifest.tools == [] and manifest.mcp_servers == [] and manifest.tags == []
+    assert manifest.tools == [] and manifest.tags == []
 
 
 def test_shipped_skills_all_have_valid_manifests() -> None:
@@ -88,17 +88,36 @@ def test_gate_catches_a_skill_declaring_a_vanished_tool(tmp_path: Path) -> None:
     assert any("declares unknown tool 'predict_pKa'" in p for p in problems)
 
 
-def test_gate_catches_a_skill_declaring_an_unknown_mcp_server(tmp_path: Path) -> None:
-    """The same check covers the MCP half of a skill's declared capabilities."""
-    skill_dir = tmp_path / "ghost-mcp"
+def test_gate_catches_a_skill_declaring_an_unknown_connector_tool(tmp_path: Path) -> None:
+    """A skill teaching a tool no connector serves fails the gate — the cross-process drift case.
+
+    The declared-tool check spans both halves of the surface, so a skill may legitimately name a
+    tool
+    that lives behind a connector rather than in this process. The failure mode this guards is the
+    same one it guards in-process: a bundle renamed or removed its tool, and the skill still teaches
+    it.
+    """
+    skill_dir = tmp_path / "ghost-connector-tool"
     skill_dir.mkdir()
     (skill_dir / "SKILL.md").write_text(
-        "---\nname: ghost-mcp\ndescription: teaches a server that is gone\n"
-        "mcp_servers:\n  - mcp-nope\n---\n\nbody\n",
+        "---\nname: ghost-connector-tool\ndescription: teaches a connector tool that is gone\n"
+        "tools:\n  - similar_unicorns\n---\n\nbody\n",
         encoding="utf-8",
     )
     problems = validate_skills.validate_skills([str(tmp_path)])
-    assert any("declares unknown MCP server 'mcp-nope'" in p for p in problems)
+    assert any("declares unknown tool 'similar_unicorns'" in p for p in problems)
+
+
+def test_a_real_connector_tool_satisfies_the_gate(tmp_path: Path) -> None:
+    """The other direction: a tool an enabled connector serves resolves, though out of process."""
+    skill_dir = tmp_path / "structure-judgment"
+    skill_dir.mkdir()
+    (skill_dir / "SKILL.md").write_text(
+        "---\nname: structure-judgment\ndescription: when a similarity hit counts as precedent\n"
+        "tools:\n  - similar_molecules\n---\n\nbody\n",
+        encoding="utf-8",
+    )
+    assert validate_skills.validate_skills([str(tmp_path)]) == []
 
 
 def test_gate_catches_an_enabled_skill_that_does_not_exist(

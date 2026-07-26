@@ -33,6 +33,7 @@ _PACKAGES = (
     "bo",
     "calc",
     "chemclaw",
+    "connectors",
     "eln",
     "evals",
     "infra",
@@ -62,6 +63,14 @@ _INFRASTRUCTURE_HOSTS = {
 
 _URL = re.compile(r"https?://([A-Za-z0-9.-]+)")
 
+# Our own in-cluster Services and loopback. A connector is a Chemclaw component we deploy, reached
+# at
+# `chemclaw-connector-<name>` (the Helm Service) or at a loopback port in dev, so its address is the
+# *most* internal kind of host there is — the opposite of the third-party data source this guard
+# exists to catch. A prefix rule rather than one exemption per bundle: adding a connector must not
+# require editing this test, or the guard becomes friction that gets weakened instead of respected.
+_INTERNAL_PREFIXES = ("chemclaw-", "127.0.0.1", "localhost")
+
 
 def _host_literals() -> dict[str, set[str]]:
     """Every http(s) host literal in first-party source, keyed by repo-relative file path."""
@@ -71,7 +80,7 @@ def _host_literals() -> dict[str, set[str]]:
             hosts = {
                 host
                 for host in _URL.findall(path.read_text(encoding="utf-8"))
-                if host not in _INFRASTRUCTURE_HOSTS
+                if host not in _INFRASTRUCTURE_HOSTS and not host.startswith(_INTERNAL_PREFIXES)
             }
             if hosts:
                 found[str(path.relative_to(_ROOT))] = hosts

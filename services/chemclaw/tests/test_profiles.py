@@ -49,13 +49,13 @@ def test_profile_narrows_tools_and_swaps_instructions() -> None:
     assert agent.default_options["instructions"] != _INSTRUCTIONS
 
 
-def test_profile_can_narrow_mcp_servers() -> None:
-    """`mcp_server_names` narrows the attached MCP capability servers to the named subset."""
+def test_profile_can_narrow_connectors() -> None:
+    """`mcp_server_names` narrows the attached connectors to the named subset."""
     agent = build_agent(
         chat_client=object(),
-        profile=AgentProfile(name="mol-only", mcp_server_names=frozenset({"mcp-molfp"})),
+        profile=AgentProfile(name="mol-only", mcp_server_names=frozenset({"molfp"})),
     )
-    assert {t.name for t in agent.mcp_tools} == {"mcp-molfp"}
+    assert {t.name for t in agent.mcp_tools} == {"molfp"}
 
 
 def test_profile_attenuates_but_audit_and_authz_always_attach() -> None:

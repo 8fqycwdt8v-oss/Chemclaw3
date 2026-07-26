@@ -25,6 +25,7 @@ from agent_framework._compaction import (
 
 from agents.chemclaw_agent import _build_compaction, build_agent
 from chemclaw.config import settings
+from connectors.registry import connector_tool_names
 
 _DOMAIN_TOOLS = {
     "compute_xtb_energy",
@@ -77,7 +78,7 @@ def test_agent_attaches_fingerprint_search_as_mcp_servers() -> None:
     no subprocess is spawned here).
     """
     agent = build_agent(chat_client=object())
-    assert {t.name for t in agent.mcp_tools} == {"mcp-molfp", "mcp-rxnfp"}
+    assert {t.name for t in agent.mcp_tools} == {"molfp", "rxnfp"}
     function_tool_names = {f.name for f in agent.default_options["tools"]}
     assert {"find_similar_reactions", "find_similar_molecules"} & function_tool_names == set()
 
@@ -86,13 +87,14 @@ def test_instructions_only_name_available_tools() -> None:
     """Every tool the instructions tell the model to call actually exists (no name drift).
 
     Regression guard for the `find_similar_reactions` vs `similar_reactions` class of bug: the
-    agent's advertised surface is the registered function tools plus the allowed MCP tools, and
+    agent's advertised surface is the registered function tools plus the connectors' tools, and
     the instructions must not promise a tool outside that set.
     """
     agent = build_agent(chat_client=object())
     available = {f.name for f in agent.default_options["tools"]}
-    for spec in settings.mcp_servers:
-        available |= set(spec.allowed_tools or [])
+    # A connector's endpoint tools are named in its manifest, not by a Python symbol this process
+    # holds, so the advertised surface is the registered functions plus the connectors' tool names.
+    available |= set(connector_tool_names())
 
     # The tool names the instructions direct the model to use.
     referenced = {
@@ -143,14 +145,14 @@ def test_harness_agent_keeps_full_capability_toolset(monkeypatch: pytest.MonkeyP
     """The harness must not drop Chemclaw's tools — it runs over the *same* capability set.
 
     Regression guard against a harness path that silently ships a reduced toolset: the harness
-    agent advertises every classic function tool and attaches the same MCP capability servers.
+    agent advertises every classic function tool and attaches the same connectors.
     """
     classic = {t.name for t in build_agent(chat_client=object()).default_options["tools"]}
     _enable_harness(monkeypatch)
     harness = build_agent(chat_client=object())
     harness_tools = {t.name for t in harness.default_options["tools"]}
     assert classic <= harness_tools  # every classic capability tool is still present
-    assert {"mcp-molfp", "mcp-rxnfp"} == {t.name for t in harness.mcp_tools}
+    assert {"molfp", "rxnfp"} == {t.name for t in harness.mcp_tools}
 
 
 @pytest.mark.parametrize(

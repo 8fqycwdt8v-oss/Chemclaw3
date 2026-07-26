@@ -1,7 +1,7 @@
 """The per-turn run lifecycle (plan step F2-T1): the missing caller that actually runs the agent.
 
 `run_turn` owns exactly what the agent's own docstring says a caller must own: it opens the MCP tool
-contexts for the turn (`async with *agent.mcp_tools`), runs the turn against the session's thread,
+connectors for the turn (`agent.mcp_tools`), runs the turn against the session's thread,
 and translates the model's streamed updates into the typed `service.events` the surfaces render.
 When the harness is enabled the *same* call drives its completion loop (MAF's loop middleware runs
 inside `agent.run`), so plan/execute autonomy needs no separate driver here.
@@ -39,6 +39,7 @@ from agents.turn_signals import (
 )
 from agents.verifier import verify_turn_answer
 from chemclaw.config import settings
+from connectors.registry import open_reachable
 from service.budget import BudgetTracker
 from service.events import (
     AnswerEvent,
@@ -119,10 +120,10 @@ async def run_turn(
     state_snapshot = copy.deepcopy(session.state)
     try:
         async with AsyncExitStack() as stack:
-            # Open each MCP capability server for the duration of the turn, then tear it down — the
-            # lifecycle the agent constructor deliberately leaves to its caller.
-            for tool in getattr(agent, "mcp_tools", None) or []:
-                await stack.enter_async_context(tool)
+            # Connect each connector for the duration of the turn, then tear it down — the
+            # lifecycle the agent constructor deliberately leaves to its caller. An unreachable
+            # connector costs its tools, not the turn (`connectors.registry.open_reachable`).
+            await open_reachable(stack, getattr(agent, "mcp_tools", None) or [])
             stream = agent.run(user_message, stream=True, session=session)
             async for update in stream:
                 turn_tokens += _usage_tokens(update)

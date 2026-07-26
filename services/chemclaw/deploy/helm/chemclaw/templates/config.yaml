@@ -21,6 +21,11 @@ data:
          (gap DEP-2). `CHEMCLAW_KNOWLEDGE_DIR` stays at its relative default: it resolves against
          the image WORKDIR (/app), which is exactly `knowledge.publishPath`. */}}
   CHEMCLAW_NOTE_REPO_DIR: {{ .Values.knowledge.noteRepoPath | quote }}
+  {{- /* Derived from `.Values.connectors` rather than hand-written in `config`, for the same reason
+         the note-repo dir is: the address the front door dials must be the Service that the same
+         value block created. Only the enabled connectors appear, so a disabled bundle is simply
+         unreachable rather than pointing at a Service with no pods. */}}
+  CHEMCLAW_CONNECTOR_URLS: {{ include "chemclaw.connectorUrls" . | quote }}
 ---
 apiVersion: v1
 kind: ServiceAccount

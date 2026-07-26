@@ -25,7 +25,7 @@ A cross-field validator lives in the section that owns the relationship.
 
 House rule for a *collection* field — pick by what the elements are, not by taste:
 
-- **Typed JSON list** (`mcp_servers`, `data_source_specs`) when each element *carries its own
+- **Typed JSON list** (`data_source_specs`, `connector_urls`) when each element *carries its own
   config*. The element gets a pydantic model, so it is validated, documented by its type, and
   can grow fields without a parsing change. Where the elements vary by kind, discriminate them
   (`Field(discriminator=...)` / `Discriminator`) rather than widening one model with optional
@@ -41,71 +41,10 @@ fields are **not** migrated to match — that would be churn without a defect to
 """
 
 import os
-import sys
 from typing import Annotated, Literal, Self
 
-from pydantic import BaseModel, ConfigDict, Discriminator, Field, Tag, model_validator
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
-
-
-class StdioMcpServerSpec(BaseModel):
-    """Launch spec for one **stdio** MCP server the agent attaches as a capability (D-029).
-
-    `allowed_tools` restricts which of that server's tools the conversational agent may call
-    (the write/index tools are excluded — ingestion writes go through the PR-gate, not chat).
-    """
-
-    model_config = ConfigDict(extra="forbid")
-
-    transport: Literal["stdio"] = "stdio"
-    name: str
-    command: str
-    args: list[str] = Field(default_factory=list)
-    allowed_tools: list[str] | None = None
-
-
-class HttpMcpServerSpec(BaseModel):
-    """Connection spec for one **remote HTTP** MCP server (MAF's `MCPStreamableHTTPTool`).
-
-    The remote counterpart of `StdioMcpServerSpec`: instead of spawning a local subprocess, the
-    agent reaches an already-running server over Streamable HTTP at `url`. `allowed_tools` means
-    exactly what it means for stdio — the agent-facing subset — so the PR-gate boundary is
-    transport-independent. `request_timeout` (whole seconds, as MAF types it) is the one knob a
-    remote transport genuinely needs that a local subprocess does not — an unreachable host must
-    not hang a turn; `None` defers to MAF's own default rather than inventing a number here.
-    """
-
-    model_config = ConfigDict(extra="forbid")
-
-    transport: Literal["http"] = "http"
-    name: str
-    url: str
-    allowed_tools: list[str] | None = None
-    request_timeout: int | None = Field(default=None, gt=0)
-
-
-def _mcp_transport_tag(value: object) -> str:
-    """Read a spec's transport tag, defaulting to `"stdio"` when it is absent.
-
-    A *callable* discriminator (rather than `Field(discriminator="transport")`) exists purely for
-    backwards compatibility: every config shipped before the union — `.env.example`, the Helm
-    values, any deployment's `CHEMCLAW_MCP_SERVERS` JSON — predates the tag, and a plain
-    discriminator would reject all of them. Defaulting an absent tag to the only transport that
-    existed then keeps every such config valid, while a new server still tags itself explicitly.
-    """
-    if isinstance(value, dict):
-        return str(value.get("transport", "stdio"))
-    return str(getattr(value, "transport", "stdio"))
-
-
-# One MCP capability server, discriminated on `transport`. Keeping the public name `McpServerSpec`
-# for the union means every existing annotation and import stays valid — only the set of shapes it
-# admits grew. A new transport (websocket, if one is ever needed) is one variant here plus one
-# branch in `agents.chemclaw_agent._mcp_tool`.
-McpServerSpec = Annotated[
-    Annotated[StdioMcpServerSpec, Tag("stdio")] | Annotated[HttpMcpServerSpec, Tag("http")],
-    Discriminator(_mcp_transport_tag),
-]
 
 
 class JsonElnSourceSpec(BaseModel):
@@ -536,29 +475,6 @@ class AgentSettings(BaseSettings):
     # skill visible (today's behavior). ENV override is JSON, e.g.
     # CHEMCLAW_SKILL_ROLE_GATES='{"deep-research": ["process-chemist"]}'.
     skill_role_gates: dict[str, list[str]] = Field(default_factory=dict)
-    # MCP capability servers the agent attaches (the plan's capability layer, D-029): the agent
-    # calls the fingerprint search over the MCP protocol rather than importing it in-process, so a
-    # capability is a running server, not agent code. Adding one is an entry here (ENV-overridable
-    # as JSON), never a change to `build_agent`. Each spec is discriminated on `transport`:
-    # `stdio` (the default, and what both built-ins use) runs the server as a subprocess launched
-    # from the repo root; `http` reaches an already-running remote server by URL. An entry with no
-    # `transport` key is read as stdio, so configs written before the union keep working.
-    # `allowed_tools` keeps the agent to the read/search tools on either transport (index/write
-    # stays in the PR-gated ingestion path, off the conversational agent).
-    mcp_servers: list[McpServerSpec] = [
-        StdioMcpServerSpec(
-            name="mcp-molfp",
-            command=sys.executable,
-            args=["-m", "mcp_servers.molfp.server"],
-            allowed_tools=["similar_molecules", "substructure_matches"],
-        ),
-        StdioMcpServerSpec(
-            name="mcp-rxnfp",
-            command=sys.executable,
-            args=["-m", "mcp_servers.rxnfp.server"],
-            allowed_tools=["similar_reactions"],
-        ),
-    ]
     # Conversation context management (MAF compaction). The agent keeps a session thread and
     # composes tool calls that return large payloads (evidence sweeps, full ELN recipes), so a
     # long chat would grow unbounded. Compaction runs only when the included context exceeds
@@ -1110,6 +1026,64 @@ class SourcesSettings(BaseSettings):
         return self
 
 
+class ConnectorSettings(BaseSettings):
+    """The connector seam: which capability bundles this deployment runs, and how it reaches them.
+
+    Its own section because a connector is the one mechanism for adding *any* capability — the MCP
+    tools a FastAPI server serves, the durable jobs a Temporal worker runs, and the skills and agent
+    profiles that come with them (`connectors/`, `docs/connector-plan.md`). It replaces the old
+    `mcp_servers` list, which could only describe the first of those four.
+    """
+
+    # Where connector bundles are discovered: one or more directories, OS-path-separator delimited
+    # like `PATH` (and like `skills_dir`), so an operator can add a private bundle directory without
+    # code changes. A bundle is any subdirectory containing `connector.yaml`. Read it through the
+    # `connectors_dirs` property, never raw. Earlier directories win a name collision, so a private
+    # bundle can override a shipped one.
+    connectors_dir: str = "connectors"
+
+    # Which discovered connectors are actually enabled — discovery is not enablement. Empty (the
+    # default) means every discovered bundle, so a fresh checkout runs the full shipped surface. A
+    # non-empty pathsep list narrows to exactly those names *in that order* (tool order is part of
+    # the prompt, so it is configuration, not chance). A name here that no bundle provides is a
+    # startup error rather than a capability that silently stops working.
+    connectors_enabled: str = ""
+
+    # Per-connector endpoint override, by connector name. A bundle's manifest ships a working dev
+    # default (a loopback URL); a cluster's address belongs to the deployment, so Helm sets this
+    # instead of patching a file in the repo. ENV override is JSON, e.g.
+    # CHEMCLAW_CONNECTOR_URLS='{"molfp":"http://chemclaw-connector-molfp:8080/mcp"}'.
+    connector_urls: dict[str, str] = Field(default_factory=dict)
+
+    # What an unreachable enabled connector means. Default (`false`) is *degrade loudly*: the
+    # service still starts, the failure is logged, reported by `/readyz` and counted by the
+    # `chemclaw_connectors_unhealthy` gauge, and that connector's tools are simply not reachable.
+    # `true` is fail-fast for a deployment where serving with a silently reduced tool surface is
+    # worse than not serving at all (the GxP posture).
+    connectors_required: bool = False
+
+    # Bound on the startup health probe of one connector. Small: this runs before the service is
+    # ready, and a blackholed host must not delay readiness by more than a couple of seconds.
+    connector_health_timeout_seconds: float = Field(default=2.0, gt=0)
+
+    # Whole-run ceiling for one connector job's child workflow (`ConnectorJobWorkflow`). Generous,
+    # because a connector job is by definition the long-running kind, but bounded so a wedged
+    # connector workflow eventually fails instead of pinning a run forever. Deliberately one global
+    # ceiling rather than a per-manifest field: a bundle in the repo must not be able to grant
+    # itself unlimited runtime — that is a deployment's call.
+    connector_job_timeout_seconds: float = Field(default=86_400.0, gt=0)
+
+    @property
+    def connectors_dirs(self) -> list[str]:
+        """The connector bundle directories, split on the OS path separator (like `PATH`)."""
+        return [d for d in self.connectors_dir.split(os.pathsep) if d]
+
+    @property
+    def connectors_enabled_list(self) -> list[str]:
+        """The explicitly enabled connector names; empty means "every discovered bundle"."""
+        return [c for c in self.connectors_enabled.split(os.pathsep) if c]
+
+
 class MemorySettings(BaseSettings):
     """The memory layers (plan Phase 5): playbook and campaign synthesis.
 
@@ -1309,6 +1283,7 @@ class Settings(
     FingerprintSettings,
     ElnSettings,
     SourcesSettings,
+    ConnectorSettings,
     MemorySettings,
     RetrievalSettings,
     ReportSettings,

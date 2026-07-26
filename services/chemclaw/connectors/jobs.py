@@ -1,0 +1,251 @@
+"""One generated agent tool per declared job — the four bespoke adapters, written once.
+
+`agents/qm_tools.py::submit_qm_job` and the three launchers in `agents/durable_tools.py` are the
+same handful of lines four times: authorize the trigger, refuse under dry-run, demand an actor,
+derive a deterministic workflow id, start the workflow, announce the launch, return the id. Only the
+workflow class and the id derivation differed — and both are now manifest data (`JobSpec.workflow`,
+plus the job name and the arguments the id hashes). So the adapter becomes a factory: one function
+built per declared job, with the shared body written in exactly one place.
+
+The generated tool is a *first-class* tool, not a special case. It is registered through the same
+`agents.tool_registry.register_tool` a hand-written tool uses, keyed by the manifest's `name`, which
+is what makes every existing mechanism apply to it untouched: the audit middleware wraps it, the
+per-tool authorization gate addresses it by that name (`tool_role_gates`, and the built-in
+`DEFAULT_WRITE_TOOL_GATES` for a job that writes), a profile can narrow it away, and
+`scripts.validate_prose_contract` sees it when checking the agent's prose.
+
+Why a generated pydantic model rather than a `dict` parameter: MAF derives a tool's JSON schema from
+its signature, and a single pydantic-model parameter is already the in-repo idiom for a structured
+argument (`start_optimization_campaign(spec: CampaignSpec)`). Building that model from the declared
+`params` gives the model a real, typed, per-field-documented schema — an untyped `dict[str, Any]`
+would advertise "pass anything", which is precisely how a model calls a tool wrongly.
+"""
+
+from importlib import import_module
+from typing import Any, cast
+
+from pydantic import BaseModel, Field, create_model
+from temporalio.common import WorkflowIDReusePolicy
+from temporalio.exceptions import WorkflowAlreadyStartedError
+
+from agents.authz import authorize_trigger, require_actor
+from agents.dialogue_tools import dry_run_notice, is_dry_run
+from agents.session_context import get_current_session_id
+from agents.tool_registry import CapabilityTool
+from agents.turn_signals import record_job_started
+from chemclaw.config import settings
+from chemclaw.ids import stable_hash
+from chemclaw.temporal_client import connect
+from connectors.manifest import JobParamType, JobSpec
+from workflows.connector_job import ConnectorJobInput, ConnectorJobWorkflow
+
+# The declared parameter types, mapped to the annotations the generated model is built from. Closed
+# by design (see `JobParamType`): every entry is a type a JSON-schema-driven model can fill
+# reliably.
+_PARAM_ANNOTATIONS: dict[JobParamType, Any] = {
+    "string": str,
+    "integer": int,
+    "number": float,
+    "boolean": bool,
+    "string[]": list[str],
+    "number[]": list[float],
+    "object": dict[str, Any],
+}
+
+
+# How much of a job's arguments a dry-run notice shows — the same budget as the audit trail's and
+# the turn event's tool-argument preview, so one convention covers every "show what was called".
+_DETAIL_MAX_CHARS = 200
+
+
+class ConnectorJobError(ValueError):
+    """A declared job cannot be built — a bad `params_model` reference.
+
+    A `ValueError` subclass for the same reason `ConnectorError` is: this is a "this deployment is
+    misconfigured" failure, and one `except ValueError` at an entry point should catch all of them.
+    """
+
+
+def _camel(value: str) -> str:
+    """`bo-campaign`/`start_campaign` → `BoCampaign`/`StartCampaign` — for a readable model name."""
+    return "".join(part.capitalize() for part in value.replace("-", "_").split("_") if part)
+
+
+def resolve_params_model(reference: str) -> type[BaseModel]:
+    """Import the pydantic model a `module:Attribute` reference names, for a structured job input.
+
+    The full-fidelity alternative to declaring params inline: a job whose input is a rich domain
+    object (a nested optimization problem, a list of report sections) already has a validated model
+    in code, and re-declaring its shape in YAML would both lose structure and create a second source
+    of truth. Referencing it keeps one schema and gives the agent the same typed surface a
+    hand-written tool would advertise.
+
+    Only the *type* is imported, never the capability — a shared DTO, which is exactly what crosses
+    a process boundary in any client/server split. A reference that does not resolve to a pydantic
+    model is a configuration error reported here (and by `make connector-validate`), not a confusing
+    failure when the tool is first called.
+
+    Raises:
+        ConnectorJobError: When the module or attribute does not exist, or is not a pydantic model.
+    """
+    module_name, _, attribute = reference.partition(":")
+    try:
+        module = import_module(module_name)
+    except ImportError as exc:
+        raise ConnectorJobError(
+            f"params_model {reference!r}: cannot import {module_name!r}"
+        ) from exc
+    model = getattr(module, attribute, None)
+    if model is None:
+        raise ConnectorJobError(f"params_model {reference!r}: {module_name!r} has no {attribute!r}")
+    if not (isinstance(model, type) and issubclass(model, BaseModel)):
+        raise ConnectorJobError(f"params_model {reference!r} is not a pydantic model")
+    return model
+
+
+def _params_model(connector: str, job: JobSpec) -> type[BaseModel]:
+    """The pydantic model for one job's launch arguments — referenced, or generated from `params`.
+
+    A generated field carries its manifest `description`, so the JSON schema documents every
+    argument for the model reading it. An optional param defaults to `None` and widens to
+    `T | None`, because "the caller may omit this" and "the value may be absent" must agree — a
+    required-typed field with a `None` default would validate a payload the workflow cannot use.
+    """
+    if job.params_model is not None:
+        return resolve_params_model(job.params_model)
+    fields: dict[str, Any] = {}
+    for param in job.params:
+        annotation = _PARAM_ANNOTATIONS[param.type]
+        if param.required:
+            fields[param.name] = (annotation, Field(description=param.description))
+        else:
+            fields[param.name] = (
+                annotation | None,
+                Field(default=None, description=param.description),
+            )
+    return create_model(
+        f"{_camel(connector)}{_camel(job.name)}Params",
+        __doc__=f"Launch arguments for the {job.name!r} job served by connector {connector!r}.",
+        **fields,
+    )
+
+
+def _docstring(job: JobSpec) -> str:
+    """Assemble the tool docstring the model reads: summary, description, then the arguments.
+
+    MAF derives the tool description from the docstring, so this *is* the job's model-facing
+    documentation. The `Args:` section is rendered from the same declared params the schema is built
+    from, so a parameter can never be documented in the prose but missing from the signature — the
+    drift a hand-written adapter invites.
+    """
+    lines = [job.summary]
+    if job.description:
+        lines.extend(["", job.description.strip()])
+    if job.params:
+        lines.extend(["", "Args:", "    params: The job's launch arguments."])
+        lines.extend(f"        {param.name}: {param.description}" for param in job.params)
+    elif job.params_model is not None:
+        # A referenced model documents its own fields (their descriptions travel in the JSON schema
+        # MAF derives from it), so repeating them here would be a second, drift-prone copy.
+        lines.extend(["", "Args:", "    params: The job's launch arguments; see the field docs."])
+    lines.extend(
+        [
+            "",
+            "Returns:",
+            "    The job id to poll with `get_durable_job_status`. Re-launching with identical",
+            "    arguments returns the existing job id rather than starting a second run.",
+        ]
+    )
+    return "\n".join(lines)
+
+
+def job_workflow_id(connector: str, job: str, payload: dict[str, Any]) -> str:
+    """The deterministic id of one connector job run — the idempotency key (D-011).
+
+    Public because it is the *contract*, not an implementation detail: a duplicate launch must
+    resolve to this id, and Stage B's migration test asserts the ids the four bespoke adapters
+    produced are reproduced exactly, so no in-flight workflow history is orphaned.
+    """
+    return f"{connector}-{job}-{stable_hash([connector, job, payload])}"
+
+
+def build_job_tool(connector: str, job: JobSpec) -> CapabilityTool:
+    """Build the agent tool that launches one declared connector job.
+
+    The returned coroutine function is what MAF advertises: its `__name__` is the manifest's job
+    name (which is also the authorization key and the profile-narrowing key), its docstring is the
+    model-facing description, and its single parameter is the generated params model.
+
+    Args:
+        connector: The owning connector's name — part of the workflow id, and reported in the
+            push-back payload so a completion can be traced back to its capability.
+        job: The declared job.
+
+    Returns:
+        An async tool function, unregistered — the registry call belongs to the caller that knows
+        which connectors are enabled (`connectors.registry`).
+    """
+    params_model = _params_model(connector, job)
+
+    async def launch(params: params_model) -> str:  # type: ignore[valid-type]
+        # Authorize the expensive trigger against the turn's user *before* any durable work (F4-T5),
+        # so an autonomously-planned todo cannot start a costly run outside the user's entitlements.
+        if job.expensive:
+            authorize_trigger(job.name)
+        # `params` is an instance of the model built above; mypy sees only the local alias, so the
+        # `model_dump` call needs the cast. Validation has already happened — MAF constructs the
+        # model from the tool call's arguments before the body runs.
+        payload: dict[str, Any] = cast(BaseModel, params).model_dump(mode="json", exclude_none=True)
+        workflow_id = job_workflow_id(connector, job.name, payload)
+        if is_dry_run():
+            return dry_run_notice(f"start the {job.name} job", _detail(connector, payload))
+        # `require_actor` is the core rule (F4-T3): under Entra, refuse durable work with no user.
+        requested_by = require_actor()
+        client = await connect()
+        try:
+            handle = await client.start_workflow(
+                ConnectorJobWorkflow.run,
+                ConnectorJobInput(
+                    connector=connector,
+                    job=job.name,
+                    workflow=job.workflow,
+                    task_queue=job.task_queue,
+                    payload=payload,
+                    requested_by=requested_by,
+                    session_id=get_current_session_id() or "",
+                    publish_to_graph=job.publish_to_graph,
+                ),
+                id=workflow_id,
+                task_queue=settings.background_task_queue,
+                # Only a *failed* run may re-execute under the same id: the default policy rejects
+                # duplicates while a run is open but would silently recompute a completed one.
+                id_reuse_policy=WorkflowIDReusePolicy.ALLOW_DUPLICATE_FAILED_ONLY,
+            )
+        except WorkflowAlreadyStartedError:
+            # The identical job is already running or already done: the idempotency contract
+            # succeeding, so hand back its id. Deliberately *not* announced as started — an
+            # already-finished run will never emit the matching `job_completed` event, and the
+            # surface would show a row that stays "running" forever (see `agents/qm_tools.py`).
+            return workflow_id
+        record_job_started(handle.id, job.name)
+        return handle.id
+
+    launch.__name__ = job.name
+    launch.__qualname__ = job.name
+    launch.__doc__ = _docstring(job)
+    return launch
+
+
+def _detail(connector: str, payload: dict[str, Any]) -> str:
+    """The argument summary a dry-run notice reports (sorted for stability, bounded in length).
+
+    Bounded because a structured job's payload can be a whole optimization problem, and a dry-run
+    notice is a sentence a chemist reads — not a dump. The same reasoning (and the same 200-char
+    budget) as the tool-argument preview in the audit trail and the turn's `ToolCallEvent`.
+    """
+    if not payload:
+        return f"connector {connector}"
+    rendered = ", ".join(f"{key}={value!r}" for key, value in sorted(payload.items()))
+    if len(rendered) > _DETAIL_MAX_CHARS:
+        rendered = rendered[:_DETAIL_MAX_CHARS] + "…"
+    return f"connector {connector} with {rendered}"

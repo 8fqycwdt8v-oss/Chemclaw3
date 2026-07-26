@@ -1,0 +1,22 @@
+# The molecule-fingerprint capability: ECFP4 similarity and substructure search.
+#
+# `index_molecule` is deliberately absent from `tools`: it mutates the fingerprint index, and the
+# agent's surface is read/compute only (mutation goes through a job or a core PR-gate tool, D-029).
+# The server still exposes it, for the ingestion path that runs outside the conversation.
+name: molfp
+description: >-
+  Molecule fingerprints over the indexed corpus: ECFP4 Tanimoto similarity search and SMARTS/SMILES
+  substructure matching. Judgment about what similarity counts as precedent lives in the
+  reaction-search skill (shared with rxnfp, so it belongs to neither bundle), not here.
+
+endpoint:
+  transport: http
+  # A loopback dev default; a cluster address is set per deployment via CHEMCLAW_CONNECTOR_URLS.
+  url: http://127.0.0.1:8811/mcp
+  health_url: http://127.0.0.1:8811/healthz
+  request_timeout: 30
+  auth:
+    mode: none
+  tools:
+    - similar_molecules
+    - substructure_matches

@@ -18,6 +18,7 @@ import logging
 import uuid
 from collections import OrderedDict
 from collections.abc import AsyncIterator, Callable
+from contextlib import asynccontextmanager
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Protocol
@@ -45,6 +46,7 @@ from agents.interaction_tools import (
 )
 from agents.session_events import stream_new_events
 from chemclaw.config import settings
+from connectors.health import check_connectors_at_startup, probe_connectors
 from scripts.schedules import ScheduleHealth, describe_schedules
 from service.auth import Principal, require_principal
 from service.budget import BudgetExceeded, BudgetTracker
@@ -190,6 +192,23 @@ class ApprovalStatusOut(BaseModel):
     status: str
 
 
+@asynccontextmanager
+async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
+    """Probe the enabled connectors once before serving, so an operator learns it here, not later.
+
+    The probe's *result* only informs (readiness reports it, a gauge counts it) — a missing
+    connector
+    costs capability, not correctness, so the default is to serve anyway. `connectors_required` is
+    the opt-in inversion: it raises here, which fails startup, for a deployment where answering
+    with a
+    silently reduced tool surface is worse than not answering. That check belongs at startup rather
+    than in the readiness route because refusing to *start* is the only way to keep a pod with
+    degraded capability out of a rollout.
+    """
+    app.state.connector_health = await check_connectors_at_startup()
+    yield
+
+
 def create_app(
     agent_factory: Callable[[], Any] = build_agent,
     owner_store: SessionOwners | None = None,
@@ -209,7 +228,7 @@ def create_app(
         A configured `FastAPI` application.
     """
     _refuse_unauthenticated_exposure()
-    app = FastAPI(title="Chemclaw", docs_url=None, redoc_url=None)
+    app = FastAPI(title="Chemclaw", docs_url=None, redoc_url=None, lifespan=_lifespan)
     _add_security_headers(app)
     _add_cors(app)
     # One agent per process, built lazily on first use so importing the app needs no credentials;
@@ -260,6 +279,14 @@ def create_app(
         "chemclaw_turn_capacity", lambda: float(settings.service_max_concurrent_turns)
     )
     METRICS.bind_gauge("chemclaw_live_sessions", lambda: float(len(app.state.live_sessions)))
+    # Out-of-process capability is a new failure mode, so it gets a signal an operator can alert on.
+    # Refreshed by the readiness probe (and at startup), read from the snapshot here — a gauge must
+    # not perform network I/O when Prometheus scrapes it.
+    app.state.connector_health = []
+    METRICS.bind_gauge(
+        "chemclaw_connectors_unhealthy",
+        lambda: float(sum(1 for item in app.state.connector_health if item.state == "unreachable")),
+    )
 
     async def _resolve_session(session_id: str, principal: Principal) -> Any:
         """Return the caller's session — from the live cache, or rehydrated from durable ownership.
@@ -310,9 +337,25 @@ def create_app(
 
     @app.get("/readyz")
     async def readyz() -> dict[str, str]:
-        """Readiness: the agent can be built (config/provider resolves)."""
+        """Readiness: the agent can be built, plus each enabled connector's reachability.
+
+        The connector states are *reported*, not required: an unreachable connector costs the agent
+        that capability, and hiding it would leave a chemist wondering why an answer got worse. It
+        is
+        re-probed here rather than read from a startup snapshot so the answer is current, and the
+        probe also refreshes the `chemclaw_connectors_unhealthy` gauge — a readiness probe runs on
+        the
+        cadence a gauge wants anyway, so one bounded sweep serves both. A deployment that would
+        rather
+        not serve at all in this state sets `connectors_required`, which fails startup instead.
+        """
         _agent()
-        return {"status": "ready"}
+        health = await probe_connectors()
+        app.state.connector_health = health
+        return {
+            "status": "ready",
+            "connectors": ", ".join(f"{item.name}={item.state}" for item in health),
+        }
 
     @app.post("/sessions")
     async def create_session(

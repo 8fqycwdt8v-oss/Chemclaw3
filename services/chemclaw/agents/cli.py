@@ -33,6 +33,7 @@ from agents.chemclaw_agent import build_agent
 from agents.identity_context import reset_current_identity, set_current_identity
 from chemclaw.config import settings
 from chemclaw.logging import configure_logging
+from connectors.registry import open_reachable
 
 _EXIT_WORDS = {"exit", "quit", ":q"}
 
@@ -90,16 +91,16 @@ async def _run(args: argparse.Namespace) -> None:
     Identity is stamped ambient (`agents.identity_context`) for the whole session — a CLI run is
     one actor throughout, unlike the multi-user front door, which stamps it per turn (F2/F4) —
     and reset on exit. The MCP capability servers are spawned once for the session and torn down
-    on exit (the `async with` over `agent.mcp_tools` the `build_agent` docstring prescribes), so a
-    multi-turn REPL does not re-launch them per turn.
+    on exit (the lifecycle the `build_agent` docstring prescribes), so a multi-turn REPL does not
+    reconnect them per turn. An unreachable connector is skipped with a warning rather than aborting
+    the session — the same degrade-loudly posture the front door takes.
     """
     actor, roles = resolve_identity(admin=args.admin, actor=args.actor)
     identity_token = set_current_identity(actor, roles)
     try:
         agent = _build_cli_agent(args, actor)
         async with contextlib.AsyncExitStack() as stack:
-            for tool in agent.mcp_tools:
-                await stack.enter_async_context(tool)
+            await open_reachable(stack, agent.mcp_tools)
             if args.message is not None:
                 print((await converse(agent, args.message)).strip())
             else:

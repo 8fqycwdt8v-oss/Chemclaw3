@@ -59,16 +59,16 @@ def test_registry_holds_exactly_the_inprocess_tools() -> None:
     assert set(registered_tool_names()) == _EXPECTED_INPROCESS_TOOLS
 
 
-def test_capability_tools_match_registry_plus_mcp() -> None:
+def test_capability_tools_match_registry_plus_connectors() -> None:
     """`_capability_tools()` is the registered function tools, then the MCP capability tools."""
-    from agents.chemclaw_agent import _mcp_capability_tools
+    from connectors.registry import mcp_tools
 
     tools = _capability_tools()
     inprocess = registered_tools()
     # The in-process tools appear first, in registration order, unchanged.
     assert tools[: len(inprocess)] == inprocess
     # The tail is exactly the config-driven MCP capability servers.
-    assert len(tools) == len(inprocess) + len(_mcp_capability_tools())
+    assert len(tools) == len(inprocess) + len(mcp_tools())
 
 
 def test_agent_advertises_the_registered_inprocess_tools() -> None:

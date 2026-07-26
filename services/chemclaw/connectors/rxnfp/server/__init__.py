@@ -1,0 +1,1 @@
+"""The `rxnfp` connector's FastAPI/MCP server (see `app.py`)."""

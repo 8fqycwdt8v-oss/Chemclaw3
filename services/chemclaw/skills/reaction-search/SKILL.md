@@ -4,9 +4,10 @@ description: >-
   Judgment for finding structurally related molecules and reactions with the fingerprint
   tools: molecule similarity vs. substructure vs. reaction similarity, what Tanimoto counts
   as precedent, and how to combine with metadata filters and the knowledge graph.
-mcp_servers:
-  - mcp-molfp
-  - mcp-rxnfp
+tools:
+  - similar_molecules
+  - substructure_matches
+  - similar_reactions
 ---
 
 # Reaction / structure search

@@ -49,6 +49,9 @@ _GAUGES: dict[str, str] = {
     "chemclaw_turns_in_flight": "Turns currently streaming.",
     "chemclaw_turn_capacity": "Configured maximum concurrent turns (the admission cap).",
     "chemclaw_live_sessions": "Sessions held in the front door's in-process LRU.",
+    # Out-of-process capability can fail independently of the chat service, so its reachability
+    # is a first-class signal rather than something to find in a log (`connectors.health`).
+    "chemclaw_connectors_unhealthy": "Enabled connectors that could not be reached (0 = all up).",
 }
 
 

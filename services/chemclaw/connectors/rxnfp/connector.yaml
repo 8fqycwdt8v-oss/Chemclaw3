@@ -1,0 +1,19 @@
+# The reaction-fingerprint capability: DRFP similarity search over past reactions.
+#
+# `index_reaction` is deliberately absent from `tools` — it mutates the index, and the agent's
+# surface is read/compute only (D-029). The server still exposes it for the ingestion path.
+name: rxnfp
+description: >-
+  Reaction fingerprints over the indexed corpus: DRFP similarity search, for finding past runs of a
+  transformation. What counts as a precedent is the bundled reaction-search skill's judgment.
+
+endpoint:
+  transport: http
+  # A loopback dev default; a cluster address is set per deployment via CHEMCLAW_CONNECTOR_URLS.
+  url: http://127.0.0.1:8812/mcp
+  health_url: http://127.0.0.1:8812/healthz
+  request_timeout: 30
+  auth:
+    mode: none
+  tools:
+    - similar_reactions
