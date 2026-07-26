@@ -67,18 +67,23 @@ def _ref(note: Note) -> NoteRef:
 
 @tool
 async def find_notes(text: str) -> list[NoteRef]:
-    """Find notes whose id, tags, SMILES, or body contain `text` (case-insensitive).
+    """Find notes whose id, tags, SMILES, or body contain every word of `text` (case-insensitive).
 
     Use this to locate an entry note before expanding its neighborhood.
 
     Args:
-        text: Substring to search for.
+        text: One or more words to search for. Each word may match anywhere in the note
+            (id, type, SMILES, tags, or body) independently — this is not a phrase search, so
+            "Suzuki coupling solvent" matches a note containing all three words in any order or
+            position, not only one containing that exact run of text.
 
     Returns:
-        Matching note references (id + type + smiles + tags), body omitted.
+        Matching note references (id + type + smiles + tags), body omitted. An empty result means
+        no current note contains every word — it does not mean the topic is absent from the
+        graph; a single differently-worded term (e.g. just "suzuki") may still find it.
     """
     graph = await asyncio.to_thread(build_graph, settings.knowledge_path)
-    needle = text.lower()
+    needles = text.lower().split()
     today = date.today()
     # A broad needle matches most of the corpus, and the whole hit list goes into the model's
     # context. Bound it like every other retrieval surface (`fingerprint_max_top_k`,
@@ -93,8 +98,10 @@ async def find_notes(text: str) -> list[NoteRef]:
         # as current fact (KM-7). It stays in Git and remains reachable by explicit id.
         if not note.is_current(today):
             continue
-        haystack = " ".join([note.id, note.type, note.compound_smiles or "", *note.tags, note.body])
-        if needle in haystack.lower():
+        haystack = " ".join(
+            [note.id, note.type, note.compound_smiles or "", *note.tags, note.body]
+        ).lower()
+        if needles and all(needle in haystack for needle in needles):
             matches.append(_ref(note))
             if len(matches) == cap:
                 log.warning(
