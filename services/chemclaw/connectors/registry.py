@@ -78,7 +78,7 @@ def _bundle_dirs() -> list[Path]:
     return [found[name] for name in sorted(found)]
 
 
-def load_manifest(bundle: Path) -> ConnectorManifest:
+def _load_manifest(bundle: Path) -> ConnectorManifest:
     """Parse and validate one bundle's `connector.yaml`, raising `ConnectorError` on any problem.
 
     The folder name is authoritative: a manifest whose `name` disagrees with its directory would be
@@ -112,7 +112,7 @@ def discovered() -> dict[str, tuple[Path, ConnectorManifest]]:
     the process's lifetime (config is read once at import, and bundles do not appear at run time).
     `discovered.cache_clear()` is the seam a test uses after pointing `connectors_dir` elsewhere.
     """
-    return {bundle.name: (bundle, load_manifest(bundle)) for bundle in _bundle_dirs()}
+    return {bundle.name: (bundle, _load_manifest(bundle)) for bundle in _bundle_dirs()}
 
 
 def enabled() -> list[ConnectorManifest]:
@@ -133,12 +133,6 @@ def enabled() -> list[ConnectorManifest]:
             f"connectors_enabled names unknown connector(s) {unknown}; discovered: {sorted(found)}"
         )
     return [found[name][1] for name in names]
-
-
-def enabled_bundle_dirs() -> list[Path]:
-    """The directories of the enabled bundles — how their skills and profiles are found (§6)."""
-    found = discovered()
-    return [found[manifest.name][0] for manifest in enabled()]
 
 
 def skills_dirs() -> list[str]:

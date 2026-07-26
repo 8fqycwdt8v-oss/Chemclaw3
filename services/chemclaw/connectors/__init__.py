@@ -10,12 +10,13 @@ workflow is a bundle and a config token — never an edit to orchestration code.
 
 Layout:
 
-- `manifest.py` — the validated contract (`ConnectorManifest`, the transport and auth unions,
-`JobSpec`).
+- `manifest.py` — the validated contract: `ConnectorManifest`, the two unions, `JobSpec`.
 - `registry.py` — discovery, enablement, and building the MCP tools + generated job tools.
 - `identity.py` — what travels with a call: the turn's identity as headers, our credential as auth.
+- `transport.py` — the MAF MCP tools, built so an unreachable connector costs its tools only.
 - `jobs.py` — one generated durable-launch tool per declared job.
 - `health.py` — the startup reachability probe behind `/readyz` and the unhealthy gauge.
+- `server.py` — the connector *side*: a FastMCP capability as the FastAPI app a bundle serves.
 
 The durable half lives in `workflows/connector_job.py`: core's `ConnectorJobWorkflow` keeps
 idempotency, actor attribution, the PR-gate and session push-back, while the connector owns the
