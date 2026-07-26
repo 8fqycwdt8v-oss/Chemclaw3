@@ -120,3 +120,40 @@ def test_energy_key_is_addressed_by_geometry_not_by_seed() -> None:
     key = XtbSpec(task="sp").cache_key(structure_from_smiles("CCO"))
     assert key.calc_type == "xtb.sp"
     assert key.params_hash == XtbSpec(task="sp").cache_key(structure_from_smiles("OCC")).params_hash
+
+
+# Textbook relative stabilities (kcal/mol, more-stable species first). Chosen to span the
+# range where the comparison is easy (alkene geometry) to where it is large (ethanol vs its
+# ether isomer): all five are orderings any chemist would call uncontroversial.
+_ISOMER_PAIRS = [
+    ("C/C=C/C", "C/C=C\\C", "trans- vs cis-2-butene"),
+    ("CC(C)C", "CCCC", "isobutane vs n-butane"),
+    ("CC(=O)O", "COC=O", "acetic acid vs methyl formate"),
+    ("Cc1ccc(C)cc1", "Cc1ccccc1C", "p- vs o-xylene"),
+    ("CCO", "COC", "ethanol vs dimethyl ether"),
+]
+
+
+@pytest.mark.parametrize(
+    ("stable", "less_stable", "label"),
+    _ISOMER_PAIRS,
+    ids=[label for *_, label in _ISOMER_PAIRS],
+)
+def test_relative_isomer_energies_have_the_right_ordering(
+    stable: str, less_stable: str, label: str
+) -> None:
+    """The energy calculator ranks isomer stability correctly — the only use it has.
+
+    An absolute GFN2 energy answers nothing on its own; the whole point of the tool is
+    comparing related structures. This pins that behaviour across five textbook pairs.
+
+    It is also a regression guard with teeth. Before the geometry policy was fixed, the
+    single point ran on a raw ETKDG embedding whose residual strain exceeded the energy
+    difference being asked about, and two of these five pairs came out **inverted**. A
+    change that reverts the relaxation would fail here rather than quietly returning
+    confident, backwards chemistry.
+    """
+    assert (
+        run_xtb(XtbInput(smiles=stable)).total_energy_hartree
+        < run_xtb(XtbInput(smiles=less_stable)).total_energy_hartree
+    )

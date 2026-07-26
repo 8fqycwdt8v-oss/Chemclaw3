@@ -50,6 +50,26 @@ def _energy(spec: XtbSpec, structure: Structure) -> XtbResult:
     )
 
 
+def _sp_structure(smiles: str, charge: int) -> Structure:
+    """Embed the geometry a single point runs on: MMFF-relaxed where parametrized.
+
+    Relaxation is **required for the energy to mean anything comparative**, and the
+    margin is not subtle. Measured over five textbook isomer pairs, a raw ETKDG
+    embedding gets the sign of the relative energy *wrong* in two of them — isobutane
+    vs. n-butane and ethanol vs. dimethyl ether — because the residual strain in an
+    unrelaxed geometry is larger than the energy difference being asked about. The
+    same geometries relaxed with MMFF get all five orderings right. Since a
+    single-point energy is only ever useful relatively (see the module docstring's
+    callers and `calculation-selection`), an unrelaxed geometry answers the question
+    wrongly rather than approximately.
+
+    This is the policy `calc.pka` and `calc.xtb_props` already apply; the energy path
+    was the one that did not, and the fix re-addresses its cache entries (the geometry
+    is part of `structure_id`), so old values are recomputed rather than mixed in.
+    """
+    return structure_from_smiles(smiles, charge=charge, optimize=True)
+
+
 def run_xtb(job: XtbInput) -> XtbResult:
     """Compute a GFN2-xTB single-point energy for one molecule.
 
@@ -60,7 +80,7 @@ def run_xtb(job: XtbInput) -> XtbResult:
     an energy that can be hundreds of kcal/mol off. Those checks live in
     `calc.structure.Structure`, so every xTB task inherits them identically.
     """
-    return _energy(XtbSpec(task="sp"), structure_from_smiles(job.smiles, charge=job.charge))
+    return _energy(XtbSpec(task="sp"), _sp_structure(job.smiles, job.charge))
 
 
 async def run_cached_xtb(store: ResultStore, job: XtbInput) -> tuple[XtbResult, bool]:
@@ -73,7 +93,7 @@ async def run_cached_xtb(store: ResultStore, job: XtbInput) -> tuple[XtbResult, 
     stale value. `structure_from_smiles` canonicalizes before embedding, so two
     spellings of one molecule cannot produce two different energies (D-011).
     """
-    structure = structure_from_smiles(job.smiles, charge=job.charge)
+    structure = _sp_structure(job.smiles, job.charge)
     spec = XtbSpec(task="sp")
     return await run_cached(
         store, spec.cache_key(structure), lambda: _energy(spec, structure), XtbResult
