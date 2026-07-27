@@ -41,7 +41,13 @@ _COUNTERS: dict[str, str] = {
     "chemclaw_jobs_started_total": "Durable jobs launched by an agent tool.",
     "chemclaw_notes_proposed_total": "Notes opened on a branch through the PR-gate.",
     "chemclaw_event_streams_rejected_total": (
-        "Push-back event streams rejected with 429 at the per-user cap."
+        "Push-back event streams rejected with 429 at the per-user or per-process cap."
+    ),
+    # A guard that switches itself off is worse than one that fails loudly, and this one did
+    # exactly that 32 times in a 126-second load test while nothing but a WARNING said so.
+    "chemclaw_rollback_watermark_unavailable_total": (
+        "Turns that ran without a durable-history rollback watermark (D-107): a client "
+        "disconnect during one of these can leave an orphaned tool_use and brick the session."
     ),
 }
 

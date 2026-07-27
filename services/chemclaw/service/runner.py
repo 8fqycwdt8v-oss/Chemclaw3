@@ -56,6 +56,7 @@ from service.events import (
     TokenEvent,
     ToolCallEvent,
 )
+from service.metrics import METRICS
 
 logger = logging.getLogger(__name__)
 
@@ -141,14 +142,28 @@ async def run_turn(
     # the orphaned `tool_use` in the database and bricked the session anyway, which is exactly the
     # failure the snapshot exists to prevent. A watermark lets the rollback delete what this turn
     # actually wrote, and nothing else.
+    #
+    # The read stays non-fatal, and that is a decision rather than an omission. Failing the turn
+    # would trade a *conditional* future fault — this session breaks only if the client also
+    # disconnects mid-tool-call — for a *certain* immediate one: every turn on the pod fails
+    # whenever the session store hiccups, including the turns that would have completed fine. The
+    # guard is a mitigation, not the thing being guarded.
+    #
+    # What was wrong is that it was silent. A load test ran 32 turns unguarded in 126 seconds and
+    # said so only in a WARNING nobody scrapes. It is now an ERROR *and* a counter, so "the
+    # rollback guard is off" is alertable — which is the property that lets an operator act before
+    # a chemist finds a bricked session. (The cause was connect churn; that is fixed by pooling in
+    # the previous commit. This is the part that must not depend on having fixed the cause.)
     history_watermark: int | None = None
     if history is not None and hasattr(history, "latest_message_id"):
         try:
             history_watermark = await history.latest_message_id(session.session_id)
         except Exception:  # noqa: BLE001 - a rollback aid must never fail the turn it guards
-            logger.warning(
-                "could not read the history watermark for session %s; a disconnect this turn "
-                "will not roll durable history back",
+            METRICS.increment("chemclaw_rollback_watermark_unavailable_total")
+            logger.error(
+                "could not read the history watermark for session %s; this turn runs WITHOUT the "
+                "durable-history rollback guard, so a client disconnect during it can leave an "
+                "orphaned tool_use and brick the session",
                 session.session_id,
                 exc_info=True,
             )
