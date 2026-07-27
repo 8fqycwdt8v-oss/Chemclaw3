@@ -51,7 +51,14 @@ The load test's fixes landed (see D-119). What it surfaced and did **not** close
       `save_messages` remember the ids it inserted would remove the pre-turn read entirely, but the
       history provider is shared across every session on the pod, so it needs per-turn state that
       does not collide. Counted for now (`chemclaw_rollback_watermark_unavailable_total`).
-- [ ] **SCALE-5 Not yet measured:** the live-Anthropic 50-session run, the multi-replica run, and
+- [ ] **SCALE-5 A turn still opens and tears down one MCP session per connector.**
+      `connectors.registry.open_reachable` enters every connector tool for the turn and closes it
+      after, because a connector's connection must belong to exactly one turn
+      (`agents.chemclaw_agent.connector_tools`). At six connectors that is ~900 MCP handshakes for
+      150 turns, and it is the most likely remaining per-turn fixed cost. Untouched here on
+      purpose: pooling the connections across turns changes an isolation guarantee, which is not a
+      performance decision.
+- [ ] **SCALE-6 Not yet measured:** the live-Anthropic 50-session run, the multi-replica run, and
       the chaos scenarios.
 
 ## Open — Live e2e testing pass (2026-07-27, D-109)

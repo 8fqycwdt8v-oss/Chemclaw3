@@ -252,17 +252,18 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
     That check belongs at startup rather than in the readiness route because refusing to *start*
     is the only way to keep a pod with degraded capability out of a rollout.
     """
+    # First, so everything below is logged the way the operator asked. The front door never
+    # configured either of these, so it ran on Python's default root logger (WARNING, no format)
+    # while every worker honoured `CHEMCLAW_LOG_LEVEL`/`LOG_FORMAT`, and `CHEMCLAW_OTEL_ENABLED`
+    # was simply inert here — the one process a chemist actually talks to was the one with no
+    # observability wiring. Here rather than in `create_app` because this is the "about to serve"
+    # moment, matching each worker's `main()`.
+    configure_logging()
+    configure_telemetry()
     # Register the file-authored profiles before any agent is built, so a session can name one
     # on its first request. Failing here is the right outcome for a malformed profile: it is a
     # deployment configuration error, and a front door that started anyway would 400 every
     # request naming that profile with no hint as to why.
-    # The front door never configured either of these, so it ran on Python's default root logger
-    # (WARNING, no format) while every worker honoured `CHEMCLAW_LOG_LEVEL`/`LOG_FORMAT`, and
-    # `CHEMCLAW_OTEL_ENABLED` was simply inert here — the one process a chemist actually talks to
-    # was the one with no observability wiring. Called at startup rather than in `create_app`
-    # because this is the "about to serve" moment, matching each worker's `main()`.
-    configure_logging()
-    configure_telemetry()
     load_profiles()
     async with db.pooling():
         app.state.connector_health = await check_connectors_at_startup()

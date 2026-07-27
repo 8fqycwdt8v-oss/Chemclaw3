@@ -95,10 +95,12 @@ _GAUGES: dict[str, str] = {
 
 
 class Metrics:
-    """A tiny, thread-safe counter/gauge registry that renders Prometheus exposition text.
+    """A tiny, thread-safe counter/gauge/histogram registry rendering Prometheus exposition text.
 
     Gauges are read through callables rather than stored, so a gauge can never drift from the
-    structure it describes (the semaphore, the session map) — there is nothing to keep in sync.
+    structure it describes (the semaphore, the session map, the connection pools) — there is
+    nothing to keep in sync. Counters and histograms are accumulated, since there is no live
+    structure holding "how many turns have ever run".
     """
 
     def __init__(self) -> None:
@@ -106,9 +108,9 @@ class Metrics:
         self._lock = threading.Lock()
         self._counts: dict[str, float] = dict.fromkeys(_COUNTERS, 0.0)
         self._gauges: dict[str, Callable[[], float]] = {}
-        # Per histogram: one cumulative count per bucket boundary, plus the running sum and total
-        # count the exposition format requires. Cumulative is computed at render time from these
-        # per-bucket tallies, so an observation is one index and one increment.
+        # Per histogram: one tally per bucket, plus a final overflow slot for samples past the
+        # last boundary, plus the running sum. The *cumulative* counts the exposition format wants
+        # are derived at render time, so recording a sample is one index and one increment.
         self._histograms: dict[str, list[float]] = {
             name: [0.0] * (len(_BUCKETS) + 1) for name in _HISTOGRAMS
         }
@@ -181,10 +183,10 @@ class Metrics:
             # Prometheus buckets are cumulative ("how many samples were <= le"), so the per-bucket
             # tallies are summed as they are emitted; the final `+Inf` bucket equals the count.
             cumulative = 0.0
-            for boundary, tally in zip(_BUCKETS, buckets, strict=False):
+            for boundary, tally in zip(_BUCKETS, buckets[:-1], strict=True):
                 cumulative += tally
                 lines.append(f'{name}_bucket{{le="{boundary:g}"}} {cumulative:g}')
-            cumulative += buckets[-1]
+            cumulative += buckets[-1]  # the overflow slot: samples past the last boundary
             lines += [
                 f'{name}_bucket{{le="+Inf"}} {cumulative:g}',
                 f"{name}_sum {histogram_sums[name]:g}",

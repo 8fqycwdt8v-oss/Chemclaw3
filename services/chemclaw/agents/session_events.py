@@ -23,8 +23,6 @@ from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
 from functools import partial
 from typing import Any
 
-from psycopg import AsyncConnection
-from psycopg.rows import TupleRow
 from psycopg.types.json import Jsonb
 from pydantic import BaseModel, Field
 
@@ -96,27 +94,6 @@ async def record_session_event(
         await conn.commit()
 
 
-async def _claim_on(
-    conn: AsyncConnection[TupleRow], session_id: str, kinds: Sequence[str] | None
-) -> list[SessionEvent]:
-    """Run the atomic claim on an existing connection (shared by one-shot claim and the tailer).
-
-    With `kinds` set, only rows of those kinds are claimed — the claim is destructive, so the
-    filter must live in the SQL: rows of other kinds stay unconsumed for their own consumer instead
-    of being marked consumed and dropped.
-    """
-    if kinds is None:
-        cursor = await conn.execute(_CLAIM, (session_id,))
-    else:
-        cursor = await conn.execute(_CLAIM_KINDS, (session_id, list(kinds)))
-    rows = await cursor.fetchall()
-    await conn.commit()
-    return [
-        SessionEvent(event_id=row[0], session_id=row[1], kind=row[2], payload=row[3] or {})
-        for row in sorted(rows, key=lambda r: r[0])
-    ]
-
-
 async def claim_unconsumed(
     session_id: str, *, kinds: Sequence[str] | None = None, dsn: str | None = None
 ) -> list[SessionEvent]:
@@ -126,11 +103,23 @@ async def claim_unconsumed(
     the same rows (COR-4). Rows are re-sorted by id since RETURNING order is unspecified. `kinds`
     scopes the claim to those event kinds (None claims everything): the claim is at-most-once, so a
     kind-selective consumer must filter here, never after the claim.
+
+    The tailer calls this once per poll rather than holding a connection of its own, so the whole
+    claim — connection included — lives in this one function.
     """
     async with db.connection(
         _dsn(dsn), statement_timeout_seconds=settings.pg_statement_timeout_seconds
     ) as conn:
-        return await _claim_on(conn, session_id, kinds)
+        if kinds is None:
+            cursor = await conn.execute(_CLAIM, (session_id,))
+        else:
+            cursor = await conn.execute(_CLAIM_KINDS, (session_id, list(kinds)))
+        rows = await cursor.fetchall()
+        await conn.commit()
+    return [
+        SessionEvent(event_id=row[0], session_id=row[1], kind=row[2], payload=row[3] or {})
+        for row in sorted(rows, key=lambda r: r[0])
+    ]
 
 
 async def stream_new_events(
