@@ -31,7 +31,8 @@ from pydantic import BaseModel, field_validator
 from sse_starlette.sse import EventSourceResponse
 from starlette.datastructures import MutableHeaders
 from starlette.middleware.cors import CORSMiddleware
-from starlette.responses import Response
+from starlette.requests import Request
+from starlette.responses import JSONResponse, Response
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from agents.attachments import STORE as ATTACHMENTS
@@ -310,6 +311,11 @@ def create_app(
     app = FastAPI(title="Chemclaw", docs_url=None, redoc_url=None, lifespan=_lifespan)
     _add_security_headers(app)
     _add_cors(app)
+    # One handler rather than a try/except per route: every route that touches durable session
+    # state can hit the pool, and `chemclaw.db` already funnels both "no database" and "no free
+    # connection in time" into `ConnectionError` precisely because a caller cannot act on the
+    # difference. See `_database_unavailable`.
+    app.add_exception_handler(ConnectionError, _database_unavailable)
     # One agent per process, built lazily on first use so importing the app needs no
     # credentials; per-session threads keep conversations apart. F3 replaces the in-memory
     # session map with a durable store and wires job→session push-back. One agent per profile
@@ -937,6 +943,27 @@ _SECURITY_HEADERS: tuple[tuple[str, str], ...] = (
     ("X-Frame-Options", "DENY"),
     ("Strict-Transport-Security", "max-age=63072000; includeSubDomains"),
 )
+
+
+async def _database_unavailable(request: Request, exc: Exception) -> Response:
+    """Turn a failed Postgres checkout into a retryable 503 instead of an unhandled 500.
+
+    `create_session` writes the session's owner row before returning an id, so it needs a
+    connection; under load 16 of those writes raised `psycopg_pool.PoolTimeout` and, with no
+    handler anywhere, became HTTP 500s. A 500 tells a client "this request is broken, do not
+    retry" — the opposite of the truth. The pool was not even exhausted: it held 13 of a
+    permitted 64 connections and opened none during the run, so the callers were waiting for a
+    connection that was *available* and could not be handed to them, which is the same event-loop
+    starvation that used to show up as a connect timeout.
+
+    Answered with the admission path's wording on purpose. "Server at capacity; retry shortly" is
+    what a shed turn already says, the client behaviour is identical (back off and retry), and a
+    browser has no business learning which piece of infrastructure is behind it — while a
+    misconfigured DSN still names itself loudly in the log line below.
+    """
+    METRICS.increment("chemclaw_db_unavailable_total")
+    logger.warning("shedding %s %s: %s", request.method, request.url.path, exc)
+    return JSONResponse(status_code=503, content={"detail": "server at capacity; retry shortly"})
 
 
 def _refuse_unauthenticated_exposure() -> None:

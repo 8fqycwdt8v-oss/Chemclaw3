@@ -17,6 +17,7 @@ from agent_framework import AgentSession
 from fastapi.testclient import TestClient
 
 from service.app import LiveSession, _LiveSessions, create_app
+from service.metrics import METRICS
 
 # A minimal ASGI HTTP scope, for the one test that drives the app below `TestClient` (which
 # cannot express "the handler was cancelled and nothing was ever sent").
@@ -462,6 +463,43 @@ class _FakeOwnerStore:
     async def list_for_owner(self, owner: str | None) -> list[tuple[str, datetime]]:
         rows = [(sid, self.created[sid]) for sid, own in self.owners.items() if own == owner]
         return sorted(rows, key=lambda row: row[1], reverse=True)
+
+
+class _UnreachableOwnerStore(_FakeOwnerStore):
+    """An ownership registry whose every call fails the way a starved pool checkout does.
+
+    `chemclaw.db.connection` maps both `PoolTimeout` and an unreachable server to
+    `ConnectionError`, so this is exactly what a route sees when no pooled connection can be
+    handed over in time.
+    """
+
+    async def record(self, session_id: str, owner: str | None) -> None:
+        raise ConnectionError("Postgres unreachable at host=db: couldn't get a connection")
+
+
+def test_a_failed_postgres_checkout_sheds_with_503_and_is_counted() -> None:
+    """Creating a session when no connection can be got is a retryable 503, never a 500.
+
+    `create_session` writes the owner row before it returns an id, and under load 16 of those
+    writes raised `psycopg_pool.PoolTimeout` with no handler anywhere — HTTP 500, which tells a
+    client the request is broken and must not be retried. It is the opposite: the pool held 13 of
+    a permitted 64 connections and opened none, so the caller was waiting for a connection that
+    was free, and retrying is precisely the right move.
+
+    Counterfactual: without the `ConnectionError` handler this call raises out of the app and
+    `TestClient` re-raises it (a 500 in production), and the counter stays at 0.
+    """
+    before = METRICS.value("chemclaw_db_unavailable_total")
+    app = create_app(
+        agent_factory=lambda _profile: _FakeAgent(),
+        owner_store=_UnreachableOwnerStore(),
+        connector_factory=_no_connectors,
+    )
+    with TestClient(app) as client:
+        res = client.post("/sessions")
+    assert res.status_code == 503
+    assert res.json()["detail"] == "server at capacity; retry shortly"
+    assert METRICS.value("chemclaw_db_unavailable_total") == before + 1
 
 
 def test_session_list_is_owner_scoped_and_newest_first() -> None:

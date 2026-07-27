@@ -49,6 +49,15 @@ _COUNTERS: dict[str, str] = {
     "chemclaw_event_streams_rejected_total": (
         "Push-back event streams rejected with 429 at the per-user or per-process cap."
     ),
+    # A pooled checkout that times out is indistinguishable, from the route's point of view, from
+    # an unreachable database — both arrive as `ConnectionError` and both are retryable. The load
+    # run turned 16 of them into HTTP 500s because no route caught them, and the pool they came
+    # from was not even exhausted: it never grew past 13 of 64 connections and opened zero new
+    # ones. Counted separately from the admission shed so "the loop could not schedule a handoff"
+    # is not read as "the LLM endpoint is full".
+    "chemclaw_db_unavailable_total": (
+        "Requests shed with 503 because a pooled Postgres connection could not be obtained."
+    ),
     # A guard that switches itself off is worse than one that fails loudly, and this one did
     # exactly that 32 times in a 126-second load test while nothing but a WARNING said so.
     "chemclaw_rollback_watermark_unavailable_total": (
