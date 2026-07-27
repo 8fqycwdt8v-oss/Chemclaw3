@@ -91,7 +91,10 @@ class ReactionEnergyResult(BaseModel):
     species: list[SpeciesEnergy]
     cache_hits: int
     uncertainty_kcal: float
-    conformer_treatment: Literal["single"] = "single"
+    # Which conformational treatment produced the deltas. Was hard-coded to "single" and
+    # therefore wrong at `thorough`, where an ensemble is searched and its entropy folded
+    # into every ΔG — the one level where a reader most needs to know it was not single.
+    conformer_treatment: Literal["single", "lowest-plus-conformational-entropy"]
     warnings: list[str] = Field(default_factory=list)
 
 
@@ -211,7 +214,11 @@ async def _species_energy(
         electronic_energy_hartree=minimum.energy_hartree,
         enthalpy_hartree=thermo.enthalpy_hartree,
         gibbs_free_energy_hartree=gibbs,
-        conformational_entropy_kcal=round(ensemble_correction, 3) or None,
+        # `is not None`, not truthiness: a rigid species has a genuine 0.000 correction,
+        # and `0.0 or None` reported that as "not computed at this level".
+        conformational_entropy_kcal=(
+            round(ensemble_correction, 3) if conformer_spec is not None else None
+        ),
         is_minimum=thermo.is_minimum,
         was_cached=cached,
     )
@@ -282,7 +289,10 @@ async def compute_reaction_energy(
         for entry in species
         if entry.is_minimum is False
     ]
-    if level == "standard" and any(entry.multiplicity > 1 for entry in species):
+    # Every level, not just `standard`: the caveat is about the *energies*, which every
+    # level differences, so gating it on one level dropped it from exactly the `thorough`
+    # homolysis a user paid the most for.
+    if any(entry.multiplicity > 1 for entry in species):
         warnings.append(
             "open-shell species present: unrestricted GFN2 energies are less reliable "
             "than closed-shell ones, so treat a homolysis energy as an ordering"
@@ -305,6 +315,9 @@ async def compute_reaction_energy(
         species=species,
         cache_hits=sum(entry.was_cached for entry in species),
         uncertainty_kcal=settings.xtb_reaction_uncertainty_kcal,
+        conformer_treatment=(
+            "lowest-plus-conformational-entropy" if conformer_spec is not None else "single"
+        ),
         warnings=warnings,
     )
 

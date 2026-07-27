@@ -383,3 +383,28 @@ layer, so the merge was a feature set meeting ~38 modules it had never seen. Rec
       equal both ways.
 - [x] `mcp_servers/calc/server.py::predict_pka` docstring updated for X11 — it still said
       O-H/S-H only, which is the one place the base support had not actually reached the agent.
+
+## Heavy review of the whole branch (D-103)
+
+Read the 12k-line diff against `main`. Five real defects, all in green code, three of them
+contradicted by their own docstring. Fixed and pinned:
+
+- [x] **GFN-FF optimization could never succeed** — the geometry was checked against a GFN2
+      gradient (measured 1.3e-2 vs a 5e-4 target on octane), so every run raised "did not
+      converge"; a run that passed would have reported a GFN2 energy labelled GFN-FF.
+      `max_gradient` is now `float | None` and GFN-FF converges on its own surface.
+- [x] **A crest upgrade served stale ensembles** — `crest_cli.binary_version()` documented
+      itself as being for the cache key and no key ever called it.
+- [x] **`engine` inherited by two specs that never honour it** — a radical's ensemble was
+      keyed as tblite's while crest did the work. `CrestSpec` fixes both; the honest
+      consequence (no spin-polarization fallback for a radical search) is now documented.
+- [x] **The open-shell caveat was gated on `level == "standard"`** — dropped from the
+      `thorough` homolysis a user paid the most for.
+- [x] **`conformer_treatment` and `conformational_entropy_kcal` could not tell the truth** —
+      a single-value `Literal`, and `0.0 or None`.
+- [x] Smaller: `crest_cli.run` promised an ordering it did not enforce (and `lowest` is
+      `conformers[0]` after truncation); `_safe` skipped the one config-supplied argv value.
+
+**Left open deliberately:** `ensemble_seconds` has no fixed-overhead term, so a small-molecule
+CREST search is predicted at 0.5 s and runs inline when it really takes ~10 s. Same shape as
+the error the cost model fixed at the large end; re-fitting it is a measurement session.

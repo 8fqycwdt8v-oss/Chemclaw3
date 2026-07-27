@@ -93,7 +93,10 @@ def _task_flags(task: CliTask) -> list[str]:
     promise is what makes the finite-difference Hessian on top of it meaningful.
     """
     if task in ("opt", "ohess"):
-        return [f"--{task}", settings.xtb_cli_opt_level]
+        # Config-supplied rather than model-supplied, but checked all the same: the
+        # module's stated rule is that *every* value reaching argv is checked, and a rule
+        # with a quiet exception is one nobody can rely on when adding the next flag.
+        return [f"--{task}", _safe(settings.xtb_cli_opt_level, "optimization level")]
     return {"sp": [], "hess": ["--hess"]}[task]
 
 

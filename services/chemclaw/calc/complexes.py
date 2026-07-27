@@ -38,15 +38,19 @@ from calc.crest_cli import CrestEffort
 from calc.store import ResultStore, run_cached
 from calc.structure import Structure, structure_from_smiles
 from calc.xtb_opt import OptSpec, optimize_structure
-from calc.xtb_spec import XtbSpec
+from calc.xtb_spec import CrestSpec
 from chemclaw.chem import require_canonical_smiles
 from chemclaw.config import settings
 
 _HARTREE_TO_KCAL = 627.5094740631
 
 
-class ComplexSpec(XtbSpec):
-    """Settings of one non-covalent complex search."""
+class ComplexSpec(CrestSpec):
+    """Settings of one non-covalent complex search.
+
+    `CrestSpec` because the search is crest's; the three optimizations around it run on
+    whatever `calc.xtb_opt` resolves, and `_opt_spec` keeps that consistent with this one.
+    """
 
     task: Literal["complex"] = "complex"
     effort: CrestEffort = Field(default_factory=lambda: settings.crest_effort)
@@ -128,6 +132,17 @@ def _ordered(smiles_a: str, smiles_b: str) -> tuple[str, str]:
     return (first, second) if first <= second else (second, first)
 
 
+def _opt_spec(spec: ComplexSpec) -> OptSpec:
+    """The optimization settings the monomers and the bound complex all share.
+
+    `engine` is carried across rather than left to re-resolve. It defaults to the same
+    thing, so this changes no result today — but an explicitly-engined `ComplexSpec` would
+    otherwise have optimized on one backend while its key named the other, which is the
+    cache defect (D-011) rather than a preference.
+    """
+    return OptSpec(method=spec.method, engine=spec.engine, solvent=spec.solvent)
+
+
 def compute_interaction(spec: ComplexSpec, smiles_a: str, smiles_b: str) -> InteractionResult:
     """Search the binding modes of two molecules and return their interaction energy.
 
@@ -139,10 +154,7 @@ def compute_interaction(spec: ComplexSpec, smiles_a: str, smiles_b: str) -> Inte
     """
     smiles_a, smiles_b = _ordered(smiles_a, smiles_b)
     monomers = [
-        optimize_structure(
-            OptSpec(method=spec.method, solvent=spec.solvent),
-            structure_from_smiles(smiles, optimize=True),
-        )
+        optimize_structure(_opt_spec(spec), structure_from_smiles(smiles, optimize=True))
         for smiles in (smiles_a, smiles_b)
     ]
     start = _combine(monomers[0].structure, monomers[1].structure, spec.separation_angstrom)
@@ -156,8 +168,7 @@ def compute_interaction(spec: ComplexSpec, smiles_a: str, smiles_b: str) -> Inte
     if not modes:
         raise ValueError("the complex search returned no binding modes")
     bound = optimize_structure(
-        OptSpec(method=spec.method, solvent=spec.solvent),
-        min(modes, key=lambda member: member.energy_hartree).structure,
+        _opt_spec(spec), min(modes, key=lambda member: member.energy_hartree).structure
     )
     separated = sum(monomer.energy_hartree for monomer in monomers)
     return InteractionResult(

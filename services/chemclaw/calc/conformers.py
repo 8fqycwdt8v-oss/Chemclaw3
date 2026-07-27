@@ -44,19 +44,22 @@ from calc import crest_cli
 from calc.crest_cli import CrestEffort, EnsembleSearch
 from calc.store import ResultStore, run_cached
 from calc.structure import Structure
-from calc.xtb_spec import XtbSpec
+from calc.xtb_spec import CrestSpec
 from chemclaw.config import settings
 
 _HARTREE_TO_KCAL = 627.5094740631
 _GAS_CONSTANT_CAL = 1.987204258640832  # cal/(mol K)
 
 
-class ConformerSpec(XtbSpec):
+class ConformerSpec(CrestSpec):
     """Settings of one ensemble search.
 
     Every field enters the cache key through `model_dump()`, as with the other task
     specs — including `effort`, because a quick search and an extensive one are different
     calculations that must not share an entry.
+
+    `CrestSpec` rather than `XtbSpec` because crest, not `engine`, is what runs one of
+    these — so crest's build is what the key is versioned on.
     """
 
     task: Literal["conformers"] = "conformers"

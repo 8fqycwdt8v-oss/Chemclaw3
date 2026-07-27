@@ -10,6 +10,7 @@ import asyncio
 import numpy as np
 import pytest
 
+from calc import xtb_cli
 from calc.store import InMemoryStore
 from calc.structure import Structure, structure_from_smiles
 from calc.xtb_opt import OptimizationSummary, OptSpec, optimize_structure, run_cached_optimization
@@ -20,6 +21,7 @@ def test_optimization_lowers_the_energy_and_flattens_the_gradient() -> None:
     result = optimize_structure(OptSpec(), structure_from_smiles("CCO", optimize=True))
     assert result.energy_hartree < result.initial_energy_hartree
     assert result.relaxation_kcal > 0
+    assert result.max_gradient is not None  # only GFN-FF may omit it
     assert result.max_gradient <= OptSpec().gradient_tolerance
     assert result.steps > 0
 
@@ -122,3 +124,41 @@ def test_summary_drops_the_coordinates_but_keeps_the_address() -> None:
     summary = OptimizationSummary.of(result)
     assert summary.structure_id == result.structure.structure_id
     assert "positions" not in summary.model_dump()
+
+
+@pytest.mark.skipif(not xtb_cli.is_available(), reason="GFN-FF exists only in the xtb binary")
+def test_gfnff_optimization_is_verified_on_its_own_surface() -> None:
+    """A force-field geometry is not a GFN2 stationary point, and must not be judged as one.
+
+    The bug this pins: `_energy_and_gradient` substituted GFN2 for GFN-FF and the result
+    was then checked against this module's Cartesian gradient tolerance. Measured on
+    octane, a converged GFN-FF geometry carries a GFN2 max-gradient of 1.3e-2 against a
+    5e-4 target, so **every** GFN-FF optimization raised "did not converge" — the entire
+    large-system escape valve was unreachable through `optimize_structure`.
+
+    Two things are asserted because the fix has two halves. `max_gradient is None` says
+    the promise is xtb's ANC convergence rather than a Cartesian gradient this module
+    cannot compute; and the energy is the force field's own, roughly -3.7 Hartree for
+    octane, nowhere near the ~-26 Hartree GFN2 value that was previously being reported
+    under a GFN-FF label.
+    """
+    result = optimize_structure(
+        OptSpec(method="GFN-FF"), structure_from_smiles("CCCCCCCC", optimize=True)
+    )
+    assert result.method == "GFN-FF"
+    assert result.max_gradient is None
+    assert result.steps > 0
+    assert -10.0 < result.energy_hartree < 0.0  # a GFN-FF energy, not a GFN2 one
+
+
+def test_gfnff_without_the_binary_says_what_is_wrong() -> None:
+    """No binary means no force field, and the error should say so rather than tblite's.
+
+    Also the radical case: `for_structure` routes any open shell in-process, so a GFN-FF
+    request on a radical lands here even where xtb *is* installed.
+    """
+    with pytest.raises(ValueError, match="GFN-FF is a force field"):
+        optimize_structure(
+            OptSpec(method="GFN-FF", engine="tblite"),
+            structure_from_smiles("CCCC", optimize=True),
+        )

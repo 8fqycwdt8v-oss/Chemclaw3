@@ -179,3 +179,42 @@ def test_a_conformer_search_finds_butanes_rotamers() -> None:
     assert ensemble.conformational_entropy_cal_per_mol_k > 0
     assert ensemble.ensemble_correction_kcal < 0
     assert ensemble.sampled is True
+
+
+def test_crest_backed_specs_are_keyed_on_crests_own_build() -> None:
+    """A crest upgrade must recompute an ensemble, and before this nothing made it (D-011).
+
+    `calc_version` named the tblite/xtb build for every spec, including the two whose work
+    crest actually does. `crest_cli.binary_version()` existed and its docstring said it was
+    "for the cache key (an upgrade must recompute)" — and no caller ever passed it to one,
+    so upgrading crest silently served every stored ensemble and interaction energy.
+
+    Asserted on both CREST-backed specs, and asserted *negatively* against the engine build
+    too: naming the wrong program is what the defect was, so keeping both names would not
+    fix it.
+    """
+    from calc.complexes import ComplexSpec
+    from calc.xtb_spec import backend_version
+
+    for spec in (ConformerSpec(), ComplexSpec()):
+        version = spec.calc_version()
+        assert crest_cli.binary_version() in version
+        assert backend_version("tblite") not in version
+
+
+def test_a_crest_spec_does_not_claim_a_backend_it_never_runs_on() -> None:
+    """`engine` is inherited but meaningless for a search crest performs — so it is not keyed.
+
+    The sharp case is an open shell. `XtbSpec.for_structure` rewrites `engine` to `tblite`
+    for any radical, which made a radical's ensemble key claim tblite had computed it while
+    `compute_ensemble` called crest regardless. The key now names crest either way, and the
+    honest consequence — that a radical CREST search gets no spin-polarization fallback,
+    because there is nowhere to fall back to — is documented on `CrestSpec` rather than
+    disguised by the key.
+    """
+    radical = structure_from_smiles("[CH3]", multiplicity=None)
+    closed = structure_from_smiles("C", optimize=True)
+    spec = ConformerSpec()
+    assert spec.for_structure(radical) is spec  # no silent backend switch
+    assert spec.cache_key(radical).calc_version == spec.cache_key(closed).calc_version
+    assert "tblite" not in spec.cache_key(radical).calc_version

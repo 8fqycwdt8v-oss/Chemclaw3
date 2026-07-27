@@ -132,3 +132,37 @@ than from the code, and only a test that asserted it caught it.
 **Rule:** when a quantity is symmetric in its inputs, do not assume the function computing it is.
 Assert the invariant in a test at the cheapest layer that carries it — and if it fails, canonicalize
 the input at the entry point rather than weakening the docstring to match the bug.
+
+
+## The docstring is the best bug detector in a codebase that writes them (2026-07-27, review)
+
+A heavy review of 12k green lines found five real defects, and **three announced themselves
+in their own docstring**. `_energy_and_gradient` said "for GFN-FF the check is skipped" and
+did not skip it. `crest_cli.binary_version` said "for the cache key" and no cache key
+called it. `crest_cli.run` said "lowest energy first" and never sorted. In every case the
+prose was right about the intent and the code had drifted from it — so the fastest read was
+not "what does this do" but "does this do what it says".
+
+That works here *because* the house style demands a why-docstring on everything. It is the
+compounding return on that rule: the docstring is a second, independent statement of intent,
+and a diff between two statements of intent is exactly what a reviewer can spot and a test
+usually cannot.
+
+**Rule:** when reviewing, read each docstring as an assertion and check it against the body.
+Treat a mismatch as a defect in the *code* until proven otherwise. And when writing, never
+soften a docstring to match a body you have not verified — that converts the detector into
+camouflage.
+
+## Green tests prove the paths you thought of (2026-07-27, review)
+
+Every defect above sat in tested code. GFN-FF was tested at the `xtb_cli.run` layer and
+never through `optimize_structure`, the layer that broke it. The CREST cache key was tested
+for *hits* (same input, served from store) and never for *misses* (upgraded binary, must
+recompute) — and a cache bug is always on the miss side, because a key that is too coarse
+still hits. `conformer_treatment` had a `Literal` type that made the wrong value the only
+possible value, so no assertion could have failed.
+
+**Rule:** for a cache, test that the key *changes* when each versioned input changes, not
+only that it repeats. For a layered capability, test it through the entry point callers
+actually use, not the layer it is implemented in. And treat a single-value `Literal` as a
+smell: a field that cannot vary cannot be right except by luck.

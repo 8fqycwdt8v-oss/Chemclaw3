@@ -188,3 +188,38 @@ def test_no_solvents_is_an_error_not_an_empty_ranking() -> None:
             await compare_solvent_effects(InMemoryStore(), ["CCO"], ["CCO"], [])
 
     asyncio.run(_run())
+
+
+def test_the_open_shell_caveat_is_not_gated_on_one_level() -> None:
+    """A homolysis carries its warning at every level, not only at `standard`.
+
+    The bug: the condition read `level == "standard"`, so the caveat about unrestricted
+    GFN2 energies vanished at `quick` and at `thorough` — dropping it from exactly the
+    `thorough` run a user paid the most for. The warning is about the electronic energies,
+    which every level differences, so no level is exempt.
+    """
+
+    async def _run() -> None:
+        store = InMemoryStore()
+        # H2 -> 2 H., the smallest homolysis: two doublets on the product side.
+        result = await compute_reaction_energy(store, ["[H][H]"], ["[H]", "[H]"], level="quick")
+        assert any("open-shell" in warning for warning in result.warnings)
+
+    asyncio.run(_run())
+
+
+def test_a_reaction_reports_which_conformational_treatment_produced_it() -> None:
+    """`conformer_treatment` was hard-coded to "single" and so was wrong wherever it mattered.
+
+    At `thorough` an ensemble is searched and its conformational entropy folded into every
+    ΔG — the one level where a reader needs to know the treatment was *not* single, and
+    the one level the field misreported. Asserted at `quick` here (no crest needed); the
+    thorough branch is covered by the ensemble tests.
+    """
+
+    async def _run() -> None:
+        result = await compute_reaction_energy(InMemoryStore(), ["CCO"], ["CCO"], level="quick")
+        assert result.conformer_treatment == "single"
+        assert all(entry.conformational_entropy_kcal is None for entry in result.species)
+
+    asyncio.run(_run())

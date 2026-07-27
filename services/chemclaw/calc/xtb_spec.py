@@ -18,7 +18,7 @@ from typing import Literal, Self
 
 from pydantic import BaseModel, Field
 
-from calc import xtb_cli
+from calc import crest_cli, xtb_cli
 from calc.store import CalculationKey
 from calc.structure import Structure
 from calc.xtb_engine import engine_version
@@ -105,20 +105,30 @@ class XtbSpec(BaseModel):
             return self.model_copy(update={"engine": "tblite"})
         return self
 
+    def calc_version(self) -> str:
+        """What actually computes this spec, versioned — the cache's staleness guard.
+
+        Its own method so a task whose work is done by a *different program* can say so.
+        `XtbSpec` runs on `engine`; the CREST-backed specs do not run on it at all, and a
+        key that named the wrong program is a key that survives an upgrade to the right
+        one (D-011). See `CrestSpec`.
+        """
+        return f"{self.method}+{self.engine}+{backend_version(self.engine)}"
+
     def cache_key(self, structure: Structure) -> CalculationKey:
         """The versioned identity of running this spec on `structure`.
 
-        `calc_version` carries the method *and* the engine build, so a tblite or RDKit
-        upgrade recomputes rather than serving a value the new stack would not
-        reproduce. Everything else in the spec lands in `params` automatically — that
-        is the whole point of deriving the key from `model_dump()`.
+        `calc_version` carries the method *and* the build of whatever runs it, so a
+        tblite, xtb, crest or RDKit upgrade recomputes rather than serving a value the
+        new stack would not reproduce. Everything else in the spec lands in `params`
+        automatically — that is the whole point of deriving the key from `model_dump()`.
         """
         resolved = self.for_structure(structure)
         if resolved is not self:
             return resolved.cache_key(structure)
         return CalculationKey.build(
             calc_type=f"xtb.{self.task}",
-            calc_version=f"{self.method}+{self.engine}+{backend_version(self.engine)}",
+            calc_version=self.calc_version(),
             inputs={
                 "structure": structure.structure_id,
                 "charge": structure.charge,
@@ -126,3 +136,36 @@ class XtbSpec(BaseModel):
             },
             params=self.model_dump(exclude={"task", "method", "engine"}),
         )
+
+
+class CrestSpec(XtbSpec):
+    """Base of the specs whose work is done by `crest`, not by `engine`.
+
+    Two things are wrong for a CREST search if it inherits `XtbSpec` unchanged, and both
+    are cache defects rather than cosmetic ones.
+
+    **CREST's own build was in no key.** `calc_version` named the tblite/xtb build, so
+    upgrading crest — the program that actually produced the ensemble — served every
+    stored ensemble and interaction energy unchanged. `crest_cli.binary_version()` existed
+    and documented itself as being "for the cache key"; nothing called it.
+
+    **`engine` was inherited but never honoured.** `compute_ensemble` and
+    `compute_interaction` call `crest_cli.run` whatever it says, so a spec could be keyed
+    as `tblite` while crest did the work — which `for_structure` made routine rather than
+    hypothetical, because it rewrites `engine` to `tblite` for any open-shell input.
+
+    So `engine` is dropped from this key entirely and `for_structure` is a no-op. Note
+    what the second one means and does not mean: an open-shell CREST search is **not**
+    protected by the D-095 spin-polarization fallback, because there is nowhere to fall
+    back to — crest has no in-process equivalent. That is a real limitation of radical
+    conformer searches, and it is now stated instead of hidden behind a key that claimed
+    tblite had run.
+    """
+
+    def for_structure(self, structure: Structure) -> Self:
+        """No-op: there is no second backend to fall back to (see the class docstring)."""
+        return self
+
+    def calc_version(self) -> str:
+        """Keyed on crest's build, because crest is what runs."""
+        return f"{self.method}+crest-{crest_cli.binary_version()}"

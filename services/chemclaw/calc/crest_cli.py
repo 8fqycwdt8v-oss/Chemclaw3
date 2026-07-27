@@ -240,10 +240,16 @@ def run(
             if candidate.exists():
                 members = _read_ensemble(candidate, structure)
                 degeneracies = _read_degeneracies(directory, len(members))
-                return [
+                paired = [
                     member.model_copy(update={"degeneracy": degeneracy})
                     for member, degeneracy in zip(members, degeneracies, strict=True)
                 ]
+                # Sorted here rather than assumed. CREST does write its ensembles lowest
+                # first, but `ConformerEnsemble.lowest` is `conformers[0]` and the member
+                # list is truncated to `max_members` — so a file that ever came back in
+                # another order would silently drop the lowest conformer and report the
+                # wrong one, which is not a failure any test would show as a failure.
+                return sorted(paired, key=lambda member: member.energy_hartree)
         raise CliError(f"crest {search} wrote no ensemble file")
 
 

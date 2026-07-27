@@ -71,6 +71,11 @@ class OptimizationResult(BaseModel):
     not a stationary point produces frequencies, thermochemistry and reaction energies
     that all look ordinary and mean nothing, so the honest contract is that holding an
     `OptimizationResult` guarantees convergence (gate G4).
+
+    `max_gradient` is `None` for **GFN-FF only**, and that is the one case where the
+    guarantee is worded differently rather than weakened: a force field has no tblite
+    equivalent, so this module cannot re-evaluate its gradient, and convergence is xtb's
+    own ANCopt convergence on the GFN-FF surface — required, not assumed.
     """
 
     smiles: str | None
@@ -88,8 +93,9 @@ class OptimizationResult(BaseModel):
     relaxation_kcal: float
     steps: int
     # Largest absolute gradient component (Hartree/Angstrom) at the final geometry,
-    # over the free atoms — the quantity `OptSpec.gradient_tolerance` bounds.
-    max_gradient: float
+    # over the free atoms — the quantity `OptSpec.gradient_tolerance` bounds. `None` only
+    # for GFN-FF, whose surface this module cannot evaluate (see the class docstring).
+    max_gradient: float | None
     # Root-mean-square coordinate displacement, in Angstrom. Not Kabsch-aligned: the
     # forces of a molecule sum to zero, so an optimization introduces no net
     # translation and this is a movement measure, not a superposition.
@@ -114,7 +120,7 @@ class OptimizationSummary(BaseModel):
     energy_hartree: float
     relaxation_kcal: float
     steps: int
-    max_gradient: float
+    max_gradient: float | None
     displacement_rms_angstrom: float
 
     @classmethod
@@ -154,6 +160,16 @@ def optimize_structure(spec: OptSpec, structure: Structure) -> OptimizationResul
     resolved = spec.for_structure(structure)
     if resolved.engine == "xtb":
         return _optimize_with_binary(resolved, structure)
+    if resolved.method == "GFN-FF":
+        # Named here rather than surfacing tblite's own "Method 'GFN-FF' is not available
+        # for this calculator", which is true but says nothing about what to do. Reachable
+        # two ways: a deployment without the binary, and a *radical*, which `for_structure`
+        # sends in-process whatever was configured.
+        raise ValueError(
+            "GFN-FF is a force field and exists only in the xtb binary, which is "
+            f"{'not installed' if not xtb_cli.is_available() else 'unavailable for this input'}"
+            "; use a GFN method or install xtb"
+        )
     return _optimize_with_library(resolved, structure)
 
 
@@ -338,6 +354,15 @@ def _optimize_with_binary(spec: OptSpec, structure: Structure) -> OptimizationRe
     Frozen atoms fall back to the Cartesian path — pinning coordinates is expressible as
     optimizer bounds but not as an xtb flag without writing a control file, which is
     exactly the input surface `calc.xtb_cli` refuses to have.
+
+    **GFN-FF is verified on its own surface**, because there is no other honest option:
+    tblite has no force field, so re-evaluating the geometry in-process would test a
+    GFN-FF minimum against a *GFN2* gradient — a different potential energy surface, on
+    which a converged force-field geometry is simply not a stationary point. Measured, an
+    octane relaxed by GFN-FF carries a GFN2 max-gradient of 1.3e-2 against this module's
+    5e-4 target, so every GFN-FF optimization raised "did not converge". Its convergence
+    is now xtb's own ANC convergence, required rather than assumed, and its energy is the
+    binary's own — a GFN2 number labelled GFN-FF was the other half of the same bug.
     """
     if spec.frozen_atoms:
         return _optimize_with_library(spec, structure)
@@ -352,6 +377,8 @@ def _optimize_with_binary(spec: OptSpec, structure: Structure) -> OptimizationRe
         raise ValueError("xtb --opt produced no optimized geometry")
     key = spec.cache_key(structure)
     optimized = outcome.structure.model_copy(update={"origin": key.as_str()})
+    if spec.method == "GFN-FF":
+        return _force_field_result(spec, structure, optimized, outcome)
     initial, _, _ = _energy_and_gradient(spec, structure, structure)
     energy, gradient, _ = _energy_and_gradient(spec, structure, optimized)
     max_gradient = float(np.max(np.abs(gradient)))
@@ -380,18 +407,56 @@ def _optimize_with_binary(spec: OptSpec, structure: Structure) -> OptimizationRe
     )
 
 
+def _force_field_result(
+    spec: OptSpec, structure: Structure, optimized: Structure, outcome: xtb_cli.CliResult
+) -> OptimizationResult:
+    """Package a GFN-FF relaxation, whose only convergence evidence is xtb's own.
+
+    `outcome.cycles` is parsed from xtb's "CONVERGED AFTER" line, so requiring it is
+    requiring the binary to say it converged — not inferring it from an exit code, which
+    `calc.xtb_cli` documents as unreliable. Without it there is no evidence at all, and
+    the contract is that an `OptimizationResult` is a converged one.
+
+    `initial_energy_hartree` equals the final energy because a force-field single point at
+    the input geometry would be a second subprocess for a number nothing reads; the
+    relaxation is reported as 0.0 rather than invented.
+    """
+    if outcome.cycles is None:
+        raise ValueError(
+            "xtb --opt with GFN-FF did not report convergence, and a force-field geometry "
+            "cannot be verified in-process (tblite has no GFN-FF): refusing to return it"
+        )
+    _, positions = structure.arrays()
+    final = np.array(optimized.positions)
+    return OptimizationResult(
+        smiles=structure.smiles,
+        input_structure_id=structure.structure_id,
+        structure=optimized,
+        method=spec.method,
+        engine=spec.engine,
+        solvent=spec.solvent,
+        initial_energy_hartree=outcome.energy_hartree,
+        energy_hartree=outcome.energy_hartree,
+        relaxation_kcal=0.0,
+        steps=outcome.cycles,
+        max_gradient=None,
+        displacement_rms_angstrom=float(np.sqrt(np.mean((final - positions) ** 2))),
+        frozen_atoms=[],
+    )
+
+
 def _energy_and_gradient(
     spec: OptSpec, template: Structure, at: Structure
 ) -> tuple[float, np.ndarray, np.ndarray]:
     """Evaluate energy and gradient at `at`, using the in-process engine.
 
     Used to verify a binary-produced geometry against our own convergence criterion.
-    GFN-FF has no tblite equivalent, so for it the check is skipped and xtb's own
-    convergence stands — stated here rather than silently.
+    Never reached for GFN-FF — that path returns before this, because substituting GFN2
+    here is what made a force-field optimization fail against the wrong surface.
     """
     numbers, _ = template.arrays()
     calc = make_calculator(
-        spec.method if spec.method != "GFN-FF" else "GFN2-xTB",
+        spec.method,
         numbers,
         np.array(at.positions),
         charge=at.charge,

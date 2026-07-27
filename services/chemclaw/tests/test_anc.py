@@ -98,6 +98,7 @@ def test_preconditioning_beats_plain_cartesian_optimization(
     structure = structure_from_smiles(smiles, multiplicity=None, optimize=True)
     result = optimize_structure(OptSpec(engine="tblite", frozen_atoms=frozen), structure)
     assert result.steps < 0.75 * cartesian_steps
+    assert result.max_gradient is not None  # only GFN-FF may omit it
     assert result.max_gradient <= OptSpec().gradient_tolerance
 
 
