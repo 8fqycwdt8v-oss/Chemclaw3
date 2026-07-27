@@ -10,8 +10,9 @@ conversation can hold open.
 for it (`JobSpec.inline_wait_seconds`) and reports the result if it arrives; otherwise the chemist
 gets a job id. So the same tool serves the two-second case and the twenty-minute one, and the split
 is decided by what actually happened rather than by a cost model that can be wrong in both
-directions. The previous design *did* predict, with `calc.xtb_cost` consulted in the agent's
-process — which is what kept the whole heavy chemistry closure inside the chat service's image.
+directions. The previous design *did* predict, from a power law over the atom count consulted in
+the agent's process — which is what kept the whole heavy chemistry closure inside the chat
+service's image. That predictor was deleted with its settings once nothing called it (D-117).
 
 Deterministic orchestration only: this sequences and times one activity, and every non-deterministic
 thing lives in `connectors.calc.activities`. It runs on this bundle's own queue, reached by

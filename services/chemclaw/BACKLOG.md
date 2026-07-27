@@ -105,7 +105,9 @@ risk). Four findings fixed in `a96932d`; the rest need a decision or are follow-
 - [ ] **DA-7 [Low] Test-to-module locality is weak** — 3 of 5 mutations survived their "obvious" test
       file and died only under the full suite — [S]. Not a correctness gap (CI runs everything); a
       developer feedback-loop one.
-- [x] **DA-10 [Med] Buy down live-edge risk offline** — [M]. **Decided (D-2) and done** (D-082):
+- [x] **DA-10 [Med] Buy down live-edge risk offline** — [M]. **Decided (D-2) and done** (D-082,
+      and actually reaching CI only in D-117 — same stranded-workflow cause as the coverage entry
+      below; until then only the offline half ran):
       `make helm-validate` (`helm template` | `kubeconform -strict`) runs in CI, plus
       `tests/test_helm_chart.py` for the gap a schema check cannot see — a chart key that is not a
       `Settings` field (silently ignored as an env var, unlike the `.env` path that broke DA-1) and a
@@ -696,6 +698,10 @@ MAF ships the harness natively (`create_harness_agent` + `TodoProvider`/`AgentMo
 - [x] Coverage threshold in CI (D-037): `[tool.coverage.report] fail_under = 80` and CI runs
       `make lint type cov` as its gate. Floor set safely below the measured offline baseline (86%,
       Postgres/Temporal skipped; CI runs those and is higher). Ratchet upward as coverage climbs.
+      *(This entry was false from the Replit restructure until D-117: the only workflow that ran
+      `cov` had been stranded at `services/chemclaw/.github/`, where GitHub Actions never reads, so
+      the executing gate ran `make test`. The floor is now enforced by the root workflow, and
+      measured over the shipped package set rather than one that omitted `connectors/`.)*
 
 ### MAF out-of-the-box features (analysis done)
 - [x] **Function middleware** (`@function_middleware`) — one DRY GxP tool-audit trail

@@ -69,12 +69,19 @@ build-backend = "hatchling.build"
 # Every first-party top-level package, not just `chemclaw`: the console entry point is
 # `agents.cli:main` and the feature code lives across these siblings, so a non-editable
 # `pip install` of the wheel must ship all of them or the `chemclaw` command and its imports
-# break (audit ARC-1). Keep this list in sync with `[tool.coverage.run] source` below.
+# break (audit ARC-1).
+#
+# This list, `[tool.coverage.run] source` below, and `make type` are all derived from the same
+# rule and enforced against the filesystem by `tests/test_packaging.py` — because keeping them
+# "in sync" by comment did not work: `connectors/` (the entire capability surface) and
+# `templates/` were both missing from here and from coverage, and `service`/`sources` from
+# `make type`, all silently (D-117).
 packages = [
     "agents",
     "bo",
     "calc",
     "chemclaw",
+    "connectors",
     "eln",
     "evals",
     "kg",
@@ -85,6 +92,7 @@ packages = [
     "scripts",
     "service",
     "sources",
+    "templates",
     "workers",
     "workflows",
 ]
@@ -152,12 +160,15 @@ addopts = "-ra"
 timeout = 180
 
 # Coverage is opt-in via `make cov` (not the default `make test`, which stays fast and
-# dependency-light). Measures the first-party packages only; the offline-skipped Temporal/
-# Postgres paths are exercised in CI, so the CI number is the real one and is >= the offline
-# number (running more tests only covers more). CI runs `make cov` as a gate (BACKLOG P2).
+# dependency-light). Measures the shipped packages — the same list as the wheel, enforced by
+# `tests/test_packaging.py` — so what is measured is exactly what a deployment runs. The
+# offline-skipped Temporal/Postgres paths are exercised in CI, so the CI number is the real one
+# and is >= the offline number (running more tests only covers more). The root workflow runs
+# `make cov` as a gate; before D-117 it did not, because the only workflow that did had been
+# stranded at `services/chemclaw/.github/` where GitHub Actions never reads.
 [tool.coverage.run]
 branch = true
-source = ["agents", "bo", "calc", "chemclaw", "eln", "evals", "kg", "mcp_servers", "memory", "report", "safety", "scripts", "service", "sources", "workers", "workflows"]
+source = ["agents", "bo", "calc", "chemclaw", "connectors", "eln", "evals", "kg", "mcp_servers", "memory", "report", "safety", "scripts", "service", "sources", "templates", "workers", "workflows"]
 omit = ["*/__init__.py"]
 
 [tool.coverage.report]

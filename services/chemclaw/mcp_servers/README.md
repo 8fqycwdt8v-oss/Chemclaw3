@@ -13,9 +13,14 @@ the `server` object from here and serve it. Moving the bodies into the bundles w
 no behavioural change, so it has not been done — but a **new** capability's code goes in its bundle,
 not here.
 
-`mcp_servers/calc/` used to be a third server and is deleted (D-113). It duplicated the `calc`
-bundle's tool surface — two live definitions of `predict_pka`, differing in one of them — which is
-the failure this directory must not reproduce.
+`mcp_servers/calc/` used to be a third server. It duplicated the `calc` bundle's tool surface — two
+live definitions of `predict_pka`, differing in one of them — which is the failure this directory
+must not reproduce. D-113 decided to delete it; **it was actually deleted in D-117**, and the gap
+between those two facts is the point: this paragraph asserted the deletion across four ADRs while
+the file was still tracked, still built into the image by
+`deploy/Containerfile`, and still dispatchable as `CHEMCLAW_COMPONENT=mcp-calc`. A README is not a
+gate. `tests/test_deploy_chart.py` now asserts both directions of the chart↔entrypoint
+correspondence, which is what would have caught it.
 
 **Why `mcp_servers/` and not `mcp/`:** the directory cannot be named `mcp` — that package name is
 taken by the installed MCP SDK (`from mcp.server.fastmcp import FastMCP`), and a local `mcp/`

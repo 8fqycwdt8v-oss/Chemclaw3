@@ -1,2 +1,0 @@
-- [Chemclaw Python deployment](chemclaw-deployment.md) — Python FastAPI service in services/chemclaw/ with specific pip/venv and port constraints on Replit.
-- [Git push workflow](git-push-workflow.md) — user preference is direct commits to `main` on all three Chemclaw3 repos, no PRs.

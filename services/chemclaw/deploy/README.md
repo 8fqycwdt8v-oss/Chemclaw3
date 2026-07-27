@@ -79,10 +79,21 @@ turn and a job; dashboards track loop iterations, tool latency, and job status.
 
 ## CI/CD (F6-T4)
 
-`.github/workflows/deploy.yml`: every push **builds** the image + smoke-imports each entrypoint as a
-non-root UID, and **lints/renders** the chart (`helm lint`, `helm template | kubeconform`). The
-push-to-registry + `helm upgrade` rollout is guarded to the default branch and needs cluster creds;
-migrations run as the pre-deploy Job before rollout.
+Two workflows, both at the **repository root** — the only place GitHub Actions reads them from.
+Until D-117 these lived under `services/chemclaw/.github/`, where nothing executed them.
+
+- `ci.yml` — `make lint type cov` against a real Postgres, the seven validators, and a `chart` job
+  that renders the chart against the Kubernetes schemas (`helm template | kubeconform -strict`).
+- `image.yml` — on pull requests and `main`, **builds** the multi-target image and smoke-imports
+  every component the entrypoint dispatches as a non-root UID, then asserts an unknown component
+  exits 64. The component list is derived from the bundles present, so it cannot drift from what
+  ships; the two directions of chart↔entrypoint agreement are checked offline in
+  `tests/test_deploy_chart.py`.
+
+The push-to-registry + `helm upgrade` rollout is **not** wired: the stranded workflow carried it as
+a job whose whole body was an `echo`, and a stub is not a pipeline. Its trigger — a real cluster and
+its credentials — is recorded in `DEFERRED.md`. Migrations run as the pre-deploy Job
+(`templates/migrate-job.yaml`), never inside an app container.
 
 > **Verified offline:** pure-YAML parse + template brace-balance + `Settings` key mapping. `helm
 > template`/`kubeconform`/the image build run in CI (no helm/daemon in the dev sandbox) — this is

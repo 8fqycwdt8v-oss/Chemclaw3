@@ -26,10 +26,9 @@ from pydantic import ValidationError
 # Importing the agent package's tool modules is what populates the tool registry (the same
 # registration side effect `build_agent` relies on), so the declared-tool check sees the real set.
 from agents import chemclaw_agent as _agent  # noqa: F401 — imported for tool registration
+from agents.chemclaw_agent import available_tool_names
 from agents.skill_manifest import SkillManifest
-from agents.tool_registry import registered_tool_names
 from chemclaw.config import settings
-from connectors.registry import connector_tool_names
 from connectors.registry import skills_dirs as connector_skills_dirs
 
 
@@ -103,7 +102,7 @@ def _dependency_problems(skill_file: Path, manifest: SkillManifest) -> list[str]
     launchers). One set, because a skill's author does not care which side of the process boundary a
     tool lives on — only that it exists.
     """
-    known_tools = {*registered_tool_names(), *connector_tool_names()}
+    known_tools = available_tool_names()
     return [
         f"{skill_file}: declares unknown tool {tool!r}; available tools: {sorted(known_tools)}"
         for tool in sorted(set(manifest.tools) - known_tools)

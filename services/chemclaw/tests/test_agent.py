@@ -26,6 +26,7 @@ from agent_framework._compaction import (
 from agents.chemclaw_agent import _build_compaction, build_agent, connector_tools
 from chemclaw.config import settings
 from connectors.registry import connector_tool_names, discovered
+from templates.registry import template_tool_names
 
 # The domain capability an agent must be able to reach, spanning both halves of the surface: the
 # durable launchers and the knowledge/PR-gate tools are in-process, the property calculators are the
@@ -130,33 +131,30 @@ def test_instructions_only_name_available_tools() -> None:
     Regression guard for the `find_similar_reactions` vs `similar_reactions` class of bug: the
     agent's advertised surface is the registered function tools plus the connectors' tools, and
     the instructions must not promise a tool outside that set.
+
+    The referenced set is **extracted from the prose**, not listed here. It used to be a hardcoded
+    set of eleven names, which meant the test could only catch drift in names someone had thought
+    to enumerate — and `_INSTRUCTIONS` names at least ten further tools that were covered by
+    nothing at all, because the prose-contract validator's own pattern (backtick immediately
+    followed by `(`) matched zero times in a file that names every tool bare (D-117). Sharing the
+    validator's extractor means the two cannot disagree about what the prose promises.
     """
+    from scripts.validate_prose_contract import referenced_tool_names
+
     agent = build_agent(chat_client=object())
     available = {f.name for f in agent.default_options["tools"]}
     # A connector's endpoint tools are named in its manifest, not by a Python symbol this process
     # holds, so the advertised surface is the registered functions plus the connectors' tool names.
     available |= set(connector_tool_names())
+    available |= set(template_tool_names())
 
-    # The tool names the instructions direct the model to use.
-    referenced = {
-        "gather_evidence",
-        "expand_note",
-        "find_notes",
-        "similar_reactions",
-        "similar_molecules",
-        "substructure_matches",
-        "submit_qm_job",
-        "get_job_status",
-        "suggest_next_experiment",
-        "propose_knowledge_note",
-        "record_confirmed_answer",
-    }
-    missing = {name for name in referenced if name not in available}
-    assert missing == set(), f"instructions reference unavailable tools: {missing}"
-    # And each referenced name must actually appear in the instruction text.
     from agents.chemclaw_agent import _INSTRUCTIONS
 
-    assert all(name in _INSTRUCTIONS for name in referenced)
+    referenced = referenced_tool_names(_INSTRUCTIONS)
+    # A floor, so a refactor that empties the prose cannot make this test vacuously green.
+    assert len(referenced) >= 11, f"the instructions name suspiciously few tools: {referenced}"
+    missing = {name for name in referenced if name not in available}
+    assert missing == set(), f"instructions reference unavailable tools: {missing}"
 
 
 def _enable_harness(monkeypatch: pytest.MonkeyPatch, *, autonomy: str = "plan_only") -> None:

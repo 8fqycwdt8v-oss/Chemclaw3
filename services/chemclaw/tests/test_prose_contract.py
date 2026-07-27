@@ -8,11 +8,8 @@ fail at call time. `mypy` cannot see prose, `pytest` did not read it, and `make 
 checks frontmatter.
 """
 
-from scripts.validate_prose_contract import (
-    _ALLOWED_NON_TOOLS,
-    _registered_tool_names,
-    check_prose_contract,
-)
+from agents.chemclaw_agent import available_tool_names
+from scripts.validate_prose_contract import _ALLOWED_NON_TOOLS, check_prose_contract
 
 
 def test_shipped_prose_names_only_real_tools() -> None:
@@ -22,13 +19,13 @@ def test_shipped_prose_names_only_real_tools() -> None:
 
 def test_mcp_tools_count_as_real() -> None:
     """MCP capability tools have no Python symbol, so they must come from the config allowlist."""
-    names = _registered_tool_names()
+    names = available_tool_names()
     assert {"similar_molecules", "substructure_matches", "similar_reactions"} <= names
 
 
 def test_in_process_tools_count_as_real() -> None:
     """The function tools registered on the agent are recognised too."""
-    assert {"gather_evidence", "expand_note", "predict_pka"} <= _registered_tool_names()
+    assert {"gather_evidence", "expand_note", "predict_pka"} <= available_tool_names()
 
 
 def test_a_made_up_tool_is_caught(tmp_path: object, monkeypatch: object) -> None:

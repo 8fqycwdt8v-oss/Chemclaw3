@@ -3,10 +3,12 @@
 import asyncio
 
 import pytest
+from pydantic import ValidationError
 
 from calc.store import InMemoryStore
 from calc.structure import structure_from_smiles
 from calc.xtb_scan import ScanSpec, run_cached_scan, run_scan
+from chemclaw.config import settings
 
 
 def test_butane_torsion_profile_has_anti_and_gauche_in_the_right_places() -> None:
@@ -61,6 +63,24 @@ def test_an_out_of_range_atom_index_is_rejected() -> None:
     structure = structure_from_smiles("O", optimize=True)
     with pytest.raises(ValueError, match="out of range"):
         run_scan(ScanSpec(atoms=(0, 9), values=(1.0,)), structure)
+
+
+def test_a_scan_longer_than_the_cap_is_rejected() -> None:
+    """`xtb_scan_max_points` is a real bound, not a documented intention (D-117).
+
+    Every point is a full constrained geometry optimization and the values come from the model,
+    so the length of `values` *is* the cost of the call. The setting has described itself as
+    bounding that "the way `xtb_hessian_max_atoms` bounds a Hessian" since it was added, but
+    nothing enforced it: the field carried `min_length=1` and no maximum, leaving an unbounded
+    compute request the agent could issue simply by naming more values.
+    """
+    over = tuple(float(i) for i in range(settings.xtb_scan_max_points + 1))
+    with pytest.raises(ValidationError, match="capped at"):
+        ScanSpec(atoms=(0, 1, 2, 3), values=over)
+
+    # Exactly at the cap is still allowed — the bound is inclusive.
+    at_limit = tuple(float(i) for i in range(settings.xtb_scan_max_points))
+    assert len(ScanSpec(atoms=(0, 1, 2, 3), values=at_limit).values) == settings.xtb_scan_max_points
 
 
 def test_scan_spec_freezes_exactly_the_scanned_atoms() -> None:

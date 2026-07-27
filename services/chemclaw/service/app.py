@@ -104,12 +104,19 @@ class _LiveSessions:
 
     def add(
         self, session_id: str, session: Any, owner: str | None, profile: str | None = None
-    ) -> None:
-        """Register a live session (most-recently-used), evicting the oldest past capacity."""
-        self._entries[session_id] = LiveSession(session=session, owner=owner, profile=profile)
+    ) -> LiveSession:
+        """Register a live session (most-recently-used), evicting the oldest past capacity.
+
+        Returns the entry it stored, so a caller that needs the handle back does not have to
+        `get` what it just `add`ed — a round trip that reads as if the entry might be missing
+        when it cannot be, and whose `None` branch was previously silenced with a type ignore.
+        """
+        entry = LiveSession(session=session, owner=owner, profile=profile)
+        self._entries[session_id] = entry
         self._entries.move_to_end(session_id)
         while len(self._entries) > self._capacity:
             self._entries.popitem(last=False)
+        return entry
 
     def get(self, session_id: str) -> "LiveSession | None":
         """Return the live entry for `session_id` (marking it recently used), or None."""
@@ -360,7 +367,7 @@ def create_app(
         An unknown session — or one owned by someone else — is a 404 with no existence leak
         either way.
         """
-        entry = app.state.live_sessions.get(session_id)
+        entry = _live_sessions().get(session_id)
         if entry is not None:
             if entry.owner is not None and entry.owner != principal.oid:
                 raise HTTPException(status_code=404, detail="unknown session")
@@ -378,7 +385,7 @@ def create_app(
         # Re-check the cache after the awaited lookup: two racing requests would otherwise each
         # mint a live handle over the same durable thread, and the loser's handle would keep
         # writing outside the cache. The first rehydrator's handle wins; both callers share it.
-        entry = app.state.live_sessions.get(session_id)
+        entry = _live_sessions().get(session_id)
         if entry is not None:
             return entry
         # The durable history provider reloads the thread on the session's first use, so
@@ -392,8 +399,18 @@ def create_app(
         # than left as a surprise; persisting the profile is the fix if a deployment ever needs
         # the narrowing to survive a restart.
         session = _agent().create_session(session_id=session_id)
-        app.state.live_sessions.add(session_id, session, owner)
-        return app.state.live_sessions.get(session_id)  # type: ignore[return-value]
+        return _live_sessions().add(session_id, session, owner)
+
+    def _live_sessions() -> _LiveSessions:
+        """The live-session cache, read through one annotated accessor.
+
+        `app.state` is untyped by design in Starlette, so every direct read of it returns `Any` and
+        silently disables type checking on whatever it touches. Reading it once here keeps that
+        `Any` in a single place instead of leaking into each caller's return type — which is what
+        `service/` had been doing unchecked, because it was missing from `make type` (D-117).
+        """
+        sessions: _LiveSessions = app.state.live_sessions
+        return sessions
 
     def _agent(profile: str | None = None) -> Any:
         """The process's agent for `profile`, built once and cached under its name.
