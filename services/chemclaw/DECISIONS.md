@@ -4217,3 +4217,55 @@ incidental number is a test that will one day block a good change and teach nobo
 second renumbers; this is that branch. `main` had taken D-109, so this branch's six ADRs moved from
 D-109…D-114 to D-110…D-115, with every in-repo reference updated, and all seven numbers are now
 reserved in `ADR-REGISTRY.md` — which is the mechanism that should make this the last renumber.
+
+## D-117 — Consolidating the outstanding branches, and deleting what four generations of the design left behind
+
+Three branches were open against `main`, two of them with live PRs, and none of them could be
+merged. All three were cut before the Replit monorepo restructure, so `git diff main..branch`
+reports a whole-tree file move: the branch's `agents/`, `workflows/`, `workers/` and `tests/` sit at
+the repository root while `main`'s sit under `services/chemclaw/`. `git cherry` marks every commit
+unmerged, which reads as "none of this work has landed" and is wrong — it is a patch-id artifact of
+the move, and most of the content *had* landed by other routes.
+
+**What a merge would actually have done.** `git diff --diff-filter=A main..branch` — the files a
+merge would add — is the honest measure. Every added path is at the old root layout, so a merge
+re-creates the whole service a second time in the wrong place. Worse, several of the additions are
+modules `main` deliberately deleted: `agents/calc_tools.py` and `agents/bo_tools.py` (D-111/D-114),
+`deploy/helm/chemclaw/templates/deployment-mcp.yaml`, `tests/test_mcp_server_spec.py`,
+`tests/test_mcp_transport.py`, `workflows/bo_campaign.py`, and two `SKILL.md` files that moved into
+`connectors/*`. Merging would have resurrected the pre-connector-seam architecture D-110 retired,
+duplicated at paths nothing imports. So the branches are *ported*, not merged, and then deleted.
+
+**What was genuinely missing turned out to be two small things and one real bug.**
+
+`claude/chemclaw3-github-repos-8w2wvg` contributed nothing — every file it adds relative to `main`
+is already present. It is deleted with no port.
+
+`claude/ci-test-timeout-guard` (PR #27) contributed only `pytest-timeout`. Its job-level
+`timeout-minutes` had already reached `main` by another route; the per-test cap had not. Both
+matter, and they are not redundant: the job timeout bounds the runner bill, the per-test timeout
+*names the test*. The `signal` default is kept rather than `thread` because `thread` calls
+`os._exit()` and takes the whole session down, which would reproduce the original failure — a hang
+early in alphabetical collection order stopping everything after it from running.
+
+`claude/session-history-endpoints` (PR #25) contributed only its approval-signal fix; its two
+routes and `SessionOwnerStore.list_for_owner` had already landed. That fix is the real find.
+`service/runner.py` yielded `ApprovalRequestEvent(prompt=...)` and never set `approval_id`, so the
+field documented since D-032 as "the durable hold's handle, so a surface can actually answer it via
+`POST /approvals/{id}/decision`" was always `""`. `service/static/app.js` does
+`if (!evt.approval_id) return;` — so the Yes/No control never rendered, and **every interaction
+approval was unanswerable from every surface**. The durable hold, the decision route and the review
+queue were all built, tested, and reachable only by a client that already knew an id nothing ever
+told it.
+
+The fix is the mechanism the same file already uses three times over: an `ApprovalSignal` on the
+per-turn signal buffer, recorded by `start_approval` and mapped in `_signal_event` beside
+`JobSignal`, `ProposalSignal` and `QuestionSignal`. A turn signal rather than a return value for
+exactly the reason D-077 gives for the other three — the handle must come from the tool that opened
+the hold, never from anything the model can author, or the agent could fabricate an approval.
+It is announced on the already-started path too, so re-surfacing a candidate stays answerable;
+without that, the idempotent branch would hand back an id it never announced.
+
+Plan approvals keep `approval_id == ""`, and that emptiness is now load-bearing rather than
+incidental: they have no durable hold and are answered by the next turn, so a handle there would
+point a surface at a workflow that does not exist. The field is what distinguishes the two kinds.

@@ -178,3 +178,40 @@ def test_a_failing_plan_read_never_sinks_the_turn(monkeypatch: pytest.MonkeyPatc
     events = _events(_SignallingAgent(jobs=[], proposals=[]))
     assert events[-1].type == "answer"
     assert not [e for e in events if e.type == "error"]
+
+
+def test_an_approval_signal_carries_the_holds_handle_to_the_stream() -> None:
+    """An opened approval hold reaches the surface WITH the id that answers it (gap RCH-3).
+
+    `ApprovalRequestEvent.approval_id` has always documented itself as the handle a surface posts
+    to `POST /approvals/{id}/decision`, but nothing populated it: `start_approval` returns the id
+    into the model's context, and the runner sees only the model's streamed updates. So every
+    approval arrived renderable but unanswerable — and `service/static/app.js` returns early on an
+    empty handle, so the Yes/No control never rendered at all.
+    """
+    from agents.turn_signals import record_approval_request
+    from service.runner import _signal_event
+
+    token = begin_turn()
+    try:
+        record_approval_request("Save this to the knowledge graph? What is the pKa?", "approval-7")
+        signals = drain()
+    finally:
+        end_turn(token)
+
+    assert len(signals) == 1
+    event = _signal_event(signals[0])
+    assert event.type == "approval_request"
+    assert event.approval_id == "approval-7"
+    assert "pKa" in event.prompt
+
+
+def test_a_plan_approval_still_has_no_handle() -> None:
+    """The other approval kind — a plan prompt — has no durable hold and must stay handle-less.
+
+    It is answered by the next turn, not by a decision endpoint, so an id there would point a
+    surface at a hold that does not exist. The emptiness is load-bearing, not incidental.
+    """
+    from service.events import ApprovalRequestEvent
+
+    assert ApprovalRequestEvent(prompt="Approve the plan?").approval_id == ""
