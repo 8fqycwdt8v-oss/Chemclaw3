@@ -61,10 +61,23 @@ The load test's fixes landed (see D-119). What it surfaced and did **not** close
       `tool_result`, harness-only, 100 % of calls); this one is on the **classic path with
       `harness_enabled` off**, which is the shipped default.
 
-      Next step is a minimal reproduction against `agent_framework` alone — one Anthropic client,
-      two tools, a prompt that forces parallel calls, streaming — and then an upstream issue. A
-      local mitigation is not available at the obvious layer: the malformed block is inside a
-      message MAF composes and sends itself.
+      **A minimal `agent_framework`-only reproduction was attempted and did NOT reproduce**
+      (`scratchpad/repro_live1.py`): one `AnthropicClient`, three trivial tools, a prompt asking
+      for nine calls at once, streamed, 8 consecutive attempts — **0/8 failed**. That negative
+      result is worth as much as the positive one, because it rules out the simplest story
+      ("MAF drops a name on any parallel tool call") and points at something in chemclaw's own
+      surface that the minimal case lacks. The candidates, in the order worth testing:
+
+      1. **The MCP connector tools.** Six of them, reached over HTTP, whose schemas arrive at run
+         time rather than from a Python signature. The failing turns ran with all six attached.
+      2. **Tool-surface size.** 28 in-process tools plus 6 connectors, against 3 in the minimal
+         case — more tools means more parallel calls per message and longer schemas.
+      3. **The context providers** — history, skills and compaction all rewrite the message list
+         around the model call, and the failing index is always an early message.
+
+      Reproduce by adding those to `repro_live1.py` one at a time; the first one that turns it red
+      is the answer. A local mitigation is not available at the obvious layer either way: the
+      malformed block is inside a message MAF composes and sends itself.
 
 
 - [ ] **CI-1 `main` has been red since D-117 enabled the real gates: `check` is cancelled at the
