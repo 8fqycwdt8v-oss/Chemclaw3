@@ -96,11 +96,18 @@ def _dependency_problems(skill_file: Path, manifest: SkillManifest) -> list[str]
     judgment this gate should refuse to ship.
     """
     problems: list[str] = []
-    known_tools = set(registered_tool_names())
+    # A skill names a *capability*, not a transport. Which process delivers a tool — the
+    # agent itself or an MCP server on its own pod — is a deployment decision (X8 moved
+    # seven calculators out), and a skill's judgment about `predict_pka` is the same
+    # judgment either way. So a declaration resolves against both registries, and moving
+    # a tool between them is not a skill edit.
     known_servers = {server.name for server in settings.mcp_servers}
+    known_tools = set(registered_tool_names()) | {
+        name for server in settings.mcp_servers for name in (server.allowed_tools or [])
+    }
     for tool in sorted(set(manifest.tools) - known_tools):
         problems.append(
-            f"{skill_file}: declares unknown tool {tool!r}; registered tools: {sorted(known_tools)}"
+            f"{skill_file}: declares unknown tool {tool!r}; available tools: {sorted(known_tools)}"
         )
     for server in sorted(set(manifest.mcp_servers) - known_servers):
         problems.append(

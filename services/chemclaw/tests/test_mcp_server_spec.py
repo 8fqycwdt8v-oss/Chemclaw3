@@ -85,6 +85,6 @@ def test_unknown_transport_is_rejected() -> None:
 def test_defaults_are_stdio_and_unchanged() -> None:
     """The two shipped capability servers stay stdio with their pinned allowed_tools."""
     settings = Settings(_env_file=None)  # type: ignore[call-arg]
-    assert {s.name for s in settings.mcp_servers} == {"mcp-molfp", "mcp-rxnfp"}
+    assert {s.name for s in settings.mcp_servers} == {"mcp-molfp", "mcp-rxnfp", "mcp-calc"}
     assert all(isinstance(s, StdioMcpServerSpec) for s in settings.mcp_servers)
     assert all(s.allowed_tools for s in settings.mcp_servers)  # the boundary is still pinned

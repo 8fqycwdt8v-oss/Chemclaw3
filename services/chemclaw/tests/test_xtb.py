@@ -7,10 +7,15 @@ proves the store integration computes once and reuses thereafter.
 import asyncio
 from importlib.metadata import version
 
+import numpy as np
 import pytest
+from rdkit import Chem
+from rdkit.Chem import AllChem
 
 from calc.store import InMemoryStore
-from calc.xtb import XtbInput, _calc_version, run_cached_xtb, run_xtb
+from calc.structure import structure_from_smiles
+from calc.xtb import XtbInput, run_cached_xtb, run_xtb
+from calc.xtb_spec import XtbSpec
 
 
 def test_water_energy_is_physical() -> None:
@@ -104,4 +109,85 @@ def test_calc_version_embeds_rdkit_build() -> None:
     Embedding changes across RDKit releases, so an upgrade must be a cache
     miss, not a silent stale hit.
     """
-    assert version("rdkit") in _calc_version()
+    key = XtbSpec(task="sp").cache_key(structure_from_smiles("CCO"))
+    assert version("rdkit") in key.calc_version
+
+
+def test_energy_key_is_addressed_by_geometry_not_by_seed() -> None:
+    """The single-point key names the structure, so it has no free parameters (X1).
+
+    The embedding seed used to appear in `params`; it is now inside the geometry the
+    key already names, so `params` is empty — the honest statement that a single point
+    is fully determined by its structure and method.
+    """
+    key = XtbSpec(task="sp").cache_key(structure_from_smiles("CCO"))
+    assert key.calc_type == "xtb.sp"
+    assert key.params_hash == XtbSpec(task="sp").cache_key(structure_from_smiles("OCC")).params_hash
+
+
+# Textbook relative stabilities (kcal/mol, more-stable species first). Chosen to span the
+# range where the comparison is easy (alkene geometry) to where it is large (ethanol vs its
+# ether isomer): all five are orderings any chemist would call uncontroversial.
+_ISOMER_PAIRS = [
+    ("C/C=C/C", "C/C=C\\C", "trans- vs cis-2-butene"),
+    ("CC(C)C", "CCCC", "isobutane vs n-butane"),
+    ("CC(=O)O", "COC=O", "acetic acid vs methyl formate"),
+    ("Cc1ccc(C)cc1", "Cc1ccccc1C", "p- vs o-xylene"),
+    ("CCO", "COC", "ethanol vs dimethyl ether"),
+]
+
+
+@pytest.mark.parametrize(
+    ("stable", "less_stable", "label"),
+    _ISOMER_PAIRS,
+    ids=[label for *_, label in _ISOMER_PAIRS],
+)
+def test_relative_isomer_energies_have_the_right_ordering(
+    stable: str, less_stable: str, label: str
+) -> None:
+    """The energy calculator ranks isomer stability correctly — the only use it has.
+
+    An absolute GFN2 energy answers nothing on its own; the whole point of the tool is
+    comparing related structures. This pins that behaviour across five textbook pairs.
+
+    It is also a regression guard with teeth. Before the geometry policy was fixed, the
+    single point ran on a raw ETKDG embedding whose residual strain exceeded the energy
+    difference being asked about, and two of these five pairs came out **inverted**. A
+    change that reverts the relaxation would fail here rather than quietly returning
+    confident, backwards chemistry.
+    """
+    assert (
+        run_xtb(XtbInput(smiles=stable)).total_energy_hartree
+        < run_xtb(XtbInput(smiles=less_stable)).total_energy_hartree
+    )
+
+
+def test_the_engine_is_the_only_place_units_change() -> None:
+    """Everything `calc.xtb_engine` hands upward is in Angstrom (X1's unit boundary).
+
+    Merged from `main`, `conformer_positions` was `positions_bohr` and returned atomic
+    units, because there `geometry` did too. On this branch `geometry` returns Angstrom and
+    `gfn2_energy` converts internally — so feeding it Bohr would have scaled every ensemble
+    geometry by 1.8897 and produced energies that are wrong and entirely plausible-looking.
+
+    Asserted on a bond length rather than on a constant: water's O-H is ~0.96 Angstrom and
+    ~1.81 Bohr, so the two are unmistakable and the test says which one the module promises.
+    """
+    from calc.xtb_engine import conformer_positions, geometry, parse_molecule
+
+    mol = parse_molecule("O")
+    for numbers, positions in (
+        geometry(mol, seed=42, optimize=True),
+        conformer_positions(_embedded(mol)),
+    ):
+        oxygen = int(np.argmax(numbers))
+        hydrogen = next(i for i in range(len(numbers)) if i != oxygen)
+        bond = float(np.linalg.norm(positions[oxygen] - positions[hydrogen]))
+        assert 0.8 < bond < 1.2, f"O-H of {bond:.2f} is not Angstrom (Bohr would be ~1.8)"
+
+
+def _embedded(mol: Chem.Mol) -> Chem.Mol:
+    """A copy of `mol` carrying one embedded conformer, for `conformer_positions`."""
+    work = Chem.Mol(mol)
+    AllChem.EmbedMolecule(work, randomSeed=42)
+    return work

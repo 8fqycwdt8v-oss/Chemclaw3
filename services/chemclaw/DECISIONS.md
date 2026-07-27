@@ -2789,3 +2789,873 @@ procedure notes yet"), not a special case to work around. Verified locally by re
 CI condition (removing the tracked symlink, recreating an empty directory, running
 `python -m kg.validate`) — exits 0, "OK: knowledge is a valid knowledge graph" — then restored the
 symlink in the working tree before committing, since only the CI step changes, not the tracked path.
+
+## D-095 — xTB capability seams (X1) and the properties the SCF already produced (X2)
+
+**Context.** `docs/xtb-tools-proposal.md` inventories what the xTB ecosystem offers against what
+ChemClaw consumed: one capability (a single-point energy) through one of three engines (`tblite`
+in-process). The same SCF that produced that energy also produced Mulliken charges, Wiberg bond
+orders, the dipole, and the orbital energies, all of which were read and discarded. This ADR covers
+the first two phases of that proposal — the ones that add no dependency.
+
+**Decision 1 — geometry becomes a content-addressed value (`calc/structure.py`).** Every calculator
+previously went SMILES → embed → compute in one breath, so two tasks on "the same molecule" silently
+produced two different geometries and nothing could reuse one. `Structure` carries elements,
+positions (Angstrom, rounded to `xtb_geometry_decimals` on construction), charge, multiplicity, and
+an optional `origin`; `structure_id` is a stable hash of the chemical content alone.
+
+*The unplanned payoff is in the cache key.* Keying on `structure_id` rather than on
+`(smiles, embed_seed)` is strictly stronger: the seed's effect is already inside the coordinates, so
+the key stays correct without naming it, and a geometry arriving later from an optimizer or a file
+hits the same entry. `xtb.sp`'s `params_hash` is now empty by construction — the honest statement
+that a single point has no free parameters beyond its structure and method.
+
+*It also generalizes a guard rather than weakening one.* The old `require_closed_shell` refused every
+odd-electron system because a SMILES does not encode multiplicity. `Structure` validates the electron
+count *against a declared* multiplicity instead, so an accidental radical still fails fast (with a
+message naming the fix) while a deliberate open shell is computable. That is what makes the Fukui
+ions legitimate rather than silent — the previous check would have made X2 impossible.
+
+**Decision 2 — one cache-key derivation (`calc/xtb_spec.py`).** `XtbSpec` holds every field that can
+move a number and derives the key once over `model_dump()`, so a new knob is keyed by construction
+rather than by review. It shipped with three callers on day one (`sp`, `properties`, `fukui`).
+
+**Decision 3 — three things the proposal describes were deliberately *not* built.** The `XtbEngine`
+protocol (one backend today), the structure *store* (nothing in X1/X2 produces a geometry, so it
+would have one writer and no reader), and a `calc/xtb/` package (cannot coexist with `calc/xtb.py`;
+`calc/` is flat). Each would have been a one-caller abstraction written before knowing what X3 needs
+— the Rule of Three case the proposal's own §12 makes. `XtbSpec` shipped because it has three
+callers; that is the line.
+
+**Decision 4 — Fukui indices are computed on an MMFF-relaxed geometry, and that is load-bearing.**
+Measured, not assumed: on a raw ETKDG embedding the residual distortion breaks the symmetry of
+chemically equivalent ring positions badly enough to invert the ordering for phenol and toluene
+(*ortho* and *meta* overlap). Relaxing first restores the equivalence — toluene's two *ortho* carbons
+agree to 1e-4 — and recovers *para* > *ortho* > *meta*, while nitrobenzene correctly inverts to
+*meta*. `calc.pka` already set the same flag for the same reason. A GFN2 optimization would be better
+and is the first thing X3 improves; until then `structure_id` records honestly that these are
+force-field geometries.
+
+**Consequence — a one-time cache invalidation, accepted.** `calc_type` moved from `xtb` to `xtb.sp`
+and the key's inputs changed, so existing `calculation_results` rows for the energy calculator are
+orphaned. Energies are unchanged; only the addressing is. The cost is one recomputation of a
+sub-second calculator, and it is the documented kind of invalidation (D-011: a widened key is a
+correctness feature). Nothing else was touched — `XtbInput`/`XtbResult`/`run_xtb`/`run_cached_xtb`
+keep their signatures and their values, and `calc.pka`'s calibrated path is untouched.
+
+**Verification.** The physics is asserted rather than assumed: the definitional identity
+f⁰ = (f⁻ + f⁺)/2 per atom, the per-molecule normalization Σf ≈ 1, benzene's six equivalent aromatic
+bond orders and zero dipole, and — the discriminating case — nitrobenzene inverting to *meta* while
+phenol and toluene direct *ortho/para*. A descriptor that merely tracked ring position would pass the
+activating cases and fail that one. Ring positions in the tests are derived from the molecular graph,
+not hardcoded, so a change in RDKit's canonical atom order cannot leave them silently checking the
+wrong atoms.
+
+## D-096 — xTB descriptors as BO featurization (U1)
+
+**Context.** `docs/xtb-use-cases.md` §6.2 ranked this the highest-value xTB integration and noted
+it needs **no new xTB capability** — only wiring. A BoFire campaign over "which ligand / base /
+solvent" modelled the choice as a bare category, so the surrogate learned an independent effect per
+label and could say nothing about an option nobody had run. With eight ligands and a budget of
+twelve experiments, most of the budget goes to discovering that the model has no opinion.
+
+**Decision.** `CategoricalParameter` gains two optional fields: `structures` (category → SMILES,
+the declared input) and `descriptors` (category → values, the computed output). `bo.featurize`
+fills the second from the first through `calc.xtb_props`, and `bo.engine` maps a featurized
+parameter to BoFire's `CategoricalDescriptorInput` instead of `CategoricalInput`.
+
+**Both halves are carried deliberately.** `structures` is provenance — which molecule produced
+which descriptor row — and `descriptors` is what the surrogate saw. Storing the *values* in the
+spec (rather than recomputing per round) is what keeps a durable campaign's featurization stable
+across rounds and worker restarts: a campaign cannot silently re-featurize itself mid-run because
+a calculator was upgraded.
+
+**Descriptor set, and one deliberate omission.** HOMO (donor strength), LUMO (acceptor strength),
+dipole (polarity), and the most positive / most negative Mulliken charge (electrostatic extremes,
+carrying H-bond donor and acceptor character). The **HOMO-LUMO gap is excluded**: it equals
+`lumo - homo` exactly, so shipping it alongside both would hand the GP a perfectly collinear
+column — worse kernel conditioning for no information.
+
+**The trap this decision walked into and out of.** Swapping the BoFire feature type looks
+sufficient but is not obviously so: a strategy's `input_preprocessing_specs` reports ORDINAL even
+for a descriptor input, which reads like the descriptors are being ignored. They are not — that
+field is the *pre-processing* step, and the encoding that matters is the surrogate's own
+`categorical_encodings`, which defaults to DESCRIPTOR for a `CategoricalDescriptorInput` and to
+ORDINAL for a plain one. Since we *depend on a default rather than setting it*, and since the
+failure mode is silent (the campaign still runs, still returns candidates, and simply stops
+generalizing), `tests/test_bo_featurize.py` pins both encodings explicitly.
+
+**Verification is the payoff, not the plumbing.** With three ligands observed and PCy3 unobserved,
+the bare surrogate predicts exactly the mean of the observed values for PCy3 — the arithmetic
+signature of having no information about it — while the featurized surrogate moves the prediction
+toward its descriptor neighbour PtBu3. That is asserted directly, because a test that only checks
+candidate shape would pass just as happily on a featurization that was wired up but inert. The
+descriptors are also checked to carry real chemistry (trialkylphosphines rank above
+triarylphosphines on HOMO; the aryl ligand's low-lying pi* shows in its LUMO), and the
+values-matrix row/column order is asserted against the declared order, since BoFire matches by
+position and a transpose would build a working campaign on the wrong molecules.
+
+**Ancillary move.** `default_store()` moved from `agents.calc_tools` to `calc.postgres_store`:
+storage is not a calculator concept, and the featurizer needs the same seam. Tests that patch it
+at the importing module are unaffected.
+
+**Limit, stated in the skill rather than hidden.** The featurization is **electronic only**.
+Cone angles and buried volume need a 3D geometry, so two ligands differing mainly in bulk look
+similar — a real limitation for phosphine selection specifically, and one the geometry tasks
+(plan X3) would address.
+
+## D-097 — The single point runs on a relaxed geometry, and the skill catalogue that found it
+
+**Context.** Ideating the skill layer (`docs/xtb-skill-catalogue.md`) surfaced that
+`compute_xtb_energy` is the tool an agent naturally reaches for to compare isomers, and that no
+skill governed that use. Measuring before writing the judgment — the discipline that produced the
+pKa finding in D-095's companion review — found a defect rather than a limitation.
+
+**The finding.** Over five textbook isomer pairs, the single point on a raw ETKDG embedding got
+the **sign of the relative energy wrong in two**: isobutane vs. n-butane, and ethanol vs. dimethyl
+ether. The cause is not the Hamiltonian but the geometry — residual strain in an unrelaxed
+embedding exceeds the energy difference being asked about. The same geometries relaxed with MMFF
+give all five orderings correctly.
+
+**Decision.** `calc.xtb` relaxes before the single point, via `_sp_structure`. This makes the
+geometry policy uniform: `calc.pka` and `calc.xtb_props` already relaxed for exactly this reason,
+and the energy path was the one that did not. Pinned by a parametrized regression test over all
+five pairs, so a change that reverts the relaxation fails loudly rather than returning confident,
+backwards chemistry.
+
+**Consequence.** Cached single-point energies re-address (the geometry is part of `structure_id`),
+so old entries are recomputed rather than mixed with new ones — the same clean invalidation D-095
+recorded, for the same reason. Absolute energies shift slightly; every *ordering* improves.
+
+**The residual limit, carried by a skill rather than a comment.** Relaxed magnitudes are still
+poor — ethanol vs. dimethyl ether comes out ~3.5 kcal/mol against an experimental ~12. The new
+`relative-energy-comparisons` skill states the rule this implies (orderings, not magnitudes; ties
+under ~1 kcal/mol; same formula and charge or the comparison is meaningless, not merely
+imprecise) and points at X3 for anything quantitative.
+
+**Skill catalogue.** `docs/xtb-skill-catalogue.md` maps 28 skills across six families — product
+prediction, degradation/stability, conformation, reaction design, process/formulation, and
+cross-cutting — against the capability each needs. Three shipped here because they need none:
+`product-prediction` (regioisomers and the kinetic-vs-thermodynamic question the tools cannot
+answer for you), `relative-energy-comparisons`, and `degradation-liabilities` (forced-degradation
+study design and impurity hypothesis filtering).
+
+**What the distribution argues.** **19 of the 28 catalogued skills are gated on X3 or X4.** The
+judgment layer is not the bottleneck — the capability under it is. Two entries also change the
+value case for those phases: an xTB Hessian yields IR *intensities* as well as frequencies, so a
+computed IR spectrum is a real discriminator between candidate impurity structures (X3); and
+bond dissociation energies — radical stability, HAT selectivity, antioxidant strength — are now
+unblocked at the model level, because D-095's `Structure` validates a declared multiplicity
+instead of refusing every open shell. Both need only the X4 reaction composite, not new physics.
+
+## D-098 — X3/X4: geometries, free energies, the reaction composite, and durable routing
+
+**Context.** X1/X2 gave the xTB layer its seams and the properties a single point already
+produces. Everything above that — "what does it look like", "what is ΔG", "does this reaction
+go" — needed a geometry optimizer and a Hessian. The skill catalogue (D-097) had measured the
+gap precisely: **19 of its 28 skills were gated on X3 or X4**.
+
+**Decision.** Build both phases: `calc/xtb_opt.py` (L-BFGS-B over tblite's analytic gradient),
+`calc/xtb_thermo.py` (finite-difference Hessian, quasi-RRHO thermochemistry, IR intensities),
+`calc/xtb_scan.py` (relaxed scans), `calc/reaction.py` (balanced reaction energies and solvent
+comparisons), five agent tools, and — see below — a durable execution path for the expensive
+ones.
+
+**No `ase`.** The proposal offered "`ase` (or a scipy L-BFGS over the tblite gradient)". Taking
+the second: `scipy` was already resident and `minimize(method="L-BFGS-B", jac=True)` over an
+*analytic* gradient is a dozen lines. ASE's `Vibrations` caches displacements **to a directory
+on disk**, a side effect that does not belong inside a content-addressed calculator. `scipy` is
+promoted from transitive to declared, because first-party modules now import it.
+
+**Spec subclasses, not one widening `XtbSpec`.** `OptSpec`/`ThermoSpec`/`ScanSpec` inherit
+`cache_key` unchanged — it derives from `model_dump()`, so a subclass field is keyed by
+construction. Adding `temperature_k` to the base model would have put a temperature in a
+*single point's* cache key.
+
+**The optimized structure is a field of the cached result.** X1 deferred a structure store until
+something produced a geometry; X3 does. It turned out to need one field, not a subsystem: the
+result store already persists it, content-addressed by the optimization's own key, and `origin`
+records the lineage.
+
+**IR intensities came free.** The Hessian loop displaces every Cartesian and reads the gradient;
+tblite returns the dipole from the same SCF, so dipole derivatives — and therefore a computable
+IR spectrum — cost one array that was being discarded. Same move X2 made for charges and bond
+orders. This is what makes `computed-spectra-comparison` shippable.
+
+### Three defects the measurements found
+
+**1. Open-shell energies were silently wrong.** tblite's `uhf` only sets the *occupation*; with
+no spin-dependent term the energy expression does not stabilize an open shell at all. Triplet O2
+came out **1.7 kcal/mol above** singlet O2 — the ground state, inverted. Adding the
+spin-polarization contribution wherever there are unpaired electrons puts the triplet 15.8
+kcal/mol below (experimental gap ~22) and cuts ethane's C–C dissociation error from +42 to +25
+kcal/mol. Measured that this leaves the validated X2 Fukui orderings (phenol, toluene,
+nitrobenzene) unchanged, so it applies uniformly rather than as a special case. Cache impact is
+handled by a new `_HAMILTONIAN_REVISION` tag in `engine_version()`: a change to *how* a
+calculation is set up is otherwise invisible to the key.
+
+**2. The optimizer's first step could destroy the molecule.** L-BFGS-B scales its opening trial
+step by 1/|gradient|, which on a strained geometry is wildly too large — measured on a water
+with a 1.6 Å O–H, its first move collapsed the bond to **0.20 Å** and the SCF then failed to
+converge at all. Fixed with a trust radius enforced through bounds, re-entered per leg.
+
+**3. Ordinary molecules optimize onto saddle points.** A force field hands over an eclipsed
+methyl and a Cartesian optimizer preserves that symmetry all the way down. Ethyl acetate — an
+ordinary ester — settles at a **-42 cm⁻¹** mode, where its "free energy" is not one.
+`relax_to_minimum` displaces along the imaginary mode and re-optimizes; ethyl acetate needs one
+such step and lands 0.016 kcal/mol lower, which confirms the diagnosis (a shallow rotor saddle,
+not a different structure).
+
+A fourth was found by a test rather than a measurement: filtering the x/y/z rotations by
+singular value looks equivalent to a proper linearity test and is not — an optimized CO2 is bent
+by a fraction of a degree, so its "null" rotation survives the cut and eats a real vibration.
+Rotations are now built about the principal axes and kept by moment of inertia, the same
+criterion the entropy uses.
+
+**Validation is against measurement, not against itself.** Water's standard entropy comes out
+**45.05 cal/mol/K against a measured 45.10**; the ZPE, the mode counts (including CO2's 3N−5),
+the n-butane torsion profile (anti lowest, gauche +0.6, syn barrier 5.7) and water's IR band
+ordering are all pinned the same way.
+
+### Temporal, and a stopgap that was the wrong call
+
+X3/X4 were first shipped with an *atom cap and a point cap* — refusing work that would block a
+turn. That was wrong, and the timings say so: a four-species reaction is 4.6 s, a seven-point
+scan 4.2 s, a five-solvent screen ~25 s, and a long scan on a mid-sized molecule is minutes.
+Refusing a calculation because it is slow is a worse answer than running it durably. (X1/X2 were
+genuinely different: a single point is 2.4 ms, where a workflow is pure overhead.)
+
+So the expensive tools now **route by predicted cost** (`calc/xtb_cost.py`, a power law fitted
+to those measurements, used only against a threshold): under the inline budget they compute in
+the turn, over it they submit an `XtbJobWorkflow` on the existing `hpc-jobs` queue and return a
+job id with a push-back. One activity rather than a fan-out, because every expensive part is
+already content-addressed — a retry after a worker restart walks straight through the work it
+already did. The job spec is a **closed, typed union**, the same boundary rule the proposal sets
+for the expert escape hatch.
+
+**`get_qm_job_status` → `get_job_status`.** Generalized rather than duplicated: "how is my
+calculation doing" is one question, and two near-identical tools is a way to have the model
+choose wrong. Dispatch is on the id prefix, so a foreign id is rejected before anything is
+deserialized.
+
+**Skills.** Six new: `reaction-thermodynamics`, `conformational-analysis`,
+`atropisomer-assessment` (the one with a regulatory hook — a computed barrier maps to an
+interconversion half-life and therefore to an ICH class, and the method's error spans two
+classes, which is the whole point of the skill), `computed-spectra-comparison`,
+`solvent-selection`, `bond-strength-and-radicals`. Five existing skills updated for the widened
+ladder.
+
+**The limit carried by skills rather than code, as with pKa (D-097/U3).** GFN2 homolysis
+energies are badly overestimated in absolute terms even with spin polarization, while the
+*orderings* hold (benzylic C–H clearly weaker than methane's). `bond-strength-and-radicals`
+states the rule this implies — rank, never quote — and the reaction result attaches an
+open-shell warning of its own.
+
+## D-099 — Durable capabilities declare their own queue
+
+**Context.** Adding `XtbJobWorkflow` (D-098) meant editing a hardcoded list inside
+`workers/hpc_worker.py`. That was the *one* extension seam left in the system that forced an
+edit to infrastructure code: agent tools declare themselves with `@tool`, metrics with
+`@metric`, skills by folder, MCP servers and data sources by config token — and workflows by
+being remembered. The failure is silent and total: a workflow that is written, tested and
+imported but missing from a worker's list never runs, and nothing fails until a job sits in the
+queue forever.
+
+**Decision.** `workflows/registry.py`, shaped exactly like `agents.tool_registry`: a
+`@durable_workflow("hpc")` / `@durable_activity("background")` decorator at the definition site,
+a dict per queue keyed by the name Temporal will advertise, insertion-ordered, with a duplicate
+guard. Both workers now read what they serve from the registry instead of restating it, and the
+startup log line is derived from it too, so it cannot go stale.
+
+**The queue is a property of the capability, not of the deployment** (D-006): `hpc` for few
+heavy workers, `background` for many light ones. Which one a durable job belongs on follows from
+what it does, so the declaration belongs next to the code that does it.
+
+**Two details the shape forced.** The key is the *Temporal* name, read from the definition
+Temporal attached, not the Python name — the registry's job is catching two capabilities
+claiming one name, so it has to key on the name that actually collides. And re-registering the
+**same** definition is allowed, because Temporal's workflow sandbox re-imports workflow modules
+to run them and would otherwise trip the guard on every workflow task; the guard compares the
+defining module rather than object identity.
+
+**What still requires an edit,** and honestly: a workflow in a *new* module needs one import
+line in the worker, because importing is what triggers registration. That is the same
+side-effect-import contract `agents.chemclaw_agent` has for tools, and it is one line rather
+than two lists.
+
+## D-100 — Sizing for real substrates: the workload is 200-800 Da
+
+**Context.** The X3/X4 cost model was fitted on 3-14 atom test molecules. The actual target is
+process R&D substrates in the 200-800 Da range, where conformer and job work runs in minutes,
+not seconds.
+
+**Measured, on this stack** (optimize + Hessian, one core):
+
+| molecule                   | atoms | optimize (steps) | Hessian  | total   |
+|----------------------------|-------|------------------|----------|---------|
+| ibuprofen (MW 206)         |    33 |   11.6 s ( 71)   |   7.5 s  |  19 s   |
+| sildenafil (MW 475)        |    63 |   66.0 s (154)   | 435.1 s  | 501 s   |
+| atorvastatin core (MW 559) |    76 |   96.6 s (177)   | 218.3 s  | 315 s   |
+| erythromycin (MW 734)      |   118 |  552.6 s (232)   |1007.1 s  |1560 s   |
+
+**The old model predicted 47 s for the 76-atom case — under by a factor of seven**, and 100 s
+for the 118-atom one against a measured 26 minutes. The exponent fitted on small molecules was
+1.7; on real substrates it is ~3, because the fixed overhead that dominates a small molecule is
+irrelevant at 76 atoms and the real scaling takes over.
+
+**And atom count is not the whole story.** Sildenafil at 63 atoms costs *more* than the
+atorvastatin core at 76 — its Hessian alone is twice as expensive — because a heteroatom-dense,
+conjugated system carries more basis functions per atom and converges its SCF harder. No
+function of atom count removes that scatter, so the refitted model (exponent 3.0, set to err
+high) carries a factor of ~2 either way in the drug range. That is fine for its only job —
+comparing against a threshold — and it is why the estimate reported to a user is an order of
+magnitude, never a countdown.
+
+**Consequences, all of them pointing the same way.** Everything in the target range now routes
+to a durable job, which is correct rather than a limitation. `xtb_hessian_max_atoms` goes to 150
+(an 800 Da molecule is ~120 atoms with hydrogens, so 120 was exactly at the ceiling);
+`xtb_opt_max_steps` to 1500 (177 steps at 76 atoms, and the count grows with size, so 400 would
+have failed large substrates *after* doing all the work); the job's start-to-close budget to four
+hours. The activity now **heartbeats** between species, solvents and scan points through a
+`Progress` callback (`calc/progress.py`), so a dead worker is detected in minutes rather than at
+the four-hour timeout — and `calc/` still knows nothing about Temporal.
+
+**A second finding, carried rather than fixed.** Sildenafil does **not** reach a clean minimum on
+the first pass, so `relax_to_minimum`'s displacement-and-reoptimize loop is not a rare path at
+drug size — and each attempt costs a full optimization *and* a full Hessian, which at 100 atoms
+is tens of minutes. When the refinement triggers on a large molecule, it dominates the job. The
+config comment says so; the reaction result already warns when a species is not a minimum.
+
+**The bottleneck this exposes, recorded as X9 rather than fixed.** 177 Cartesian L-BFGS steps for
+one 76-atom molecule (232 for 118 atoms) is the dominant cost, and it compounds through every scan point and every
+species. A redundant-internal-coordinate optimizer typically cuts that 3-5x. The Cartesian
+optimizer was the right first choice — dependency-free and easy to reason about — and it is now
+the single largest speedup available for this workload.
+
+## D-101 — X5/X6/X7: the binaries, and what they change
+
+**X5, the `xtb` binary.** Added as a second backend behind the same task API, selected by
+`settings.xtb_engine` (`auto` by default) and resolved to a concrete name *before* the cache key
+is built — a key containing "auto" would mean different things on two deployments and they would
+share entries computed by different programs.
+
+**It is not a marginal improvement.** Measured, optimize + Hessian on the substrates this system
+is pointed at:
+
+| molecule                   | atoms | tblite + Cartesian L-BFGS | xtb backend | speedup |
+|----------------------------|-------|---------------------------|-------------|---------|
+| ibuprofen (MW 206)         |    33 |   19.0 s                  |    5.7 s    |  3.3x   |
+| atorvastatin core (MW 559) |    76 |  315 s (177 steps)        |   38.1 s (39) | 8.3x  |
+| erythromycin (MW 734)      |   118 | 1560 s (232 steps)        |  142.5 s (94) | 10.9x |
+
+**This retires X9.** The internal-coordinate optimizer filed as "the single largest speedup
+available for this workload" is ANCopt, and it is a process call away. Writing one would have
+been a reimplementation of the reference.
+
+**The seam is the Hessian, not the thermochemistry.** xtb prints its own thermodynamic block and
+this backend ignores it, taking the Hessian matrix and handing it to `calc.xtb_thermo`. One RRHO
+implementation — the one validated against water's measured standard entropy — keeps the symmetry
+number an explicit input instead of xtb's silent guess, keeps quasi-RRHO identical across
+backends, and therefore keeps free energies from the two comparable. The binary path reproduces
+water's 45.10 cal/(mol K) exactly as the in-process path does, and that cross-backend agreement
+is a test.
+
+Also from X5: **GFN-FF**, which optimized the 118-atom substrate in 0.7 s. Not a quantum method
+and it yields no orbitals, but it makes large-system pre-optimization free.
+
+**A threading default that cost 4x.** Pinning `--parallel 1` was the cautious first choice and
+made a 76-atom Hessian 98 s instead of 27 s. The default is now xtb's own (use the machine),
+which is right for a dedicated worker pod; pin to 1 only where activities share one.
+
+**X6, CREST.** Conformer, tautomer and protomer sampling. It removes this system's most pervasive
+caveat — every other number describes one conformer — and supplies the **conformational entropy**
+that every single-conformer free energy is missing. `compute_reaction_energy` gains
+`level="thorough"`, which searches, works from the lowest member, and adds that term. It does
+*not* Boltzmann-average free energies over every conformer: that is one Hessian per member, half
+an hour each at 76 atoms. `treatment` on the result says which approximation was used rather than
+letting a reader assume the better one.
+
+**Rotamer degeneracy is load-bearing, not bookkeeping.** n-butane's gauche stands for two
+mirror-image rotamers and its methyl rotations multiply further; weighting by degeneracy puts the
+anti at 59.2% against CREST's own reported 59.14%, and the ensemble entropy at 6.23 against its
+6.227. Ignoring degeneracy gives 73% — simply wrong. Both are pinned by a hand-computed test.
+
+**CREST is the system's first non-deterministic calculator, and that had to be said out loud.**
+Metadynamics samples from a random seed, so two runs differ. Everything else in `calc/` satisfies
+"same key, same value"; this does not. The store is what makes it *stable* — the first run's
+ensemble is what every later question sees, so a report and the number behind it cannot drift —
+and `sampled: True` on the result tells a reader the populations are a sample.
+
+This bit immediately, and instructively: the first test asserted `total_found == 2` for n-butane,
+passed twice, and returned 4 on the third run because CREST split methyl-rotor variants
+differently. The test now pins what is stable across runs and never a sampled count. A test that
+pins a sampled quantity is a CI flake with a delay fuse.
+
+**X7, the expert seam.** `run_xtb_task` takes a **typed spec, never a string** — no argv, no
+flags, no `$...` control file, no paths. That is concrete rather than theoretical: a SMILES, an
+ELN record and a retrieved document all reach this tool through the model, and xtb's control-file
+syntax can reference external files and point charges. With a typed spec the worst a prompt
+injection achieves is an expensive but well-formed calculation, which the authorization gate and
+the cost router already bound. It is in `DEFAULT_WRITE_TOOL_GATES` — closed until an operator
+grants the role — and deliberately has no second on/off setting, because two independent switches
+for one capability is how a deployment comes to believe something is disabled when it is not.
+
+Built last, as the proposal argued: after X1-X6 the list it has to cover is short — a non-default
+GFN parametrization, a tightened accuracy — rather than everything the shaped tools had not got
+to yet.
+
+**Two things the binary does that its exit code does not tell you.** Its default
+optimization level converges to ~1e-3 Hartree/Bohr, looser than the tolerance
+`calc.xtb_opt` promises — ethanol stopped at 6.3e-4 Hartree/Angstrom against a 5e-4 target and
+was correctly rejected, wasting the run; the fix is to ask for `vtight` rather than to loosen the
+promise, because that promise is what makes the Hessian on top of it meaningful. And a Hessian on
+**linear CO2** computes correctly — the output file holds its textbook 655/1345/2446 cm^-1 — and
+then the process aborts during teardown with SIGABRT. A non-zero exit is therefore accepted when
+every file the task is defined by is present, and logged; discarding a complete calculation over
+a crash in its own cleanup would silently have lost every linear molecule.
+
+**Both binaries are in the image**, as pinned release tarballs (UBI9 has neither in its
+repositories). xtb is LGPL-3.0, crest GPL-3.0; both are invoked as separate processes over files
+and never linked, so the usual analysis is that neither affects this codebase's licence — but
+*distributing* them in an image is a decision for whoever owns the product, and the crest layer
+is separable for exactly that reason. Both are optional at runtime: absent, `xtb_engine=auto`
+falls back and the ensemble tools report that they are unavailable.
+
+## D-102 — X9 revisited: preconditioning the path the binary cannot take
+
+**Context.** D-101 retired X9 on the grounds that ANCopt *is* the internal-coordinate optimizer
+and it is a process call away. That was right about the general case and wrong about the scope:
+two paths cannot use the binary at all, and neither is rare.
+
+- **Relaxed scans.** Holding atoms fixed is expressible as optimizer bounds but not as an xtb
+  flag without writing a control file — precisely the input surface `calc.xtb_cli` refuses to
+  have. A scan is one constrained optimization *per point*, so a 24-point profile pays the
+  Cartesian cost 24 times.
+- **Open-shell species**, which route to the in-process backend because the binary cannot apply
+  the spin-polarization term their energy needs.
+
+So the work was never "replace ANCopt"; it was "stop the fallback path — which handles exactly
+what ANCopt cannot — from being the slow one".
+
+**Decision.** Optimize in the eigenbasis of an approximate Hessian, scaled by the square root of
+its curvature (`calc/anc.py`). The transform is **linear**, so a step is an exact Cartesian
+displacement and there is nothing to back-transform — the same reason xtb's own optimizer uses
+approximate normal coordinates rather than redundant internals. Frozen atoms are excluded from
+the basis by construction, so the constraint is not something the optimizer can violate.
+
+### Three things that only measurement decided
+
+**The first version was 10x slower than no preconditioner at all.** Setting L-BFGS-B's `gtol` to
+zero left it with no stopping criterion, so every leg ran to `maxiter`. The second attempt
+converted the threshold into preconditioned units using the *softest* direction's scale — the
+wrong end — and every leg then stopped almost immediately, failing to converge in 1500 steps. The
+fix is to stop on the quantity actually promised: the objective records the Cartesian gradient
+and a callback halts the leg when it meets the tolerance, so no threshold is ever converted
+between unit systems.
+
+**The eigenvalue floor is not a safety net — it is the model.** Lindh's pairwise form has no
+bending or torsional terms, and on ibuprofen that leaves **37 of 99 directions with essentially
+zero curvature**, where the true Hessian's lower quartile is 0.089 and its median 0.40
+Hartree/Angstrom^2. The floor is the stand-in for what the model cannot see. At a safety-net
+0.005 the preconditioner was *slower* than none; swept against measured step counts it optimizes
+near 1.0 and turns over by 1.5.
+
+**The payoff, at floor 1.0:**
+
+| case                      | Cartesian | preconditioned |
+|---------------------------|-----------|----------------|
+| naproxen                  |  44 steps |  19 steps      |
+| ibuprofen                 |  71 steps |  24 steps      |
+| ibuprofen, 2 atoms frozen |  57 steps |  27 steps      |
+| benzyl radical            |  10 steps |   6 steps      |
+
+About **2x**, consistently, including both cases this exists for. Stated honestly rather than
+sold: that is modest beside ANCopt's 8-11x, and the reason is visible in the number — with the
+floor this high the scale ratio is only ~3, so the model is damping the stiff directions it
+identifies reliably and is trusted for nothing else. A full Lindh model with angle and torsion
+terms would do better, at the cost of primitive-internal machinery and a Wilson B matrix. Worth
+it only if scans and radicals ever become the common case; recorded rather than built.
+
+## D-103 — X8: the calculators as an MCP server, and the line identity draws
+
+**Context.** The heavy half of this system's dependency closure — RDKit, tblite, scipy, and the
+`xtb`/`crest` binaries — belongs to the calculators, as does the CPU load. Hosting them in the
+agent's process means an optimization that saturates a core competes with a conversation for it.
+The requirement was stated plainly: run them in their own pod.
+
+**Decision.** `mcp_servers/calc` (`mcp-calc`), a third FastMCP capability server alongside
+`molfp`/`rxnfp`, hosting the seven tools that compute: `compute_xtb_energy`,
+`compute_electronic_properties`, `predict_site_reactivity`, `optimize_geometry`,
+`compute_thermochemistry`, `predict_solubility`, `predict_pka`. Thin, like its siblings — every
+body already lived in `calc/`, so this is transport. It runs as its own pod via
+`CHEMCLAW_COMPONENT=mcp-calc`, or over `http` against an already-running remote.
+
+**The tools were moved, not copied.** One capability advertised twice is a surface the model has
+to choose between for no reason, and the two copies drift.
+
+### What cannot move, and why it is not about chemistry
+
+`compute_reaction_energy`, `compare_solvents`, `scan_coordinate` and `sample_conformers` route to
+Temporal above a cost threshold; `run_xtb_task` is role-gated. All five need `require_actor()` and
+`get_current_session_id()` — the turn's authenticated user and the conversation to notify, both
+**ambient** and, by the F4-T3 reject-if-absent rule, never model-supplied. An MCP server is a
+separate process with no conversation and no authenticated user; the only way to give it those
+would be as tool *arguments*, which would make identity a model-authored value — precisely what
+that rule exists to prevent.
+
+So the boundary is **MCP carries capability, the agent keeps identity**, and it predicts what can
+ever move: anything that computes, nothing that authorizes. The tools that stay are the ones that
+*decide and delegate* — they price the request and either run it or hand back a job id — while the
+computation itself is the same `calc/` code the server hosts.
+
+### The one change that was not mechanical
+
+`scripts/validate_skills` resolved a declared tool against the in-process registry only, so every
+skill teaching a moved tool would have failed the gate. Widening it to include each configured
+server's `allowed_tools` is not a workaround for the migration — it is the correct model: **a
+skill names a capability, and which process delivers it is a deployment decision the judgment
+layer should be insulated from.** The evidence that this is right is that **no skill changed** in
+a migration that moved seven tools out of process. The check is not weakened: an invented tool
+name still fails, and both cases are tested.
+
+`test_mcp_transport` needed no edit either — it parametrizes over configured stdio servers, so it
+picked the new one up and proved it spawns as a real subprocess advertising exactly its seven
+tools, which is the boundary that keeps anything else on that server off the agent (D-029).
+
+### A regression the migration caused, and the better mechanism it forced
+
+Agent *profiles* attenuate the advertised surface by name, and `mcp_server_names` narrows whole
+servers. So a profile that named `predict_pka` broke: the tool was no longer in-process, and
+MCP attenuation was server-granular — the choice was all seven calculators or none.
+
+That is the same mistake the skill validator would have made, one layer up: a profile is a
+statement about *capabilities*, not about which process hosts them. `tool_names` now resolves
+across both transports and narrows a server's `allowed_tools` to the **intersection** with what
+the profile asked for, on a copy so one profile cannot narrow the surface for everyone else. A
+server with nothing asked for is not attached at all. Naming one tool grants that tool, never its
+server — pinned by a test, because an attenuation mechanism that silently widens is worse than
+none.
+
+**What did not move and is worth naming:** `bo/featurize.py` imports `calc.xtb_props` directly,
+in-process, because it is not a tool call — the BO featurization is library use, and MCP is the
+*agent's* transport, not an internal one. A second consumer of the calculators inside the same
+process is not a reason to route it through a subprocess.
+
+## D-104 — X11: two molecules together, and the half of the amine problem that is refused
+
+**Context.** Two gaps were named together in the X11 backlog entry because both are CREST searches
+this system already had wired at the CLI layer and neither had a calculator: `--nci` samples how
+two molecules associate, and `--protonate`/`--deprotonate` was the presumed route to **U2**, the
+basic amines the pKa predictor had never covered. Both were assumed to be work, not risk. One of
+them was.
+
+### Non-covalent complexes: the only question here about a pair
+
+`calc.complexes` computes an interaction energy as the difference of **relaxed** species — the
+complex at its best sampled binding mode, minus each monomer optimized alone. That deliberately
+includes the deformation cost of binding, which a rigid-monomer definition drops and which is part
+of what associating actually costs. `--nci` is what makes the search tractable: it wraps the pair
+in a logfermi wall, without which metadynamics simply lets the two molecules drift apart.
+
+Validated against CCSD(T)/CBS: water dimer **-4.97** (ref -5.0), ammonia dimer **-2.86** (-3.1),
+methane dimer **-0.41** (-0.5), water-ammonia **-5.31** (-6.4). Three within a few tenths, the
+mixed donor/acceptor pair 1.1 kcal/mol under-bound. Good enough to rank association strength and
+to say bound or not; not good enough to quote a binding constant.
+
+The pair is the **cache subject**: `run_cached_interaction` keys on the combined starting
+structure, so A-with-B and B-with-A are one entry rather than two runs of a minutes-long search.
+Two limits ship with every number and are stated in the model and the skill: it is an *energy*,
+not a free energy — the association entropy that decides whether the complex exists at a given
+temperature is absent, and for weak pairs it is comparable to the interaction itself — and the
+search is stochastic, so a binding mode that was not sampled cannot be reported.
+
+### Basic amines: one class calibrates better than the acids, the other is refused
+
+Fitted over 20 experimental amines. The class splits so sharply that shipping one number for both
+halves would have been indefensible:
+
+| class | n | Spearman | R² | RMSE | ships |
+|---|---|---|---|---|---|
+| aromatic / aryl N — pyridines, azoles, anilines | 7 | **1.000** | 0.993 | 0.17 | yes, ±1.0 |
+| aliphatic amines | 13 | **-0.17** | — | — | **no** |
+
+Aromatic nitrogen is the *better* of this system's two pKa calibrations — better than the acid
+path's ρ 0.965 / RMSE ~1.5. Held out afterwards: 1,2,3-triazole +0.57, 3,4-lutidine -0.25.
+
+**The refusal is diagnosed, not cautious.** In the gas phase GFN2 reproduces the experimental
+proton affinity order exactly (NH₃ < MeNH₂ < Me₂NH < Me₃N), so the Hamiltonian is not the problem.
+Switching on ALPB **reverses** that order completely. And the true aqueous order is neither: it is
+non-monotonic (Me₃N < NH₃ < MeNH₂ < Me₂NH), because aqueous aliphatic amine basicity is set by how
+many hydrogen bonds the ammonium ion can donate to water — which falls with substitution, and
+which a continuum model, having no explicit solvent, cannot see. **No linear recalibration
+recovers a non-monotonic relationship**, so this is not a threshold waiting to be relaxed; it
+changes when the solvation treatment changes, and explicit-solvent or cluster-continuum is not in
+this system. ρ = -0.17 is not "imprecise", it is no ranking ability, so a number would carry no
+information while looking exactly like one that did (G4).
+
+**The base path optimizes where the acid path does not**, and that was measured too: on the same
+seven references, MMFF geometries give ρ 0.893 and GFN2-optimized ones give 1.000. Protonation
+pyramidalizes a nitrogen and puckers a ring — the relaxation is doing real work. The acid
+calibration keeps its force-field policy because it was fitted and validated through that path;
+refitting it is a separate deliberate change, not a side effect of this one.
+
+**Acid wins when a molecule has both.** A compound with an O-H has a pKa in the ordinary sense and
+that is the number the question means. The `site` field says which equilibrium was computed,
+because an amine's tabulated value is its *conjugate acid's* pKa and quoting it as "the pKa" is
+wrong by orders of magnitude in the wrong direction.
+
+**What was not built.** `--protonate`/`--deprotonate` — the structural half — turned out not to be
+what U2 needed. The split above is electronic and the protomer enumeration is cheap in RDKit; a
+metadynamics search for protonation *sites* would not have moved a correlation that fails for
+solvation reasons. Left in the backlog rather than built speculatively.
+
+## D-105 — Fourth reconciliation with `main` (PR #28): the restored tree meets the xTB layer
+
+**Context.** `main` landed the restore of the tree the Replit move rewound (D-091) while this
+branch was building the xTB capability layer. The branch was based on the *rewound* tree, so the
+merge is not two feature sets meeting — it is a feature set meeting ~38 modules it had never seen.
+Five files conflicted. Two were mechanical; three were not, and each of the three was a place where
+the two designs disagreed about the same thing rather than merely touching the same lines.
+
+**The ADR numbers collided again, exactly as D-088 describes.** Both sides independently allocated
+D-082…D-091. `main`'s allocation keeps the numbers — it is the trunk, it merged first, and its ids
+are already cited from `BACKLOG.md`, `DEFERRED.md` and several modules. This branch's ten xTB ADRs
+renumber to **D-095…D-104**, and every citation moved with them: `BACKLOG.md` (the X-entries only —
+`main`'s DA-5/DA-10/TOOL-6 rows keep theirs), `tasks/todo.md`, `tasks/lessons.md`,
+`calc/xtb_spec.py`, `agents/calc_tools.py`, `workflows/README.md`, `workers/README.md`, and the
+three xTB design docs. `tests/test_decision_log.py`, which `main` added *as the fix for the last
+collision*, is what makes this checkable rather than reviewable — and it passes.
+
+### `_log_prediction` follows the calculators it hooks
+
+`main` added a prediction ledger (`calc/calibration.py`, D-090's gap IDEA-2) and hooked it into
+`predict_pka` and `predict_solubility` in `agents/calc_tools.py` — deliberately at the *tool* layer,
+"the boundary where a prediction becomes advice a chemist acts on". X8 (D-103) had moved both of
+those calculators to `mcp_servers/calc`. So the hook's stated principle and its location had come
+apart.
+
+Resolved by moving the hook, not by weakening either side: the MCP server's tool functions *are*
+the tool layer now, so `_log_prediction` lives there and hooks the same two calculators at the same
+boundary. It needs no ambient identity — the ledger is keyed on the canonical SMILES, not on who
+asked — so it crosses the D-103 line cleanly, which is the test that boundary was written to pass.
+`report_measurement` and `calculator_trust` stay in-process: they record and score, they do not
+compute, and nothing about them is a calculator.
+
+`default_store()` keeps X8's home in `calc/postgres_store.py` rather than `agents/calc_tools.py`,
+because the MCP server needs it too and a tool module is the wrong place for the one naming of the
+production backend.
+
+### The registry absorbed four workflows rather than being replaced by them
+
+`workers/background_worker.py` was the sharpest conflict: this branch reads what it serves from the
+registry (D-099), `main` restored the hand-maintained lists and *added four modules to them* —
+`audit_verify`, `digest`, `note_index`, `retention`. Taking the registry naively would have dropped
+four workflows and six activities on the floor, silently, which is the exact failure mode the
+registry exists to prevent.
+
+So the four modules were decorated at their definition sites, which is what D-099 says adding a
+durable capability means. Then the resolution was *verified rather than asserted*: the registry's
+served sets were diffed against `main`'s explicit lists, and they are equal — fourteen workflows and
+twenty-four activities, nothing missing and nothing extra. A merge that claims to preserve a
+capability list should prove it against the list it replaced.
+
+**One thing the merge caught that the branch had missed.** `mcp_servers/calc/server.py`'s
+`predict_pka` docstring still described the tool as O-H/S-H only — stale since D-104 added
+aromatic-nitrogen bases and the aliphatic refusal. The agent reads that docstring, so it was the
+one place the X11 result had not actually shipped. Corrected here.
+
+## D-106 — Heavy review of the xTB layer: five defects the tests did not catch
+
+A full read of the branch's 12k lines against `main`. The green suite was not evidence:
+every defect below sits in a path the tests exercised from the wrong side, and three of
+them were **contradicted by their own docstring**, which turned out to be the most
+reliable place to look. Where a module said what it did and the code did something else,
+the docstring was right about the intent and the code was wrong.
+
+### 1. GFN-FF optimization could never succeed
+
+`_energy_and_gradient` substituted GFN2 for GFN-FF and `_optimize_with_binary` then
+checked the result against this module's Cartesian gradient tolerance. A converged
+force-field geometry is not a GFN2 stationary point: measured on octane, GFN2 max-gradient
+**1.3e-2** against a 5e-4 target, so every GFN-FF optimization raised "did not converge".
+Had one passed, its `energy_hartree` would have been a GFN2 number labelled GFN-FF.
+
+The whole large-system escape valve — the 118-atom substrate in 0.7 s that justifies
+carrying GFN-FF at all — was unreachable through `optimize_structure`, and reachable by a
+model through `run_xtb_task(task="opt", method="GFN-FF")`. The docstring already described
+the correct behaviour ("for it the check is skipped and xtb's own convergence stands"); it
+is now implemented. `max_gradient` is `float | None`, `None` for GFN-FF only, and
+convergence there is xtb's own "CONVERGED AFTER" — required, not inferred from an exit
+code the module elsewhere documents as unreliable. Widening the type made `mypy` name both
+call sites, which is the argument for widening it rather than returning a sentinel.
+
+### 2. A CREST upgrade served stale ensembles
+
+`calc_version` named the tblite/xtb build for *every* spec, including `ConformerSpec` and
+`ComplexSpec`, whose work crest does. `crest_cli.binary_version()` existed and its
+docstring read "for the cache key (an upgrade must recompute)" — and nothing ever called
+it. So upgrading crest, the program that produced the number, changed no key and every
+stored ensemble and interaction energy survived it. A dead function whose docstring
+asserts a guarantee is worse than an absent one; it reads as implemented.
+
+### 3. `engine` was inherited by two specs that never honour it
+
+`compute_ensemble` and `compute_interaction` call `crest_cli.run` whatever `engine` says.
+`XtbSpec.for_structure` rewrites `engine` to `tblite` for any open shell — so a radical's
+ensemble was keyed as tblite's while crest did the work.
+
+Both are fixed by one seam: `calc_version()` is now an overridable method, and `CrestSpec`
+overrides it to key on crest's build and drops `engine` from the key entirely, with
+`for_structure` a no-op. The honest consequence is now *stated* rather than hidden: an
+open-shell CREST search gets no D-098 spin-polarization fallback, because there is nowhere
+to fall back to. `ComplexSpec` additionally propagates its engine into the `OptSpec` its
+three optimizations use, which they previously re-resolved independently.
+
+### 4. The open-shell caveat was gated on one level
+
+`if level == "standard" and any(multiplicity > 1)` — so a homolysis run at `thorough`, the
+most expensive path, lost the warning that unrestricted GFN2 energies are an ordering
+rather than a value. The caveat is about the energies, which every level differences.
+
+### 5. Two fields that could not tell the truth
+
+`conformer_treatment: Literal["single"] = "single"` was structurally incapable of
+reporting the ensemble treatment, and was therefore wrong at exactly `thorough`, the one
+level where a reader needs it. And `conformational_entropy_kcal=round(x, 3) or None` sent
+a rigid species' genuine 0.000 to `None`, which means "not computed at this level" — a
+different claim.
+
+### Two smaller ones, and one calibration note left open
+
+`crest_cli.run` promised "lowest energy first" and returned file order; crest does sort, but
+`ConformerEnsemble.lowest` is `conformers[0]` *after* a truncation to `max_members`, so the
+unenforced invariant would have silently dropped and misreported the lowest conformer. Now
+sorted. `xtb_cli._safe` was applied to the solvent but not to `xtb_cli_opt_level`, against
+the module's stated rule that every argv value is checked — operator-supplied rather than
+model-supplied, so not a boundary breach, but a rule with a quiet exception is not a rule.
+
+**Left open, deliberately:** `ensemble_seconds` has no fixed-overhead term, so it predicts
+0.5 s for a water CREST search that really takes ~10 s, and small searches route inline.
+It is the mirror of the error the cost model fixed at the large end. Recorded rather than
+re-fitted, because fixing it properly means measuring CREST's startup across sizes, which
+is a measurement session and not a review edit.
+
+## D-107 — Fifth reconciliation with `main` (PR #31): a unit boundary and a sign, both silent
+
+`main` landed D-092's process/analytical calculators — logD, developability descriptors, a
+reaction exotherm screen, a Boltzmann conformer ensemble — plus two CI fixes, while this
+branch was under review. Seven files conflicted. The textual ones were routine. Two were
+not, and neither would have failed a test on either branch alone: each is a defect that
+exists **only in the combination**.
+
+**The ADR numbers collided for the third time**, so this branch shifts again, D-092…D-103
+to **D-095…D-106**. `main` keeps its allocation, as in D-105. This is now a recurring cost
+of parallel branches rather than an accident, and `tests/test_decision_log.py` catches it
+every time — which is the argument for the check existing, not against the practice.
+
+### The unit boundary: `geometry()` returned different units on the two branches
+
+X1 made `calc.xtb_engine` the **single unit boundary** — Angstrom above it, Bohr only
+inside, conversion in `make_calculator`/`evaluate_point`. `main` never had that change, so
+its `geometry()` returns Bohr and its `gfn2_energy` consumes Bohr, which is self-consistent
+*there*. It also added `positions_bohr`, a genuinely useful helper for reading one conformer
+of a multi-conformer embedding by id, which `calc.conformer_ensemble` feeds straight into
+`gfn2_energy`.
+
+Merged naively, that helper hands Bohr to a function which on this branch multiplies by
+1.8897 — every ensemble geometry inflated by that factor, energies wrong and entirely
+plausible. Resolved by keeping the boundary and renaming the helper to
+`conformer_positions`, returning Angstrom: the name now states the unit, which is what stops
+the next person reintroducing it. Pinned by a test that asserts water's O-H is ~0.96 and not
+~1.81 — two numbers no one can confuse.
+
+### The sign: logD took the acid form for a base
+
+`calc.logd` composes `predict_logd` from Crippen LogP and `calc.pka` via
+Henderson-Hasselbalch, and hard-coded `logD = clogP - log10(1 + 10**(pH - pKa))`. That is the
+**acid** form, and it was correct when written: `calc.pka` covered acids only and *raised*
+for a base.
+
+X11 widened `calc.pka` to aromatic and aryl nitrogen. Pyridine stopped raising and started
+flowing into the acid formula, where the ionized fraction rises with pH instead of falling.
+Measured: pyridine at pH 7.4 came out at **-0.92 against a clogP of 1.08** — two full log
+units too lipophobic, for a base that is >99% neutral at that pH, and nothing raised.
+`predict_logd` now branches on `PkaResult.site`, which is the field that makes the two
+distinguishable and the reason it exists.
+
+The general lesson is worth more than the fix: **widening a domain is a breaking change to
+every consumer that encoded the old one**, even though nothing about its signature changed.
+`calc.pka` gained a capability; `calc.logd` silently lost its correctness.
+
+### Two implementations of two capabilities now coexist, deliberately
+
+`calc.conformer_ensemble` (RDKit ETKDG + MMFF prune + GFN2 single points) alongside
+`calc.conformers` (CREST metadynamics, rotamer degeneracies, conformational entropy); and
+`calc.reaction_energy` (cached single points, stoichiometric coefficients, exotherm flag)
+alongside `calc.reaction` (optimizes every species, Hessians, ΔH/ΔG, balance enforced).
+
+Both pairs are kept, and neither was deleted, because the choice is a product decision rather
+than a merge decision. They are also genuinely different: the CREST search needs an optional
+binary and costs minutes; the ETKDG ensemble is dependency-free and always available. The
+exotherm screen is a hazard flag on unoptimized geometries; the reaction composite is a
+thermodynamic answer that refuses an unbalanced equation. The tool names do not collide, so
+the registry is satisfied. **What is owed is a decision, not a merge**: `BACKLOG.md` carries
+it as an open item rather than this ADR pretending it was resolved.
+
+## D-108 — One conformer ensemble, one reaction composite: the duplicates are removed
+
+D-107 kept two implementations of two capabilities through a merge and recorded that a
+*decision* was owed rather than pretending the merge had made one. This is the decision,
+and it was taken on the user's instruction: remove the older tools and replace them with
+the framework this branch built.
+
+**What was removed.** `calc/conformer_ensemble.py`, `workflows/conformer_job.py`,
+`workflows/conformer_models.py`, `workflows/conformer_activities.py`,
+`agents/conformer_tools.py` (tools `submit_conformer_ensemble_job`,
+`get_conformer_job_status`), `calc/reaction_energy.py` and the `estimate_reaction_energy`
+tool — with their four test modules and four config settings.
+
+**What replaced them.** `calc/conformers.py` behind `sample_conformers`, and
+`calc/reaction.py` behind `compute_reaction_energy`. Both route through the one durable xTB
+job (`XtbJobSpec` discriminated union → `XtbJobWorkflow`) and are polled with the one
+`get_job_status`, rather than each capability carrying its own workflow, its own models, its
+own activities and its own status tool.
+
+### Why the replacements are strictly better, and where they are not
+
+The conformer ensembles are not close. ETKDG + MMFF prune + GFN2 singles enumerates
+*embeddings*; CREST searches conformational space by metadynamics, and it returns two things
+the older path structurally could not: **rotamer degeneracies**, without which n-butane's
+anti population comes out at 73% against a measured 59%, and the **conformational entropy**
+that every single-conformer free energy is missing. It also feeds `level="thorough"` in the
+reaction composite, which the standalone workflow could not.
+
+The reaction pair is closer, and the honest reading is that they answered *overlapping*
+questions rather than one. The removed screen differenced cached single points on
+force-field geometries; the composite optimizes every species, can add Hessians for ΔH/ΔG,
+and refuses an unbalanced equation instead of returning a difference that includes whatever
+atoms the two sides do not share. The screen's one genuine capability — the thermal-hazard
+flag — was **moved onto the composite** (`is_strongly_exothermic` against the same
+configured threshold) rather than dropped, and is pinned by its own test. Consolidating is
+not the same as losing a feature, and the difference is exactly that port.
+
+**Two costs, stated rather than buried.**
+
+- The removed screen ran on **cached single points and no optimization**, so it was seconds
+  where the composite is minutes. `level="quick"` is the equivalent gear — it optimizes but
+  skips every Hessian — and the exotherm flag is available there. It is still slower, and
+  that is a real trade for correctness (a screen on an unrelaxed geometry is differencing
+  two arbitrary conformers).
+- CREST is an **optional binary**; the ETKDG path needed only RDKit. The deployment image
+  installs both `xtb` and `crest` (`deploy/Containerfile`), so this costs nothing where the
+  system actually runs — but a bare `pip install` dev environment now has no conformer
+  ensemble at all, where before it had a weaker one. `crest_cli.run` already names the
+  missing binary and says which capabilities it takes with it.
+
+### The queue was wrong too, which the consolidation fixed for free
+
+The standalone conformer workflow sat on the **`background`** queue — many light workers.
+A CREST search is minutes of saturated CPU, which is the definition of the **`hpc`** queue
+(D-006). Folding it into the xTB job put it on the right one, and it is now one queue choice
+for every expensive xTB task rather than a decision repeated per capability. Pinned by a test
+in `tests/test_workers.py`, which previously asserted the wrong queue and now asserts why.

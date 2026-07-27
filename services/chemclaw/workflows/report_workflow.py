@@ -28,6 +28,7 @@ with workflow.unsafe.imports_passed_through():
         report_note,
     )
     from report.retrievers import FingerprintReactionRetriever, GraphRetriever
+    from workflows.registry import durable_activity, durable_workflow
 
 from workflows.orchestrator import fan_out
 from workflows.publish import BAD_DATA_RETRY, publish_note
@@ -38,18 +39,21 @@ def default_retrievers() -> list[SourceRetriever]:
     return [GraphRetriever(), FingerprintReactionRetriever(default_reaction_store())]
 
 
+@durable_activity("background")
 @activity.defn
 async def retrieve_section(section: ReportSection) -> SynthesizedSection:
     """Retrieve one report section's evidence across the production sources."""
     return await gather_section(section, default_retrievers())
 
 
+@durable_activity("background")
 @activity.defn
 async def propose_report(report: Report) -> str:
     """Render the gathered report as a PR-gated `report` note; return the reference."""
     return await propose_note(report_note(report), default_submitter())
 
 
+@durable_workflow("background")
 @workflow.defn
 class ReportSectionWorkflow:
     """Retrieve one report section durably — the fan-out unit of a report (plan F10-D2).
@@ -82,6 +86,7 @@ class ReportSectionWorkflow:
             )
 
 
+@durable_workflow("background")
 @workflow.defn
 class DevelopmentReportWorkflow:
     """Draft a report durably, fanning sections out to child workflows, then PR-gate the draft."""

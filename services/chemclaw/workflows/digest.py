@@ -26,6 +26,7 @@ with workflow.unsafe.imports_passed_through():
     from agents.subscriptions import Subscription, all_subscriptions, mark_reported
     from chemclaw.config import settings
     from kg.graph import load_notes
+    from workflows.registry import durable_activity, durable_workflow
 
 from workflows.notify import notify_session_best_effort
 from workflows.publish import BAD_DATA_RETRY
@@ -42,6 +43,7 @@ class DigestItem(BaseModel):
     note_ids: list[str]
 
 
+@durable_activity("background")
 @activity.defn
 async def collect_digests() -> list[DigestItem]:
     """Find, per subscription, the notes matching it that appeared since its watermark.
@@ -93,12 +95,14 @@ def _is_new(note: object, subscription: Subscription) -> bool:
     return bool(valid_from >= subscription.last_seen_at.date())
 
 
+@durable_activity("background")
 @activity.defn
 async def acknowledge_digest(subscription_id: int) -> None:
     """Advance a subscription's watermark, once its digest has actually been delivered."""
     await mark_reported(subscription_id)
 
 
+@durable_workflow("background")
 @workflow.defn
 class DigestWorkflow:
     """Deliver each subscriber's standing-query digest, then advance their watermark."""

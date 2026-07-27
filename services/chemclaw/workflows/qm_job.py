@@ -25,10 +25,12 @@ with workflow.unsafe.imports_passed_through():
     from workflows.knowledge import write_knowledge_node
     from workflows.models import QMJobInput, QMJobResult
     from workflows.notify import notify_session_best_effort
+    from workflows.registry import durable_workflow
 
 from workflows.publish import BAD_DATA_RETRY, publish_note_best_effort
 
 
+@durable_workflow("hpc")
 @workflow.defn
 class QMJobWorkflow:
     """Runs one QM calculation as a durable job, returning a typed result."""

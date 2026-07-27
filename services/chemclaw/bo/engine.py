@@ -13,6 +13,7 @@ from typing import Any
 import pandas as pd
 from bofire.data_models.domain.api import Domain, Inputs, Outputs
 from bofire.data_models.features.api import (
+    CategoricalDescriptorInput,
     CategoricalInput,
     ContinuousInput,
     ContinuousOutput,
@@ -45,6 +46,35 @@ def _resolve_seed(seed: int | None) -> int:
     return settings.bo_seed if seed is None else seed
 
 
+def _categorical_input(
+    parameter: CategoricalParameter,
+) -> CategoricalInput | CategoricalDescriptorInput:
+    """Map a categorical to BoFire, using its descriptors when it has been featurized (U1).
+
+    The distinction is the whole point of featurization and it is invisible at the call site,
+    so it is worth stating: a `CategoricalInput` is encoded ordinally inside a BoTorch
+    surrogate — the model sees an index and can only learn each label independently — while a
+    `CategoricalDescriptorInput` is descriptor-encoded, so the model sees the molecule's
+    position in descriptor space and can generalize to a category it has never been told
+    about. `tests/test_bo_featurize.py` pins that encoding, because it is a BoFire default we
+    depend on rather than one we set.
+    """
+    if parameter.descriptors is None:
+        return CategoricalInput(key=parameter.name, categories=parameter.categories)
+    names = parameter.descriptor_names()
+    return CategoricalDescriptorInput(
+        key=parameter.name,
+        categories=parameter.categories,
+        descriptors=names,
+        # Row order must follow `categories`, column order `names` — BoFire matches by
+        # position, not by label, so a mismatch here would silently mislabel the chemistry.
+        values=[
+            [parameter.descriptors[category][name] for name in names]
+            for category in parameter.categories
+        ],
+    )
+
+
 def _to_domain(problem: OptimizationProblem) -> Domain:
     """Translate our problem into a BoFire `Domain` (inputs + one objective output)."""
     inputs = []
@@ -54,7 +84,7 @@ def _to_domain(problem: OptimizationProblem) -> Domain:
                 ContinuousInput(key=parameter.name, bounds=(parameter.lower, parameter.upper))
             )
         else:
-            inputs.append(CategoricalInput(key=parameter.name, categories=parameter.categories))
+            inputs.append(_categorical_input(parameter))
     objective = (
         MinimizeObjective(w=1.0)
         if problem.objective.direction == "minimize"

@@ -21,16 +21,19 @@ from temporalio import activity, workflow
 with workflow.unsafe.imports_passed_through():
     from chemclaw.config import settings
     from report.vector_index import default_note_index, reindex_notes
+    from workflows.registry import durable_activity, durable_workflow
 
 from workflows.publish import BAD_DATA_RETRY
 
 
+@durable_activity("background")
 @activity.defn
 async def reindex_notes_activity() -> int:
     """Rebuild the derived note index from the knowledge graph; return the note count indexed."""
     return await reindex_notes(default_note_index())
 
 
+@durable_workflow("background")
 @workflow.defn
 class NoteReindexWorkflow:
     """Refresh the derived note index so hybrid retrieval sees the current graph.

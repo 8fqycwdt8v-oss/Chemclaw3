@@ -23,6 +23,7 @@ with workflow.unsafe.imports_passed_through():
     from chemclaw.config import settings
     from kg.git_submitter import default_submitter
     from memory.interaction import propose_confirmed_answer
+    from workflows.registry import durable_activity, durable_workflow
 
 from workflows.publish import note_publish_retry
 
@@ -54,6 +55,7 @@ class ApprovalOutcome(BaseModel):
     reference: str = ""
 
 
+@durable_activity("background")
 @activity.defn
 async def propose_confirmed_answer_activity(candidate: InteractionCandidate) -> str:
     """Propose the approved candidate as an interaction note via the PR-gate (the write side)."""
@@ -66,6 +68,7 @@ async def propose_confirmed_answer_activity(candidate: InteractionCandidate) -> 
     )
 
 
+@durable_workflow("background")
 @workflow.defn
 class InteractionApprovalWorkflow:
     """Hold a confirmed-answer note pending a human Yes/No, then publish on Yes.

@@ -27,11 +27,8 @@ from agents.chemclaw_agent import _build_compaction, build_agent
 from chemclaw.config import settings
 
 _DOMAIN_TOOLS = {
-    "compute_xtb_energy",
-    "predict_solubility",
-    "predict_pka",
     "submit_qm_job",
-    "get_qm_job_status",
+    "get_job_status",
     "find_notes",
     "expand_note",
     "propose_knowledge_note",
@@ -77,7 +74,7 @@ def test_agent_attaches_fingerprint_search_as_mcp_servers() -> None:
     no subprocess is spawned here).
     """
     agent = build_agent(chat_client=object())
-    assert {t.name for t in agent.mcp_tools} == {"mcp-molfp", "mcp-rxnfp"}
+    assert {t.name for t in agent.mcp_tools} == {"mcp-molfp", "mcp-rxnfp", "mcp-calc"}
     function_tool_names = {f.name for f in agent.default_options["tools"]}
     assert {"find_similar_reactions", "find_similar_molecules"} & function_tool_names == set()
 
@@ -102,11 +99,8 @@ def test_instructions_only_name_available_tools() -> None:
         "similar_reactions",
         "similar_molecules",
         "substructure_matches",
-        "compute_xtb_energy",
-        "predict_pka",
-        "predict_solubility",
         "submit_qm_job",
-        "get_qm_job_status",
+        "get_job_status",
         "suggest_next_experiment",
         "propose_knowledge_note",
         "record_confirmed_answer",
@@ -150,7 +144,7 @@ def test_harness_agent_keeps_full_capability_toolset(monkeypatch: pytest.MonkeyP
     harness = build_agent(chat_client=object())
     harness_tools = {t.name for t in harness.default_options["tools"]}
     assert classic <= harness_tools  # every classic capability tool is still present
-    assert {"mcp-molfp", "mcp-rxnfp"} == {t.name for t in harness.mcp_tools}
+    assert {"mcp-molfp", "mcp-rxnfp", "mcp-calc"} == {t.name for t in harness.mcp_tools}
 
 
 @pytest.mark.parametrize(

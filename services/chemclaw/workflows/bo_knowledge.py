@@ -15,6 +15,7 @@ from chemclaw.ids import stable_hash
 from kg.git_submitter import default_submitter
 from kg.note import Note
 from kg.pr_gate import propose_note
+from workflows.registry import durable_activity
 
 
 def note_from_campaign_result(objective_name: str, result: CampaignResult) -> Note:
@@ -44,6 +45,7 @@ def note_from_campaign_result(objective_name: str, result: CampaignResult) -> No
     )
 
 
+@durable_activity("background")
 @activity.defn
 async def write_campaign_node(objective_name: str, result: CampaignResult) -> str:
     """Write a campaign recommendation to the graph as a PR-gated note; return its ref."""

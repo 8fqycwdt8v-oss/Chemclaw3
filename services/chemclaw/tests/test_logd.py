@@ -79,3 +79,45 @@ def test_logd_reuses_the_cached_pka() -> None:
         assert pka_after.pka == pka_before.pka
 
     asyncio.run(_run())
+
+
+def test_a_base_is_corrected_in_the_other_direction() -> None:
+    """Henderson-Hasselbalch runs the opposite way for a base, and the sign is everything.
+
+    A cross-branch regression, invisible to either side alone. `calc.logd` was written when
+    `calc.pka` covered acids only, so it hard-coded the acid form
+    `logD = clogP - log10(1 + 10**(pH - pKa))`. X11 widened the predictor to aromatic and
+    aryl nitrogen, and pyridine — which previously *raised* — began flowing into that
+    formula as though it were an acid.
+
+    Measured: pyridine (pKaH 5.4) at pH 7.4 came out at -0.92 against a clogP of 1.08, two
+    full log units too lipophobic, and nothing raised. A base two units *below* the working
+    pH is essentially all neutral, so its logD must be its clogP — which is the assertion.
+    """
+
+    async def _run() -> None:
+        from rdkit import Chem
+        from rdkit.Chem import Crippen
+
+        result = await predict_logd(InMemoryStore(), LogdInput(smiles="c1ccncc1", ph=7.4))
+        mol = Chem.MolFromSmiles(result.smiles)
+        assert mol is not None
+        assert result.pka < 6.5  # a weak base, well below the working pH
+        assert result.log_d == pytest.approx(Crippen.MolLogP(mol), abs=0.05)
+
+    asyncio.run(_run())
+
+
+def test_an_aliphatic_amine_is_refused_rather_than_given_a_logd() -> None:
+    """The refusal propagates: no pKa means no pH correction, so no logD (gate G4).
+
+    `calc.pka` declines aliphatic amines because it cannot rank them at all, and a logD
+    built on a number that does not exist would be a plausible-looking product of two
+    guesses rather than one.
+    """
+
+    async def _run() -> None:
+        with pytest.raises(ValueError, match="aliphatic nitrogen"):
+            await predict_logd(InMemoryStore(), LogdInput(smiles="C1CCNCC1", ph=7.4))
+
+    asyncio.run(_run())

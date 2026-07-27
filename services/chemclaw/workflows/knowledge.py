@@ -13,6 +13,7 @@ from kg.git_submitter import default_submitter
 from kg.note import Note
 from kg.pr_gate import propose_note
 from workflows.models import QMJobInput, QMJobResult, qm_job_key
+from workflows.registry import durable_activity
 
 
 def note_from_qm_result(result: QMJobResult) -> Note:
@@ -45,6 +46,7 @@ def note_from_qm_result(result: QMJobResult) -> Note:
     )
 
 
+@durable_activity("background")
 @activity.defn
 async def write_knowledge_node(result: QMJobResult) -> str:
     """Write a QM result to the graph as a PR-gated note; return the PR reference."""

@@ -21,6 +21,7 @@ from chemclaw.chem import require_canonical_smiles
 from chemclaw.config import settings
 from workflows.hpc import nextflow
 from workflows.models import HpcJobHandle, QMJobInput, QMJobResult, qm_job_key
+from workflows.registry import durable_activity
 
 # Format the mock scheduler emits; parsed by `parse_qm_output`. Kept next to the
 # only two functions that produce/consume it so the contract stays local.
@@ -29,6 +30,7 @@ _ENERGY_RE = re.compile(r"energy=(-?\d+\.\d+)")
 _CONVERGED_RE = re.compile(r"converged=(True|False)")
 
 
+@durable_activity("hpc")
 @activity.defn
 async def prepare_input(job: QMJobInput) -> QMJobInput:
     """Validate and normalize the request before submission (plan step 1.2).
@@ -44,6 +46,7 @@ async def prepare_input(job: QMJobInput) -> QMJobInput:
     return job.model_copy(update={"molecule_smiles": smiles})
 
 
+@durable_activity("hpc")
 @activity.defn
 async def submit_to_hpc(job: QMJobInput) -> HpcJobHandle:
     """Enqueue the QM job and return a handle — via the real launcher or the mock (plan F5).
@@ -59,6 +62,7 @@ async def submit_to_hpc(job: QMJobInput) -> HpcJobHandle:
     return HpcJobHandle(scheduler_job_id=f"mock-{qm_job_key(job)}")
 
 
+@durable_activity("hpc")
 @activity.defn
 async def poll_hpc_status(handle: HpcJobHandle) -> str:
     """Poll until the job completes and return its raw output — real launcher or mock (plan F5).
@@ -121,6 +125,7 @@ async def _poll_nextflow(handle: HpcJobHandle) -> str:
         await asyncio.sleep(settings.hpc_poll_interval_seconds)
 
 
+@durable_activity("hpc")
 @activity.defn
 async def parse_qm_output(job: QMJobInput, raw_output: str) -> QMJobResult:
     """Parse raw HPC output into a typed result (plan step 1.4).
