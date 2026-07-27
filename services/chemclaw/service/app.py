@@ -35,6 +35,7 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
+from agents.agent_pool import AgentPool
 from agents.attachments import STORE as ATTACHMENTS
 from agents.attachments import AttachmentError, AttachmentSummary, parse_attachment
 from agents.chemclaw_agent import build_agent, connector_tools, history_provider
@@ -443,6 +444,12 @@ def create_app(
     # `session.state`), so one instance is correct for both and neither carries per-session
     # state.
     app.state.history = history_provider()
+    # One agent — and therefore one chat client — per concurrent turn (D-123). The cached
+    # `_agent()` below still serves everything that does not stream; only a streaming turn needs
+    # exclusivity, because that is where the Anthropic client keeps tool-call identity on itself.
+    app.state.agent_pool = AgentPool(
+        app.state.agent_factory, settings.service_max_concurrent_turns
+    )
     # Admission control on concurrent turns (AG-15): a bounded permit set caps how many turns
     # hit the shared LLM endpoint at once. A permit is held for a turn's whole streamed run; a
     # turn that cannot get one within the admission timeout is shed with 503. Built here so it
@@ -757,13 +764,21 @@ def create_app(
                     # wall-clock half). A stall inside `run_turn` surfaces here as TimeoutError
                     # and becomes one user-safe error event; a stall in the transport tears the
                     # stream down, and the `finally` still frees the permit either way.
-                    async with asyncio.timeout(settings.service_turn_timeout_seconds):
+                    async with (
+                        asyncio.timeout(settings.service_turn_timeout_seconds),
+                        # Exclusive for this turn (D-123). Two turns streaming through one chat
+                        # client interleave its tool-call bookkeeping and emit a `tool_use` block
+                        # with an empty name, which Anthropic rejects — 20% of turns in a live
+                        # 50-user run. The lease is returned even if the turn raises or the client
+                        # disconnects, so a pod cannot bleed capacity.
+                        app.state.agent_pool.lease(live.profile) as turn_agent,
+                    ):
                         async for event in run_turn(
                             # The session's profile picks both halves of its surface: the agent
                             # it talks to and the connectors that agent gets. Selecting one
                             # without the other would advertise a narrowed toolset over the full
                             # connector set.
-                            _agent(live.profile),
+                            turn_agent,
                             live.session,
                             body.message,
                             actor=principal.oid,

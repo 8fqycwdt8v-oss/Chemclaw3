@@ -32,46 +32,21 @@ missing prerequisite), in D-092.
 
 The load test's fixes landed (see D-119). What it surfaced and did **not** close:
 
-- [ ] **LIVE-1 The front door shares ONE cached `Agent` across all concurrent turns, and that
-      corrupts streamed tool calls. Root-caused, with a proven fix.** The most serious open defect
-      in the system, and only a live concurrent run finds it.
+- [x] **LIVE-1 The front door shared one chat client across concurrent turns, corrupting streamed
+      tool calls.** Closed by D-123: `AgentPool` leases one agent — and with it one chat client —
+      per concurrent turn, sized to `service_max_concurrent_turns`.
 
-      Symptom: Anthropic 400,
-      `messages.N.content.M.tool_use.name: String should have at least 1 character` — an assistant
-      `tool_use` block reconstructed with an **empty name**, which invalidates the follow-up request
-      carrying the tool results. On the 50-user live run, **30 of 150 turns (20 %) died this way**,
-      while the infrastructure itself was clean (150/150 admitted, 0 shed, 0 conflict, 0 transport).
+      Root-caused by elimination (8 live attempts each): sequential turns never failed across three
+      variants; 8 concurrent turns on one shared agent failed 8/8; per-turn agents passed 8/8; and
+      per-turn agents with a **shared client** failed 8/8 — which named the client.
+      `agent_framework_anthropic` keeps the tool call it is parsing on the client instance, and an
+      argument delta carries `name=""` and recovers its identity from it, so two interleaved streams
+      file one turn's arguments under the other's call id.
 
-      Isolated by elimination, 8 attempts each against live Haiku:
-
-      | Variant | Setup | Result |
-      |---|---|---|
-      | A | bare `agent_framework`, 3 tools, **sequential** | 0/8 fail |
-      | B | + the 6 MCP connectors, **sequential** | 0/8 fail |
-      | C | full `build_agent()` + connectors, **sequential** | 0/8 fail |
-      | **D** | full `build_agent()`, 8 turns **concurrent, sharing one agent** | **8/8 FAIL** |
-      | **E** | identical, but **one agent per turn** | **0/8 fail** |
-
-      D and E differ in exactly one line. `agent_framework` keeps streaming tool-call accumulation
-      on state owned by the **agent**, not the run, so two interleaved streams write into each
-      other's `tool_use` blocks. It needs two or more tool calls in one assistant message to show
-      up as an empty name, which is why every failure names `content.2` or `content.3`.
-
-      **This repo makes that sharing the default.** `agents/chemclaw_agent.py` caches one agent per
-      profile — "an agent is configuration rather than per-conversation state" — and
-      `service/app.py` hands that one object to every concurrent turn on the pod. The assumption is
-      correct for the classic non-streaming path and false for the streaming one, which is the only
-      path the front door uses.
-
-      **Why every stub run reported a clean 150/150:** the stub emits exactly one tool call per
-      response, and a single `tool_use` block has nothing to interleave with. The defect is
-      invisible to any test that does not use a real model making parallel calls under concurrency.
-
-      Fix direction is proven (variant E) but not yet costed: building an agent per turn re-runs
-      skill discovery and tool assembly, which is why it was cached in the first place. Decide
-      between (a) per-turn construction with the assembly cost measured, and (b) finding the
-      specific shared mutable state and isolating that. Reproductions are in
-      `scratchpad/repro_live1{,b,c,d,e}.py`.
+      Verified on the same live 50-user run that exposed it: **150 answers / 0 errors** (was 120/30),
+      zero empty `tool_use` names, p50 19.8 s → 16.9 s, throughput 1.76 → 1.99 turns/s, and 208 tool
+      calls against 151 — the count of tools that now run to completion rather than dying with their
+      turn. The upstream fix is tracked in `DEFERRED.md`; when it lands the pool goes away.
 
 - [ ] **CI-1 `main` has been red since D-117 enabled the real gates: `check` is cancelled at the
       30-minute job timeout, every run.** Runs on `main` at `5f95166`, `5e0827a` and `33d454e` all
