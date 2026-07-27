@@ -1,4 +1,4 @@
-"""Bench-chemistry tools the agent was missing (gaps TOOL-2, TOOL-3, TOOL-4, TOOL-5).
+"""The `chem` connector's MCP tool surface: bench chemistry (gaps TOOL-2, TOOL-4, TOOL-5).
 
 Four capabilities that were absent from the tool surface even though the chemistry for three of
 them already existed somewhere in the repo:
@@ -12,19 +12,21 @@ them already existed somewhere in the repo:
   in `evals.metrics` (for scoring), but the agent could not answer "what do I weigh out?" (TOOL-4).
 - `render_structure` — RDKit is already a dependency and the UI showed SMILES strings (TOOL-5).
 
-All four are pure and synchronous: no network, no durable state, no store. They are the cheap half
+All are pure and synchronous: no network, no durable state, no store. They are the cheap half
 of the chemistry surface — the expensive half (xTB, BO, fingerprint search) already existed.
 """
 
+from mcp.server.fastmcp import FastMCP
 from pydantic import BaseModel, Field
 from rdkit import Chem
 from rdkit.Chem import Descriptors, Draw, rdChemReactions
 from rdkit.Chem.Draw import rdMolDraw2D
 
-from agents.tool_registry import tool
 from chemclaw.chem import InvalidSmilesError, require_canonical_smiles
 from chemclaw.config import settings
 from chemclaw.reagents import ResolvedCompound, resolve_compound_name
+
+server = FastMCP("chem")
 
 
 class ChargeRow(BaseModel):
@@ -47,7 +49,7 @@ class ChargeTable(BaseModel):
     unresolved: list[str] = Field(default_factory=list)
 
 
-@tool
+@server.tool()
 async def resolve_compound(name: str) -> ResolvedCompound | None:
     """Resolve a reagent name, abbreviation, or SMILES to its canonical structure.
 
@@ -68,7 +70,7 @@ async def resolve_compound(name: str) -> ResolvedCompound | None:
     return resolve_compound_name(name)
 
 
-@tool
+@server.tool()
 async def stoichiometry_table(
     basis: str, basis_mass_g: float, reagents: list[str], equivalents: list[float]
 ) -> ChargeTable:
@@ -139,7 +141,7 @@ class GreenMetrics(BaseModel):
     pmi: float
 
 
-@tool
+@server.tool()
 async def green_metrics(input_masses_g: list[float], product_mass_g: float) -> GreenMetrics:
     """Compute the E-factor and PMI of a set of conditions (gap IDEA-3).
 
@@ -181,7 +183,7 @@ async def green_metrics(input_masses_g: list[float], product_mass_g: float) -> G
     )
 
 
-@tool
+@server.tool()
 async def render_structure(smiles: str) -> str:
     """Draw a molecule or reaction as an SVG the chat surface can show inline.
 

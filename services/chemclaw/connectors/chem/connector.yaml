@@ -1,0 +1,22 @@
+# Bench chemistry: the pure, synchronous tools that answer "what do I weigh out, what is this
+# compound, what does it look like, how green is this route". Its own bundle because `rdkit` is its
+# dependency and nothing else in the chat service needs one.
+name: chem
+description: >-
+  Bench chemistry over RDKit: resolve a compound name to a structure, build a stoichiometry/charge
+  table, compute E-factor and PMI for a route, and render a structure as an image. Pure and
+  synchronous — no store, no network, no durable state.
+
+endpoint:
+  transport: http
+  # A loopback dev default; a cluster address is set per deployment via CHEMCLAW_CONNECTOR_URLS.
+  url: http://127.0.0.1:8814/mcp
+  health_url: http://127.0.0.1:8814/healthz
+  request_timeout: 30
+  auth:
+    mode: none
+  tools:
+    - resolve_compound
+    - stoichiometry_table
+    - green_metrics
+    - render_structure

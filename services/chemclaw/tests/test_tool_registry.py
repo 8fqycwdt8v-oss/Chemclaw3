@@ -20,9 +20,6 @@ from agents.tool_registry import (
 # The exact in-process capability tools the old hardcoded list advertised — the registry must
 # reproduce this set, no more and no less (the MCP servers are advertised separately).
 _EXPECTED_INPROCESS_TOOLS = {
-    "compute_xtb_energy",
-    "predict_solubility",
-    "predict_pka",
     "submit_qm_job",
     "get_qm_job_status",
     "find_notes",
@@ -31,10 +28,6 @@ _EXPECTED_INPROCESS_TOOLS = {
     "suggest_next_experiment",
     "propose_knowledge_note",
     "record_confirmed_answer",
-    "resolve_compound",
-    "stoichiometry_table",
-    "green_metrics",
-    "render_structure",
     "request_development_report",
     "start_optimization_campaign",
     "get_durable_job_status",
@@ -48,8 +41,6 @@ _EXPECTED_INPROCESS_TOOLS = {
     "stop_watching",
     "list_attachments",
     "read_attachment",
-    "report_measurement",
-    "calculator_trust",
 }
 
 
@@ -79,11 +70,11 @@ def test_agent_advertises_the_registered_inprocess_tools() -> None:
 def test_duplicate_registration_is_a_loud_error() -> None:
     """Registering two tools under one name is a programming error (as in `evals.metric`)."""
 
-    async def compute_xtb_energy() -> None:  # shadows an already-registered name on purpose
+    async def gather_evidence() -> None:  # shadows an already-registered name on purpose
         return None
 
     with pytest.raises(ValueError, match="already registered"):
-        register_tool(compute_xtb_energy)
+        register_tool(gather_evidence)
 
 
 def test_decorator_registers_and_returns_function_unchanged() -> None:

@@ -19,11 +19,10 @@ import asyncio
 import tempfile
 from pathlib import Path
 
-import agents.calc_tools as calc_tools
 import agents.research_tools as research_tools
 import agents.search_tools as search_tools
+import connectors.calc.server.tools as calc_tools
 from agents.bo_tools import suggest_next_experiment
-from agents.calc_tools import predict_solubility
 from agents.research_tools import gather_evidence
 from agents.search_tools import find_similar_reactions
 from bo.problem import (
@@ -35,6 +34,7 @@ from bo.problem import (
 )
 from calc.store import InMemoryStore
 from chemclaw.config import settings
+from connectors.calc.server.tools import predict_solubility
 from mcp_servers.fpstore import InMemoryFingerprintStore
 from mcp_servers.rxnfp.search import record_for_reaction
 

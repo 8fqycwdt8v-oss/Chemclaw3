@@ -1,13 +1,18 @@
-"""Agent tools for the fast calculators (plan step 1c.5).
+"""The `calc` connector's MCP tool surface: the fast calculators (plan step 1c.5).
 
-Exposes cached calculators to the MAF agent as callable tools. Unlike the QM/HPC
-path, fast calculators run **inline** (sub-second) — no durable workflow is
-needed; the calculation store (Phase 1b) already makes a repeat call free and
-idempotent. `default_store` names the production backend and is the seam tests
-swap for an in-memory store.
+Exposes the cached calculators as MCP tools. Unlike the QM/HPC path, fast calculators run
+**inline** (sub-second) — no durable workflow is needed; the calculation store (Phase 1b) already
+makes a repeat call free and idempotent, which is why these are tools on a connector rather than a
+`jobs:` entry. `default_store` names the production backend and is the seam tests swap for an
+in-memory store.
+
+Running here rather than in the agent's process is what takes `tblite` and the calculation store's
+driver out of the chat service's image (D-092): a calculation's dependencies are the calculator's
+business, and this capability scales on its own.
 """
 
-from agents.tool_registry import tool
+from mcp.server.fastmcp import FastMCP
+
 from calc.calibration import (
     Calibration,
     PredictionRecord,
@@ -22,6 +27,8 @@ from calc.store import ResultStore
 from calc.xtb import XtbInput, XtbResult, run_cached_xtb
 from chemclaw.chem import canonical_smiles
 from chemclaw.ids import stable_hash
+
+server = FastMCP("calc")
 
 
 def default_store() -> ResultStore:
@@ -54,7 +61,7 @@ async def _log_prediction(
     )
 
 
-@tool
+@server.tool()
 async def report_measurement(property_name: str, smiles: str, measured_value: float) -> str:
     """Record a *measured* property value, so predictions can be scored against reality.
 
@@ -84,7 +91,7 @@ async def report_measurement(property_name: str, smiles: str, measured_value: fl
     )
 
 
-@tool
+@server.tool()
 async def calculator_trust(property_name: str) -> Calibration:
     """Report how far a calculator's predictions have actually been off, measured not asserted.
 
@@ -108,7 +115,7 @@ async def calculator_trust(property_name: str) -> Calibration:
     )
 
 
-@tool
+@server.tool()
 async def compute_xtb_energy(smiles: str, charge: int = 0) -> XtbResult:
     """Compute the GFN2-xTB total energy of a molecule (fast, semiempirical).
 
@@ -126,7 +133,7 @@ async def compute_xtb_energy(smiles: str, charge: int = 0) -> XtbResult:
     return result
 
 
-@tool
+@server.tool()
 async def predict_solubility(smiles: str) -> SolubilityResult:
     """Predict aqueous solubility (log S, mol/L) of a molecule, with uncertainty.
 
@@ -147,7 +154,7 @@ async def predict_solubility(smiles: str) -> SolubilityResult:
     return result
 
 
-@tool
+@server.tool()
 async def predict_pka(smiles: str) -> PkaResult:
     """Predict the pKa of a molecule's most acidic O-H/S-H site via GFN2-xTB.
 

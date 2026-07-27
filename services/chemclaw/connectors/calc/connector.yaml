@@ -1,0 +1,29 @@
+# The fast calculators. Its own bundle because `tblite` and the calculation store are its
+# dependencies, and because a property calculation and a chat turn have nothing in common
+# operationally — this is the capability most worth scaling on its own.
+#
+# `report_measurement` writes, but to the *calibration ledger*, which is this capability's own store —
+# not the knowledge graph, whose only agent-reachable write path remains the PR-gate in core.
+name: calc
+description: >-
+  Fast cached property calculators: xTB single-point energy, predicted pKa and solubility, plus the
+  calibration ledger that scores those predictions against measured values. Sub-second and cached,
+  so a repeat call is free — heavy QM goes through the durable submit_qm_job instead.
+
+endpoint:
+  transport: http
+  # A loopback dev default; a cluster address is set per deployment via CHEMCLAW_CONNECTOR_URLS.
+  url: http://127.0.0.1:8815/mcp
+  health_url: http://127.0.0.1:8815/healthz
+  request_timeout: 60
+  auth:
+    mode: none
+  tools:
+    - compute_xtb_energy
+    - predict_pka
+    - predict_solubility
+    - calculator_trust
+    - report_measurement
+
+skills:
+  - calculation-selection

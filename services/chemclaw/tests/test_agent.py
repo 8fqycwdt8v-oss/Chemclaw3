@@ -27,6 +27,10 @@ from agents.chemclaw_agent import _build_compaction, build_agent, connector_tool
 from chemclaw.config import settings
 from connectors.registry import connector_tool_names, discovered
 
+# The domain capability an agent must be able to reach, spanning both halves of the surface: the
+# durable launchers and the knowledge/PR-gate tools are in-process, the property calculators are the
+# `calc` connector's. Asserted against the union rather than against the agent's own list, because
+# where a tool *runs* is a deployment concern and where it is *reachable from* is the contract.
 _DOMAIN_TOOLS = {
     "compute_xtb_energy",
     "predict_solubility",
@@ -49,7 +53,9 @@ def test_agent_applies_default_generation_options() -> None:
 def test_agent_advertises_qm_tools() -> None:
     """All domain tools are registered on the agent under their function names."""
     agent = build_agent(chat_client=object())
-    tool_names = {tool.name for tool in agent.default_options["tools"]}
+    tool_names = {tool.name for tool in agent.default_options["tools"]} | set(
+        connector_tool_names()
+    )
     assert _DOMAIN_TOOLS <= tool_names
 
 

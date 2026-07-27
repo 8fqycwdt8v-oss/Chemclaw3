@@ -36,21 +36,27 @@ def test_default_profile_reproduces_todays_agent() -> None:
 
 
 def test_profile_narrows_tools_and_swaps_instructions() -> None:
-    """A profile advertises only its named tool subset and its own instructions."""
-    agent = build_agent(
-        chat_client=object(),
-        profile=AgentProfile(
-            name="property-lookup",
-            instructions="Answer physical-property questions tersely; cite computed values.",
-            tool_names=frozenset({"predict_pka", "predict_solubility", "gather_evidence"}),
-        ),
+    """A profile advertises only its named tool subset and its own instructions.
+
+    `tool_names` spans both halves of the surface, which is what makes a profile expressible at
+    all now that the domain capabilities live behind connectors: `gather_evidence` is in-process,
+    the two predictors are the `calc` connector's, and a profile naming all three must get exactly
+    those — the in-process tools narrowed, and `calc` attached with its allow-list cut to two.
+    """
+    profile = AgentProfile(
+        name="property-lookup",
+        instructions="Answer physical-property questions tersely; cite computed values.",
+        tool_names=frozenset({"predict_pka", "predict_solubility", "gather_evidence"}),
     )
-    assert {t.name for t in agent.default_options["tools"]} == {
-        "predict_pka",
-        "predict_solubility",
-        "gather_evidence",
-    }
+    agent = build_agent(chat_client=object(), profile=profile)
+    assert {t.name for t in agent.default_options["tools"]} == {"gather_evidence"}
     assert agent.default_options["instructions"] != _INSTRUCTIONS
+
+    connectors = connector_tools(profile)
+    assert [connector.name for connector in connectors] == ["calc"]
+    assert set(connectors[0].allowed_tools or ()) == {"predict_pka", "predict_solubility"}
+    # Every other connector is dropped rather than attached with an empty surface.
+    assert "chem" not in {connector.name for connector in connectors}
 
 
 def test_profile_can_narrow_connectors() -> None:

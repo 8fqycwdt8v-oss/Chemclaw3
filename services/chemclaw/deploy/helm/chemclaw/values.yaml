@@ -78,6 +78,12 @@ connectors:
   safety:
     enabled: true
     replicas: 1
+  chem:
+    enabled: true
+    replicas: 1
+  calc:
+    enabled: true
+    replicas: 1
 
 # The port every connector container listens on (its own Service maps it 1:1). One value rather than
 # per-connector: they are separate Services, so there is no port to deconflict, and a single number

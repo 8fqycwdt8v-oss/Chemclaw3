@@ -8,7 +8,7 @@ import asyncio
 
 import pytest
 
-import agents.calc_tools as calc_tools
+import connectors.calc.server.tools as calc_tools
 from calc.store import InMemoryStore
 
 

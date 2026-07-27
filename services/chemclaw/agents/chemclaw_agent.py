@@ -41,8 +41,6 @@ from agent_framework._harness._loop import todos_remaining
 # site, not an edit here.
 from agents import attachments as _attachments  # noqa: F401
 from agents import bo_tools as _bo_tools  # noqa: F401
-from agents import calc_tools as _calc_tools  # noqa: F401
-from agents import chem_tools as _chem_tools  # noqa: F401
 from agents import dialogue_tools as _dialogue_tools  # noqa: F401
 from agents import durable_tools as _durable_tools  # noqa: F401
 from agents import graph_tools as _graph_tools  # noqa: F401
@@ -58,7 +56,7 @@ from agents.skill_access import EnabledSkillsSource, RoleScopedSkillsSource
 from agents.tool_authz import enforce_tool_authz
 from agents.tool_registry import register_tool, registered_tool_names, registered_tools
 from chemclaw.config import settings
-from connectors.registry import job_tools, mcp_tools, skills_dirs
+from connectors.registry import connector_tool_names, job_tools, mcp_tools, skills_dirs
 
 _INSTRUCTIONS = (
     "You are Chemclaw, a research assistant for pharmaceutical/chemical process R&D. Your job "
@@ -295,11 +293,17 @@ def _capability_tools(profile: AgentProfile | None = None) -> list[Any]:
     - one MCP tool per enabled connector endpoint (`connectors.registry`), through which every
       out-of-process capability is reached.
 
-    A profile's `tool_names` / `mcp_server_names` *narrow* the advertised surface to the named
-    subset — attenuation only, never widening. A name that no built tool provides is a loud
-    error (fail-fast) rather than a silently-empty toolset. `None` (the default profile)
-    advertises the full surface, so the classic path and the registry tests build the complete
-    set unchanged.
+    A profile's `tool_names` narrows the advertised surface to the named subset — attenuation only,
+    never widening. It spans **both** halves: the in-process tools here and, in `connector_tools`,
+    each connector's agent-facing allow-list. That has to be one dial rather than two, because after
+    the domain capabilities moved to connectors most tools a profile would name live out of process,
+    and a `tool_names` that could only reach the in-process half would be unable to express
+    "a property-lookup agent" at all. `mcp_server_names` remains the coarser dial, selecting whole
+    connectors.
+
+    A name in `tool_names` that nothing at all provides is a loud error (fail-fast) rather than a
+    silently-empty toolset. `None` (the default profile) advertises the full surface, so the classic
+    path and the registry tests build the complete set unchanged.
     """
     prof = profile if profile is not None else get_profile(None)
     # Job tools are ordinary registry tools: registering them here (once per process, guarded
@@ -309,8 +313,29 @@ def _capability_tools(profile: AgentProfile | None = None) -> list[Any]:
     _register_job_tools()
     inprocess = registered_tools()
     if prof.tool_names is not None:
-        inprocess = _narrow(inprocess, prof.tool_names, prof.name, "tool")
+        _reject_unknown_tool_names(prof)
+        # Names belonging to a connector are not missing, just not *here* — `connector_tools`
+        # applies them to the allow-lists. So this half narrows without complaining about them.
+        keep = prof.tool_names & set(registered_tool_names())
+        inprocess = [tool for tool in inprocess if tool.__name__ in keep]
     return inprocess
+
+
+def _reject_unknown_tool_names(profile: AgentProfile) -> None:
+    """Fail the build when a profile names a tool neither half of the surface provides.
+
+    The whole surface, checked in one place, because that is the only place that can tell a typo
+    from a name that merely lives on the other side of the process boundary. Splitting the check
+    would make each half reject the other's tools.
+    """
+    assert profile.tool_names is not None  # only called when the profile narrows
+    available = {*registered_tool_names(), *connector_tool_names()}
+    unknown = profile.tool_names - available
+    if unknown:
+        raise ValueError(
+            f"agent profile {profile.name!r} lists unknown tool(s) {sorted(unknown)}; "
+            f"known: {sorted(available)}"
+        )
 
 
 def connector_tools(profile: str | AgentProfile | None = None) -> list[Any]:
@@ -326,14 +351,18 @@ def connector_tools(profile: str | AgentProfile | None = None) -> list[Any]:
     once.
 
     This is why connectors are *not* attached by `build_agent`: an `Agent` is built once per
-    process,
-    which is exactly the lifetime a connector tool must not have. `Agent.run(tools=…)` appends
-    run-scoped tools to the configured ones, so the turn's caller passes these and the model
-    sees one combined surface (`service.runner.run_turn`).
+    process, which is exactly the lifetime a connector tool must not have. `Agent.run(tools=…)`
+    appends run-scoped tools to the configured ones, so the turn's caller passes these and the
+    model sees one combined surface (`service.runner.run_turn`).
+
+    Both profile dials apply here. `mcp_server_names` selects whole connectors; `tool_names`
+    additionally narrows each surviving connector's agent-facing allow-list, and a connector left
+    with no named tool is dropped rather than attached with an empty surface. That is what lets a
+    profile say "just the two solubility tools" now that those tools live out of process.
 
     Args:
-        profile: The profile whose `mcp_server_names` narrows the set (a name, an `AgentProfile`, or
-            `None` for the default, which advertises every enabled connector).
+        profile: The profile to narrow by (a name, an `AgentProfile`, or `None` for the default,
+            which advertises every enabled connector's full allow-list).
 
     Returns:
         Unconnected MCP tools, one per enabled connector with an endpoint. The caller connects them
@@ -343,7 +372,25 @@ def connector_tools(profile: str | AgentProfile | None = None) -> list[Any]:
     tools: list[Any] = list(mcp_tools())
     if prof.mcp_server_names is not None:
         tools = _narrow(tools, prof.mcp_server_names, prof.name, "connector")
+    if prof.tool_names is not None:
+        tools = _narrow_allowed_tools(tools, prof.tool_names)
     return tools
+
+
+def _narrow_allowed_tools(tools: list[Any], keep: frozenset[str]) -> list[Any]:
+    """Restrict each connector's allow-list to `keep`, dropping connectors left with nothing.
+
+    Mutating `allowed_tools` on the instance is safe precisely because these are per-turn objects
+    (`connector_tools`): there is no shared connector whose surface another turn could see change.
+    """
+    narrowed = []
+    for tool in tools:
+        allowed = sorted(set(tool.allowed_tools or ()) & keep)
+        if not allowed:
+            continue
+        tool.allowed_tools = allowed
+        narrowed.append(tool)
+    return narrowed
 
 
 def _register_job_tools() -> None:

@@ -61,9 +61,23 @@ server*, and two concurrent turns proven to keep their own identity.
 
 ## Stage C — domain connectors
 
-- [ ] `calc`, `chem`, `safety`, then `kg`
-- [ ] `bo` moves its workflow to its own worker + task queue (proves plan §5.3 decoupling)
-- [ ] Helm: per-connector Deployment/Service + NetworkPolicy
+- [x] **Safety rubric verified across the process boundary** before moving anything
+      (`tests/test_connector_safety_rubric.py`): a connector tool call is audited with the turn's
+      actor, and `tool_role_gates` denies it by name without the tool body ever running. Neither is
+      inspectable from the wiring — MAF assembles MCP tools separately from the configured ones — so
+      this had to be driven through a real agent against a real server.
+- [x] `safety` — `screen_hazards`, with the `safety-screening` skill in the bundle
+- [x] `chem` — `resolve_compound`, `stoichiometry_table`, `green_metrics`, `render_structure`
+      (takes `rdkit` out of the front-door image)
+- [x] `calc` — the calculators + the calibration ledger, with `calculation-selection` in the bundle
+      (takes `tblite` and the calculation store's driver out)
+- [x] Helm: an entry per bundle; Deployment/Service/NetworkPolicy already generalized in Stage A
+- [ ] `kg` — `find_notes`, `expand_note`, `find_knowledge_gaps`, `gather_evidence`. The deepest
+      coupling: it needs the knowledge tree and the vector index, so decide first whether it also
+      owns re-indexing (`NoteReindexWorkflow` moves with it or does not).
+- [ ] `bo` moves its workflow to its own worker + task queue (proves plan §5.3 decoupling), which is
+      also where `start_optimization_campaign` becomes a manifest `jobs:` entry
+- [ ] `qm`/`report` job manifests, once their workflows move and return the envelope directly
 
 ## Stage D — agentic workflow configuration
 
@@ -74,6 +88,27 @@ server*, and two concurrent turns proven to keep their own identity.
 
 - [ ] Specified only. Trigger recorded in `BACKLOG.md`: a second real use case a profile provably
       cannot express.
+
+## Review — Stage C (in progress)
+
+Three bundles migrated, `make lint type test` green at **977 passed**. Two defects found by the
+existing suite while doing it, both real and both fixed at the root:
+
+1. **Swallowing `CancelledError` in the connector transport broke the front door's turn timeout.**
+   A hung turn ran to completion holding its admission permit — the exact failure
+   `service_turn_timeout_seconds` exists to prevent. MAF swallows it in its own MCP paths on the
+   grounds that an internal cancel scope is indistinguishable from a real one; at this layer it *is*
+   distinguishable (`Task.cancelling()`), and the distinction is load-bearing. Caught by
+   `test_stalled_turn_times_out_and_frees_the_permit`, which is why that test is worth its weight.
+2. **`AgentProfile.tool_names` could no longer reach a migrated tool.** With the domain capabilities
+   behind connectors, a dial that only narrowed the in-process half could not express "a
+   property-lookup agent" at all. `tool_names` now spans both halves — narrowing in-process tools
+   *and* each connector's allow-list, dropping connectors left with nothing — with one unknown-name
+   check over the union, since only that has enough information to tell a typo from a name on the
+   other side of the boundary.
+
+Also: connector expectations in tests now derive from `discovered()` rather than hardcoded names, so
+adding a bundle does not break unrelated tests.
 
 ## Review — Stages A and B
 
