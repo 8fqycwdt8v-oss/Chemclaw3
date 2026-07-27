@@ -28,12 +28,15 @@ from temporalio import workflow
 with workflow.unsafe.imports_passed_through():
     from chemclaw.config import settings
     from connectors.calc.activities import run_xtb_calculation
+    from connectors.calc.specs import XtbJobInput, XtbJobSpec
     from workflows.connector_job import ConnectorJobResult
-    from workflows.models import XtbJobInput, XtbJobSpec
 
+from connectors.queues import bundle_queue
 from workflows.publish import BAD_DATA_RETRY
+from workflows.registry import durable_workflow
 
 
+@durable_workflow(bundle_queue("calc"))
 @workflow.defn
 class CalcJobWorkflow:
     """Run one expensive xTB calculation durably and return it in the connector envelope."""

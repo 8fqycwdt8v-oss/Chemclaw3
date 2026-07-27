@@ -39,9 +39,12 @@ with workflow.unsafe.imports_passed_through():
     from connectors.bo.knowledge import note_from_campaign_result
     from workflows.connector_job import ConnectorJobResult
 
+from connectors.queues import bundle_queue
 from workflows.publish import BAD_DATA_RETRY
+from workflows.registry import durable_workflow
 
 
+@durable_workflow(bundle_queue("bo"))
 @workflow.defn
 class BoCampaignWorkflow:
     """Run a BO campaign durably and return the best point, the history, and the note to gate."""

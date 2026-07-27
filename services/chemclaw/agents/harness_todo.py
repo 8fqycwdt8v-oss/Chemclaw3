@@ -1,11 +1,11 @@
 """Bridge a submitted async job to the harness's todo list (BACKLOG.md F3-T3 follow-up: D-040).
 
-When the harness's execute-mode loop calls a fire-and-forget tool like `submit_qm_job`, the todo
-the model was working cannot simply stay open — `todos_remaining` would keep re-invoking the model
-every loop iteration with nothing new to report, and the model has no way to tell "the job is still
-running" from "this was forgotten". `mark_awaiting_job` records, directly in the harness's own
-`TodoProvider` state, that a todo is blocked on a specific job id; `complete_awaiting_job` flips it
-once the job's push-back event arrives (`agents.session_events`), so the *next* turn's
+When the harness's execute-mode loop calls a fire-and-forget tool like `compute_dft_energy`, the
+todo the model was working cannot simply stay open — `todos_remaining` would keep re-invoking the
+model every loop iteration with nothing new to report, and the model has no way to tell "the job is
+still running" from "this was forgotten". `mark_awaiting_job` records, directly in the harness's
+own `TodoProvider` state, that a todo is blocked on a specific job id; `complete_awaiting_job`
+flips it once the job's push-back event arrives (`agents.session_events`), so the *next* turn's
 `todos_remaining` check sees it as done instead of stuck open forever.
 
 This closes exactly the gap `BACKLOG.md` names ("flipping the harness `awaiting` todo on

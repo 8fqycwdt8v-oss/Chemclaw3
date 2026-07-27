@@ -3,8 +3,8 @@
 `DevelopmentReportWorkflow` (all of Phase 5b) was built, tested, and registered on the
 background worker with **no caller anywhere** — no agent tool, no HTTP route, no Schedule — so
 the only way to start it in a running deployment was the Temporal CLI. This is the missing
-adapter, deliberately the *same* thin shape as `agents/qm_tools.py` (D-002): authorize → stamp
-the ambient actor → deterministic workflow id → return the id immediately. No durable state
+adapter, in the thin shape the QM launcher established (D-002): authorize → stamp the ambient
+actor → deterministic workflow id → return the id immediately. No durable state
 lives here; the agent never blocks. Completion reaches the chat through the existing push-back
 channel (F3-T3).
 
@@ -20,7 +20,10 @@ reads: without it the report was the one durable job a chemist could poll to `co
 have no tool that hands over the answer.
 
 `get_durable_job_status` stays here for good: it is generic over every durable job,
-connector-owned or not, and it is now the one place a finished job's result is collected.
+connector-owned or not, and it is now the **only** place a finished job's result is collected.
+The QM/HPC job was the last one with a status tool of its own; it is a `qm` connector job as of
+D-118, `agents/job_status.py` is gone, and so is the envelope-shaped exception this tool made
+for it.
 """
 
 from datetime import UTC, datetime
@@ -63,7 +66,7 @@ class DurableJobStatus(BaseModel):
 
 
 # Terminal Temporal statuses map to one word the model can act on, so a tool result never leaks
-# SDK enum spelling into the conversation. Mirrors `qm_tools._STATUS`.
+# SDK enum spelling into the conversation.
 _TERMINAL = {
     WorkflowExecutionStatus.COMPLETED: "completed",
     WorkflowExecutionStatus.FAILED: "failed",
@@ -84,17 +87,6 @@ def _report_id(request: ReportRequest) -> str:
         *(f"{s.heading}|{s.query}|{s.memory_layer}" for s in request.sections),
     ]
     return f"report-{stable_hash(payload)}"
-
-
-async def _status_of(workflow_id: str, kind: str) -> str:
-    """Map a durable run's Temporal status to one word, or raise a clear error on an unknown id."""
-    client = await connect()
-    handle = client.get_workflow_handle(workflow_id)
-    try:
-        description = await handle.describe()
-    except RPCError as exc:
-        raise ValueError(f"no {kind} with id {workflow_id!r}") from exc
-    return _TERMINAL.get(description.status, "running") if description.status else "running"
 
 
 @tool
@@ -140,8 +132,8 @@ async def request_development_report(title: str, sections: list[ReportSection]) 
         # Same report already running or completed: hand back the existing id rather than
         # redrafting it (the QM tool's idempotency contract, applied here). Deliberately no
         # `job_started` signal: this run already existed (and may already be finished), so
-        # announcing a start would be false. Mirrors `submit_qm_job`, which for the same reason
-        # does not re-mark an awaiting todo on a duplicate submit.
+        # announcing a start would be false. The generated connector-job launcher skips the
+        # announcement on a duplicate for exactly the same reason.
         return workflow_id
     record_job_started(handle.id, "report")
     return handle.id
@@ -152,10 +144,10 @@ async def get_durable_job_status(job_id: str) -> DurableJobStatus:
     """Collect a durable job: its status, and its result once it has completed.
 
     This is the follow-up for **every** job id this system hands out — a connector job such as
-    `compute_reaction_energy` or `start_optimization_campaign`, a development report, or a
-    calculation deferred because it was too slow to answer inside the turn. Poll it until the
-    status is no longer `running`; a completed connector job carries its result with it, so there
-    is no second call to make.
+    `compute_dft_energy`, `compute_reaction_energy` or `start_optimization_campaign`, a development
+    report, or a calculation deferred because it was too slow to answer inside the turn. Poll it
+    until the status is no longer `running`; a completed connector job carries its result with it,
+    so there is no second call to make.
 
     Args:
         job_id: The id returned by any durable launcher.
@@ -163,8 +155,16 @@ async def get_durable_job_status(job_id: str) -> DurableJobStatus:
     Returns:
         The status (running, completed, failed, cancelled, terminated, timed_out) and, once
         completed, the one-line `summary` plus the structured `result`. A job still running reports
-        the status alone, as does an HPC/DFT job — `submit_qm_job` returns its own richer shape, so
-        collect that one with `get_job_status`.
+        the status alone.
+
+    Raises:
+        ValueError: When the id is unknown, or names a completed workflow whose result is not the
+            connector envelope. That second case used to degrade to a bare status, because the
+            HPC/DFT job returned its own typed result and had its own status tool
+            (`agents/job_status.py`). It is a `qm` connector job now (D-118), so every durable job
+            this system hands an id for returns the envelope — a result that is not one means the
+            id belongs to a workflow no tool advertises, and reporting "completed" with an empty
+            result would tell a chemist their calculation is done while silently withholding it.
     """
     client = await connect()
     handle = client.get_workflow_handle(job_id)
@@ -178,11 +178,16 @@ async def get_durable_job_status(job_id: str) -> DurableJobStatus:
     raw = await handle.result()
     try:
         envelope = ConnectorJobResult.model_validate(raw)
-    except ValidationError:
-        # A completed job whose result is not the envelope — today only the QM/HPC job, which
-        # has its own typed result and its own status tool. The status is still the honest
-        # answer; the shape is not one this tool reads, and inventing a summary would be worse.
-        return DurableJobStatus(job_id=job_id, status=status)
+    except ValidationError as exc:
+        # Hard, not a degraded status. The single exception this branch tolerated was the QM/HPC
+        # job, which is a connector job now — so every launcher this system exposes produces the
+        # envelope, and a result that is not one is a foreign workflow id. Returning "completed"
+        # with no result for it would report a finished calculation while withholding the answer,
+        # which is the failure mode the envelope was adopted to end (D-118).
+        raise ValueError(
+            f"durable job {job_id!r} completed but did not return the connector job envelope; "
+            "the id does not belong to a job any launcher in this system started"
+        ) from exc
     return DurableJobStatus(
         job_id=job_id, status=status, summary=envelope.summary, result=envelope.data
     )

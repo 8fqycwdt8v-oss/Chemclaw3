@@ -43,7 +43,7 @@ chemistry when that is what answers the question.
    notes do not state (weighing an untried solvent against the tested ones, a pKa, a relative
    stability), run it yourself with `predict_solubility` / `predict_pka` / `compute_xtb_energy`
    and fold the result — with its uncertainty — into the answer; do not stop at "the ELN does
-   not say". Heavy QM goes through `submit_qm_job`.
+   not say". Heavy QM goes through `compute_dft_energy`.
 6. **Design the next experiment when that is the question.** "What should I run next / which
    condition to try" is answered with `suggest_next_experiment`: frame the decision space and
    turn the historic runs you gathered into observations, then propose the next point(s). See

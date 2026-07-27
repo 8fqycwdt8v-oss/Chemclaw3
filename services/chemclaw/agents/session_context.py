@@ -1,12 +1,13 @@
 """The ambient session for the current turn (plan Phase F3-T3).
 
-When the agent launches a durable job (e.g. `submit_qm_job`), the job must know *which session* to
-notify on completion — but the session id is not something the model should pass as a tool argument
-(it is not chemistry, and the model must not be able to spoof it). So the front-door runner stamps
-the current session into a `contextvar` for the duration of the turn, and job-launching tools read
-it here. A `contextvar` is the right carrier: it is task-local, so concurrent turns for different
-sessions never see each other's id, and it defaults to `None` off the request path (tests, the
-classic non-service caller) where there simply is no session to notify.
+When the agent launches a durable job (e.g. `compute_dft_energy`), the job must know *which
+session* to notify on completion — but the session id is not something the model should pass as a
+tool argument (it is not chemistry, and the model must not be able to spoof it). So the front-door
+runner stamps the current session into a `contextvar` for the duration of the turn, and
+job-launching tools read it here. A `contextvar` is the right carrier: it is task-local, so
+concurrent turns for different sessions never see each other's id, and it defaults to `None` off
+the request path (tests, the classic non-service caller) where there simply is no session to
+notify.
 
 `get_current_session` carries the live `AgentSession` object alongside the id, for the one
 consumer that needs more than the id: `agents.harness_todo.mark_awaiting_job` mutates the

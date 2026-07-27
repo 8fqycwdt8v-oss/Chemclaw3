@@ -31,17 +31,20 @@ from calc.postgres_store import default_store
 from calc.reaction import compare_solvent_effects, compute_reaction_energy
 from calc.structure import structure_from_smiles
 from calc.xtb_scan import ScanSpec, run_cached_scan
-from workflows.models import (
+from connectors.calc.results import XtbJobResult
+from connectors.calc.specs import (
     ComplexJobSpec,
     EnsembleJobSpec,
     ReactionJobSpec,
     ScanJobSpec,
     SolventScreenJobSpec,
     XtbJobInput,
-    XtbJobResult,
 )
+from connectors.queues import bundle_queue
+from workflows.registry import durable_activity
 
 
+@durable_activity(bundle_queue("calc"))
 @activity.defn
 async def run_xtb_calculation(job: XtbJobInput) -> XtbJobResult:
     """Run one durable xTB task and return its typed result.

@@ -41,11 +41,24 @@ jobs:
         # generic `connector-*` prefixes are expanded from the bundles actually present.
         run: |
           set -euo pipefail
-          modules=(
-            service.app
-            workers.hpc_worker
-            workers.background_worker
+          # Read the fixed cases out of the entrypoint rather than restating them. A hand-kept
+          # copy is exactly how this step first failed: it listed `workers.hpc_worker`, which
+          # D-118 deleted when the HPC job became a connector job, so CI asserted a component
+          # that no longer exists. A second list can disagree with the script in either
+          # direction; a grep of the script cannot.
+          modules=()
+          while read -r module; do modules+=("${module}"); done < <(
+            grep -oE 'python -m [a-z_][a-z0-9_.]*' deploy/entrypoint.sh | cut -d' ' -f3
           )
+          while read -r target; do modules+=("${target%%:*}"); done < <(
+            grep -oE 'uvicorn [a-z_][a-z0-9_.]*:[a-zA-Z_]+' deploy/entrypoint.sh | cut -d' ' -f2
+          )
+          # The `connector-*` cases build their target from `${name}`, so they are quoted and the
+          # greps above deliberately skip them; they expand from the bundles actually present.
+          test "${#modules[@]}" -ge 2 || {
+            echo "found ${#modules[@]} fixed component(s) in entrypoint.sh; the greps have drifted" >&2
+            exit 1
+          }
           for bundle in connectors/*/; do
             name="$(basename "${bundle}")"
             [ -f "${bundle}/server/app.py" ] && modules+=("connectors.${name}.server.app")

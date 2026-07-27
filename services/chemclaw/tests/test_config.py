@@ -28,7 +28,6 @@ def test_defaults_load_without_env() -> None:
     """A fresh checkout with no `.env` yields the documented dev defaults."""
     settings = Settings(_env_file=None)  # type: ignore[call-arg]
     assert settings.temporal_address == "localhost:7233"
-    assert settings.hpc_task_queue == "hpc-jobs"
     assert settings.background_task_queue == "background-jobs"
     assert settings.postgres_dsn.startswith("postgresql://")
 
@@ -93,11 +92,11 @@ def test_hybrid_retrieval_defaults_are_backward_compatible() -> None:
 def test_parity_json_env_overrides(monkeypatch: pytest.MonkeyPatch) -> None:
     """The dict-typed F10 knobs parse their JSON env overrides."""
     monkeypatch.setenv("CHEMCLAW_MODEL_ROUTES", '{"verifier": "small"}')
-    monkeypatch.setenv("CHEMCLAW_TOOL_ROLE_GATES", '{"submit_qm_job": ["chemist"]}')
+    monkeypatch.setenv("CHEMCLAW_TOOL_ROLE_GATES", '{"compute_dft_energy": ["chemist"]}')
     monkeypatch.setenv("CHEMCLAW_TOOL_AUTHZ_DEFAULT", "deny")
     settings = Settings(_env_file=None)  # type: ignore[call-arg]
     assert settings.model_routes == {"verifier": "small"}
-    assert settings.tool_role_gates == {"submit_qm_job": ["chemist"]}
+    assert settings.tool_role_gates == {"compute_dft_energy": ["chemist"]}
     assert settings.tool_authz_default == "deny"
 
 
@@ -140,10 +139,12 @@ def test_entra_authorization_sets_parse() -> None:
     """Expensive-action and privileged-role config parse from comma lists to sets."""
     settings = Settings(  # type: ignore[call-arg]
         _env_file=None,
-        entra_expensive_actions="submit_qm_job, start_bo_campaign",
+        entra_expensive_actions="compute_dft_energy, start_bo_campaign",
         entra_privileged_roles="compute,admin",
     )
-    assert settings.entra_expensive_action_set == frozenset({"submit_qm_job", "start_bo_campaign"})
+    assert settings.entra_expensive_action_set == frozenset(
+        {"compute_dft_energy", "start_bo_campaign"}
+    )
     assert settings.entra_privileged_role_set == frozenset({"compute", "admin"})
 
 
@@ -263,7 +264,7 @@ def test_entra_role_gate_must_be_configured_symmetrically() -> None:
             entra_required=True,
             entra_audience="api://x",
             entra_tenant_id="t",
-            entra_expensive_actions="submit_qm_job",  # roles missing → gate silently open
+            entra_expensive_actions="compute_dft_energy",  # roles missing → gate silently open
         )
 
 
@@ -274,7 +275,7 @@ def test_entra_required_full_config_is_accepted() -> None:
         entra_required=True,
         entra_audience="api://x",
         entra_tenant_id="t",
-        entra_expensive_actions="submit_qm_job",
+        entra_expensive_actions="compute_dft_energy",
         entra_privileged_roles="compute",
     )
     assert settings.entra_required is True

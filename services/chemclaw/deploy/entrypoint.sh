@@ -13,9 +13,6 @@ case "${component}" in
     exec uvicorn service.app:create_app --factory \
       --host "${CHEMCLAW_SERVICE_HOST:-0.0.0.0}" --port "${CHEMCLAW_SERVICE_PORT:-8080}"
     ;;
-  hpc-worker)
-    exec python -m workers.hpc_worker
-    ;;
   background-worker)
     exec python -m workers.background_worker
     ;;

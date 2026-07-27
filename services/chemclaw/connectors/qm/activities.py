@@ -3,11 +3,14 @@
 HPC has two backends selected by `hpc_launch_interface` (plan F5): the **mock** (default) simulates
 a SLURM-style async job so the durable path (submit → heartbeat-poll → parse) is provable
 end-to-end without a cluster, kept for CI/local; **nextflow** dispatches to the real launcher
-(`workflows.hpc.nextflow`). Only this module changed to make compute real — the workflow and the
-agent stay put, exactly as this module's original contract promised.
+(`connectors.qm.hpc.nextflow`). Only this module changed to make compute real — the workflow and
+the agent stay put, exactly as this module's original contract promised.
 
 Activities may do anything (sleep, network, hashing); determinism is the workflow's concern, not
 theirs.
+
+They run on this bundle's own worker (`connectors.qm.worker`), never core's: the HPC launcher
+credential, the artifact store and the 24-hour poll belong to this capability alone (D-118).
 """
 
 import asyncio
@@ -19,8 +22,9 @@ from temporalio.exceptions import ApplicationError
 
 from chemclaw.chem import require_canonical_smiles
 from chemclaw.config import settings
-from workflows.hpc import nextflow
-from workflows.models import HpcJobHandle, QMJobInput, QMJobResult, qm_job_key
+from connectors.qm.hpc import nextflow
+from connectors.qm.specs import HpcJobHandle, QMJobInput, QMJobResult, qm_job_key
+from connectors.queues import bundle_queue
 from workflows.registry import durable_activity
 
 # Format the mock scheduler emits; parsed by `parse_qm_output`. Kept next to the
@@ -30,7 +34,7 @@ _ENERGY_RE = re.compile(r"energy=(-?\d+\.\d+)")
 _CONVERGED_RE = re.compile(r"converged=(True|False)")
 
 
-@durable_activity("hpc")
+@durable_activity(bundle_queue("qm"))
 @activity.defn
 async def prepare_input(job: QMJobInput) -> QMJobInput:
     """Validate and normalize the request before submission (plan step 1.2).
@@ -46,7 +50,7 @@ async def prepare_input(job: QMJobInput) -> QMJobInput:
     return job.model_copy(update={"molecule_smiles": smiles})
 
 
-@durable_activity("hpc")
+@durable_activity(bundle_queue("qm"))
 @activity.defn
 async def submit_to_hpc(job: QMJobInput) -> HpcJobHandle:
     """Enqueue the QM job and return a handle — via the real launcher or the mock (plan F5).
@@ -62,7 +66,7 @@ async def submit_to_hpc(job: QMJobInput) -> HpcJobHandle:
     return HpcJobHandle(scheduler_job_id=f"mock-{qm_job_key(job)}")
 
 
-@durable_activity("hpc")
+@durable_activity(bundle_queue("qm"))
 @activity.defn
 async def poll_hpc_status(handle: HpcJobHandle) -> str:
     """Poll until the job completes and return its raw output — real launcher or mock (plan F5).
@@ -125,7 +129,7 @@ async def _poll_nextflow(handle: HpcJobHandle) -> str:
         await asyncio.sleep(settings.hpc_poll_interval_seconds)
 
 
-@durable_activity("hpc")
+@durable_activity(bundle_queue("qm"))
 @activity.defn
 async def parse_qm_output(job: QMJobInput, raw_output: str) -> QMJobResult:
     """Parse raw HPC output into a typed result (plan step 1.4).

@@ -34,8 +34,7 @@ class AuthorizationError(Exception):
 # agent (D-029), so this gate only matters if an operator ever widens that list.
 DEFAULT_WRITE_TOOL_GATES: frozenset[str] = frozenset(
     {
-        "submit_qm_job",  # launches a durable (potentially HPC) job
-        "run_xtb_task",  # the expert escape hatch: runs a calculation the shaped tools declined
+        "compute_dft_energy",  # launches a durable HPC/DFT run
         "propose_knowledge_note",  # pushes a branch to the knowledge repo
         "record_confirmed_answer",  # pushes a branch to the knowledge repo
         "index_molecule",  # mutates the fingerprint index
@@ -84,7 +83,7 @@ def authorize_tool(tool: str) -> None:
     docstring, not in a message a chemist reads.
 
     Args:
-        tool: The tool's registered name (e.g. `"submit_qm_job"`, `"gather_evidence"`).
+        tool: The tool's registered name (e.g. `"compute_dft_energy"`, `"gather_evidence"`).
 
     Raises:
         AuthorizationError: When enforcement is on and the user is not permitted to call `tool` —
@@ -125,7 +124,7 @@ def authorize_trigger(action: str) -> None:
     """Authorize the current turn's user to trigger `action`, or raise `AuthorizationError`.
 
     Args:
-        action: The trigger's name (e.g. `"submit_qm_job"`). If it is not in
+        action: The trigger's name (e.g. `"compute_dft_energy"`). If it is not in
             `entra_expensive_actions`, the call is always allowed.
 
     Raises:

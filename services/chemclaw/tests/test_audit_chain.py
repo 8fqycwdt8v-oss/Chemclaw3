@@ -52,14 +52,14 @@ def test_chain_hash_is_deterministic_and_field_sensitive() -> None:
 
 def test_check_chain_accepts_an_intact_chain() -> None:
     """A correctly-linked chain reports no problems."""
-    rows = _linked([_event("find_notes"), _event("submit_qm_job"), _event("expand_note")])
+    rows = _linked([_event("find_notes"), _event("compute_dft_energy"), _event("expand_note")])
     assert check_chain(rows) == []
 
 
 def test_check_chain_flags_a_mutated_row() -> None:
     """Altering a stored row's audited field (without re-hashing) is detected as tampering."""
-    rows = _linked([_event("find_notes"), _event("submit_qm_job")])
-    tampered = rows[1]._replace(event=_event("submit_qm_job", actor="attacker"))
+    rows = _linked([_event("find_notes"), _event("compute_dft_energy")])
+    tampered = rows[1]._replace(event=_event("compute_dft_energy", actor="attacker"))
     problems = check_chain([rows[0], tampered])
     assert any("tampered" in p for p in problems)
 
@@ -101,7 +101,7 @@ def test_postgres_sink_writes_a_verifiable_chain() -> None:
 
         sink = PostgresAuditSink()
         await sink.record(_event("find_notes"))
-        await sink.record(_event("submit_qm_job"))
+        await sink.record(_event("compute_dft_energy"))
         await sink.record(_event("expand_note"))
 
         assert await verify_chain() == []  # a freshly written chain verifies

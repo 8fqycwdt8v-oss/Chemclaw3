@@ -43,11 +43,10 @@ _EXPECTED_INPROCESS_TOOLS = {
     "find_knowledge_gaps",
     "propose_knowledge_note",
     "record_confirmed_answer",
-    # The two durable launchers core still owns, and their status tools. `submit_qm_job` needs the
-    # HPC identity bridge rather than a connector; the report's workflow has not moved into a
-    # bundle yet (BACKLOG.md).
-    "submit_qm_job",
-    "get_job_status",
+    # The one durable launcher core still owns — the report's workflow has not moved into a bundle
+    # (D-115: its closure *is* core's) — and the one status tool every durable job is collected
+    # with, connector-owned or not. The QM launcher and its bespoke status tool were the last pair
+    # to go; the HPC job is a declared `qm` connector job now (D-118).
     "request_development_report",
     "get_durable_job_status",
 }

@@ -8,8 +8,8 @@ config source (the pydantic `Settings`) fed from a `ConfigMap` + three plain `Se
 | Component | Entry (`CHEMCLAW_COMPONENT`) | Runs |
 |---|---|---|
 | Front door | `service` | `uvicorn service.app:create_app` behind an OIDC **Route** |
-| HPC worker | `hpc-worker` | `python -m workers.hpc_worker` — `hpc-jobs` queue (few, heavy) |
 | Background worker | `background-worker` | `python -m workers.background_worker` — `background-jobs` (light) |
+| Connector worker | `connector-worker-<name>` | `python -m connectors.<name>.worker` — that bundle's own queue |
 | MCP servers | `mcp-molfp` / `mcp-rxnfp` | fingerprint capability servers |
 
 All five are the **same image** (`deploy/Containerfile`), rootless (UID 1001, arbitrary-UID safe for

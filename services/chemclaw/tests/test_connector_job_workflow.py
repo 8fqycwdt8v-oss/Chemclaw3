@@ -42,6 +42,7 @@ _FIXTURE_DIR = Path(__file__).parent / "fixtures" / "connectors"
 _CONNECTOR_QUEUE = "connector-fixture"
 _CORE_QUEUE = "background-jobs"
 _SESSION = "session-under-test"
+_ACTOR = "oid-under-test"
 _EXPECTED_ID = job_workflow_id("fixture", "run_fixture_job", {"subject": "benzene"})
 
 
@@ -57,18 +58,27 @@ def test_the_wrapper_is_served_by_the_background_worker() -> None:
     assert ConnectorJobWorkflow in BACKGROUND_WORKFLOWS
 
 
-def test_a_connector_workflow_returns_a_well_formed_envelope() -> None:
+def test_a_connector_workflow_returns_a_well_formed_envelope(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """The connector-side half of the contract, checked without a server.
 
     The envelope is the entire cross-process agreement, so it is worth asserting directly: a
     summary the chat can show, the job's own structured data, and an optional `Note` that has
     already passed the graph's slug/schema validators — which is what stops a malformed proposal
     from reaching the PR-gate and failing later at branch creation.
+
+    `memo_value` is stubbed because there is no run outside a workflow to carry a memo; the real
+    read is exercised end to end below, where core stamps it.
     """
+    monkeypatch.setattr(
+        "tests.fixtures.connectors.fixture.workflows.workflow.memo_value",
+        lambda key, default="": default,
+    )
     result = asyncio.run(FixtureJobWorkflow().run({"subject": "benzene"}))
     assert isinstance(result, ConnectorJobResult)
     assert result.summary == "fixture job ran on benzene"
-    assert result.data == {"subject": "benzene", "ran": True}
+    assert result.data["subject"] == "benzene" and result.data["ran"] is True
     assert result.note is not None
     assert result.note.id == "fixture-benzene"
     # `created_by="agent"` is what routes it through the PR-gate rather than straight into the
@@ -135,12 +145,18 @@ def test_a_connector_job_runs_its_own_workflow_and_core_does_the_rest(
             async with core, connector:
                 # The session is ambient, never a model-supplied argument (F3-T3), so the tool
                 # picks up which chat to wake exactly as it does mid-turn.
+                from agents.identity_context import (
+                    reset_current_identity,
+                    set_current_identity,
+                )
                 from agents.session_context import reset_current_session_id, set_current_session_id
 
                 token = set_current_session_id(_SESSION)
+                identity = set_current_identity(_ACTOR, frozenset())
                 try:
                     job_id = await tool(tool.__annotations__["params"](subject="benzene"))
                 finally:
+                    reset_current_identity(identity)
                     reset_current_session_id(token)
                 # The tool returns immediately — the agent never blocks on a durable job — so
                 # the id is what comes back, and the result is awaited separately as a poll
@@ -160,7 +176,12 @@ def test_a_connector_job_runs_its_own_workflow_and_core_does_the_rest(
 
     # The connector's own result crossed back through the envelope unchanged.
     assert result.summary == "fixture job ran on benzene"
-    assert result.data == {"subject": "benzene", "ran": True}
+    assert result.data["subject"] == "benzene" and result.data["ran"] is True
+    # And the requesting actor reached the connector's own workflow — on the run's memo, so it
+    # never became a payload field the model could author. This is the route the HPC job depends
+    # on: its cluster submission runs under a shared service identity, and `requested_by` is the
+    # only thing that makes it attributable (F4-T3, D-118).
+    assert result.data["requested_by"] == _ACTOR
     # Core PR-gated the note the connector produced; the connector never touched the graph itself.
     assert [note.id for note in published] == ["fixture-benzene"]
     assert published[0].created_by == "agent"  # so a human must sign it off at the gate

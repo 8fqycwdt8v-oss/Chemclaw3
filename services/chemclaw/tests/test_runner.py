@@ -121,7 +121,7 @@ def test_confidence_exactly_at_threshold_is_not_flagged(monkeypatch: pytest.Monk
 
 
 class _JobLaunchingAgent:
-    """Announces a launched job mid-stream, the way `submit_qm_job` does from inside a tool call."""
+    """Announces a launched job mid-stream, as a durable launcher does from inside a tool call."""
 
     mcp_tools: list[object] = []
 

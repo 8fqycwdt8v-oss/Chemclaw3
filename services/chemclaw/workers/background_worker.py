@@ -1,12 +1,14 @@
 """The `background-jobs` worker (plan step 1.8).
 
-Hosts light, long-running background jobs: ELN sync, note re-indexing, reports, the
-generic connector-job wrapper and template runs. Run it with
-`python -m workers.background_worker` (after `make up`). Kept separate from the HPC
-worker so heavy and light work scale independently on their own queues (D-006).
+Hosts light, long-running background jobs: ELN sync, note re-indexing, reports, memory
+synthesis, the generic connector-job wrapper and template runs. Run it with
+`python -m workers.background_worker` (after `make up`). This is core's only worker —
+the heavy `hpc-jobs` fleet existed for one workflow, and that workflow is a connector
+job now (D-118). D-006's heavy/light split is intact one level down: one core queue,
+plus one per bundle, each sized for its own work.
 
 A *connector's* own workflows are not here: they run on the bundle's own worker and
-queue (`connectors/bo/worker.py` on `connector-bo`), which is the point of the seam —
+queue (`connectors/qm/worker.py` on `connector-qm`), which is the point of the seam —
 this worker never imports a capability's dependency closure.
 """
 
@@ -31,7 +33,6 @@ from workflows import digest as _digest  # noqa: F401
 from workflows import eln_sync as _eln_sync  # noqa: F401
 from workflows import eval_drift as _eval_drift  # noqa: F401
 from workflows import interaction_approval as _interaction_approval  # noqa: F401
-from workflows import knowledge as _knowledge  # noqa: F401
 from workflows import memory_jobs as _memory_jobs  # noqa: F401
 from workflows import note_index as _note_index  # noqa: F401
 from workflows import notify as _notify  # noqa: F401

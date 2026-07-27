@@ -2,25 +2,24 @@
 name: qm-job-submission
 description: >-
   Judgment for when to run a quantum-mechanical (QM/DFT) calculation and how to
-  choose the method and basis set before calling submit_qm_job.
+  choose the method and basis set before calling compute_dft_energy.
 tools:
-  - submit_qm_job
-  - get_job_status
+  - compute_dft_energy
+  - get_durable_job_status
 ---
 
 # QM job submission
 
 This skill holds the *judgment* around QM/DFT calculations. The mechanics —
-starting the durable job and polling it — live in the `submit_qm_job` and
-`get_job_status` tools; use this skill to decide **whether** and **how** to
+starting the durable job and polling it — live in the `compute_dft_energy` and
+`get_durable_job_status` tools; use this skill to decide **whether** and **how** to
 call them.
 
-`get_job_status` answers for **every** durable calculation, not only QM. The larger xTB
-tasks (a reaction over several sizeable species, a solvent screen, a long scan) route
-themselves to the same job machinery when they are predicted to take too long to run in
-a turn, and hand back a job id instead of a result. That is not an escalation to DFT and
-does not go through this skill's cost reasoning — it is the same cheap calculation, run
-somewhere it will not block the conversation. Poll it the same way.
+`get_durable_job_status` answers for **every** durable job, not only QM. The larger xTB
+tasks (a reaction over several sizeable species, a solvent screen, a long scan) hand back
+a job id instead of a result whenever they run past their inline budget. That is not an
+escalation to DFT and does not go through this skill's cost reasoning — it is the same
+cheap calculation, run somewhere it will not block the conversation. Poll it the same way.
 
 ## When a QM calculation is warranted
 
@@ -56,5 +55,5 @@ does not.
 | More reliable energetics | `B3LYP` or `wB97X-D` / `def2-TZVP` |
 | Non-covalent / dispersion-sensitive | a dispersion-corrected functional / `def2-TZVP` |
 
-State the method and basis set you chose and why, then call `submit_qm_job`.
+State the method and basis set you chose and why, then call `compute_dft_energy`.
 Report the returned job id to the user rather than waiting for the result.

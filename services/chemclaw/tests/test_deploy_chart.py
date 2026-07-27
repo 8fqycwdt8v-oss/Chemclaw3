@@ -178,6 +178,28 @@ def test_image_installs_git() -> None:
     assert "dnf install -y git" in (DEPLOY / "Containerfile").read_text()
 
 
+def test_the_chart_gives_each_bundle_the_halves_its_manifest_declares() -> None:
+    """`server`/`worker` in values must match the bundle's own `connector.yaml`, both ways.
+
+    These two flags are the chart's only hand-maintained mirror of a manifest, and each direction
+    fails silently in a different way. A bundle with `jobs:` and no `worker: true` gets no pod
+    polling its queue, so every job it starts waits forever — the exact failure `workflows.registry`
+    exists to prevent, one layer out. A bundle with `server: true` and no `endpoint:` gets an app
+    Deployment running `uvicorn connectors.<name>.server.app:app` against a module that does not
+    exist, which is a crash loop plus a bogus entry in the front door's address map.
+
+    Derived from the manifests rather than listed, so a new bundle is covered on the day it is
+    created.
+    """
+    from connectors.registry import discovered
+
+    entries = _values()["connectors"]
+    for name, (_bundle, manifest) in discovered().items():
+        cfg = entries[name]
+        assert bool(cfg.get("server")) is (manifest.endpoint is not None), name
+        assert bool(cfg.get("worker")) is bool(manifest.jobs), name
+
+
 def test_every_shipped_connector_has_a_chart_entry() -> None:
     """A bundle with no `connectors` entry could never be given pods — DEP-3's successor.
 
@@ -207,10 +229,11 @@ def test_note_repo_clone_exists_wherever_notes_are_submitted() -> None:
     for template in ("deployment-service.yaml", "deployment-workers.yaml"):
         text = (CHART / "templates" / template).read_text()
         assert 'include "chemclaw.noteRepoInit"' in text, template
-    # The hpc worker routes note writes to the background queue and must NOT get one.
-    workers = (CHART / "templates" / "deployment-workers.yaml").read_text()
-    hpc = workers.split("---")[0]
-    assert 'include "chemclaw.noteRepoInit"' not in hpc
+    # And nowhere else. A connector's worker returns its note in the job envelope for core to
+    # PR-gate (D-118), so giving it a writable clone would hand a bundle a second write path into
+    # the graph — the asymmetry the seam exists to enforce.
+    connectors = (CHART / "templates" / "deployment-connectors.yaml").read_text()
+    assert 'include "chemclaw.noteRepoInit"' not in connectors
 
 
 def test_schedules_are_applied_by_a_post_install_hook() -> None:

@@ -191,9 +191,12 @@ set so adding to it is a reviewed edit:
   core modules import `kg`, so a bundle would move three thin tools and leave every one of those
   imports behind — a zero dependency win and a second read path to one note tree. Re-indexing stays
   in core with it.
-- **`submit_qm_job`** and the report — the first needs the HPC identity bridge, the second's closure
-  (retrievers, embedding index) is what core keeps for `gather_evidence` anyway. Both still return
-  results the generic status tools read.
+- **The development report** — its closure (retrievers, embedding index) is what core keeps for
+  `gather_evidence` anyway, so a bundle would isolate nothing (D-115). It still returns the
+  connector envelope, so `get_durable_job_status` collects it like any other job. The QM/DFT run
+  used to be listed here beside it, on the reasoning that it needs the HPC identity bridge; that
+  turned out to be a property of the *bundle's worker*, not of core, and it is `connectors/qm/`
+  now (D-118).
 
 ## (iv-b) Add a specialized agent (a **profile**)
 

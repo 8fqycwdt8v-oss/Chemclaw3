@@ -1,9 +1,12 @@
 """Behavioral tests for the QM durable spine (plan Phase 1, acceptance P1).
 
-Proves the full path runs to a typed result on Temporal's time-skipping test
-server, and that the workflow history replays deterministically (the guarantee
-CHECKMATE 1's worker-restart spike relies on). Activity edge cases are checked
-directly. No running cluster required.
+Proves the full path runs to a typed result on Temporal's time-skipping test server, and that the
+workflow history replays deterministically (the guarantee CHECKMATE 1's worker-restart spike relies
+on). Activity edge cases are checked directly. No running cluster required.
+
+The workflow is a `qm` connector job now (D-118), so what it returns is the `ConnectorJobResult`
+envelope and what it takes is the bare `QmJobSpec` — the actor arrives on the run's memo, stamped
+by `ConnectorJobWorkflow`, and is deliberately not a field the model could author.
 """
 
 import asyncio
@@ -17,19 +20,26 @@ from temporalio.testing import ActivityEnvironment
 from temporalio.worker import Replayer, Worker
 
 from chemclaw.config import settings
+from connectors.qm.activities import parse_qm_output, poll_hpc_status, prepare_input
+from connectors.qm.hpc import nextflow
+from connectors.qm.specs import HpcJobHandle, QMJobInput, QmJobSpec
+from connectors.qm.workflows import QMJobWorkflow
 from tests.temporal_env import QM_ACTIVITIES, pydantic_client, start_env_or_skip
-from workflows.activities import parse_qm_output, poll_hpc_status, prepare_input
-from workflows.hpc import nextflow
-from workflows.models import HpcJobHandle, QMJobInput
-from workflows.qm_job import QMJobWorkflow
+from workflows.connector_job import ConnectorJobResult
 
-_TASK_QUEUE = "test-hpc"
+_TASK_QUEUE = "test-connector-qm"
 
 
-def test_qm_job_runs_to_typed_result() -> None:
-    """A submitted job completes durably and returns a parsed `QMJobResult`."""
+def test_qm_job_runs_to_the_connector_envelope() -> None:
+    """A submitted job completes durably and comes back in the envelope core reads.
 
-    async def _run() -> None:
+    The envelope is the whole cross-process contract: one line the chat shows, the job's own
+    structured result, and the note core PR-gates. A QM run that returned its bespoke
+    `QMJobResult` instead would poll to `completed` in `get_durable_job_status` and then hand the
+    chemist nothing — the failure the envelope was adopted to end.
+    """
+
+    async def _run() -> ConnectorJobResult:
         async with await start_env_or_skip() as env:
             client = pydantic_client(env)
             async with Worker(
@@ -38,17 +48,65 @@ def test_qm_job_runs_to_typed_result() -> None:
                 workflows=[QMJobWorkflow],
                 activities=QM_ACTIVITIES,
             ):
-                result = await client.execute_workflow(
+                result: ConnectorJobResult = await client.execute_workflow(
                     QMJobWorkflow.run,
-                    QMJobInput(molecule_smiles="CCO", method="B3LYP", basis_set="def2-SVP"),
+                    QmJobSpec(molecule_smiles="CCO", method="B3LYP", basis_set="def2-SVP"),
                     id="qm-test-1",
                     task_queue=_TASK_QUEUE,
                 )
-        assert result.converged is True
-        assert result.molecule_smiles == "CCO"
-        assert result.total_energy_hartree <= 0.0
+                return result
 
-    asyncio.run(_run())
+    result = asyncio.run(_run())
+    assert result.data["converged"] is True
+    assert result.data["molecule_smiles"] == "CCO"
+    assert result.data["total_energy_hartree"] <= 0.0
+    assert "B3LYP/def2-SVP on CCO" in result.summary
+
+
+def test_the_actor_reaches_the_hpc_side_from_the_run_memo() -> None:
+    """`requested_by` survives the move to a declared job — by memo, not by spec field.
+
+    The HPC cluster runs under a shared service identity, so the requesting user is the only thing
+    that makes a run attributable (F4-T3). `ConnectorJobWorkflow` stamps it on the child's memo;
+    this asserts the reading half against a real server, with the memo set the way the wrapper
+    sets it. Losing it would silently anonymize every cluster submission.
+    """
+
+    async def _run() -> ConnectorJobResult:
+        async with await start_env_or_skip() as env:
+            client = pydantic_client(env)
+            async with Worker(
+                client,
+                task_queue=_TASK_QUEUE,
+                workflows=[QMJobWorkflow],
+                activities=QM_ACTIVITIES,
+            ):
+                result: ConnectorJobResult = await client.execute_workflow(
+                    QMJobWorkflow.run,
+                    QmJobSpec(molecule_smiles="CCO", method="B3LYP", basis_set="def2-SVP"),
+                    id="qm-test-memo",
+                    task_queue=_TASK_QUEUE,
+                    memo={"requested_by": "oid-from-the-turn"},
+                )
+                return result
+
+    result = asyncio.run(_run())
+    assert result.data["requested_by"] == "oid-from-the-turn"
+    assert result.note is not None
+    assert result.note.source == "qm:oid-from-the-turn"  # and into the audit trail on the note
+
+
+def test_the_model_cannot_author_the_actor() -> None:
+    """The spec the manifest advertises carries no identity field — offline, always runs.
+
+    `params_model` becomes the JSON schema the LLM fills in, so a `requested_by` on `QmJobSpec`
+    would let a model attribute a cluster run to anyone. The activities still need it, which is
+    why it lives one subclass down on `QMJobInput`, reachable only from the memo.
+    """
+    assert "requested_by" not in QmJobSpec.model_fields
+    assert "requested_by" in QMJobInput.model_fields
+    # And nothing ambient to the turn leaked in with it.
+    assert set(QmJobSpec.model_fields) == {"molecule_smiles", "method", "basis_set"}
 
 
 def test_workflow_history_replays_deterministically() -> None:
@@ -65,7 +123,7 @@ def test_workflow_history_replays_deterministically() -> None:
             ):
                 handle = await client.start_workflow(
                     QMJobWorkflow.run,
-                    QMJobInput(molecule_smiles="c1ccccc1", method="HF", basis_set="STO-3G"),
+                    QmJobSpec(molecule_smiles="c1ccccc1", method="HF", basis_set="STO-3G"),
                     id="qm-test-replay",
                     task_queue=_TASK_QUEUE,
                 )
@@ -113,7 +171,7 @@ def test_bad_input_surfaces_as_workflow_failure() -> None:
                 with pytest.raises(WorkflowFailureError) as excinfo:
                     await client.execute_workflow(
                         QMJobWorkflow.run,
-                        QMJobInput(molecule_smiles=" ", method="HF", basis_set="X"),
+                        QmJobSpec(molecule_smiles=" ", method="HF", basis_set="X"),
                         id="qm-test-bad",
                         task_queue=_TASK_QUEUE,
                     )
