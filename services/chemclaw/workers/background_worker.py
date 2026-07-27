@@ -25,8 +25,6 @@ from workflows import audit_verify as _audit_verify  # noqa: F401
 from workflows import bo_activities as _bo_activities  # noqa: F401
 from workflows import bo_campaign as _bo_campaign  # noqa: F401
 from workflows import bo_knowledge as _bo_knowledge  # noqa: F401
-from workflows import conformer_activities as _conformer_activities  # noqa: F401
-from workflows import conformer_job as _conformer_job  # noqa: F401
 from workflows import digest as _digest  # noqa: F401
 from workflows import eln_sync as _eln_sync  # noqa: F401
 from workflows import eval_drift as _eval_drift  # noqa: F401

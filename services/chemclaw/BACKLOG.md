@@ -3,27 +3,6 @@
 Prioritized open action items. Top = next. Keep in sync with `docs/implementation-plan.md`
 (phase/step numbers) at session end.
 
-## Open — Two implementations of two capabilities, awaiting a product decision (D-107)
-
-The xTB branch and D-092's research follow-up landed overlapping capability in parallel. Both
-were kept through the merge because deleting either is a product call, not a merge call. The
-tool names do not collide, so nothing is broken — but advertising two answers to one question
-is a surface the model has to choose between for no reason (the argument D-103 makes for
-moving a tool rather than copying it).
-
-- [ ] **Conformer ensembles.** `calc.conformer_ensemble` (RDKit ETKDG + MMFF prune + GFN2
-      single points, zero new dependencies, always available) vs `calc.conformers` (CREST
-      metadynamics, rotamer degeneracies, conformational entropy, needs the optional `crest`
-      binary and costs minutes). The CREST one is strictly more informative where it can run;
-      the ETKDG one is the only one that runs everywhere. A defensible outcome is to keep both
-      and route on binary availability — but that should be *decided*, and the two agent tools
-      (`submit_conformer_ensemble_job`, `sample_conformers`) merged into one.
-- [ ] **Reaction energetics.** `calc.reaction_energy` (cached single points, stoichiometric
-      coefficients, exotherm hazard flag) vs `calc.reaction` (optimizes every species, Hessians,
-      ΔH/ΔG, atom/charge balance enforced). These are closer to genuinely different questions —
-      a safety screen and a thermodynamic answer — so the likely outcome is to keep both and say
-      so in `calculation-selection`, which currently lists them without distinguishing them.
-
 ## Done — Process/analytical-development capability research (2026-07-26, D-092)
 
 A survey of open-source ML/cheminformatics and fast-ab-initio packages for chemical and analytical
@@ -35,11 +14,14 @@ missing prerequisite), in D-092.
 
 - [x] `predict_developability_profile` — RDKit-only Ro5/Veber descriptor panel (`calc/descriptors.py`).
 - [x] `predict_logd` — pH-dependent logD from the existing cached pKa + Crippen LogP (`calc/logd.py`).
-- [x] `estimate_reaction_energy` — reaction exotherm screen from cached per-species GFN2-xTB (`calc/reaction_energy.py`).
+- [x] ~~`estimate_reaction_energy`~~ — **superseded (D-108)**. Its exotherm flag moved onto
+      `compute_reaction_energy`, which computes the same difference over optimized geometries and
+      enforces atom/charge balance. `calc/reaction_energy.py` removed.
 - [x] `generate_screening_design` — full-factorial categorical DoE screen (`bo/engine.py::factorial_design`).
-- [x] `ConformerEnsembleWorkflow` — durable Boltzmann-weighted GFN2-xTB conformer ensemble
-      (`workflows/conformer_job.py`, `calc/conformer_ensemble.py`), agent tools
-      `submit_conformer_ensemble_job`/`get_conformer_job_status`.
+- [x] ~~`ConformerEnsembleWorkflow`~~ — **superseded (D-108)**. Conformer ensembles are
+      `calc/conformers.py` (CREST metadynamics with rotamer degeneracies and conformational
+      entropy) behind `sample_conformers`, routed through the one xTB durable job. The ETKDG
+      implementation and its dedicated workflow/models/activities were removed.
 
 > **Every open item below was assessed on 2026-07-25** — trigger held? real defect? offline-verifiable?
 > KISS? — in **`docs/backlog-plan.md`** (verdict table + specs for the survivors + the working queue in

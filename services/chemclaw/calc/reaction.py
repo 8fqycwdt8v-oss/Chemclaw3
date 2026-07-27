@@ -7,6 +7,11 @@ identically and doing the bookkeeping that is otherwise done by hand and got wro
 
 Three disciplines are enforced here rather than trusted:
 
+**A thermal-hazard flag, not a heat of reaction.** `is_strongly_exothermic` is raised when
+ΔE falls below the configured threshold. It replaced a standalone exotherm screen and keeps
+that screen's discipline: advisory like the structural hazard screen (D-080), a reason to go
+and look at the thermal data rather than a number to design a jacket from.
+
 **Balance.** Reactant and product atoms and total charge must match. An unbalanced
 equation produces a difference that includes whatever atoms the two sides do not share
 — a number that is meaningless rather than merely imprecise, and one that looks
@@ -91,6 +96,13 @@ class ReactionEnergyResult(BaseModel):
     species: list[SpeciesEnergy]
     cache_hits: int
     uncertainty_kcal: float
+    # Thermal-hazard screening flag, absorbed from the standalone exotherm screen this
+    # module replaced. Advisory exactly as the structural hazard screen is (D-080): a
+    # strongly negative electronic energy is a reason to look at the thermal data, never
+    # a heat of reaction and never a clearance. It reads ΔE rather than ΔG deliberately —
+    # a runaway is driven by the heat released, which is the enthalpic quantity.
+    is_strongly_exothermic: bool
+    exotherm_threshold_kcal: float
     # Which conformational treatment produced the deltas. Was hard-coded to "single" and
     # therefore wrong at `thorough`, where an ensemble is searched and its entropy folded
     # into every ΔG — the one level where a reader most needs to know it was not single.
@@ -315,6 +327,8 @@ async def compute_reaction_energy(
         species=species,
         cache_hits=sum(entry.was_cached for entry in species),
         uncertainty_kcal=settings.xtb_reaction_uncertainty_kcal,
+        is_strongly_exothermic=delta_e <= settings.reaction_energy_exotherm_threshold_kcal,
+        exotherm_threshold_kcal=settings.reaction_energy_exotherm_threshold_kcal,
         conformer_treatment=(
             "lowest-plus-conformational-entropy" if conformer_spec is not None else "single"
         ),

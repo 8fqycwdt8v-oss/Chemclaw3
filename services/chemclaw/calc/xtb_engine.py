@@ -122,17 +122,15 @@ def require_closed_shell(mol: Chem.Mol, charge: int) -> None:
 def conformer_positions(mol: Chem.Mol, conf_id: int = -1) -> tuple[np.ndarray, np.ndarray]:
     """Extract (atomic numbers, positions in **Angstrom**) from an embedded conformer on `mol`.
 
-    Shared by the single-conformer `geometry` (below) and the multi-conformer ensemble
-    (`calc.conformer_ensemble`), which embeds many conformers up front via
-    `AllChem.EmbedMultipleConfs` and then reads each one out by id rather than re-embedding.
+    Reads one conformer of an already-embedded molecule by id, so a caller that embedded
+    several up front (`AllChem.EmbedMultipleConfs`) gets each without re-embedding.
 
     Arrived from `main` as `positions_bohr`, returning atomic units — correct there, where
-    `geometry` also returned Bohr and `gfn2_energy` consumed it. It is renamed rather than
-    adapted at the call site because this branch made `calc.xtb_engine` the **single unit
-    boundary** (X1): everything above it is Angstrom and the conversion happens inside
-    `make_calculator`/`evaluate_point`. Two functions here disagreeing about their unit is
-    precisely the bug that boundary exists to prevent, and a name that states the unit is
-    what stops the next person reintroducing it.
+    `geometry` also returned Bohr. It is renamed rather than adapted at the call site because
+    this branch made `calc.xtb_engine` the **single unit boundary** (X1): everything above it
+    is Angstrom and the conversion happens inside `make_calculator`/`evaluate_point`. Two
+    functions here disagreeing about their unit is precisely the bug that boundary exists to
+    prevent, and a name that states the unit is what stops the next person reintroducing it.
     """
     conformer = mol.GetConformer(conf_id)
     numbers = np.array([atom.GetAtomicNum() for atom in mol.GetAtoms()])

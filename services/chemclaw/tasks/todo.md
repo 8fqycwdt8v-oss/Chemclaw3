@@ -432,3 +432,32 @@ so neither branch's tests could have caught them:
 **Owed, not done:** two implementations of conformer ensembles and two of reaction energetics
 now coexist. Kept both — deleting either is a product decision. Tracked at the top of
 `BACKLOG.md`.
+
+## Consolidation: one conformer ensemble, one reaction composite (D-108)
+
+Instruction: remove the old tools completely and replace them with the newly developed
+framework. D-107 had kept both and recorded that a decision was owed; this is it.
+
+- [x] Removed `calc/conformer_ensemble.py`, `calc/reaction_energy.py`,
+      `agents/conformer_tools.py`, `workflows/conformer_{job,models,activities}.py`,
+      their four test modules, and four now-dead config settings + env entries.
+- [x] Ported the **exotherm flag** onto `compute_reaction_energy`
+      (`is_strongly_exothermic` / `exotherm_threshold_kcal`) so consolidating lost no
+      capability — pinned by `test_the_exotherm_flag_survived_the_consolidation`.
+- [x] Repointed `skills/calculation-selection` at `sample_conformers` /
+      `compute_reaction_energy` + `get_job_status`, and `DEFERRED.md`'s ANI-2x row at
+      `calc.conformers`.
+- [x] `tests/test_workers.py` now asserts the xTB job is on the **`hpc`** queue — the
+      removed workflow was on `background`, which was the wrong queue for a minutes-long
+      CREST search (D-006).
+- [x] Verified end-to-end: three tool names gone from the registry, every replacement
+      present, 37 in-process tools.
+
+**Kept, because they were never duplicates:** `predict_logd`,
+`predict_developability_profile`, `generate_screening_design` — genuinely new capability
+from D-092 with no counterpart on this branch.
+
+**Cost accepted and recorded in D-108:** the exotherm screen was seconds on cached single
+points; `level="quick"` is the equivalent gear but still optimizes. And CREST is an optional
+binary — the deployment image ships it, but a bare `pip install` dev environment now has no
+conformer ensemble where it previously had a weaker one.

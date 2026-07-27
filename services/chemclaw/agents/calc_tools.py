@@ -33,22 +33,13 @@ from calc.descriptors import DescriptorInput, DescriptorProfile, run_cached_desc
 from calc.logd import LogdInput, LogdResult
 from calc.logd import predict_logd as _predict_logd
 from calc.postgres_store import default_store
-from calc.reaction import ReactionEnergyResult as ThermodynamicReactionResult
 from calc.reaction import (
+    ReactionEnergyResult,
     ReactionLevel,
     SolventComparisonResult,
     compare_solvent_effects,
 )
 from calc.reaction import compute_reaction_energy as _compute_reaction_energy
-
-# Two reaction-energy models now coexist, and they answer different questions rather than
-# duplicating one. `calc.reaction_energy` (D-092) is a cached *single-point* exotherm screen
-# — no geometry optimization, stoichiometric coefficients, a hazard flag. `calc.reaction`
-# (D-098) optimizes every species and adds Hessians, so it reports ΔH/ΔG and refuses an
-# unbalanced equation. Both export `ReactionEnergyResult`; the thermodynamic one is aliased
-# here so the two names cannot be confused at a call site, which a bare re-export invites.
-from calc.reaction_energy import ReactionEnergyInput, ReactionEnergyResult, ReactionSpecies
-from calc.reaction_energy import estimate_reaction_energy as _estimate_reaction_energy
 from calc.structure import structure_from_smiles
 from calc.xtb_cost import (
     ensemble_seconds,
@@ -180,7 +171,7 @@ async def compute_reaction_energy(
     solvent: str | None = None,
     temperature_k: float = 0.0,
     level: ReactionLevel = "standard",
-) -> ThermodynamicReactionResult | DeferredJob:
+) -> ReactionEnergyResult | DeferredJob:
     """Compute the energy, enthalpy and free energy of a balanced reaction (GFN2-xTB).
 
     The composite that answers "does this go?". Every species is optimized the same
@@ -426,30 +417,3 @@ async def predict_logd(smiles: str, ph: float | None = None) -> LogdResult:
         uncertainty (state it — this is not an exact value).
     """
     return await _predict_logd(default_store(), LogdInput(smiles=smiles, ph=ph))
-
-
-@tool
-async def estimate_reaction_energy(
-    reactants: list[ReactionSpecies], products: list[ReactionSpecies]
-) -> ReactionEnergyResult:
-    """Estimate a reaction's GFN2-xTB electronic energy and flag if it is strongly exothermic.
-
-    A process-safety screening signal, not a validated heat of reaction: it omits entropy,
-    solvation beyond xTB's implicit model, and phase changes. Use it the way the structural
-    hazard screen is used — to flag attention, never to certify a reaction is safe to scale.
-    Each species is a cached xTB single point, so reactions sharing species with an
-    earlier one are mostly free to re-score.
-
-    Args:
-        reactants: The reactant side, each species with its SMILES, net charge, and
-            stoichiometric coefficient (must be a balanced equation — this does not check
-            atom/mass balance for you).
-        products: The product side, same shape as `reactants`.
-
-    Returns:
-        The reaction electronic energy in kcal/mol, whether it crosses the configured
-        exotherm threshold, and the threshold itself so the flag can be checked.
-    """
-    return await _estimate_reaction_energy(
-        default_store(), ReactionEnergyInput(reactants=reactants, products=products)
-    )

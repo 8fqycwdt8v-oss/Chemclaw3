@@ -19,7 +19,6 @@ import pytest
 # process it is exercising.
 import agents.calc_tools as inprocess_tools
 import mcp_servers.calc.server as calc_tools
-from calc.reaction_energy import ReactionSpecies
 from calc.store import InMemoryStore
 from chemclaw.config import settings
 
@@ -125,23 +124,5 @@ def test_predict_logd_tool_defaults_ph_and_reuses_pka(monkeypatch: pytest.Monkey
         result = await inprocess_tools.predict_logd("OC(=O)c1ccccc1")
         assert result.ph == settings.logd_default_ph
         assert result.uncertainty > 0
-
-    asyncio.run(_run())
-
-
-def test_estimate_reaction_energy_tool_flags_exotherm(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The reaction-energy tool returns the flag and echoes the configured threshold."""
-    store = InMemoryStore()
-    monkeypatch.setattr(inprocess_tools, "default_store", lambda: store)
-
-    async def _run() -> None:
-        from chemclaw.config import settings
-
-        result = await inprocess_tools.estimate_reaction_energy(
-            reactants=[ReactionSpecies(smiles="CCO", coefficient=1.0)],
-            products=[ReactionSpecies(smiles="CCO", coefficient=1.0)],
-        )
-        assert result.exotherm_threshold_kcal == settings.reaction_energy_exotherm_threshold_kcal
-        assert result.is_strongly_exothermic is False  # a null reaction is not exothermic
 
     asyncio.run(_run())

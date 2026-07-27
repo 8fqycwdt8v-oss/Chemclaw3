@@ -44,7 +44,6 @@ from agents import attachments as _attachments  # noqa: F401
 from agents import bo_tools as _bo_tools  # noqa: F401
 from agents import calc_tools as _calc_tools  # noqa: F401
 from agents import chem_tools as _chem_tools  # noqa: F401
-from agents import conformer_tools as _conformer_tools  # noqa: F401
 from agents import dialogue_tools as _dialogue_tools  # noqa: F401
 from agents import durable_tools as _durable_tools  # noqa: F401
 from agents import graph_tools as _graph_tools  # noqa: F401

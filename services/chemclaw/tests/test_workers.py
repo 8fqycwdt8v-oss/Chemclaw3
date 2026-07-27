@@ -10,10 +10,10 @@ from collections.abc import Iterable
 
 from workers.background_worker import BACKGROUND_ACTIVITIES, BACKGROUND_WORKFLOWS
 from workers.hpc_worker import HPC_ACTIVITIES, HPC_WORKFLOWS
-from workflows.conformer_activities import prepare_conformer_input, run_conformer_ensemble
-from workflows.conformer_job import ConformerEnsembleWorkflow
 from workflows.eln_sync import ElnSyncWorkflow, load_sync_cursor, store_sync_cursor
 from workflows.qm_job import QMJobWorkflow
+from workflows.xtb_activities import run_xtb_calculation
+from workflows.xtb_job import XtbJobWorkflow
 
 
 def _names(items: Iterable[object]) -> list[str]:
@@ -35,11 +35,17 @@ def test_background_worker_registers_eln_sync_with_cursor_activities() -> None:
         assert activity in BACKGROUND_ACTIVITIES
 
 
-def test_background_worker_registers_conformer_ensemble_and_activities() -> None:
-    """The conformer-ensemble workflow and both of its activities are registered (D-092)."""
-    assert ConformerEnsembleWorkflow in BACKGROUND_WORKFLOWS
-    for activity in (prepare_conformer_input, run_conformer_ensemble):
-        assert activity in BACKGROUND_ACTIVITIES
+def test_the_hpc_worker_registers_the_xtb_job_that_serves_conformer_ensembles() -> None:
+    """Conformer ensembles run on the xTB job, which is an `hpc` capability (D-108).
+
+    The standalone conformer workflow this replaced sat on `background`, whose workers are
+    many and light. That was the wrong queue for it: a CREST search is minutes of saturated
+    CPU, which is the definition of the `hpc` queue (D-006). One durable job now serves every
+    expensive xTB task — ensemble, reaction, solvent screen, scan, complex — discriminated on
+    its spec, so the queue choice is made once rather than per capability.
+    """
+    assert XtbJobWorkflow in HPC_WORKFLOWS
+    assert run_xtb_calculation in HPC_ACTIVITIES
 
 
 def test_registration_lists_have_no_duplicates() -> None:

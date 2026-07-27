@@ -16,6 +16,7 @@ from calc.reaction import (
     compute_reaction_energy,
 )
 from calc.store import InMemoryStore
+from chemclaw.config import settings
 
 
 def test_esterification_returns_all_three_deltas() -> None:
@@ -221,5 +222,31 @@ def test_a_reaction_reports_which_conformational_treatment_produced_it() -> None
         result = await compute_reaction_energy(InMemoryStore(), ["CCO"], ["CCO"], level="quick")
         assert result.conformer_treatment == "single"
         assert all(entry.conformational_entropy_kcal is None for entry in result.species)
+
+    asyncio.run(_run())
+
+
+def test_the_exotherm_flag_survived_the_consolidation() -> None:
+    """The one capability the removed exotherm screen had, now on the composite (D-108).
+
+    `calc.reaction_energy` was deleted rather than kept alongside this module, so its
+    thermal-hazard flag had to move rather than be dropped — that is the difference between
+    consolidating and losing a feature. It reads ΔE against the same configured threshold.
+
+    Asserted on a combustion-like oxidation, which is unambiguously strongly exothermic at
+    any level of theory, and on a thermoneutral identity so the flag is not simply always on.
+    """
+
+    async def _run() -> None:
+        store = InMemoryStore()
+        burn = await compute_reaction_energy(
+            store, ["C", "O=O", "O=O"], ["O=C=O", "O", "O"], level="quick"
+        )
+        assert burn.is_strongly_exothermic is True
+        assert burn.delta_e_kcal <= burn.exotherm_threshold_kcal
+        assert burn.exotherm_threshold_kcal == settings.reaction_energy_exotherm_threshold_kcal
+
+        nothing = await compute_reaction_energy(store, ["CCO"], ["CCO"], level="quick")
+        assert nothing.is_strongly_exothermic is False
 
     asyncio.run(_run())

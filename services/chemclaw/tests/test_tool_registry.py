@@ -58,10 +58,7 @@ _EXPECTED_INPROCESS_TOOLS = {
     "calculator_trust",
     "predict_developability_profile",
     "predict_logd",
-    "estimate_reaction_energy",
     "generate_screening_design",
-    "submit_conformer_ensemble_job",
-    "get_conformer_job_status",
 }
 
 
