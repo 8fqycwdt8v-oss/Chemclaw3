@@ -84,6 +84,12 @@ connectors:
   calc:
     enabled: true
     replicas: 1
+  bo:
+    enabled: true
+    replicas: 1
+    # This bundle owns durable work, so it also gets a Temporal worker Deployment polling the queue
+    # its manifest declares. Bundles without a `jobs:` entry leave this unset and get only the app.
+    worker: true
 
 # The port every connector container listens on (its own Service maps it 1:1). One value rather than
 # per-connector: they are separate Services, so there is no port to deconflict, and a single number

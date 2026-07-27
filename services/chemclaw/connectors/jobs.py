@@ -2,25 +2,28 @@
 
 `agents/qm_tools.py::submit_qm_job` and the three launchers in `agents/durable_tools.py` are the
 same handful of lines four times: authorize the trigger, refuse under dry-run, demand an actor,
-derive a deterministic workflow id, start the workflow, announce the launch, return the id. Only the
-workflow class and the id derivation differed — and both are now manifest data (`JobSpec.workflow`,
-plus the job name and the arguments the id hashes). So the adapter becomes a factory: one function
-built per declared job, with the shared body written in exactly one place.
+derive a deterministic workflow id, start the workflow, announce the launch, return the id. Only
+the workflow class and the id derivation differed — and both are now manifest data
+(`JobSpec.workflow`, plus the job name and the arguments the id hashes). So the adapter becomes
+a factory: one function built per declared job, with the shared body written in exactly one
+place.
 
-The generated tool is a *first-class* tool, not a special case. It is registered through the same
-`agents.tool_registry.register_tool` a hand-written tool uses, keyed by the manifest's `name`, which
-is what makes every existing mechanism apply to it untouched: the audit middleware wraps it, the
-per-tool authorization gate addresses it by that name (`tool_role_gates`, and the built-in
-`DEFAULT_WRITE_TOOL_GATES` for a job that writes), a profile can narrow it away, and
+The generated tool is a *first-class* tool, not a special case. It is registered through the
+same `agents.tool_registry.register_tool` a hand-written tool uses, keyed by the manifest's
+`name`, which is what makes every existing mechanism apply to it untouched: the audit middleware
+wraps it, the per-tool authorization gate addresses it by that name (`tool_role_gates`, and the
+built-in `DEFAULT_WRITE_TOOL_GATES` for a job that writes), a profile can narrow it away, and
 `scripts.validate_prose_contract` sees it when checking the agent's prose.
 
-Why a generated pydantic model rather than a `dict` parameter: MAF derives a tool's JSON schema from
-its signature, and a single pydantic-model parameter is already the in-repo idiom for a structured
-argument (`start_optimization_campaign(spec: CampaignSpec)`). Building that model from the declared
+Why a generated pydantic model rather than a `dict` parameter: MAF derives a tool's JSON schema
+from its signature, and a single pydantic-model parameter is already the in-repo idiom for a
+structured argument (`start_optimization_campaign(spec: CampaignSpec)`). Building that model
+from the declared
 `params` gives the model a real, typed, per-field-documented schema — an untyped `dict[str, Any]`
 would advertise "pass anything", which is precisely how a model calls a tool wrongly.
 """
 
+from collections.abc import Callable
 from importlib import import_module
 from typing import Any, cast
 
@@ -39,9 +42,9 @@ from chemclaw.temporal_client import connect
 from connectors.manifest import JobParamType, JobSpec
 from workflows.connector_job import ConnectorJobInput, ConnectorJobWorkflow
 
-# The declared parameter types, mapped to the annotations the generated model is built from. Closed
-# by design (see `JobParamType`): every entry is a type a JSON-schema-driven model can fill
-# reliably.
+# The declared parameter types, mapped to the annotations the generated model is built from.
+# Closed by design (see `JobParamType`): every entry is a type a JSON-schema-driven model can
+# fill reliably.
 _PARAM_ANNOTATIONS: dict[JobParamType, Any] = {
     "string": str,
     "integer": int,
@@ -53,16 +56,18 @@ _PARAM_ANNOTATIONS: dict[JobParamType, Any] = {
 }
 
 
-# How much of a job's arguments a dry-run notice shows — the same budget as the audit trail's and
-# the turn event's tool-argument preview, so one convention covers every "show what was called".
+# How much of a job's arguments a dry-run notice shows — the same budget as the audit trail's
+# and the turn event's tool-argument preview, so one convention covers every "show what was
+# called".
 _DETAIL_MAX_CHARS = 200
 
 
 class ConnectorJobError(ValueError):
     """A declared job cannot be built — a bad `params_model` reference.
 
-    A `ValueError` subclass for the same reason `ConnectorError` is: this is a "this deployment is
-    misconfigured" failure, and one `except ValueError` at an entry point should catch all of them.
+    A `ValueError` subclass for the same reason `ConnectorError` is: this is a "this deployment
+    is misconfigured" failure, and one `except ValueError` at an entry point should catch all of
+    them.
     """
 
 
@@ -75,15 +80,15 @@ def resolve_params_model(reference: str) -> type[BaseModel]:
     """Import the pydantic model a `module:Attribute` reference names, for a structured job input.
 
     The full-fidelity alternative to declaring params inline: a job whose input is a rich domain
-    object (a nested optimization problem, a list of report sections) already has a validated model
-    in code, and re-declaring its shape in YAML would both lose structure and create a second source
-    of truth. Referencing it keeps one schema and gives the agent the same typed surface a
-    hand-written tool would advertise.
+    object (a nested optimization problem, a list of report sections) already has a validated
+    model in code, and re-declaring its shape in YAML would both lose structure and create a
+    second source of truth. Referencing it keeps one schema and gives the agent the same typed
+    surface a hand-written tool would advertise.
 
-    Only the *type* is imported, never the capability — a shared DTO, which is exactly what crosses
-    a process boundary in any client/server split. A reference that does not resolve to a pydantic
-    model is a configuration error reported here (and by `make connector-validate`), not a confusing
-    failure when the tool is first called.
+    Only the *type* is imported, never the capability — a shared DTO, which is exactly what
+    crosses a process boundary in any client/server split. A reference that does not resolve to
+    a pydantic model is a configuration error reported here (and by `make connector-validate`),
+    not a confusing failure when the tool is first called.
 
     Raises:
         ConnectorJobError: When the module or attribute does not exist, or is not a pydantic model.
@@ -101,6 +106,30 @@ def resolve_params_model(reference: str) -> type[BaseModel]:
     if not (isinstance(model, type) and issubclass(model, BaseModel)):
         raise ConnectorJobError(f"params_model {reference!r} is not a pydantic model")
     return model
+
+
+def resolve_precondition(reference: str) -> Callable[[Any], None]:
+    """Import the `module:function` a job's `precondition` names, for the pre-launch domain check.
+
+    Resolved at build time (and by `make connector-validate`), not at call time, so a typo is a
+    configuration error a deployment finds before a chemist does.
+
+    Raises:
+        ConnectorJobError: When the module or attribute does not exist, or is not callable.
+    """
+    module_name, _, attribute = reference.partition(":")
+    try:
+        module = import_module(module_name)
+    except ImportError as exc:
+        raise ConnectorJobError(
+            f"precondition {reference!r}: cannot import {module_name!r}"
+        ) from exc
+    check = getattr(module, attribute, None)
+    if check is None:
+        raise ConnectorJobError(f"precondition {reference!r}: {module_name!r} has no {attribute!r}")
+    if not callable(check):
+        raise ConnectorJobError(f"precondition {reference!r} is not callable")
+    return check  # type: ignore[no-any-return]
 
 
 def _params_model(connector: str, job: JobSpec) -> type[BaseModel]:
@@ -134,7 +163,8 @@ def _docstring(job: JobSpec) -> str:
     """Assemble the tool docstring the model reads: summary, description, then the arguments.
 
     MAF derives the tool description from the docstring, so this *is* the job's model-facing
-    documentation. The `Args:` section is rendered from the same declared params the schema is built
+    documentation. The `Args:` section is rendered from the same declared params the schema is
+    built
     from, so a parameter can never be documented in the prose but missing from the signature — the
     drift a hand-written adapter invites.
     """
@@ -145,8 +175,9 @@ def _docstring(job: JobSpec) -> str:
         lines.extend(["", "Args:", "    params: The job's launch arguments."])
         lines.extend(f"        {param.name}: {param.description}" for param in job.params)
     elif job.params_model is not None:
-        # A referenced model documents its own fields (their descriptions travel in the JSON schema
-        # MAF derives from it), so repeating them here would be a second, drift-prone copy.
+        # A referenced model documents its own fields (their descriptions travel in the JSON
+        # schema MAF derives from it), so repeating them here would be a second, drift-prone
+        # copy.
         lines.extend(["", "Args:", "    params: The job's launch arguments; see the field docs."])
     lines.extend(
         [
@@ -173,8 +204,8 @@ def build_job_tool(connector: str, job: JobSpec) -> CapabilityTool:
     """Build the agent tool that launches one declared connector job.
 
     The returned coroutine function is what MAF advertises: its `__name__` is the manifest's job
-    name (which is also the authorization key and the profile-narrowing key), its docstring is the
-    model-facing description, and its single parameter is the generated params model.
+    name (which is also the authorization key and the profile-narrowing key), its docstring is
+    the model-facing description, and its single parameter is the generated params model.
 
     Args:
         connector: The owning connector's name — part of the workflow id, and reported in the
@@ -182,19 +213,26 @@ def build_job_tool(connector: str, job: JobSpec) -> CapabilityTool:
         job: The declared job.
 
     Returns:
-        An async tool function, unregistered — the registry call belongs to the caller that knows
-        which connectors are enabled (`connectors.registry`).
+        An async tool function, unregistered — the registry call belongs to the caller that
+        knows which connectors are enabled (`connectors.registry`).
     """
     params_model = _params_model(connector, job)
+    precondition = resolve_precondition(job.precondition) if job.precondition else None
 
     async def launch(params: params_model) -> str:  # type: ignore[valid-type]
-        # Authorize the expensive trigger against the turn's user *before* any durable work (F4-T5),
-        # so an autonomously-planned todo cannot start a costly run outside the user's entitlements.
+        # Authorize the expensive trigger against the turn's user *before* any durable work
+        # (F4-T5), so an autonomously-planned todo cannot start a costly run outside the user's
+        # entitlements.
         if job.expensive:
             authorize_trigger(job.name)
-        # `params` is an instance of the model built above; mypy sees only the local alias, so the
-        # `model_dump` call needs the cast. Validation has already happened — MAF constructs the
-        # model from the tool call's arguments before the body runs.
+        # Then the job's own domain guard, if it declared one, for the reason
+        # `JobSpec.precondition` records: this is the only replay-safe place such a check can
+        # live.
+        if precondition is not None:
+            precondition(params)
+        # `params` is an instance of the model built above; mypy sees only the local alias, so
+        # the `model_dump` call needs the cast. Validation has already happened — MAF constructs
+        # the model from the tool call's arguments before the body runs.
         payload: dict[str, Any] = cast(BaseModel, params).model_dump(mode="json", exclude_none=True)
         workflow_id = job_workflow_id(connector, job.name, payload)
         if is_dry_run():
@@ -217,8 +255,9 @@ def build_job_tool(connector: str, job: JobSpec) -> CapabilityTool:
                 ),
                 id=workflow_id,
                 task_queue=settings.background_task_queue,
-                # Only a *failed* run may re-execute under the same id: the default policy rejects
-                # duplicates while a run is open but would silently recompute a completed one.
+                # Only a *failed* run may re-execute under the same id: the default policy
+                # rejects duplicates while a run is open but would silently recompute a
+                # completed one.
                 id_reuse_policy=WorkflowIDReusePolicy.ALLOW_DUPLICATE_FAILED_ONLY,
             )
         except WorkflowAlreadyStartedError:
@@ -239,9 +278,10 @@ def build_job_tool(connector: str, job: JobSpec) -> CapabilityTool:
 def _detail(connector: str, payload: dict[str, Any]) -> str:
     """The argument summary a dry-run notice reports (sorted for stability, bounded in length).
 
-    Bounded because a structured job's payload can be a whole optimization problem, and a dry-run
-    notice is a sentence a chemist reads — not a dump. The same reasoning (and the same 200-char
-    budget) as the tool-argument preview in the audit trail and the turn's `ToolCallEvent`.
+    Bounded because a structured job's payload can be a whole optimization problem, and a
+    dry-run notice is a sentence a chemist reads — not a dump. The same reasoning (and the same
+    200-char budget) as the tool-argument preview in the audit trail and the turn's
+    `ToolCallEvent`.
     """
     if not payload:
         return f"connector {connector}"

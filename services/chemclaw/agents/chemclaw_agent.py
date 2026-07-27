@@ -40,7 +40,6 @@ from agent_framework._harness._loop import todos_remaining
 # it instead of from a hand-maintained list — so adding a tool is a `@tool` at its definition
 # site, not an edit here.
 from agents import attachments as _attachments  # noqa: F401
-from agents import bo_tools as _bo_tools  # noqa: F401
 from agents import dialogue_tools as _dialogue_tools  # noqa: F401
 from agents import durable_tools as _durable_tools  # noqa: F401
 from agents import graph_tools as _graph_tools  # noqa: F401

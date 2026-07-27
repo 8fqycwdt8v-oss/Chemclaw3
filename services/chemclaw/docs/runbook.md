@@ -165,9 +165,10 @@ costs its tools for that turn, not the turn itself; set `CHEMCLAW_CONNECTORS_REQ
 startup instead. Verify a bundle standalone with `uvicorn connectors.<name>.server.app:app` and check
 `/healthz`; tool *discovery* needs no database, but *invoking* a search does.
 
-**What ships today.** Five bundles: `molfp` and `rxnfp` (fingerprint search), `safety` (the hazard
-screen), `chem` (bench chemistry over RDKit) and `calc` (the fast calculators and the calibration
-ledger). A few tools remain in-process by design, not by omission: the conversation plumbing that
+**What ships today.** Six bundles: `molfp` and `rxnfp` (fingerprint search), `safety` (the hazard
+screen), `chem` (bench chemistry over RDKit), `calc` (the fast calculators and the calibration
+ledger), and `bo` (Bayesian optimization — the one that also owns durable work, so it runs a second
+Deployment for its own Temporal worker; set `worker: true` on a bundle in the chart to get one). A few tools remain in-process by design, not by omission: the conversation plumbing that
 reads or writes the turn's own state (`ask_clarifying_question`, attachments, preferences, watches),
 the durable-job launchers, and the two PR-gate writers, which are the GxP boundary. Those are a
 `@tool` in `agents/` and nothing else.

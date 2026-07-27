@@ -19,6 +19,12 @@ case "${component}" in
   background-worker)
     exec python -m workers.background_worker
     ;;
+  connector-worker-*)
+    # A connector bundle's own Temporal worker, for a bundle that owns durable work
+    # (`connectors/<name>/worker.py`). Matched before `connector-*` so the more specific prefix wins.
+    name="${component#connector-worker-}"
+    exec python -m "connectors.${name}.worker"
+    ;;
   connector-*)
     # A connector bundle's own FastAPI app (`connectors/<name>/server/app.py`). One case for every
     # connector rather than one per name: the component name carries the bundle, so adding a

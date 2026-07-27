@@ -23,6 +23,7 @@ from bo.objectives import (
     solubility_objective,
 )
 from bo.problem import (
+    CampaignResult,
     CampaignSpec,
     CategoricalParameter,
     ContinuousParameter,
@@ -40,9 +41,9 @@ from calc.solubility import SolubilityInput, predict_solubility
 from calc.store import InMemoryStore
 from chemclaw.chem import InvalidSmilesError
 from chemclaw.config import settings
+from connectors.bo.activities import evaluate_candidates, propose_initial, propose_next
+from connectors.bo.workflows import BoCampaignWorkflow
 from tests.temporal_env import pydantic_client, start_env_or_skip
-from workflows.bo_activities import evaluate_candidates, propose_initial, propose_next
-from workflows.bo_campaign import BoCampaignWorkflow
 
 warnings.filterwarnings("ignore")
 
@@ -238,18 +239,24 @@ def test_durable_campaign_runs_end_to_end() -> None:
                 workflows=[BoCampaignWorkflow],
                 activities=_BO_ACTIVITIES,
             ):
-                result = await client.execute_workflow(
+                # The connector contract: payload in, `ConnectorJobResult` out. The campaign's own
+                # result travels in `data`, which is why it is re-parsed here rather than typed —
+                # core deliberately never knows this shape (D-093).
+                envelope = await client.execute_workflow(
                     BoCampaignWorkflow.run,
-                    spec,
+                    spec.model_dump(mode="json"),
                     id="bo-campaign-test",
                     task_queue="test-bo",
                 )
+        result = CampaignResult.model_validate(envelope.data)
         # Every round ran and every point was actually evaluated by the objective.
         assert len(result.history) == 6  # 4 seed + 2 rounds x batch 1
         assert all(o.provenance == "predicted" for o in result.history)
         # The best that survived serialization is the true optimum of the returned
         # history — i.e. the durable reduce is correct, not desynced from the history.
         assert result.best == best_of(spec.problem, result.history)
+        # And the envelope's summary is the one line the chat shows for a finished campaign.
+        assert "reizman_suzuki" in envelope.summary
 
     asyncio.run(_run())
 

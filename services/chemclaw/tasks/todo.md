@@ -75,8 +75,14 @@ server*, and two concurrent turns proven to keep their own identity.
 - [ ] `kg` — `find_notes`, `expand_note`, `find_knowledge_gaps`, `gather_evidence`. The deepest
       coupling: it needs the knowledge tree and the vector index, so decide first whether it also
       owns re-indexing (`NoteReindexWorkflow` moves with it or does not).
-- [ ] `bo` moves its workflow to its own worker + task queue (proves plan §5.3 decoupling), which is
-      also where `start_optimization_campaign` becomes a manifest `jobs:` entry
+- [x] `bo` — the reference connector-owned durable capability (D-094): its workflow, activities and
+      worker live in the bundle on `connector-bo`, `start_optimization_campaign` is a manifest
+      `jobs:` entry, and the bespoke adapter is deleted. Core serves no BO workflow. The move needed
+      one manifest entry plus the workflow's return type, and no core edit — the property the seam
+      was built to have. `write_campaign_node` is gone: the note *mapping* stayed in the bundle, the
+      *publish* moved to core, so a connector structurally cannot reach the PR-gate.
+      Added `JobSpec.precondition` so the round-ceiling guard survived the migration (every other
+      placement re-runs at replay against current config).
 - [ ] `qm`/`report` job manifests, once their workflows move and return the envelope directly
 
 ## Stage D — agentic workflow configuration

@@ -16,20 +16,20 @@ from agents.tool_registry import (
     registered_tools,
     tool,
 )
+from connectors.registry import enabled
 
-# The exact in-process capability tools the old hardcoded list advertised — the registry must
-# reproduce this set, no more and no less (the MCP servers are advertised separately).
+# The in-process capability tools: the conversation plumbing that reads or writes the turn's own
+# state, plus the two PR-gate writers and the durable launchers core still owns. The domain
+# capabilities are not here — they moved to connectors (D-093) and are advertised per turn.
 _EXPECTED_INPROCESS_TOOLS = {
     "submit_qm_job",
     "get_qm_job_status",
     "find_notes",
     "expand_note",
     "gather_evidence",
-    "suggest_next_experiment",
     "propose_knowledge_note",
     "record_confirmed_answer",
     "request_development_report",
-    "start_optimization_campaign",
     "get_durable_job_status",
     "find_knowledge_gaps",
     "ask_clarifying_question",
@@ -44,20 +44,29 @@ _EXPECTED_INPROCESS_TOOLS = {
 }
 
 
-def test_registry_holds_exactly_the_inprocess_tools() -> None:
-    """Importing the agent populates the registry with precisely the in-process capability tools."""
-    assert set(registered_tool_names()) == _EXPECTED_INPROCESS_TOOLS
+def test_registry_holds_the_inprocess_tools_and_only_job_launchers_besides() -> None:
+    """Importing the agent registers precisely the in-process tools; building it adds job launchers.
+
+    Two populations share this registry on purpose. The `@tool` functions arrive on import, and the
+    generated launcher for each declared connector job is registered when an agent is built — which
+    is exactly what makes a job tool addressable by `tool_role_gates` and wrapped by the audit
+    middleware like any other. So "exactly the in-process set" is only true before a build, and the
+    invariant worth asserting is that nothing *else* ever appears.
+    """
+    assert _EXPECTED_INPROCESS_TOOLS <= set(registered_tool_names())
+    build_agent(chat_client=object())
+    extra = set(registered_tool_names()) - _EXPECTED_INPROCESS_TOOLS
+    assert extra == {job for manifest in enabled() for job in (j.name for j in manifest.jobs)}
 
 
 def test_capability_tools_are_exactly_the_registry() -> None:
-    """`_capability_tools()` is the registered function tools, then the MCP capability tools."""
+    """`_capability_tools()` is the registry, whole and in order — connectors are not in it.
+
+    A connector's MCP tools are per-turn (`connector_tools`), not per-process, so the agent's own
+    tool list is the registry and nothing more.
+    """
     tools = _capability_tools()
-    inprocess = registered_tools()
-    # The in-process tools appear first, in registration order, unchanged.
-    assert tools[: len(inprocess)] == inprocess
-    # The tail is exactly the config-driven MCP capability servers.
-    # Connectors are not in here: they are per-turn (`connector_tools`), not per-process.
-    assert len(tools) == len(inprocess)
+    assert tools == registered_tools()
 
 
 def test_agent_advertises_the_registered_inprocess_tools() -> None:

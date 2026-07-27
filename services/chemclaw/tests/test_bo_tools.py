@@ -8,7 +8,6 @@ in-process (no Temporal), the same as the campaign tests.
 
 import asyncio
 
-from agents.bo_tools import suggest_next_experiment
 from bo.problem import (
     CategoricalParameter,
     ContinuousParameter,
@@ -16,6 +15,7 @@ from bo.problem import (
     Observation,
     OptimizationProblem,
 )
+from connectors.bo.server.tools import suggest_next_experiment
 
 
 def _problem() -> OptimizationProblem:

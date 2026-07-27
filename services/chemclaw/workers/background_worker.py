@@ -1,9 +1,14 @@
 """The `background-jobs` worker (plan step 1.8).
 
-Hosts light, long-running background jobs — starting with the durable BO campaign
-(plan step 1d.4). Run it with `python -m workers.background_worker` (after
-`make up`). Kept separate from the HPC worker so heavy and light work scale
-independently on their own queues (D-006).
+Hosts core's light, long-running background jobs — the ELN sync, the memory-synthesis and report
+workflows, the periodic maintenance jobs — plus `ConnectorJobWorkflow`, the generic wrapper every
+connector job runs inside. Run it with `python -m workers.background_worker` (after `make up`). Kept
+separate from the HPC worker so heavy and light work scale independently (D-006).
+
+A *connector's* own workflows are deliberately absent: they are served by that bundle's worker on
+its own queue (`connectors/bo/worker.py` is the first), and core reaches them by workflow type name
+through the wrapper. That is why adding a durable capability no longer adds a line to the lists
+below.
 """
 
 import asyncio
@@ -17,13 +22,6 @@ from chemclaw.config import settings
 from chemclaw.logging import configure_logging, configure_telemetry
 from chemclaw.temporal_client import connect
 from workflows.audit_verify import AuditChainVerifyWorkflow, check_audit_chain
-from workflows.bo_activities import (
-    evaluate_candidates,
-    propose_initial,
-    propose_next,
-)
-from workflows.bo_campaign import BoCampaignWorkflow
-from workflows.bo_knowledge import write_campaign_node
 from workflows.connector_job import ConnectorJobWorkflow
 from workflows.digest import DigestWorkflow, acknowledge_digest, collect_digests
 from workflows.eln_sync import (
@@ -65,7 +63,6 @@ logger = logging.getLogger(__name__)
 # The workflows and activities this worker serves on the background-jobs queue. Module-level
 # so the registration is one list (and directly assertable in tests), not buried in main().
 BACKGROUND_WORKFLOWS: list[type] = [
-    BoCampaignWorkflow,
     ElnSyncWorkflow,
     CampaignSynthesisWorkflow,
     PlaybookDistillationWorkflow,
@@ -86,11 +83,7 @@ BACKGROUND_WORKFLOWS: list[type] = [
     ConnectorJobWorkflow,
 ]
 BACKGROUND_ACTIVITIES: Sequence[Callable[..., Any]] = [
-    propose_initial,
-    propose_next,
-    evaluate_candidates,
     write_knowledge_node,
-    write_campaign_node,
     list_ingest_sources,
     sync_eln_entries,
     load_sync_cursor,
@@ -114,7 +107,7 @@ BACKGROUND_ACTIVITIES: Sequence[Callable[..., Any]] = [
 
 
 async def main() -> None:
-    """Connect and poll the background-jobs queue for BO campaigns, graph writes, ELN sync."""
+    """Connect and poll the background-jobs queue for core's jobs and the connector-job wrapper."""
     configure_logging()
     configure_telemetry()
     client = await connect()

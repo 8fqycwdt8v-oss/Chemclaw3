@@ -1,20 +1,19 @@
-"""Bridge a BO campaign's recommendation into the knowledge graph (plan step 1d.5).
+"""Map a BO campaign's recommendation to a knowledge-graph note (plan step 1d.5).
 
-A finished campaign's best point is the experiment the optimizer recommends running
-next; like a QM result, it becomes an agent-authored note proposed through the **same**
-PR-gate (D-005) so a human validates before it enters the graph. `note_from_campaign_result`
-is the pure mapping (tested directly); `write_campaign_node` is the Temporal activity that
-runs it and submits, on the `background-jobs` queue. The PR-gate itself (`propose_note` +
-`default_submitter`) is reused, not duplicated — this module only adds the BO→note mapping.
+A finished campaign's best point is the experiment the optimizer recommends running next; like a QM
+result, it becomes an agent-authored note proposed through the **same** PR-gate (D-005) so a human
+validates before it enters the graph.
+
+This module is the *mapping only*, which is the connector split: turning a campaign result into a
+note is the BO domain's knowledge, so it lives in the bundle; pushing that note through the PR-gate
+is the GxP boundary, so it stays in core (`ConnectorJobWorkflow` publishes whatever note the result
+envelope carries). The activity that used to do both is gone — a connector must not be able to reach
+around the gate, and now it structurally cannot.
 """
-
-from temporalio import activity
 
 from bo.problem import CampaignResult
 from chemclaw.ids import stable_hash
-from kg.git_submitter import default_submitter
 from kg.note import Note
-from kg.pr_gate import propose_note
 
 
 def note_from_campaign_result(objective_name: str, result: CampaignResult) -> Note:
@@ -42,10 +41,3 @@ def note_from_campaign_result(objective_name: str, result: CampaignResult) -> No
         source=f"bo:{objective_name}",
         body=body,
     )
-
-
-@activity.defn
-async def write_campaign_node(objective_name: str, result: CampaignResult) -> str:
-    """Write a campaign recommendation to the graph as a PR-gated note; return its ref."""
-    note = note_from_campaign_result(objective_name, result)
-    return await propose_note(note, default_submitter())

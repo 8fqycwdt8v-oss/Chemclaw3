@@ -59,6 +59,49 @@ spec:
           resources:
             {{- toYaml $.Values.resources.connector | nindent 12 }}
 ---
+{{- if $cfg.worker }}
+{{- /* A bundle that owns durable work also runs its own Temporal worker, polling the queue its
+       manifest declares. No HTTP port and no probes: liveness is the Temporal poll itself, exactly
+       as for core's workers. This is the half that keeps a capability's heavy dependencies out of
+       both the chat service and core's worker. */ -}}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "chemclaw.name" $ }}-connector-worker-{{ $name }}
+  labels:
+    {{- include "chemclaw.labels" $ | nindent 4 }}
+    app.kubernetes.io/component: connector-worker-{{ $name }}
+spec:
+  replicas: {{ $cfg.replicas }}
+  selector:
+    matchLabels:
+      {{- include "chemclaw.selectorLabels" $ | nindent 6 }}
+      app.kubernetes.io/component: connector-worker-{{ $name }}
+  template:
+    metadata:
+      labels:
+        {{- include "chemclaw.selectorLabels" $ | nindent 8 }}
+        app.kubernetes.io/component: connector-worker-{{ $name }}
+    spec:
+      serviceAccountName: {{ $.Values.serviceAccount.name }}
+      containers:
+        - name: connector-worker-{{ $name }}
+          image: "{{ $.Values.image.repository }}:{{ $.Values.image.tag }}"
+          imagePullPolicy: {{ $.Values.image.pullPolicy }}
+          env:
+            - name: CHEMCLAW_COMPONENT
+              value: "connector-worker-{{ $name }}"
+            {{- include "chemclaw.env" $ | nindent 12 }}
+          envFrom:
+            {{- include "chemclaw.envFrom" $ | nindent 12 }}
+          resources:
+            {{- toYaml $.Values.resources.worker | nindent 12 }}
+          volumeMounts:
+            {{- include "chemclaw.tlsMount" $ | nindent 12 }}
+      volumes:
+        {{- include "chemclaw.volumes" $ | nindent 8 }}
+---
+{{- end }}
 apiVersion: v1
 kind: Service
 metadata:

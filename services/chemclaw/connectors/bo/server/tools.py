@@ -1,28 +1,35 @@
-"""Agent tool for Bayesian-optimization experiment design (plan Phase 1d, agent surface).
+"""The `bo` connector's MCP tool surface: one-shot Bayesian-optimization experiment design.
 
-Exposes BoFire's ask step to the conversation agent so a "which experiment should I run
-next?" question is answered from data the agent has already gathered: the agent assembles the
-decision space and the runs so far (from ELN history via the research tools) and asks for the
-next point(s) to try. Like the fast calculators, a single ask is inline and sub-second — the
-GP fit runs off the event loop; the durable `BoCampaignWorkflow` remains the path for an
-*automated* closed loop that evaluates its own objective over many rounds. This tool is the
-one-shot human-in-the-loop suggestion.
+Exposes BoFire's ask step to the conversation agent so a "which experiment should I run next?"
+question is answered from data the agent has already gathered: the agent assembles the decision
+space and the runs so far (from ELN history via the research tools) and asks for the next
+point(s) to try. Like the fast calculators, a single ask is inline and sub-second — the GP fit
+runs off the event loop; the durable `BoCampaignWorkflow` remains the path for an *automated*
+closed loop that evaluates its own objective over many rounds. This tool is the one-shot
+human-in-the-loop suggestion.
 
 Layer discipline (G6): this is read-only *capability*. The judgment — how to turn a vague
 "optimize the reaction" into a concrete problem, which historic runs are comparable enough to
-seed it, and how to present a suggestion a human must still run — lives in the
-`experiment-design` skill. BoFire is never imported here; only the neutral `bo.problem` types
-cross this boundary.
+seed it, and how to present a suggestion a human must still run — lives in the bundled
+`experiment-design` skill.
+
+BoFire lives on this side of the connector boundary now: only the neutral `bo.problem` types
+cross it, as the model-facing schema of this tool and of the campaign job. That is what keeps
+`bofire` and `botorch` out of the chat service's image while the agent can still ask both
+questions.
 """
 
 import asyncio
 
-from agents.tool_registry import tool
+from mcp.server.fastmcp import FastMCP
+
 from bo.engine import initial_candidates, propose_candidates
 from bo.problem import Candidate, Observation, OptimizationProblem
 
+server = FastMCP("bo")
 
-@tool
+
+@server.tool()
 async def suggest_next_experiment(
     problem: OptimizationProblem,
     observations: list[Observation] | None = None,
@@ -33,13 +40,13 @@ async def suggest_next_experiment(
     Answers "what should I try next?" Give the decision space (which conditions may vary and
     their ranges/choices) and the runs done so far (their conditions and the measured
     objective); it returns the point(s) a surrogate model expects to be most informative. With
-    no observations yet it returns space-filling seed points instead (a model needs data
-    first). These are *proposals a human runs* — surface them, do not treat them as results.
+    no observations yet it returns space-filling seed points instead (a model needs data first).
+    These are *proposals a human runs* — surface them, do not treat them as results.
 
     Build `problem` and `observations` from evidence you have gathered (e.g. past runs of the
-    transformation via similar_reactions / an optimization-campaign note), so the
-    suggestion rests on real history. Mark each observation's `provenance` "measured" for lab
-    data or "predicted" if it came from a model, keeping the campaign honest.
+    transformation via similar_reactions / an optimization-campaign note), so the suggestion
+    rests on real history. Mark each observation's `provenance` "measured" for lab data or
+    "predicted" if it came from a model, keeping the campaign honest.
 
     Args:
         problem: The decision variables (continuous/categorical) and the single objective
