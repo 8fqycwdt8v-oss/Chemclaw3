@@ -4735,13 +4735,18 @@ operator running a terminal session against a database without switching `sessio
   only `sink if sink is not None else default_audit_sink()` back to `NullAuditSink()` fails
   `test_an_omitted_sink_no_longer_silently_means_log_only` and nothing else.
 
-**This does not yet produce a row, and that is recorded rather than implied.** With the sink
-correctly resolved — `default_audit_sink()` returns `PostgresAuditSink` under the load-test config —
-a live turn still writes nothing to `audit_events`, because the audit middleware **never fires**. A
-`@function_middleware`-typed spy records zero invocations while MAF returns a `tool` role message,
-with the harness enabled or disabled. The four middlewares are attached (`surface_authorization_denials`,
-`surface_domain_errors`, `audit_tool_calls`, `enforce_tool_authz`) and none of them run on that path.
+**Verified end to end.** `audit_events: 4 -> 5` on a live turn against the stub model, with
+`default_audit_sink()` resolving to `PostgresAuditSink` under the load-test config.
 
-That is a second, separate defect, and a larger one — `enforce_tool_authz` is the RBAC gate. It is
-tracked as **AUDIT-1** in `BACKLOG.md` with the reproduction. This ADR fixes the half that was
-findable by reading the code; the half that needed running it is open.
+That verification took two attempts, and the first one was wrong in a way worth recording. It
+reported that the middleware never fires and warned that `enforce_tool_authz` — the RBAC gate,
+registered the same way — might be inert too. The cause was the *test harness*: the stub model sent
+`{"query": "benzene"}` while `find_notes` takes `text`, so every call failed argument validation
+inside `agent_framework._tools._auto_invoke_function` and returned at the parse-error branch, which
+sits before the middleware branch. No tool body ran, so nothing was audited. With the stub
+corrected: `PIPELINE.EXECUTE fired n=4`, `exc=None`, and the row lands. RBAC was never affected.
+
+What survives is smaller and is tracked separately in `BACKLOG.md`: a call rejected for bad
+arguments is not audited at all (**AUDIT-2**), so the trail cannot answer "what did the agent
+attempt and get wrong" — and the load runs' "100 tool calls" were all parse failures, so their
+tool-path claim is being re-measured (**LOAD-1**).

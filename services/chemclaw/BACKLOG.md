@@ -62,6 +62,63 @@ The load test's fixes landed (see D-119). What it surfaced and did **not** close
       runner or an equivalent, and the first step is naming the test — `--timeout-method=thread` in
       CI would at least fail loudly with a name instead of burning the job silently.
 
+- [x] **AUDIT-1 — RETRACTED. The middleware fires; my harness was sending invalid arguments.**
+      I reported that the `@function_middleware` chain records zero invocations and warned that
+      `enforce_tool_authz`, the RBAC gate, might therefore be inert. **That was wrong, and the error
+      was mine.** The stub model sent `{"query": "benzene"}` while `find_notes` takes `text`, so
+      every tool call failed argument validation inside `_auto_invoke_function` and returned at the
+      parse-error branch — which sits *before* the middleware branch. No tool body ever ran, so of
+      course nothing was audited.
+
+      With the stub corrected, on the D-122 tree: `PIPELINE.EXECUTE fired n=4`, the tool returned
+      `exc=None`, and `audit_events: 4 -> 5`. The GxP trail works end to end. RBAC is not affected.
+
+      Two real things survive it, both smaller than the retracted claim:
+
+- [ ] **AUDIT-2 A tool call rejected for bad arguments is neither audited nor authorization-checked.**
+      `_auto_invoke_function` returns the parse error before reaching the middleware pipeline, so
+      "the model asked for `find_notes` with arguments it could not satisfy" leaves no trace in
+      `audit_events`. Authorization not running is harmless (nothing executed); the *audit* gap is
+      not, for a GxP trail whose purpose is to answer "what did the agent attempt". Upstream
+      behaviour in `agent_framework._tools`, so the fix is either a wrapper or an upstream change.
+
+- [ ] **LOAD-1 Re-state the load-test tool claim.** The runs reported "100 tool calls" and "the
+      tool path genuinely exercised". Both are wrong for the same reason: those calls were
+      dispatched and every one failed argument validation, so no tool body — no RDKit, no note
+      scan, no database read — ever executed. The infrastructure findings (pool, event loop,
+      worker count) stand, since they concern the request path rather than the tool body, but the
+      absolute throughput numbers are optimistic and are being re-measured with the stub fixed.
+
+- [ ] **CI-1 `main` has been red since D-117 enabled the real gates: `check` is cancelled at the
+      30-minute job timeout, every run.** Runs on `main` at `5f95166`, `5e0827a` and `33d454e` all
+      end `cancelled` after exactly 30:00, and so does every PR run since. This is a regression from
+      D-117 — the gates it moved into the root workflow are correct, but nobody checked the job
+      could finish inside `timeout-minutes: 30`.
+
+      It is a **hang, not slowness**. The log stops dead:
+
+      ```
+      17:54:52  tests/test_bo_campaign.py ................  [  8%]
+      17:54:52  tests/test_bo_doe.py ...                    [  8%]
+      17:54:58  tests/test_bo_featurize.py .............     [  9%]
+      18:22:46  ##[error]The operation was canceled.
+      ```
+
+      28 minutes of silence at 9 %, and the orphan-process list at cleanup is
+      `make`, `uv`, `pytest`, `temporal-test-server-sdk-python-1.30.0` — so it hangs on the first
+      test needing the Temporal test server.
+
+      **`timeout = 180` did not fire, and that is the second half of the bug.** pyproject picks the
+      `signal` method deliberately (to fail one test rather than `os._exit` the session). SIGALRM is
+      delivered to the main thread, but `temporalio` blocks inside its Rust core via PyO3, so the
+      interpreter never gets back to run the handler. The one guard against exactly this failure is
+      inert against exactly this failure.
+
+      Not reproducible locally: the Temporal tests **skip** in this sandbox (the test server cannot
+      be downloaded), which is why 1277-passing local runs say nothing about it. Fixing it needs a
+      runner or an equivalent, and the first step is naming the test — `--timeout-method=thread` in
+      CI would at least fail loudly with a name instead of burning the job silently.
+
 - [ ] **AUDIT-1 The tool-audit middleware does not fire, so `audit_events` stays empty even with a
       durable sink wired.** D-122 fixed the half that was findable by reading: the service passed no
       sink, so the trail was log-only. With that fixed and `default_audit_sink()` verified to return
