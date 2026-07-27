@@ -20,7 +20,6 @@ durable result already lives in the graph/session, that is the right side of the
 
 import asyncio
 from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
-from contextlib import AsyncExitStack
 from functools import partial
 from typing import Any
 
@@ -90,7 +89,7 @@ async def record_session_event(
     insert would deliver the same notification twice. With a key set, the second insert lands on
     the unique index and becomes a no-op; None (non-retrying writers) appends unconditionally.
     """
-    async with await db.connect(
+    async with db.connection(
         _dsn(dsn), statement_timeout_seconds=settings.pg_statement_timeout_seconds
     ) as conn:
         await conn.execute(_INSERT, (session_id, kind, Jsonb(payload or {}), dedupe_key))
@@ -128,7 +127,7 @@ async def claim_unconsumed(
     scopes the claim to those event kinds (None claims everything): the claim is at-most-once, so a
     kind-selective consumer must filter here, never after the claim.
     """
-    async with await db.connect(
+    async with db.connection(
         _dsn(dsn), statement_timeout_seconds=settings.pg_statement_timeout_seconds
     ) as conn:
         return await _claim_on(conn, session_id, kinds)
@@ -148,11 +147,14 @@ async def stream_new_events(
     `poll_seconds` default to the Postgres channel + configured interval but are injectable, so the
     loop is unit-testable with fakes and no database. `max_polls` bounds the loop for tests.
 
-    The default (database) path opens **one** connection for the stream's whole lifetime: the loop
-    polls every couple of seconds forever, so connect-per-poll would churn a fresh Postgres
-    connection per stream per interval — multiplied by concurrent streams, a real exhaustion risk
-    for the shared session-store database. A connection failure ends the stream (the client
-    reconnects), exactly as it would have failed a per-poll connect.
+    The default (database) path **borrows a connection per poll** rather than holding one for the
+    stream's lifetime. Holding one was right while every connection was a fresh handshake — a
+    2-second poll loop would otherwise have churned one connect per stream per interval. With the
+    front door pooling (`chemclaw.db.pooling`) the borrow is free and holding is the expensive
+    choice: `service_max_event_streams_per_user` is 5, so 50 chemists is 250 streams, and 250
+    connections pinned for the lifetime of open browser tabs would exhaust the pool for the turns
+    that actually need it. A connection failure ends the stream (the client reconnects), exactly
+    as before.
 
     Args:
         session_id: The session to tail.
@@ -169,20 +171,15 @@ async def stream_new_events(
         re-delivered — the atomic claim is the concurrency guard, COR-4).
     """
     interval = poll_seconds if poll_seconds is not None else settings.session_event_poll_seconds
-    async with AsyncExitStack() as stack:
-        if claim is not None:
-            do_claim: Callable[[], Awaitable[list[SessionEvent]]] = partial(claim, session_id)
-        else:
-            conn = await stack.enter_async_context(
-                await db.connect(
-                    _dsn(None), statement_timeout_seconds=settings.pg_statement_timeout_seconds
-                )
-            )
-            do_claim = partial(_claim_on, conn, session_id, kinds)
-        polls = 0
-        while max_polls is None or polls < max_polls:
-            for event in await do_claim():
-                yield event
-            polls += 1
-            if max_polls is None or polls < max_polls:
-                await asyncio.sleep(interval)
+    do_claim: Callable[[], Awaitable[list[SessionEvent]]] = (
+        partial(claim, session_id)
+        if claim is not None
+        else partial(claim_unconsumed, session_id, kinds=kinds)
+    )
+    polls = 0
+    while max_polls is None or polls < max_polls:
+        for event in await do_claim():
+            yield event
+        polls += 1
+        if max_polls is None or polls < max_polls:
+            await asyncio.sleep(interval)

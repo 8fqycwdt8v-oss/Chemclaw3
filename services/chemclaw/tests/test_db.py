@@ -100,3 +100,54 @@ def test_connect_wraps_unreachable_db_without_leaking_the_password(
     assert "db.host" in message  # but the admin sees which database failed
     assert "connection refused" in message  # ...and the underlying cause
     assert not isinstance(exc_info.value, ValueError)  # not a ChemclawError → Temporal retries
+
+
+def test_connection_without_a_pool_opens_a_dedicated_connection(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A process that never entered `pooling()` keeps the pre-pool behavior: one connect per call.
+
+    Scripts, migrations and unit tests must not need pool setup to talk to Postgres, so the
+    fallback path is part of the contract rather than an accident.
+    """
+    opened: list[str] = []
+
+    class _Conn:
+        async def __aenter__(self) -> "_Conn":
+            return self
+
+        async def __aexit__(self, *_exc: object) -> None:
+            return None
+
+    async def _fake_connect(dsn: str, **kwargs: object) -> _Conn:
+        opened.append(dsn)
+        return _Conn()
+
+    monkeypatch.setattr(db, "connect", _fake_connect)
+
+    async def _run() -> None:
+        for _ in range(3):
+            async with db.connection("postgresql://h/db"):
+                pass
+
+    asyncio.run(_run())
+    assert opened == ["postgresql://h/db"] * 3
+
+
+def test_pooling_resets_its_state_even_when_the_block_raises() -> None:
+    """`pooling()` must not leave the process believing it still has a pool after a crash.
+
+    A stuck flag would send every later `connection()` at a pool dictionary that has been
+    cleared, so the failure mode of a failed startup would be a permanently broken process
+    rather than a restart.
+    """
+
+    async def _run() -> None:
+        with pytest.raises(RuntimeError):
+            async with db.pooling():
+                assert db._POOLING is True
+                raise RuntimeError("boom")
+
+    asyncio.run(_run())
+    assert db._POOLING is False
+    assert db._POOLS == {}

@@ -36,7 +36,7 @@ from temporalio import activity, workflow
 
 with workflow.unsafe.imports_passed_through():
     from chemclaw.config import settings
-    from chemclaw.db import connect
+    from chemclaw.db import connection
     from workflows.registry import durable_activity, durable_workflow
 
 from workflows.publish import BAD_DATA_RETRY
@@ -74,7 +74,7 @@ async def prune_expired_rows() -> RetentionOutcome:
     disagree about what "expired" means.
     """
     outcome = RetentionOutcome(deleted={}, skipped=[])
-    async with await connect(
+    async with connection(
         settings.postgres_dsn,
         statement_timeout_seconds=settings.pg_statement_timeout_seconds,
     ) as conn:

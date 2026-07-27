@@ -8,6 +8,8 @@ Rule-of-Three extraction: the second fingerprint domain (reactions) made the dup
 real, so the ranking lives in exactly one place (DRY), just like the calculation store.
 """
 
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from typing import Protocol, runtime_checkable
 
 import psycopg
@@ -194,22 +196,24 @@ class PostgresFingerprintStore:
             f"LIMIT %(k)s"
         )
 
-    async def _connect(self) -> psycopg.AsyncConnection[TupleRow]:
-        """Open a connection that fails fast, with a clear message, when unreachable.
+    @asynccontextmanager
+    async def _connection(self) -> AsyncIterator[psycopg.AsyncConnection[TupleRow]]:
+        """Borrow a connection with the configured per-statement timeout.
 
-        Delegates to the shared `chemclaw.db.connect` so a down/misconfigured database
-        reports "Postgres unreachable at <host>" instead of a raw psycopg traceback (DRY
-        with the calculation store). Applies the configured per-statement timeout too, so a
-        slow HNSW similarity scan is cancelled rather than pinning its worker — the same bound
-        every other store carries.
+        Pooled per process when the process opened a pool (`chemclaw.db.pooling`), so a
+        request path pays no TCP+auth handshake; a dedicated connect otherwise. Either way a
+        down or misconfigured database reports "Postgres unreachable at <host>" rather than a
+        raw psycopg traceback, and a hung query is cancelled rather than pinning the enclosing
+        activity for its whole budget.
         """
-        return await db.connect(
+        async with db.connection(
             self._dsn, statement_timeout_seconds=settings.pg_statement_timeout_seconds
-        )
+        ) as conn:
+            yield conn
 
     async def add(self, record: FingerprintRecord) -> None:
         """Insert or replace a fingerprint by id."""
-        async with await self._connect() as conn:
+        async with self._connection() as conn:
             await conn.execute(
                 self._upsert,
                 {
@@ -234,7 +238,7 @@ class PostgresFingerprintStore:
             sql, params = self._all, None
         else:
             sql, params = f'{self._all} ORDER BY id COLLATE "C" LIMIT %(limit)s', {"limit": limit}
-        async with await self._connect() as conn:
+        async with self._connection() as conn:
             async with conn.cursor() as cur:
                 await cur.execute(sql, params)
                 rows = await cur.fetchall()
@@ -242,7 +246,7 @@ class PostgresFingerprintStore:
 
     async def find_similar(self, query_bits: str, top_k: int, threshold: float) -> list[Match]:
         """Return up to `top_k` records with Tanimoto >= `threshold`, most similar first."""
-        async with await self._connect() as conn:
+        async with self._connection() as conn:
             async with conn.cursor() as cur:
                 params = {
                     "q": query_bits,

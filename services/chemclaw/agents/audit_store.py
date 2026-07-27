@@ -58,7 +58,7 @@ class PostgresAuditSink:
 
     async def record(self, event: AuditEvent) -> None:
         """Append one audit event, chained to the current tip under a serializing advisory lock."""
-        async with await db.connect(
+        async with db.connection(
             self._dsn, statement_timeout_seconds=settings.pg_statement_timeout_seconds
         ) as conn:
             # Serialize appenders so two concurrent inserts cannot read the same tip and fork the

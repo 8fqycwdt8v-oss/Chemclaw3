@@ -189,6 +189,36 @@ class StoreSettings(BaseSettings):
     # start-to-close budget. 0 disables it; migrations deliberately connect without a statement
     # timeout (an index build may be slow).
     pg_statement_timeout_seconds: float = Field(default=30.0, ge=0)
+    # Per-process connection pool (`chemclaw.db.pooling`). Connect-per-call was measured at ~2.7
+    # TCP+auth handshakes per chat turn, and the cost lands on the event loop rather than on the
+    # database — a connect that cannot be scheduled inside `pg_connect_timeout_seconds` fails,
+    # which is how a non-fatal correctness guard got silently disarmed under load.
+    #
+    # `min_size` connections are kept warm so the first request after an idle period does not pay
+    # a handshake. `max_size` bounds one process; the deployment total is
+    # `max_size × distinct DSNs × processes` (front-door replicas × `service_uvicorn_workers`,
+    # plus the workers), which must stay under the server's `max_connections`.
+    pg_pool_min_size: int = Field(default=2, ge=0)
+    pg_pool_max_size: int = Field(default=16, gt=0)
+    # Close a connection idle beyond this, so a burst does not pin `max_size` sockets forever.
+    pg_pool_max_idle_seconds: float = Field(default=300.0, gt=0)
+    # How long a caller waits for a free pooled connection before the request fails as a
+    # transient infrastructure fault (a `ConnectionError`, which Temporal retries).
+    pg_pool_timeout_seconds: float = Field(default=10.0, gt=0)
+
+    @model_validator(mode="after")
+    def _pool_bounds_are_orderable(self) -> "StoreSettings":
+        """A pool whose floor exceeds its ceiling cannot be built; say so at startup, not later.
+
+        psycopg_pool raises on construction, which in a worker means a crash on the first query
+        rather than at boot — and the misconfiguration is a single reversed pair of numbers.
+        """
+        if self.pg_pool_min_size > self.pg_pool_max_size:
+            raise ValueError(
+                f"pg_pool_min_size ({self.pg_pool_min_size}) exceeds "
+                f"pg_pool_max_size ({self.pg_pool_max_size})"
+            )
+        return self
 
 
 class HpcSettings(BaseSettings):
@@ -815,6 +845,12 @@ class ServiceSettings(BaseSettings):
     # client needs one stream per open session view; past the cap the request is refused with
     # 429.
     service_max_event_streams_per_user: int = Field(default=5, gt=0)
+    # The same cap across *all* users on this process. The per-user cap alone bounds one client;
+    # it does not bound the pod, so 50 concurrent chemists at the per-user cap is 250 forever-
+    # polling streams on one event loop — each a task and a periodic pooled query. This is the
+    # pod-level ceiling, refused with the same 429. Sized as a generous multiple of the per-user
+    # cap so it only binds in the aggregate case the per-user cap cannot see.
+    service_max_event_streams_total: int = Field(default=200, gt=0)
 
 
 class EntraSettings(BaseSettings):

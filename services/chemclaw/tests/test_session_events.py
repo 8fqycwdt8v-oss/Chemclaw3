@@ -8,12 +8,16 @@ no-double-claim guarantee — is proven against a real database when one is pres
 import asyncio
 from uuid import uuid4
 
+import pytest
+
 from agents.session_events import (
     SessionEvent,
     claim_unconsumed,
     record_session_event,
     stream_new_events,
 )
+from chemclaw import db
+from chemclaw.config import settings
 from tests.pg import migrated_db_or_skip
 
 
@@ -135,32 +139,37 @@ def test_kind_scoped_claim_leaves_other_kinds_unconsumed() -> None:
     asyncio.run(_run())
 
 
-def test_tailer_reuses_one_connection_across_polls(monkeypatch) -> None:  # type: ignore[no-untyped-def]
-    """The default (database) tailer opens one connection for the stream's lifetime.
+def test_tailer_releases_its_connection_between_polls(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A live tailer must not hold a connection while it sleeps between polls.
 
-    Per-poll connects would churn a fresh Postgres connection every interval for every stream,
-    an exhaustion vector on the shared session store.
+    It used to, deliberately: without a pool, per-poll connecting meant a fresh handshake per
+    stream per interval. With a pool the trade inverts — `service_max_event_streams_per_user` is
+    5, so 50 chemists is 250 streams, and 250 connections pinned for the lifetime of open browser
+    tabs would starve the turns that actually need them.
+
+    Proven by starving the pool down to a single connection: the tailer is running, and a
+    concurrent writer must still be able to borrow it. Holding across polls makes this raise
+    `ConnectionError` on the pool timeout.
     """
-    from chemclaw import db
-
-    connects: list[str] = []
-    real_connect = db.connect
-
-    async def _counting_connect(dsn: str, **kwargs: object) -> object:
-        connects.append(dsn)
-        return await real_connect(dsn, **kwargs)  # type: ignore[arg-type]
+    monkeypatch.setattr(settings, "pg_pool_min_size", 1)
+    monkeypatch.setattr(settings, "pg_pool_max_size", 1)
+    monkeypatch.setattr(settings, "pg_pool_timeout_seconds", 2.0)
 
     async def _run() -> None:
         await migrated_db_or_skip()
-        session_id = "sess-f3t2-connection-reuse"
-        await claim_unconsumed(session_id)  # start clean
-        for i in range(3):
-            await record_session_event(session_id, "job_completed", {"job_id": f"j-{i}"})
+        session_id = f"sess-f3t2-release-{uuid4()}"
+        async with db.pooling():
+            seen: list[SessionEvent] = []
 
-        monkeypatch.setattr(db, "connect", _counting_connect)
-        seen = [event async for event in stream_new_events(session_id, poll_seconds=0, max_polls=3)]
-        assert len(seen) == 3
-        assert len(connects) == 1  # one connection for the whole 3-poll stream
+            async def _tail() -> None:
+                async for event in stream_new_events(session_id, poll_seconds=0.05, max_polls=40):
+                    seen.append(event)
+
+            task = asyncio.create_task(_tail())
+            await asyncio.sleep(0.15)  # the tailer has polled at least once and is now sleeping
+            await record_session_event(session_id, "job_completed", {"job_id": "j-1"})
+            await task
+        assert [event.payload["job_id"] for event in seen] == ["j-1"]
 
     asyncio.run(_run())
 

@@ -48,6 +48,7 @@ from agents.interaction_tools import (
 from agents.profile_discovery import load_profiles
 from agents.profiles import get_profile
 from agents.session_events import stream_new_events
+from chemclaw import db
 from chemclaw.config import settings
 from connectors.health import check_connectors_at_startup, probe_connectors
 from scripts.schedules import ScheduleHealth, describe_schedules
@@ -233,24 +234,30 @@ class ApprovalStatusOut(BaseModel):
 
 @asynccontextmanager
 async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
-    """Probe the enabled connectors once before serving, so an operator learns it here, not later.
+    """Open this process's Postgres pool, then probe the connectors once before serving.
 
-    The probe's *result* only informs (readiness reports it, a gauge counts it) — a missing
-    connector costs capability, not correctness, so the default is to serve anyway.
+    The pool belongs here because it belongs to one process and one event loop, and because
+    everything below `chemclaw.db.connection` inherits it with no plumbing: the session store,
+    the ownership registry, the push-back tailer and the rollback watermark all stop paying a
+    TCP+auth handshake per call. That churn — measured at ~2.7 connects per turn — was what made
+    a connect fail to be scheduled inside its timeout under load, which silently disarmed the
+    non-fatal rollback-watermark guard (D-107).
+
+    The connector probe's *result* only informs (readiness reports it, a gauge counts it) — a
+    missing connector costs capability, not correctness, so the default is to serve anyway.
     `connectors_required` is the opt-in inversion: it raises here, which fails startup, for a
-    deployment where answering
-    with a
-    silently reduced tool surface is worse than not answering. That check belongs at startup
-    rather than in the readiness route because refusing to *start* is the only way to keep a pod
-    with degraded capability out of a rollout.
+    deployment where answering with a silently reduced tool surface is worse than not answering.
+    That check belongs at startup rather than in the readiness route because refusing to *start*
+    is the only way to keep a pod with degraded capability out of a rollout.
     """
     # Register the file-authored profiles before any agent is built, so a session can name one
     # on its first request. Failing here is the right outcome for a malformed profile: it is a
     # deployment configuration error, and a front door that started anyway would 400 every
     # request naming that profile with no hint as to why.
     load_profiles()
-    app.state.connector_health = await check_connectors_at_startup()
-    yield
+    async with db.pooling():
+        app.state.connector_health = await check_connectors_at_startup()
+        yield
 
 
 def _default_agent_factory(profile: str | None) -> Any:
@@ -653,15 +660,20 @@ def create_app(
     ) -> EventSourceResponse:
         """Stream async job push-back for the session (F3-T3): a finished job wakes the chat.
 
-        Bounded per user (`service_max_event_streams_per_user`): each stream polls the database
-        for its whole lifetime, so unbounded streams are a connection-exhaustion vector (429 past
-        the cap). The claim is scoped to `job_completed` in the SQL itself — the claim is
+        Bounded twice, because one bound does not imply the other: per user
+        (`service_max_event_streams_per_user`) so no single client can fan out, and across all
+        users on this process (`service_max_event_streams_total`) because 50 chemists each within
+        their per-user cap is still 250 forever-polling tasks on one event loop. Each stream
+        polls the database for its whole lifetime, so unbounded streams are a load vector (429
+        past either cap). The claim is scoped to `job_completed` in the SQL itself — the claim is
         destructive (at-most-once), so filtering after it would silently destroy events of any
         other kind meant for another consumer.
         """
         await _resolve_session(session_id, principal)
         streams: dict[str, int] = app.state.event_streams
-        if streams.get(principal.oid, 0) >= settings.service_max_event_streams_per_user:
+        at_user_cap = streams.get(principal.oid, 0) >= settings.service_max_event_streams_per_user
+        at_pod_cap = sum(streams.values()) >= settings.service_max_event_streams_total
+        if at_user_cap or at_pod_cap:
             METRICS.increment("chemclaw_event_streams_rejected_total")
             raise HTTPException(
                 status_code=429, detail="too many concurrent event streams; close one and retry"

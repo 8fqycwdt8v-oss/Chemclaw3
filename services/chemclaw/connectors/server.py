@@ -28,6 +28,7 @@ from starlette.requests import Request
 from starlette.responses import Response
 from starlette.types import ASGIApp
 
+from chemclaw import db
 from connectors.identity import HEADER_ACTOR, HEADER_DRY_RUN, HEADER_SESSION
 
 logger = logging.getLogger(__name__)
@@ -77,8 +78,15 @@ def connector_app(server: FastMCP, *, name: str) -> FastAPI:
 
     @asynccontextmanager
     async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
-        """Run the MCP session manager for the app's lifetime (the sub-app's own lifespan)."""
-        async with server.session_manager.run():
+        """Run the MCP session manager, and pool Postgres, for the app's lifetime.
+
+        The session manager is the sub-app's own lifespan, which mounting does not run.
+        `db.pooling` is here for the same reason it is in the front door's lifespan: a
+        connector that touches a store (`calc` reads and writes the calculation cache) otherwise
+        opens a connection per tool call, and the handshake lands on the same event loop that
+        serves every other request on this process.
+        """
+        async with db.pooling(), server.session_manager.run():
             yield
 
     app = FastAPI(title=f"chemclaw-connector-{name}", lifespan=lifespan)

@@ -14,9 +14,13 @@ it, which is the entire point of it being standing.
 """
 
 import logging
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from datetime import datetime
 from typing import Any
 
+import psycopg
+from psycopg.rows import TupleRow
 from pydantic import BaseModel
 
 from agents.authz import require_actor
@@ -50,16 +54,25 @@ class Subscription(BaseModel):
     last_seen_at: datetime | None = None
 
 
-async def _connect() -> Any:
-    """Open a fast-failing connection with the configured per-statement timeout."""
-    return await db.connect(
+@asynccontextmanager
+async def _connection() -> AsyncIterator[psycopg.AsyncConnection[TupleRow]]:
+    """Borrow a connection with the configured per-statement timeout.
+
+    Pooled per process when the process opened a pool (`chemclaw.db.pooling`), so a
+    request path pays no TCP+auth handshake; a dedicated connect otherwise. Either way a
+    down or misconfigured database reports "Postgres unreachable at <host>" rather than a
+    raw psycopg traceback, and a hung query is cancelled rather than pinning the enclosing
+    activity for its whole budget.
+    """
+    async with db.connection(
         settings.postgres_dsn, statement_timeout_seconds=settings.pg_statement_timeout_seconds
-    )
+    ) as conn:
+        yield conn
 
 
 async def add(owner: str, query: str, note_type: str | None) -> None:
     """Save a standing query for `owner`. Idempotent — asking twice does not double-notify."""
-    async with await _connect() as conn:
+    async with _connection() as conn:
         async with conn.cursor() as cur:
             await cur.execute(_INSERT, (owner, query, note_type))
         await conn.commit()
@@ -77,7 +90,7 @@ async def all_subscriptions() -> list[Subscription]:
 
 async def _fetch(sql: str, params: tuple[Any, ...]) -> list[Subscription]:
     """Run a subscription query and map the rows."""
-    async with await _connect() as conn:
+    async with _connection() as conn:
         async with conn.cursor() as cur:
             await cur.execute(sql, params)
             rows = await cur.fetchall()
@@ -89,7 +102,7 @@ async def _fetch(sql: str, params: tuple[Any, ...]) -> list[Subscription]:
 
 async def remove(owner: str, query: str) -> None:
     """Drop a standing query — a subscription nobody can cancel becomes spam."""
-    async with await _connect() as conn:
+    async with _connection() as conn:
         async with conn.cursor() as cur:
             await cur.execute(_DELETE, (owner, query))
         await conn.commit()
@@ -102,7 +115,7 @@ async def mark_reported(subscription_id: int) -> None:
     silently skip, because a duplicate digest line is a nuisance and a missed one defeats the
     feature.
     """
-    async with await _connect() as conn:
+    async with _connection() as conn:
         async with conn.cursor() as cur:
             await cur.execute(_TOUCH, (subscription_id,))
         await conn.commit()

@@ -15,12 +15,14 @@ never interprets message shape — a MAF change is a value change, not a schema 
 """
 
 import logging
-from collections.abc import Sequence
+from collections.abc import AsyncIterator, Sequence
+from contextlib import asynccontextmanager
 from datetime import datetime
 from typing import Any, ClassVar
 
 import psycopg
 from agent_framework import HistoryProvider, Message
+from psycopg.rows import TupleRow
 from psycopg.types.json import Jsonb
 
 from agents.message_pairing import strip_call_ids, unmatched_call_ids
@@ -69,11 +71,20 @@ class PostgresHistoryProvider(HistoryProvider):
         super().__init__(source_id=source_id or self.DEFAULT_SOURCE_ID)
         self._dsn = dsn or settings.session_store_dsn or settings.postgres_dsn
 
-    async def _connect(self) -> psycopg.AsyncConnection[Any]:
-        """Open a fast-failing connection with the configured per-statement timeout."""
-        return await db.connect(
+    @asynccontextmanager
+    async def _connection(self) -> AsyncIterator[psycopg.AsyncConnection[TupleRow]]:
+        """Borrow a connection with the configured per-statement timeout.
+
+        Pooled per process when the process opened a pool (`chemclaw.db.pooling`), so a
+        request path pays no TCP+auth handshake; a dedicated connect otherwise. Either way a
+        down or misconfigured database reports "Postgres unreachable at <host>" rather than a
+        raw psycopg traceback, and a hung query is cancelled rather than pinning the enclosing
+        activity for its whole budget.
+        """
+        async with db.connection(
             self._dsn, statement_timeout_seconds=settings.pg_statement_timeout_seconds
-        )
+        ) as conn:
+            yield conn
 
     async def get_messages(
         self, session_id: str | None, *, state: dict[str, Any] | None = None, **kwargs: Any
@@ -88,7 +99,7 @@ class PostgresHistoryProvider(HistoryProvider):
         """
         if not session_id:
             return []
-        async with await self._connect() as conn:
+        async with self._connection() as conn:
             async with conn.cursor() as cur:
                 await cur.execute(_SELECT_WITH_ID, (session_id,))
                 rows = await cur.fetchall()
@@ -122,7 +133,7 @@ class PostgresHistoryProvider(HistoryProvider):
         racing on the same broken session converge on the same rows.
         """
         try:
-            async with await self._connect() as conn:
+            async with self._connection() as conn:
                 async with conn.cursor() as cur:
                     if deletions:
                         await cur.execute(_DELETE_IDS, (session_id, deletions))
@@ -148,7 +159,7 @@ class PostgresHistoryProvider(HistoryProvider):
 
         The pre-turn watermark for `rollback_to`.
         """
-        async with await self._connect() as conn:
+        async with self._connection() as conn:
             async with conn.cursor() as cur:
                 await cur.execute(_MAX_ID, (session_id,))
                 row = await cur.fetchone()
@@ -162,7 +173,7 @@ class PostgresHistoryProvider(HistoryProvider):
         are already committed, so a half-written turn survived the rollback that was supposed to
         discard it.
         """
-        async with await self._connect() as conn:
+        async with self._connection() as conn:
             async with conn.cursor() as cur:
                 await cur.execute(_DELETE_AFTER, (session_id, watermark or 0))
                 deleted = cur.rowcount
@@ -181,7 +192,7 @@ class PostgresHistoryProvider(HistoryProvider):
         if not session_id or not messages:
             return
         rows = [(session_id, Jsonb(message.to_dict())) for message in messages]
-        async with await self._connect() as conn:
+        async with self._connection() as conn:
             async with conn.cursor() as cur:
                 await cur.executemany(_INSERT, rows)
             await conn.commit()
@@ -206,15 +217,24 @@ class SessionOwnerStore:
         """Bind to the session-store database (falling back to the shared `postgres_dsn`)."""
         self._dsn = dsn or settings.session_store_dsn or settings.postgres_dsn
 
-    async def _connect(self) -> psycopg.AsyncConnection[Any]:
-        """Open a fast-failing connection with the configured per-statement timeout."""
-        return await db.connect(
+    @asynccontextmanager
+    async def _connection(self) -> AsyncIterator[psycopg.AsyncConnection[TupleRow]]:
+        """Borrow a connection with the configured per-statement timeout.
+
+        Pooled per process when the process opened a pool (`chemclaw.db.pooling`), so a
+        request path pays no TCP+auth handshake; a dedicated connect otherwise. Either way a
+        down or misconfigured database reports "Postgres unreachable at <host>" rather than a
+        raw psycopg traceback, and a hung query is cancelled rather than pinning the enclosing
+        activity for its whole budget.
+        """
+        async with db.connection(
             self._dsn, statement_timeout_seconds=settings.pg_statement_timeout_seconds
-        )
+        ) as conn:
+            yield conn
 
     async def record(self, session_id: str, owner: str | None) -> None:
         """Record a session's owner at creation (idempotent — the first writer wins)."""
-        async with await self._connect() as conn:
+        async with self._connection() as conn:
             async with conn.cursor() as cur:
                 await cur.execute(_OWNER_INSERT, (session_id, owner))
             await conn.commit()
@@ -225,7 +245,7 @@ class SessionOwnerStore:
         The `found` flag distinguishes an unknown session from a known one owned by the shared
         principal (a real `NULL` owner), which a bare `str | None` return could not.
         """
-        async with await self._connect() as conn:
+        async with self._connection() as conn:
             async with conn.cursor() as cur:
                 await cur.execute(_OWNER_SELECT, (session_id,))
                 row = await cur.fetchone()
@@ -238,7 +258,7 @@ class SessionOwnerStore:
         listing reads it directly rather than adding a second registry that could disagree with the
         one `_resolve_session` authorizes against.
         """
-        async with await self._connect() as conn:
+        async with self._connection() as conn:
             async with conn.cursor() as cur:
                 await cur.execute(_OWNER_LIST, (owner, settings.service_max_listed_sessions))
                 rows = await cur.fetchall()

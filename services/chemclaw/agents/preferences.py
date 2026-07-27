@@ -16,8 +16,11 @@ so dev and tests need no infrastructure and a preference is never a hard depende
 """
 
 import logging
-from typing import Any
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 
+import psycopg
+from psycopg.rows import TupleRow
 from pydantic import BaseModel
 
 from agents.authz import require_actor
@@ -51,11 +54,20 @@ class PreferenceStore:
         self._dsn = dsn or settings.session_store_dsn or settings.postgres_dsn
         self._memory: dict[tuple[str, str], str] = {}
 
-    async def _connect(self) -> Any:
-        """Open a fast-failing connection with the configured per-statement timeout."""
-        return await db.connect(
+    @asynccontextmanager
+    async def _connection(self) -> AsyncIterator[psycopg.AsyncConnection[TupleRow]]:
+        """Borrow a connection with the configured per-statement timeout.
+
+        Pooled per process when the process opened a pool (`chemclaw.db.pooling`), so a
+        request path pays no TCP+auth handshake; a dedicated connect otherwise. Either way a
+        down or misconfigured database reports "Postgres unreachable at <host>" rather than a
+        raw psycopg traceback, and a hung query is cancelled rather than pinning the enclosing
+        activity for its whole budget.
+        """
+        async with db.connection(
             self._dsn, statement_timeout_seconds=settings.pg_statement_timeout_seconds
-        )
+        ) as conn:
+            yield conn
 
     async def remember(self, owner: str, key: str, value: str) -> None:
         """Set (or replace) one preference for `owner`. Idempotent by (owner, key)."""
@@ -63,7 +75,7 @@ class PreferenceStore:
         if settings.session_store != "postgres":
             return
         try:
-            async with await self._connect() as conn:
+            async with self._connection() as conn:
                 async with conn.cursor() as cur:
                     await cur.execute(_UPSERT, (owner, key, value))
                 await conn.commit()
@@ -76,7 +88,7 @@ class PreferenceStore:
         """Every preference `owner` has set, key-sorted (stable for the model to read)."""
         if settings.session_store == "postgres":
             try:
-                async with await self._connect() as conn:
+                async with self._connection() as conn:
                     async with conn.cursor() as cur:
                         await cur.execute(_SELECT, (owner,))
                         rows = await cur.fetchall()
@@ -95,7 +107,7 @@ class PreferenceStore:
         if settings.session_store != "postgres":
             return
         try:
-            async with await self._connect() as conn:
+            async with self._connection() as conn:
                 async with conn.cursor() as cur:
                     await cur.execute(_DELETE, (owner, key))
                 await conn.commit()

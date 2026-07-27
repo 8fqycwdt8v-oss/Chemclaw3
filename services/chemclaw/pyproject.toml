@@ -23,6 +23,7 @@ dependencies = [
     "networkx>=3.6.1",
     "numpy>=2.0",
     "pandas>=2.2",
+    "psycopg-pool>=3.2",
     "psycopg[binary]>=3.2",
     "pydantic-settings>=2.5",
     "pyjwt[crypto]>=2.8",
