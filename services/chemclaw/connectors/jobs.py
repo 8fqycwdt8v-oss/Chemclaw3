@@ -314,11 +314,16 @@ async def _await_briefly(handle: Any, budget: float) -> ConnectorJobResult | Non
     abandoned mid-wait leaves a durable run that still completes, still caches its result and
     still pushes back to the session. That is the property that makes this safe to do inside a
     conversation at all.
+
+    The result is *validated*, not cast: the envelope is the connector contract, and a
+    bundle-authored workflow returning some other shape should fail here by name rather than hand
+    the model an unlabelled dict to interpret.
     """
     try:
-        return cast(ConnectorJobResult, await asyncio.wait_for(handle.result(), budget))
+        finished = await asyncio.wait_for(handle.result(), budget)
     except TimeoutError:
         return None
+    return ConnectorJobResult.model_validate(finished)
 
 
 def _detail(connector: str, payload: dict[str, Any]) -> str:

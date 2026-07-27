@@ -176,10 +176,24 @@ startup instead. Verify a bundle standalone with `uvicorn connectors.<name>.serv
 **What ships today.** Six bundles: `molfp` and `rxnfp` (fingerprint search), `safety` (the hazard
 screen), `chem` (bench chemistry over RDKit), `calc` (the fast calculators and the calibration
 ledger), and `bo` (Bayesian optimization — the one that also owns durable work, so it runs a second
-Deployment for its own Temporal worker; set `worker: true` on a bundle in the chart to get one). A few tools remain in-process by design, not by omission: the conversation plumbing that
-reads or writes the turn's own state (`ask_clarifying_question`, attachments, preferences, watches),
-the durable-job launchers, and the two PR-gate writers, which are the GxP boundary. Those are a
-`@tool` in `agents/` and nothing else.
+Deployment for its own Temporal worker; set `worker: true` on a bundle in the chart to get one). 
+**What stays in core is a rule, not an omission** (D-114), and `tests/test_tool_registry.py` pins the
+set so adding to it is a reviewed edit:
+
+- **Conversation plumbing** — anything reading or writing the turn's own state
+  (`ask_clarifying_question`, attachments, preferences, watches). Another process does not have the
+  turn.
+- **The two PR-gate writers** (`propose_knowledge_note`, `record_confirmed_answer`) — the GxP
+  boundary. A connector reaches the gate only by returning a note in a job envelope, for core to
+  publish.
+- **The knowledge-graph reads** (`find_notes`, `expand_note`, `find_knowledge_gaps`, and the
+  `gather_evidence` sweep over them). The graph is core's *data layer*, not a capability: thirteen
+  core modules import `kg`, so a bundle would move three thin tools and leave every one of those
+  imports behind — a zero dependency win and a second read path to one note tree. Re-indexing stays
+  in core with it.
+- **`submit_qm_job`** and the report — the first needs the HPC identity bridge, the second's closure
+  (retrievers, embedding index) is what core keeps for `gather_evidence` anyway. Both still return
+  results the generic status tools read.
 
 ## (iv-b) Add a specialized agent (a **profile**)
 

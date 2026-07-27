@@ -28,6 +28,7 @@ with workflow.unsafe.imports_passed_through():
         report_note,
     )
     from report.retrievers import FingerprintReactionRetriever, GraphRetriever
+    from workflows.connector_job import ConnectorJobResult
     from workflows.registry import durable_activity, durable_workflow
 
 from workflows.orchestrator import fan_out
@@ -92,13 +93,26 @@ class DevelopmentReportWorkflow:
     """Draft a report durably, fanning sections out to child workflows, then PR-gate the draft."""
 
     @workflow.run
-    async def run(self, request: ReportRequest) -> str:
+    async def run(self, request: ReportRequest) -> ConnectorJobResult:
         """Fan each section out to a child workflow, then propose the assembled draft note.
 
         Sections are retrieved as independent child workflows (bounded parallelism). Each child owns
         its own retry (the activity's `BAD_DATA_RETRY`) and degrades a failed section to a visible
         `retrieval_failed` marker, so every requested section appears in the draft in request order:
         a failure is shown, never silently missing (F10-D2). No child-level retry is layered here.
+
+        **It returns the connector envelope, though it is not a connector's workflow** (D-114). The
+        envelope is what `get_durable_job_status` reads, so a bare note-ref string made the report
+        the one durable job a chemist could poll to `completed` and then have no tool that hands
+        over the answer. Adopting the shape closes that, and it is the whole benefit the report
+        would have got from moving into a bundle — the isolation half buys nothing, because its
+        closure (the graph, the retrievers, the fingerprint store) is what core keeps for
+        `gather_evidence` regardless.
+
+        It still publishes its own note rather than returning one for core to gate, and that is
+        correct here for the reason it would be wrong in a bundle: the note *reference* is this
+        workflow's result, so publishing is the work, not a side effect — and this is core's own
+        workflow, on the side of the boundary the PR-gate lives on.
         """
         sections = await fan_out(
             ReportSectionWorkflow,
@@ -108,4 +122,11 @@ class DevelopmentReportWorkflow:
         report = Report(title=request.title, sections=sections)
         # The note reference *is* this workflow's result, so the publish is not
         # best-effort — but it shares the bounded-attempts discipline (G4).
-        return await publish_note(propose_report, [report])
+        note_ref = await publish_note(propose_report, [report])
+        return ConnectorJobResult(
+            summary=(
+                f"Drafted {request.title!r} with {len(sections)} section(s); "
+                f"opened for review as {note_ref}."
+            ),
+            data={"note_ref": note_ref, "title": request.title, "sections": len(sections)},
+        )

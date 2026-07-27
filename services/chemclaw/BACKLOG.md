@@ -131,10 +131,16 @@ templates — D-109/D-110/D-111/D-112). Stage C is partly done: `molfp`, `rxnfp`
 `calc` and `bo` have moved. What remains is staged in `docs/connector-plan.md` §9, with the trigger
 for each recorded here rather than left implicit.
 
-- [ ] **Stage C, remainder — the `kg` bundle** — [M]. The deepest coupling: it needs the knowledge
-      tree and the vector index, so the open question is whether the bundle also owns re-indexing.
-      Everything else in Stage C has landed. *Trigger: an answer to the re-indexing question — the
-      mechanical part is now well-trodden (D-110/D-111).*
+- [x] ~~**Stage C, remainder — the `kg` bundle**~~ — **WON'T BUILD**, and the reason is also the
+      answer to the open question (D-114). The graph is not a peripheral capability; it is core's
+      own data layer. Thirteen core modules import `kg` — the PR-gate, all six memory layers, the
+      report retrievers, the eval verifier, the note index — so a bundle would move three thin read
+      tools and leave every one of those imports where it is: the dependency win is **zero**, and
+      the cost is a second read path to one note tree. Re-indexing stays in core for the same
+      reason, on the background queue, triggered by a merge into the repo core owns. The rule is
+      written down where the next author will read it (`connectors/manifest.py`, runbook §(iv)), so
+      "why isn't `find_notes` behind a connector?" has an answer in place rather than being
+      re-litigated.
 - [ ] **Stage C, remainder — the `report` job** — [S]. The last bespoke durable adapter that can
       move; it follows `bo`'s shape once its workflow returns the `ConnectorJobResult` envelope
       directly instead of being wrapped a third time. *Trigger: now; mechanical after D-111/D-113.*

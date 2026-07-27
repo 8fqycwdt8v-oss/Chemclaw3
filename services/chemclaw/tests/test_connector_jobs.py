@@ -277,3 +277,142 @@ def test_the_run_is_attributed_to_the_turns_actor(client: _FakeClient) -> None:
         reset_current_identity(identity)
     payload: ConnectorJobInput = client.calls[0]["input"]
     assert payload.requested_by == "user-7"
+
+
+# --- inline_wait_seconds: one tool for the fast and the slow case (D-113) ----------------
+
+
+_INLINE_SPEC = JobSpec.model_validate(
+    {
+        **_SPEC.model_dump(exclude_none=True),
+        "name": "compute_something",
+        "inline_wait_seconds": 5,
+    }
+)
+
+
+class _ResultHandle(_FakeHandle):
+    """A handle whose `result()` resolves, hangs, or raises — the three outcomes of the wait."""
+
+    def __init__(self, workflow_id: str, outcome: Any) -> None:
+        super().__init__(workflow_id)
+        self.outcome = outcome
+
+    async def result(self) -> Any:
+        """Resolve to the envelope, raise the scripted failure, or never finish."""
+        if isinstance(self.outcome, BaseException):
+            raise self.outcome
+        if self.outcome is None:
+            await asyncio.Event().wait()  # still running when the budget expires
+        return self.outcome
+
+
+class _ResultClient(_FakeClient):
+    """A client whose started (or existing) workflow has a scripted `result()`."""
+
+    def __init__(self, outcome: Any, error: Exception | None = None) -> None:
+        super().__init__(error)
+        self.outcome = outcome
+        self.rejoined: list[str] = []
+
+    async def start_workflow(self, _run: Any, arg: Any, **kwargs: Any) -> _ResultHandle:
+        """Record the launch, then behave as `_FakeClient` does but with a result-bearing handle."""
+        self.calls.append({"input": arg, **kwargs})
+        if self.error is not None:
+            raise self.error
+        return _ResultHandle(str(kwargs["id"]), self.outcome)
+
+    def get_workflow_handle(self, workflow_id: str, **_kwargs: Any) -> _ResultHandle:
+        """The rejoin path a duplicate submit takes (sync in the real client too)."""
+        self.rejoined.append(workflow_id)
+        return _ResultHandle(workflow_id, self.outcome)
+
+
+def _install(monkeypatch: pytest.MonkeyPatch, client: _ResultClient) -> _ResultClient:
+    """Put `client` behind the tool's `connect()` seam."""
+
+    async def _connect() -> _ResultClient:
+        return client
+
+    monkeypatch.setattr("connectors.jobs.connect", _connect)
+    return client
+
+
+_ENVELOPE = {"summary": "Computed it.", "data": {"value": 1.5}}
+
+
+def test_a_quick_job_returns_its_result_inside_the_turn(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The point of the whole mechanism: fast work is an answer, not a job id to poll.
+
+    Before this, a tool decided by *predicting* its cost, which is what kept the chemistry cost
+    model — and so the capability's dependency closure — inside the agent's process.
+    """
+    fake = _install(monkeypatch, _ResultClient(_ENVELOPE))
+    tool = build_job_tool("calc", _INLINE_SPEC)
+    result = asyncio.run(tool(_params(tool, smiles="CCO")))
+    assert result.summary == "Computed it."
+    assert result.data == {"value": 1.5}
+    assert len(fake.calls) == 1  # it really did start a durable run
+
+
+def test_a_slow_job_falls_back_to_a_job_id_and_announces_it(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Past the budget the tool hands back an id — and only then is the job announced.
+
+    The announcement is the tell that the two paths are genuinely different: a run that answered
+    inside the turn has no background work for the surface to show as pending.
+    """
+    fake = _install(monkeypatch, _ResultClient(None))  # never finishes
+    spec = JobSpec.model_validate(
+        {**_INLINE_SPEC.model_dump(exclude_none=True), "inline_wait_seconds": 0.05}
+    )
+    tool = build_job_tool("calc", spec)
+    token = begin_turn()
+    try:
+        result = asyncio.run(tool(_params(tool, smiles="CCO")))
+        signals = [signal for signal in drain() if isinstance(signal, JobSignal)]
+    finally:
+        end_turn(token)
+    assert result == fake.calls[0]["id"]
+    assert [s.job_id for s in signals] == [fake.calls[0]["id"]]
+
+
+def test_a_failed_job_raises_rather_than_degrading_to_a_job_id(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The distinction that matters: "not finished" is a job id, "failed" is an error.
+
+    Swallowing the failure would hand back an id for a run that is already dead, and the chemist
+    would poll a corpse.
+    """
+    _install(monkeypatch, _ResultClient(RuntimeError("the SCF diverged")))
+    tool = build_job_tool("calc", _INLINE_SPEC)
+    with pytest.raises(RuntimeError, match="SCF diverged"):
+        asyncio.run(tool(_params(tool, smiles="CCO")))
+
+
+def test_re_asking_a_finished_job_returns_its_result_not_its_id(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A repeat of a cheap calculation should feel like a cache hit, which is what it is.
+
+    The idempotent id means the second ask hits `WorkflowAlreadyStartedError`; rejoining the
+    finished run is what turns that into an answer rather than a poll.
+    """
+    from temporalio.exceptions import WorkflowAlreadyStartedError
+
+    already = WorkflowAlreadyStartedError("exists", "CalculationWorkflow", run_id=None)
+    fake = _install(monkeypatch, _ResultClient(_ENVELOPE, error=already))
+    tool = build_job_tool("calc", _INLINE_SPEC)
+    result = asyncio.run(tool(_params(tool, smiles="CCO")))
+    assert result.summary == "Computed it."
+    assert fake.rejoined == [job_workflow_id("calc", "compute_something", {"smiles": "CCO"})]
+
+
+def test_a_job_without_the_budget_still_returns_only_an_id(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Opting out is the default: no `inline_wait_seconds` means no wait and no behaviour change."""
+    fake = _install(monkeypatch, _ResultClient(_ENVELOPE))
+    tool = build_job_tool("calc", _SPEC)  # the spec without the budget
+    result = asyncio.run(tool(_params(tool, smiles="CCO")))
+    assert result == fake.calls[0]["id"]

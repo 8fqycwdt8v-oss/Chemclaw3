@@ -12,6 +12,23 @@ validated by pydantic with `extra="forbid"`, so a misspelled key fails `make con
 in CI instead of silently vanishing — the same fail-fast stance `SkillManifest` takes for
 `SKILL.md` frontmatter and the config models take for env values.
 
+**What does *not* become a connector, and why the line is here.** A connector holds *capability* —
+work whose dependencies and CPU are its own business and whose result is a value. Three kinds of
+tool stay in core by rule, and each is a rule rather than a backlog item:
+
+1. **Conversation plumbing** — anything that reads or writes the *turn's* own state (attachments,
+   preferences, watches, clarifying questions). Another process does not have the turn.
+2. **The PR-gate writers** (`propose_knowledge_note`, `record_confirmed_answer`). The gate is the
+   GxP boundary; a connector reaches it only by returning a `Note` in a job envelope, which is a
+   proposal core decides to publish. That asymmetry is the point.
+3. **Core's own data layer — the knowledge graph.** This one is worth stating because it looks like
+   a capability and is not (D-114). Thirteen core modules import `kg`: the PR-gate, all six memory
+   layers, the report retrievers, the eval verifier, the note index. Moving `find_notes`,
+   `expand_note` and `find_knowledge_gaps` to a bundle would leave every one of those imports in
+   core — a zero dependency win — and add a second read path to one note tree. A capability earns a
+   bundle by taking a dependency closure *with* it; the graph cannot, because core is its main
+   consumer, not the conversation.
+
 Two shapes vary by kind and are therefore discriminated unions (the house rule in
 `chemclaw/config.py`'s docstring, already used for `McpServerSpec`/`DataSourceSpec`): the
 transport a connector is reached over, and how we authenticate to it. Adding a transport or an

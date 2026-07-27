@@ -72,9 +72,10 @@ server*, and two concurrent turns proven to keep their own identity.
 - [x] `calc` — the calculators + the calibration ledger, with `calculation-selection` in the bundle
       (takes `tblite` and the calculation store's driver out)
 - [x] Helm: an entry per bundle; Deployment/Service/NetworkPolicy already generalized in Stage A
-- [ ] `kg` — `find_notes`, `expand_note`, `find_knowledge_gaps`, `gather_evidence`. The deepest
-      coupling: it needs the knowledge tree and the vector index, so decide first whether it also
-      owns re-indexing (`NoteReindexWorkflow` moves with it or does not).
+- [~] `kg` — **won't build** (D-114). Thirteen core modules import `kg`, so moving the three read
+      tools out leaves every one of those imports where it is: zero dependency win, plus a second
+      read path to one note tree. Re-indexing stays in core with it. The rule is written into
+      `connectors/manifest.py` and the runbook rather than left as folklore.
 - [x] `bo` — the reference connector-owned durable capability (D-111): its workflow, activities and
       worker live in the bundle on `connector-bo`, `start_optimization_campaign` is a manifest
       `jobs:` entry, and the bespoke adapter is deleted. Core serves no BO workflow. The move needed
@@ -83,7 +84,15 @@ server*, and two concurrent turns proven to keep their own identity.
       *publish* moved to core, so a connector structurally cannot reach the PR-gate.
       Added `JobSpec.precondition` so the round-ceiling guard survived the migration (every other
       placement re-runs at replay against current config).
-- [ ] `qm`/`report` job manifests, once their workflows move and return the envelope directly
+- [x] `calc`'s expensive half — the five orphaned hybrid tools became `jobs:` entries over
+      `CalcJobWorkflow` on `connector-calc` with `inline_wait_seconds`, so one tool still serves the
+      two-second and the twenty-minute case (D-113). This is what finally took `tblite`, RDKit,
+      SciPy and the `xtb`/`crest` binaries out of the chat image.
+- [~] `report` — **envelope, not a bundle** (D-114). Its closure is what core keeps for
+      `gather_evidence` regardless, so isolation buys nothing; but returning `ConnectorJobResult`
+      closed the hole where `get_durable_job_status` could report `completed` with nothing to hand
+      back. Stays on core's worker.
+- [~] `qm` — stays in core: it needs the HPC identity bridge, which is core's, not a capability's.
 
 ## Stage D — agentic workflow configuration — DONE
 
@@ -147,6 +156,53 @@ Built at the user's explicit request, ahead of its recorded trigger (see the rev
       unmodified `main`; the initial gradient was already computed and discarded.
 - [ ] `kg` — the last bundle. Still needs the re-indexing decision.
 - [ ] The `report` job — moves once its workflow returns the envelope directly.
+
+## Review — reconciliation with `main`, and the two open Stage C points closed
+
+`make lint type test` green: **1172 passed, 57 skipped**, every validator passing
+(`connector-`, `template-`, `skill-`, `prose-`). ADRs D-113 (the merge + the calculators) and
+D-114 (the two open points).
+
+**The merge was two convergent designs, not a conflict.** `main`'s X8 had independently moved seven
+calculators out of the agent's process behind an MCP server, for the same reason the connector seam
+exists — via `settings.mcp_servers`, the mechanism this branch removed. Resolution: `mcp_servers/calc`
+deleted, its tools re-homed in `connectors/calc/`, taking `main`'s bodies wherever they were newer
+(its `predict_pka` carries X11's base support; keeping the bundle's copy would have silently reverted
+a real capability). ADR numbers collided too — mine renumbered D-092…D-095 → D-109…D-112.
+
+**Adopted from `main` rather than merged around:** `workflows/registry.py` (D-099). A workflow
+declaring its own queue at its definition site fixes exactly the failure my new workflows were
+exposed to — written, tested, imported, absent from the worker's list, and therefore never run.
+
+**The defect the merge produced, and the validator that caught it.** Five tools
+(`compute_reaction_energy`, `compare_solvents`, `scan_coordinate`, `sample_conformers`,
+`compute_interaction_energy`) ended up **orphaned**: nothing imported `agents/calc_tools.py`, so they
+were dead code that eleven `SKILL.md` files still declared. `make skill-validate` found it; `make
+test` on either branch alone would not have.
+
+They had stayed in-process because each *predicted* its cost and submitted a job when expensive, and
+submitting needs ambient identity. Sound reason, obsolete conclusion — the generated launcher already
+is the in-process half that holds identity. `JobSpec.inline_wait_seconds` closes the gap: start the
+run, wait a bounded moment, return the result or the job id. Better than the threshold it replaced
+because elapsed time cannot be wrong about what already happened, and because a cost model can only
+live where the chemistry lives — `exceeds_inline_budget` in the agent's process was what kept
+`tblite`/RDKit/SciPy and the `xtb` binaries in the chat image, making the `calc` bundle decorative for
+the expensive half of its own capability.
+
+**Two open points, both answered by measuring:**
+
+- **`kg`: won't build.** Thirteen core modules import `kg`, so a bundle moves three thin read tools
+  and leaves every one of those imports — a zero dependency win plus a second read path to one tree.
+  The rule is now written in `connectors/manifest.py` and the runbook so it is not re-litigated.
+- **`report`: the envelope, not a bundle.** Its closure is what core keeps for `gather_evidence`
+  anyway. But it returned a bare note-ref string, which made it the one job
+  `get_durable_job_status` could report `completed` for with nothing to hand back — so it now returns
+  `ConnectorJobResult` and stays on core's worker.
+
+**Also fixed while here:** `get_durable_job_status` returns the result, not just a status word (the
+hole making the calculators durable would otherwise have opened); `get_job_status` narrowed to the
+HPC job it was always about, its dead `xtb-` branch gone; `run_xtb_task`'s role gate moved onto the
+two CREST searches rather than disappearing with the tool.
 
 ## Review — Stages D and E
 

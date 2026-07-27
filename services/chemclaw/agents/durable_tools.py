@@ -10,11 +10,17 @@ channel (F3-T3).
 
 **This shape is superseded and this module is shrinking.** The BO campaign that used to be its
 second tool now lives in the `bo` connector bundle, declared as one `jobs:` entry over the
-generic `ConnectorJobWorkflow` (D-110) — which is where a *new* durable capability goes. The
-report follows when its workflow moves into a bundle and returns the `ConnectorJobResult`
-envelope directly; until then converting it would mean either changing a tested workflow's
-return type for no functional gain or wrapping it a third time. `get_durable_job_status` stays
-here for good: it is generic over every durable job, connector-owned or not.
+generic `ConnectorJobWorkflow` (D-110) — which is where a *new* durable capability goes.
+
+The report deliberately did *not* follow it into a bundle (D-114): its dependency closure — the
+graph, the retrievers, the embedding index — is what core keeps for `gather_evidence` anyway, so
+the isolation a bundle exists to buy would be zero, and all that would remain is churn. What it
+*did* adopt is the `ConnectorJobResult` envelope, because that is what `get_durable_job_status`
+reads: without it the report was the one durable job a chemist could poll to `completed` and then
+have no tool that hands over the answer.
+
+`get_durable_job_status` stays here for good: it is generic over every durable job,
+connector-owned or not, and it is now the one place a finished job's result is collected.
 """
 
 from datetime import UTC, datetime
@@ -155,10 +161,10 @@ async def get_durable_job_status(job_id: str) -> DurableJobStatus:
         job_id: The id returned by any durable launcher.
 
     Returns:
-        The status (running, completed, failed, cancelled, terminated, timed_out) and, for a
-        completed connector job, the one-line `summary` and the structured `result`. A job that is
-        still running, or one whose result is not a connector envelope (a report, a QM job — use
-        `get_job_status` for those), reports the status alone.
+        The status (running, completed, failed, cancelled, terminated, timed_out) and, once
+        completed, the one-line `summary` plus the structured `result`. A job still running reports
+        the status alone, as does an HPC/DFT job — `submit_qm_job` returns its own richer shape, so
+        collect that one with `get_job_status`.
     """
     client = await connect()
     handle = client.get_workflow_handle(job_id)
@@ -173,9 +179,9 @@ async def get_durable_job_status(job_id: str) -> DurableJobStatus:
     try:
         envelope = ConnectorJobResult.model_validate(raw)
     except ValidationError:
-        # A completed job whose result is not a connector envelope — a report, a QM run. Its
-        # status is still the honest answer; the shape simply is not one this tool can read, and
-        # inventing a summary for it would be worse than saying so.
+        # A completed job whose result is not the envelope — today only the QM/HPC job, which
+        # has its own typed result and its own status tool. The status is still the honest
+        # answer; the shape is not one this tool reads, and inventing a summary would be worse.
         return DurableJobStatus(job_id=job_id, status=status)
     return DurableJobStatus(
         job_id=job_id, status=status, summary=envelope.summary, result=envelope.data

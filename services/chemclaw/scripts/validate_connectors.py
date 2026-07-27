@@ -26,6 +26,7 @@ Read-only; touches nothing.
 import sys
 from pathlib import Path
 
+from chemclaw.config import settings
 from connectors.jobs import build_job_tool
 from connectors.manifest import ConnectorManifest
 from connectors.registry import ConnectorError, discovered, enabled, job_tools
@@ -86,13 +87,27 @@ def _tool_surface_problems(manifest: ConnectorManifest) -> list[str]:
 
 
 def _job_problems(manifest: ConnectorManifest) -> list[str]:
-    """Build each declared job's tool, so an unresolvable `params_model` fails here (rule 4)."""
+    """Build each declared job's tool, so an unresolvable `params_model` fails here (rule 4).
+
+    Also checks the one cross-cutting number a manifest cannot validate on its own:
+    `inline_wait_seconds` is spent *inside* a turn, so a bundle declaring a wait at or beyond
+    `service_turn_timeout_seconds` has written a job whose fast path can never win — the turn is
+    killed first, and every call looks like a timeout rather than like the deferral it should have
+    been. The manifest cannot see the deployment's timeout; this check can.
+    """
     problems: list[str] = []
     for job in manifest.jobs:
         try:
             build_job_tool(manifest.name, job)
         except ValueError as exc:
             problems.append(f"connector {manifest.name!r}: job {job.name!r} cannot be built: {exc}")
+        budget = job.inline_wait_seconds
+        if budget is not None and budget >= settings.service_turn_timeout_seconds:
+            problems.append(
+                f"connector {manifest.name!r}: job {job.name!r} waits {budget}s inline, which is "
+                f"not below the {settings.service_turn_timeout_seconds}s turn timeout — the turn "
+                "would be killed before the wait could ever return a result"
+            )
     return problems
 
 
