@@ -1,4 +1,4 @@
--- One turn at a time per session, across every process (D-120).
+-- One turn at a time per session, across every process (D-121).
 --
 -- The front door already refuses a second concurrent turn on one session with a 409, because two
 -- turns driving `agent.run` against the same conversation thread interleave their messages into

@@ -16,7 +16,7 @@ never interprets message shape — a MAF change is a value change, not a schema 
 Three stores live here because they are one session's durable state and must share a database:
 the message history above, `SessionOwnerStore` (who owns a session id — the fact the in-process
 LRU loses on restart), and `SessionTurnClaims` (which process is running a turn on it right now —
-the fact the in-process 409 guard loses at the pod boundary, D-120).
+the fact the in-process 409 guard loses at the pod boundary, D-121).
 """
 
 import logging
@@ -45,7 +45,7 @@ _DELETE_IDS = "DELETE FROM session_messages WHERE session_id = %s AND id = ANY(%
 _MAX_ID = "SELECT MAX(id) FROM session_messages WHERE session_id = %s"
 _DELETE_AFTER = "DELETE FROM session_messages WHERE session_id = %s AND id > %s"
 
-# The per-session turn claim (D-120). One statement, so the check and the take cannot be
+# The per-session turn claim (D-121). One statement, so the check and the take cannot be
 # interleaved by another process: `ON CONFLICT … DO UPDATE … WHERE` takes the row lock, and the
 # update only fires when the incumbent claim has expired. `RETURNING` is empty exactly when a live
 # claim was left alone, which is the caller's "someone else is running a turn" answer.
@@ -296,7 +296,7 @@ class SessionOwnerStore:
 
 
 class SessionTurnClaims:
-    """One turn at a time per session, across every process, as a leased row (D-120).
+    """One turn at a time per session, across every process, as a leased row (D-121).
 
     The front door refuses a second concurrent turn on a session with a 409, because two turns
     driving `agent.run` against the same conversation thread interleave their messages into one

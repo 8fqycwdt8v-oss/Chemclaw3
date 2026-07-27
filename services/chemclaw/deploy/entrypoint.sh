@@ -14,7 +14,7 @@ case "${component}" in
     # leaves the rest idle — a load test measured front-door throughput flat from 10 to 50
     # concurrent users. CHEMCLAW_SERVICE_UVICORN_WORKERS is the knob for that. It still defaults
     # to 1, but no longer because of the turn guard: that is a leased row in `session_turns` now
-    # and every process shares it (D-120). What stays per-process is capability — attachments,
+    # and every process shares it (D-121). What stays per-process is capability — attachments,
     # harness todos and the admission cap — and no ingress can pin a request below the pod, so
     # replicas plus Route affinity remain the supported way to use more CPU. Passed only when
     # raised, so the default keeps today's single-process signal handling and PID 1.

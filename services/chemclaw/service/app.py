@@ -152,7 +152,7 @@ class SessionOwners(Protocol):
 
 
 class SessionTurns(Protocol):
-    """The durable "who is running a turn on this session" claim (D-120).
+    """The durable "who is running a turn on this session" claim (D-121).
 
     A Protocol for the same reason `SessionOwners` is one: the concrete
     `agents.session_store.SessionTurnClaims` needs a database, so it is imported only on the
@@ -397,7 +397,7 @@ def create_app(
             in-process one. Injectable for the same reason `agent_factory` is: a test drives the
             whole HTTP surface without a connector server running.
         turn_claims: The durable "one turn at a time per session" claim, which is what makes that
-            guard hold across processes rather than only within one (D-120). Defaults to the
+            guard hold across processes rather than only within one (D-121). Defaults to the
             config-gated store (present only under `session_store="postgres"`); tests inject an
             in-memory fake to exercise the cross-process conflict without a database.
 
@@ -451,7 +451,7 @@ def create_app(
     # for the running turn). Check-and-add is atomic on the event loop (no await between them),
     # so the gate has no race window.
     app.state.active_turns = set()
-    # The same gate at the width the deployment actually has (D-120). The set above is one
+    # The same gate at the width the deployment actually has (D-121). The set above is one
     # process's view, and the chart runs the front door at two replicas, so the second POST can
     # land on a process that has never heard of the first. A leased row in `session_turns` is what
     # both processes can see; None under the in-memory session store, where two processes share no

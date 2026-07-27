@@ -32,14 +32,21 @@ missing prerequisite), in D-092.
 
 The load test's fixes landed (see D-119). What it surfaced and did **not** close:
 
-- [ ] **SCALE-1 The 409 same-session guard is per-process, and so is admission control.**
-      `service/app.py`'s `active_turns` and the admission semaphore live in one process's memory.
-      That is already only per-*pod* under `service.replicas: 2`, and `service_uvicorn_workers`
-      (default 1) would widen it to per-*worker*. Until the guard survives a process boundary,
-      raising either number trades a correctness guarantee for throughput. A Postgres advisory lock
-      is the obvious mechanism and was rejected for now: it is connection-scoped, so it would pin a
-      pooled connection for a turn's whole duration. A short-lived `session_turns` row with an owner
-      and a heartbeat is the shape that would work.
+- [x] **SCALE-1 The 409 same-session guard is per-process.** Closed by D-121: a turn also takes a
+      leased `session_turns` row, refreshed three times per lease and released at the end, so the
+      guard holds across workers *and* replicas. The advisory lock stayed rejected for the reason
+      recorded here — connection-scoped, so it would pin a pooled connection for the whole turn.
+      **Admission control is deliberately still per-process**: it bounds load on the shared LLM
+      endpoint, and the deployment's real ceiling is `service_max_concurrent_turns × workers ×
+      replicas`. Making it exact would cost a durable write and a heartbeat per turn to bound a
+      *resource*, which is a worse trade than tuning the per-process number (SCALE-3).
+- [ ] **SCALE-1b Attachments and harness todos are still per-process, and always were.**
+      `agents.attachments.STORE` and the harness `TodoProvider` state live on the live
+      `AgentSession` in one process's memory, so a chemist who uploads a CSV and then asks about it
+      must reach the same pod. The Route now asserts session affinity (D-121), which pins to a
+      *pod* — nothing can pin below one, which is why `service_uvicorn_workers` still defaults to 1
+      for any deployment that uses uploads or the harness. Making attachments durable is the fix if
+      intra-pod workers are ever wanted.
 - [ ] **SCALE-2 The HPA still scales on CPU.** `values.yaml` documents this as the wrong signal for
       a stream-bound service and now has better ones to use: `chemclaw_turns_in_flight` against
       `chemclaw_turn_capacity`, and the new `chemclaw_turn_duration_seconds` histogram. Needs a
@@ -55,9 +62,13 @@ The load test's fixes landed (see D-119). What it surfaced and did **not** close
       `connectors.registry.open_reachable` enters every connector tool for the turn and closes it
       after, because a connector's connection must belong to exactly one turn
       (`agents.chemclaw_agent.connector_tools`). At six connectors that is ~900 MCP handshakes for
-      150 turns, and it is the most likely remaining per-turn fixed cost. Untouched here on
-      purpose: pooling the connections across turns changes an isolation guarantee, which is not a
-      performance decision.
+      150 turns. **Measured, and it is not the ceiling:** against the live fleet the six handshakes
+      cost 139–198 ms per turn, ~0.6 % of a 26.7 s p50 — so the "most likely remaining per-turn
+      fixed cost" is noise, and pooling the connections across turns (which would trade a real
+      isolation guarantee for it) is not worth doing. Connecting the six *concurrently* instead of
+      sequentially is the cheap, isolation-preserving half; it measured no better here only because
+      the dev fleet is one process serving all six, which is also why a `--workers 4` load run may
+      find its ceiling in `scripts.connectors_dev` rather than in the front door.
 - [ ] **SCALE-6 Not yet measured:** the live-Anthropic 50-session run, the multi-replica run, and
       the chaos scenarios.
 

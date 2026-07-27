@@ -21,7 +21,7 @@ metadata:
   labels:
     {{- include "chemclaw.labels" . | nindent 4 }}
   annotations:
-    # Pin a browser to one front-door pod (D-120). Not a performance preference — a correctness
+    # Pin a browser to one front-door pod (D-121). Not a performance preference — a correctness
     # one. The per-session turn guard is durable now (`session_turns`), but three things a
     # conversation depends on still live in one process's memory and are invisible to a sibling
     # replica: uploaded attachments (`agents.attachments`, session-scoped and in-memory by

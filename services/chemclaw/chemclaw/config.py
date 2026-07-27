@@ -765,7 +765,7 @@ class ServiceSettings(BaseSettings):
     #
     # The per-session turn guard is no longer among the reasons to keep this at 1: under
     # `session_store="postgres"` a turn takes a leased row in `session_turns`, so two turns on one
-    # session cannot be admitted by two processes (D-120). What is still per-process is
+    # session cannot be admitted by two processes (D-121). What is still per-process is
     # *capability*, not correctness — the admission semaphore (so the deployment's real cap is
     # this many times `service_max_concurrent_turns`), the event-stream caps, uploaded attachments
     # and harness todos, all of which live in one process's memory and are therefore invisible to
@@ -775,7 +775,7 @@ class ServiceSettings(BaseSettings):
     # deployment that does not use attachments or the harness. Under `session_store="memory"`
     # there is no shared claim at all and this must stay 1.
     service_uvicorn_workers: int = Field(default=1, gt=0)
-    # How long a turn's claim on its session (`session_turns`, D-120) stays valid before another
+    # How long a turn's claim on its session (`session_turns`, D-121) stays valid before another
     # process may take it. A lease rather than a lock because a lock would have to be held on a
     # pooled connection for the turn's whole duration; the cost of a lease is that exclusion holds
     # only while the holder is scheduled often enough to refresh it, which the front door does

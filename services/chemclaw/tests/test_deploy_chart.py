@@ -247,7 +247,7 @@ def test_the_route_pins_a_browser_to_one_front_door_pod() -> None:
     """Session affinity is a correctness requirement of the front door, not a tuning preference.
 
     The chart runs the front door at two replicas and autoscales to six. The per-session turn
-    guard is durable now (`session_turns`, D-120), but a conversation still depends on state that
+    guard is durable now (`session_turns`, D-121), but a conversation still depends on state that
     lives only in the process that created it: uploaded attachments, the harness todo list, and
     the live `AgentSession` handle. Land the follow-up request on a sibling pod and the agent
     simply cannot see the file the chemist just uploaded.
