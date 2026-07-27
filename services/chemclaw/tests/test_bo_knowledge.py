@@ -55,17 +55,20 @@ def test_note_id_is_stable_for_the_same_recommendation() -> None:
     )
 
 
-@pytest.mark.timeout(600)
 def test_campaign_publishes_recommendation_to_graph(monkeypatch: pytest.MonkeyPatch) -> None:
     """With publish_to_graph, a finished campaign proposes a bo-candidate note (bg queue).
 
-    Overrides the 180s per-test cap rather than raising it globally. This is the one test that
-    fits a real BoTorch GP and runs a real acquisition optimisation *inside* a Temporal worker, and
-    on a shared runner that optimisation retries: CI logs show
-    `Optimization failed in gen_candidates_scipy ... Trying again with a new set of initial
-    conditions`, several times, each a fresh multi-start. It is slow, not hung — and the global cap
-    exists to catch hangs, so weakening it for everything to accommodate one genuinely heavy test
-    would trade the guard away for nothing.
+    This test carried `@pytest.mark.timeout(600)` on the reasoning that it is "slow, not hung"
+    because it fits a real BoTorch GP inside a Temporal worker. That reasoning was wrong, and it
+    kept `main` red: the core worker below registered activities only, so the
+    `ConnectorJobWorkflow` submitted to its queue had no registered handler and its workflow task
+    was never completed. `execute_workflow` then waits forever — and it is a *cheap* forever, with
+    no CPU burnt, which is why "slow" looked plausible.
+
+    Measured against the live Temporal dev server, with `background_task_queue` pointed at a private
+    name so no other worker could serve it: without `workflows=[ConnectorJobWorkflow]` the call
+    hung past 100 s; with it, the campaign completed in well under the 180 s global cap. So the
+    override is gone too — this test does not need one.
     """
     fake = FakeSubmitter()
     # The gate is core's now, so the submitter is patched where core publishes from.
@@ -90,9 +93,13 @@ def test_campaign_publishes_recommendation_to_graph(monkeypatch: pytest.MonkeyPa
                     workflows=[BoCampaignWorkflow],
                     activities=_BO_ACTIVITIES,
                 ),
+                # Core's wrapper runs HERE, so this worker must register it. Registering only
+                # the activity is what hung: Temporal keeps redelivering a workflow task whose
+                # type no worker knows, and the caller waits on a result that can never arrive.
                 Worker(
                     client,
                     task_queue=settings.background_task_queue,
+                    workflows=[ConnectorJobWorkflow],
                     activities=[publish_memory_note_activity],
                 ),
             ):
