@@ -23,7 +23,7 @@ import psycopg
 from agent_framework import HistoryProvider, Message
 from psycopg.types.json import Jsonb
 
-from agents.message_pairing import strip_unmatched_calls
+from agents.message_pairing import strip_call_ids, unmatched_call_ids
 from chemclaw import db
 from chemclaw.config import settings
 
@@ -93,16 +93,27 @@ class PostgresHistoryProvider(HistoryProvider):
                 await cur.execute(_SELECT_WITH_ID, (session_id,))
                 rows = await cur.fetchall()
         stored = [(int(row[0]), Message.from_dict(row[1])) for row in rows]
-        repaired = strip_unmatched_calls([message for _, message in stored])
-        if len(repaired) == len(stored) and all(
-            new is old for new, (_, old) in zip(repaired, stored, strict=True)
-        ):
-            return repaired  # untouched — the overwhelmingly common path, no write at all
-        await self._persist_repair(session_id, stored, repaired)
-        return repaired
+        orphans = unmatched_call_ids([message for _, message in stored])
+        if not orphans:
+            return [message for _, message in stored]  # the common path: no rewrite, no write
+        # Decided per row rather than by diffing two lists: once a message is dropped entirely the
+        # lists no longer line up, and a positional pairing would rewrite the wrong row's message.
+        kept: list[Message] = []
+        deletions: list[int] = []
+        rewrites: list[tuple[Jsonb, int]] = []
+        for row_id, message in stored:
+            repaired = strip_call_ids(message, orphans)
+            if repaired is None:
+                deletions.append(row_id)
+                continue
+            kept.append(repaired)
+            if repaired is not message:  # identity, so only genuinely changed rows are written
+                rewrites.append((Jsonb(repaired.to_dict()), row_id))
+        await self._persist_repair(session_id, deletions, rewrites)
+        return kept
 
     async def _persist_repair(
-        self, session_id: str, stored: list[tuple[int, Message]], repaired: list[Message]
+        self, session_id: str, deletions: list[int], rewrites: list[tuple[Jsonb, int]]
     ) -> None:
         """Write back a repaired history, so the orphan is removed once rather than re-filtered.
 
@@ -110,14 +121,6 @@ class PostgresHistoryProvider(HistoryProvider):
         swallowed — the caller still gets the clean history either way. Idempotent, so two readers
         racing on the same broken session converge on the same rows.
         """
-        by_id = dict(zip([row_id for row_id, _ in stored], repaired, strict=False))
-        surviving = {id(message) for message in repaired}
-        deletions = [row_id for row_id, message in stored if id(message) not in surviving]
-        rewrites = [
-            (Jsonb(by_id[row_id].to_dict()), row_id)
-            for row_id, message in stored
-            if row_id in by_id and by_id[row_id] is not message
-        ]
         try:
             async with await self._connect() as conn:
                 async with conn.cursor() as cur:

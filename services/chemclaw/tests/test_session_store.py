@@ -86,6 +86,54 @@ def test_an_orphaned_tool_call_is_repaired_on_read() -> None:
     asyncio.run(_run())
 
 
+def test_repair_rewrites_the_right_rows_when_an_earlier_one_is_dropped() -> None:
+    """A dropped row must not shift the rewrite onto a later row's message.
+
+    Regression guard: pairing the stored row ids against the repaired list *positionally* works
+    only while the two are the same length. The moment one message is discarded outright, every
+    row after it lines up against the wrong message — so a trimmed message would be written over
+    an unrelated row, corrupting history the repair was supposed to be saving.
+    """
+
+    async def _run() -> None:
+        provider = await _provider_or_skip()
+        session_id = "sess-orphan-shift"
+        await provider.rollback_to(session_id, None)
+        await provider.save_messages(
+            session_id,
+            [
+                Message(role="user", contents=["first, a question"]),
+                # Dropped entirely (nothing but the orphan call) — this is what shifts the list.
+                Message(
+                    role="assistant",
+                    contents=[
+                        Content.from_function_call(
+                            call_id="c-gone", name="predict_pka", arguments={}
+                        )
+                    ],
+                ),
+                # Trimmed, not dropped: its prose must survive, on its own row.
+                Message(
+                    role="assistant",
+                    contents=[
+                        Content.from_text("and some prose worth keeping"),
+                        Content.from_function_call(
+                            call_id="c-trim", name="screen_hazards", arguments={}
+                        ),
+                    ],
+                ),
+            ],
+        )
+
+        await provider.get_messages(session_id)  # triggers the repair + write-back
+        reloaded = await PostgresHistoryProvider().get_messages(session_id)
+
+        assert [m.text for m in reloaded] == ["first, a question", "and some prose worth keeping"]
+        assert unmatched_call_ids(reloaded) == set()
+
+    asyncio.run(_run())
+
+
 def test_a_matched_pair_is_never_touched_by_the_repair() -> None:
     """A complete call/result pair round-trips intact — the repair must not eat healthy history."""
 

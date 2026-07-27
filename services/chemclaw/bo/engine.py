@@ -1,9 +1,11 @@
-"""BoFire adapter — the only module that touches BoFire (plan Phase 1d, D-012).
+"""BoFire adapter — the only module that touches BoFire (plan Phase 1d, D-012; D-092).
 
 Maps our neutral `OptimizationProblem`/`Observation` types to BoFire's domain and
 strategies, proposes candidates, and maps results back to our `Candidate` type.
 Nothing BoFire leaks past this boundary (gate G6), so the engine could be swapped
-without touching the campaign, agents, or skills.
+without touching the campaign, agents, or skills. `factorial_design` (D-092) is the
+same adapter shape for BoFire's classical categorical `FactorialStrategy`, alongside
+the Bayesian-optimization strategies.
 """
 
 from typing import Any
@@ -16,7 +18,11 @@ from bofire.data_models.features.api import (
     ContinuousOutput,
 )
 from bofire.data_models.objectives.api import MaximizeObjective, MinimizeObjective
-from bofire.data_models.strategies.api import RandomStrategy, SoboStrategy
+from bofire.data_models.strategies.api import (
+    FractionalFactorialStrategy,
+    RandomStrategy,
+    SoboStrategy,
+)
 from bofire.strategies import api as strategies
 
 from bo.problem import (
@@ -27,6 +33,7 @@ from bo.problem import (
     Observation,
     OptimizationProblem,
     ParamValue,
+    ScreeningDesign,
     discrete_candidate_count,
     params_key,
 )
@@ -133,3 +140,30 @@ def propose_candidates(
     strategy = strategies.map(SoboStrategy(domain=_to_domain(problem), seed=_resolve_seed(seed)))
     strategy.tell(_observations_to_frame(problem, observations))
     return _frame_to_candidates(problem, strategy.ask(n))
+
+
+def factorial_design(problem: OptimizationProblem) -> ScreeningDesign:
+    """Generate every combination of `problem`'s categorical parameters (a full-factorial screen).
+
+    Raises `ValueError` if `problem` names any continuous parameter (D-092 research follow-up):
+    on an all-categorical domain BoFire's `FractionalFactorialStrategy` (`n_generators=0`, the
+    default) returns the plain Cartesian product, but the same class silently *fractionates* a
+    continuous input instead of erroring — rejected up front instead (gate G4), since a design that
+    looks complete but quietly omits or fractionates a factor is worse than a clear refusal.
+    Reformulate a continuous factor as a small set of discrete levels (e.g. temperature as
+    "low"/"high") to include it in a screen, or use `propose_candidates`/`initial_candidates` for a
+    continuous decision space.
+    """
+    continuous = [p.name for p in problem.parameters if isinstance(p, ContinuousParameter)]
+    if continuous:
+        raise ValueError(
+            "factorial_design only supports categorical parameters; "
+            f"{continuous!r} are continuous — discretize them into levels first"
+        )
+    strategy = strategies.map(FractionalFactorialStrategy(domain=_to_domain(problem)))
+    frame = strategy.ask()
+    categorical_names = [p.name for p in problem.parameters]
+    runs: list[dict[str, ParamValue]] = [
+        {name: str(row[name]) for name in categorical_names} for _, row in frame.iterrows()
+    ]
+    return ScreeningDesign(runs=runs)

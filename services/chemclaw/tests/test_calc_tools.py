@@ -9,6 +9,7 @@ import asyncio
 import pytest
 
 import agents.calc_tools as calc_tools
+from calc.reaction_energy import ReactionSpecies
 from calc.store import InMemoryStore
 
 
@@ -38,5 +39,51 @@ def test_predict_solubility_tool_reports_uncertainty(monkeypatch: pytest.MonkeyP
         result = await calc_tools.predict_solubility("CCO")
         assert result.model == "esol-delaney@2004"
         assert result.uncertainty_log > 0
+
+    asyncio.run(_run())
+
+
+def test_predict_developability_profile_tool_flags_ro5(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The developability tool returns the descriptor panel and Ro5/Veber flags."""
+    store = InMemoryStore()
+    monkeypatch.setattr(calc_tools, "default_store", lambda: store)
+
+    async def _run() -> None:
+        result = await calc_tools.predict_developability_profile("CC(=O)Oc1ccccc1C(=O)O")
+        assert result.lipinski_violations == 0
+        assert result.veber_pass is True
+
+    asyncio.run(_run())
+
+
+def test_predict_logd_tool_defaults_ph_and_reuses_pka(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The logD tool defaults pH and reports the pKa uncertainty it was derived from."""
+    store = InMemoryStore()
+    monkeypatch.setattr(calc_tools, "default_store", lambda: store)
+
+    async def _run() -> None:
+        from chemclaw.config import settings
+
+        result = await calc_tools.predict_logd("OC(=O)c1ccccc1")
+        assert result.ph == settings.logd_default_ph
+        assert result.uncertainty > 0
+
+    asyncio.run(_run())
+
+
+def test_estimate_reaction_energy_tool_flags_exotherm(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The reaction-energy tool returns the flag and echoes the configured threshold."""
+    store = InMemoryStore()
+    monkeypatch.setattr(calc_tools, "default_store", lambda: store)
+
+    async def _run() -> None:
+        from chemclaw.config import settings
+
+        result = await calc_tools.estimate_reaction_energy(
+            reactants=[ReactionSpecies(smiles="CCO", coefficient=1.0)],
+            products=[ReactionSpecies(smiles="CCO", coefficient=1.0)],
+        )
+        assert result.exotherm_threshold_kcal == settings.reaction_energy_exotherm_threshold_kcal
+        assert result.is_strongly_exothermic is False  # a null reaction is not exothermic
 
     asyncio.run(_run())

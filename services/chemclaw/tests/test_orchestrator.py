@@ -9,22 +9,26 @@ while its siblings still return.
 import asyncio
 
 from temporalio import workflow
-from temporalio.client import Client
-from temporalio.exceptions import ApplicationError
-from temporalio.worker import Worker
 
-from workflows.orchestrator import _batches, fan_out
-
-# This module defines workflows, so the worker sandbox re-imports it (and everything it imports)
-# when it validates them. Two of those imports are illegal inside the sandbox and abort worker
-# construction: `chemclaw.config` builds its `settings` singleton at import time, and
-# pydantic-settings' dotenv source calls `Path(...).expanduser()`; `tests.temporal_env` pulls in
-# `workflows.activities`, whose httpx import reaches `urllib.request`. Neither is workflow code —
-# they are the harness — so they are passed through, the same discipline `workflows/*.py` applies.
-# `workflows.orchestrator` stays sandboxed on purpose: it is the code under test.
+# This module *defines* a workflow (`_FanOutParent`), so Temporal's sandbox re-imports it — and
+# everything it imports — inside the sandbox when validating that workflow. Two of those imports
+# execute code the sandbox forbids: `chemclaw.config` constructs `Settings()`, whose
+# pydantic-settings `env_file` resolution calls `Path.expanduser()`, and the test-harness/client
+# imports reach `urllib.request`. Either one fails the whole worker with
+# "Failed validating workflow _FanOutParent" — the CI-only failure this guard fixes (it skips
+# offline, where no Temporal test server is available).
+#
+# Passing them through is the established pattern here, not a workaround: every production workflow
+# module already wraps its `chemclaw.config` import exactly this way (`workflows/orchestrator.py`,
+# `audit_verify.py`, `digest.py`, …). None of this is workflow code — it is settings plus the test
+# harness — so none of it needs the sandbox's determinism checks.
 with workflow.unsafe.imports_passed_through():
+    from temporalio.client import Client
+    from temporalio.worker import Worker
+
     from chemclaw.config import settings
     from tests.temporal_env import pydantic_client, start_env_or_skip
+    from workflows.orchestrator import _batches, fan_out
 
 
 def test_batches_splits_in_order() -> None:
@@ -34,19 +38,23 @@ def test_batches_splits_in_order() -> None:
     assert _batches([1], 3) == [[1]]
 
 
-@workflow.defn
+@workflow.defn(failure_exception_types=[Exception])
 class _DoublerWorkflow:
-    """A trivial child: doubles its input, or fails the execution on the poison value 13."""
+    """A trivial child: doubles its input, or raises on the poison value 13.
+
+    `failure_exception_types=[Exception]` is required (D-093), not decoration: by default the
+    Temporal SDK treats a raw (non-`FailureError`) exception raised in workflow code as a possible
+    *bug* and suspends the workflow via an internal task-failure retry loop that ignores any
+    `RetryPolicy` entirely and never gives up — so the poison input's plain `ValueError` would hang
+    the workflow forever instead of producing the `WorkflowExecutionFailed` the `fan_out` isolation
+    contract (and `orchestrator.BAD_DATA_RETRY` default) actually depends on. This is exactly the
+    CI-only hang `ci.yml`'s own comment described.
+    """
 
     @workflow.run
     async def run(self, value: int) -> int:
         if value == 13:
-            # `ApplicationError`, not a bare `ValueError`: the SDK fails the *workflow task* on any
-            # non-`FailureError` exception and retries that task forever, so a plain raise would
-            # leave the child Running and hang the parent instead of exercising fan-out isolation.
-            # `non_retryable` then stops the child on its first attempt — the "exhausted its
-            # retries" state whose drop-and-continue handling is what this test asserts.
-            raise ApplicationError("poison input", non_retryable=True)
+            raise ValueError("poison input")
         return value * 2
 
 

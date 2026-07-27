@@ -384,6 +384,29 @@ class CalculatorSettings(BaseSettings):
     # model uncertainty attached to every prediction, config like `pka_uncertainty`.
     solubility_rmse_log: float = 0.75
 
+    # logD (calc.logd, D-092): the working pH used when a caller does not name one.
+    # 7.4 (physiological pH) is the conventional analytical-chemistry default.
+    logd_default_ph: float = 7.4
+
+    # Reaction energetics (calc.reaction_energy, D-092): a reaction electronic energy at or
+    # below this threshold (kcal/mol, negative = exothermic) is flagged for thermal-hazard
+    # attention. -20 kcal/mol is a conservative, commonly cited screening threshold for a
+    # "strongly exothermic" flag; advisory only, like the structural hazard screen (D-080).
+    reaction_energy_exotherm_threshold_kcal: float = -20.0
+
+    # Conformer ensemble (workflows.conformer_job, D-092): ETKDG conformers generated before
+    # GFN2-xTB Boltzmann-weighting. `conformer_energy_window_kcal` prunes conformers above the
+    # lowest-energy one by more than this after the cheap MMFF pass (they contribute negligible
+    # Boltzmann population and just cost xTB time); `conformer_boltzmann_temperature_kelvin` is
+    # the population-weighting temperature (298.15 K = room temperature).
+    conformer_ensemble_size: int = Field(default=20, ge=1, le=200)
+    conformer_energy_window_kcal: float = Field(default=10.0, gt=0)
+    conformer_boltzmann_temperature_kelvin: float = Field(default=298.15, gt=0)
+    # The durable workflow's per-activity budget: an ensemble of `conformer_ensemble_size`
+    # sequential xTB single points on one worker thread, generously bounded (mirrors
+    # `bo_activity_timeout_seconds`'s role for the BO campaign's activities).
+    conformer_activity_timeout_seconds: float = Field(default=600.0, gt=0)
+
 
 class BoSettings(BaseSettings):
     """Durable BoFire BO campaigns (plan step 1d.4).

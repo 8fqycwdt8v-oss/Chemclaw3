@@ -19,8 +19,8 @@ import asyncio
 import json
 
 from agents.tool_registry import tool
-from bo.engine import initial_candidates, propose_candidates
-from bo.problem import Candidate, Observation, OptimizationProblem
+from bo.engine import factorial_design, initial_candidates, propose_candidates
+from bo.problem import Candidate, Observation, OptimizationProblem, ScreeningDesign
 
 
 @tool
@@ -73,3 +73,28 @@ async def suggest_next_experiment(
     if history:
         return await asyncio.to_thread(propose_candidates, problem, history, count)
     return await asyncio.to_thread(initial_candidates, problem, count)
+
+
+@tool
+async def generate_screening_design(problem: OptimizationProblem) -> ScreeningDesign:
+    """Generate a full-factorial screening design over categorical conditions (D-092).
+
+    Use this for the *other* classical DoE question — "run every combination of these discrete
+    choices" — e.g. every catalyst x solvent x base combination before narrowing to a BO campaign,
+    or a robustness matrix of discrete method parameters. This is a complete, up-front design a
+    human runs as a batch; it does not adapt to results the way `suggest_next_experiment` does.
+
+    Only categorical parameters are supported: a continuous parameter (temperature, equivalents)
+    raises rather than being silently ignored from the design. Discretize it into levels first
+    (e.g. temperature as "low"/"high") if it belongs in the screen, or use
+    `suggest_next_experiment` for a continuous decision space.
+
+    Args:
+        problem: The decision variables (categorical only) and the objective (its direction is
+            not used by a screening design, but the same `OptimizationProblem` shape is reused so
+            observations from the screen can seed a follow-up `suggest_next_experiment` campaign).
+
+    Returns:
+        Every combination of the categorical levels, one dict of parameter name to value per run.
+    """
+    return await asyncio.to_thread(factorial_design, problem)

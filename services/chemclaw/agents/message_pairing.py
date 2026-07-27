@@ -74,32 +74,38 @@ def calls_without_adjacent_results(messages: Sequence[Message]) -> set[str]:
     return missing
 
 
-def strip_unmatched_calls(messages: Sequence[Message]) -> list[Message]:
-    """Return `messages` with every unanswered function call removed.
+def strip_call_ids(message: Message, call_ids: set[str]) -> Message | None:
+    """Return `message` without the calls in `call_ids`, or `None` if nothing is left of it.
+
+    Returns the *same object* when there is nothing to strip, so a caller can use identity to tell
+    "untouched" from "rewritten" — which a storage layer needs in order to update only the rows
+    that actually changed.
 
     Only the offending content item is dropped, not the whole message: an assistant turn commonly
     carries prose *and* a tool call, and discarding the prose would silently rewrite what the
-    assistant said. A message left with no content at all is dropped, since an empty message is
+    assistant said. A message left with no content at all yields `None`, since an empty message is
     itself a malformed block.
     """
+    contents = [
+        content
+        for content in message.contents
+        if not (content.type == _CALL and content.call_id in call_ids)
+    ]
+    if len(contents) == len(message.contents):
+        return message
+    if not contents:
+        return None
+    # Shallow-copy so `author_name`/`message_id`/`additional_properties` ride along — rebuilding
+    # via `Message(role=..., contents=...)` would quietly drop them.
+    trimmed = copy.copy(message)
+    trimmed.contents = contents
+    return trimmed
+
+
+def strip_unmatched_calls(messages: Sequence[Message]) -> list[Message]:
+    """Return `messages` with every unanswered function call removed."""
     orphans = unmatched_call_ids(messages)
     if not orphans:
         return list(messages)  # the overwhelmingly common case: no copying, no allocation churn
-    kept: list[Message] = []
-    for message in messages:
-        contents = [
-            content
-            for content in message.contents
-            if not (content.type == _CALL and content.call_id in orphans)
-        ]
-        if len(contents) == len(message.contents):
-            kept.append(message)
-            continue
-        if not contents:
-            continue  # nothing survived; the message was the tool call and nothing else
-        # Shallow-copy so `author_name`/`message_id`/`additional_properties` ride along — rebuilding
-        # via `Message(role=..., contents=...)` would quietly drop them.
-        trimmed = copy.copy(message)
-        trimmed.contents = contents
-        kept.append(trimmed)
-    return kept
+    stripped = (strip_call_ids(message, orphans) for message in messages)
+    return [message for message in stripped if message is not None]
