@@ -32,6 +32,41 @@ missing prerequisite), in D-092.
 
 The load test's fixes landed (see D-119). What it surfaced and did **not** close:
 
+- [ ] **LIVE-1 One live turn in five fails: Anthropic 400,
+      `tool_use.name: String should have at least 1 character`.** The highest-severity open item,
+      and only a live run finds it — the stub emits one tool call per response and never validates
+      the assistant message it gets back.
+
+      Measured on the 50-user live run (Haiku, 4 workers, real signed identities):
+      **150/150 turns admitted, 0 shed, 0 conflict, 0 budget refusal, 0 transport error** — the
+      infrastructure holds — but `event types: {answer: 120, error: 30, tool_call: 151}`. **30 of
+      150 turns, 20 %, ended in an error event.**
+
+      Characterised rather than guessed at:
+
+      - **Not load-dependent.** 2/12 (17 %) at 4 users; 30/150 (20 %) at 50. The rate is flat.
+      - **Not the session store.** Reproduces with `session_store=memory` as well as `postgres`.
+      - **Streaming only.** Non-streaming `agent.run` over the same prompts never fails.
+      - **Parallel tool calls.** Every failure names `messages.1.content.2`,
+        `messages.1.content.3` or `messages.3.content.3` — the assistant message *from this turn*,
+        at its third or fourth content block. So the model emitted text plus **two or more
+        `tool_use` blocks in one message**, and a later block was reconstructed with an empty
+        `name`. The follow-up request carrying the tool results is then rejected outright.
+      - **Intermittent by nature**: it needs the model to choose parallel calls, so three-turn
+        probes pass roughly half the time and prove nothing on their own.
+
+      The defect is in how `agent_framework` accumulates streamed tool-call deltas, not in
+      chemclaw's code — we never build the outgoing request. It is a *different* fault from the
+      harness streaming 400 already in `DEFERRED.md` (a `user` block between `tool_use` and
+      `tool_result`, harness-only, 100 % of calls); this one is on the **classic path with
+      `harness_enabled` off**, which is the shipped default.
+
+      Next step is a minimal reproduction against `agent_framework` alone — one Anthropic client,
+      two tools, a prompt that forces parallel calls, streaming — and then an upstream issue. A
+      local mitigation is not available at the obvious layer: the malformed block is inside a
+      message MAF composes and sends itself.
+
+
 - [ ] **CI-1 `main` has been red since D-117 enabled the real gates: `check` is cancelled at the
       30-minute job timeout, every run.** Runs on `main` at `5f95166`, `5e0827a` and `33d454e` all
       end `cancelled` after exactly 30:00, and so does every PR run since. This is a regression from
