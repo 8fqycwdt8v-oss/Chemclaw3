@@ -272,3 +272,45 @@ def test_a_comment_never_swallows_the_line_after_it() -> None:
             if following.startswith((" ", "\t")):
                 offenders.append(f"{path.name}:{index + 1} swallows {following.strip()!r}")
     assert not offenders, "comment closures that eat the next line: " + "; ".join(offenders)
+
+
+# Kinds kubeconform has no schema for, so `make helm-validate` runs with
+# `-ignore-missing-schemas` and *skips* them rather than failing. Keeping the set explicit is what
+# stops that flag from being a hole: a skipped kind is a deliberate entry here, not a silent pass.
+_UNVALIDATED_KINDS = frozenset({"Route"})
+
+
+def test_only_the_known_crd_is_unvalidated_by_kubeconform() -> None:
+    """Pin which kinds the chart renders, so `-ignore-missing-schemas` cannot hide a new one.
+
+    `make helm-validate` must pass `-ignore-missing-schemas` because the chart renders an OpenShift
+    `route.openshift.io/v1 Route`, and no JSON schema for it exists in kubeconform's defaults or in
+    the datreeio CRDs catalog — both 404. Without the flag the target can never pass, which is why
+    it had never been seen to pass: the only workflow that ran it was stranded where GitHub Actions
+    does not read (D-117).
+
+    The cost of the flag is that an unknown kind is skipped instead of rejected. This test buys that
+    back offline: every kind the chart renders is either a core Kubernetes kind (which kubeconform
+    does validate) or is named here.
+    """
+    core_kinds = {
+        "ConfigMap",
+        "Deployment",
+        "HorizontalPodAutoscaler",
+        "Job",
+        "NetworkPolicy",
+        "Secret",
+        "Service",
+        "ServiceAccount",
+    }
+    rendered = set(re.findall(r"^kind:\s*([A-Za-z]+)", _all_templates(), flags=re.MULTILINE))
+    unexpected = rendered - core_kinds - _UNVALIDATED_KINDS
+    assert not unexpected, (
+        f"the chart renders kind(s) {sorted(unexpected)} that kubeconform may silently skip — "
+        "add a schema location, or add them to _UNVALIDATED_KINDS with the reason"
+    )
+    # And the exemption must stay earned: if Route ever gains a schema, drop it from the set.
+    assert _UNVALIDATED_KINDS <= rendered, (
+        f"_UNVALIDATED_KINDS names kind(s) the chart no longer renders: "
+        f"{sorted(_UNVALIDATED_KINDS - rendered)}"
+    )

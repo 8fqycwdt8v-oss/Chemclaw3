@@ -60,10 +60,19 @@ prose-validate:  ## Check the agent's prose only names tools that exist (gap IDE
 	uv run python -m scripts.validate_prose_contract
 
 helm-validate:  ## Render the Helm chart and validate it against the Kubernetes schemas.
+	@# `-ignore-missing-schemas` is required, not a relaxation of convenience: the chart renders an
+	@# OpenShift `route.openshift.io/v1 Route`, and no JSON schema for it exists in kubeconform's
+	@# defaults or in the datreeio CRDs catalog (both paths return 404). Without the flag this
+	@# target can never pass — which is why it had never been seen to: the only workflow that ran
+	@# it was stranded where GitHub Actions does not read (D-117).
+	@#
+	@# The flag skips a kind rather than failing it, so `tests/test_deploy_chart.py` pins exactly
+	@# which kinds the chart renders. A new unvalidated CRD is then a deliberate edit to that test,
+	@# not something that slips through as "skipped".
 	@command -v helm >/dev/null || { echo "helm not installed - see docs/runbook.md"; exit 1; }
 	@command -v kubeconform >/dev/null || { echo "kubeconform not installed - see docs/runbook.md"; exit 1; }
 	helm template chemclaw deploy/helm/chemclaw \
-	  | kubeconform -strict -summary -kubernetes-version $(KUBE_VERSION) \
+	  | kubeconform -strict -summary -ignore-missing-schemas -kubernetes-version $(KUBE_VERSION) \
 	      -schema-location default -schema-location \
 	      'https://raw.githubusercontent.com/datreeio/CRDs-catalog/main/{{.Group}}/{{.ResourceKind}}_{{.ResourceAPIVersion}}.json'
 

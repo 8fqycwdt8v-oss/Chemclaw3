@@ -57,11 +57,27 @@ def test_agent_advertises_qm_tools() -> None:
     assert _DOMAIN_TOOLS <= tool_names
 
 
-def test_agent_has_skills_history_and_compaction() -> None:
-    """Skills (judgment), a session history, and context compaction are all attached."""
+def test_agent_has_skills_history_and_compaction(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Skills (judgment), a session history, and context compaction are all attached.
+
+    `session_store` is pinned rather than left ambient. Naming `InMemoryHistoryProvider` while
+    reading whatever the environment happens to hold makes this assert the *default deployment*
+    rather than a property of `build_agent`: with `CHEMCLAW_SESSION_STORE=postgres` exported — the
+    Helm default, and what a live-stack shell has set — it failed for a reason that was not a bug.
+    A test whose meaning changes with the environment can also pass for the wrong reason.
+    """
+    monkeypatch.setattr(settings, "session_store", "memory")
     agent = build_agent(chat_client=object())
     provider_types = {type(p).__name__ for p in agent.context_providers}
     assert {"SkillsProvider", "InMemoryHistoryProvider", "CompactionProvider"} <= provider_types
+
+
+def test_the_history_provider_follows_the_configured_store(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Both stores satisfy the same contract, so `build_agent` attaches whichever is configured."""
+    monkeypatch.setattr(settings, "session_store", "postgres")
+    attached = {type(p).__name__ for p in build_agent(chat_client=object()).context_providers}
+    assert "PostgresHistoryProvider" in attached
+    assert "InMemoryHistoryProvider" not in attached
 
 
 def test_skills_load_and_read_without_an_unanswerable_approval() -> None:
@@ -166,6 +182,7 @@ def _enable_harness(monkeypatch: pytest.MonkeyPatch, *, autonomy: str = "plan_on
 def test_harness_agent_adds_todo_and_mode_providers(monkeypatch: pytest.MonkeyPatch) -> None:
     """`harness_enabled` wires MAF todo + plan/execute mode atop history/skills/compaction."""
     _enable_harness(monkeypatch)
+    monkeypatch.setattr(settings, "session_store", "memory")  # pinned, see the test above
     agent = build_agent(chat_client=object())
     provider_types = {type(p).__name__ for p in agent.context_providers}
     assert {
