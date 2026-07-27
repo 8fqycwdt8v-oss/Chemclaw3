@@ -149,3 +149,4 @@ number is one another session will take.
 | D-117 | Consolidating the outstanding branches, and deleting what four generations of the design left behind |
 | D-118 | One connector seam for MCP, Temporal and long-running HPC tools |
 | D-119 | Production scale: the event loop, the connection pool, and a guard that switched itself off |
+| D-120 | The front door as a multi-process service: pure-ASGI headers, a durable turn claim, a pool timeout that sheds |

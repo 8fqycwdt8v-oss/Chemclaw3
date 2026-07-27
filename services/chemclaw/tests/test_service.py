@@ -8,14 +8,32 @@ per turn via a spy tool.
 
 import asyncio
 import json
-from collections.abc import Callable
+from collections.abc import Callable, MutableMapping
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
+import pytest
 from agent_framework import AgentSession
 from fastapi.testclient import TestClient
 
 from service.app import LiveSession, _LiveSessions, create_app
+
+# A minimal ASGI HTTP scope, for the one test that drives the app below `TestClient` (which
+# cannot express "the handler was cancelled and nothing was ever sent").
+_ASGI_GET_SCOPE: dict[str, Any] = {
+    "type": "http",
+    "asgi": {"version": "3.0", "spec_version": "2.1"},
+    "http_version": "1.1",
+    "method": "GET",
+    "scheme": "http",
+    "path": "/drained",
+    "raw_path": b"/drained",
+    "query_string": b"",
+    "root_path": "",
+    "headers": [(b"host", b"testserver")],
+    "client": ("127.0.0.1", 1234),
+    "server": ("testserver", 80),
+}
 
 
 class _SpyMcpTool:
@@ -107,6 +125,66 @@ def test_static_chat_page_is_served() -> None:
         assert res.headers["X-Frame-Options"] == "DENY"
         assert "frame-ancestors 'none'" in res.headers["Content-Security-Policy"]
         assert "Strict-Transport-Security" in res.headers
+
+
+def test_security_headers_reach_a_streaming_sse_response() -> None:
+    """The SSE turn stream carries the same headers as a static page.
+
+    The static-page test above passes under *any* middleware implementation; a streamed
+    `EventSourceResponse` is the case that distinguishes them, because it is the response whose
+    headers are sent long before its body exists.
+    """
+    agent = _FakeAgent()
+    with _client(agent) as client:
+        session_id = client.post("/sessions").json()["session_id"]
+        with client.stream(
+            "POST", f"/sessions/{session_id}/messages", json={"message": "hello"}
+        ) as res:
+            assert res.status_code == 200
+            assert res.headers["X-Frame-Options"] == "DENY"
+            assert "frame-ancestors 'none'" in res.headers["Content-Security-Policy"]
+
+
+def test_a_cancelled_request_closes_the_connection_instead_of_500ing() -> None:
+    """A handler cancelled before it responds must not be turned into a 500 with a traceback.
+
+    This is the multi-worker blocker, and it is not hypothetical: a 50-user load run logged 44
+    `RuntimeError("No response returned.")` tracebacks, every one on the SSE turn route, each
+    served to a chemist as an HTTP 500. `BaseHTTPMiddleware` produced them — it runs the app in a
+    second task and pipes its ASGI messages through a memory stream, so a handler that ends
+    without responding (a pod draining mid-stream, a client that gave up waiting for an
+    admission permit) reaches `call_next` as a closed stream and is re-raised as a server error.
+
+    Driven at the raw ASGI level rather than through `TestClient`, because the distinction *is*
+    the ASGI contract: cancellation must propagate out of the app (the server then simply closes
+    the connection) rather than being converted into a response. Counterfactual: with the old
+    `BaseHTTPMiddleware` this raises `RuntimeError`, not `CancelledError`.
+    """
+    app = create_app(agent_factory=lambda _profile: _FakeAgent(), connector_factory=_no_connectors)
+
+    @app.get("/drained")
+    async def drained() -> dict[str, str]:
+        """Stand in for a handler the server cancels mid-request."""
+        raise asyncio.CancelledError
+
+    # The static UI is mounted at "/" and would otherwise swallow the path, since Starlette
+    # matches routes in registration order.
+    app.router.routes.insert(0, app.router.routes.pop())
+
+    sent: list[MutableMapping[str, Any]] = []
+
+    async def _send(message: MutableMapping[str, Any]) -> None:
+        sent.append(message)
+
+    async def _receive() -> MutableMapping[str, Any]:
+        return {"type": "http.request", "body": b"", "more_body": False}
+
+    async def _drive() -> None:
+        with pytest.raises(asyncio.CancelledError):
+            await app(_ASGI_GET_SCOPE, _receive, _send)
+
+    asyncio.run(_drive())
+    assert sent == [], f"a cancelled handler still emitted a response: {sent}"
 
 
 def test_message_stream_runs_a_turn_and_connects_its_connectors_once() -> None:

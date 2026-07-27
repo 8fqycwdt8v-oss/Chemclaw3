@@ -29,10 +29,10 @@ from fastapi import Depends, FastAPI, HTTPException, UploadFile
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, field_validator
 from sse_starlette.sse import EventSourceResponse
-from starlette.middleware.base import BaseHTTPMiddleware
+from starlette.datastructures import MutableHeaders
 from starlette.middleware.cors import CORSMiddleware
-from starlette.requests import Request
 from starlette.responses import Response
+from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from agents.attachments import STORE as ATTACHMENTS
 from agents.attachments import AttachmentError, AttachmentSummary, parse_attachment
@@ -928,6 +928,16 @@ _CONTENT_SECURITY_POLICY = (
     "connect-src 'self'; img-src 'self' data:; base-uri 'none'; frame-ancestors 'none'"
 )
 
+# The full header set, as the `(name, value)` pairs the ASGI response-start message wants. A
+# tuple rather than four `setdefault` calls so adding a header is one line and the middleware
+# stays a loop.
+_SECURITY_HEADERS: tuple[tuple[str, str], ...] = (
+    ("Content-Security-Policy", _CONTENT_SECURITY_POLICY),
+    ("X-Content-Type-Options", "nosniff"),
+    ("X-Frame-Options", "DENY"),
+    ("Strict-Transport-Security", "max-age=63072000; includeSubDomains"),
+)
+
 
 def _refuse_unauthenticated_exposure() -> None:
     """Fail closed when the app would run unauthenticated (`entra_required` off) network-exposed.
@@ -961,27 +971,58 @@ def _refuse_unauthenticated_exposure() -> None:
     )
 
 
+class _SecurityHeaders:
+    """Stamp the browser security headers onto every response — pure ASGI, never buffering (SEC-5).
+
+    Pure ASGI rather than `BaseHTTPMiddleware`, which is what this used to be. That wrapper runs
+    the downstream app as a *second task* and pipes its ASGI messages through a memory stream, so
+    a request that ends without ever sending a response — a client that gives up while waiting
+    for an admission permit, a pod draining mid-stream on a rolling deploy, anything that
+    cancels the handler — reaches `call_next` as a closed stream and is re-raised as
+    `RuntimeError("No response returned.")`: a 500 with a traceback where the honest outcome is
+    a closed connection. A 50-user load run logged 44 of them, every one on the SSE turn route,
+    and the same wrapper is why an `EventSourceResponse` cannot be run under more than one
+    uvicorn worker safely.
+
+    This wraps only `send`, mutating the `http.response.start` headers in place. The body is
+    never re-tasked, never buffered, and a long-lived SSE stream is byte-for-byte what the route
+    produced.
+    """
+
+    def __init__(self, app: ASGIApp) -> None:
+        """Wrap `app`, the rest of the ASGI stack below this middleware."""
+        self._app = app
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        """Pass the call through, adding the headers to the response-start message.
+
+        Non-HTTP scopes (lifespan, websocket) carry no response headers, so they pass straight
+        through — a middleware that assumed `http` would break startup.
+        """
+        if scope["type"] != "http":
+            await self._app(scope, receive, send)
+            return
+
+        async def _send(message: Message) -> None:
+            if message["type"] == "http.response.start":
+                headers = MutableHeaders(scope=message)
+                for name, value in _SECURITY_HEADERS:
+                    # setdefault, so a route that deliberately sets its own policy still wins.
+                    headers.setdefault(name, value)
+            await send(message)
+
+        await self._app(scope, receive, _send)
+
+
 def _add_security_headers(app: FastAPI) -> None:
     """Add the browser security headers to every response, when `service_security_headers` is on.
 
     Off only when a deployment fronts its own header policy at the ingress/Route; on by default
-    so the app is safe standalone. The headers are static, so a lightweight middleware sets them
+    so the app is safe standalone. The headers are static, so one pure-ASGI middleware sets them
     on every response (including static files and errors) without touching the route handlers.
     """
-    if not settings.service_security_headers:
-        return
-
-    async def _set_headers(request: Request, call_next: Callable[[Request], Any]) -> Response:
-        response: Response = await call_next(request)
-        response.headers.setdefault("Content-Security-Policy", _CONTENT_SECURITY_POLICY)
-        response.headers.setdefault("X-Content-Type-Options", "nosniff")
-        response.headers.setdefault("X-Frame-Options", "DENY")
-        response.headers.setdefault(
-            "Strict-Transport-Security", "max-age=63072000; includeSubDomains"
-        )
-        return response
-
-    app.add_middleware(BaseHTTPMiddleware, dispatch=_set_headers)
+    if settings.service_security_headers:
+        app.add_middleware(_SecurityHeaders)
 
 
 def _add_cors(app: FastAPI) -> None:
