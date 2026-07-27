@@ -4367,3 +4367,56 @@ Fixing it also exposed a fourth name space problem: `validate_skills`, `validate
 `agents/chemclaw_agent.py` also unioned the generated template launchers. A skill naming
 `run_hazard_briefing` failed validation although the tool exists. All four now call one
 `available_tool_names()`.
+
+## D-118 — One connector seam for MCP, Temporal and long-running HPC tools
+
+The seam D-110 built covers plain MCP tools and connector-owned durable jobs declaratively. It does
+not cover the third kind — a long-running HPC job — which is still four hand-written core edits per
+capability, and it carries three smaller duplications beside it. This ADR closes them. It opens with
+the defect that shaped the rest, because that defect was invisible and is the reason the seam needs
+a *mechanical* boundary rather than a documented one.
+
+**The chat service was loading the quantum-chemistry closure the `calc` bundle exists to exclude.**
+
+`connector.yaml`'s `params_model` names a pydantic model as `module:Class`, and
+`connectors/jobs.py` resolves that name by **importing** it — inside `build_job_tool`, which
+`agents/chemclaw_agent.py` calls on *every* `build_agent`, and again in `make connector-validate`.
+The `calc` bundle pointed its five jobs at `workflows/models.py`, which imported `calc.complexes`,
+`calc.conformers`, `calc.reaction` and `calc.xtb_scan` for the *result* types that happened to live
+in the same file as the *request* types.
+
+Measured from a clean interpreter, building the enabled job tools loaded:
+
+```
+heavy third-party: ['tblite', 'tblite._libtblite', 'tblite.exceptions',
+                    'tblite.interface', 'tblite.library']
+calc.* modules:    15  (anc, complexes, conformers, crest_cli, progress, reaction, store,
+                        structure, xtb_cli, xtb_engine, xtb_opt, xtb_scan, xtb_spec, xtb_thermo)
+```
+
+`tblite` is a compiled quantum-chemistry library. It was resident in the chat pod, which never calls
+it. Nothing failed and no test noticed, because the coupling arrives through a *string in YAML*
+rather than through an import statement anyone would read. This is exactly the closure
+`connectors/calc/workflows.py` says D-114 removed — *"which is what kept the whole heavy chemistry
+closure inside the chat service's image"* — quietly restored by the one field that resolves an
+import.
+
+**The fix is a split on what a module may import, not on what it is about.** Requests move to
+`connectors/calc/specs.py`, a leaf importing pydantic and config only; results move to
+`connectors/calc/results.py`, which may import the heavy `calc.*` types because only this bundle's
+own worker ever imports *it*. After the move the same measurement reports `heavy: NONE`,
+`calc.*: NONE`.
+
+`tests/test_connector_isolation.py` asserts it in a **subprocess**, which is not incidental: by the
+time any test runs, the session's `sys.modules` already holds everything every other test imported,
+so an in-process check would pass no matter what the manifest said. Counterfactually verified — a
+single heavy import added back to the leaf module fails it with the exact five `tblite` entries.
+
+**`JobStatus.xtb_result` went with it, and was already dead.** The field, and the
+`kind: Literal["qm", "xtb"]` that chose between it and `qm_result`, date from when one status tool
+answered for both engines. D-114 moved the xTB job into the `calc` bundle, where
+`get_durable_job_status` reports it through the connector envelope, so `agents/job_status.py` has
+hardcoded `kind="qm"` and populated only `qm_result` ever since. Nothing wrote or read
+`xtb_result` — grep confirms a single occurrence in the whole tree, its own declaration. Removed
+rather than kept as a field whose `None` means "unreachable here"; it was also the last thing
+pulling the `calc.*` result closure into core.

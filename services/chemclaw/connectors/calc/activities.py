@@ -31,14 +31,14 @@ from calc.postgres_store import default_store
 from calc.reaction import compare_solvent_effects, compute_reaction_energy
 from calc.structure import structure_from_smiles
 from calc.xtb_scan import ScanSpec, run_cached_scan
-from workflows.models import (
+from connectors.calc.results import XtbJobResult
+from connectors.calc.specs import (
     ComplexJobSpec,
     EnsembleJobSpec,
     ReactionJobSpec,
     ScanJobSpec,
     SolventScreenJobSpec,
     XtbJobInput,
-    XtbJobResult,
 )
 
 

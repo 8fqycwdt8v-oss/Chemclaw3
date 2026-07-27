@@ -28,8 +28,8 @@ from temporalio import workflow
 with workflow.unsafe.imports_passed_through():
     from chemclaw.config import settings
     from connectors.calc.activities import run_xtb_calculation
+    from connectors.calc.specs import XtbJobInput, XtbJobSpec
     from workflows.connector_job import ConnectorJobResult
-    from workflows.models import XtbJobInput, XtbJobSpec
 
 from workflows.publish import BAD_DATA_RETRY
 

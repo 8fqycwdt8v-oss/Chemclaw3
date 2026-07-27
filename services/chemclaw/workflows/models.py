@@ -6,14 +6,10 @@ activity boundary (handles and results passed between activities). One module so
 no shape is duplicated between the agent, the workflow, and the activities.
 """
 
-from typing import Annotated, Literal
+from typing import Literal
 
 from pydantic import BaseModel, Field
 
-from calc.complexes import InteractionResult
-from calc.conformers import ConformerEnsemble
-from calc.reaction import ReactionEnergyResult, SolventComparisonResult
-from calc.xtb_scan import ScanResult
 from chemclaw.chem import require_canonical_smiles
 from chemclaw.config import settings
 from chemclaw.ids import stable_hash
@@ -110,127 +106,22 @@ class QMJobResult(BaseModel):
     requested_by: str
 
 
-class ReactionJobSpec(BaseModel):
-    """A durable reaction-energy request (xTB plan X4)."""
-
-    kind: Literal["reaction"] = "reaction"
-    reactants: list[str] = Field(min_length=1)
-    products: list[str] = Field(min_length=1)
-    solvent: str | None = None
-    temperature_k: float | None = None
-    level: Literal["quick", "standard", "thorough"] = "standard"
-
-
-class SolventScreenJobSpec(BaseModel):
-    """A durable solvent-comparison request over one reaction (xTB plan X4)."""
-
-    kind: Literal["solvents"] = "solvents"
-    reactants: list[str] = Field(min_length=1)
-    products: list[str] = Field(min_length=1)
-    solvents: list[str] = Field(min_length=1)
-    temperature_k: float | None = None
-    level: Literal["quick", "standard", "thorough"] = "standard"
-
-
-class ScanJobSpec(BaseModel):
-    """A durable relaxed-scan request along one internal coordinate (xTB plan X3)."""
-
-    kind: Literal["scan"] = "scan"
-    smiles: str = Field(min_length=1)
-    atoms: list[int] = Field(min_length=2, max_length=4)
-    values: list[float] = Field(min_length=2)
-    solvent: str | None = None
-
-
-class EnsembleJobSpec(BaseModel):
-    """A durable conformer/tautomer/protomer search request (xTB plan X6)."""
-
-    kind: Literal["ensemble"] = "ensemble"
-    smiles: str = Field(min_length=1)
-    search: Literal["conformers", "tautomers", "protomers", "deprotomers"] = "conformers"
-    solvent: str | None = None
-    effort: Literal["quick", "normal", "extensive"] = "quick"
-
-
-class ComplexJobSpec(BaseModel):
-    """A durable non-covalent complex search over two molecules (xTB plan X11)."""
-
-    kind: Literal["complex"] = "complex"
-    smiles_a: str = Field(min_length=1)
-    smiles_b: str = Field(min_length=1)
-    solvent: str | None = None
-    effort: Literal["quick", "normal", "extensive"] = "quick"
-
-
-# What an xTB job may be asked to do, discriminated on `kind`. A closed, typed union
-# rather than a free-form request is the same boundary rule the proposal sets for the
-# expert escape hatch: a model-authored payload can select among calculations we
-# defined, and can never describe one we did not.
-XtbJobSpec = Annotated[
-    ReactionJobSpec | SolventScreenJobSpec | ScanJobSpec | EnsembleJobSpec | ComplexJobSpec,
-    Field(discriminator="kind"),
-]
-
-
-class XtbJobInput(BaseModel):
-    """A request to run an expensive xTB task as a durable job (xTB plan X3/X4).
-
-    The same shape as `QMJobInput` for the fields that are about *who asked* rather than
-    *what to compute*: `requested_by` for the audit trail, `session_id` for the
-    completion push-back, both stamped from the turn's ambient context at submit and
-    never supplied by the model. Excluded from `xtb_job_key` for the same reason —
-    identical science dedupes across users and sessions (D-011).
-    """
-
-    spec: XtbJobSpec
-    requested_by: str = settings.service_actor_id
-    session_id: str | None = None
-
-
-def xtb_job_key(job: XtbJobInput) -> str:
-    """Stable identity of an xTB job: its spec alone.
-
-    Note what this key is *not*: it is not the calculation cache key. Each species,
-    optimization and Hessian inside the job is separately content-addressed by
-    `calc.xtb_spec`, so two different jobs sharing a species still share that work. This
-    key exists only to make submit idempotent — the same request while it is running, or
-    after it finished, returns the existing job rather than starting a second one.
-    """
-    return stable_hash(job.spec.model_dump())
-
-
-class XtbJobResult(BaseModel):
-    """The outcome of a durable xTB job: exactly one of the three result shapes.
-
-    Three optional fields rather than a union, because each result model is a rich
-    domain type with no field in common to discriminate on, and a wrong smart-union
-    match would be a silent data corruption rather than a loud error.
-    """
-
-    kind: str
-    summary: str
-    reaction: ReactionEnergyResult | None = None
-    solvents: SolventComparisonResult | None = None
-    scan: ScanResult | None = None
-    ensemble: ConformerEnsemble | None = None
-    interaction: InteractionResult | None = None
-
-
 class JobStatus(BaseModel):
-    """A non-blocking status view of any durable calculation job (plan 1.6, xTB X3/X4).
+    """A non-blocking status view of a durable QM calculation job (plan 1.6).
 
-    One model across both job kinds, because "how is my calculation doing" is one
-    question and the agent should not have to know which engine answered it. `status` is
-    Temporal's execution status name (RUNNING/COMPLETED/FAILED/…); exactly one of the
-    result fields is populated, and only once the job has completed.
+    `status` is Temporal's execution status name (RUNNING/COMPLETED/FAILED/…); `qm_result` is
+    populated only once the job has completed.
 
-    Two typed fields rather than one polymorphic one: a QM result and an xTB result are
-    genuinely different shapes, and naming both keeps the model reading a field whose
-    contents it can predict from the name.
+    It used to carry an `xtb_result` beside it and a `kind: Literal["qm", "xtb"]` to choose
+    between them, from when one status tool answered for both engines. D-114 moved the xTB job
+    into the `calc` bundle, where `get_durable_job_status` reports it through the connector
+    envelope — so `agents/job_status.py` has hardcoded `kind="qm"` and set only `qm_result` ever
+    since, and the second field was never populated or read by anything. Removed rather than left
+    as a field whose `None` meant "this can never happen here" (D-118); the type it named was also
+    the last thing pulling the `calc.*` result closure into core.
     """
 
     job_id: str
-    kind: Literal["qm", "xtb"]
+    kind: Literal["qm"] = "qm"
     status: str
     qm_result: QMJobResult | None = None
-    xtb_result: XtbJobResult | None = None

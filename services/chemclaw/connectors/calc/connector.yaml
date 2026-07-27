@@ -62,7 +62,7 @@ jobs:
       about rate, since there are no transition states here. Quote the reported uncertainty: a
       semiempirical reaction free energy is for comparing related reactions, not for a number in a
       report.
-    params_model: workflows.models:ReactionJobSpec
+    params_model: connectors.calc.specs:ReactionJobSpec
 
   - name: compare_solvents
     workflow: CalcJobWorkflow
@@ -74,7 +74,7 @@ jobs:
       rather than a set of absolute numbers that would each carry the method's full error. Use it to
       narrow a solvent screen before bench time. The differences between solvents are more
       trustworthy than any single value; say so when reporting.
-    params_model: workflows.models:SolventScreenJobSpec
+    params_model: connectors.calc.specs:SolventScreenJobSpec
 
   - name: scan_coordinate
     workflow: CalcJobWorkflow
@@ -87,7 +87,7 @@ jobs:
       indices for a bond, three for an angle, four for a dihedral (0-based, as RDKit numbers them).
       The barrier it reports is an upper bound on the *ground-state* profile and is not a transition
       state.
-    params_model: workflows.models:ScanJobSpec
+    params_model: connectors.calc.specs:ScanJobSpec
 
   - name: sample_conformers
     workflow: CalcJobWorkflow
@@ -99,7 +99,7 @@ jobs:
       than one arbitrary geometry. Needs the optional CREST binary; without it the job reports that
       the search is unavailable rather than silently returning a single conformer. Effort trades
       wall-clock for coverage; a search is never cheap, so expect a job id.
-    params_model: workflows.models:EnsembleJobSpec
+    params_model: connectors.calc.specs:EnsembleJobSpec
     # A CREST search is the one genuinely costly thing in this bundle — minutes of saturated
     # CPU, and unlike the xTB tasks its cost is not bounded by the input's size. It inherits
     # the role gate that used to sit on `run_xtb_task`, the expert escape hatch these five
@@ -117,7 +117,7 @@ jobs:
       host-guest binding, solvent-solute association. Searches complex geometries rather than
       assuming one, then reports the interaction energy of the best. Semiempirical and in continuum
       solvent, so treat it as a ranking between candidate partners, not an absolute binding energy.
-    params_model: workflows.models:ComplexJobSpec
+    params_model: connectors.calc.specs:ComplexJobSpec
     # A CREST search is the one genuinely costly thing in this bundle — minutes of saturated
     # CPU, and unlike the xTB tasks its cost is not bounded by the input's size. It inherits
     # the role gate that used to sit on `run_xtb_task`, the expert escape hatch these five
