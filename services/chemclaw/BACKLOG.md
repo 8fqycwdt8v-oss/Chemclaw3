@@ -32,6 +32,36 @@ missing prerequisite), in D-092.
 
 The load test's fixes landed (see D-119). What it surfaced and did **not** close:
 
+- [ ] **CI-1 `main` has been red since D-117 enabled the real gates: `check` is cancelled at the
+      30-minute job timeout, every run.** Runs on `main` at `5f95166`, `5e0827a` and `33d454e` all
+      end `cancelled` after exactly 30:00, and so does every PR run since. This is a regression from
+      D-117 — the gates it moved into the root workflow are correct, but nobody checked the job
+      could finish inside `timeout-minutes: 30`.
+
+      It is a **hang, not slowness**. The log stops dead:
+
+      ```
+      17:54:52  tests/test_bo_campaign.py ................  [  8%]
+      17:54:52  tests/test_bo_doe.py ...                    [  8%]
+      17:54:58  tests/test_bo_featurize.py .............     [  9%]
+      18:22:46  ##[error]The operation was canceled.
+      ```
+
+      28 minutes of silence at 9 %, and the orphan-process list at cleanup is
+      `make`, `uv`, `pytest`, `temporal-test-server-sdk-python-1.30.0` — so it hangs on the first
+      test needing the Temporal test server.
+
+      **`timeout = 180` did not fire, and that is the second half of the bug.** pyproject picks the
+      `signal` method deliberately (to fail one test rather than `os._exit` the session). SIGALRM is
+      delivered to the main thread, but `temporalio` blocks inside its Rust core via PyO3, so the
+      interpreter never gets back to run the handler. The one guard against exactly this failure is
+      inert against exactly this failure.
+
+      Not reproducible locally: the Temporal tests **skip** in this sandbox (the test server cannot
+      be downloaded), which is why 1277-passing local runs say nothing about it. Fixing it needs a
+      runner or an equivalent, and the first step is naming the test — `--timeout-method=thread` in
+      CI would at least fail loudly with a name instead of burning the job silently.
+
 - [ ] **AUDIT-1 The tool-audit middleware does not fire, so `audit_events` stays empty even with a
       durable sink wired.** D-122 fixed the half that was findable by reading: the service passed no
       sink, so the trail was log-only. With that fixed and `default_audit_sink()` verified to return
