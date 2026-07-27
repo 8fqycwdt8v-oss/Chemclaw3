@@ -146,7 +146,14 @@ def test_a_connector_job_runs_its_own_workflow_and_core_does_the_rest(
                 # the id is what comes back, and the result is awaited separately as a poll
                 # would.
                 assert job_id == _EXPECTED_ID
-                result: ConnectorJobResult = await client.get_workflow_handle(job_id).result()
+                # `result_type` is required, not decoration. An untyped handle hands the pydantic
+                # converter nothing to decode into, so `.result()` returns the raw `dict` and every
+                # attribute read below fails with `'dict' object has no attribute 'summary'` — which
+                # is exactly how this test failed the first time CI actually ran it (D-117). The
+                # product path was fine throughout: `workflows/connector_job.py:106` already passes
+                # `result_type` on the child call, verified against a live server.
+                handle = client.get_workflow_handle(job_id, result_type=ConnectorJobResult)
+                result: ConnectorJobResult = await handle.result()
                 return result
 
     result = asyncio.run(_run())

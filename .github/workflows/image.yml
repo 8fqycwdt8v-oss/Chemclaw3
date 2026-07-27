@@ -1,0 +1,68 @@
+# Image gate (plan F6-T4): the single multi-target image builds, and every component the
+# entrypoint dispatches actually imports as a non-root UID.
+#
+# This ran nowhere before D-117. It lived at `services/chemclaw/.github/workflows/deploy.yml`,
+# which GitHub Actions never reads, and its smoke step still named `mcp-molfp`/`mcp-rxnfp` —
+# components `entrypoint.sh` would now reject with exit 64. It passed anyway, because the step ran
+# `python -c import <module>` rather than the entrypoint, so it never exercised the dispatch it
+# claimed to cover. The component/entrypoint agreement is now checked offline in both directions
+# by `tests/test_deploy_chart.py`; what only an image can prove is that the closure installs and
+# imports under an arbitrary high UID, which is what this does.
+#
+# Deliberately NOT on every branch push: the build fetches the xtb and crest release tarballs and
+# the full dependency closure, so it costs minutes. Pull requests and `main` are where it matters.
+#
+# The registry push and cluster rollout are not here. The stranded workflow carried them as a job
+# whose entire body was `echo "docker push + helm upgrade ..."` — a stub, deleted rather than
+# carried forward. Its trigger is recorded in DEFERRED.md: a real cluster and its credentials.
+name: image
+
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+
+defaults:
+  run:
+    working-directory: services/chemclaw
+
+jobs:
+  image:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build the multi-target image (rootless)
+        run: docker build -f deploy/Containerfile -t chemclaw:ci .
+
+      - name: Smoke every dispatchable component as a non-root UID
+        # Derived from the entrypoint's own cases so this cannot drift from what ships: the two
+        # generic `connector-*` prefixes are expanded from the bundles actually present.
+        run: |
+          set -euo pipefail
+          modules=(
+            service.app
+            workers.hpc_worker
+            workers.background_worker
+          )
+          for bundle in connectors/*/; do
+            name="$(basename "${bundle}")"
+            [ -f "${bundle}/server/app.py" ] && modules+=("connectors.${name}.server.app")
+            [ -f "${bundle}/worker.py" ] && modules+=("connectors.${name}.worker")
+          done
+          for module in "${modules[@]}"; do
+            echo "::group::import ${module}"
+            docker run --rm --user 1001 --entrypoint python chemclaw:ci -c "import ${module}"
+            echo "::endgroup::"
+          done
+
+      - name: An unknown component must fail loudly, not silently start something
+        run: |
+          set -euo pipefail
+          status=0
+          docker run --rm --user 1001 -e CHEMCLAW_COMPONENT=not-a-component chemclaw:ci || status=$?
+          test "${status}" -eq 64 || {
+            echo "expected exit 64 for an unknown component, got ${status}" >&2
+            exit 1
+          }

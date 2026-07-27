@@ -24,14 +24,23 @@ WORKDIR /app
 # over files and never linked, so the usual analysis is that neither affects this
 # codebase's licence — but *distributing* them inside an image is a decision for whoever
 # owns the product. Drop the crest layer to ship without it.
+#
+# The xtb link is resolved by *finding* the extracted binary rather than guessing its directory.
+# The previous form tried `/opt/xtb-dist/bin/xtb` and fell back to `/opt/xtb-${XTB_VERSION}/bin/xtb`
+# — but `ln -s` succeeds when its target does not exist, creating a dangling link, so the `||`
+# fallback could never run and the version check below failed with 127. The 6.6.1 tarball extracts
+# to `xtb-6.6.1/`, i.e. exactly the path the unreachable fallback named, so **this image had never
+# built**. Nothing noticed because the workflow that builds it was stranded under
+# `services/chemclaw/.github/`, where GitHub Actions never reads (both fixed in D-117).
 ARG XTB_VERSION=6.6.1
 ARG CREST_VERSION=3.0.2
 RUN set -eux; \
     curl -fsSL -o /tmp/xtb.tar.xz \
       "https://github.com/grimme-lab/xtb/releases/download/v${XTB_VERSION}/xtb-${XTB_VERSION}-linux-x86_64.tar.xz"; \
     tar -xJf /tmp/xtb.tar.xz -C /opt; \
-    ln -s "/opt/xtb-dist/bin/xtb" /usr/local/bin/xtb 2>/dev/null || \
-      ln -s "/opt/xtb-${XTB_VERSION}/bin/xtb" /usr/local/bin/xtb; \
+    xtb_bin="$(find /opt -maxdepth 4 -type f -name xtb -perm -u+x -print -quit)"; \
+    test -n "${xtb_bin}" || { echo "no xtb binary under /opt after extraction" >&2; exit 1; }; \
+    ln -sfn "${xtb_bin}" /usr/local/bin/xtb; \
     curl -fsSL -o /tmp/crest.tar.xz \
       "https://github.com/crest-lab/crest/releases/download/v${CREST_VERSION}/crest-gnu-12-ubuntu-latest.tar.xz"; \
     mkdir -p /opt/crest && tar -xJf /tmp/crest.tar.xz -C /opt/crest --strip-components=1; \

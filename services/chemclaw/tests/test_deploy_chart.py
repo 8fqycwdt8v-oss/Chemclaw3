@@ -86,9 +86,53 @@ def test_every_declared_component_has_an_entrypoint_case() -> None:
             "\n".join(_template_text().values()),
         )
     )
-    # Templated names (e.g. "mcp-{{ $name }}") are checked by their prefix instead.
+    # Templated names (e.g. "connector-{{ $name }}") are checked by their prefix instead.
     concrete = {name for name in declared if "{{" not in name}
     assert concrete <= cases, f"components with no entrypoint case: {sorted(concrete - cases)}"
+
+
+def test_the_entrypoint_has_no_case_the_chart_never_declares() -> None:
+    """The other direction, which is how a deleted component stayed routable (D-117).
+
+    The check above catches a chart component with no entrypoint case — a crash loop. It cannot
+    catch the reverse: an entrypoint case for a component nothing deploys. That is what happened
+    to `mcp-calc`. Its module was described as deleted in three separate documents, yet
+    `entrypoint.sh` still carried `mcp-calc) exec python -m mcp_servers.calc.server`, so the image
+    went on shipping and dispatching a second live copy of seven `calc`-bundle tools. Nothing
+    failed, because nothing looked this way.
+
+    `*` is the unknown-component guard, and the two `<prefix>-*` cases are the generic connector
+    dispatch — the whole point of the seam is that they match names no chart line spells out.
+    """
+    entrypoint = (DEPLOY / "entrypoint.sh").read_text()
+    cases = set(re.findall(r"^\s{2}([a-z0-9-]+)\)", entrypoint, flags=re.MULTILINE))
+    prefixes = set(re.findall(r"^\s{2}([a-z0-9-]+)-\*\)", entrypoint, flags=re.MULTILINE))
+    declared = set(
+        re.findall(
+            r'name:\s*CHEMCLAW_COMPONENT\s*\n\s*value:\s*"([a-z0-9-]+)"',
+            "\n".join(_template_text().values()),
+        )
+    )
+    # A chart value like "connector-{{ $name }}" reduces to the prefix the entrypoint globs on.
+    templated_prefixes = {
+        name.split("-")[0] for name in re.findall(r'value:\s*"([a-z0-9-]+)-\{\{', _all_templates())
+    }
+    orphans = {
+        case
+        for case in cases
+        if case not in declared
+        and case not in prefixes
+        and not any(case.startswith(f"{prefix}-") for prefix in prefixes | templated_prefixes)
+    }
+    assert not orphans, (
+        f"entrypoint dispatches components nothing deploys: {sorted(orphans)} — "
+        "either the chart lost a component or the case outlived its module"
+    )
+
+
+def _all_templates() -> str:
+    """Every chart template as one string (both component tests read it this way)."""
+    return "\n".join(_template_text().values())
 
 
 # Top-level directories that are never shipped: test code, and the docs/infra trees the image
@@ -228,3 +272,45 @@ def test_a_comment_never_swallows_the_line_after_it() -> None:
             if following.startswith((" ", "\t")):
                 offenders.append(f"{path.name}:{index + 1} swallows {following.strip()!r}")
     assert not offenders, "comment closures that eat the next line: " + "; ".join(offenders)
+
+
+# Kinds kubeconform has no schema for, so `make helm-validate` runs with
+# `-ignore-missing-schemas` and *skips* them rather than failing. Keeping the set explicit is what
+# stops that flag from being a hole: a skipped kind is a deliberate entry here, not a silent pass.
+_UNVALIDATED_KINDS = frozenset({"Route"})
+
+
+def test_only_the_known_crd_is_unvalidated_by_kubeconform() -> None:
+    """Pin which kinds the chart renders, so `-ignore-missing-schemas` cannot hide a new one.
+
+    `make helm-validate` must pass `-ignore-missing-schemas` because the chart renders an OpenShift
+    `route.openshift.io/v1 Route`, and no JSON schema for it exists in kubeconform's defaults or in
+    the datreeio CRDs catalog — both 404. Without the flag the target can never pass, which is why
+    it had never been seen to pass: the only workflow that ran it was stranded where GitHub Actions
+    does not read (D-117).
+
+    The cost of the flag is that an unknown kind is skipped instead of rejected. This test buys that
+    back offline: every kind the chart renders is either a core Kubernetes kind (which kubeconform
+    does validate) or is named here.
+    """
+    core_kinds = {
+        "ConfigMap",
+        "Deployment",
+        "HorizontalPodAutoscaler",
+        "Job",
+        "NetworkPolicy",
+        "Secret",
+        "Service",
+        "ServiceAccount",
+    }
+    rendered = set(re.findall(r"^kind:\s*([A-Za-z]+)", _all_templates(), flags=re.MULTILINE))
+    unexpected = rendered - core_kinds - _UNVALIDATED_KINDS
+    assert not unexpected, (
+        f"the chart renders kind(s) {sorted(unexpected)} that kubeconform may silently skip — "
+        "add a schema location, or add them to _UNVALIDATED_KINDS with the reason"
+    )
+    # And the exemption must stay earned: if Route ever gains a schema, drop it from the set.
+    assert _UNVALIDATED_KINDS <= rendered, (
+        f"_UNVALIDATED_KINDS names kind(s) the chart no longer renders: "
+        f"{sorted(_UNVALIDATED_KINDS - rendered)}"
+    )

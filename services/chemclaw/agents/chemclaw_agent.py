@@ -388,15 +388,29 @@ def _capability_tools(profile: AgentProfile | None = None) -> list[Any]:
     return inprocess
 
 
+def available_tool_names() -> set[str]:
+    """Every tool name the agent can resolve, across all three name spaces.
+
+    The three are genuinely separate — in-process `@tool` functions this process holds as symbols,
+    connector endpoint tools named only by a manifest allow-list, and the `run_<name>` launchers
+    generated from step templates — and only the union is meaningful. Exposed rather than inlined
+    because four other places need exactly this set: the skill validator, the template validator,
+    the prose-contract validator, and the test that checks the instructions against it. Three of
+    those unioned only the first two name spaces, so a skill or template step naming a template
+    launcher failed validation although the tool exists (D-117). One definition, one answer.
+    """
+    return {*registered_tool_names(), *connector_tool_names(), *template_tool_names()}
+
+
 def _reject_unknown_tool_names(profile: AgentProfile) -> None:
-    """Fail the build when a profile names a tool neither half of the surface provides.
+    """Fail the build when a profile names a tool no part of the surface provides.
 
     The whole surface, checked in one place, because that is the only place that can tell a typo
     from a name that merely lives on the other side of the process boundary. Splitting the check
-    would make each half reject the other's tools.
+    would make each part reject the others' tools.
     """
     assert profile.tool_names is not None  # only called when the profile narrows
-    available = {*registered_tool_names(), *connector_tool_names(), *template_tool_names()}
+    available = available_tool_names()
     unknown = profile.tool_names - available
     if unknown:
         raise ValueError(

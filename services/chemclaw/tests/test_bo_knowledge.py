@@ -55,8 +55,18 @@ def test_note_id_is_stable_for_the_same_recommendation() -> None:
     )
 
 
+@pytest.mark.timeout(600)
 def test_campaign_publishes_recommendation_to_graph(monkeypatch: pytest.MonkeyPatch) -> None:
-    """With publish_to_graph, a finished campaign proposes a bo-candidate note (bg queue)."""
+    """With publish_to_graph, a finished campaign proposes a bo-candidate note (bg queue).
+
+    Overrides the 180s per-test cap rather than raising it globally. This is the one test that
+    fits a real BoTorch GP and runs a real acquisition optimisation *inside* a Temporal worker, and
+    on a shared runner that optimisation retries: CI logs show
+    `Optimization failed in gen_candidates_scipy ... Trying again with a new set of initial
+    conditions`, several times, each a fresh multi-start. It is slow, not hung — and the global cap
+    exists to catch hangs, so weakening it for everything to accommodate one genuinely heavy test
+    would trade the guard away for nothing.
+    """
     fake = FakeSubmitter()
     # The gate is core's now, so the submitter is patched where core publishes from.
     monkeypatch.setattr(memory_jobs, "default_submitter", lambda: fake)

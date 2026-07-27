@@ -42,11 +42,30 @@ class ProposalSignal(BaseModel):
     reference: str
 
 
-# One buffer per turn, holding both kinds in the order they occurred. A single list (rather than one
+class ApprovalSignal(BaseModel):
+    """A durable approval hold a tool opened during this turn (gap RCH-3).
+
+    `ApprovalRequestEvent` has carried an `approval_id` field — documented as "the durable hold's
+    handle, so a surface can actually answer it via `POST /approvals/{id}/decision`" — since the
+    hold was built, but nothing ever populated it: `start_approval` returns the id *into the
+    model's context*, and the runner only sees the model's streamed updates. So every approval
+    event reached the UI with an empty handle, and a surface could render the request but not the
+    button that answers it, which is the whole point of the hold.
+
+    Carried as a turn signal for the same reason as `JobSignal`: the id must come from the tool
+    that opened the hold, not from anything the model can author.
+    """
+
+    prompt: str
+    approval_id: str
+
+
+Signal = JobSignal | ProposalSignal | QuestionSignal | ApprovalSignal
+
+
+# One buffer per turn, holding every kind in the order they occurred. A single list (rather than one
 # per kind) keeps ordering across kinds, which is what a transcript needs.
-_signals: ContextVar[list[JobSignal | ProposalSignal | QuestionSignal] | None] = ContextVar(
-    "chemclaw_turn_signals", default=None
-)
+_signals: ContextVar[list[Signal] | None] = ContextVar("chemclaw_turn_signals", default=None)
 
 
 def begin_turn() -> object:
@@ -80,6 +99,13 @@ def record_question(question: str, options: list[str]) -> None:
         buffer.append(QuestionSignal(question=question, options=options))
 
 
+def record_approval_request(prompt: str, approval_id: str) -> None:
+    """Note that a durable approval hold was opened. A no-op off the request path."""
+    buffer = _signals.get()
+    if buffer is not None:
+        buffer.append(ApprovalSignal(prompt=prompt, approval_id=approval_id))
+
+
 def set_job_sink() -> object:
     """Open a per-turn sink. Alias of `begin_turn`, kept as the name main's callers already use.
 
@@ -106,7 +132,7 @@ def drain_started_jobs() -> list[str]:
     return [s.job_id for s in drain() if isinstance(s, JobSignal)]
 
 
-def drain() -> list[JobSignal | ProposalSignal | QuestionSignal]:
+def drain() -> list[Signal]:
     """Take and clear everything recorded since the last drain (empty off the request path)."""
     buffer = _signals.get()
     if not buffer:

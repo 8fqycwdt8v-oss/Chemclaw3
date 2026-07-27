@@ -14,6 +14,7 @@ from temporalio.exceptions import WorkflowAlreadyStartedError
 from temporalio.service import RPCError
 
 from agents.authz import require_actor
+from agents.turn_signals import record_approval_request
 from chemclaw.config import settings
 from chemclaw.temporal_client import connect
 from workflows.interaction_approval import InteractionApprovalWorkflow, InteractionCandidate
@@ -55,8 +56,25 @@ async def start_approval(candidate: InteractionCandidate) -> str:
             task_queue=settings.background_task_queue,
         )
     except WorkflowAlreadyStartedError:
+        _announce(owned, approval_id)
         return approval_id  # the hold already exists — idempotent surface
+    _announce(owned, handle.id)
     return handle.id
+
+
+def _announce(candidate: InteractionCandidate, approval_id: str) -> None:
+    """Surface the opened hold — with its handle — on the turn's event stream (gap RCH-3).
+
+    `ApprovalRequestEvent.approval_id` has always documented itself as the handle a surface
+    answers via `POST /approvals/{id}/decision`, but nothing populated it: `start_approval`
+    returns the id into the *model's* context, and the runner sees only the model's streamed
+    updates. So every approval reached the UI with an empty handle — renderable, unanswerable.
+
+    Recorded as a turn signal rather than returned, for the same reason `JobSignal` is: the
+    handle must come from the tool that opened the hold, never from anything the model authors.
+    Announced on the already-started path too, so a re-surfaced candidate is still answerable.
+    """
+    record_approval_request(f"Save this to the knowledge graph? {candidate.question}", approval_id)
 
 
 async def decide_approval(approval_id: str, approved: bool) -> None:

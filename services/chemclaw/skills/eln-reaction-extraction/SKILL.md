@@ -47,7 +47,7 @@ out of the graph.
 
 ## Validation is not optional
 
-- Every mapped reaction goes through `validate_ord` (RDKit parse + atom/mass balance) **before**
+- Every mapped reaction goes through ELN validation (RDKit parse + atom/mass balance) **before**
   it is indexed or proposed. A reaction whose product contains an element the inputs never
   supply is wrong — reject it and record why; do not "fix" it silently.
 - Ingestion is a proposal, not a fact: the reaction note enters through the PR-gate for human

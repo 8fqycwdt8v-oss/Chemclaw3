@@ -18,6 +18,7 @@ error at import; the same definition re-registering is not, because Temporal's
 sandbox re-imports workflow modules to run them.
 
 **What belongs on `hpc-jobs`:** anything whose cost is measured in minutes.
-`QMJobWorkflow` (HPC/DFT) and `XtbJobWorkflow` — the xTB tasks that
-`calc.xtb_cost` predicts are too slow for a conversation turn, which on the
-200-800 Da substrates this system targets is most of them (D-098, D-100).
+`QMJobWorkflow` (HPC/DFT) is the one core workflow on this queue. The xTB tasks
+that used to sit beside it as `XtbJobWorkflow` now run as `CalcJobWorkflow` on the
+`calc` bundle's own queue (D-114), so they are not registered here at all — the
+heavy chemistry closure stays out of the chat service's image.

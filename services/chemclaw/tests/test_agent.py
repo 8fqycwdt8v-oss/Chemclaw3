@@ -26,6 +26,7 @@ from agent_framework._compaction import (
 from agents.chemclaw_agent import _build_compaction, build_agent, connector_tools
 from chemclaw.config import settings
 from connectors.registry import connector_tool_names, discovered
+from templates.registry import template_tool_names
 
 # The domain capability an agent must be able to reach, spanning both halves of the surface: the
 # durable launchers and the knowledge/PR-gate tools are in-process, the property calculators are the
@@ -56,11 +57,27 @@ def test_agent_advertises_qm_tools() -> None:
     assert _DOMAIN_TOOLS <= tool_names
 
 
-def test_agent_has_skills_history_and_compaction() -> None:
-    """Skills (judgment), a session history, and context compaction are all attached."""
+def test_agent_has_skills_history_and_compaction(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Skills (judgment), a session history, and context compaction are all attached.
+
+    `session_store` is pinned rather than left ambient. Naming `InMemoryHistoryProvider` while
+    reading whatever the environment happens to hold makes this assert the *default deployment*
+    rather than a property of `build_agent`: with `CHEMCLAW_SESSION_STORE=postgres` exported — the
+    Helm default, and what a live-stack shell has set — it failed for a reason that was not a bug.
+    A test whose meaning changes with the environment can also pass for the wrong reason.
+    """
+    monkeypatch.setattr(settings, "session_store", "memory")
     agent = build_agent(chat_client=object())
     provider_types = {type(p).__name__ for p in agent.context_providers}
     assert {"SkillsProvider", "InMemoryHistoryProvider", "CompactionProvider"} <= provider_types
+
+
+def test_the_history_provider_follows_the_configured_store(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Both stores satisfy the same contract, so `build_agent` attaches whichever is configured."""
+    monkeypatch.setattr(settings, "session_store", "postgres")
+    attached = {type(p).__name__ for p in build_agent(chat_client=object()).context_providers}
+    assert "PostgresHistoryProvider" in attached
+    assert "InMemoryHistoryProvider" not in attached
 
 
 def test_skills_load_and_read_without_an_unanswerable_approval() -> None:
@@ -130,33 +147,30 @@ def test_instructions_only_name_available_tools() -> None:
     Regression guard for the `find_similar_reactions` vs `similar_reactions` class of bug: the
     agent's advertised surface is the registered function tools plus the connectors' tools, and
     the instructions must not promise a tool outside that set.
+
+    The referenced set is **extracted from the prose**, not listed here. It used to be a hardcoded
+    set of eleven names, which meant the test could only catch drift in names someone had thought
+    to enumerate — and `_INSTRUCTIONS` names at least ten further tools that were covered by
+    nothing at all, because the prose-contract validator's own pattern (backtick immediately
+    followed by `(`) matched zero times in a file that names every tool bare (D-117). Sharing the
+    validator's extractor means the two cannot disagree about what the prose promises.
     """
+    from scripts.validate_prose_contract import referenced_tool_names
+
     agent = build_agent(chat_client=object())
     available = {f.name for f in agent.default_options["tools"]}
     # A connector's endpoint tools are named in its manifest, not by a Python symbol this process
     # holds, so the advertised surface is the registered functions plus the connectors' tool names.
     available |= set(connector_tool_names())
+    available |= set(template_tool_names())
 
-    # The tool names the instructions direct the model to use.
-    referenced = {
-        "gather_evidence",
-        "expand_note",
-        "find_notes",
-        "similar_reactions",
-        "similar_molecules",
-        "substructure_matches",
-        "submit_qm_job",
-        "get_job_status",
-        "suggest_next_experiment",
-        "propose_knowledge_note",
-        "record_confirmed_answer",
-    }
-    missing = {name for name in referenced if name not in available}
-    assert missing == set(), f"instructions reference unavailable tools: {missing}"
-    # And each referenced name must actually appear in the instruction text.
     from agents.chemclaw_agent import _INSTRUCTIONS
 
-    assert all(name in _INSTRUCTIONS for name in referenced)
+    referenced = referenced_tool_names(_INSTRUCTIONS)
+    # A floor, so a refactor that empties the prose cannot make this test vacuously green.
+    assert len(referenced) >= 11, f"the instructions name suspiciously few tools: {referenced}"
+    missing = {name for name in referenced if name not in available}
+    assert missing == set(), f"instructions reference unavailable tools: {missing}"
 
 
 def _enable_harness(monkeypatch: pytest.MonkeyPatch, *, autonomy: str = "plan_only") -> None:
@@ -168,6 +182,7 @@ def _enable_harness(monkeypatch: pytest.MonkeyPatch, *, autonomy: str = "plan_on
 def test_harness_agent_adds_todo_and_mode_providers(monkeypatch: pytest.MonkeyPatch) -> None:
     """`harness_enabled` wires MAF todo + plan/execute mode atop history/skills/compaction."""
     _enable_harness(monkeypatch)
+    monkeypatch.setattr(settings, "session_store", "memory")  # pinned, see the test above
     agent = build_agent(chat_client=object())
     provider_types = {type(p).__name__ for p in agent.context_providers}
     assert {

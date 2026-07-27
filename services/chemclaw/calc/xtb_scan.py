@@ -30,6 +30,7 @@ from calc.store import ResultStore, run_cached
 from calc.structure import Structure
 from calc.xtb_engine import parse_molecule
 from calc.xtb_opt import OptSpec, optimize_structure
+from chemclaw.config import settings
 
 _HARTREE_TO_KCAL = 627.5094740631
 
@@ -61,6 +62,26 @@ class ScanSpec(OptSpec):
     def _freeze_the_scanned_atoms(self) -> "ScanSpec":
         """Hold the coordinate by freezing the atoms that define it."""
         self.frozen_atoms = self.atoms
+        return self
+
+    @model_validator(mode="after")
+    def _bound_the_point_count(self) -> "ScanSpec":
+        """Refuse a scan longer than `xtb_scan_max_points`.
+
+        Every point is a full constrained geometry optimization, so the length of `values` *is*
+        the cost of the call — and the values come from the model. `xtb_scan_max_points` has
+        documented itself as bounding that "the way `xtb_hessian_max_atoms` bounds a Hessian"
+        since it was added, but unlike that one it was never enforced anywhere: the field carried
+        `min_length=1` and no maximum, so a scan was an unbounded compute request the agent could
+        issue by naming more values. Checked here rather than at the tool boundary because the
+        spec is what every caller (tool, durable job, cache key) is built from.
+        """
+        limit = settings.xtb_scan_max_points
+        if len(self.values) > limit:
+            raise ValueError(
+                f"a relaxed scan is capped at {limit} points "
+                f"(xtb_scan_max_points); {len(self.values)} were requested"
+            )
         return self
 
     @property

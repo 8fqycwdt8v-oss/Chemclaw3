@@ -382,22 +382,6 @@ class CalculatorSettings(BaseSettings):
     # pointed at (an 800 Da molecule is ~120 atoms with hydrogens) with headroom; a
     # Hessian there is ~40 minutes, which is a job, not a refusal.
     xtb_hessian_max_atoms: int = 150
-    # Predicted seconds above which an xTB request runs as a durable Temporal job rather
-    # than inline in the agent's turn. Roughly the longest a chat should sit silent.
-    xtb_inline_budget_seconds: float = 10.0
-    # Cost model coefficients (`calc.xtb_cost`): seconds ~ scale * atoms**exponent, with
-    # separate scales for an optimization and for an optimization plus its Hessian.
-    # Fitted to measurements on *drug-sized* molecules (see `calc.xtb_cost`), not on the
-    # small test molecules — an exponent fitted on those came out at 1.7 and
-    # under-predicted a 76-atom substrate sevenfold. Retune rather than recode on faster
-    # hardware.
-    xtb_cost_exponent: float = 3.0
-    xtb_cost_optimize_scale: float = 3.0e-4
-    xtb_cost_hessian_scale: float = 1.0e-3
-    # A CREST conformer search on top, for the `thorough` level. Measured ~50 s on
-    # 14-atom n-butane, which is already 100x an optimization at that size — a search is
-    # metadynamics plus hundreds of optimizations, and it is never an inline request.
-    xtb_cost_ensemble_scale: float = 2.0e-2
     # Start-to-close budget for one durable xTB job activity. Four hours, because the
     # workload is drug-sized molecules: one 76-atom species takes ~5 minutes to optimize
     # and take a Hessian, so a multi-species reaction at 100+ atoms is genuinely hours.

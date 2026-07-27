@@ -1,11 +1,12 @@
-# CI gate: lint + type + test on every push and PR. A red run blocks merge —
-# this is the automated half of the CLAUDE.md "green before done" rule.
+# CI gate: every check CLAUDE.md's "green before done" rule names. A red run blocks merge.
 #
-# Lives at the repository root because that is the only place GitHub Actions reads
-# workflows from. The Python service moved under `services/chemclaw/` in the Replit
-# restructure, which left its workflow at `services/chemclaw/.github/workflows/ci.yml`
-# where nothing executes it — so the repo had no CI at all. This runs that same gate
-# from the service directory; the in-service copy stays as the service's own record.
+# Lives at the repository root because that is the only place GitHub Actions reads workflows from.
+# The Python service moved under `services/chemclaw/` in the Replit restructure, which stranded its
+# workflow at `services/chemclaw/.github/workflows/ci.yml` where nothing executed it. For a while
+# this file then ran a *subset* of that stranded workflow, and three live documents went on claiming
+# the missing gates were enforced — `pyproject.toml` ("CI runs `make cov` as a gate") and two `[x]`
+# entries in `BACKLOG.md`. D-117 moved every gate here and deleted the stranded copies, so what runs
+# and what is claimed to run are the same thing again.
 name: ci
 
 on:
@@ -21,9 +22,9 @@ jobs:
   check:
     runs-on: ubuntu-latest
     # A hung test must fail this job, not occupy a runner until GitHub's 6-hour ceiling (D-093:
-    # tests/test_orchestrator.py's fan-out test used to do exactly that before its own fix). The
-    # whole gate takes minutes, so this ceiling only ever trips on a genuine hang; kept as the
-    # general safety net now that the known cause is fixed.
+    # tests/test_orchestrator.py's fan-out test used to do exactly that). `pytest-timeout`'s
+    # per-test cap is the inner bound that names the offending test; this is the outer one, for a
+    # hang its signal-based interrupt cannot reach. The whole gate takes minutes.
     timeout-minutes: 30
     # Real Postgres so the calculation-store and session-store integration tests run (not skip).
     services:
@@ -56,31 +57,28 @@ jobs:
       - name: Apply database migrations
         run: make db-migrate
 
-      - name: Lint + type + test
-        run: make lint type test
-
-      - name: Ensure a local knowledge directory
-        # `knowledge` is a git-tracked symlink to a Replit-workspace-specific absolute path
-        # (deliberately kept for that deployment, D-091); it does not resolve on this runner, or
-        # on any other checkout. kg-validate needs a real directory to check, and an empty one is
-        # a valid "no notes yet" corpus (BACKLOG.md), so swap the broken link for an empty
-        # directory in this checkout only — the committed symlink itself is untouched.
-        run: |
-          if [ ! -d knowledge ]; then
-            rm -f knowledge
-            mkdir -p knowledge
-          fi
+      # `cov`, not `test`: the 80% floor is a regression gate, and it is measured over the shipped
+      # package set (enforced by tests/test_packaging.py) so it measures what a deployment runs.
+      - name: Lint + type + test with the coverage floor
+        run: make lint type cov
 
       - name: Validate knowledge graph
         run: make kg-validate
 
+      # The scientific quality gates: the versioned metric case-set and ELN export validation.
+      - name: Run the eval case-set
+        run: make eval
+
+      - name: Validate ELN exports
+        run: make eln-validate
+
       - name: Validate skills
         run: make skill-validate
 
-      # The three gates the connector seam added (D-109/D-112). Each catches a class of failure
-      # that is invisible at import and only shows up at run time: a bundle whose declared job
-      # cannot be built, a template step naming a tool that does not exist, and prose that promises
-      # the model a tool nobody serves.
+      # The connector seam's gates (D-109/D-112). Each catches a class of failure invisible to the
+      # test suite because it is about the *wiring* between a declaration and the live surface: a
+      # bundle whose declared job cannot be built, a template step naming a tool that does not
+      # exist, prose promising the model a tool nobody serves.
       - name: Validate connectors
         run: make connector-validate
 
@@ -89,3 +87,30 @@ jobs:
 
       - name: Validate the agent's prose contract
         run: make prose-validate
+
+  # The deployment gate (DA-10/D-2). The Helm chart is the one artifact no test can exercise
+  # offline, and a broken chart is only discovered at `helm install` — in production, on the worst
+  # day. Rendering it against the Kubernetes schemas needs no cluster and no credentials. A separate
+  # job so it runs in parallel with `check` rather than lengthening it.
+  chart:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      # No uv here on purpose: `make helm-validate` shells out to `helm` and `kubeconform` and runs
+      # no Python at all. Installing uv without ever calling `uv sync` leaves the action's cache
+      # path empty, and its post-job save then fails the whole job — a green validation reported as
+      # a red check.
+      - name: Install Helm
+        uses: azure/setup-helm@v4
+
+      - name: Install kubeconform
+        run: |
+          curl -sSLo /tmp/kubeconform.tar.gz \
+            https://github.com/yannh/kubeconform/releases/download/v0.6.7/kubeconform-linux-amd64.tar.gz
+          tar -xzf /tmp/kubeconform.tar.gz -C /tmp kubeconform
+          sudo install -m 0755 /tmp/kubeconform /usr/local/bin/kubeconform
+
+      - name: Render + validate the Helm chart
+        run: make helm-validate

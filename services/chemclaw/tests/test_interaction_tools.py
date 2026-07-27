@@ -15,6 +15,7 @@ from temporalio.worker import Worker
 import agents.interaction_tools as interaction_tools
 import workflows.interaction_approval as approval
 from agents.interaction_tools import approval_status, decide_approval, start_approval
+from agents.turn_signals import ApprovalSignal, begin_turn, drain, end_turn
 from chemclaw.config import settings
 from tests.conftest import FakeSubmitter
 from tests.temporal_env import pydantic_client, start_env_or_skip
@@ -52,12 +53,25 @@ def test_start_signal_query_drives_the_hold(monkeypatch: pytest.MonkeyPatch) -> 
                 workflows=[InteractionApprovalWorkflow],
                 activities=[propose_confirmed_answer_activity],
             ):
-                approval_id = await start_approval(_CANDIDATE)
-                assert approval_id == "approval-q-77"
-                assert await approval_status(approval_id) == "pending"
+                # Inside a turn buffer, so the announced handle is observable (gap RCH-3): the
+                # id must reach the surface out of band, because `start_approval` returns it
+                # into the *model's* context and the runner only sees streamed updates.
+                token = begin_turn()
+                try:
+                    approval_id = await start_approval(_CANDIDATE)
+                    assert approval_id == "approval-q-77"
+                    assert await approval_status(approval_id) == "pending"
 
-                # Surfacing the same candidate again is idempotent (same hold id).
-                assert await start_approval(_CANDIDATE) == approval_id
+                    # Surfacing the same candidate again is idempotent (same hold id).
+                    assert await start_approval(_CANDIDATE) == approval_id
+
+                    # Announced on BOTH paths — the fresh start and the already-started one.
+                    # Without the second, a re-surfaced candidate would be unanswerable.
+                    announced = [s for s in drain() if isinstance(s, ApprovalSignal)]
+                    assert [s.approval_id for s in announced] == [approval_id, approval_id]
+                    assert all("Preferred base" in s.prompt for s in announced)
+                finally:
+                    end_turn(token)
 
                 await decide_approval(approval_id, True)  # the Yes click
                 await client.get_workflow_handle(approval_id).result()

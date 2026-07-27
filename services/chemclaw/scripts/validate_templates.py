@@ -18,8 +18,6 @@ Read-only; touches nothing.
 import sys
 
 from agents.profiles import registered_profile_names
-from agents.tool_registry import registered_tool_names
-from connectors.registry import connector_tool_names
 from connectors.registry import enabled as enabled_connectors
 from templates.manifest import AgentStep, JobStep, Template, ToolStep
 from templates.registry import TemplateError, discovered, enabled
@@ -31,9 +29,9 @@ def _available_tools() -> set[str]:
     Importing the agent package is what populates the in-process registry, exactly as
     `scripts.validate_skills` does it — the check has to see the real set, not a hardcoded list.
     """
-    from agents import chemclaw_agent as _agent  # noqa: F401 — imported for tool registration
+    from agents.chemclaw_agent import available_tool_names
 
-    return {*registered_tool_names(), *connector_tool_names()}
+    return available_tool_names()
 
 
 def _available_jobs() -> set[str]:

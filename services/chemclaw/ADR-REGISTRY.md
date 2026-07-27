@@ -146,3 +146,4 @@ number is one another session will take.
 | D-114 | Sixth reconciliation with `main`: the xTB layer meets the connector seam |
 | D-115 | The two remaining Stage C items, answered: neither becomes a bundle |
 | D-116 | Seventh reconciliation with `main` (PR #30): two capabilities the merge silently restored |
+| D-117 | Consolidating the outstanding branches, and deleting what four generations of the design left behind |
