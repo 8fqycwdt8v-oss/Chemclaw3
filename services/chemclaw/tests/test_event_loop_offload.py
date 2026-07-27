@@ -17,8 +17,11 @@ import threading
 from typing import Any
 
 import pytest
+from rdkit.Chem.Draw import rdMolDraw2D
 
 from calc.store import InMemoryStore
+from calc.xtb_spec import XtbSpec
+from chemclaw.reagents import resolve_compound_name
 from connectors.chem.server import tools as chem_tools
 
 
@@ -36,9 +39,7 @@ def test_render_structure_draws_off_the_event_loop(monkeypatch: pytest.MonkeyPat
     """Depiction (2D coordinates + SVG rasterisation) is the heaviest RDKit call in `chem`."""
     seen: list[int] = []
     monkeypatch.setattr(
-        chem_tools.rdMolDraw2D,
-        "MolDraw2DSVG",
-        _thread_recording(chem_tools.rdMolDraw2D.MolDraw2DSVG, seen),
+        rdMolDraw2D, "MolDraw2DSVG", _thread_recording(rdMolDraw2D.MolDraw2DSVG, seen)
     )
 
     async def _run() -> tuple[int, str]:
@@ -69,9 +70,7 @@ def test_resolve_compound_canonicalises_off_the_event_loop(monkeypatch: pytest.M
     """An unrecognised name falls through to an RDKit canonicalisation, not a dict lookup."""
     seen: list[int] = []
     monkeypatch.setattr(
-        chem_tools,
-        "resolve_compound_name",
-        _thread_recording(chem_tools.resolve_compound_name, seen),
+        chem_tools, "resolve_compound_name", _thread_recording(resolve_compound_name, seen)
     )
 
     async def _run() -> int:
@@ -98,11 +97,7 @@ def test_electronic_properties_embed_and_key_off_the_event_loop(
     monkeypatch.setattr(
         xtb_props, "_property_structure", _thread_recording(xtb_props._property_structure, embeds)
     )
-    monkeypatch.setattr(
-        xtb_props.XtbSpec,
-        "cache_key",
-        _thread_recording(xtb_props.XtbSpec.cache_key, keys),
-    )
+    monkeypatch.setattr(XtbSpec, "cache_key", _thread_recording(XtbSpec.cache_key, keys))
 
     async def _run() -> int:
         await xtb_props.run_cached_properties(InMemoryStore(), "CCO")
