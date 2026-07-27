@@ -6,7 +6,16 @@
 # 1.29; override (`make helm-validate KUBE_VERSION=1.30.0`) when the target cluster moves.
 KUBE_VERSION ?= 1.29.0
 
-.PHONY: install lint type test cov check chat db-migrate schedules-apply kg-validate eval eln-validate skill-validate connector-validate template-validate connectors prose-validate helm-validate audit-verify reindex up down
+.DEFAULT_GOAL := help
+
+.PHONY: help install lint type test cov check chat db-migrate schedules-apply kg-validate eval eln-validate skill-validate connector-validate template-validate connectors prose-validate helm-validate audit-verify reindex up down
+
+help:  ## List every target with its one-line description (the default).
+	@# Reads the `## ` comments beside each target, so a new target documents itself the day it is
+	@# written and this list cannot drift from what the Makefile actually offers.
+	@grep -hE '^[a-z][a-z0-9-]*:.*?## ' $(MAKEFILE_LIST) \
+		| sort \
+		| awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-20s\033[0m %s\n", $$1, $$2}'
 
 install:  ## Sync the venv with runtime + dev dependencies.
 	uv sync

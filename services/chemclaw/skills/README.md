@@ -19,17 +19,18 @@ to add a second, e.g. team-private, skills directory without code changes.
 
 ### SKILL.md front-matter schema
 
-YAML front-matter between `---` fences, per the
-[Agent Skills spec](https://agentskills.io/specification):
+YAML front-matter between `---` fences. This is **`agents.skill_manifest.SkillManifest`**, which
+is `extra="forbid"` — any field not in this table fails `make skill-validate`. It is a narrowing of
+the [Agent Skills spec](https://agentskills.io/specification): the spec's `license`,
+`compatibility`, `allowed_tools` and `metadata` are **not accepted here**, because nothing in this
+system reads them and a field the validator ignores is a field that silently rots.
 
 | Field | Required | Notes |
 |---|---|---|
 | `name` | yes | lowercase letters/numbers/hyphens, ≤64 chars, no leading/trailing/double hyphen. **Must match the directory name** and be unique (a duplicate name is skipped). |
 | `description` | yes | ≤1024 chars. This is the L1 text the model sees to decide *whether* to load the skill — make it say when to reach for it. |
-| `license` | no | license name/reference. |
-| `compatibility` | no | ≤500 chars. |
-| `allowed_tools` | no | space-delimited pre-approved tool names. |
-| `metadata` | no | arbitrary key/value pairs. |
+| `tools` | no | The capabilities this skill's judgment is written about, **by tool name** — in-process tools, generated connector job launchers, and tools an enabled connector serves, all in one list. Validated against the live surface, so a renamed or deleted tool fails CI instead of leaving stale prose. Omit it for pure process guidance. |
+| `tags` | no | Free-form grouping ("retrieval", "optimization"). Human-facing only — nothing dispatches on a tag. |
 
 ### Template
 
