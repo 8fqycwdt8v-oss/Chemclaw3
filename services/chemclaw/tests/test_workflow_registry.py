@@ -83,6 +83,31 @@ def test_re_registering_the_same_definition_is_allowed() -> None:
     assert names.count("RegistryReimportProbe") == 1
 
 
+def test_a_sandbox_reimport_does_not_replace_the_registered_object() -> None:
+    """The *first* object registered under a name is the one kept, not the latest.
+
+    Counting by name (above) is not enough, and the gap was not theoretical: Temporal's
+    sandbox re-import builds a brand-new class object for the same definition, and storing
+    it swapped out the very object `workers.hpc_worker` captured at import time. The worker
+    list and the registry then held two classes that print identically and compare unequal,
+    so `test_every_declared_capability_reaches_its_worker` failed with
+    `QMJobWorkflow != QMJobWorkflow`.
+
+    It only bites once a `Worker` has actually been constructed, which is why it reproduced
+    in CI and never where the Temporal test server is unavailable — the reason this asserts
+    identity directly instead of relying on a Temporal-backed test to notice.
+    """
+    module = "workflows.identity_probe"
+    first = _probe("RegistryIdentityProbe", module)
+    durable_workflow("background")(first)
+    reimported = _probe("RegistryIdentityProbe", module)  # what the sandbox builds
+    returned = durable_workflow("background")(reimported)
+
+    registered = [w for w in registered_workflows("background") if w.__name__ == first.__name__]
+    assert registered == [first]  # identity: the worker's captured object still stands
+    assert returned is reimported  # ...and Temporal still gets the object it built back
+
+
 def test_describe_names_what_a_worker_serves() -> None:
     """The startup log line is derived, not restated — so it cannot go stale."""
     line = describe("hpc")

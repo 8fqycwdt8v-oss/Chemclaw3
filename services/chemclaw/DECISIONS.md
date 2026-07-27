@@ -3776,6 +3776,29 @@ runs zero legs and returns byte-identical. Scoped to the library backend, which 
 reachable here; whether the `xtb` binary's own ANCopt has the same property is untested, because
 the binary is not installed in this environment — flagged rather than guessed at.
 
+**5d. The durable-capability registry was not re-import safe.** The second of two failures
+inherited from `main` rather than caused by the merge, and the more interesting one, because it
+could only ever fail where Temporal actually runs.
+
+`workflows/registry.py` anticipated the sandbox: its duplicate guard compares the defining
+*module* rather than object identity, precisely so that Temporal re-importing a workflow module
+is not mistaken for two capabilities claiming one name. Having allowed the re-registration, it
+then stored it — and the sandbox's re-import builds a *new* class object for the same definition,
+so the registry quietly swapped out the very object `workers/hpc_worker.py` captured at import
+time. `HPC_WORKFLOWS == registered_workflows("hpc")` then compared two classes that print
+identically and are not the same object: `QMJobWorkflow != QMJobWorkflow`.
+
+The fix is to keep the *first* registration and return the incoming object unchanged, so Temporal
+still receives the class it built while the registry keeps the one the workers hold. That is what
+the guard's own docstring already implied; only the store was missing it.
+
+Worth recording as a testing lesson rather than a one-line fix: `test_workflow_registry` already
+had a re-registration test, and it passed throughout — it counted entries *by name*, which is
+invariant under exactly this bug. The assertion that mattered was identity, and it was missing.
+The regression test now added builds the second class object by hand, so it reproduces a sandbox
+re-import with no Temporal server at all — the failure was otherwise invisible in any environment
+where the test server cannot be downloaded, which is every environment this was developed in.
+
 **6. ADR numbers now have an allocation ledger.** This ADR was written as D-092, renumbered to
 D-095, then to D-109 — three collisions in one day, each found only when a merge conflicted. The
 cause is structural: concurrent branches all append to the end of `DECISIONS.md` and all compute
