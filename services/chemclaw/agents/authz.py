@@ -35,12 +35,18 @@ class AuthorizationError(Exception):
 DEFAULT_WRITE_TOOL_GATES: frozenset[str] = frozenset(
     {
         "submit_qm_job",  # launches a durable (potentially HPC) job
+        "run_xtb_task",  # the expert escape hatch: runs a calculation the shaped tools declined
         "propose_knowledge_note",  # pushes a branch to the knowledge repo
         "record_confirmed_answer",  # pushes a branch to the knowledge repo
         "index_molecule",  # mutates the fingerprint index
         "index_reaction",  # mutates the fingerprint index
     }
 )
+
+
+def _actor() -> str:
+    """Name the turn's user for a refusal message, or say plainly that there isn't one."""
+    return get_current_actor() or "an unauthenticated user"
 
 
 def _has_required_role(required: frozenset[str]) -> bool:
@@ -67,6 +73,16 @@ def authorize_tool(tool: str) -> None:
     `"deny"` — a privileged role is not an allowlist entry. The gate is active only under
     `entra_required`; in dev it is open.
 
+    Every refusal message is written for the **chemist**, because `agents.tool_authz` hands it to
+    the model verbatim as the tool's result and the model relays it into the conversation. All
+    three therefore say the same thing in the same shape — who was refused, which tool, and why —
+    rather than describing the deployment's configuration. A live RBAC sweep found the cost of the
+    old phrasing: the deny-default message ("not in the tool allowlist") read as an operator's note
+    about a config file, so the model relayed a denial as "not currently available… a configuration
+    issue", which tells a chemist to file a bug instead of requesting access. The operator's remedy
+    (add an entry to `tool_role_gates`, or grant a privileged role) belongs in the runbook and this
+    docstring, not in a message a chemist reads.
+
     Args:
         tool: The tool's registered name (e.g. `"submit_qm_job"`, `"gather_evidence"`).
 
@@ -80,24 +96,28 @@ def authorize_tool(tool: str) -> None:
     required = settings.tool_role_gates.get(tool)
     if required is not None:
         if not _has_required_role(frozenset(required)):
-            actor = get_current_actor() or "an unauthenticated user"
-            raise AuthorizationError(f"{actor} lacks a role permitted to call {tool}")
+            raise AuthorizationError(
+                f"{_actor()} is not authorized to use {tool}: the account holds none of the "
+                "roles this tool requires"
+            )
         return
     if settings.tool_authz_default == "deny":
         # Allowlist mode: not listed ⇒ refused, always. Checked *before* the built-in write
         # gate so a privileged role can never open an unlisted write tool under `deny` —
         # that would invert the allowlist for exactly the dangerous tools.
-        raise AuthorizationError(f"{tool} is not in the tool allowlist (deny by default)")
+        raise AuthorizationError(
+            f"{_actor()} is not authorized to use {tool}: this deployment permits only an "
+            "approved list of tools, and this one is not on it"
+        )
     if tool in DEFAULT_WRITE_TOOL_GATES:
         privileged = settings.entra_privileged_role_set
         # An empty privileged set means fail closed, not open: `_has_required_role` treats
         # "no roles required" as satisfied, which is right for operator gates but would
         # silently void the built-in write gate on an unconfigured deployment.
         if not privileged or not _has_required_role(privileged):
-            actor = get_current_actor() or "an unauthenticated user"
             raise AuthorizationError(
-                f"{actor} lacks a privileged role for the write tool {tool} "
-                "(gated by default; override via tool_role_gates)"
+                f"{_actor()} is not authorized to use {tool}: it changes stored data, so it "
+                "requires a privileged role the account does not hold"
             )
 
 

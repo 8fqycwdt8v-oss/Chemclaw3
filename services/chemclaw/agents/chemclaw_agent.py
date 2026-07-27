@@ -53,7 +53,11 @@ from agents.audit import AuditSink, make_audit_middleware
 from agents.llm_provider import build_chat_client
 from agents.profiles import AgentProfile, get_profile
 from agents.skill_access import EnabledSkillsSource, RoleScopedSkillsSource
-from agents.tool_authz import enforce_tool_authz
+from agents.tool_authz import (
+    enforce_tool_authz,
+    surface_authorization_denials,
+    surface_domain_errors,
+)
 from agents.tool_registry import register_tool, registered_tool_names, registered_tools
 from chemclaw.config import settings
 from connectors.registry import connector_tool_names, job_tools, mcp_tools, skills_dirs
@@ -101,7 +105,22 @@ _INSTRUCTIONS = (
     "or corrects an answer worth reusing, record_confirmed_answer captures it as an interaction "
     "note through that same PR-gate. Load the deep-research skill for how "
     "to run this loop, and the calculation/search skills for which tool fits and how far to "
-    "trust it."
+    "trust it.\n"
+    "Long conversations: this session's context is compacted to a token budget, so an older "
+    "turn can age out of what you currently see with no marker left behind. If asked about "
+    "something from earlier that you cannot find, say you don't have that part of the "
+    "conversation in view right now and ask the chemist to repeat it — never assert that it "
+    "'never happened' or that the current message is 'the first' one; you cannot see far enough "
+    "back to know that, and claiming otherwise misstates the record.\n"
+    "Refused tools: a tool result beginning 'Refused:' is an access-control decision about the "
+    "asking chemist's account, not a fault. Relay it as such — name the tool, give the reason "
+    "the result states, and point them at whoever grants access in their organization. Never "
+    "describe it as the tool being 'unavailable' or 'not working', as a configuration issue, or "
+    "as a temporary service problem: all of those send a chemist to debug a system that is "
+    "behaving exactly as intended, and none of them tells them the one thing that would actually "
+    "get them the answer — that they need to request access. Do not retry the call or attempt "
+    "the same action through another tool; report the refusal and continue with whatever else "
+    "the question needs."
 )
 
 
@@ -163,7 +182,18 @@ def build_agent(
                 settings.skills_enabled_list,
             ),
             settings.skill_role_gates,
-        )
+        ),
+        # MAF registers `load_skill`/`read_skill_resource` with `approval_mode="always_require"`
+        # by default, and nothing here answers an approval (no `ToolApprovalMiddleware`, no
+        # front-door decision endpoint) — so every turn that reaches for a skill would otherwise
+        # stall on an unanswerable `user_input_requests` entry. `settings.skills_dirs` is always a
+        # deployer-configured, first-party path (the shipped `skills/` tree, never tenant/user-
+        # uploaded content), the same trust boundary the in-process tool registry already assumes
+        # — so these two read-only tools are the "trusted source" case the flags exist for.
+        # `run_skill_script` is left at its default (still gated): no `script_runner` is wired to
+        # `FileSkillsSource`, so a call fails fast with a clear error instead of running anything.
+        disable_load_skill_approval=True,
+        disable_read_skill_resource_approval=True,
     )
     history = history_provider()
     audit = make_audit_middleware(
@@ -171,14 +201,23 @@ def build_agent(
         actor=actor,
         sink=audit_sink,
     )
-    # Two function middlewares over every tool call: audit records it, then per-tool
-    # authorization gates it (F10-C). Audit is outermost so a denied call (authz raises before
-    # the tool runs) is still recorded as an error outcome. Both are no-ops on the dev path
-    # (log-only sink; authz open until `entra_required`), so the classic path is unchanged by
-    # default. They are attached unconditionally, *after* the profile narrows the toolset — so a
-    # profile attenuates capability but can never bypass audit or authorization (the safety
-    # rubric, audit §7).
-    middleware = [audit, enforce_tool_authz]
+    # Four function middlewares over every tool call, outermost first: `surface_authorization_
+    # denials` and `surface_domain_errors` each turn one known-safe exception type (an
+    # authorization refusal; chemclaw's own `ChemclawError` bad-input contract) into its own
+    # clear, safe result instead of MAF's opaque "Function failed." — audit records the call
+    # underneath both, so a denial or bad-input error is still logged as an `error` outcome
+    # exactly as before; per-tool authorization (F10-C) gates it innermost, closest to the tool
+    # body. All four are no-ops on the dev path (log-only sink; authz open until
+    # `entra_required`; no ChemclawError raised on a happy path), so the classic path is
+    # unchanged by default. They are attached unconditionally, *after* the profile narrows the
+    # toolset — so a profile attenuates capability but can never bypass audit or authorization
+    # (the safety rubric, audit §7).
+    middleware = [
+        surface_authorization_denials,
+        surface_domain_errors,
+        audit,
+        enforce_tool_authz,
+    ]
     # Default generation params from config (F0.3), applied to every turn unless a run overrides
     # them — so temperature/length are a deployment setting, not a per-call literal.
     options = ChatOptions(
@@ -239,7 +278,7 @@ def _build_harness_agent(
         else settings.harness_autonomy
     )
     start_mode = "plan" if autonomy == "plan_only" else "execute"
-    return create_harness_agent(
+    agent = create_harness_agent(
         client,
         name="chemclaw",
         agent_instructions=instructions,
@@ -262,6 +301,29 @@ def _build_harness_agent(
         loop_max_iterations=settings.harness_max_loop_iterations,
         middleware=middleware,
     )
+    # Two things `create_harness_agent` switches on are individually fine and jointly fatal on the
+    # *streaming* path — which is the only path the front door uses:
+    #
+    #   1. per-service-call history persistence, whose middleware replaces the outgoing messages
+    #      with history+input each model call and signals "stop resending the transcript" by
+    #      stamping a sentinel `conversation_id` on the finalized response;
+    #   2. `MessageInjectionMiddleware`, installed unconditionally, which while streaming returns a
+    #      *new* `ChatResponse` built by `ChatResponse.from_updates()`. The sentinel lived on the
+    #      inner response, never on a streamed update, so the rebuild drops it.
+    #
+    # The function-invocation loop reads that sentinel to decide whether to clear its accumulated
+    # transcript. With it gone the loop re-sent everything *while* history was independently
+    # re-injected, and the duplicate put a `user` block between a `tool_use` and its `tool_result`
+    # — which Anthropic rejects outright ("tool_use ids were found without tool_result blocks
+    # immediately after"). 100% of tool calls, both autonomy modes, so harness mode never worked.
+    #
+    # Turning (1) off breaks the chain at its start: nothing injects, so no sentinel is needed. The
+    # cost is that history is durable per *run* rather than per model call — exactly the classic
+    # path's behaviour, and `harness_enabled` is off by default, so this is not a regression for
+    # anyone. The real fix belongs upstream (preserve `conversation_id` across that finalizer);
+    # `tests/test_harness_execution.py` pins the behaviour so this cannot silently rot.
+    agent.require_per_service_call_history_persistence = False
+    return agent
 
 
 def history_provider() -> HistoryProvider:
@@ -412,7 +474,13 @@ def _register_generated_tools() -> None:
             register_tool(tool_fn)
 
 
-def _narrow(tools: list[Any], keep: frozenset[str], profile_name: str, kind: str) -> list[Any]:
+def _narrow(
+    tools: list[Any],
+    keep: frozenset[str],
+    profile_name: str,
+    kind: str,
+    also_known: set[str] | None = None,
+) -> list[Any]:
     """Keep only tools whose advertised name is in `keep`, raising if `keep` names an absent tool.
 
     MAF advertises an in-process tool under its `__name__` and a connector's MCP tool under its
@@ -421,7 +489,7 @@ def _narrow(tools: list[Any], keep: frozenset[str], profile_name: str, kind: str
     not a tool that silently vanishes from the agent's surface.
     """
     available = {getattr(t, "name", None) or t.__name__: t for t in tools}
-    unknown = keep - available.keys()
+    unknown = keep - available.keys() - (also_known or set())
     if unknown:
         raise ValueError(
             f"agent profile {profile_name!r} lists unknown {kind}(s) {sorted(unknown)}; "

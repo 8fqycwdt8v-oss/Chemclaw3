@@ -10,7 +10,6 @@ distilled rule is the corresponding skill's judgment, layered on top.
 """
 
 from datetime import date
-from pathlib import Path
 
 from chemclaw.config import settings
 from eln.ord import OrdReaction
@@ -78,7 +77,7 @@ def _with_supersedes(notes: list[Note]) -> list[Note]:
     """
     if not notes:
         return notes
-    existing = load_notes(Path(settings.knowledge_dir))
+    existing = load_notes(settings.knowledge_path)
     return [*notes, *supersede_updates(notes, existing, date.today())]
 
 

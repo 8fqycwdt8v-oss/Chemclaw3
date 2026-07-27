@@ -17,6 +17,14 @@ to use it and how to weigh what it returns.
   **expand 1–2 hops** with `neighborhood(...)`. Relations are meaningful in both
   directions (a precursor references its product and vice versa), so traversal is
   undirected.
+- `find_notes` requires every word you pass to appear *somewhere* in the note (not
+  as one exact phrase, but each word can match anywhere) — a natural-language query
+  like "what solvent gave the best yield" fails not because the data is missing but
+  because no note literally contains "what", "gave", or "best". Query with the
+  compound name, reaction type, or a specific term (e.g. "suzuki", "dioxane") instead
+  of a full question, and expand from there. A first query returning nothing is a
+  cue to retry with a different or narrower term, not to conclude the graph has no
+  answer.
 - Prefer **graph traversal over vector similarity** (D-004): a linked note is a
   stated relation, not a guess. Do not rank by embedding distance.
 - Keep the hop count small (1–2). Going deeper pulls in weakly-related notes and

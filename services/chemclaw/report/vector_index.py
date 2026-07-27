@@ -259,7 +259,7 @@ async def reindex_notes(index: NoteIndex, notes_dir: str | None = None) -> int:
     on a schedule or after a merge. Notes deleted from disk leave a harmless stale row — the
     retrievers drop any hit whose note no longer loads — so a full teardown is never required.
     """
-    directory = Path(notes_dir if notes_dir is not None else settings.knowledge_dir)
+    directory = Path(notes_dir) if notes_dir is not None else settings.knowledge_path
     notes = await asyncio.to_thread(load_notes, directory) if directory.exists() else []
     if not notes:
         return 0

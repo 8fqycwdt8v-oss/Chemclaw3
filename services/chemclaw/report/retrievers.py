@@ -65,7 +65,7 @@ class GraphRetriever:
 
     def __init__(self, notes_dir: str | None = None) -> None:
         """Read notes from the given directory, or the configured `knowledge_dir`."""
-        self._dir = Path(notes_dir if notes_dir is not None else settings.knowledge_dir)
+        self._dir = Path(notes_dir) if notes_dir is not None else settings.knowledge_path
 
     async def retrieve(self, query: str, filters: dict[str, Any]) -> list[EvidenceChunk]:
         """Return chunks from notes matching `query` (substring), ranked best first.
@@ -184,7 +184,7 @@ class VectorRetriever:
     def __init__(self, index: NoteIndex, notes_dir: str | None = None) -> None:
         """Search `index`; resolve excerpts from the given notes dir or `knowledge_dir`."""
         self._index = index
-        self._dir = Path(notes_dir if notes_dir is not None else settings.knowledge_dir)
+        self._dir = Path(notes_dir) if notes_dir is not None else settings.knowledge_path
 
     async def retrieve(self, query: str, filters: dict[str, Any]) -> list[EvidenceChunk]:
         """Return chunks for the notes most cosine-similar to `query` under the type/tag filters."""
@@ -214,7 +214,7 @@ class LexicalRetriever:
     def __init__(self, index: NoteIndex, notes_dir: str | None = None) -> None:
         """Search `index`; resolve excerpts from the given notes dir or `knowledge_dir`."""
         self._index = index
-        self._dir = Path(notes_dir if notes_dir is not None else settings.knowledge_dir)
+        self._dir = Path(notes_dir) if notes_dir is not None else settings.knowledge_path
 
     async def retrieve(self, query: str, filters: dict[str, Any]) -> list[EvidenceChunk]:
         """Return chunks for the notes best matching `query`'s terms under the type/tag filters."""

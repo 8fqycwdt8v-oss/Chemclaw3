@@ -10,9 +10,9 @@ channel (F3-T3).
 
 **This shape is superseded and this module is shrinking.** The BO campaign that used to be its
 second tool now lives in the `bo` connector bundle, declared as one `jobs:` entry over the
-generic `ConnectorJobWorkflow` (D-110) — which is where a *new* durable capability goes.
+generic `ConnectorJobWorkflow` (D-111) — which is where a *new* durable capability goes.
 
-The report deliberately did *not* follow it into a bundle (D-114): its dependency closure — the
+The report deliberately did *not* follow it into a bundle (D-115): its dependency closure — the
 graph, the retrievers, the embedding index — is what core keeps for `gather_evidence` anyway, so
 the isolation a bundle exists to buy would be zero, and all that would remain is churn. What it
 *did* adopt is the `ConnectorJobResult` envelope, because that is what `get_durable_job_status`

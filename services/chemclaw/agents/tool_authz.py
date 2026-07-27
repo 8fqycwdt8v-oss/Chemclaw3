@@ -17,7 +17,8 @@ from collections.abc import Awaitable, Callable
 
 from agent_framework import FunctionInvocationContext, function_middleware
 
-from agents.authz import authorize_tool
+from agents.authz import AuthorizationError, authorize_tool
+from chemclaw.errors import ChemclawError
 
 
 @function_middleware
@@ -33,3 +34,64 @@ async def enforce_tool_authz(
     """
     authorize_tool(context.function.name)
     await call_next()
+
+
+@function_middleware
+async def surface_authorization_denials(
+    context: FunctionInvocationContext,
+    call_next: Callable[[], Awaitable[None]],
+) -> None:
+    """Turn a denied call into its own clear result, instead of MAF's generic failure message.
+
+    Without `include_detailed_errors` (MAF's default), *any* exception that escapes a tool call —
+    `AuthorizationError` included — collapses into the same opaque "Error: Function failed.",
+    with no exception text reaching the model at all (`agent_framework._tools`: the detailed
+    message is gated behind that one client-wide flag). Turning that flag on globally was
+    considered and rejected: chemclaw's own errors are written to be chemist-safe, but an
+    *unexpected* exception (e.g. a database-driver error) can embed connection details in its
+    message, and the flag cannot distinguish exception types — it would expose either both or
+    neither. `AuthorizationError` is chemclaw's own, deliberately-worded, always-safe type
+    (e.g. "X lacks a privileged role for Y"), so it alone is singled out here: caught, and its
+    message becomes the tool's own successful result — verbatim, no gating — so the model can
+    accurately tell the chemist *why* the call was refused instead of guessing at "a temporary
+    service issue." Every other exception is left untouched, still falling through to MAF's
+    generic (safe-by-omission) handling.
+
+    Attach this *outside* both `enforce_tool_authz` and the audit middleware: the exception must
+    still reach audit unchanged (so a denial is recorded as an `error` outcome, exactly as
+    today) before this layer converts it into the value the model actually sees.
+    """
+    try:
+        await call_next()
+    except AuthorizationError as exc:
+        context.result = f"Refused: {exc}"
+
+
+@function_middleware
+async def surface_domain_errors(
+    context: FunctionInvocationContext,
+    call_next: Callable[[], Awaitable[None]],
+) -> None:
+    """Turn a tool's own bad-input error into its own clear result, not MAF's generic failure.
+
+    Same gap as `surface_authorization_denials`, a second known-safe exception type: every
+    `ChemclawError` (`chemclaw.errors`) is chemclaw's own established "this input/data is
+    invalid" contract, raised only with a deliberately-worded, caller-safe message (e.g.
+    `expand_note`'s "no note with id 'X'" — it echoes back the id the model itself supplied,
+    never internal state). A live e2e finding: `expand_note` citing a reaction whose note is a
+    pending, unmerged PR-gate submission (an expected, recurring scenario — D-018) failed with
+    MAF's opaque "Error: Function failed.", so the model could not tell "pending review" apart
+    from "typo'd id" apart from "deleted note," and could only guess at what happened.
+    `ChemclawError`'s many subclasses (`InvalidSmilesError`, `FingerprintError`, `NoteError`,
+    ...) get the same treatment for free — every one of them is written to this same safe
+    contract. Every other exception is left untouched, still falling through to MAF's generic
+    (safe-by-omission) handling.
+
+    Attach this alongside `surface_authorization_denials`, outside the audit middleware, for
+    the same reason: the exception must still reach audit unchanged (recorded as an `error`
+    outcome) before this layer converts it into what the model sees.
+    """
+    try:
+        await call_next()
+    except ChemclawError as exc:
+        context.result = f"Error: {exc}"

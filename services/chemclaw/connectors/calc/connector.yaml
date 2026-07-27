@@ -38,7 +38,7 @@ skills:
 # same name, same arguments — now started as a durable run the launcher waits a moment for. Cheap
 # requests still answer inside the turn; only the ones that genuinely take minutes come back as a
 # job id. That replaced a predicted-cost threshold evaluated in the agent's process, which is what
-# had kept `tblite`, RDKit and SciPy in the chat service's image (D-113).
+# had kept `tblite`, RDKit and SciPy in the chat service's image (D-114).
 #
 # All five share one workflow: `XtbJobSpec` is already a closed union discriminated on `kind`, so
 # each job references its own member as `params_model` and the workflow dispatches on it. One

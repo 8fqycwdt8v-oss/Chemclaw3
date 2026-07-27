@@ -279,7 +279,7 @@ def test_the_run_is_attributed_to_the_turns_actor(client: _FakeClient) -> None:
     assert payload.requested_by == "user-7"
 
 
-# --- inline_wait_seconds: one tool for the fast and the slow case (D-113) ----------------
+# --- inline_wait_seconds: one tool for the fast and the slow case (D-114) ----------------
 
 
 _INLINE_SPEC = JobSpec.model_validate(

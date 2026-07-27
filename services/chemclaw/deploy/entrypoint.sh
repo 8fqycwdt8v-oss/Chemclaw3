@@ -33,6 +33,9 @@ case "${component}" in
     exec uvicorn "connectors.${name}.server.app:app" \
       --host "${CHEMCLAW_SERVICE_HOST:-0.0.0.0}" --port "${CHEMCLAW_SERVICE_PORT:-8080}"
     ;;
+  mcp-calc)
+    exec python -m mcp_servers.calc.server
+    ;;
   *)
     echo "unknown CHEMCLAW_COMPONENT=${component}" >&2
     exit 64

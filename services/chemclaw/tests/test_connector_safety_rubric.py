@@ -287,7 +287,10 @@ def test_a_denied_connector_tool_never_runs_and_is_still_audited(
     denial = recorded["echo_subject"]
     assert denial.outcome == "error"
     assert "AuthorizationError" in denial.detail
-    assert "lacks a role permitted to call echo_subject" in denial.detail
+    # The message names *who* was refused and *which* tool, which is what an auditor reads; the
+    # exact wording is `agents.authz`'s to own, so this asserts the parts that must not drift.
+    assert "not authorized to use echo_subject" in denial.detail
+    assert "user-42" in denial.detail
     # The decisive half: the tool never ran. The gate is in core, before the call goes out — the
     # connection and the tool listing still happen, because those precede any model decision.
     assert governed.invocations == []

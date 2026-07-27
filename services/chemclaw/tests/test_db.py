@@ -47,6 +47,41 @@ def test_redact_unparseable_dsn_yields_placeholder() -> None:
     assert db._redact("::garbage==") == "<postgres>"
 
 
+def test_dsn_options_survive_alongside_a_statement_timeout() -> None:
+    """A DSN's own libpq `options` is kept when we add our statement timeout, not overwritten.
+
+    psycopg merges a keyword argument *over* the connection string, so assigning `options=`
+    silently dropped whatever the DSN carried — and only on connections that asked for a timeout,
+    since `None` is dropped rather than merged. That made an operator's `search_path` (the shape
+    the test-schema isolation depends on), `application_name`, or `work_mem` vanish on some call
+    sites and survive on others.
+    """
+    dsn = "postgresql://h/db?options=-c%20search_path%3Dchemclaw_test,public"
+    merged = db._merged_options(dsn, 30.0)
+    assert merged is not None
+    assert "search_path=chemclaw_test,public" in merged  # the operator's setting survives
+    assert "statement_timeout=30000" in merged  # and ours is applied
+    # Ours last, so libpq's last-occurrence-wins gives our timeout precedence over a DSN's own.
+    assert merged.index("statement_timeout") > merged.index("search_path")
+
+
+def test_no_statement_timeout_leaves_dsn_options_untouched() -> None:
+    """With no timeout to add we contribute nothing, so the DSN's `options` passes through."""
+    dsn = "postgresql://h/db?options=-c%20search_path%3Dchemclaw_test,public"
+    assert db._merged_options(dsn, None) is None
+    assert db._merged_options(dsn, 0) is None
+
+
+def test_statement_timeout_applies_when_the_dsn_has_no_options() -> None:
+    """The ordinary case: no DSN options, so ours is the whole string."""
+    assert db._merged_options("postgresql://h/db", 1.5) == "-c statement_timeout=1500"
+
+
+def test_unparseable_dsn_still_gets_our_timeout() -> None:
+    """A DSN libpq cannot parse still carries our option; the connect reports the real error."""
+    assert db._merged_options("::garbage==", 2.0) == "-c statement_timeout=2000"
+
+
 def test_connect_wraps_unreachable_db_without_leaking_the_password(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

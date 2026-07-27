@@ -22,7 +22,7 @@ tool stay in core by rule, and each is a rule rather than a backlog item:
    GxP boundary; a connector reaches it only by returning a `Note` in a job envelope, which is a
    proposal core decides to publish. That asymmetry is the point.
 3. **Core's own data layer — the knowledge graph.** This one is worth stating because it looks like
-   a capability and is not (D-114). Thirteen core modules import `kg`: the PR-gate, all six memory
+   a capability and is not (D-115). Thirteen core modules import `kg`: the PR-gate, all six memory
    layers, the report retrievers, the eval verifier, the note index. Moving `find_notes`,
    `expand_note` and `find_knowledge_gaps` to a bundle would leave every one of those imports in
    core — a zero dependency win — and add a second read path to one note tree. A capability earns a

@@ -117,7 +117,7 @@ export with `make eln-validate`.
 ## (iv) Add a capability — a tool, a durable job, and their skills (a **connector**)
 
 A capability is a **connector bundle**: one folder declaring everything it contributes. There is no
-second mechanism — `CHEMCLAW_MCP_SERVERS` is gone (D-109).
+second mechanism — `CHEMCLAW_MCP_SERVERS` is gone (D-110).
 
 ```
 connectors/<name>/
@@ -177,7 +177,7 @@ startup instead. Verify a bundle standalone with `uvicorn connectors.<name>.serv
 screen), `chem` (bench chemistry over RDKit), `calc` (the fast calculators and the calibration
 ledger), and `bo` (Bayesian optimization — the one that also owns durable work, so it runs a second
 Deployment for its own Temporal worker; set `worker: true` on a bundle in the chart to get one). 
-**What stays in core is a rule, not an omission** (D-114), and `tests/test_tool_registry.py` pins the
+**What stays in core is a rule, not an omission** (D-115), and `tests/test_tool_registry.py` pins the
 set so adding to it is a reviewed edit:
 
 - **Conversation plumbing** — anything reading or writing the turn's own state

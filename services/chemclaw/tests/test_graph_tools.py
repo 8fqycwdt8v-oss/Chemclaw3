@@ -8,6 +8,7 @@ import pytest
 import agents.graph_tools as graph_tools
 from agents.graph_tools import expand_note, find_notes, propose_knowledge_note
 from chemclaw.config import settings
+from chemclaw.errors import ChemclawError
 from tests.conftest import FakeSubmitter
 
 
@@ -29,6 +30,34 @@ def test_find_notes_matches_tag(tmp_path: Path, monkeypatch: pytest.MonkeyPatch)
     assert {r.id for r in refs} == {"compound-a"}
 
 
+def test_find_notes_matches_all_words_not_a_literal_phrase(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Every word in the query must appear somewhere in the note — not as one exact phrase.
+
+    Regression guard: a natural multi-word question ("target reaction") used to require that
+    exact run of text to appear verbatim, so it missed a note whose words are present but not
+    adjacent in that order — a real live-e2e finding where the model then reported "no data"
+    even though the corpus had it.
+    """
+    _seed(tmp_path)
+    monkeypatch.setattr(settings, "knowledge_dir", str(tmp_path))
+    # "target" is on compound-a; "reaction" only appears on reaction-r's own id/type, and
+    # compound-a's body only links to it as "[[reaction-r]]" — no note contains the literal
+    # phrase "target reaction", but compound-a contains both words independently.
+    refs = asyncio.run(find_notes("target reaction"))
+    assert {r.id for r in refs} == {"compound-a"}
+
+
+def test_find_notes_returns_nothing_when_one_word_is_absent(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """All-words matching still excludes a note missing even one of the query's words."""
+    _seed(tmp_path)
+    monkeypatch.setattr(settings, "knowledge_dir", str(tmp_path))
+    assert asyncio.run(find_notes("target nonexistentword")) == []
+
+
 def test_expand_note_returns_neighbors(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """expand_note returns the body and the linked note as a neighbor."""
     _seed(tmp_path)
@@ -39,10 +68,17 @@ def test_expand_note_returns_neighbors(tmp_path: Path, monkeypatch: pytest.Monke
 
 
 def test_expand_unknown_note_raises(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Expanding an unknown id is a clear error (G4)."""
+    """Expanding an unknown id is a clear error (G4), and a `ChemclawError` specifically.
+
+    `ChemclawError` (a `ValueError` subclass) is chemclaw's own always-safe "bad input"
+    contract, so `agents.tool_authz.surface_domain_errors` surfaces this message to the model
+    verbatim instead of MAF's opaque generic failure — the common real cause is a citation to a
+    note still pending PR-gate review, which the chemist can otherwise not distinguish from a
+    typo or a deleted note.
+    """
     _seed(tmp_path)
     monkeypatch.setattr(settings, "knowledge_dir", str(tmp_path))
-    with pytest.raises(ValueError, match="no note with id"):
+    with pytest.raises(ChemclawError, match="no note with id"):
         asyncio.run(expand_note("ghost"))
 
 

@@ -130,12 +130,57 @@ after each cluster of steps before moving on.
 - `BACKLOG.md` — prioritized open action items.
 - `DEFERRED.md` — consciously postponed items **with the reason they are not now**.
 - `DECISIONS.md` — architecture decisions with rationale (append-only ADR log).
+- `ADR-REGISTRY.md` — the `D-NNN` allocation ledger, one line per number. **Every session that
+  writes an ADR must reserve its number here** (see below).
 - `tasks/lessons.md` — self-improvement log. Review it at session start; after **any**
   correction from the user, add the pattern here and write a rule for yourself that prevents
   the same mistake. Iterate ruthlessly until the mistake rate drops.
 
 Keep these current; they are the memory across sessions. For recurring patterns, prefer a
 `.claude/skills/<name>/SKILL.md` over bloating this file.
+
+### Allocating an ADR number
+
+ADR numbers have collided three times, each costing a renumber during a merge. The cause is
+structural, not carelessness: several branches run concurrently, all append to the end of
+`DECISIONS.md`, and each picks "highest I can see, plus one" — against its *own* branch, which
+cannot see the others. Follow this exactly.
+
+**1. Enumerate against `origin/main`, never against your branch.** Your branch's highest number
+is stale the moment another branch merges.
+
+```sh
+git fetch origin main
+# the highest number currently allocated:
+git show origin/main:services/chemclaw/ADR-REGISTRY.md | grep -oE '^\| D-[0-9]+' | sort -V | tail -1
+# cross-check against the log itself (the two must agree):
+git show origin/main:services/chemclaw/DECISIONS.md | grep -cE '^## D-[0-9]+'
+```
+
+Your number is that highest one **+ 1**. To list every heading locally, use
+`grep -nE '^## D-[0-9]+' DECISIONS.md`.
+
+**2. Reserve it in your first commit, not your last.** Add the row to `ADR-REGISTRY.md` as soon as
+you know you will write an ADR — before the ADR itself exists. A number you have not yet pushed is
+a number another session will take.
+
+**3. When it collides anyway, the branch merging *second* renumbers.** This is a rule, not a
+judgement call, so two sessions never both wait or both move. Whoever is merging (you, if you hit
+the conflict) takes the *new* free number, and fixes every reference:
+
+```sh
+git grep -n 'D-0*<old>'          # DECISIONS.md, ADR-REGISTRY.md, BACKLOG.md, DEFERRED.md, code comments
+```
+
+`DECISIONS.md` is append-only, so the resolution is always "keep both blocks, main's first, renumber
+mine" — never drop or reorder an already-merged ADR.
+
+**4. Do not renumber a merged ADR to close a gap.** A gap is harmless; a moved number breaks every
+citation to it. `D-008` already sits after `D-009` in file order for this reason — leave it.
+
+If collisions continue despite this, the fix is to abandon the global sequence for date-plus-slug
+ids (`D-2026-07-27-harness-streaming`), which cannot collide. That is a deliberate convention
+change — raise it, don't drift into it.
 
 ## Token / context management
 

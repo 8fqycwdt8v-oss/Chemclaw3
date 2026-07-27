@@ -20,6 +20,7 @@ questions.
 """
 
 import asyncio
+import json
 
 from mcp.server.fastmcp import FastMCP
 
@@ -34,7 +35,7 @@ server = FastMCP("bo")
 @server.tool()
 async def suggest_next_experiment(
     problem: OptimizationProblem,
-    observations: list[Observation] | None = None,
+    observations: list[Observation] | str | None = None,
     count: int = 1,
 ) -> list[Candidate]:
     """Suggest the next experiment(s) to run for an optimization problem (Bayesian optimization).
@@ -67,11 +68,26 @@ async def suggest_next_experiment(
     Returns:
         The proposed candidate point(s), each a mapping of parameter name to value.
     """
+    # A tool call arrives as JSON, so the framework hands this function plain dicts and lists —
+    # never `OptimizationProblem`/`Observation` instances, because the wire format has no model
+    # concept. This is the one tool here with a nested-model parameter, so it is the one boundary
+    # that has to bridge back into typed objects. Re-validating an already-correct instance is a
+    # no-op (`model_validate` short-circuits on an exact-type match), so every direct and test
+    # caller that passes real models is unaffected.
+    problem = OptimizationProblem.model_validate(problem)
+    # On a large batch the model occasionally emits the observations array JSON-*encoded* as a
+    # single string rather than as an array — a live e2e finding on a six-parameter problem.
+    # Schema validation would otherwise reject the whole call before this body runs, with no
+    # detail reaching the model to self-correct from. Accepting the string is strictly more
+    # permissive (a real list is untouched), so it is robustness, not a behaviour change.
+    if isinstance(observations, str):
+        observations = json.loads(observations)
+    history = [Observation.model_validate(item) for item in observations] if observations else []
     # Featurize before the engine sees the problem: descriptors change how the surrogate
     # models the categorical space, so this must happen for the seeding path too — otherwise
     # a problem that declares structures would silently fall back to an opaque category.
+    # Runs *after* the coercion above, because it needs a real `OptimizationProblem`.
     featurized = await featurize_problem(default_store(), problem)
-    history = observations or []
     if history:
         return await asyncio.to_thread(propose_candidates, featurized, history, count)
     return await asyncio.to_thread(initial_candidates, featurized, count)
@@ -99,4 +115,4 @@ async def generate_screening_design(problem: OptimizationProblem) -> ScreeningDe
     Returns:
         Every combination of the categorical levels, one dict of parameter name to value per run.
     """
-    return await asyncio.to_thread(factorial_design, problem)
+    return await asyncio.to_thread(factorial_design, OptimizationProblem.model_validate(problem))

@@ -22,6 +22,9 @@ The shape deliberately mirrors `agents.tool_registry`: a dict per queue keyed by
 Temporal will advertise, insertion-ordered, with a duplicate guard. The one difference is
 that re-registering the *same* definition is allowed, because Temporal's workflow sandbox
 re-imports workflow modules and would otherwise trip the guard on every workflow task.
+Allowed, and **ignored**: the first registration is the one kept, because the sandbox's
+re-import builds a new class object for the same definition and overwriting would swap out
+the object the worker modules captured at import time.
 """
 
 import logging
@@ -85,6 +88,14 @@ def durable_workflow(queue: Queue) -> Callable[[_WorkflowT], _WorkflowT]:
         existing = registered.get(name)
         if existing is not None:
             _claim(existing, cls, "workflow", name)
+            # Keep the first. The re-registration is Temporal's sandbox re-importing the
+            # module, which builds a *new* class object for the same definition; storing it
+            # would swap out the very object the worker modules captured at import time, so
+            # `registered_workflows(queue)` would stop equalling the worker's own list — the
+            # equality `test_workflow_registry` asserts, and which only breaks once a Worker
+            # has actually been constructed (so it passes wherever Temporal is unavailable).
+            # The class is still returned unchanged, so Temporal gets the object it built.
+            return cls
         registered[name] = cls
         return cls
 
@@ -100,6 +111,7 @@ def durable_activity(queue: Queue) -> Callable[[_ActivityT], _ActivityT]:
         existing = registered.get(name)
         if existing is not None:
             _claim(existing, fn, "activity", name)
+            return fn  # keep the first, for the reason spelled out in `durable_workflow`
         registered[name] = fn
         return fn
 

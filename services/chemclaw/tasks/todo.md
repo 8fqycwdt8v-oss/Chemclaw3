@@ -54,7 +54,7 @@ generated job tool; unknown enabled connector fails loud; non-loopback `auth: no
       Temporal test here; the wrapper's worker registration and the envelope shape are pinned by
       sandbox-safe tests that always run)
 - [~] The four bespoke adapters are **deliberately not migrated** — they wrap workflows returning
-      typed domain results, not the envelope. Moves in Stage C with their code (D-109, plan §9).
+      typed domain results, not the envelope. Moves in Stage C with their code (D-110, plan §9).
 
 Gate B met: fingerprint search reached over HTTP with the identity headers *observed by a live
 server*, and two concurrent turns proven to keep their own identity.
@@ -72,11 +72,11 @@ server*, and two concurrent turns proven to keep their own identity.
 - [x] `calc` — the calculators + the calibration ledger, with `calculation-selection` in the bundle
       (takes `tblite` and the calculation store's driver out)
 - [x] Helm: an entry per bundle; Deployment/Service/NetworkPolicy already generalized in Stage A
-- [~] `kg` — **won't build** (D-114). Thirteen core modules import `kg`, so moving the three read
+- [~] `kg` — **won't build** (D-115). Thirteen core modules import `kg`, so moving the three read
       tools out leaves every one of those imports where it is: zero dependency win, plus a second
       read path to one note tree. Re-indexing stays in core with it. The rule is written into
       `connectors/manifest.py` and the runbook rather than left as folklore.
-- [x] `bo` — the reference connector-owned durable capability (D-111): its workflow, activities and
+- [x] `bo` — the reference connector-owned durable capability (D-112): its workflow, activities and
       worker live in the bundle on `connector-bo`, `start_optimization_campaign` is a manifest
       `jobs:` entry, and the bespoke adapter is deleted. Core serves no BO workflow. The move needed
       one manifest entry plus the workflow's return type, and no core edit — the property the seam
@@ -86,9 +86,9 @@ server*, and two concurrent turns proven to keep their own identity.
       placement re-runs at replay against current config).
 - [x] `calc`'s expensive half — the five orphaned hybrid tools became `jobs:` entries over
       `CalcJobWorkflow` on `connector-calc` with `inline_wait_seconds`, so one tool still serves the
-      two-second and the twenty-minute case (D-113). This is what finally took `tblite`, RDKit,
+      two-second and the twenty-minute case (D-114). This is what finally took `tblite`, RDKit,
       SciPy and the `xtb`/`crest` binaries out of the chat image.
-- [~] `report` — **envelope, not a bundle** (D-114). Its closure is what core keeps for
+- [~] `report` — **envelope, not a bundle** (D-115). Its closure is what core keeps for
       `gather_evidence` regardless, so isolation buys nothing; but returning `ConnectorJobResult`
       closed the hole where `get_durable_job_status` could report `completed` with nothing to hand
       back. Stays on core's worker.
@@ -130,7 +130,7 @@ Built at the user's explicit request, ahead of its recorded trigger (see the rev
 - [x] `make template-validate` — CI gate that a step's tool, job or profile actually exists.
 - [x] `templates/README.md` + runbook §(iv-c): when to reach for a template rather than a profile.
 
-## Stage C — completed by the merge with `main` (D-113)
+## Stage C — completed by the merge with `main` (D-114)
 
 - [x] `calc` is whole. The four calculators `main`'s X8 added, plus `predict_logd` and
       `predict_developability_profile`, moved into the bundle; the duplicate
@@ -160,15 +160,15 @@ Built at the user's explicit request, ahead of its recorded trigger (see the rev
 ## Review — reconciliation with `main`, and the two open Stage C points closed
 
 `make lint type test` green: **1172 passed, 57 skipped**, every validator passing
-(`connector-`, `template-`, `skill-`, `prose-`). ADRs D-113 (the merge + the calculators) and
-D-114 (the two open points).
+(`connector-`, `template-`, `skill-`, `prose-`). ADRs D-114 (the merge + the calculators) and
+D-115 (the two open points).
 
 **The merge was two convergent designs, not a conflict.** `main`'s X8 had independently moved seven
 calculators out of the agent's process behind an MCP server, for the same reason the connector seam
 exists — via `settings.mcp_servers`, the mechanism this branch removed. Resolution: `mcp_servers/calc`
 deleted, its tools re-homed in `connectors/calc/`, taking `main`'s bodies wherever they were newer
 (its `predict_pka` carries X11's base support; keeping the bundle's copy would have silently reverted
-a real capability). ADR numbers collided too — mine renumbered D-092…D-095 → D-109…D-112.
+a real capability). ADR numbers collided too — mine renumbered D-092…D-095 → D-110…D-113.
 
 **Adopted from `main` rather than merged around:** `workflows/registry.py` (D-099). A workflow
 declaring its own queue at its definition site fixes exactly the failure my new workflows were
@@ -207,7 +207,7 @@ two CREST searches rather than disappearing with the tool.
 ## Review — Stages D and E
 
 `make lint type test` green at **1005 passed, 45 skipped** (the skips are the unchanged offline set:
-26 Postgres, 19 Temporal-server). ADR D-112 records the design; three things are worth flagging here.
+26 Postgres, 19 Temporal-server). ADR D-113 records the design; three things are worth flagging here.
 
 **The gate found two omissions that would have shipped silently.** The image never `COPY`d
 `templates/` or `profiles/` — both are discovered from disk, so the container would have started
@@ -253,7 +253,7 @@ adding a bundle does not break unrelated tests.
 this sandbox's proxy, so the end-to-end durable test could not be executed here and is CI-gated like
 its siblings). `make connector-validate`, `make skill-validate` and `make prose-validate` all pass.
 
-Two things were found by measurement rather than reading, and both changed the design (D-109):
+Two things were found by measurement rather than reading, and both changed the design (D-110):
 
 1. **MAF's `header_provider` silently delivers nothing over streamable HTTP.** It is invoked with the
    right values; the server receives no headers, because MAF's ContextVar is set in the calling task
@@ -338,7 +338,7 @@ the skill catalogue says gate 19 of its 28 skills.
       Hartree/Angstrom and the dipole out); friendly failure for an unknown ALPB solvent; the
       spin-polarization contribution for open shells, versioned into the cache key.
 - [x] X3.5 Durable routing (unplanned, see decision 6): `calc/xtb_cost.py`, `XtbJobWorkflow` +
-      activity, `agents/xtb_job_tools.py`, and `get_qm_job_status` generalized to `get_job_status`.
+      activity, the generated job launchers, and `get_qm_job_status` generalized to `get_job_status`.
 - [x] X3.2 `calc/xtb_opt.py`: `OptSpec`, `OptimizationResult`, `optimize_structure`,
       `run_cached_optimization`. Frozen-atom support (bounds), convergence on max |gradient|.
 - [x] X3.3 `calc/xtb_thermo.py`: finite-difference Hessian + dipole derivatives, Eckart projection,
@@ -533,7 +533,8 @@ same terms, so the agent declines rather than reaching for a substitute.
 `main` restored the tree the Replit move had rewound while this branch was building the xTB
 layer, so the merge was a feature set meeting ~38 modules it had never seen. Recorded in D-105.
 
-- [x] ADR renumbering: this branch's ten xTB ADRs D-082…D-091 → **D-112…D-104**, `main`'s
+- [x] ADR renumbering: this branch's ten xTB ADRs D-082…D-091 → **D-113…D-104**, `main`'s
+- [x] ADR renumbering: this branch's ten xTB ADRs D-082…D-091 → **D-095…D-104**, `main`'s
       allocation keeps the numbers. Every citation moved with them; `tests/test_decision_log.py`
       (which `main` added as the fix for the *previous* collision) passes.
 - [x] `_log_prediction` moved to `mcp_servers/calc/server.py` — it hooks `predict_pka` and
@@ -573,7 +574,8 @@ the error the cost model fixed at the large end; re-fitting it is a measurement 
 
 ## Reconciliation with `main` (PR #31) — the process/analytical calculators (D-107)
 
-`main` landed D-109's logD, developability descriptors, exotherm screen and ETKDG conformer
+`main` landed D-110's logD, developability descriptors, exotherm screen and ETKDG conformer
+`main` landed D-092's logD, developability descriptors, exotherm screen and ETKDG conformer
 ensemble, plus two CI fixes. Seven conflicts. Two defects existed **only in the combination**,
 so neither branch's tests could have caught them:
 
@@ -584,7 +586,8 @@ so neither branch's tests could have caught them:
 - [x] **The logD sign.** `calc.logd` hard-coded the acid Henderson-Hasselbalch form, correct
       when `calc.pka` raised for bases. X11 widened the domain; pyridine at pH 7.4 came out at
       -0.92 against a clogP of 1.08 — two log units, silent. Now branches on `PkaResult.site`.
-- [x] ADR renumbering, third time: this branch's D-109…D-103 → **D-112…D-106**.
+- [x] ADR renumbering, third time: this branch's D-110…D-103 → **D-113…D-106**.
+- [x] ADR renumbering, third time: this branch's D-092…D-103 → **D-095…D-106**.
 - [x] `workers/background_worker.py`: registry kept, `main`'s conformer workflow + activities
       decorated. Verified served (15 workflows, 26 activities).
 - [x] `tests/test_calc_tools.py`: two module aliases, since X8 split the tools across two
@@ -616,7 +619,8 @@ framework. D-107 had kept both and recorded that a decision was owed; this is it
 
 **Kept, because they were never duplicates:** `predict_logd`,
 `predict_developability_profile`, `generate_screening_design` — genuinely new capability
-from D-109 with no counterpart on this branch.
+from D-110 with no counterpart on this branch.
+from D-092 with no counterpart on this branch.
 
 **Cost accepted and recorded in D-108:** the exotherm screen was seconds on cached single
 points; `level="quick"` is the equivalent gear but still optimizes. And CREST is an optional

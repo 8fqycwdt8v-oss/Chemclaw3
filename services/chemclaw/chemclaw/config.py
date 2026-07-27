@@ -39,6 +39,7 @@ fields are **not** migrated to match — that would be churn without a defect to
 """
 
 import os
+from pathlib import Path
 from typing import Annotated, Literal, Self
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
@@ -1004,6 +1005,26 @@ class KgSettings(BaseSettings):
     # into `InteractionApprovalWorkflow`; this bounds the wait so an unanswered prompt cannot
     # pin a workflow forever. Default 7 days — generous for an out-of-band review, still finite.
     interaction_approval_timeout_seconds: float = Field(default=604800.0, gt=0)
+
+    @property
+    def knowledge_path(self) -> Path:
+        """Where the notes actually live on disk: `note_repo_dir / knowledge_dir`.
+
+        The PR-gate (`kg.git_submitter.GitNoteSubmitter`) writes into `note_repo_dir` — a
+        dedicated clone in any real deployment, never the service's own checkout
+        (`_require_dedicated_checkout`) — so a reader that resolved `knowledge_dir` alone
+        (relative to the process CWD) would be looking at a different tree than the one
+        notes are written to, and would see nothing an agent had ever proposed. Every reader
+        (`kg.graph.load_notes`, the report retrievers, the note-index rebuild, `kg.validate`,
+        the ELN sync, the memory-job synthesizers) resolves its default notes directory through
+        this property instead of `knowledge_dir` raw, so read and write always agree on one
+        location. `note_repo_dir`'s dev default (".") makes this identical to today's
+        CWD-relative `Path(knowledge_dir)` — no behavior change until a deployment points
+        `note_repo_dir` at a dedicated clone. An absolute `knowledge_dir` (as a test/demo may
+        set directly, bypassing `_knowledge_dir_is_relative`) still wins outright: `Path.
+        __truediv__` discards the left operand when the right is absolute.
+        """
+        return Path(self.note_repo_dir) / self.knowledge_dir
 
     @model_validator(mode="after")
     def _knowledge_dir_is_relative(self) -> Self:

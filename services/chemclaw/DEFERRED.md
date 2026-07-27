@@ -190,3 +190,13 @@ abstraction with no second caller. **AGT-6** structured outputs — the W1 tools
 arguments, so MAF already forces a validated payload at the machine-consumed call site whose absence
 was the original reason to defer. **AGT-1** turn cancellation — verified correct as of `4bc9b04`
 and now measured by `tests/test_turn_cancellation.py`.
+
+## Live-testing follow-ups (2026-07-27, D-109)
+
+From the nine-stage live e2e pass. The fixes themselves shipped; what is recorded here is the
+part that cannot be closed from inside this repo.
+
+| Item | Why not now | Trigger to revisit |
+|---|---|---|
+| **Upstream fix for the harness streaming 400** | `create_harness_agent` enables per-service-call history persistence *and* installs `MessageInjectionMiddleware`. The latter, while streaming, rebuilds the response via `ChatResponse.from_updates()`, which drops the sentinel `conversation_id` the former uses to tell the function-invocation loop "stop resending the transcript". The loop then re-sent everything while history was independently re-injected, putting a `user` block between a `tool_use` and its `tool_result` → Anthropic 400 on 100% of tool calls, both autonomy modes. Chemclaw disables per-service-call persistence to break the chain (`agents/chemclaw_agent.py`), which costs mid-turn history durability — the classic path's behaviour, and `harness_enabled` is off by default. The real fix is upstream: preserve `conversation_id` across that finalizer. | `agent-framework-core` ships a fix; then drop the local override and delete this row. `tests/test_harness_execution.py` fails if the override is removed early |
+| **Per-model-call history durability under the harness** | Follows from the row above: with the override in place a harness turn persists history per *run*, so a crash mid-turn loses that turn rather than resuming from the last model call. Acceptable because it is exactly what the non-harness path has always done, and because the alternative today is a feature that cannot make a single tool call. | The upstream fix lands, restoring the option |

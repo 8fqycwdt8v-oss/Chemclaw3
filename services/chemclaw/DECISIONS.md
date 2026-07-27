@@ -3660,7 +3660,162 @@ A CREST search is minutes of saturated CPU, which is the definition of the **`hp
 for every expensive xTB task rather than a decision repeated per capability. Pinned by a test
 in `tests/test_workers.py`, which previously asserted the wrong queue and now asserts why.
 
-## D-109 — The connector seam: one way to add a tool, a skill, or an agentic workflow
+## D-109 — Four fixes from the live e2e pass, and two root causes that were not what they looked like
+
+**Context.** A nine-stage live pass against the real stack (Postgres+pgvector, Temporal, real
+Anthropic calls, real signed tokens) left four open findings. Fixing them changed the diagnosis of
+two, and the corrected diagnoses are the part worth recording.
+
+**1. Harness mode failed on every tool call — and the test double is why nobody knew.**
+`create_harness_agent` sets `require_per_service_call_history_persistence=True`, whose middleware
+replaces the outgoing messages each model call and signals "stop resending the transcript" with a
+sentinel `conversation_id` on the finalized response. It also installs `MessageInjectionMiddleware`
+unconditionally, which *while streaming* returns a new `ChatResponse` from
+`ChatResponse.from_updates()` — and the sentinel, living on the inner response rather than on any
+streamed update, does not survive. The function-invocation loop therefore re-sent the whole
+transcript while history was independently re-injected, and the duplicate put a `user` block
+between a `tool_use` and its `tool_result`, which Anthropic rejects outright. Both autonomy modes,
+single and parallel calls, 100%.
+
+Chemclaw sets the flag back to `False` after construction. That breaks the chain at its start —
+nothing injects, so no sentinel is needed — at the cost of per-*run* rather than per-model-call
+history durability, which is exactly what the classic path has always done and what
+`harness_enabled=False` (the default) already gives everyone. The correct fix is upstream and is
+recorded in `DEFERRED.md`.
+
+**Decision: treat the test double's class hierarchy as production-relevant.**
+`ScriptedChatClient` derived from `FunctionInvocationLayer + BaseChatClient` and its docstring
+claimed that mirrored a concrete client. It did not: `BaseChatClient` is deliberately the base
+*without* middleware wrapping, and the omitted `ChatMiddlewareLayer` is what consumes
+`client_kwargs["middleware"]`. Every harness test ran a pipeline containing **zero** chat
+middleware — including the two the harness installs — so three tests passed green against
+machinery production never used. Adding the layer reproduces the failure offline with no network.
+A fake that diverges from the real type's *layering*, not just its behaviour, tests nothing; the
+regression tests now assert the wire invariant (every call followed by its result) over the
+messages actually handed to the client.
+
+**2. The suite was destroying live data.** Nine test files wrote to production tables with no
+isolation. `test_audit_chain` truncated `audit_events` — the GxP tamper-evident hash chain — then
+deliberately corrupted a row and left it that way, so `make audit-verify` failed permanently
+afterwards. On the dev database this was not hypothetical: rows 1–3 of the "real" audit trail were
+that test's own fixtures, with row 2 still reading `actor='attacker'`. CI never noticed because its
+database is a per-run container, which is precisely why a shared database was where it bit.
+
+**Decision: isolate by schema, carried on the DSN, not by a parameter threaded through the stores.**
+Every store already resolves its connection from `settings.postgres_dsn`, so redirecting that one
+value (to `options=-c search_path=chemclaw_test,public`) isolates all of them with no schema
+argument anywhere in product code. `public` stays second because `vector` is installed per
+database. The schema name is a constant in `tests/pg.py`, not a `Settings` field: `config.py` is
+the operator-facing deployment surface and its parity tests require every field to appear in
+`.env.example` — a test-only knob does not belong there.
+
+This surfaced a real product bug (**3**): `chemclaw.db.connect` passed `options=` as a psycopg
+keyword, which *overrides* the connection string rather than merging with it — but only when a
+statement timeout was set, since `None` is dropped. An operator's `search_path`, `application_name`
+or `work_mem` therefore vanished on some call sites and survived on others, non-deterministically.
+Now merged, with ours appended last so libpq's last-occurrence-wins keeps our timeout authoritative.
+
+**4. The orphan-`tool_use` rollback protected nothing on the path that ships.** D-091 §2 snapshots
+and restores `session.state` on a client disconnect. Under `session_store="postgres"` the messages
+are not in `session.state` — `save_messages` has already committed them — so the orphan survived
+the rollback meant to discard it, and every later turn on that session replayed it into the same
+400. **Decision: enforce the invariant on read, and make the rollback durable as well.**
+Read-time repair (`PostgresHistoryProvider.get_messages` drops and deletes unanswered calls) is the
+load-bearing half, because the disconnect handler is not the only way a turn dies between writing a
+call and writing its result — a `SIGKILL`, an OOM, or a pod eviction runs no Python cleanup at all,
+and the harness's per-service-call persistence had been *widening* that window by writing the call
+before the tool ran. It also heals sessions already broken in the field. The watermark rollback is
+kept alongside it because the two differ: repair removes orphans, whereas the rollback's contract
+is that a half-written turn is discarded whole.
+
+The pairing rule lives in `agents/message_pairing.py` with two forms, and the distinction is
+load-bearing: `unmatched_call_ids` (by id, order-independent) decides what is safe to *delete from
+storage*, where a merely out-of-order pair is intact history; `calls_without_adjacent_results`
+(the stricter wire rule) validates what is about to be *sent*. Using the lenient one on the wire
+would have missed finding 1 entirely — duplicated history leaves a second, unanswered copy of a
+call whose id does appear answered once.
+
+**5. RBAC denial narration — the reported cause was wrong.** The pass attributed inconsistent
+narration to tool docstrings ("gated" tools explained themselves, others did not). No tool
+docstring mentions gating, permissions, or privileges anywhere. The actual cause: `authorize_tool`
+emits three different messages, and under the shipped default only the five
+`DEFAULT_WRITE_TOOL_GATES` tools can ever be denied — so the self-explaining "lacks a privileged
+role" message was the only one anyone had seen. The deny-default message, "not in the tool
+allowlist (deny by default)", is written from the perspective of whoever edits the config, and the
+model relayed it as "not currently available… a configuration issue" — which sends a chemist to
+report a bug rather than to request access. **Decision: all three refusals share one chemist-facing
+shape** (who, which tool, why), the operator's remedy moves to the docstring and runbook, and
+`_INSTRUCTIONS` gains a passage on narrating a refusal — mirroring the compaction passage, which
+was already the house pattern for honest limitation-reporting. Verified live: all five previously
+vague read tools now state it is an access decision and say how to get access.
+
+**5b. The test schema is per-process.** Found by hitting it: the session fixture *drops* its
+schema on the way out, so a fixed name means a second pytest run deletes the first run's tables
+mid-flight — which is what happened when a single test file was run while the full suite was
+going. The schema is now suffixed with the pid, verified by running two suites concurrently
+against one database and confirming both pass and neither leaves residue. A hard kill can strand
+an orphan schema; it is inert and unmistakably named, which is the right trade against the
+alternative of a shared name that is unsafe by construction.
+
+**5c. A converged geometry was not a fixed point.** Unrelated to the four findings above and
+folded in only because it blocked this branch's CI: `tests/test_xtb_opt.py::test_a_converged_
+structure_is_a_fixed_point` failed identically on pristine `main` (verified in a clean worktree —
+same two structure ids), so it was `main`'s failure, not a merge artifact.
+
+The in-process optimizer's loop was bounded only by the step count, so it always ran at least one
+leg before testing convergence. Re-optimizing an already-relaxed water therefore moved it 3e-4
+Angstrom, and a third pass moved it again. Because a structure id is a hash of the coordinates,
+every pass minted a new id — which silently forks the calculation cache and quietly voids the
+"compute once, never recompute" guarantee (D-011) for every task keyed on a geometry. The test was
+right to call this out; it was pinning a property the code did not have.
+
+The fix seeds the convergence test from the *input* geometry's gradient and makes the loop
+`while max_gradient > tolerance and steps < max_steps`. It costs nothing: `evaluate_point` already
+computed that gradient for the initial energy and discarded it. An already-minimal structure now
+runs zero legs and returns byte-identical. Scoped to the library backend, which is the one
+reachable here; whether the `xtb` binary's own ANCopt has the same property is untested, because
+the binary is not installed in this environment — flagged rather than guessed at.
+
+**5d. The durable-capability registry was not re-import safe.** The second of two failures
+inherited from `main` rather than caused by the merge, and the more interesting one, because it
+could only ever fail where Temporal actually runs.
+
+`workflows/registry.py` anticipated the sandbox: its duplicate guard compares the defining
+*module* rather than object identity, precisely so that Temporal re-importing a workflow module
+is not mistaken for two capabilities claiming one name. Having allowed the re-registration, it
+then stored it — and the sandbox's re-import builds a *new* class object for the same definition,
+so the registry quietly swapped out the very object `workers/hpc_worker.py` captured at import
+time. `HPC_WORKFLOWS == registered_workflows("hpc")` then compared two classes that print
+identically and are not the same object: `QMJobWorkflow != QMJobWorkflow`.
+
+The fix is to keep the *first* registration and return the incoming object unchanged, so Temporal
+still receives the class it built while the registry keeps the one the workers hold. That is what
+the guard's own docstring already implied; only the store was missing it.
+
+Worth recording as a testing lesson rather than a one-line fix: `test_workflow_registry` already
+had a re-registration test, and it passed throughout — it counted entries *by name*, which is
+invariant under exactly this bug. The assertion that mattered was identity, and it was missing.
+The regression test now added builds the second class object by hand, so it reproduces a sandbox
+re-import with no Temporal server at all — the failure was otherwise invisible in any environment
+where the test server cannot be downloaded, which is every environment this was developed in.
+
+**6. ADR numbers now have an allocation ledger.** This ADR was written as D-092, renumbered to
+D-095, then to D-109 — three collisions in one day, each found only when a merge conflicted. The
+cause is structural: concurrent branches all append to the end of `DECISIONS.md` and all compute
+"highest visible + 1" against their own branch, which by construction cannot see the others.
+`ADR-REGISTRY.md` is the ledger — one line per number, so "what is taken?" is a grep against
+`origin/main` rather than a scan of a 3,700-line document — and `CLAUDE.md` carries the procedure:
+enumerate against `origin/main`, reserve in the *first* commit, and on a collision the branch
+merging **second** renumbers (a rule, so neither session waits for the other).
+
+Stated honestly, because a ledger that overpromises is worse than none: **this does not prevent
+collisions.** Two branches can still append the same number to the ledger. What changes is the
+cost — a one-line conflict a grep finds, instead of a ninety-line conflict inside a prose block
+where the number is easy to miss. The collision-proof fix is to drop the global sequence for
+date-plus-slug ids; that is a convention change worth making deliberately if this recurs, and it
+is recorded as the escalation rather than done unilaterally here.
+
+## D-110 — The connector seam: one way to add a tool, a skill, or an agentic workflow
 
 **Context.** Five extension seams existed, and adding a capability meant touching four unrelated
 places — a `@tool` function in `agents/`, a `settings.mcp_servers` entry, a bespoke Temporal adapter
@@ -3739,9 +3894,9 @@ including out-of-process tools — the coarser field would have passed while the
 Design, staging and open questions: `docs/connector-plan.md`. Supersedes the `mcp_servers` half of
 D-029 and D-081's transport union; the rest of D-081 stands.
 
-## D-110 — Stage C: the domain connectors, and two defects the migration surfaced
+## D-111 — Stage C: the domain connectors, and two defects the migration surfaced
 
-`safety`, `chem` and `calc` moved out of the agent's process to their own bundles (D-109's seam).
+`safety`, `chem` and `calc` moved out of the agent's process to their own bundles (D-110's seam).
 Five connectors ship now; `rdkit`, `tblite` and the calculation store's driver are no longer the chat
 service's dependencies, which was the operational point of the exercise.
 
@@ -3770,7 +3925,7 @@ the migration would have been unsafe and Stage C would not have proceeded.
    name a whole `calc` connector but not "just the two predictors". `tool_names` now spans both
    halves, narrowing the in-process tools *and* each connector's agent-facing allow-list, dropping a
    connector left with no named tool. Mutating `allowed_tools` per instance is safe only because
-   connectors are per-turn objects (D-109) — on a shared connector it would have been a cross-turn
+   connectors are per-turn objects (D-110) — on a shared connector it would have been a cross-turn
    surface change. The unknown-name check moved to the union, since only a view of the whole surface
    can tell a typo from a name that lives on the other side of the boundary.
 
@@ -3785,7 +3940,7 @@ Remaining in Stage C: `kg` (needs a decision on whether it also owns re-indexing
 workflow moves to its own worker, taking `start_optimization_campaign` onto the generic job path with
 it). See `tasks/todo.md`.
 
-## D-111 — `bo` as the reference connector-owned durable capability
+## D-112 — `bo` as the reference connector-owned durable capability
 
 The `bo` bundle is the one that proves the durable half of the seam rather than describing it. It
 owns both flavours: `suggest_next_experiment` is an inline MCP tool on its own FastAPI server, and
@@ -3796,7 +3951,7 @@ polling `connector-bo`. Core's background worker no longer serves any BO workflo
 **What this establishes.** Moving a durable workflow out of core was one manifest entry plus changing
 the workflow's return type to `ConnectorJobResult`. Nothing in core was edited to accommodate it,
 because `ConnectorJobWorkflow` addresses the child by workflow *type name* and task queue, both
-strings from `connector.yaml` — the property D-109 claimed and this is the first exercise of. The
+strings from `connector.yaml` — the property D-110 claimed and this is the first exercise of. The
 practical payoff is that `bofire`/`botorch` now load only in the bundle's two processes.
 
 **The PR-gate split, made structural.** `write_campaign_node` — an activity that both *built* the
@@ -3820,9 +3975,9 @@ generic path is a silent regression, which is the opposite of what the seam is f
 Remaining in Stage C: the `kg` bundle, and the `qm`/`report` jobs, which follow the same shape once
 their workflows move and return the envelope directly.
 
-## D-112 — Stages D and E: profiles select an agent, templates fix a procedure
+## D-113 — Stages D and E: profiles select an agent, templates fix a procedure
 
-The connector seam (D-109) made *capability* one thing to add. These two stages do the same for the
+The connector seam (D-110) made *capability* one thing to add. These two stages do the same for the
 two ways an "agentic workflow" is configured, and the decision worth recording is that they are two
 things and not one.
 
@@ -3888,15 +4043,15 @@ worked case, not two. The gate existed to prevent building a step engine nobody 
 it was guarding — a second caller failing to materialize — remains open and is noted here rather
 than presented as retired.
 
-## D-113 — Sixth reconciliation with `main`: the xTB layer meets the connector seam
+## D-114 — Sixth reconciliation with `main`: the xTB layer meets the connector seam
 
 Two branches solved the same problem in the same window without knowing it. `main`'s X8 moved the
 seven calculators out of the agent's process behind an MCP server because "the calculators carry the
-heavy half of this system's dependency closure"; the connector seam (D-109) built the general
+heavy half of this system's dependency closure"; the connector seam (D-110) built the general
 mechanism for exactly that. The merge is where they become one thing, and the interesting part is
 what the merge *exposed* rather than what it moved.
 
-**Convergent evidence, worth stating.** X8's reasoning and D-109's are nearly word-for-word — the
+**Convergent evidence, worth stating.** X8's reasoning and D-110's are nearly word-for-word — the
 capability scales on its own pod, judgment stays out, only DTOs cross. Two independent derivations
 of the same boundary is the strongest argument either has, and it settles the "is this seam the
 right shape" question better than another round of design would.
@@ -3963,21 +4118,21 @@ questions even when the machinery is identical.
    is the regression that would quietly restore the coupling this removed.
 
 **ADR renumbering.** The branch's four ADRs were written as D-092…D-095 while `main` independently
-used those numbers. They are D-109…D-112 here, with every in-repo reference updated. Numbering
+used those numbers. They are D-110…D-113 here, with every in-repo reference updated. Numbering
 collisions are the predictable cost of an append-only log on two branches; the alternative (a
 reservation) is worse than renaming on merge.
 
 **Two production gaps closed while reviewing, both of the same kind — a gate that existed but was
 not wired.** CI ran `make skill-validate` and neither `connector-validate`, `template-validate` nor
 `prose-validate`, so three of the five gates the seam added were enforceable only by hand; they are
-CI steps now. And the image never `COPY`d `templates/` or `profiles/` (D-112) — both discovered from
+CI steps now. And the image never `COPY`d `templates/` or `profiles/` (D-113) — both discovered from
 disk, so the container would have started clean and simply offered fewer capabilities. A validator
 nobody runs and a directory nobody ships fail the same way: silently, in the direction of less.
 
-## D-114 — The two remaining Stage C items, answered: neither becomes a bundle
+## D-115 — The two remaining Stage C items, answered: neither becomes a bundle
 
 Both open points closed by measuring rather than by preference, and the measurement says no in both
-cases. Worth recording because "everything becomes a connector" is the wrong reading of D-109: a
+cases. Worth recording because "everything becomes a connector" is the wrong reading of D-110: a
 capability earns a bundle by taking a dependency closure *with* it, and a tool that leaves the
 closure behind gains nothing but a second code path.
 
@@ -4001,10 +4156,64 @@ core's background worker.
 It still publishes its own note rather than returning one for core to gate — correct here for
 precisely the reason it would be wrong in a bundle. The note *reference* is the workflow's result, so
 publishing is the work rather than a side effect, and this workflow already sits on the side of the
-boundary the PR-gate lives on. A connector cannot make that claim, which is why D-111 took the
+boundary the PR-gate lives on. A connector cannot make that claim, which is why D-112 took the
 publish away from `bo`.
 
 **What this leaves in core, as a closed list rather than a backlog:** conversation plumbing, the two
 PR-gate writers, the knowledge-graph reads, `submit_qm_job` (it needs the HPC identity bridge, which
 is core's), the report, and the two status tools. Every one of those is a rule with a reason, and
 `tests/test_tool_registry.py` pins the set so adding to it is a reviewed edit.
+
+## D-116 — Seventh reconciliation with `main` (PR #30): two capabilities the merge silently restored
+
+The e2e-testing branch merged into `main` while this one was open, and the reconciliation is
+mechanical in the direction that matters — `main` does not have the connector seam, so every
+conflict where it re-introduces `settings.mcp_servers`, `agents/calc_tools.py`, `agents/bo_tools.py`
+or `workflows/bo_campaign.py` resolves to this branch. What is worth recording is the two places
+where "resolve to ours" was the *wrong* answer, and the class of defect that produced them.
+
+**A merge that deletes a file on one side and edits it on the other restores the file.** Git reports
+that as `modify/delete` and asks; it does not report the *transitive* case, where the deleted file's
+module is still imported. Four modules came back this way — `workflows/xtb_job.py`,
+`workflows/xtb_activities.py`, `agents/xtb_job_tools.py`, `agents/xtb_expert_tools.py` — all replaced
+by the `calc` bundle's durable half in D-114, none flagged as a conflict, because on this branch they
+simply no longer existed. Two of them were dead-but-harmless; `xtb_job_tools.py` imported a module
+this branch had deleted, so it was an `ImportError` waiting for the first test that touched it.
+
+**The one that would have been a real regression.** `connectors/bo/activities.py` came back carrying
+`@durable_activity("background")`. Git's rename detection had matched it to `main`'s
+`workflows/bo_activities.py`, which legitimately registers on core's queue — so the decorator
+followed the file across the boundary. The effect: core's background worker would have served the BO
+activities again, loading `bofire` and `botorch` into the process the bundle exists to keep them out
+of. Nothing about it looks wrong in a diff; it is three decorator lines in a file whose contents are
+otherwise correct.
+
+`tests/test_workflow_registry.py` caught it, and how it caught it is the lesson. `main`'s
+`test_every_declared_capability_reaches_its_worker` asserts `BACKGROUND_WORKFLOWS ==
+registered_workflows("background")` — a snapshot taken at worker import compared against the live
+registry. A capability registering *after* that snapshot makes the two disagree, which is exactly
+what a stray connector registration does. The absence-assertion added in D-114 covers the same
+boundary from the other side; between them the failure is now caught twice, and the docstring in
+`connectors/bo/activities.py` says why the decorator must not be there.
+
+**Adopted from PR #30, each verified present after resolution rather than assumed:** the two
+error-surfacing middlewares (`surface_authorization_denials`, `surface_domain_errors`) around audit
+and authz — the chain is four deep now, not two; the BO argument coercion, which this branch had to
+*port* into `connectors/bo/server/tools.py` because that file is a rename of the module the fix
+landed in, so the merge kept this branch's older body (a plain "ours" resolution would have dropped a
+live-e2e finding: the model sometimes JSON-encodes the observations array as a string); the report's
+retrievers coming from `sources.registry.active_retrieve_sources()` rather than a hardcoded
+`GraphRetriever()`; `find_notes` matching every query word independently; the xTB fixed-point fix;
+and the registry's re-import safety.
+
+**Two of this branch's own tests were wrong in the same way, and it is worth naming.** Both asserted
+a *count* where they meant a *property*: the middleware chain "has length 2", and an authorization
+message contained one specific phrase. Both broke on additions that were improvements. They now
+assert what they meant — the narrowed agent's chain equals the default agent's (by name, since the
+audit entry is a per-agent closure), and the denial names the actor and the tool. A test that pins an
+incidental number is a test that will one day block a good change and teach nobody anything.
+
+**ADR numbering, per the ledger rule `main` added in the interim.** That rule says the branch merging
+second renumbers; this is that branch. `main` had taken D-109, so this branch's six ADRs moved from
+D-109…D-114 to D-110…D-115, with every in-repo reference updated, and all seven numbers are now
+reserved in `ADR-REGISTRY.md` — which is the mechanism that should make this the last renumber.

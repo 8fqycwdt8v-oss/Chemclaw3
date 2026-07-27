@@ -7,9 +7,10 @@ none, so it skips). The provider-selection test is a pure unit test with no data
 
 import asyncio
 
-from agent_framework import InMemoryHistoryProvider, Message
+from agent_framework import Content, InMemoryHistoryProvider, Message
 
 from agents.chemclaw_agent import history_provider
+from agents.message_pairing import unmatched_call_ids
 from agents.session_store import PostgresHistoryProvider, SessionOwnerStore
 from chemclaw.config import settings
 from tests.pg import migrated_db_or_skip
@@ -42,6 +43,155 @@ def test_messages_survive_a_new_provider_instance() -> None:
         reader = PostgresHistoryProvider()
         loaded = await reader.get_messages(session_id)
         assert any("phenol" in m.text for m in loaded)
+
+    asyncio.run(_run())
+
+
+def test_an_orphaned_tool_call_is_repaired_on_read() -> None:
+    """A stored call with no result is dropped *and* removed from the table, not just filtered.
+
+    This is the poison-pill case: the model rejects a thread whose `tool_use` has no
+    `tool_result`, so without this the session fails on every later turn — permanently, since a
+    `SIGKILL` or pod eviction between the two writes runs no rollback handler at all.
+    """
+
+    async def _run() -> None:
+        provider = await _provider_or_skip()
+        session_id = "sess-orphan-repair"
+        await provider.rollback_to(session_id, None)  # a clean slate for a rerun
+        await provider.save_messages(
+            session_id,
+            [
+                Message(role="user", contents=["screen sodium azide"]),
+                Message(
+                    role="assistant",
+                    contents=[
+                        Content.from_text("Checking that now."),
+                        Content.from_function_call(
+                            call_id="c-orphan", name="screen_hazards", arguments={}
+                        ),
+                    ],
+                ),
+            ],
+        )
+
+        loaded = await provider.get_messages(session_id)
+        assert unmatched_call_ids(loaded) == set()  # the caller never sees the orphan
+        assert any("Checking that now." in m.text for m in loaded)  # the prose survived
+
+        # ...and it is gone from storage, so the repair is paid once rather than on every read.
+        fresh = PostgresHistoryProvider()
+        assert unmatched_call_ids(await fresh.get_messages(session_id)) == set()
+
+    asyncio.run(_run())
+
+
+def test_repair_rewrites_the_right_rows_when_an_earlier_one_is_dropped() -> None:
+    """A dropped row must not shift the rewrite onto a later row's message.
+
+    Regression guard: pairing the stored row ids against the repaired list *positionally* works
+    only while the two are the same length. The moment one message is discarded outright, every
+    row after it lines up against the wrong message — so a trimmed message would be written over
+    an unrelated row, corrupting history the repair was supposed to be saving.
+    """
+
+    async def _run() -> None:
+        provider = await _provider_or_skip()
+        session_id = "sess-orphan-shift"
+        await provider.rollback_to(session_id, None)
+        await provider.save_messages(
+            session_id,
+            [
+                Message(role="user", contents=["first, a question"]),
+                # Dropped entirely (nothing but the orphan call) — this is what shifts the list.
+                Message(
+                    role="assistant",
+                    contents=[
+                        Content.from_function_call(
+                            call_id="c-gone", name="predict_pka", arguments={}
+                        )
+                    ],
+                ),
+                # Trimmed, not dropped: its prose must survive, on its own row.
+                Message(
+                    role="assistant",
+                    contents=[
+                        Content.from_text("and some prose worth keeping"),
+                        Content.from_function_call(
+                            call_id="c-trim", name="screen_hazards", arguments={}
+                        ),
+                    ],
+                ),
+            ],
+        )
+
+        await provider.get_messages(session_id)  # triggers the repair + write-back
+        reloaded = await PostgresHistoryProvider().get_messages(session_id)
+
+        assert [m.text for m in reloaded] == ["first, a question", "and some prose worth keeping"]
+        assert unmatched_call_ids(reloaded) == set()
+
+    asyncio.run(_run())
+
+
+def test_a_matched_pair_is_never_touched_by_the_repair() -> None:
+    """A complete call/result pair round-trips intact — the repair must not eat healthy history."""
+
+    async def _run() -> None:
+        provider = await _provider_or_skip()
+        session_id = "sess-orphan-healthy"
+        await provider.rollback_to(session_id, None)
+        await provider.save_messages(
+            session_id,
+            [
+                Message(
+                    role="assistant",
+                    contents=[
+                        Content.from_function_call(call_id="c-ok", name="predict_pka", arguments={})
+                    ],
+                ),
+                Message(
+                    role="tool",
+                    contents=[Content.from_function_result(call_id="c-ok", result="9.95")],
+                ),
+            ],
+        )
+        loaded = await provider.get_messages(session_id)
+        assert [c.type for m in loaded for c in m.contents] == ["function_call", "function_result"]
+
+    asyncio.run(_run())
+
+
+def test_rollback_deletes_only_what_the_turn_wrote() -> None:
+    """The durable half of the disconnect rollback: rows past the watermark go, earlier ones stay.
+
+    `session.state` is not where this provider keeps messages — `save_messages` has already
+    committed them — so restoring the state alone left a half-written turn durably stored.
+    """
+
+    async def _run() -> None:
+        provider = await _provider_or_skip()
+        session_id = "sess-rollback"
+        await provider.rollback_to(session_id, None)
+        await provider.save_messages(session_id, [Message(role="user", contents=["turn one"])])
+
+        watermark = await provider.latest_message_id(session_id)
+        assert watermark is not None
+        await provider.save_messages(session_id, [Message(role="user", contents=["turn two"])])
+
+        assert await provider.rollback_to(session_id, watermark) == 1
+        remaining = await provider.get_messages(session_id)
+        assert [m.text for m in remaining] == ["turn one"]  # the committed turn is untouched
+
+    asyncio.run(_run())
+
+
+def test_watermark_is_none_for_a_session_with_no_history() -> None:
+    """A first turn has nothing to roll back to, and rolling back to `None` clears the session."""
+
+    async def _run() -> None:
+        provider = await _provider_or_skip()
+        assert await provider.latest_message_id("sess-never-used") is None
 
     asyncio.run(_run())
 

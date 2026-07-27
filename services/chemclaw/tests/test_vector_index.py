@@ -10,6 +10,7 @@ import asyncio
 from pathlib import Path
 
 from chemclaw.config import settings
+from chemclaw.db import connect
 from chemclaw.embeddings import embed_texts
 from report.vector_index import (
     InMemoryNoteIndex,
@@ -92,9 +93,7 @@ def test_postgres_index_within_restricts_before_top_k() -> None:
 
     async def _run() -> None:
         await migrated_db_or_skip()
-        import psycopg
-
-        async with await psycopg.AsyncConnection.connect(settings.postgres_dsn) as conn:
+        async with await connect(settings.postgres_dsn) as conn:
             await conn.execute("TRUNCATE note_index")
             await conn.commit()
 
@@ -126,9 +125,7 @@ def test_postgres_note_index_round_trip() -> None:
 
     async def _run() -> None:
         await migrated_db_or_skip()
-        import psycopg
-
-        async with await psycopg.AsyncConnection.connect(settings.postgres_dsn) as conn:
+        async with await connect(settings.postgres_dsn) as conn:
             await conn.execute("TRUNCATE note_index")
             await conn.commit()
 

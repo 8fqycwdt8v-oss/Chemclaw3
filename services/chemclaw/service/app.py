@@ -568,6 +568,7 @@ def create_app(
                             budget=app.state.budget,
                             dry_run=body.dry_run,
                             connectors=app.state.connector_factory(live.profile),
+                            history=app.state.history,
                         ):
                             if event.type == "error":
                                 METRICS.increment("chemclaw_turns_failed_total")

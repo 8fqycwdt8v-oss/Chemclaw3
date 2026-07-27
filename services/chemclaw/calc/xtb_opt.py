@@ -245,16 +245,6 @@ def _preconditioned_leg(
     return to_cartesian(np.asarray(outcome.x, dtype=float)), max(int(outcome.nit), 1)
 
 
-def _free_max_gradient(gradient: np.ndarray, free_mask: np.ndarray) -> float:
-    """The largest gradient component the optimizer is allowed to relieve.
-
-    A frozen coordinate's component is zeroed rather than merely ignored: the convergence test must
-    measure the forces the optimizer *can* remove, not the ones a constraint is holding — otherwise
-    a constrained scan point could never converge.
-    """
-    return float(np.max(np.abs(np.where(free_mask, gradient.ravel(), 0.0))))
-
-
 def _optimize_with_library(spec: OptSpec, structure: Structure) -> OptimizationResult:
     """Relax with tblite's analytic gradient, L-BFGS-B, and an ANC preconditioner.
 
@@ -300,13 +290,15 @@ def _optimize_with_library(spec: OptSpec, structure: Structure) -> OptimizationR
     # standard remedy, and costs nothing on a geometry that was already close.
     current = positions.ravel()
     steps = 0
-    # Test convergence on the *input* geometry before displacing it. Without this the loop always
-    # runs at least one leg, so re-optimizing an already-converged structure moved it a little and
-    # gave it a different `structure_id` — the hash is over rounded coordinates — which forks the
-    # calculation cache for everything downstream of that geometry and quietly breaks the
-    # compute-once guarantee (D-011). The gradient is free here: `evaluate_point` above already
-    # computed it for the initial energy, and it was being discarded.
-    max_gradient = _free_max_gradient(initial_gradient, free_mask)
+    # Seeded from the *input* geometry, so a structure that is already a minimum runs no leg
+    # at all and comes back byte-identical. Previously the loop was bounded only by the step
+    # count, so it always ran at least one leg and always moved something: re-optimizing a
+    # converged water shifted it 3e-4 Angstrom, and since a structure id is a hash of the
+    # coordinates, every pass minted a new id. That silently forks the cache — the "compute
+    # once" guarantee (D-011) stops holding for every task keyed on a geometry, which is the
+    # property `test_a_converged_structure_is_a_fixed_point` exists to pin. The gradient here
+    # costs nothing: `evaluate_point` above already computed it and threw it away.
+    max_gradient = float(np.max(np.abs(np.where(free_mask, initial_gradient.ravel(), 0.0))))
     while max_gradient > spec.gradient_tolerance and steps < spec.max_steps:
         # The basis is rebuilt each leg, from the geometry the last one reached: the
         # model Hessian depends on the distances, and a leg can move them enough to
@@ -319,7 +311,9 @@ def _optimize_with_library(spec: OptSpec, structure: Structure) -> OptimizationR
         )
         steps += iterations
         _, gradient, _ = evaluate_point(calc, current.reshape(-1, 3))
-        max_gradient = _free_max_gradient(gradient, free_mask)
+        max_gradient = float(np.max(np.abs(np.where(free_mask, gradient.ravel(), 0.0))))
+        if max_gradient <= spec.gradient_tolerance:
+            break
 
     final = current.reshape(-1, 3)
     energy, _, _ = evaluate_point(calc, final)

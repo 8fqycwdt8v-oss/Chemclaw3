@@ -147,10 +147,19 @@ def test_a_profile_cannot_widen_what_its_caller_may_do() -> None:
     from agents.tool_authz import enforce_tool_authz
 
     load_profiles()
-    agent = build_agent(chat_client=object(), profile="property-lookup")
-    middleware = list(agent.middleware or [])
-    assert len(middleware) == 2  # audit + authz, unchanged by the profile
-    assert enforce_tool_authz in middleware
+    narrowed = build_agent(chat_client=object(), profile="property-lookup")
+    default = build_agent(chat_client=object())
+
+    # Asserted as *the same chain the default agent gets*, not as a count: the chain has grown
+    # (error surfacing was added around audit + authz) and a hardcoded number would have failed
+    # on that addition while saying nothing about the property that matters.
+    # Compared by *name*, because the audit entry is a closure built per agent: identity would
+    # differ for two agents that are nonetheless governed identically, which is the property here.
+    def names(agent: Any) -> list[str]:
+        return [middleware.__name__ for middleware in (agent.middleware or [])]
+
+    assert names(narrowed) == names(default)
+    assert enforce_tool_authz in (narrowed.middleware or [])
 
 
 class _FakeAgent:

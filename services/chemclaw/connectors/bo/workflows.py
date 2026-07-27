@@ -6,7 +6,7 @@ workflow state (plain data, so replay is deterministic). The best-so-far reducti
 workflow (pure). Objective evaluation is heavy and non-deterministic, hence an activity resolved
 by name.
 
-**This is the reference connector-owned workflow** (D-109/D-110), and what it does *not* do is
+**This is the reference connector-owned workflow** (D-110/D-111), and what it does *not* do is
 the point. It returns a `ConnectorJobResult` and stops: core's `ConnectorJobWorkflow` supplies
 the idempotent job id, the actor attribution, the session push-back, and the PR-gate publish of
 the note this returns. It is served by this bundle's own worker on its own task queue, so
