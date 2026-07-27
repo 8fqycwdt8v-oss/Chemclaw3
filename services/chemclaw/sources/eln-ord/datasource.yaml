@@ -1,0 +1,9 @@
+# A native Open Reaction Database drop directory — the structured-recipe counterpart of
+# `eln-json`, differing only in which adapter reads it. Ingest-only for the same no-double-count
+# reason.
+name: eln-ord
+description: >-
+  An electronic lab notebook exporting native ORD `Reaction` JSON. Ingested directly without the
+  free-text mapping step.
+
+ingest: eln.ord_adapter:OrdJsonAdapter

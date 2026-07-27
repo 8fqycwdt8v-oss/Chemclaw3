@@ -145,14 +145,15 @@ Prioritized, dependency-ordered follow-ups (each ADR-ready, none needs live infr
       byte-for-byte; a profile narrows tools/MCP + swaps instructions/harness; unknown tool names fail
       fast; the *attenuate-not-authorize* invariant is test-proven (audit+authz attach regardless of
       profile). Stage 2 (front-door selection) triggers on a **second real use case**.
-- [x] **`DataSourceSpec` discriminated union (scoped), Stage 1** — [M]. Done (D-076):
-      `DataSourceSpec = JsonElnSourceSpec | OrdElnSourceSpec` (discriminated on `type`, in `config.py`)
-      + additive `data_source_specs` token + `sources.registry.build_data_source`. Real second caller
-      without a stub — both ELN adapters already take a per-instance `export_dir`, so two instances with
-      different dirs now coexist (audit §2.3). Temporal boundary kept string-keyed. Dropped the audit's
-      near-empty `RegisteredSourceSpec` bridge (duplicates the comma token). **Snowflake connector still
-      deferred** — it joins as one more variant (nesting connection/auth/mapping; first `exchange_obo`
-      caller) when a real tenant/cluster exists (DEFERRED.md).
+- [x] **`DataSourceSpec` discriminated union (scoped), Stage 1** — [M]. Done (D-076), then
+      **superseded by D-120**. The union answered "how does a source carry per-instance config?"
+      correctly, but priced every new source against core: a pydantic model, an arm of the union and
+      a branch in `build_data_source`. A source is now a folder with a `datasource.yaml`, so config
+      lives with the source and attaching one touches zero core Python. `DataSourceSpec`,
+      `JsonElnSourceSpec`, `OrdElnSourceSpec` and `data_source_specs` are deleted; two ELN instances
+      with different dirs are two manifests. **Snowflake connector still deferred** — now a manifest
+      plus an adapter class, with nothing owed by core, when a real tenant/cluster exists
+      (DEFERRED.md).
 - [x] **Per-extension manifest + explicit enable-list** — [S]. Done (D-081): `SkillManifest`
       (pydantic `SKILL.md` frontmatter, `extra="forbid"`, optional `tools`/`mcp_servers`/`tags`) +
       `EnabledSkillsSource` + `skills_enabled`. `make skill-validate` now checks declared deps against

@@ -6,7 +6,7 @@
 # 1.29; override (`make helm-validate KUBE_VERSION=1.30.0`) when the target cluster moves.
 KUBE_VERSION ?= 1.29.0
 
-.PHONY: install lint type test cov check chat db-migrate schedules-apply kg-validate eval eln-validate skill-validate connector-validate template-validate connectors prose-validate helm-validate audit-verify reindex up down
+.PHONY: install lint type test cov check chat db-migrate schedules-apply kg-validate eval eln-validate skill-validate connector-validate datasource-validate template-validate connectors prose-validate helm-validate audit-verify reindex up down
 
 install:  ## Sync the venv with runtime + dev dependencies.
 	uv sync
@@ -49,6 +49,9 @@ skill-validate:  ## Validate SKILL.md frontmatter (name/description present, nam
 
 connector-validate:  ## Validate the connector bundles (manifests, declarations, tool surface, jobs).
 	uv run python -m scripts.validate_connectors
+
+datasource-validate:  ## Validate the data-source manifests (halves resolve, config binds, names exist).
+	uv run python -m scripts.validate_datasources
 
 template-validate:  ## Validate the step templates (steps, references, tools/jobs/profiles named).
 	uv run python -m scripts.validate_templates

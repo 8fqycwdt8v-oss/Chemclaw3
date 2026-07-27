@@ -29,11 +29,16 @@ tool stay in core by rule, and each is a rule rather than a backlog item:
    bundle by taking a dependency closure *with* it; the graph cannot, because core is its main
    consumer, not the conversation.
 
-Two shapes vary by kind and are therefore discriminated unions (the house rule in
-`chemclaw/config.py`'s docstring, already used for `McpServerSpec`/`DataSourceSpec`): the
-transport a connector is reached over, and how we authenticate to it. Adding a transport or an
-auth mode is one variant plus one branch at the single dispatch site, never a widening of one
-model with optional fields that only apply sometimes.
+Two shapes vary by kind and are therefore discriminated unions: the transport a connector is
+reached over, and how we authenticate to it. They are unions *here*, in the manifest, rather than
+in `chemclaw/config.py` — which is the whole point, and is now the rule rather than this
+file's preference: config says which attached things exist and where, a manifest says what
+each one is
+(D-118, D-120). The two config-side unions this docstring used to cite as precedent,
+`McpServerSpec` and `DataSourceSpec`, were both replaced by manifests for that reason.
+
+Adding a transport or an auth mode is one variant plus one branch at the single dispatch site,
+never a widening of one model with optional fields that only apply sometimes.
 """
 
 from typing import Literal, Self

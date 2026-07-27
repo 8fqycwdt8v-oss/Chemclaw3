@@ -19,7 +19,7 @@ from kg.note import WIKILINK, Note
 from mcp_servers.fpstore import FingerprintError, FingerprintStore
 from mcp_servers.rxnfp.search import find_similar_reactions
 from report.evidence import EvidenceChunk
-from report.vector_index import IndexHit, NoteIndex, note_text
+from report.vector_index import IndexHit, NoteIndex, default_note_index, note_text
 
 
 def _excerpt(body: str) -> str:
@@ -176,14 +176,16 @@ class VectorRetriever:
 
     An *entry point* into the graph, not a replacement (D-004): it surfaces notes semantically
     related to the query even when they share no substring or wikilink with it, which the agent
-    then expands via `expand_note`. The index backend is injected for testability.
+    then expands via `expand_note`. The index backend is injected for testability, and defaults to
+    the production one so `sources/vector/datasource.yaml` can name this class directly — a
+    manifest passes construction *config*, not pre-built objects.
     """
 
     name = "vector"
 
-    def __init__(self, index: NoteIndex, notes_dir: str | None = None) -> None:
-        """Search `index`; resolve excerpts from the given notes dir or `knowledge_dir`."""
-        self._index = index
+    def __init__(self, index: NoteIndex | None = None, notes_dir: str | None = None) -> None:
+        """Search `index` (the production note index by default); excerpts from `notes_dir`."""
+        self._index = index if index is not None else default_note_index()
         self._dir = Path(notes_dir) if notes_dir is not None else settings.knowledge_path
 
     async def retrieve(self, query: str, filters: dict[str, Any]) -> list[EvidenceChunk]:
@@ -206,14 +208,15 @@ class LexicalRetriever:
 
     The lexical/BM25-style entry point: a ranked term match that beats the graph retriever's plain
     substring test (which cannot rank, and matches incidental substrings). Also an entry point into
-    the graph, not a replacement (D-004). The index backend is injected for testability.
+    the graph, not a replacement (D-004). The index backend is injected for testability, and
+    defaults to the production one for the same reason as `VectorRetriever`.
     """
 
     name = "lexical"
 
-    def __init__(self, index: NoteIndex, notes_dir: str | None = None) -> None:
-        """Search `index`; resolve excerpts from the given notes dir or `knowledge_dir`."""
-        self._index = index
+    def __init__(self, index: NoteIndex | None = None, notes_dir: str | None = None) -> None:
+        """Search `index` (the production note index by default); excerpts from `notes_dir`."""
+        self._index = index if index is not None else default_note_index()
         self._dir = Path(notes_dir) if notes_dir is not None else settings.knowledge_path
 
     async def retrieve(self, query: str, filters: dict[str, Any]) -> list[EvidenceChunk]:
