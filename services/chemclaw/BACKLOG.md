@@ -28,6 +28,55 @@ missing prerequisite), in D-092.
 > `tasks/todo.md`). Verdicts: 8 BUILD (waves A/B/C), 14 DEFER, 5 DROP, 12 BLOCKED. The DROP verdicts are
 > corrected in place below, because they were claims about the tree that are no longer true.
 
+## Open — Live e2e testing pass (2026-07-27, D-109)
+
+Nine stages against the real running stack (Postgres+pgvector, Temporal, real Anthropic calls,
+real signed tokens). Four findings, all fixed; two corrections to what the pass first reported are
+kept because the wrong root cause is the more instructive record.
+
+- [x] **LIVE-1 [Critical] Harness mode failed on 100% of tool calls.** `tool_use ids were found
+      without tool_result blocks immediately after`, both autonomy modes, single and parallel.
+      Cause is an upstream interaction, not chemclaw's tools or middleware — see `DEFERRED.md`.
+      Neutralised locally by disabling per-service-call history persistence in
+      `_build_harness_agent`. **The reason it was never caught matters more than the fix:**
+      `ScriptedChatClient` derived from `BaseChatClient`, which is deliberately the base *without*
+      middleware wrapping, so every harness test ran a pipeline with zero chat middleware and
+      passed green while production failed every time. Fixed; two regression tests now reproduce
+      the real defect offline.
+- [x] **LIVE-2 [High] The test suite destroyed live data.** Nine test files wrote to production
+      tables with no isolation; `test_audit_chain` truncated `audit_events` (the GxP hash chain)
+      and left a deliberately corrupted row behind, so `make audit-verify` failed permanently
+      afterwards — observed on the dev database, where rows 1–3 of the real audit trail were the
+      test's own fixtures. Now migrated into a dedicated schema (`tests/pg.py`, `tests/conftest.py`).
+      CI never noticed because its database is a throwaway container.
+- [x] **LIVE-3 [Med] `chemclaw.db.connect` silently discarded a DSN's libpq `options`.** Found
+      while building LIVE-2: `options=` was passed as a psycopg keyword, which overrides the
+      connection string — but only when a statement timeout was set, so an operator's `search_path`
+      or `application_name` vanished on some call sites and survived on others. Now merged.
+- [x] **LIVE-4 [Med] The orphan-`tool_use` rollback was inert on the production path.** ISSUE-B-10
+      (D-091 §2) restored `session.state` only; under `session_store="postgres"` the rows are
+      already committed, so a client disconnect still bricked the session permanently. Now:
+      repair-on-read in `PostgresHistoryProvider` (covers `SIGKILL`/eviction, which run no handler
+      at all, and heals already-broken sessions) plus a real watermark rollback in `service/runner.py`.
+- [x] **LIVE-5 [Low] RBAC denials narrated inconsistently.** *Corrected root cause:* the pass first
+      blamed tool docstrings; no docstring mentions gating at all. The three refusal messages in
+      `authorize_tool` simply differed, and the deny-default one was phrased for whoever edits the
+      config ("not in the tool allowlist"), so the model relayed it as "a configuration issue" —
+      sending a chemist to report a bug instead of requesting access. All three now share one
+      chemist-facing shape, and `_INSTRUCTIONS` says how to narrate a refusal.
+- [x] **LIVE-7 [Med] ADR numbers collided three times in one day.** This branch's ADR was written
+      as D-092, renumbered to D-095, then to D-109 — each collision found only when a merge broke.
+      Structural, not careless: concurrent branches all append to the end of `DECISIONS.md` and all
+      compute "highest visible + 1" against their own branch. Added `ADR-REGISTRY.md` (the
+      allocation ledger, one line per number) and the procedure in `CLAUDE.md` — enumerate against
+      `origin/main`, reserve in the first commit, and on a collision the branch merging *second*
+      renumbers. Does **not** prevent collisions, only makes them a one-line conflict a grep finds;
+      the collision-proof escalation (date-plus-slug ids) is recorded in D-109 rather than done
+      unilaterally.
+- [ ] **LIVE-6 [Low] Test-to-table locality.** LIVE-2 isolates the schema but the tests still share
+      one within a run, so ordering can still couple them (`test_postgres_store` asserts on a global
+      migration result). A per-test schema or transactional rollback would close it — [S].
+
 ## Open — Deep codebase analysis (docs/audit/12-deep-analysis.md)
 
 Seven-track analysis of the dimensions the 2026-07-22 forensic audit under-covered (performance,

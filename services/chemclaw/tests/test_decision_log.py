@@ -16,12 +16,19 @@ from collections import Counter
 from pathlib import Path
 
 _DECISIONS = Path(__file__).resolve().parents[1] / "DECISIONS.md"
+_REGISTRY = Path(__file__).resolve().parents[1] / "ADR-REGISTRY.md"
 _HEADING = re.compile(r"^## (D-\d+)", re.MULTILINE)
+_REGISTRY_ROW = re.compile(r"^\| (D-\d+) \|", re.MULTILINE)
 
 
 def _adr_ids() -> list[str]:
     """Every ADR id in the log, in file order."""
     return _HEADING.findall(_DECISIONS.read_text(encoding="utf-8"))
+
+
+def _registry_ids() -> list[str]:
+    """Every ADR id in the allocation ledger, in file order."""
+    return _REGISTRY_ROW.findall(_REGISTRY.read_text(encoding="utf-8"))
 
 
 def test_every_adr_id_is_unique() -> None:
@@ -47,3 +54,35 @@ def test_the_newest_decision_is_the_last_one() -> None:
         f"the last ADR is D-{ids[-1]:03d} but the highest is D-{max(ids):03d}; "
         "a new decision belongs at the end with the next free number"
     )
+
+
+def test_the_registry_lists_exactly_the_decisions_in_the_log() -> None:
+    """`ADR-REGISTRY.md` and `DECISIONS.md` name the same ADRs, in the same order.
+
+    The registry exists so that "which numbers are taken?" is one grep against `origin/main`
+    instead of a scan of a several-thousand-line log — which is what makes it usable for
+    allocating a number *before* writing the ADR. That only holds while the two agree. A ledger
+    that has silently drifted is worse than no ledger: it is consulted, believed, and hands out a
+    number somebody already used — the exact failure it was added to prevent (D-109).
+
+    So the sync is machine-checked rather than left to whoever remembers. Adding an ADR means
+    adding both lines; this test is the reminder.
+    """
+    log, registry = _adr_ids(), _registry_ids()
+    missing = [adr for adr in log if adr not in set(registry)]
+    extra = [adr for adr in registry if adr not in set(log)]
+    assert not missing, f"in DECISIONS.md but not reserved in ADR-REGISTRY.md: {missing}"
+    assert not extra, f"reserved in ADR-REGISTRY.md but no such ADR in DECISIONS.md: {extra}"
+    assert log == registry, (
+        "ADR-REGISTRY.md lists the same ids as DECISIONS.md but in a different order; "
+        "the ledger is ascending and append-only, mirroring the log"
+    )
+
+
+def test_the_registry_has_no_duplicate_reservations() -> None:
+    """Two branches reserving the same number is exactly the collision this ledger is for.
+
+    Caught here as a one-line conflict rather than after a merge has buried it in an ADR's prose.
+    """
+    duplicates = sorted(adr for adr, count in Counter(_registry_ids()).items() if count > 1)
+    assert not duplicates, f"ADR-REGISTRY.md reserves the same number twice: {duplicates}"

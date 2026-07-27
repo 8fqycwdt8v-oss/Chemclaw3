@@ -33,6 +33,16 @@ correctly but uses them well (G6).
   full reaction SMILES (`reactants>>products`); reactions have no substructure search.
 - If unsure, combine: substructure/similarity narrows the molecules, reaction similarity
   finds the transformations that produced or consumed them.
+- **DRFP scores the whole reaction, including reagents.** If the indexed corpus encodes full
+  conditions as reactants (ligand, base, additive — common for HTE/screening data, not just
+  the two core substrates), a query built from only the core substrates can score well below
+  the similarity floor against a real, otherwise-identical-class precedent — a live e2e
+  finding (a 2-component query scored ~0.24 against a 5-component real match of the same
+  reaction class; the same query built with the matching recipe scored 1.0). A "0 hits" result
+  can therefore mean "your query's recipe detail doesn't match how the corpus was indexed," not
+  "no precedent exists." If a core-substrate-only query returns nothing, say that caveat, try
+  widening the query with plausible reagents/conditions, or fall back to `similar_molecules` on
+  the substrates before concluding there is no precedent.
 
 ## What Tanimoto counts as precedent
 

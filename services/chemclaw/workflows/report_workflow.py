@@ -27,7 +27,8 @@ with workflow.unsafe.imports_passed_through():
         gather_section,
         report_note,
     )
-    from report.retrievers import FingerprintReactionRetriever, GraphRetriever
+    from report.retrievers import FingerprintReactionRetriever
+    from sources.registry import active_retrieve_sources
     from workflows.registry import durable_activity, durable_workflow
 
 from workflows.orchestrator import fan_out
@@ -35,8 +36,19 @@ from workflows.publish import BAD_DATA_RETRY, publish_note
 
 
 def default_retrievers() -> list[SourceRetriever]:
-    """The production source retrievers (graph + reaction fingerprint). Overridden in tests."""
-    return [GraphRetriever(), FingerprintReactionRetriever(default_reaction_store())]
+    """The production source retrievers: every active text source, plus reaction fingerprint.
+
+    The text half comes from the same config-driven registry `agents.research_tools.
+    gather_evidence` fans out over (`settings.data_sources` — `graph` alone by default, or
+    `graph,vector,lexical` for hybrid retrieval), not a hardcoded `GraphRetriever()`: a report
+    section's query is prose exactly like a conversational turn's, so it needs the same
+    fix for the same literal-substring-match limitation, and a deployment that turns on hybrid
+    retrieval must not have to remember to do it in two places (D-018). The reaction-fingerprint
+    retriever is always appended — harmless on a prose query (it answers only reaction-SMILES
+    queries, `[]` otherwise) and needed when a section's query names a reaction to search by
+    structure.
+    """
+    return [*active_retrieve_sources(), FingerprintReactionRetriever(default_reaction_store())]
 
 
 @durable_activity("background")

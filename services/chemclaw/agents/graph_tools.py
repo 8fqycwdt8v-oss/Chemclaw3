@@ -10,7 +10,6 @@ it runs off the event loop.
 import asyncio
 import logging
 from datetime import date
-from pathlib import Path
 
 from pydantic import BaseModel, Field
 
@@ -18,6 +17,7 @@ from agents.framing import frame_untrusted
 from agents.tool_registry import tool
 from agents.turn_signals import record_proposal
 from chemclaw.config import settings
+from chemclaw.errors import ChemclawError
 from kg.analytics import GraphGaps, analyze
 from kg.git_submitter import default_submitter
 from kg.graph import build_graph, load_notes, neighborhood
@@ -70,18 +70,23 @@ def _ref(note: Note) -> NoteRef:
 
 @tool
 async def find_notes(text: str) -> list[NoteRef]:
-    """Find notes whose id, tags, SMILES, or body contain `text` (case-insensitive).
+    """Find notes whose id, tags, SMILES, or body contain every word of `text` (case-insensitive).
 
     Use this to locate an entry note before expanding its neighborhood.
 
     Args:
-        text: Substring to search for.
+        text: One or more words to search for. Each word may match anywhere in the note
+            (id, type, SMILES, tags, or body) independently — this is not a phrase search, so
+            "Suzuki coupling solvent" matches a note containing all three words in any order or
+            position, not only one containing that exact run of text.
 
     Returns:
-        Matching note references (id + type + smiles + tags), body omitted.
+        Matching note references (id + type + smiles + tags), body omitted. An empty result means
+        no current note contains every word — it does not mean the topic is absent from the
+        graph; a single differently-worded term (e.g. just "suzuki") may still find it.
     """
-    graph = await asyncio.to_thread(build_graph, Path(settings.knowledge_dir))
-    needle = text.lower()
+    graph = await asyncio.to_thread(build_graph, settings.knowledge_path)
+    needles = text.lower().split()
     today = date.today()
     # A broad needle matches most of the corpus, and the whole hit list goes into the model's
     # context. Bound it like every other retrieval surface (`fingerprint_max_top_k`,
@@ -96,8 +101,10 @@ async def find_notes(text: str) -> list[NoteRef]:
         # as current fact (KM-7). It stays in Git and remains reachable by explicit id.
         if not note.is_current(today):
             continue
-        haystack = " ".join([note.id, note.type, note.compound_smiles or "", *note.tags, note.body])
-        if needle in haystack.lower():
+        haystack = " ".join(
+            [note.id, note.type, note.compound_smiles or "", *note.tags, note.body]
+        ).lower()
+        if needles and all(needle in haystack for needle in needles):
             matches.append(_ref(note))
             if len(matches) == cap:
                 log.warning(
@@ -123,10 +130,21 @@ async def expand_note(note_id: str, hops: int = 1) -> NoteView:
 
     Returns:
         The note's body plus its neighborhood as references.
+
+    Raises:
+        ChemclawError: When `note_id` names no current note. A `ChemclawError` is chemclaw's
+            own always-safe "bad input" contract (`chemclaw.errors`), so `agents.tool_authz`
+            surfaces this message to the model verbatim instead of MAF's opaque generic
+            failure — the common real cause is a citation to a note still pending PR-gate
+            review (D-018: a fingerprint-indexed reaction whose note has not yet been merged),
+            which the chemist can otherwise not distinguish from a typo or a deleted note.
     """
-    graph = await asyncio.to_thread(build_graph, Path(settings.knowledge_dir))
+    graph = await asyncio.to_thread(build_graph, settings.knowledge_path)
     if note_id not in graph or graph.nodes[note_id].get("note") is None:
-        raise ValueError(f"no note with id {note_id!r}")
+        raise ChemclawError(
+            f"no note with id {note_id!r} — it may not exist, or it may be a citation to a "
+            "reaction that has been indexed but whose note is still pending human review"
+        )
     note = graph.nodes[note_id]["note"]
     # `hops` comes from the model; clamp it to [0, graph_max_hops] so a large value is bounded
     # rather than traversing the whole graph (SEC-4).
@@ -158,7 +176,7 @@ async def find_knowledge_gaps() -> GraphGaps:
         Counts per note type, isolated (unlinked) notes, projects with evidence but no
         distillation, the most-cited hub notes, and any dangling links in the served graph.
     """
-    directory = Path(settings.knowledge_dir)
+    directory = settings.knowledge_path
     graph = await asyncio.to_thread(build_graph, directory)
     notes = await asyncio.to_thread(load_notes, directory)
     return analyze(graph, notes)

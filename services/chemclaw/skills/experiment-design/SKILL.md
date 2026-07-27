@@ -19,12 +19,21 @@ you hand it, so most of the work is framing, not the call.
 ## Frame the problem from evidence
 
 1. **Fix the objective.** One scalar, and its direction — maximize yield, minimize an impurity,
-   minimize E-factor. If the user names several, pick the one they lead with and say so; v1
-   optimizes one objective.
+   minimize E-factor. If the user names several, **pick the one they lead with, say so
+   explicitly, and call the tool for that one only.** Do not dress up a single-objective call
+   as if it were a real multi-objective/Pareto optimization — if you also want to speak to the
+   other objective, do it as a separate, clearly-labeled qualitative read of the cited evidence
+   (e.g. "separately, the data shows degassing is what controls the impurity"), not as
+   "candidates" implied to come from a trade-off computation that did not actually run.
 2. **Choose the decision variables** the user can actually change: continuous (temperature,
    time, equivalents, concentration) with realistic bounds, categorical (solvent, catalyst,
    base) with the specific options in play. Do not invent variables the lab cannot set, and
-   keep bounds physically sane.
+   keep bounds physically sane — a bound outside the range a real run of this reaction class
+   could survive (e.g. well past a solvent's reflux/decomposition point) is not something to
+   quietly accept and flag only after the tool returns a point there. Confirm the bound with
+   the chemist *before* calling the tool. The same applies to genuinely ambiguous input (e.g.
+   a self-correcting or contradictory statement of the range) — ask which value they meant
+   rather than silently picking an interpretation and proceeding.
 
    **When a categorical option is a molecule, give its structure.** Set the parameter's
    `structures` (category label → SMILES) for ligands, bases, solvents and catalysts. Each

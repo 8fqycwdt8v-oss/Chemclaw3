@@ -93,7 +93,7 @@ def test_profile_attenuates_but_audit_and_authz_always_attach() -> None:
         profile=AgentProfile(name="tiny", tool_names=frozenset({"predict_pka"})),
     )
     middleware = list(agent.middleware or [])
-    assert len(middleware) == 2  # audit + authz, unchanged by the profile
+    assert len(middleware) == 4  # denial + domain-error surfacing + audit + authz, unchanged
     assert enforce_tool_authz in middleware
 
 

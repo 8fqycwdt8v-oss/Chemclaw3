@@ -16,6 +16,7 @@ cross this boundary.
 """
 
 import asyncio
+import json
 
 from agents.tool_registry import tool
 from bo.engine import factorial_design, initial_candidates, propose_candidates
@@ -27,7 +28,7 @@ from calc.postgres_store import default_store
 @tool
 async def suggest_next_experiment(
     problem: OptimizationProblem,
-    observations: list[Observation] | None = None,
+    observations: list[Observation] | str | None = None,
     count: int = 1,
 ) -> list[Candidate]:
     """Suggest the next experiment(s) to run for an optimization problem (Bayesian optimization).
@@ -60,11 +61,30 @@ async def suggest_next_experiment(
     Returns:
         The proposed candidate point(s), each a mapping of parameter name to value.
     """
+    # MAF validates a tool call's arguments against the JSON schema derived from this
+    # signature, then invokes the function with that validated payload `model_dump()`-ed back
+    # to plain dicts/lists — never with `OptimizationProblem`/`Observation` instances (the JSON
+    # tool-call wire format has no model concept, only object/array/string/number). This is the
+    # one registered tool with a nested-model parameter, so it is the one boundary that needs
+    # bridging back into typed objects; re-validating an already-correct instance is a no-op
+    # (`model_validate` short-circuits on an exact-type match), so this is transparent to every
+    # direct/test caller that already passes real model instances.
+    problem = OptimizationProblem.model_validate(problem)
+    # On a large batch of observations the model occasionally emits the array JSON-encoded as a
+    # single string instead of a real array (a live e2e finding on a 6-parameter problem) — MAF's
+    # schema validation would otherwise reject the whole call before this function ever runs, with
+    # no detail reaching the model to self-correct from. Accepting the string here and decoding it
+    # is strictly more permissive than before (a real list is untouched), so this is pure
+    # robustness, not a behavior change for the common case.
+    if isinstance(observations, str):
+        observations = json.loads(observations)
+    history = [Observation.model_validate(o) for o in observations] if observations else []
     # Featurize before the engine sees the problem: descriptors change how the surrogate
     # models the categorical space, so this must happen for the seeding path too — otherwise
     # a problem that declares structures would silently fall back to an opaque category.
+    # Runs *after* the coercion above, because it needs a real `OptimizationProblem`: the model
+    # sends a plain dict, and featurizing that would fail on attribute access.
     featurized = await featurize_problem(default_store(), problem)
-    history = observations or []
     if history:
         return await asyncio.to_thread(propose_candidates, featurized, history, count)
     return await asyncio.to_thread(initial_candidates, featurized, count)

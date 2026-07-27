@@ -172,7 +172,7 @@ async def gather_cited_evidence(
     citations = cited_ids(answer)
     if not citations:
         return []
-    directory = Path(notes_dir if notes_dir is not None else settings.knowledge_dir)
+    directory = Path(notes_dir) if notes_dir is not None else settings.knowledge_path
     if not directory.exists():
         return []
     by_id = {note.id: note for note in await asyncio.to_thread(load_notes, directory)}

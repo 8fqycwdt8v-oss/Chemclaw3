@@ -422,6 +422,7 @@ def create_app(
                             roles=principal.roles,
                             budget=app.state.budget,
                             dry_run=body.dry_run,
+                            history=app.state.history,
                         ):
                             if event.type == "error":
                                 METRICS.increment("chemclaw_turns_failed_total")

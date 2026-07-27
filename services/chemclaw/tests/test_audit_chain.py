@@ -11,11 +11,14 @@ import asyncio
 from agents.audit import AuditEvent
 from agents.audit_store import PostgresAuditSink, chain_hash
 from chemclaw.config import settings
+from chemclaw.db import connect
 from scripts.verify_audit_chain import ChainRow, check_chain, verify_chain
 from tests.pg import migrated_db_or_skip
 
+_DEFAULT_ACTOR = "u-1"
 
-def _event(tool: str, *, actor: str = "u-1", detail: str = "") -> AuditEvent:
+
+def _event(tool: str, *, actor: str = _DEFAULT_ACTOR, detail: str = "") -> AuditEvent:
     """A minimal audit event for chaining tests."""
     return AuditEvent(
         correlation_id="c-1",
@@ -89,10 +92,10 @@ def test_postgres_sink_writes_a_verifiable_chain() -> None:
 
     async def _run() -> None:
         await migrated_db_or_skip()
-        # Isolate this test's rows: verify_chain reads the whole table, so start from a clean one.
-        import psycopg
-
-        async with await psycopg.AsyncConnection.connect(settings.postgres_dsn) as conn:
+        # `verify_chain` reads the whole table, so this test needs one to itself. That is what the
+        # `chemclaw_test` schema is for (tests/pg.py) — this TRUNCATE would otherwise wipe the real
+        # GxP audit trail, and the tamper below would leave it permanently unverifiable.
+        async with await connect(settings.postgres_dsn) as conn:
             await conn.execute("TRUNCATE audit_events RESTART IDENTITY")
             await conn.commit()
 
@@ -104,9 +107,16 @@ def test_postgres_sink_writes_a_verifiable_chain() -> None:
         assert await verify_chain() == []  # a freshly written chain verifies
 
         # Mutate one stored row's audited field without recomputing its hash → chain breaks.
-        async with await psycopg.AsyncConnection.connect(settings.postgres_dsn) as conn:
+        async with await connect(settings.postgres_dsn) as conn:
             await conn.execute("UPDATE audit_events SET actor = 'attacker' WHERE id = 2")
             await conn.commit()
         assert await verify_chain() != []
+
+        # Put it back: the tamper is the assertion, not a state the test is entitled to leave
+        # behind. A corrupted row outlives the run and fails every later `make audit-verify`.
+        async with await connect(settings.postgres_dsn) as conn:
+            await conn.execute("UPDATE audit_events SET actor = %s WHERE id = 2", (_DEFAULT_ACTOR,))
+            await conn.commit()
+        assert await verify_chain() == []  # and the restore is proven, not assumed
 
     asyncio.run(_run())

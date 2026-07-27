@@ -34,6 +34,29 @@ def _redact(dsn: str) -> str:
     return conninfo.make_conninfo("", **parts)
 
 
+def _merged_options(dsn: str, statement_timeout_seconds: float | None) -> str | None:
+    """Return the libpq `options` to connect with: the DSN's own, plus our statement timeout.
+
+    psycopg merges a keyword argument *over* the connection string, so passing `options=` would
+    silently discard any `options` the DSN already carries — and only on the connections that ask
+    for a statement timeout, since `None` is dropped rather than merged. An operator who sets
+    `options` in their DSN (a `search_path` for a shared database, `application_name`, `work_mem`)
+    would lose it non-deterministically depending on the call site. Concatenating instead keeps
+    both; libpq reads the last occurrence of a repeated `-c` setting, so our timeout still wins if
+    the DSN happens to set one too.
+    """
+    if not statement_timeout_seconds:
+        return None  # nothing of ours to add; the DSN's own `options` passes through untouched
+    # libpq statement_timeout is in milliseconds; passed as a server option so it applies to
+    # every statement on the connection without an extra round trip.
+    ours = f"-c statement_timeout={int(statement_timeout_seconds * 1000)}"
+    try:
+        existing = conninfo.conninfo_to_dict(dsn).get("options")
+    except psycopg.ProgrammingError:
+        return ours  # unparseable DSN: let the connect itself report it, don't mask the error
+    return f"{existing} {ours}" if isinstance(existing, str) and existing else ours
+
+
 async def connect(
     dsn: str, *, statement_timeout_seconds: float | None = None
 ) -> psycopg.AsyncConnection[TupleRow]:
@@ -49,11 +72,7 @@ async def connect(
     activity's whole budget. Omit (or pass 0/None) for no per-statement bound — the
     migration runner does this, since an index build may legitimately run long.
     """
-    options = None
-    if statement_timeout_seconds:
-        # libpq statement_timeout is in milliseconds; passed as a server option so it
-        # applies to every statement on the connection without an extra round trip.
-        options = f"-c statement_timeout={int(statement_timeout_seconds * 1000)}"
+    options = _merged_options(dsn, statement_timeout_seconds)
     try:
         return await psycopg.AsyncConnection.connect(
             dsn, connect_timeout=settings.pg_connect_timeout_seconds, options=options

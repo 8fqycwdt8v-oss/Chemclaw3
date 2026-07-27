@@ -27,22 +27,31 @@ from agent_framework import (
     ResponseStream,
     TodoSessionStore,
 )
+from agent_framework._middleware import ChatMiddlewareLayer
 from agent_framework._tools import FunctionInvocationLayer
 
 from agents.chemclaw_agent import build_agent
+from agents.message_pairing import calls_without_adjacent_results
 from chemclaw.config import settings
 
 # One scripted turn: given the messages sent to the model, return its next reply.
 _ScriptedTurn = Callable[[list[Message]], ChatResponse]
 
 
-class ScriptedChatClient(FunctionInvocationLayer, BaseChatClient):
+class ScriptedChatClient(FunctionInvocationLayer, ChatMiddlewareLayer, BaseChatClient):
     """A real chat client whose replies are a fixed script, standing in for a live LLM.
 
-    `FunctionInvocationLayer` is mixed in (as every concrete MAF client does) so the framework's
-    own tool-calling loop recognizes and executes the scripted `function_call` content against the
-    real registered tools (here, the harness's `todos_add`/`todos_complete`) — this is not a fake
-    of the tool-execution mechanism, only of the model's replies.
+    The base list mirrors a concrete MAF client's own layering
+    (`FunctionInvocationLayer` → `ChatMiddlewareLayer` → … → `BaseChatClient`), so the framework's
+    tool-calling loop executes the scripted `function_call` content against the real registered
+    tools (here `todos_add`/`todos_complete`) — this fakes the model's replies, nothing else.
+
+    `ChatMiddlewareLayer` matters more than it looks: `BaseChatClient` is deliberately the base
+    *without* middleware wrapping, and that layer is what consumes `client_kwargs["middleware"]`.
+    Omitting it ran every harness test through a pipeline with **zero** chat middleware — so the
+    two the harness itself installs (`MessageInjectionMiddleware` and
+    `PerServiceCallHistoryPersistingMiddleware`) never executed here, and the tests passed green
+    while the same code path failed 100% of the time against a real client.
     """
 
     def __init__(self, script: Sequence[_ScriptedTurn]) -> None:
@@ -209,3 +218,63 @@ def test_loop_is_capped_by_the_configured_max_iterations(monkeypatch: pytest.Mon
     assert len(client.calls) == 3
     items = asyncio.run(TodoSessionStore().load_items(session, source_id=DEFAULT_TODO_SOURCE_ID))
     assert not items[0].is_complete  # the cap stopped the loop, not the model finishing the todo
+
+
+def test_no_tool_call_reaches_the_model_without_its_result(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Every `function_call` the model is sent carries its `function_result` (the harness 400).
+
+    The live failure this pins: on the streaming path the harness sent Anthropic a transcript in
+    which a `tool_use` block was followed by a `user` block instead of its `tool_result`, and the
+    API rejected the whole request — `tool_use ids were found without tool_result blocks`. It was
+    100% reproducible on any tool call, in both autonomy modes, so harness mode was unusable.
+
+    Cause: `create_harness_agent` turns on per-service-call history persistence, whose middleware
+    tells the function-invocation loop "I am injecting history, stop resending the transcript" by
+    stamping a sentinel `conversation_id` on the finalized response. The harness *also* installs
+    `MessageInjectionMiddleware`, which on the streaming path rebuilds the response via
+    `ChatResponse.from_updates()` — and the sentinel, living on the inner response rather than on
+    any streamed update, does not survive the rebuild. The loop then re-sent the full transcript
+    while history was separately re-injected, and the duplicate put a `user` block between a call
+    and its result.
+
+    Asserted over the messages actually handed to the client, so it fails on the real defect
+    rather than on a restatement of the fix.
+    """
+    monkeypatch.setattr(settings, "harness_enabled", True)
+    monkeypatch.setattr(settings, "harness_autonomy", "execute")
+    monkeypatch.setattr(settings, "harness_max_loop_iterations", 10)
+    client = ScriptedChatClient(_two_step_script())
+    agent = build_agent(chat_client=client)
+    session = agent.create_session()
+
+    _run_turn(agent, "do the two-step task", session)
+
+    for index, sent in enumerate(client.calls):
+        assert calls_without_adjacent_results(sent) == set(), (
+            f"model call {index} was sent a tool call with no result immediately after: "
+            f"{[(m.role, [c.type for c in m.contents]) for m in sent]}"
+        )
+
+
+def test_history_is_not_duplicated_across_model_calls(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The transcript is sent once per model call, not once per injection path.
+
+    The same root cause seen from the other side: with the sentinel lost, the loop's own
+    accumulated messages and the separately-injected history both landed in one request, so the
+    turn's messages appeared twice and grew with every iteration. Counting the user's own message
+    catches that without asserting on the framework's exact message shape.
+    """
+    monkeypatch.setattr(settings, "harness_enabled", True)
+    monkeypatch.setattr(settings, "harness_autonomy", "execute")
+    monkeypatch.setattr(settings, "harness_max_loop_iterations", 10)
+    client = ScriptedChatClient(_two_step_script())
+    agent = build_agent(chat_client=client)
+    session = agent.create_session()
+
+    _run_turn(agent, "do the two-step task", session)
+
+    for index, sent in enumerate(client.calls):
+        occurrences = sum(1 for m in sent if "do the two-step task" in (m.text or ""))
+        assert occurrences <= 1, f"model call {index} repeated the user's message {occurrences}x"

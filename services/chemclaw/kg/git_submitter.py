@@ -223,6 +223,7 @@ class GitNoteSubmitter:
         # there is nothing to commit — re-proposing it is a no-op, not an error.
         returncode, _ = await self._run("diff", "--cached", "--quiet")
         if returncode == 0:
+            await self._return_to_base()
             return submission.branch
         await self._git("commit", "-m", submission.title)
         # `--force-with-lease` needs a fresh remote-tracking ref: in a fresh
@@ -235,7 +236,23 @@ class GitNoteSubmitter:
             f"+refs/heads/{submission.branch}:refs/remotes/{self._remote}/{submission.branch}",
         )
         await self._git("push", "--force-with-lease", "-u", self._remote, submission.branch)
+        await self._return_to_base()
         return submission.branch
+
+    async def _return_to_base(self) -> None:
+        """Leave the shared checkout on `base`, reset to the tip already fetched this submission.
+
+        `note_repo_dir` is not only the submitter's scratch space: readers resolve the *same*
+        checkout via `settings.knowledge_path` (`kg.graph.load_notes`, the report retrievers, the
+        note-index rebuild, the ELN sync, the memory-job synthesizers). Leaving the tree
+        checked out on `note/<id>` after a submission — the prior behavior — made every one of
+        those readers see that one proposed note's isolated content instead of the merged
+        knowledge base, until the *next* submission happened to check out `base` again first.
+        `checkout -B` (not a plain `checkout`) reuses the same reset-and-switch idiom the note
+        branch checkout above already relies on, so this never fails on the note branch's now-
+        stray local changes.
+        """
+        await self._git("checkout", "-B", self._base, f"{self._remote}/{self._base}")
 
 
 def default_submitter() -> NoteSubmitter:

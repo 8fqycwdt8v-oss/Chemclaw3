@@ -46,6 +46,23 @@ class _FailingRetriever:
         raise ChemclawError("retriever exploded")  # non-retryable → activity fails fast
 
 
+def test_default_retrievers_uses_the_configured_source_registry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`default_retrievers` must honor `settings.data_sources`, not a hardcoded `GraphRetriever`.
+
+    A report section's query is prose exactly like a conversational turn's, so it needs the
+    same source registry `agents.research_tools.gather_evidence` fans out over — a deployment
+    that turns on hybrid (vector/lexical) retrieval must not have to remember to also flip it
+    here (D-018). No Temporal/Postgres needed: this is a direct call, not a workflow run.
+    """
+    sentinel = _FakeRetriever()
+    monkeypatch.setattr(report_workflow, "active_retrieve_sources", lambda: [sentinel])
+    retrievers = report_workflow.default_retrievers()
+    assert sentinel in retrievers
+    assert any(r.name == "reaction-fingerprint" for r in retrievers)
+
+
 def test_report_workflow_drafts_and_pr_gates(monkeypatch: pytest.MonkeyPatch) -> None:
     """The workflow retrieves each section durably and proposes one cited report note."""
     fake = FakeSubmitter()
