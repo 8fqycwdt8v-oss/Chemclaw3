@@ -98,11 +98,10 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install uv
-        uses: astral-sh/setup-uv@v5
-        with:
-          python-version: "3.11"
-
+      # No uv here on purpose: `make helm-validate` shells out to `helm` and `kubeconform` and runs
+      # no Python at all. Installing uv without ever calling `uv sync` leaves the action's cache
+      # path empty, and its post-job save then fails the whole job — a green validation reported as
+      # a red check.
       - name: Install Helm
         uses: azure/setup-helm@v4
 
