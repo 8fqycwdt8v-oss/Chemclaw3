@@ -1,16 +1,25 @@
-"""Agent tool for structural hazard screening (D-080).
+"""The `safety` connector's MCP tool surface: the hazard screen, one tool.
 
-Exposes the deterministic screen (`safety.screen`) to the model so a proposed route, condition set,
-or procedure can be checked before it is written down. The tool returns *flags*, never a verdict on
-whether an experiment may run — the judgment of what to do with a flag lives in the
-`safety-screening` skill, and the decision lives with a human.
+The capability itself is unchanged and stays in `safety/screen.py` — the rule table, the SMARTS
+matching, the incompatibility check. This module is only what the agent sees, and it is where
+the tool's *description* lives, because that description is the safety-critical part: it is the
+sentence that decides whether the model treats an empty result as "no rule matched" or as
+"safe". That wording moved here verbatim from `agents/safety_tools.py`, deliberately unedited.
+
+Why the tool is defined here rather than by importing the old `@tool` function: the point of the
+connector seam is that a capability's process holds the capability. Importing the agent module
+would drag the tool registry, the audit middleware and the whole `agents` package into a server
+whose only job is to answer one question about SMARTS.
 """
 
-from agents.tool_registry import tool
+from mcp.server.fastmcp import FastMCP
+
 from safety.screen import ScreenResult, screen_reaction, screen_structure
 
+server = FastMCP("safety")
 
-@tool
+
+@server.tool()
 async def screen_hazards(smiles: list[str]) -> ScreenResult:
     """Screen molecules or a reaction for known structural hazard motifs before proposing them.
 
@@ -20,8 +29,8 @@ async def screen_hazards(smiles: list[str]) -> ScreenResult:
     species are given, checks for dangerous *combinations* between them (e.g. a strong oxidizer
     together with a strong reducing agent).
 
-    Call this before recommending a synthesis, a reagent, or a set of conditions, and report every
-    flag with its explanation to the chemist.
+    Call this before recommending a synthesis, a reagent, or a set of conditions, and report
+    every flag with its explanation to the chemist.
 
     **An empty result means no rule in the table matched — it does NOT mean the chemistry is
     safe.** Nothing here assesses toxicity, exposure, thermal stability, scale, or the process

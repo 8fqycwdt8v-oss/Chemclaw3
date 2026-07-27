@@ -25,7 +25,7 @@ from agent_framework._compaction import (
 
 from agents.chemclaw_agent import _build_compaction, build_agent, connector_tools
 from chemclaw.config import settings
-from connectors.registry import connector_tool_names
+from connectors.registry import connector_tool_names, discovered
 
 _DOMAIN_TOOLS = {
     "compute_xtb_energy",
@@ -79,7 +79,10 @@ def test_fingerprint_search_is_reached_through_connectors_not_in_process_tools()
     """
     agent = build_agent(chat_client=object())
     assert agent.mcp_tools == []  # nothing process-lived
-    assert {tool.name for tool in connector_tools()} == {"molfp", "rxnfp"}
+    # Derived from discovery, not a hardcoded pair: a hardcoded one only catches the omissions
+    # someone already thought of, and would fail on the day a bundle is added rather than on a bug.
+    assert {tool.name for tool in connector_tools()} == set(discovered())
+    assert {"molfp", "rxnfp"} <= set(discovered())  # the fingerprint capability is among them
     function_tool_names = {f.name for f in agent.default_options["tools"]}
     assert {"find_similar_reactions", "find_similar_molecules"} & function_tool_names == set()
 
@@ -155,7 +158,7 @@ def test_harness_agent_keeps_full_capability_toolset(monkeypatch: pytest.MonkeyP
     assert classic <= harness_tools  # every classic capability tool is still present
     # The harness reaches the same connectors the classic path does — per turn, from the same
     # factory.
-    assert {"molfp", "rxnfp"} == {tool.name for tool in connector_tools()}
+    assert set(discovered()) == {tool.name for tool in connector_tools()}
 
 
 @pytest.mark.parametrize(

@@ -4,7 +4,8 @@ Four capabilities that were absent from the tool surface even though the chemist
 them already existed somewhere in the repo:
 
 - `resolve_compound` — every other chemistry tool takes SMILES; chemists write names (TOOL-2).
-- hazard screening (TOOL-3) — landed independently on `main` as `safety/` + `agents.safety_tools`;
+- hazard screening (TOOL-3) — landed independently on `main` as `safety/`, and now served by the
+  `safety` connector (D-092);
   this branch's named-substance and named-pair knowledge was contributed to `safety/rules.yaml`
   rather than kept as a second screen (see D-086).
 - `stoichiometry_table` — mass balance exists in `eln.validate` (for validation) and E-factor/PMI
