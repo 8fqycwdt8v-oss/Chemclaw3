@@ -117,7 +117,7 @@ decision while looking entirely plausible. So the honest rule is: **rank with it
 set a pH with it.** Both halves are now asserted in `tests/test_pka.py`, so a future
 recalibration cannot quietly break the claim the skill rests on.
 
-**The gap worth naming — half closed by X11 (D-101).** Most pharmaceutical APIs are
+**The gap worth naming — half closed by X11 (D-104).** Most pharmaceutical APIs are
 **basic amines**, and pKa v1 covered only neutral O-H/S-H acids. Extending to protonated
 bases was recommended here as a calibration question rather than a new capability. It was
 done, and the calibration answered it in two halves rather than one:

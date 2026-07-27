@@ -93,7 +93,7 @@ conformer choice an actual decision rather than a fixed limitation.
 | **`acid-base-and-speciation`** | What is charged, at which pH, and how does that change reactivity? | pKa incl. **bases** (U2) | U2 |
 
 **`catalyst-ligand-selection` is half-built.** The descriptors exist and are now wired into BO
-(U1/D-093), but the featurization is electronic only — cone angle and buried volume need a
+(U1/D-096), but the featurization is electronic only — cone angle and buried volume need a
 geometry. The skill can ship as electronic-only with that limit stated, and gets sharper at X3.
 
 ---
@@ -149,7 +149,7 @@ written about them.
 
 ## 8. What ships now, and what it is gated on
 
-> **Status update (X3/X4 shipped, D-095).** The distribution below was the argument for
+> **Status update (X3/X4 shipped, D-098).** The distribution below was the argument for
 > building the capability, and the capability is now built: geometry optimization,
 > Hessians with IR intensities, RRHO thermochemistry, relaxed scans, balanced reaction
 > energies and solvent comparisons. Six of the gated skills have shipped —
@@ -220,12 +220,12 @@ skill's main job is making sure it *gets* asked for the scaffolds where it matte
 
 | Skill | The question | Search | Why it is worth writing |
 |---|---|---|---|
-| **`protomer-and-microspecies`** | Which nitrogen protonates first? Which microspecies dominates at this pH? | `--protonate` | Narrowed by X11, not closed. `predict_pka` now covers **aromatic and aryl nitrogen** (ρ 1.000) and picks the most stable protomer by RDKit enumeration, so the common single-site case is answered. What remains is genuinely structural: a molecule with several comparable basic sites, and the microspecies distribution across pH. Note that a CREST protomer search would *not* have rescued aliphatic amines — that failure is solvation, not structure (D-101). |
+| **`protomer-and-microspecies`** | Which nitrogen protonates first? Which microspecies dominates at this pH? | `--protonate` | Narrowed by X11, not closed. `predict_pka` now covers **aromatic and aryl nitrogen** (ρ 1.000) and picks the most stable protomer by RDKit enumeration, so the common single-site case is answered. What remains is genuinely structural: a molecule with several comparable basic sites, and the microspecies distribution across pH. Note that a CREST protomer search would *not* have rescued aliphatic amines — that failure is solvation, not structure (D-104). |
 | **`salt-and-cocrystal-screening`** | Which counterion, and will the salt be stable? | `--protonate`/`--deprotonate` | Partly ungated by X11: a ΔpKa is computable when the base is aryl nitrogen, though both partners' uncertainties (±1.0 and ±1.6) are of the same order as the 2–3 unit rule being tested, so it is a direction rather than a verdict. An aliphatic-amine API — a great many of them — is still out of reach. |
 | **`conformational-polymorph-risk`** | Does this molecule have many low-energy conformers — i.e. is it a polymorphism risk worth screening hard? | conformer search | A direct readout: `total_found` and a flat population distribution *are* the risk signal. Cheap now that ensembles exist. |
 | **`shape-and-exposure`** | Which face or site is sterically accessible across the populated ensemble, not just in one geometry? | conformer search | The standing "sterics are invisible" caveat in `product-prediction` and `catalyst-ligand-selection` is a *single-conformer* limitation as much as an electronic one. |
 | **`intramolecular-interactions`** | Is there an internal hydrogen bond, and does it hold in the populated ensemble? | conformer search | Worth several kcal/mol and it silently decides many of the comparisons this system makes. Answerable by inspecting the ensemble's geometries rather than one embedding. |
-| **`ensemble-weighted-properties`** | What is the Boltzmann-averaged dipole, pKa, or descriptor — rather than one conformer's? | conformer search | Mechanical once ensembles exist: re-run any existing property over the members and weight. The BO featurization (U1/D-093) is the most valuable consumer, since a conformer-averaged descriptor is a far better regression feature than one embedding's. |
+| **`ensemble-weighted-properties`** | What is the Boltzmann-averaged dipole, pKa, or descriptor — rather than one conformer's? | conformer search | Mechanical once ensembles exist: re-run any existing property over the members and weight. The BO featurization (U1/D-096) is the most valuable consumer, since a conformer-averaged descriptor is a far better regression feature than one embedding's. |
 
 ### The honest constraint on all of it
 

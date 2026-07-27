@@ -3,6 +3,44 @@
 Prioritized open action items. Top = next. Keep in sync with `docs/implementation-plan.md`
 (phase/step numbers) at session end.
 
+## Open — Two implementations of two capabilities, awaiting a product decision (D-107)
+
+The xTB branch and D-092's research follow-up landed overlapping capability in parallel. Both
+were kept through the merge because deleting either is a product call, not a merge call. The
+tool names do not collide, so nothing is broken — but advertising two answers to one question
+is a surface the model has to choose between for no reason (the argument D-103 makes for
+moving a tool rather than copying it).
+
+- [ ] **Conformer ensembles.** `calc.conformer_ensemble` (RDKit ETKDG + MMFF prune + GFN2
+      single points, zero new dependencies, always available) vs `calc.conformers` (CREST
+      metadynamics, rotamer degeneracies, conformational entropy, needs the optional `crest`
+      binary and costs minutes). The CREST one is strictly more informative where it can run;
+      the ETKDG one is the only one that runs everywhere. A defensible outcome is to keep both
+      and route on binary availability — but that should be *decided*, and the two agent tools
+      (`submit_conformer_ensemble_job`, `sample_conformers`) merged into one.
+- [ ] **Reaction energetics.** `calc.reaction_energy` (cached single points, stoichiometric
+      coefficients, exotherm hazard flag) vs `calc.reaction` (optimizes every species, Hessians,
+      ΔH/ΔG, atom/charge balance enforced). These are closer to genuinely different questions —
+      a safety screen and a thermodynamic answer — so the likely outcome is to keep both and say
+      so in `calculation-selection`, which currently lists them without distinguishing them.
+
+## Done — Process/analytical-development capability research (2026-07-26, D-092)
+
+A survey of open-source ML/cheminformatics and fast-ab-initio packages for chemical and analytical
+process development (new data-source connectors like LIMS out of scope), landed through the
+existing connector seams only (fast calculator, BoFire adapter, Temporal workflow — no ad hoc
+wiring). Full rationale, including two researched-and-rejected candidates (ML interatomic
+potentials, retrosynthesis — both blocked on a runtime external-data fetch D-089 rejects, not on a
+missing prerequisite), in D-092.
+
+- [x] `predict_developability_profile` — RDKit-only Ro5/Veber descriptor panel (`calc/descriptors.py`).
+- [x] `predict_logd` — pH-dependent logD from the existing cached pKa + Crippen LogP (`calc/logd.py`).
+- [x] `estimate_reaction_energy` — reaction exotherm screen from cached per-species GFN2-xTB (`calc/reaction_energy.py`).
+- [x] `generate_screening_design` — full-factorial categorical DoE screen (`bo/engine.py::factorial_design`).
+- [x] `ConformerEnsembleWorkflow` — durable Boltzmann-weighted GFN2-xTB conformer ensemble
+      (`workflows/conformer_job.py`, `calc/conformer_ensemble.py`), agent tools
+      `submit_conformer_ensemble_job`/`get_conformer_job_status`.
+
 > **Every open item below was assessed on 2026-07-25** — trigger held? real defect? offline-verifiable?
 > KISS? — in **`docs/backlog-plan.md`** (verdict table + specs for the survivors + the working queue in
 > `tasks/todo.md`). Verdicts: 8 BUILD (waves A/B/C), 14 DEFER, 5 DROP, 12 BLOCKED. The DROP verdicts are
@@ -790,40 +828,40 @@ MAF ships the harness natively (`create_harness_agent` + `TodoProvider`/`AgentMo
 - [x] 1c.4 **pKa via xTB** (`calc/pka.py`): GFN2-xTB ALPB-solvated deprotonation energy of the most
       acidic O-H/S-H site + linear calibration (R²0.93 over 10 acids). Agent tool `predict_pka`. Real tests.
 - [x] 1c.5/1c.6 xTB exposed to the MAF agent as tool `compute_xtb_energy` + `calculation-selection` skill.
-- [x] **X1 xTB capability seams** (`docs/xtb-tools-proposal.md`, D-092): `calc/structure.py`
+- [x] **X1 xTB capability seams** (`docs/xtb-tools-proposal.md`, D-095): `calc/structure.py`
       (content-addressed `Structure`) + `calc/xtb_spec.py` (`XtbSpec`, the one cache-key derivation);
       `calc/xtb.py` ported onto them with its public API and energies unchanged.
 - [x] **X2 properties + site reactivity** (`calc/xtb_props.py`): `compute_electronic_properties`
       (HOMO/LUMO/gap, dipole, Mulliken charges, Wiberg bond orders — all read from the SCF the energy
       calculator already ran) and `predict_site_reactivity` (condensed Fukui indices, three single
       points) + the `reactivity-descriptors` skill. No new dependency.
-- [x] **X3 geometries + thermochemistry** (D-095): `calc/xtb_opt.py` (scipy L-BFGS-B over tblite's
+- [x] **X3 geometries + thermochemistry** (D-098): `calc/xtb_opt.py` (scipy L-BFGS-B over tblite's
       analytic gradient — no `ase`), `calc/xtb_thermo.py` (finite-difference Hessian, quasi-RRHO
       thermochemistry, **and IR intensities**, which came free from the dipole the same SCF
       produced), `calc/xtb_scan.py` (relaxed scans). Validated against measurement: water's entropy
       45.05 vs 45.10 cal/mol/K. Found and fixed three defects — open-shell energies had no
       spin-polarization term (triplet O2 came out *above* singlet), the optimizer's first step could
       collapse a bond, and ordinary molecules optimize onto rotor saddle points.
-- [x] **X4 the composite** (D-095): `calc/reaction.py` — `compute_reaction_energy` (balance
+- [x] **X4 the composite** (D-098): `calc/reaction.py` — `compute_reaction_energy` (balance
       enforced, every species treated identically, per-species cache reuse) and
       `compare_solvent_effects`. Homolysis/BDEs work because multiplicity is read from the SMILES'
       own radical electrons.
-- [x] **Durable routing for the expensive xTB tasks** (D-095, brought forward from X5): the
+- [x] **Durable routing for the expensive xTB tasks** (D-098, brought forward from X5): the
       inline-vs-Temporal decision the phase turned out to need. `calc/xtb_cost.py` predicts the cost,
       `XtbJobWorkflow` runs what is over budget on the existing `hpc-jobs` queue, and
       `get_qm_job_status` is generalized to `get_job_status` across both job kinds.
-- [x] **X5 the `xtb` binary** (D-098): `calc/xtb_cli.py`, a hardened argv-only subprocess backend
+- [x] **X5 the `xtb` binary** (D-101): `calc/xtb_cli.py`, a hardened argv-only subprocess backend
       selected by `settings.xtb_engine`. ANCopt is **8-11x faster** than the Cartesian optimizer on
       drug-sized substrates; GFN-FF optimizes 118 atoms in 0.7 s. The binary supplies the Hessian;
       the validated RRHO stays in `calc.xtb_thermo`, so both backends reproduce water's measured
       entropy identically.
-- [x] **X6 CREST ensembles** (D-098): `calc/crest_cli.py` + `calc/conformers.py` — conformer,
+- [x] **X6 CREST ensembles** (D-101): `calc/crest_cli.py` + `calc/conformers.py` — conformer,
       tautomer and protomer searches with degeneracy-weighted populations and the conformational
       entropy every single-conformer free energy is missing. `compute_reaction_energy` gains
       `level="thorough"`. The system's first non-deterministic calculator; the store is what makes
       it stable.
-- [x] **X7 the expert seam** (D-098): `run_xtb_task` over a typed spec, role-gated by default.
-- [x] **X9 ANC preconditioning** (D-099): X5 retired the *general* case, not the scope. Relaxed
+- [x] **X7 the expert seam** (D-101): `run_xtb_task` over a typed spec, role-gated by default.
+- [x] **X9 ANC preconditioning** (D-102): X5 retired the *general* case, not the scope. Relaxed
       scans (frozen atoms are not an xtb flag) and radicals (the binary cannot spin-polarize) still
       run the in-process optimizer, and a scan pays that cost once per point. Optimizing in the
       eigenbasis of a Lindh model Hessian gives a measured **~2x** on both. The remaining headroom
@@ -833,7 +871,7 @@ MAF ships the harness natively (`create_harness_agent` + `TodoProvider`/`AgentMo
       X5-X7. There is no saddle-point search, so every "how fast" question is unanswerable and a
       relaxed-scan maximum is a sketch of a barrier rather than one. `xtb --path` (the reaction-path
       finder) and CREST's transition-state tooling are the obvious routes.
-- [x] **X11 CREST's unexploited searches** (D-101): `--nci` is now `calc.complexes` +
+- [x] **X11 CREST's unexploited searches** (D-104): `--nci` is now `calc.complexes` +
       `compute_interaction_energy` + the `molecular-association` skill — the only route in the
       system to a question about two molecules together, validated against CCSD(T)/CBS to a few
       tenths of a kcal/mol. **U2 (basic amines) is half solved and half refused**, which the
@@ -857,7 +895,7 @@ MAF ships the harness natively (`create_harness_agent` + `TodoProvider`/`AgentMo
       3-5x, which is the single largest speedup available for this workload and compounds through
       every scan point and every species of a reaction. The Cartesian optimizer was the right first
       choice (dependency-free, easy to reason about); it is now the bottleneck.
-- [x] **X8 the calculators as an MCP server** (D-100): `mcp_servers/calc` hosts the seven tools
+- [x] **X8 the calculators as an MCP server** (D-103): `mcp_servers/calc` hosts the seven tools
       that compute; the four that submit durable jobs stay in-process because they need the turn's
       actor and session. `scripts/validate_skills` now resolves a declared tool against MCP
       `allowed_tools` too, so a skill names a capability and the transport is a deployment

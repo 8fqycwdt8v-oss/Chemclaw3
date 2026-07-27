@@ -29,14 +29,26 @@ from calc.calibration import Calibration, calibration_for, record_observation
 from calc.complexes import ComplexSpec, InteractionResult, run_cached_interaction
 from calc.conformers import ConformerEnsemble, ConformerSpec, run_cached_ensemble
 from calc.crest_cli import CrestEffort, EnsembleSearch
+from calc.descriptors import DescriptorInput, DescriptorProfile, run_cached_descriptor_profile
+from calc.logd import LogdInput, LogdResult
+from calc.logd import predict_logd as _predict_logd
 from calc.postgres_store import default_store
+from calc.reaction import ReactionEnergyResult as ThermodynamicReactionResult
 from calc.reaction import (
-    ReactionEnergyResult,
     ReactionLevel,
     SolventComparisonResult,
     compare_solvent_effects,
 )
 from calc.reaction import compute_reaction_energy as _compute_reaction_energy
+
+# Two reaction-energy models now coexist, and they answer different questions rather than
+# duplicating one. `calc.reaction_energy` (D-092) is a cached *single-point* exotherm screen
+# — no geometry optimization, stoichiometric coefficients, a hazard flag. `calc.reaction`
+# (D-098) optimizes every species and adds Hessians, so it reports ΔH/ΔG and refuses an
+# unbalanced equation. Both export `ReactionEnergyResult`; the thermodynamic one is aliased
+# here so the two names cannot be confused at a call site, which a bare re-export invites.
+from calc.reaction_energy import ReactionEnergyInput, ReactionEnergyResult, ReactionSpecies
+from calc.reaction_energy import estimate_reaction_energy as _estimate_reaction_energy
 from calc.structure import structure_from_smiles
 from calc.xtb_cost import (
     ensemble_seconds,
@@ -168,7 +180,7 @@ async def compute_reaction_energy(
     solvent: str | None = None,
     temperature_k: float = 0.0,
     level: ReactionLevel = "standard",
-) -> ReactionEnergyResult | DeferredJob:
+) -> ThermodynamicReactionResult | DeferredJob:
     """Compute the energy, enthalpy and free energy of a balanced reaction (GFN2-xTB).
 
     The composite that answers "does this go?". Every species is optimized the same
@@ -310,7 +322,7 @@ async def compute_interaction_energy(
         were found, and the geometry of the best one.
     """
     # Priced on the *pair*, not on the two monomers summed. The search runs over the
-    # combined system, and the cost model's exponent is ~3 (D-097) — so two 30-atom
+    # combined system, and the cost model's exponent is ~3 (D-100) — so two 30-atom
     # partners cost 60^3, roughly four times the 2 x 30^3 that summing them predicts.
     # Under-pricing here would run a minutes-long search inline instead of deferring it.
     predicted = ensemble_seconds(f"{smiles_a}.{smiles_b}")
@@ -373,3 +385,71 @@ async def sample_conformers(
     spec = ConformerSpec(search=search, solvent=solvent, effort=effort)
     result, _ = await run_cached_ensemble(default_store(), structure, spec)
     return result
+
+
+@tool
+async def predict_developability_profile(smiles: str) -> DescriptorProfile:
+    """Compute a developability descriptor panel: MW, LogP, TPSA, H-bond counts, Ro5/Veber flags.
+
+    Use this to triage a candidate before committing bench time — Lipinski's Rule-of-Five
+    (`lipinski_violations`) and Veber's rule (`veber_pass`) are widely used oral-bioavailability
+    heuristics, not developability verdicts. Report them as flags to weigh alongside everything
+    else known about the molecule, never as a pass/fail gate on their own. Cached, so repeats
+    are free.
+
+    Args:
+        smiles: The molecule as a SMILES string.
+
+    Returns:
+        The descriptor panel plus the two rule-of-thumb flags.
+    """
+    result, _ = await run_cached_descriptor_profile(default_store(), DescriptorInput(smiles=smiles))
+    return result
+
+
+@tool
+async def predict_logd(smiles: str, ph: float | None = None) -> LogdResult:
+    """Predict the pH-dependent distribution coefficient (logD) of a neutral O-H/S-H acid.
+
+    Answers "how lipophilic is this at the pH I actually work at?" — useful for HPLC
+    mobile-phase pH selection, extraction, and formulation, where the pH-independent LogP alone
+    is not the number that matters. Built from the same acidic-site model as `predict_pka`, so it
+    shares its domain limits: only O-H/S-H acids (carboxylic acids, phenols, alcohols, thiols);
+    it raises an error for a base or a molecule with no such site rather than guessing.
+
+    Args:
+        smiles: The molecule as a SMILES string.
+        ph: The pH to evaluate at. Defaults to 7.4 (physiological pH) if omitted.
+
+    Returns:
+        logD at the given pH, plus the LogP and pKa it was derived from and the pKa model's
+        uncertainty (state it — this is not an exact value).
+    """
+    return await _predict_logd(default_store(), LogdInput(smiles=smiles, ph=ph))
+
+
+@tool
+async def estimate_reaction_energy(
+    reactants: list[ReactionSpecies], products: list[ReactionSpecies]
+) -> ReactionEnergyResult:
+    """Estimate a reaction's GFN2-xTB electronic energy and flag if it is strongly exothermic.
+
+    A process-safety screening signal, not a validated heat of reaction: it omits entropy,
+    solvation beyond xTB's implicit model, and phase changes. Use it the way the structural
+    hazard screen is used — to flag attention, never to certify a reaction is safe to scale.
+    Each species is a cached xTB single point, so reactions sharing species with an
+    earlier one are mostly free to re-score.
+
+    Args:
+        reactants: The reactant side, each species with its SMILES, net charge, and
+            stoichiometric coefficient (must be a balanced equation — this does not check
+            atom/mass balance for you).
+        products: The product side, same shape as `reactants`.
+
+    Returns:
+        The reaction electronic energy in kcal/mol, whether it crosses the configured
+        exotherm threshold, and the threshold itself so the flag can be checked.
+    """
+    return await _estimate_reaction_energy(
+        default_store(), ReactionEnergyInput(reactants=reactants, products=products)
+    )

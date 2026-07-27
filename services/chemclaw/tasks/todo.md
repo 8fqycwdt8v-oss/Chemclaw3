@@ -191,13 +191,13 @@ the skill catalogue says gate 19 of its 28 skills.
 
 ## Raised by the user mid-build, and done
 
-- [x] **A structured way to register Temporal capabilities** (D-096). Adding `XtbJobWorkflow`
+- [x] **A structured way to register Temporal capabilities** (D-099). Adding `XtbJobWorkflow`
       meant editing a hardcoded list in a worker — the one extension seam left that forced an
       edit to infrastructure code, and a silent one (an unregistered workflow never runs and
       nothing fails until a job waits forever). `workflows/registry.py` now mirrors
       `agents.tool_registry`: `@durable_workflow("hpc")` / `@durable_activity("background")` at
       the definition site, workers read what they serve.
-- [x] **Sized for the real workload: 200-800 Da, minutes not seconds** (D-097). The cost model
+- [x] **Sized for the real workload: 200-800 Da, minutes not seconds** (D-100). The cost model
       was fitted on 3-14 atom test molecules and under-predicted a 76-atom substrate
       **sevenfold**. Refitted on measured drug-sized timings (exponent 1.7 -> 3.0; the 76-atom
       point now reproduces to 1%). Atom ceiling 120 -> 150, optimizer step cap 400 -> 1500, job
@@ -233,7 +233,7 @@ modules, five new agent tools, a durable job path, six new skills and five updat
 energies had no spin-polarization term, so triplet O2 came out *above* singlet — a qualitative
 inversion that would have made every radical number wrong. The optimizer's first step could
 collapse a bond and leave the SCF unconvergeable. And ordinary molecules — ethyl acetate —
-optimize onto rotor saddle points, where a "free energy" is not one. Each is recorded in D-095
+optimize onto rotor saddle points, where a "free energy" is not one. Each is recorded in D-098
 with the number that exposed it, and each is pinned by a test that fails if it returns.
 
 **One scope decision reversed mid-build, correctly.** X3/X4 first shipped with an atom cap and a
@@ -333,7 +333,7 @@ amine and NCI, make it fully operational." Both were the two halves of the X11 b
 - [x] `calc/pka.py` extended for bases: protomer enumeration in RDKit, most stable cation defines
       the conjugate acid, separate calibration, `site: "acid" | "base"` on the result.
 - [x] `compute_interaction_energy` in `agents/calc_tools.py`, with the same cost routing as the
-      other minute-scale tools (D-097) — it defers to Temporal above the inline budget.
+      other minute-scale tools (D-100) — it defers to Temporal above the inline budget.
 - [x] `ComplexJobSpec` through `workflows/models.py` + `xtb_activities.py`, so it is durable.
 - [x] `skills/molecular-association/SKILL.md`; `ionization-and-partitioning` rewritten around the
       measured two-class result; `calculation-selection` and `degradation-liabilities` corrected.
@@ -348,7 +348,7 @@ structural: **aromatic and aryl nitrogen calibrates to Spearman 1.000** (RMSE 0.
 this system's acid calibration), while **aliphatic amines rank at -0.17**, which is no ranking
 ability at all. A protomer *search* would not have moved that, because the failure is solvation:
 gas-phase GFN2 gets the proton affinity order exactly right, ALPB reverses it, and the truth is
-non-monotonic. So half the goal shipped and half is a refusal with a diagnosis (D-101), and the
+non-monotonic. So half the goal shipped and half is a refusal with a diagnosis (D-104), and the
 CREST structural route was left unbuilt rather than built because the plan named it.
 
 Two things the build itself taught, both caught by tests rather than by review:
@@ -370,21 +370,21 @@ same terms, so the agent declines rather than reaching for a substitute.
 ## Reconciliation with `main` (PR #28) — the restored tree
 
 `main` restored the tree the Replit move had rewound while this branch was building the xTB
-layer, so the merge was a feature set meeting ~38 modules it had never seen. Recorded in D-102.
+layer, so the merge was a feature set meeting ~38 modules it had never seen. Recorded in D-105.
 
-- [x] ADR renumbering: this branch's ten xTB ADRs D-082…D-091 → **D-092…D-101**, `main`'s
+- [x] ADR renumbering: this branch's ten xTB ADRs D-082…D-091 → **D-095…D-104**, `main`'s
       allocation keeps the numbers. Every citation moved with them; `tests/test_decision_log.py`
       (which `main` added as the fix for the *previous* collision) passes.
 - [x] `_log_prediction` moved to `mcp_servers/calc/server.py` — it hooks `predict_pka` and
       `predict_solubility`, which X8 had already moved there. Same principle, correct layer.
-- [x] `workers/background_worker.py`: kept the registry (D-096) and decorated `main`'s four new
+- [x] `workers/background_worker.py`: kept the registry (D-099) and decorated `main`'s four new
       modules (`audit_verify`, `digest`, `note_index`, `retention`) so it serves them. Verified by
       diffing the registry's sets against `main`'s explicit lists — 14 workflows, 24 activities,
       equal both ways.
 - [x] `mcp_servers/calc/server.py::predict_pka` docstring updated for X11 — it still said
       O-H/S-H only, which is the one place the base support had not actually reached the agent.
 
-## Heavy review of the whole branch (D-103)
+## Heavy review of the whole branch (D-106)
 
 Read the 12k-line diff against `main`. Five real defects, all in green code, three of them
 contradicted by their own docstring. Fixed and pinned:
@@ -408,3 +408,27 @@ contradicted by their own docstring. Fixed and pinned:
 **Left open deliberately:** `ensemble_seconds` has no fixed-overhead term, so a small-molecule
 CREST search is predicted at 0.5 s and runs inline when it really takes ~10 s. Same shape as
 the error the cost model fixed at the large end; re-fitting it is a measurement session.
+
+
+## Reconciliation with `main` (PR #31) — the process/analytical calculators (D-107)
+
+`main` landed D-092's logD, developability descriptors, exotherm screen and ETKDG conformer
+ensemble, plus two CI fixes. Seven conflicts. Two defects existed **only in the combination**,
+so neither branch's tests could have caught them:
+
+- [x] **The unit boundary.** `main`'s `geometry()` returns Bohr; X1 made this branch Angstrom
+      above `calc.xtb_engine`. Its new `positions_bohr` helper fed `gfn2_energy`, which here
+      converts — every ensemble geometry would have been inflated 1.8897x, plausibly. Renamed
+      to `conformer_positions` (Angstrom), pinned by a test on water's O-H.
+- [x] **The logD sign.** `calc.logd` hard-coded the acid Henderson-Hasselbalch form, correct
+      when `calc.pka` raised for bases. X11 widened the domain; pyridine at pH 7.4 came out at
+      -0.92 against a clogP of 1.08 — two log units, silent. Now branches on `PkaResult.site`.
+- [x] ADR renumbering, third time: this branch's D-092…D-103 → **D-095…D-106**.
+- [x] `workers/background_worker.py`: registry kept, `main`'s conformer workflow + activities
+      decorated. Verified served (15 workflows, 26 activities).
+- [x] `tests/test_calc_tools.py`: two module aliases, since X8 split the tools across two
+      transports and `main`'s three new ones stayed in-process.
+
+**Owed, not done:** two implementations of conformer ensembles and two of reaction energetics
+now coexist. Kept both — deleting either is a product decision. Tracked at the top of
+`BACKLOG.md`.

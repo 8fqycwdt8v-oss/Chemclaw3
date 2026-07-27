@@ -14,6 +14,12 @@ tools:
   - scan_coordinate
   - compute_reaction_energy
   - compare_solvents
+  - sample_conformers
+  - predict_developability_profile
+  - predict_logd
+  - estimate_reaction_energy
+  - submit_conformer_ensemble_job
+  - get_conformer_job_status
 ---
 
 # Calculation selection
@@ -29,8 +35,13 @@ calculation; this skill assumes that decision is already made.
 ## Which calculator
 
 - **Electronic energy / relative stability / conformer energy** → `compute_xtb_energy`
-  (GFN2-xTB semiempirical single point). Fast, deterministic, good for *relative*
-  comparisons of related structures.
+  (GFN2-xTB semiempirical single point on one seeded conformer). Fast, deterministic,
+  good for *relative* comparisons of related structures.
+- **Conformationally flexible molecule, solution-phase behavior** → `submit_conformer_ensemble_job`
+  (a whole Boltzmann-weighted GFN2-xTB conformer ensemble, not one rigid geometry). This is a
+  durable job (tens of xTB single points), so it returns a job id — poll with
+  `get_conformer_job_status`. Reach for this instead of `compute_xtb_energy` when a single seeded
+  conformer is unlikely to be representative (a flexible chain, multiple accessible rotamers).
 - **Aqueous solubility** → `predict_solubility` (fast property model; reports an
   uncertainty — surface it).
 - **pKa** → `predict_pka` (GFN2-xTB solvated protonation/deprotonation energy +
@@ -69,6 +80,17 @@ that per solvent. The expensive tools estimate their own cost and, above a thres
 return a **job id instead of a result** — report it and poll with `get_job_status`
 rather than treating it as a failure. Prefer `level="quick"` when only an ordering of
 electronic energies is needed; it skips every Hessian.
+- **pH-dependent lipophilicity (logD)** → `predict_logd` (built on `predict_pka`, and it
+  inherits that tool's domain exactly: O-H/S-H acids and aryl-nitrogen bases, with
+  aliphatic amines refused). It applies the Henderson-Hasselbalch correction in the
+  direction the site calls for, so say which site the number belongs to. Use for HPLC mobile-phase pH selection, extraction, or
+  formulation questions where the pH-independent LogP alone is not the number that matters.
+- **Developability triage (Ro5/Veber, MW, LogP, TPSA, H-bond counts)** →
+  `predict_developability_profile`. Report the flags as heuristics to weigh, never a pass/fail
+  verdict on their own.
+- **Reaction exotherm / thermal-hazard screen** → `estimate_reaction_energy` (sums cached
+  GFN2-xTB energies over a balanced reactant/product equation). Advisory, like the structural
+  hazard screen (`screen_hazards`) — a flag for attention, never a safety certification.
 
 ## Reading results honestly
 

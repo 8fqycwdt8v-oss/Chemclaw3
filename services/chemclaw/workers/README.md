@@ -10,7 +10,7 @@ contain no business logic and no list of their own.
 **Adding a durable capability does not mean editing a worker.** A workflow or
 activity declares its queue where it is defined, with
 `@durable_workflow("hpc")` / `@durable_activity("background")`, and
-`workflows.registry` is what these modules read (D-096). The one thing still
+`workflows.registry` is what these modules read (D-099). The one thing still
 required is that the defining module be *imported* — that is the same
 side-effect-import contract `agents.chemclaw_agent` has for tools, and it is why
 each worker begins with a block of `# noqa: F401` imports.

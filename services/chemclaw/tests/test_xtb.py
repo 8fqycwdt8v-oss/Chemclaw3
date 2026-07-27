@@ -7,7 +7,10 @@ proves the store integration computes once and reuses thereafter.
 import asyncio
 from importlib.metadata import version
 
+import numpy as np
 import pytest
+from rdkit import Chem
+from rdkit.Chem import AllChem
 
 from calc.store import InMemoryStore
 from calc.structure import structure_from_smiles
@@ -157,3 +160,34 @@ def test_relative_isomer_energies_have_the_right_ordering(
         run_xtb(XtbInput(smiles=stable)).total_energy_hartree
         < run_xtb(XtbInput(smiles=less_stable)).total_energy_hartree
     )
+
+
+def test_the_engine_is_the_only_place_units_change() -> None:
+    """Everything `calc.xtb_engine` hands upward is in Angstrom (X1's unit boundary).
+
+    Merged from `main`, `conformer_positions` was `positions_bohr` and returned atomic
+    units, because there `geometry` did too. On this branch `geometry` returns Angstrom and
+    `gfn2_energy` converts internally — so feeding it Bohr would have scaled every ensemble
+    geometry by 1.8897 and produced energies that are wrong and entirely plausible-looking.
+
+    Asserted on a bond length rather than on a constant: water's O-H is ~0.96 Angstrom and
+    ~1.81 Bohr, so the two are unmistakable and the test says which one the module promises.
+    """
+    from calc.xtb_engine import conformer_positions, geometry, parse_molecule
+
+    mol = parse_molecule("O")
+    for numbers, positions in (
+        geometry(mol, seed=42, optimize=True),
+        conformer_positions(_embedded(mol)),
+    ):
+        oxygen = int(np.argmax(numbers))
+        hydrogen = next(i for i in range(len(numbers)) if i != oxygen)
+        bond = float(np.linalg.norm(positions[oxygen] - positions[hydrogen]))
+        assert 0.8 < bond < 1.2, f"O-H of {bond:.2f} is not Angstrom (Bohr would be ~1.8)"
+
+
+def _embedded(mol: Chem.Mol) -> Chem.Mol:
+    """A copy of `mol` carrying one embedded conformer, for `conformer_positions`."""
+    work = Chem.Mol(mol)
+    AllChem.EmbedMolecule(work, randomSeed=42)
+    return work

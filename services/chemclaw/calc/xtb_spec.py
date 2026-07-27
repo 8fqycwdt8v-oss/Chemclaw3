@@ -91,10 +91,10 @@ class XtbSpec(BaseModel):
         **Open-shell systems fall back to the in-process backend**, whatever was
         configured, and the reason is measured. GFN2 without a spin-polarization term
         does not stabilize an open shell at all — it put triplet O2 *above* singlet
-        (D-095) — so `calc.xtb_engine` enables that contribution whenever there are
+        (D-098) — so `calc.xtb_engine` enables that contribution whenever there are
         unpaired electrons. The `xtb` 6.6.1 binary cannot: its `--spinpol` is killed by
         the OOM killer in this build. Running a radical through it would silently
-        reintroduce exactly the physics error D-095 removed.
+        reintroduce exactly the physics error D-098 removed.
 
         Resolving here rather than at the call site is what keeps the cache honest: the
         key is derived from the *returned* spec, so an entry computed by tblite is
@@ -156,7 +156,7 @@ class CrestSpec(XtbSpec):
 
     So `engine` is dropped from this key entirely and `for_structure` is a no-op. Note
     what the second one means and does not mean: an open-shell CREST search is **not**
-    protected by the D-095 spin-polarization fallback, because there is nowhere to fall
+    protected by the D-098 spin-polarization fallback, because there is nowhere to fall
     back to — crest has no in-process equivalent. That is a real limitation of radical
     conformer searches, and it is now stated instead of hidden behind a key that claimed
     tblite had run.

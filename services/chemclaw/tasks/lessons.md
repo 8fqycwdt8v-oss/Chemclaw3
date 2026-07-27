@@ -55,7 +55,7 @@ holds: exit 0 is not evidence the outputs exist.
 `tblite` enables a spin-polarization term for open shells (without it, triplet O2 came out
 *above* singlet). The `xtb` binary does not by default, and its `--spinpol` is OOM-killed in
 this build. Dispatching a radical to whichever backend was configured would have silently
-reintroduced the exact physics error D-095 removed.
+reintroduced the exact physics error D-098 removed.
 
 **Rule:** when adding a second implementation behind one interface, enumerate what the first
 one *fixes* and check the second does the same. Where it cannot, route around it explicitly
@@ -166,3 +166,34 @@ possible value, so no assertion could have failed.
 only that it repeats. For a layered capability, test it through the entry point callers
 actually use, not the layer it is implemented in. And treat a single-value `Literal` as a
 smell: a field that cannot vary cannot be right except by luck.
+
+
+## Widening a domain breaks every consumer that encoded the old one (2026-07-27, PR #31 merge)
+
+X11 widened `calc.pka` from acids to acids-plus-aromatic-bases. Nothing about its signature
+changed, nothing in its own tests broke, and it was strictly more capable. On another branch,
+`calc.logd` had hard-coded the **acid** Henderson-Hasselbalch form — correct when written,
+because `calc.pka` *raised* for a base. Merged, pyridine stopped raising, flowed into the
+acid formula, and came out two log units too lipophobic with nothing raising.
+
+Neither branch's tests could have caught it: the defect exists only in the combination. And
+it is not a merge-conflict class of problem — the two files never touched the same lines.
+
+**Rule:** when a function's *domain* widens, grep for its callers and check each one for an
+encoded assumption about the old domain — a hard-coded sign, a branch that is now reachable,
+an error path that no longer fires. Prefer widening behind a discriminator the caller must
+read (`PkaResult.site`) over widening silently, and treat "it used to raise here" as a
+contract that consumers were entitled to rely on.
+
+## Two branches, one architecture rule — check the invariants, not just the lines (2026-07-27)
+
+The same merge nearly inflated every conformer geometry by 1.8897. `main`'s `geometry()`
+returned Bohr; this branch had made `calc.xtb_engine` the single unit boundary and returned
+Angstrom. Both self-consistent, neither wrong, and git merged the *new helper* cleanly
+because no line collided — it just pointed at the other branch's convention.
+
+**Rule:** after a merge that spans an architectural change, list the invariants that change
+introduced (units, ownership of a cache key, who resolves identity) and check the incoming
+code against each one directly. A clean textual merge says nothing about them. Where the
+invariant is a unit, put it in the *name* — `positions_bohr` vs `conformer_positions` — so
+the next reader cannot get it wrong silently.

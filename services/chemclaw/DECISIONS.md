@@ -2655,7 +2655,142 @@ of the Replit deployment) and `make eval`, whose case-set has three gated failur
 all of this — a gate that is red on arrival trains people to ignore it, and those cases deserve
 their own fix rather than a permanently-failing check.
 
-## D-092 — xTB capability seams (X1) and the properties the SCF already produced (X2)
+## D-092 — Process/analytical-development capability research: quick wins, one durable big win, and what was rejected
+
+A deep survey of open-source ML/cheminformatics and fast-ab-initio packages for chemical and
+analytical process development (data-source connectors like LIMS explicitly out of scope), asking
+specifically what could be added through the **existing** connector seams — a fast calculator
+(`calc/` + the calculation store), an MCP capability server, or a Temporal workflow — with no new
+ad hoc wiring. Landed as five additions, all through those exact seams, plus two candidates
+researched and deliberately **not** built.
+
+**Quick wins (fast, cached calculators/tools, zero new dependencies):**
+
+- `predict_developability_profile` (`calc/descriptors.py`) — an RDKit-only physicochemical panel
+  (MW, LogP, TPSA, H-bond counts, rotatable bonds, Fsp3, QED) plus Lipinski/Veber flags. Every
+  descriptor is already computed by RDKit (already a dependency); the only gap was that nothing
+  exposed the panel itself, versus the four descriptors buried inside the ESOL solubility model.
+- `predict_logd` (`calc/logd.py`) — pH-dependent lipophilicity, composing the existing cached
+  `predict_pka` with Crippen LogP via Henderson-Hasselbalch. No new cache entry (the expensive
+  half, xTB pKa, is already memoized); inherits `calc.pka`'s neutral-O-H/S-H-acid domain limit.
+- `estimate_reaction_energy` (`calc/reaction_energy.py`) — a reaction electronic-energy /
+  exotherm screen from cached per-species GFN2-xTB single points, weighted by stoichiometry.
+  Advisory, like the structural hazard screen (D-080) — a flag, never a safety certification.
+- `generate_screening_design` (`bo/engine.py::factorial_design` + `bo/problem.py::ScreeningDesign`)
+  — a full-factorial **categorical** screening design (e.g. every catalyst x solvent x base
+  combination), via BoFire's `FractionalFactorialStrategy` on an all-categorical domain (the
+  non-deprecated replacement for the now-deprecated `FactorialStrategy`). Distinct from
+  `suggest_next_experiment`'s adaptive one-batch-at-a-time proposals. Rejects a continuous
+  parameter outright (gate G4) rather than silently dropping/fractionating it.
+
+**Big win (durable Temporal workflow, zero new dependencies):** `ConformerEnsembleWorkflow`
+(`workflows/conformer_job.py` + `conformer_activities.py` + `conformer_models.py`, pure algorithm
+in `calc/conformer_ensemble.py`) — an RDKit ETKDG conformer ensemble, MMFF-pruned, then
+Boltzmann-weighted over per-conformer GFN2-xTB energies. `calc.xtb` approximates each molecule as
+one rigid seeded geometry; a flexible molecule's solution-phase behavior is more honestly read
+from a population of conformers. An ensemble (tens of xTB single points) is materially heavier
+than the inline fast-calculator's sub-second budget but is pure local CPU work, not a remote HPC
+submission — so it follows `BoCampaignWorkflow`'s shape (local activities on the light
+`background-jobs` queue), not `QMJobWorkflow`'s submit/poll shape. `calc/xtb_engine.py` gained one
+shared primitive (`positions_bohr`, factored out of `geometry`) so the ensemble reads a specific
+already-embedded conformer instead of re-embedding one each time — a DRY refactor, not new science.
+Agent tools `submit_conformer_ensemble_job`/`get_conformer_job_status` mirror `agents.qm_tools`
+exactly (D-002's thin-adapter shape).
+
+**Researched and deliberately not built**, both for the same reason:
+
+- **ML interatomic potentials as a fast-ab-initio surrogate** (ANI-2x/TorchANI, MACE-OFF/MACE-MP).
+  `torchani` was installed and inspected directly in this environment: current releases pull in
+  `huggingface-hub`/`hf-xet`, and `torchani.models.ANI2x()` fetches its pretrained weights from the
+  Hugging Face Hub on first use rather than shipping them in the wheel (this changed from older
+  releases that did bundle weights). That is a runtime external-data dependency, which is exactly
+  what D-089 says this system does not have — `tests/test_no_egress.py` enforces the source-literal
+  form of that rule, but the principle is broader than what a host-literal grep can catch. Revisit
+  only if a deployment vendors the weight files into the container image at build time as an
+  explicit, reviewed infrastructure decision (D-089's own escalation path) — not as a quiet runtime
+  fetch.
+- **Retrosynthesis (AiZynthFinder)**. The `DEFERRED.md` trigger — "after the spine + graph +
+  fingerprint layers exist" — is now met (ECFP4/DRFP fingerprint search shipped in F11). It still
+  is not built: AiZynthFinder's pretrained USPTO models and stock file are fetched via a
+  `download_public_data` step from a public host, the same runtime/deploy-time external-fetch
+  problem as the ML potentials above, for the same reason not solved here. `DEFERRED.md` updated
+  to record the sharpened blocker (not "no fingerprint layer yet", but "no vendoring story").
+
+`bo/engine.py`'s docstring is updated (still "the only module that touches BoFire") to note
+`factorial_design` as a second BoFire-touching adapter alongside the BO strategies, not a
+boundary violation — it lives in the same file specifically to keep that claim true.
+
+## D-093 — A raw exception in a fan-out child suspends as a task failure, not a workflow failure
+
+CI's own `ci.yml` comment already named the symptom: `tests/test_orchestrator.py::test_fan_out_runs_children_in_order_and_isolates_failures`
+"skips wherever the Temporal test-server binary cannot be fetched and hangs where it can" —
+investigated after a PR's CI run was cancelled at the job's 30-minute `timeout-minutes` bound
+(added earlier the same day specifically because, before it, every recent `ci` run on `main` had
+instead been cancelled at GitHub's 6-hour absolute ceiling: runs #207, #218–#221 all ran the full
+six hours before being killed). **This was not new, not caused by that PR, and not fixed by the
+timeout bound alone** — the bound only converts a silent 6-hour hang into a bounded, visibly-failing
+one. Two distinct issues stacked, and only fixing both cleared the hang.
+
+**Issue 1 — the real root cause.** The Temporal Python SDK's safety default: a raw exception raised
+directly in workflow code (not already one of the SDK's own `FailureError` subclasses, e.g. plain
+`raise ValueError(...)`) is *not* treated as a workflow failure by default. It "suspends the
+workflow via task failure" instead (`temporalio.workflow.defn`'s own docstring) — an internal retry
+loop the *worker*, not the server's `RetryPolicy`, drives, with no bound and no
+`non_retryable_error_types` check, on the theory that an unclassified exception might be a code bug
+that a redeploy will fix, not a legitimate business failure. `_DoublerWorkflow` in the fan-out test
+deliberately raises a plain `ValueError` on its poison input (13) — exactly the shape this default
+swallows into an unbounded suspend-and-retry loop, invisible to any `retry_policy` passed to
+`execute_child_workflow` at all. Against the time-skipping test server this is not a slow hang; it
+is a genuine infinite loop (an offline sandbox never gets far enough to hit it — it skips first
+when the test-server binary can't be fetched), matching the reported symptom exactly. Fixed by
+declaring `_DoublerWorkflow` with `@workflow.defn(failure_exception_types=[Exception])`, which is
+what the poison-input test was always implicitly assuming.
+
+**Issue 2 — `fan_out`'s own retry default, found while investigating Issue 1.**
+`workflows/orchestrator.py::fan_out` starts each child via
+`workflow.execute_child_workflow(..., retry_policy=retry_policy)`, where `retry_policy` defaults to
+`None` — and neither real caller (`report_workflow.py`, `memory_jobs.py`) ever passes one either.
+`None` does not mean "no retry"; it means Temporal's own default `RetryPolicy()`
+(`maximum_attempts=0`, unlimited, no `non_retryable_error_types`). Once Issue 1's fix makes the
+poison child's `ValueError` a genuine `WorkflowExecutionFailed`, *this* default is what would make
+the fan-out retry it forever anyway rather than isolating and dropping it as documented. Neither
+production caller was actually at risk from this specific default (`ReportSectionWorkflow` catches
+its activity's error and never raises; `PublishNoteWorkflow`'s uncaught error is an `ActivityError`,
+already a `FailureError`, so Issue 1 doesn't apply to it) — but the default was still wrong relative
+to the fan-out's own stated contract, so it is fixed regardless: an unset `retry_policy` now
+defaults to `BAD_DATA_RETRY` (bounded `maximum_attempts`, immediate failure for the
+already-catalogued bad-data exception types) instead of passing `None` straight through — the same
+policy already used for the sibling `resolve_fan_out_limit` local activity in the same function, so
+no new retry idiom is introduced.
+
+**Verification.** Offline: `tests/test_orchestrator.py`'s non-server tests pass; mypy/ruff clean
+across both changed files. The server-backed fan-out test itself cannot run in this sandbox (the
+Temporal test-server binary host is egress-blocked here) — confirmed instead against the real
+time-skipping server via this repo's own CI, which is reachable there. `fan_out`'s docstring now
+calls out the `failure_exception_types` gotcha directly, since any future child workflow that
+raises a raw exception (rather than an already-wrapped `FailureError`) would reintroduce Issue 1.
+
+## D-094 — CI's `kg-validate` step needs a real (even empty) `knowledge` directory
+
+Found immediately after D-093's fix cleared the fan-out hang: `make kg-validate` then failed
+fast (`notes directory does not exist: knowledge`, exit 1) on the very next CI run. `knowledge` is
+a git-tracked symlink (mode 120000) to `/home/runner/workspace/services/chemclaw-notes-repo/knowledge`
+— an absolute path specific to the Replit workspace layout, deliberately kept as one of the "six
+Replit-only additions" (D-091). It does not resolve on a GitHub Actions runner, or on any other
+checkout; `Path.exists()` on a symlink follows it to the target, so `kg.validate.main()` correctly
+reports the directory as missing and refuses to validate.
+
+Not touched: the committed symlink itself — it is a real, deliberate deployment decision for
+Replit (D-091), and rewriting or removing it here would be an unrelated, out-of-scope change to
+that target. Instead, `.github/workflows/ci.yml` gained one step before `Validate knowledge graph`
+that replaces the broken symlink with a real empty directory *in that checkout only*: `kg-validate`
+against zero notes is a legitimate, already-documented state (BACKLOG.md: "the corpus holds no
+procedure notes yet"), not a special case to work around. Verified locally by reproducing the exact
+CI condition (removing the tracked symlink, recreating an empty directory, running
+`python -m kg.validate`) — exits 0, "OK: knowledge is a valid knowledge graph" — then restored the
+symlink in the working tree before committing, since only the CI step changes, not the tracked path.
+
+## D-095 — xTB capability seams (X1) and the properties the SCF already produced (X2)
 
 **Context.** `docs/xtb-tools-proposal.md` inventories what the xTB ecosystem offers against what
 ChemClaw consumed: one capability (a single-point energy) through one of three engines (`tblite`
@@ -2716,7 +2851,7 @@ activating cases and fail that one. Ring positions in the tests are derived from
 not hardcoded, so a change in RDKit's canonical atom order cannot leave them silently checking the
 wrong atoms.
 
-## D-093 — xTB descriptors as BO featurization (U1)
+## D-096 — xTB descriptors as BO featurization (U1)
 
 **Context.** `docs/xtb-use-cases.md` §6.2 ranked this the highest-value xTB integration and noted
 it needs **no new xTB capability** — only wiring. A BoFire campaign over "which ligand / base /
@@ -2769,12 +2904,12 @@ Cone angles and buried volume need a 3D geometry, so two ligands differing mainl
 similar — a real limitation for phosphine selection specifically, and one the geometry tasks
 (plan X3) would address.
 
-## D-094 — The single point runs on a relaxed geometry, and the skill catalogue that found it
+## D-097 — The single point runs on a relaxed geometry, and the skill catalogue that found it
 
 **Context.** Ideating the skill layer (`docs/xtb-skill-catalogue.md`) surfaced that
 `compute_xtb_energy` is the tool an agent naturally reaches for to compare isomers, and that no
 skill governed that use. Measuring before writing the judgment — the discipline that produced the
-pKa finding in D-092's companion review — found a defect rather than a limitation.
+pKa finding in D-095's companion review — found a defect rather than a limitation.
 
 **The finding.** Over five textbook isomer pairs, the single point on a raw ETKDG embedding got
 the **sign of the relative energy wrong in two**: isobutane vs. n-butane, and ethanol vs. dimethyl
@@ -2789,7 +2924,7 @@ five pairs, so a change that reverts the relaxation fails loudly rather than ret
 backwards chemistry.
 
 **Consequence.** Cached single-point energies re-address (the geometry is part of `structure_id`),
-so old entries are recomputed rather than mixed with new ones — the same clean invalidation D-092
+so old entries are recomputed rather than mixed with new ones — the same clean invalidation D-095
 recorded, for the same reason. Absolute energies shift slightly; every *ordering* improves.
 
 **The residual limit, carried by a skill rather than a comment.** Relaxed magnitudes are still
@@ -2810,14 +2945,14 @@ judgment layer is not the bottleneck — the capability under it is. Two entries
 value case for those phases: an xTB Hessian yields IR *intensities* as well as frequencies, so a
 computed IR spectrum is a real discriminator between candidate impurity structures (X3); and
 bond dissociation energies — radical stability, HAT selectivity, antioxidant strength — are now
-unblocked at the model level, because D-092's `Structure` validates a declared multiplicity
+unblocked at the model level, because D-095's `Structure` validates a declared multiplicity
 instead of refusing every open shell. Both need only the X4 reaction composite, not new physics.
 
-## D-095 — X3/X4: geometries, free energies, the reaction composite, and durable routing
+## D-098 — X3/X4: geometries, free energies, the reaction composite, and durable routing
 
 **Context.** X1/X2 gave the xTB layer its seams and the properties a single point already
 produces. Everything above that — "what does it look like", "what is ΔG", "does this reaction
-go" — needed a geometry optimizer and a Hessian. The skill catalogue (D-094) had measured the
+go" — needed a geometry optimizer and a Hessian. The skill catalogue (D-097) had measured the
 gap precisely: **19 of its 28 skills were gated on X3 or X4**.
 
 **Decision.** Build both phases: `calc/xtb_opt.py` (L-BFGS-B over tblite's analytic gradient),
@@ -2910,15 +3045,15 @@ classes, which is the whole point of the skill), `computed-spectra-comparison`,
 `solvent-selection`, `bond-strength-and-radicals`. Five existing skills updated for the widened
 ladder.
 
-**The limit carried by skills rather than code, as with pKa (D-094/U3).** GFN2 homolysis
+**The limit carried by skills rather than code, as with pKa (D-097/U3).** GFN2 homolysis
 energies are badly overestimated in absolute terms even with spin polarization, while the
 *orderings* hold (benzylic C–H clearly weaker than methane's). `bond-strength-and-radicals`
 states the rule this implies — rank, never quote — and the reaction result attaches an
 open-shell warning of its own.
 
-## D-096 — Durable capabilities declare their own queue
+## D-099 — Durable capabilities declare their own queue
 
-**Context.** Adding `XtbJobWorkflow` (D-095) meant editing a hardcoded list inside
+**Context.** Adding `XtbJobWorkflow` (D-098) meant editing a hardcoded list inside
 `workers/hpc_worker.py`. That was the *one* extension seam left in the system that forced an
 edit to infrastructure code: agent tools declare themselves with `@tool`, metrics with
 `@metric`, skills by folder, MCP servers and data sources by config token — and workflows by
@@ -2948,7 +3083,7 @@ line in the worker, because importing is what triggers registration. That is the
 side-effect-import contract `agents.chemclaw_agent` has for tools, and it is one line rather
 than two lists.
 
-## D-097 — Sizing for real substrates: the workload is 200-800 Da
+## D-100 — Sizing for real substrates: the workload is 200-800 Da
 
 **Context.** The X3/X4 cost model was fitted on 3-14 atom test molecules. The actual target is
 process R&D substrates in the 200-800 Da range, where conformer and job work runs in minutes,
@@ -2997,7 +3132,7 @@ species. A redundant-internal-coordinate optimizer typically cuts that 3-5x. The
 optimizer was the right first choice — dependency-free and easy to reason about — and it is now
 the single largest speedup available for this workload.
 
-## D-098 — X5/X6/X7: the binaries, and what they change
+## D-101 — X5/X6/X7: the binaries, and what they change
 
 **X5, the `xtb` binary.** Added as a second backend behind the same task API, selected by
 `settings.xtb_engine` (`auto` by default) and resolved to a concrete name *before* the cache key
@@ -3086,9 +3221,9 @@ and never linked, so the usual analysis is that neither affects this codebase's 
 is separable for exactly that reason. Both are optional at runtime: absent, `xtb_engine=auto`
 falls back and the ensemble tools report that they are unavailable.
 
-## D-099 — X9 revisited: preconditioning the path the binary cannot take
+## D-102 — X9 revisited: preconditioning the path the binary cannot take
 
-**Context.** D-098 retired X9 on the grounds that ANCopt *is* the internal-coordinate optimizer
+**Context.** D-101 retired X9 on the grounds that ANCopt *is* the internal-coordinate optimizer
 and it is a process call away. That was right about the general case and wrong about the scope:
 two paths cannot use the binary at all, and neither is rare.
 
@@ -3141,7 +3276,7 @@ identifies reliably and is trusted for nothing else. A full Lindh model with ang
 terms would do better, at the cost of primitive-internal machinery and a Wilson B matrix. Worth
 it only if scans and radicals ever become the common case; recorded rather than built.
 
-## D-100 — X8: the calculators as an MCP server, and the line identity draws
+## D-103 — X8: the calculators as an MCP server, and the line identity draws
 
 **Context.** The heavy half of this system's dependency closure — RDKit, tblite, scipy, and the
 `xtb`/`crest` binaries — belongs to the calculators, as does the CPU load. Hosting them in the
@@ -3206,7 +3341,7 @@ in-process, because it is not a tool call — the BO featurization is library us
 *agent's* transport, not an internal one. A second consumer of the calculators inside the same
 process is not a reason to route it through a subprocess.
 
-## D-101 — X11: two molecules together, and the half of the amine problem that is refused
+## D-104 — X11: two molecules together, and the half of the amine problem that is refused
 
 **Context.** Two gaps were named together in the X11 backlog entry because both are CREST searches
 this system already had wired at the CLI layer and neither had a calculator: `--nci` samples how
@@ -3274,7 +3409,7 @@ what U2 needed. The split above is electronic and the protomer enumeration is ch
 metadynamics search for protonation *sites* would not have moved a correlation that fails for
 solvation reasons. Left in the backlog rather than built speculatively.
 
-## D-102 — Fourth reconciliation with `main` (PR #28): the restored tree meets the xTB layer
+## D-105 — Fourth reconciliation with `main` (PR #28): the restored tree meets the xTB layer
 
 **Context.** `main` landed the restore of the tree the Replit move rewound (D-091) while this
 branch was building the xTB capability layer. The branch was based on the *rewound* tree, so the
@@ -3285,7 +3420,7 @@ the two designs disagreed about the same thing rather than merely touching the s
 **The ADR numbers collided again, exactly as D-088 describes.** Both sides independently allocated
 D-082…D-091. `main`'s allocation keeps the numbers — it is the trunk, it merged first, and its ids
 are already cited from `BACKLOG.md`, `DEFERRED.md` and several modules. This branch's ten xTB ADRs
-renumber to **D-092…D-101**, and every citation moved with them: `BACKLOG.md` (the X-entries only —
+renumber to **D-095…D-104**, and every citation moved with them: `BACKLOG.md` (the X-entries only —
 `main`'s DA-5/DA-10/TOOL-6 rows keep theirs), `tasks/todo.md`, `tasks/lessons.md`,
 `calc/xtb_spec.py`, `agents/calc_tools.py`, `workflows/README.md`, `workers/README.md`, and the
 three xTB design docs. `tests/test_decision_log.py`, which `main` added *as the fix for the last
@@ -3295,14 +3430,14 @@ collision*, is what makes this checkable rather than reviewable — and it passe
 
 `main` added a prediction ledger (`calc/calibration.py`, D-090's gap IDEA-2) and hooked it into
 `predict_pka` and `predict_solubility` in `agents/calc_tools.py` — deliberately at the *tool* layer,
-"the boundary where a prediction becomes advice a chemist acts on". X8 (D-100) had moved both of
+"the boundary where a prediction becomes advice a chemist acts on". X8 (D-103) had moved both of
 those calculators to `mcp_servers/calc`. So the hook's stated principle and its location had come
 apart.
 
 Resolved by moving the hook, not by weakening either side: the MCP server's tool functions *are*
 the tool layer now, so `_log_prediction` lives there and hooks the same two calculators at the same
 boundary. It needs no ambient identity — the ledger is keyed on the canonical SMILES, not on who
-asked — so it crosses the D-100 line cleanly, which is the test that boundary was written to pass.
+asked — so it crosses the D-103 line cleanly, which is the test that boundary was written to pass.
 `report_measurement` and `calculator_trust` stay in-process: they record and score, they do not
 compute, and nothing about them is a calculator.
 
@@ -3313,23 +3448,23 @@ production backend.
 ### The registry absorbed four workflows rather than being replaced by them
 
 `workers/background_worker.py` was the sharpest conflict: this branch reads what it serves from the
-registry (D-096), `main` restored the hand-maintained lists and *added four modules to them* —
+registry (D-099), `main` restored the hand-maintained lists and *added four modules to them* —
 `audit_verify`, `digest`, `note_index`, `retention`. Taking the registry naively would have dropped
 four workflows and six activities on the floor, silently, which is the exact failure mode the
 registry exists to prevent.
 
-So the four modules were decorated at their definition sites, which is what D-096 says adding a
+So the four modules were decorated at their definition sites, which is what D-099 says adding a
 durable capability means. Then the resolution was *verified rather than asserted*: the registry's
 served sets were diffed against `main`'s explicit lists, and they are equal — fourteen workflows and
 twenty-four activities, nothing missing and nothing extra. A merge that claims to preserve a
 capability list should prove it against the list it replaced.
 
 **One thing the merge caught that the branch had missed.** `mcp_servers/calc/server.py`'s
-`predict_pka` docstring still described the tool as O-H/S-H only — stale since D-101 added
+`predict_pka` docstring still described the tool as O-H/S-H only — stale since D-104 added
 aromatic-nitrogen bases and the aliphatic refusal. The agent reads that docstring, so it was the
 one place the X11 result had not actually shipped. Corrected here.
 
-## D-103 — Heavy review of the xTB layer: five defects the tests did not catch
+## D-106 — Heavy review of the xTB layer: five defects the tests did not catch
 
 A full read of the branch's 12k lines against `main`. The green suite was not evidence:
 every defect below sits in a path the tests exercised from the wrong side, and three of
@@ -3372,7 +3507,7 @@ ensemble was keyed as tblite's while crest did the work.
 Both are fixed by one seam: `calc_version()` is now an overridable method, and `CrestSpec`
 overrides it to key on crest's build and drops `engine` from the key entirely, with
 `for_structure` a no-op. The honest consequence is now *stated* rather than hidden: an
-open-shell CREST search gets no D-095 spin-polarization fallback, because there is nowhere
+open-shell CREST search gets no D-098 spin-polarization fallback, because there is nowhere
 to fall back to. `ComplexSpec` additionally propagates its engine into the `OptSpec` its
 three optimizations use, which they previously re-resolved independently.
 
@@ -3404,3 +3539,65 @@ model-supplied, so not a boundary breach, but a rule with a quiet exception is n
 It is the mirror of the error the cost model fixed at the large end. Recorded rather than
 re-fitted, because fixing it properly means measuring CREST's startup across sizes, which
 is a measurement session and not a review edit.
+
+## D-107 — Fifth reconciliation with `main` (PR #31): a unit boundary and a sign, both silent
+
+`main` landed D-092's process/analytical calculators — logD, developability descriptors, a
+reaction exotherm screen, a Boltzmann conformer ensemble — plus two CI fixes, while this
+branch was under review. Seven files conflicted. The textual ones were routine. Two were
+not, and neither would have failed a test on either branch alone: each is a defect that
+exists **only in the combination**.
+
+**The ADR numbers collided for the third time**, so this branch shifts again, D-092…D-103
+to **D-095…D-106**. `main` keeps its allocation, as in D-105. This is now a recurring cost
+of parallel branches rather than an accident, and `tests/test_decision_log.py` catches it
+every time — which is the argument for the check existing, not against the practice.
+
+### The unit boundary: `geometry()` returned different units on the two branches
+
+X1 made `calc.xtb_engine` the **single unit boundary** — Angstrom above it, Bohr only
+inside, conversion in `make_calculator`/`evaluate_point`. `main` never had that change, so
+its `geometry()` returns Bohr and its `gfn2_energy` consumes Bohr, which is self-consistent
+*there*. It also added `positions_bohr`, a genuinely useful helper for reading one conformer
+of a multi-conformer embedding by id, which `calc.conformer_ensemble` feeds straight into
+`gfn2_energy`.
+
+Merged naively, that helper hands Bohr to a function which on this branch multiplies by
+1.8897 — every ensemble geometry inflated by that factor, energies wrong and entirely
+plausible. Resolved by keeping the boundary and renaming the helper to
+`conformer_positions`, returning Angstrom: the name now states the unit, which is what stops
+the next person reintroducing it. Pinned by a test that asserts water's O-H is ~0.96 and not
+~1.81 — two numbers no one can confuse.
+
+### The sign: logD took the acid form for a base
+
+`calc.logd` composes `predict_logd` from Crippen LogP and `calc.pka` via
+Henderson-Hasselbalch, and hard-coded `logD = clogP - log10(1 + 10**(pH - pKa))`. That is the
+**acid** form, and it was correct when written: `calc.pka` covered acids only and *raised*
+for a base.
+
+X11 widened `calc.pka` to aromatic and aryl nitrogen. Pyridine stopped raising and started
+flowing into the acid formula, where the ionized fraction rises with pH instead of falling.
+Measured: pyridine at pH 7.4 came out at **-0.92 against a clogP of 1.08** — two full log
+units too lipophobic, for a base that is >99% neutral at that pH, and nothing raised.
+`predict_logd` now branches on `PkaResult.site`, which is the field that makes the two
+distinguishable and the reason it exists.
+
+The general lesson is worth more than the fix: **widening a domain is a breaking change to
+every consumer that encoded the old one**, even though nothing about its signature changed.
+`calc.pka` gained a capability; `calc.logd` silently lost its correctness.
+
+### Two implementations of two capabilities now coexist, deliberately
+
+`calc.conformer_ensemble` (RDKit ETKDG + MMFF prune + GFN2 single points) alongside
+`calc.conformers` (CREST metadynamics, rotamer degeneracies, conformational entropy); and
+`calc.reaction_energy` (cached single points, stoichiometric coefficients, exotherm flag)
+alongside `calc.reaction` (optimizes every species, Hessians, ΔH/ΔG, balance enforced).
+
+Both pairs are kept, and neither was deleted, because the choice is a product decision rather
+than a merge decision. They are also genuinely different: the CREST search needs an optional
+binary and costs minutes; the ETKDG ensemble is dependency-free and always available. The
+exotherm screen is a hazard flag on unoptimized geometries; the reaction composite is a
+thermodynamic answer that refuses an unbalanced equation. The tool names do not collide, so
+the registry is satisfied. **What is owed is a decision, not a merge**: `BACKLOG.md` carries
+it as an open item rather than this ADR pretending it was resolved.

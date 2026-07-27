@@ -6,6 +6,7 @@ description: >-
   suggest_next_experiment, and presenting the proposal as something a human still runs.
 tools:
   - suggest_next_experiment
+  - generate_screening_design
   - propose_knowledge_note
 ---
 
@@ -74,3 +75,14 @@ A fully automated loop that proposes, evaluates its own objective, and iterates 
 human in each round. It is durable and long-running, so it returns a job id immediately; poll it
 with `get_durable_job_status`. Set `publish_to_graph` when the recommendation should be proposed as
 a PR-gated note rather than only reported in chat.
+
+## The other DoE question: a categorical screen, not an adaptive suggestion
+
+`suggest_next_experiment` and `start_optimization_campaign` both propose points *adaptively*, one
+batch at a time. Sometimes the real ask is the classical, complete-up-front design instead —
+"give me every combination of these catalyst/solvent/base choices to screen" before narrowing to
+BO. That is `generate_screening_design(problem)`: a full-factorial design over the problem's
+*categorical* parameters only. It raises if `problem` names a continuous parameter (temperature,
+equivalents) rather than silently dropping it — reformulate a continuous factor as discrete levels
+(e.g. "low"/"high") to include it, or use the adaptive tools instead if the space is genuinely
+continuous. Present the returned runs as a batch a human executes, exactly like a BO suggestion.
