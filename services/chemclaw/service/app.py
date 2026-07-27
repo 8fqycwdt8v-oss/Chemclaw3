@@ -447,9 +447,7 @@ def create_app(
     # One agent — and therefore one chat client — per concurrent turn (D-123). The cached
     # `_agent()` below still serves everything that does not stream; only a streaming turn needs
     # exclusivity, because that is where the Anthropic client keeps tool-call identity on itself.
-    app.state.agent_pool = AgentPool(
-        app.state.agent_factory, settings.service_max_concurrent_turns
-    )
+    app.state.agent_pool = AgentPool(app.state.agent_factory, settings.service_max_concurrent_turns)
     # Admission control on concurrent turns (AG-15): a bounded permit set caps how many turns
     # hit the shared LLM endpoint at once. A permit is held for a turn's whole streamed run; a
     # turn that cannot get one within the admission timeout is shed with 503. Built here so it
