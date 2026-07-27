@@ -14,21 +14,24 @@ from temporalio.common import WorkflowIDReusePolicy
 from temporalio.exceptions import WorkflowAlreadyStartedError
 from temporalio.worker import Worker
 
+import agents.job_status as job_status
 import agents.qm_tools as qm_tools
-from agents.qm_tools import get_qm_job_status, submit_qm_job
+from agents.job_status import get_job_status
+from agents.qm_tools import submit_qm_job
 from chemclaw.config import settings
 from tests.temporal_env import QM_ACTIVITIES, pydantic_client, start_env_or_skip
 from workflows.qm_job import QMJobWorkflow
 
 
 def test_submit_returns_id_and_status_yields_result(monkeypatch: pytest.MonkeyPatch) -> None:
-    """submit_qm_job returns an id immediately; get_qm_job_status later has the result."""
+    """submit_qm_job returns an id immediately; get_job_status later has the result."""
 
     async def _run() -> None:
         async with await start_env_or_skip() as env:
             client = pydantic_client(env)
             # The tools open their own client via connect(); point it at the env.
             monkeypatch.setattr(qm_tools, "connect", lambda: _ready(client))
+            monkeypatch.setattr(job_status, "connect", lambda: _ready(client))
 
             async with Worker(
                 client,
@@ -45,16 +48,17 @@ def test_submit_returns_id_and_status_yields_result(monkeypatch: pytest.MonkeyPa
 
                 # Wait for completion, then status carries the parsed result.
                 await client.get_workflow_handle(job_id).result()
-                status = await get_qm_job_status(job_id)
+                status = await get_job_status(job_id)
                 assert status.status == WorkflowExecutionStatus.COMPLETED.name
-                assert status.result is not None
-                assert status.result.molecule_smiles == "CCO"
+                assert status.kind == "qm"
+                assert status.qm_result is not None
+                assert status.qm_result.molecule_smiles == "CCO"
 
                 # Idempotent after completion too (D-011): the stored result is
                 # returned by id, never recomputed by a fresh workflow run.
                 after_done = await submit_qm_job("CCO", "B3LYP", "def2-SVP")
                 assert after_done == job_id
-                still_done = await get_qm_job_status(job_id)
+                still_done = await get_job_status(job_id)
                 assert still_done.status == WorkflowExecutionStatus.COMPLETED.name
 
     asyncio.run(_run())
@@ -68,9 +72,9 @@ def test_status_of_unknown_job_raises() -> None:
             client = pydantic_client(env)
             import unittest.mock as mock
 
-            with mock.patch.object(qm_tools, "connect", lambda: _ready(client)):
-                with pytest.raises(ValueError, match="no QM job"):
-                    await get_qm_job_status("qm-does-not-exist")
+            with mock.patch.object(job_status, "connect", lambda: _ready(client)):
+                with pytest.raises(ValueError, match="no calculation job"):
+                    await get_job_status("qm-does-not-exist")
 
     asyncio.run(_run())
 
@@ -257,9 +261,12 @@ def test_status_of_foreign_workflow_is_clear_error(monkeypatch: pytest.MonkeyPat
     async def _fake_connect() -> Any:
         return _FakeClient()
 
-    monkeypatch.setattr(qm_tools, "connect", _fake_connect)
-    with pytest.raises(ValueError, match="not a QM job"):
-        asyncio.run(get_qm_job_status("bo-campaign-1"))
+    monkeypatch.setattr(job_status, "connect", _fake_connect)
+    # A BO campaign id carries no QM prefix, so it is rejected before any deserialization — the
+    # id, not the payload, is what says which subsystem started this run. The message names the
+    # tool that *does* collect it, so a wrong call is one step from the right one.
+    with pytest.raises(ValueError, match="get_durable_job_status"):
+        asyncio.run(get_job_status("bo-campaign-1"))
 
 
 async def _ready(client: Client) -> Client:

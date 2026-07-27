@@ -32,11 +32,8 @@ from connectors.registry import connector_tool_names, discovered
 # `calc` connector's. Asserted against the union rather than against the agent's own list, because
 # where a tool *runs* is a deployment concern and where it is *reachable from* is the contract.
 _DOMAIN_TOOLS = {
-    "compute_xtb_energy",
-    "predict_solubility",
-    "predict_pka",
     "submit_qm_job",
-    "get_qm_job_status",
+    "get_job_status",
     "find_notes",
     "expand_note",
     "propose_knowledge_note",
@@ -114,11 +111,8 @@ def test_instructions_only_name_available_tools() -> None:
         "similar_reactions",
         "similar_molecules",
         "substructure_matches",
-        "compute_xtb_energy",
-        "predict_pka",
-        "predict_solubility",
         "submit_qm_job",
-        "get_qm_job_status",
+        "get_job_status",
         "suggest_next_experiment",
         "propose_knowledge_note",
         "record_confirmed_answer",

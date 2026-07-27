@@ -61,3 +61,42 @@ def test_nonexistent_configured_dir_is_reported(tmp_path: Path) -> None:
     good.write_text("---\nname: good-skill\ndescription: works\n---\nBody.\n", encoding="utf-8")
     problems = validate_skills([str(tmp_path / "real"), str(tmp_path / "typo")])
     assert any("typo" in p and "does not exist" in p for p in problems)
+
+
+def test_a_declared_tool_resolves_wherever_the_capability_lives() -> None:
+    """A skill names a capability; which process delivers it is a deployment decision.
+
+    Moving the calculators out to the `calc` connector — and the expensive ones on to its
+    durable jobs — changed no skill, because a declaration resolves against the whole
+    surface: in-process tools, every connector's MCP tools, and every declared job. If it
+    did not, moving a tool across the boundary would break every skill that teaches it,
+    which would make the deployment shape a property of the judgment layer.
+    """
+    from agents.skill_manifest import SkillManifest
+    from connectors.registry import connector_tool_names
+    from scripts.validate_skills import _dependency_problems
+
+    out_of_process = set(connector_tool_names())
+    assert "predict_pka" in out_of_process  # a connector MCP tool
+    assert "compute_reaction_energy" in out_of_process  # a connector *job*
+
+    manifest = SkillManifest(
+        name="probe",
+        description="probe",
+        # One connector MCP tool, one connector job, one in-process tool.
+        tools=["predict_pka", "compute_reaction_energy", "gather_evidence"],
+    )
+    assert _dependency_problems(Path("probe/SKILL.md"), manifest) == []
+
+
+def test_an_invented_tool_is_still_rejected() -> None:
+    """Widening the lookup must not weaken it: an unknown name is still a failure."""
+    from agents.skill_manifest import SkillManifest
+    from scripts.validate_skills import _dependency_problems
+
+    problems = _dependency_problems(
+        Path("probe/SKILL.md"),
+        SkillManifest(name="probe", description="probe", tools=["no_such_tool"]),
+    )
+    assert len(problems) == 1
+    assert "no_such_tool" in problems[0]

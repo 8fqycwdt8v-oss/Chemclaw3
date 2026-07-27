@@ -10,7 +10,9 @@ without any credentials or database. It answers one concrete question end to end
 
 Every store is in-memory and the knowledge graph is a temp directory, seeded here; the tools
 (`gather_evidence`, `find_similar_reactions`, `predict_solubility`, `suggest_next_experiment`)
-are the real ones, wired through the module seams tests use.
+are the real ones, wired through the module seams tests use — `predict_solubility` now from
+the `calc` connector bundle, which is where the calculators live now that they run in their
+own process.
 
 Run: `python -m examples.research_demo`.
 """

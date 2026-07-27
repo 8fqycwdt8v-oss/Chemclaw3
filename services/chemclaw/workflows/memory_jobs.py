@@ -26,6 +26,7 @@ with workflow.unsafe.imports_passed_through():
         build_playbook_notes,
     )
     from sources.registry import active_ingest_sources
+    from workflows.registry import durable_activity, durable_workflow
 
 from workflows.orchestrator import fan_out
 from workflows.publish import BAD_DATA_RETRY, note_publish_retry
@@ -59,30 +60,35 @@ async def _all_reactions() -> list[OrdReaction]:
     return reactions
 
 
+@durable_activity("background")
 @activity.defn
 async def build_campaign_notes_activity() -> list[Note]:
     """Detect reaction chains across the corpus and build (not publish) one campaign note each."""
     return build_campaign_notes(await _all_reactions())
 
 
+@durable_activity("background")
 @activity.defn
 async def build_playbook_notes_activity() -> list[Note]:
     """Distil cross-project candidates across the corpus and build a playbook note per candidate."""
     return build_playbook_notes(await _all_reactions())
 
 
+@durable_activity("background")
 @activity.defn
 async def build_optimization_notes_activity() -> list[Note]:
     """Group same-transformation runs across the corpus and build an optimization note per group."""
     return build_optimization_notes(await _all_reactions())
 
 
+@durable_activity("background")
 @activity.defn
 async def publish_memory_note_activity(note: Note) -> str:
     """PR-gate one already-built memory note; return its reference (the fan-out publish step)."""
     return await propose_note(note, default_submitter())
 
 
+@durable_workflow("background")
 @workflow.defn
 class PublishNoteWorkflow:
     """Publish one memory note through the PR-gate — the fan-out unit of a synthesis job (F10-D2).
@@ -118,6 +124,7 @@ async def _synthesize(build_activity: Any, id_prefix: str) -> list[str]:
     return await fan_out(PublishNoteWorkflow, notes, id_prefix=id_prefix)
 
 
+@durable_workflow("background")
 @workflow.defn
 class CampaignSynthesisWorkflow:
     """Run episodic campaign synthesis durably; return the proposed note references."""
@@ -128,6 +135,7 @@ class CampaignSynthesisWorkflow:
         return await _synthesize(build_campaign_notes_activity, "campaign")
 
 
+@durable_workflow("background")
 @workflow.defn
 class PlaybookDistillationWorkflow:
     """Run semantic playbook distillation durably; return the proposed note references."""
@@ -138,6 +146,7 @@ class PlaybookDistillationWorkflow:
         return await _synthesize(build_playbook_notes_activity, "playbook")
 
 
+@durable_workflow("background")
 @workflow.defn
 class OptimizationCampaignWorkflow:
     """Run episodic optimization-campaign grouping durably; return the proposed note references."""

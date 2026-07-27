@@ -1,14 +1,13 @@
 """The `background-jobs` worker (plan step 1.8).
 
-Hosts core's light, long-running background jobs — the ELN sync, the memory-synthesis and report
-workflows, the periodic maintenance jobs — plus `ConnectorJobWorkflow`, the generic wrapper every
-connector job runs inside. Run it with `python -m workers.background_worker` (after `make up`). Kept
-separate from the HPC worker so heavy and light work scale independently (D-006).
+Hosts light, long-running background jobs: ELN sync, note re-indexing, reports, the
+generic connector-job wrapper and template runs. Run it with
+`python -m workers.background_worker` (after `make up`). Kept separate from the HPC
+worker so heavy and light work scale independently on their own queues (D-006).
 
-A *connector's* own workflows are deliberately absent: they are served by that bundle's worker on
-its own queue (`connectors/bo/worker.py` is the first), and core reaches them by workflow type name
-through the wrapper. That is why adding a durable capability no longer adds a line to the lists
-below.
+A *connector's* own workflows are not here: they run on the bundle's own worker and
+queue (`connectors/bo/worker.py` on `connector-bo`), which is the point of the seam —
+this worker never imports a capability's dependency closure.
 """
 
 import asyncio
@@ -21,100 +20,37 @@ from temporalio.worker import Worker
 from chemclaw.config import settings
 from chemclaw.logging import configure_logging, configure_telemetry
 from chemclaw.temporal_client import connect
-from workflows.audit_verify import AuditChainVerifyWorkflow, check_audit_chain
-from workflows.connector_job import ConnectorJobWorkflow
-from workflows.digest import DigestWorkflow, acknowledge_digest, collect_digests
-from workflows.eln_sync import (
-    ElnSyncWorkflow,
-    list_ingest_sources,
-    load_sync_cursor,
-    store_sync_cursor,
-    sync_eln_entries,
-)
-from workflows.eval_drift import EvalDriftWorkflow, check_eval_drift
-from workflows.interaction_approval import (
-    InteractionApprovalWorkflow,
-    propose_confirmed_answer_activity,
-)
-from workflows.knowledge import write_knowledge_node
-from workflows.memory_jobs import (
-    CampaignSynthesisWorkflow,
-    OptimizationCampaignWorkflow,
-    PlaybookDistillationWorkflow,
-    PublishNoteWorkflow,
-    build_campaign_notes_activity,
-    build_optimization_notes_activity,
-    build_playbook_notes_activity,
-    publish_memory_note_activity,
-)
-from workflows.note_index import NoteReindexWorkflow, reindex_notes_activity
-from workflows.notify import record_session_event_activity
-from workflows.orchestrator import resolve_fan_out_limit
-from workflows.report_workflow import (
-    DevelopmentReportWorkflow,
-    ReportSectionWorkflow,
-    propose_report,
-    retrieve_section,
-)
-from workflows.retention import RetentionWorkflow, prune_expired_rows
-from workflows.template_activities import run_agent_step, run_tool_step
-from workflows.template_job import TemplateWorkflow
+
+# Importing the modules is what registers their workflows and activities (the same
+# side-effect pattern `agents.chemclaw_agent` uses for tools). With the registry
+# populated, the sets this worker serves come from it — so adding a durable capability
+# to one of these modules is a decorator at its definition site, not an edit here.
+from workflows import audit_verify as _audit_verify  # noqa: F401
+from workflows import connector_job as _connector_job  # noqa: F401
+from workflows import digest as _digest  # noqa: F401
+from workflows import eln_sync as _eln_sync  # noqa: F401
+from workflows import eval_drift as _eval_drift  # noqa: F401
+from workflows import interaction_approval as _interaction_approval  # noqa: F401
+from workflows import knowledge as _knowledge  # noqa: F401
+from workflows import memory_jobs as _memory_jobs  # noqa: F401
+from workflows import note_index as _note_index  # noqa: F401
+from workflows import notify as _notify  # noqa: F401
+from workflows import orchestrator as _orchestrator  # noqa: F401
+from workflows import report_workflow as _report_workflow  # noqa: F401
+from workflows import retention as _retention  # noqa: F401
+from workflows import template_activities as _template_activities  # noqa: F401
+from workflows import template_job as _template_job  # noqa: F401
+from workflows.registry import describe, registered_activities, registered_workflows
 
 logger = logging.getLogger(__name__)
 
-# The workflows and activities this worker serves on the background-jobs queue. Module-level
-# so the registration is one list (and directly assertable in tests), not buried in main().
-BACKGROUND_WORKFLOWS: list[type] = [
-    ElnSyncWorkflow,
-    CampaignSynthesisWorkflow,
-    PlaybookDistillationWorkflow,
-    OptimizationCampaignWorkflow,
-    PublishNoteWorkflow,
-    DevelopmentReportWorkflow,
-    ReportSectionWorkflow,
-    InteractionApprovalWorkflow,
-    EvalDriftWorkflow,
-    NoteReindexWorkflow,
-    RetentionWorkflow,
-    AuditChainVerifyWorkflow,
-    DigestWorkflow,
-    # The generic wrapper every connector job runs inside. It keeps the cross-cutting concerns
-    # (idempotency, actor attribution, PR-gate publish, session push-back) in core while the
-    # connector's own worker serves the child workflow — so a new durable capability adds a manifest
-    # entry, never a line in this list.
-    ConnectorJobWorkflow,
-    # Core's step sequencer. Like the wrapper above it is generic: a new template is a file, never
-    # a line here.
-    TemplateWorkflow,
-]
-BACKGROUND_ACTIVITIES: Sequence[Callable[..., Any]] = [
-    write_knowledge_node,
-    list_ingest_sources,
-    sync_eln_entries,
-    load_sync_cursor,
-    store_sync_cursor,
-    build_campaign_notes_activity,
-    build_playbook_notes_activity,
-    build_optimization_notes_activity,
-    publish_memory_note_activity,
-    retrieve_section,
-    propose_report,
-    propose_confirmed_answer_activity,
-    reindex_notes_activity,
-    prune_expired_rows,
-    check_audit_chain,
-    collect_digests,
-    acknowledge_digest,
-    record_session_event_activity,
-    check_eval_drift,
-    resolve_fan_out_limit,
-    run_tool_step,
-    run_agent_step,
-]
+# What this worker serves, read from the registry rather than restated here.
+BACKGROUND_WORKFLOWS: list[type] = registered_workflows("background")
+BACKGROUND_ACTIVITIES: Sequence[Callable[..., Any]] = registered_activities("background")
 
 
 async def main() -> None:
-    """Connect and poll the background-jobs queue for core's jobs and the connector-job wrapper."""
+    """Connect and poll the background-jobs queue: graph writes, ELN sync, jobs, templates."""
     configure_logging()
     configure_telemetry()
     client = await connect()
@@ -125,11 +61,11 @@ async def main() -> None:
         activities=BACKGROUND_ACTIVITIES,
     )
     logger.info(
-        "background worker connected: address=%s namespace=%s queue=%s workflows=%s",
+        "background worker connected: address=%s namespace=%s queue=%s %s",
         settings.temporal_address,
         settings.temporal_namespace,
         settings.background_task_queue,
-        [w.__name__ for w in BACKGROUND_WORKFLOWS],
+        describe("background"),
     )
     await worker.run()
 

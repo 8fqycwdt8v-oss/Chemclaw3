@@ -23,6 +23,7 @@ from the declared
 would advertise "pass anything", which is precisely how a model calls a tool wrongly.
 """
 
+import asyncio
 from collections.abc import Callable
 from importlib import import_module
 from typing import Any, cast
@@ -40,7 +41,7 @@ from chemclaw.config import settings
 from chemclaw.ids import stable_hash
 from chemclaw.temporal_client import connect
 from connectors.manifest import JobParamType, JobSpec
-from workflows.connector_job import ConnectorJobInput, ConnectorJobWorkflow
+from workflows.connector_job import ConnectorJobInput, ConnectorJobResult, ConnectorJobWorkflow
 
 # The declared parameter types, mapped to the annotations the generated model is built from.
 # Closed by design (see `JobParamType`): every entry is a type a JSON-schema-driven model can
@@ -179,14 +180,24 @@ def _docstring(job: JobSpec) -> str:
         # schema MAF derives from it), so repeating them here would be a second, drift-prone
         # copy.
         lines.extend(["", "Args:", "    params: The job's launch arguments; see the field docs."])
-    lines.extend(
-        [
-            "",
-            "Returns:",
-            "    The job id to poll with `get_durable_job_status`. Re-launching with identical",
-            "    arguments returns the existing job id rather than starting a second run.",
-        ]
-    )
+    lines.extend(["", "Returns:"])
+    if job.inline_wait_seconds is not None:
+        lines.extend(
+            [
+                "    The finished result when the calculation completes quickly, or — when it is",
+                "    too slow to hold up the conversation — a job id to poll with",
+                "    `get_durable_job_status`. Both are normal outcomes: report a job id as work",
+                "    in progress, not as a failure. Re-running with identical arguments rejoins",
+                "    the existing run rather than paying twice.",
+            ]
+        )
+    else:
+        lines.extend(
+            [
+                "    The job id to poll with `get_durable_job_status`. Re-launching with identical",
+                "    arguments returns the existing job id rather than starting a second run.",
+            ]
+        )
     return "\n".join(lines)
 
 
@@ -219,7 +230,7 @@ def build_job_tool(connector: str, job: JobSpec) -> CapabilityTool:
     params_model = _params_model(connector, job)
     precondition = resolve_precondition(job.precondition) if job.precondition else None
 
-    async def launch(params: params_model) -> str:  # type: ignore[valid-type]
+    async def launch(params: params_model) -> str | ConnectorJobResult:  # type: ignore[valid-type]
         # Authorize the expensive trigger against the turn's user *before* any durable work
         # (F4-T5), so an autonomously-planned todo cannot start a costly run outside the user's
         # entitlements.
@@ -262,10 +273,26 @@ def build_job_tool(connector: str, job: JobSpec) -> CapabilityTool:
             )
         except WorkflowAlreadyStartedError:
             # The identical job is already running or already done: the idempotency contract
-            # succeeding, so hand back its id. Deliberately *not* announced as started — an
-            # already-finished run will never emit the matching `job_completed` event, and the
-            # surface would show a row that stays "running" forever (see `agents/qm_tools.py`).
+            # succeeding. When the job answers inline, the *already finished* case is the common
+            # one (a repeat of a cheap calculation) and rejoining it is what makes a re-ask feel
+            # like a cache hit rather than a poll; a still-running one falls through to its id.
+            if job.inline_wait_seconds is not None:
+                existing = await _await_briefly(
+                    client.get_workflow_handle(workflow_id, result_type=ConnectorJobResult),
+                    job.inline_wait_seconds,
+                )
+                if existing is not None:
+                    return existing
+            # Deliberately *not* announced as started — an already-finished run will never emit
+            # the matching `job_completed` event, and the surface would show a row that stays
+            # "running" forever (see `agents/qm_tools.py`).
             return workflow_id
+        if job.inline_wait_seconds is not None:
+            finished = await _await_briefly(handle, job.inline_wait_seconds)
+            if finished is not None:
+                # It answered inside the turn, so there is no background work to announce and
+                # nothing for the chemist to poll — the result *is* the tool's return value.
+                return finished
         record_job_started(handle.id, job.name)
         return handle.id
 
@@ -273,6 +300,25 @@ def build_job_tool(connector: str, job: JobSpec) -> CapabilityTool:
     launch.__qualname__ = job.name
     launch.__doc__ = _docstring(job)
     return launch
+
+
+async def _await_briefly(handle: Any, budget: float) -> ConnectorJobResult | None:
+    """Wait up to `budget` seconds for a started job, or `None` if it is still running.
+
+    `None` means "not finished yet", never "failed": a genuine workflow failure raises, so the
+    tool reports the error rather than silently degrading to a job id the chemist would poll
+    forever waiting for a run that is already dead.
+
+    The wait is cancel-safe by construction — `asyncio.wait_for` cancels only the *waiter*, and
+    the workflow it is waiting on keeps running on its worker. So a turn that times out or is
+    abandoned mid-wait leaves a durable run that still completes, still caches its result and
+    still pushes back to the session. That is the property that makes this safe to do inside a
+    conversation at all.
+    """
+    try:
+        return cast(ConnectorJobResult, await asyncio.wait_for(handle.result(), budget))
+    except TimeoutError:
+        return None
 
 
 def _detail(connector: str, payload: dict[str, Any]) -> str:

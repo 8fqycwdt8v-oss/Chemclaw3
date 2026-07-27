@@ -117,7 +117,7 @@ export with `make eln-validate`.
 ## (iv) Add a capability — a tool, a durable job, and their skills (a **connector**)
 
 A capability is a **connector bundle**: one folder declaring everything it contributes. There is no
-second mechanism — `CHEMCLAW_MCP_SERVERS` is gone (D-092).
+second mechanism — `CHEMCLAW_MCP_SERVERS` is gone (D-109).
 
 ```
 connectors/<name>/
@@ -138,7 +138,15 @@ connectors/<name>/
    (`summary`, `data`, optional `Note`); core's `ConnectorJobWorkflow` supplies the idempotent job
    id, the actor attribution, the PR-gate publish and the session push-back. A job declares its
    arguments inline (`params:`) or by reference (`params_model: module:Model`) when the input is a
-   structured domain object.
+   structured domain object. Mark it `expensive: true` to require a privileged role before any
+   durable work starts.
+   *If the same request is sometimes fast and sometimes slow* — a reaction energy over two small
+   species versus eight with Hessians — add `inline_wait_seconds: <n>`. The launcher then waits up
+   to that long and returns the result if it lands, or the job id if it does not, so one tool serves
+   both cases and the model never has to guess a cost. Keep `n` comfortably under
+   `CHEMCLAW_SERVICE_TURN_TIMEOUT_SECONDS`: the wait is spent inside a turn. Cancelling the turn does
+   not cancel the run — it completes, caches and pushes back regardless. `connectors/calc` is the
+   worked example (five jobs, one workflow, one queue, its own worker).
 3. Run `make connector-validate`. It checks the manifest, that declared skills/profiles exist (and
    that no undeclared ones are hiding in the bundle), the read-only tool surface, and that every
    job can actually be built.

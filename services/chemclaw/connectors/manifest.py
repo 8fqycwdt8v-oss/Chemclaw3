@@ -184,6 +184,25 @@ class JobSpec(BaseModel):
     precondition: str | None = Field(default=None, pattern=r"^[\w.]+:[A-Za-z_]\w*$")
     expensive: bool = False
     publish_to_graph: bool = False
+    # How long the launcher waits for the run to finish before handing back a job id instead.
+    # Unset (the default) means "always a job": start it, return the id, poll it.
+    #
+    # This exists for the capability whose cost varies by orders of magnitude with its input. A
+    # reaction energy over two small species is a couple of seconds and belongs *in* the answer;
+    # the same tool over eight species with Hessians is minutes and must not hold a conversation
+    # open. Declaring one number here lets one tool serve both, and the model sees a result or a
+    # job id without having to choose between two tools on a cost estimate it cannot make.
+    #
+    # Deliberately a wait on the real run rather than a predicted-cost threshold, which is what
+    # this replaced: a prediction is a second model of the calculation that can be wrong in both
+    # directions (a slow "cheap" call blocks the turn anyway; a fast "expensive" one is deferred
+    # for nothing), and it can only live where the cost model lives — which would put chemistry
+    # back in core, the exact coupling the seam removes. Elapsed time needs no model and is
+    # always right.
+    #
+    # Keep it comfortably under the front door's `service_turn_timeout_seconds`: this budget is
+    # spent inside a turn, and a job that outlives the turn is the failure it exists to prevent.
+    inline_wait_seconds: float | None = Field(default=None, gt=0)
 
     @model_validator(mode="after")
     def _one_way_to_declare_params(self) -> Self:

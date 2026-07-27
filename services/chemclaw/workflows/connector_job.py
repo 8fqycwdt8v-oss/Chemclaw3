@@ -39,6 +39,7 @@ with workflow.unsafe.imports_passed_through():
     from workflows.notify import notify_session_best_effort
 
 from workflows.publish import BAD_DATA_RETRY, publish_note_best_effort
+from workflows.registry import durable_workflow
 
 
 class ConnectorJobInput(BaseModel):
@@ -84,6 +85,10 @@ class ConnectorJobResult(BaseModel):
     note: Note | None = None
 
 
+# On the light queue: this wrapper does no work itself — it starts a child on the
+# connector's own queue and waits — so it belongs with the many light workers, not the few
+# heavy ones. The *capability* is heavy; this is not (D-006).
+@durable_workflow("background")
 @workflow.defn
 class ConnectorJobWorkflow:
     """Run one connector-owned workflow as a child, then publish and notify on its behalf."""

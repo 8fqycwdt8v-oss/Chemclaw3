@@ -43,6 +43,7 @@ from agents import attachments as _attachments  # noqa: F401
 from agents import dialogue_tools as _dialogue_tools  # noqa: F401
 from agents import durable_tools as _durable_tools  # noqa: F401
 from agents import graph_tools as _graph_tools  # noqa: F401
+from agents import job_status as _job_status  # noqa: F401
 from agents import memory_tools as _memory_tools  # noqa: F401
 from agents import preferences as _preferences  # noqa: F401
 from agents import qm_tools as _qm_tools  # noqa: F401
@@ -73,8 +74,12 @@ _INSTRUCTIONS = (
     "substructure_matches find analogous substrates or a functional group (then find_notes on "
     "a hit's SMILES to reach the reactions using it). "
     "(3) For properties use compute_xtb_energy / predict_pka / predict_solubility (inline, "
-    "cached); heavy QM goes through submit_qm_job (returns a job id — report it, poll with "
-    "get_qm_job_status). (4) To answer 'which experiment/condition next', call "
+    "cached). A bigger calculation — compute_reaction_energy, compare_solvents, "
+    "scan_coordinate, sample_conformers, compute_interaction_energy — answers inline when it "
+    "is quick and otherwise returns a job id: report the id as work in progress and poll it "
+    "with get_durable_job_status, which hands back the result once it lands. Heavy QM goes "
+    "through submit_qm_job (a job id too — poll that one with get_job_status). "
+    "(4) To answer 'which experiment/condition next', call "
     "suggest_next_experiment: build the decision space and the runs-so-far from the evidence "
     "you gathered, and it returns the point(s) to try next (proposals a human runs).\n"
     "Be proactive with tools, not just when asked to compute: when a question turns on a "

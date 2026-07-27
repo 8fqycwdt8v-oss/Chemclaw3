@@ -18,6 +18,7 @@ endpoint:
     mode: none
   tools:
     - suggest_next_experiment
+    - generate_screening_design
 
 jobs:
   - name: start_optimization_campaign

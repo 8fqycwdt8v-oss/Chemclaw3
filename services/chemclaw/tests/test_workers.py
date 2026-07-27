@@ -33,6 +33,30 @@ def test_background_worker_registers_eln_sync_with_cursor_activities() -> None:
         assert activity in BACKGROUND_ACTIVITIES
 
 
+def test_the_calc_connectors_worker_serves_every_expensive_xtb_task() -> None:
+    """One durable job on the bundle's own queue serves all five expensive calculations.
+
+    A CREST search or a multi-species reaction is minutes of saturated CPU, which is why it
+    is durable at all (D-006). What changed is *whose* worker runs it: `connector-calc`, so
+    the queue can be sized for this capability alone and core's workers never load `tblite`
+    or the `xtb`/`crest` binaries. The five tasks share one workflow — `XtbJobSpec` is a
+    closed union discriminated on `kind` — so the queue choice is made once, not per
+    capability.
+    """
+    from connectors.calc.worker import CALC_ACTIVITIES, CALC_WORKFLOWS, TASK_QUEUE
+    from connectors.calc.workflows import CalcJobWorkflow
+    from connectors.registry import discovered
+
+    assert CalcJobWorkflow in CALC_WORKFLOWS
+    assert CALC_ACTIVITIES  # a workflow with no activity would be a wiring bug, not a design
+    # The queue is a contract with the manifest, not a local constant: a drift between them
+    # is a job that starts and is never picked up.
+    _, manifest = discovered()["calc"]
+    jobs = manifest.jobs
+    assert jobs and {job.task_queue for job in jobs} == {TASK_QUEUE}
+    assert {job.workflow for job in jobs} == {"CalcJobWorkflow"}
+
+
 def test_registration_lists_have_no_duplicates() -> None:
     """No workflow or activity is registered twice on either worker (wiring-drift guard)."""
     for workflows in (HPC_WORKFLOWS, BACKGROUND_WORKFLOWS):

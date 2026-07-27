@@ -23,8 +23,10 @@ import asyncio
 
 from mcp.server.fastmcp import FastMCP
 
-from bo.engine import initial_candidates, propose_candidates
-from bo.problem import Candidate, Observation, OptimizationProblem
+from bo.engine import factorial_design, initial_candidates, propose_candidates
+from bo.featurize import featurize_problem
+from bo.problem import Candidate, Observation, OptimizationProblem, ScreeningDesign
+from calc.postgres_store import default_store
 
 server = FastMCP("bo")
 
@@ -48,9 +50,16 @@ async def suggest_next_experiment(
     rests on real history. Mark each observation's `provenance` "measured" for lab data or
     "predicted" if it came from a model, keeping the campaign honest.
 
+    **When a categorical choice is a molecule** — a ligand, base, solvent, or catalyst — give
+    its `structures` (a mapping from each category label to its SMILES). Each option is then
+    described by computed electronic descriptors instead of being an opaque label, so the
+    model can reason about an option nobody has run yet rather than only about the ones with
+    data. This costs one fast calculation per option and is cached thereafter.
+
     Args:
         problem: The decision variables (continuous/categorical) and the single objective
-            (name + minimize/maximize).
+            (name + minimize/maximize). Set a categorical's `structures` when its options are
+            molecules.
         observations: Runs already done, each mapping the parameter values to the objective
             value. Omit or pass an empty list to get seed points for a fresh campaign.
         count: How many candidates to propose (a batch).
@@ -58,7 +67,36 @@ async def suggest_next_experiment(
     Returns:
         The proposed candidate point(s), each a mapping of parameter name to value.
     """
+    # Featurize before the engine sees the problem: descriptors change how the surrogate
+    # models the categorical space, so this must happen for the seeding path too — otherwise
+    # a problem that declares structures would silently fall back to an opaque category.
+    featurized = await featurize_problem(default_store(), problem)
     history = observations or []
     if history:
-        return await asyncio.to_thread(propose_candidates, problem, history, count)
-    return await asyncio.to_thread(initial_candidates, problem, count)
+        return await asyncio.to_thread(propose_candidates, featurized, history, count)
+    return await asyncio.to_thread(initial_candidates, featurized, count)
+
+
+@server.tool()
+async def generate_screening_design(problem: OptimizationProblem) -> ScreeningDesign:
+    """Generate a full-factorial screening design over categorical conditions.
+
+    Use this for the *other* classical DoE question — "run every combination of these discrete
+    choices" — e.g. every catalyst x solvent x base combination before narrowing to a BO campaign,
+    or a robustness matrix of discrete method parameters. This is a complete, up-front design a
+    human runs as a batch; it does not adapt to results the way `suggest_next_experiment` does.
+
+    Only categorical parameters are supported: a continuous parameter (temperature, equivalents)
+    raises rather than being silently ignored from the design. Discretize it into levels first
+    (e.g. temperature as "low"/"high") if it belongs in the screen, or use
+    `suggest_next_experiment` for a continuous decision space.
+
+    Args:
+        problem: The decision variables (categorical only) and the objective (its direction is
+            not used by a screening design, but the same `OptimizationProblem` shape is reused so
+            observations from the screen can seed a follow-up `suggest_next_experiment` campaign).
+
+    Returns:
+        Every combination of the categorical levels, one dict of parameter name to value per run.
+    """
+    return await asyncio.to_thread(factorial_design, problem)

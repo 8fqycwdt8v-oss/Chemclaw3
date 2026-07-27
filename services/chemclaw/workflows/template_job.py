@@ -39,6 +39,7 @@ with workflow.unsafe.imports_passed_through():
     )
 
 from workflows.publish import BAD_DATA_RETRY
+from workflows.registry import durable_workflow
 
 
 class TemplateRunInput(BaseModel):
@@ -71,6 +72,9 @@ class TemplateRunResult(BaseModel):
     result: Any = None
 
 
+# On the light queue: the sequencer only substitutes references and dispatches. Whatever
+# weight a step carries is the tool's, the job's child workflow's, or the model turn's.
+@durable_workflow("background")
 @workflow.defn
 class TemplateWorkflow:
     """Run a template's steps in order, durably, and return every step's result."""

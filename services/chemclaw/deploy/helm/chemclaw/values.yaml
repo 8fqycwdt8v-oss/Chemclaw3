@@ -84,6 +84,11 @@ connectors:
   calc:
     enabled: true
     replicas: 1
+    # The expensive calculations (reaction energies, solvent screens, scans, CREST searches) run
+    # as durable jobs on this bundle's own queue, so it gets a worker Deployment too. Sizing it
+    # separately from core's `hpc` worker is the point: this is the only pod that needs the
+    # `xtb`/`crest` binaries and the CPU to saturate with them.
+    worker: true
   bo:
     enabled: true
     replicas: 1

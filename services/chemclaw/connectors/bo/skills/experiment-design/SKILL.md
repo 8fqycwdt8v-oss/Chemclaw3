@@ -6,6 +6,7 @@ description: >-
   suggest_next_experiment, and presenting the proposal as something a human still runs.
 tools:
   - suggest_next_experiment
+  - generate_screening_design
   - propose_knowledge_note
 ---
 
@@ -24,11 +25,35 @@ you hand it, so most of the work is framing, not the call.
    time, equivalents, concentration) with realistic bounds, categorical (solvent, catalyst,
    base) with the specific options in play. Do not invent variables the lab cannot set, and
    keep bounds physically sane.
+
+   **When a categorical option is a molecule, give its structure.** Set the parameter's
+   `structures` (category label → SMILES) for ligands, bases, solvents and catalysts. Each
+   option is then described by computed electronic descriptors instead of being an opaque
+   label, which is what lets the model say anything at all about an option nobody has run:
+   without it the surrogate's prediction for an untried ligand is just the average of the
+   ones you did run. It costs one fast calculation per option, cached thereafter. Two limits
+   worth stating to the user: the descriptors are **electronic only** — two ligands differing
+   mainly in bulk look similar — and a wrong SMILES silently describes the wrong molecule, so
+   only supply structures you are sure of.
 3. **Seed with real runs.** Gather the transformation's history (`find_similar_reactions`, an
    `optimization-campaign` note) and turn each run into an observation: its conditions →
    objective value. Mark `provenance` "measured" for lab data, "predicted" if you filled a
    value from a model. With no runs on file, the tool returns space-filling seed points — say
    the campaign is starting cold.
+
+## Narrowing a categorical space before you frame it
+
+When the user brings more candidate options than the campaign can carry — twelve ligands, eight
+bases, a substrate scope — the choice of *which* to put in the design is itself a decision, and
+it is made before the tool is called. A fast electronic ranking
+(`compute_electronic_properties`, `predict_site_reactivity`; judgment in
+`reactivity-descriptors`) is a legitimate way to shortlist, because ranking is what a
+semiempirical method is actually good at and the cost of being wrong is one wasted run.
+
+Two conditions on doing this. Say that the shortlist came from a calculation, not from data, so
+the user can overrule it. And keep at least one option in the design that the ranking did *not*
+favour — a campaign seeded only with what a model already liked cannot discover that the model
+was wrong.
 
 ## Call and present
 
@@ -50,3 +75,14 @@ A fully automated loop that proposes, evaluates its own objective, and iterates 
 human in each round. It is durable and long-running, so it returns a job id immediately; poll it
 with `get_durable_job_status`. Set `publish_to_graph` when the recommendation should be proposed as
 a PR-gated note rather than only reported in chat.
+
+## The other DoE question: a categorical screen, not an adaptive suggestion
+
+`suggest_next_experiment` and `start_optimization_campaign` both propose points *adaptively*, one
+batch at a time. Sometimes the real ask is the classical, complete-up-front design instead —
+"give me every combination of these catalyst/solvent/base choices to screen" before narrowing to
+BO. That is `generate_screening_design(problem)`: a full-factorial design over the problem's
+*categorical* parameters only. It raises if `problem` names a continuous parameter (temperature,
+equivalents) rather than silently dropping it — reformulate a continuous factor as discrete levels
+(e.g. "low"/"high") to include it, or use the adaptive tools instead if the space is genuinely
+continuous. Present the returned runs as a batch a human executes, exactly like a BO suggestion.

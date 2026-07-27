@@ -10,7 +10,7 @@ channel (F3-T3).
 
 **This shape is superseded and this module is shrinking.** The BO campaign that used to be its
 second tool now lives in the `bo` connector bundle, declared as one `jobs:` entry over the
-generic `ConnectorJobWorkflow` (D-093) — which is where a *new* durable capability goes. The
+generic `ConnectorJobWorkflow` (D-110) — which is where a *new* durable capability goes. The
 report follows when its workflow moves into a bundle and returns the `ConnectorJobResult`
 envelope directly; until then converting it would mean either changing a tested workflow's
 return type for no functional gain or wrapping it a third time. `get_durable_job_status` stays
@@ -18,7 +18,9 @@ here for good: it is generic over every durable job, connector-owned or not.
 """
 
 from datetime import UTC, datetime
+from typing import Any
 
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from temporalio.client import WorkflowExecutionStatus
 from temporalio.common import WorkflowIDReusePolicy
 from temporalio.exceptions import WorkflowAlreadyStartedError
@@ -32,8 +34,27 @@ from chemclaw.config import settings
 from chemclaw.ids import stable_hash
 from chemclaw.temporal_client import connect
 from report.harness import ReportRequest, ReportSection
+from workflows.connector_job import ConnectorJobResult
 from workflows.note_index import NoteReindexWorkflow
 from workflows.report_workflow import DevelopmentReportWorkflow
+
+
+class DurableJobStatus(BaseModel):
+    """What `get_durable_job_status` reports: where a job is, and what it produced.
+
+    A model rather than the bare status word it used to return, because the connector seam made
+    the follow-up question answerable: a job's result now arrives in one envelope
+    (`ConnectorJobResult`), so the tool that reports "completed" can hand over the result in the
+    same breath instead of leaving the model to ask again with no tool that answers.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    job_id: str
+    status: str
+    summary: str | None = None
+    result: dict[str, Any] = Field(default_factory=dict)
+
 
 # Terminal Temporal statuses map to one word the model can act on, so a tool result never leaks
 # SDK enum spelling into the conversation. Mirrors `qm_tools._STATUS`.
@@ -121,17 +142,44 @@ async def request_development_report(title: str, sections: list[ReportSection]) 
 
 
 @tool
-async def get_durable_job_status(job_id: str) -> str:
-    """Check a durable report or optimization campaign: `running`, `completed`, `failed`, ….
+async def get_durable_job_status(job_id: str) -> DurableJobStatus:
+    """Collect a durable job: its status, and its result once it has completed.
+
+    This is the follow-up for **every** job id this system hands out — a connector job such as
+    `compute_reaction_energy` or `start_optimization_campaign`, a development report, or a
+    calculation deferred because it was too slow to answer inside the turn. Poll it until the
+    status is no longer `running`; a completed connector job carries its result with it, so there
+    is no second call to make.
 
     Args:
-        job_id: The id returned by any durable launcher — `request_development_report`, a
-            connector job such as `start_optimization_campaign`, or `submit_qm_job`.
+        job_id: The id returned by any durable launcher.
 
     Returns:
-        One word: running, completed, failed, cancelled, terminated, or timed_out.
+        The status (running, completed, failed, cancelled, terminated, timed_out) and, for a
+        completed connector job, the one-line `summary` and the structured `result`. A job that is
+        still running, or one whose result is not a connector envelope (a report, a QM job — use
+        `get_job_status` for those), reports the status alone.
     """
-    return await _status_of(job_id, "durable job")
+    client = await connect()
+    handle = client.get_workflow_handle(job_id)
+    try:
+        description = await handle.describe()
+    except RPCError as exc:
+        raise ValueError(f"no durable job with id {job_id!r}") from exc
+    status = _TERMINAL.get(description.status, "running") if description.status else "running"
+    if status != "completed":
+        return DurableJobStatus(job_id=job_id, status=status)
+    raw = await handle.result()
+    try:
+        envelope = ConnectorJobResult.model_validate(raw)
+    except ValidationError:
+        # A completed job whose result is not a connector envelope — a report, a QM run. Its
+        # status is still the honest answer; the shape simply is not one this tool can read, and
+        # inventing a summary for it would be worse than saying so.
+        return DurableJobStatus(job_id=job_id, status=status)
+    return DurableJobStatus(
+        job_id=job_id, status=status, summary=envelope.summary, result=envelope.data
+    )
 
 
 async def request_note_reindex() -> str:

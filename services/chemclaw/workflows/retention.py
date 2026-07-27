@@ -37,6 +37,7 @@ from temporalio import activity, workflow
 with workflow.unsafe.imports_passed_through():
     from chemclaw.config import settings
     from chemclaw.db import connect
+    from workflows.registry import durable_activity, durable_workflow
 
 from workflows.publish import BAD_DATA_RETRY
 
@@ -63,6 +64,7 @@ def _window_days(table: str) -> int:
     }[table]
 
 
+@durable_activity("background")
 @activity.defn
 async def prune_expired_rows() -> RetentionOutcome:
     """Delete rows past their table's retention window; return the per-table counts.
@@ -93,6 +95,7 @@ async def prune_expired_rows() -> RetentionOutcome:
     return outcome
 
 
+@durable_workflow("background")
 @workflow.defn
 class RetentionWorkflow:
     """Enforce the deployment's retention windows on a cadence (gap SCH-1)."""

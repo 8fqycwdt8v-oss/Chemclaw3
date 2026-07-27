@@ -12,7 +12,7 @@ to use, what Tanimoto counts as precedent, and how to combine hits lives in the
 test can swap them for in-memory stores without a database.
 
 NOT registered on the live agent. The conversational agent reaches structural search over the
-MCP capability servers (`settings.mcp_servers`: `similar_reactions`/`similar_molecules`/
+the `molfp`/`rxnfp` connector bundles (`similar_reactions`/`similar_molecules`/
 `substructure_matches`), not these in-process wrappers — see `agents.chemclaw_agent`. These
 exist as the credential-free, subprocess-free in-process seam for the examples and tests; the
 MCP path is the production one. Keep the two in sync if the search surface changes.

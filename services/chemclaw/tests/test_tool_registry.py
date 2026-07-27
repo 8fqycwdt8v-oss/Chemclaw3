@@ -19,29 +19,37 @@ from agents.tool_registry import (
 from connectors.registry import enabled
 from templates.registry import template_tool_names
 
-# The in-process capability tools: the conversation plumbing that reads or writes the turn's own
-# state, plus the two PR-gate writers and the durable launchers core still owns. The domain
-# capabilities are not here — they moved to connectors (D-093) and are advertised per turn.
+# Every in-process capability tool, spelled out: the registry must reproduce this set, no more and
+# no less (a connector's tools are advertised separately, per turn). Adding one is a deliberate,
+# reviewed edit here rather than a silent widening of what the agent can do — and the review that
+# edit invites is "should this be a connector tool instead?", which is the point.
 _EXPECTED_INPROCESS_TOOLS = {
-    "submit_qm_job",
-    "get_qm_job_status",
-    "find_notes",
-    "expand_note",
-    "gather_evidence",
-    "propose_knowledge_note",
-    "record_confirmed_answer",
-    "request_development_report",
-    "get_durable_job_status",
-    "find_knowledge_gaps",
+    # The conversation plumbing: everything that reads or writes the *turn's own* state, which is
+    # by definition unavailable to another process.
     "ask_clarifying_question",
-    "remember_preference",
-    "recall_preferences",
-    "forget_preference",
+    "list_attachments",
+    "read_attachment",
     "watch_for",
     "list_watches",
     "stop_watching",
-    "list_attachments",
-    "read_attachment",
+    "remember_preference",
+    "recall_preferences",
+    "forget_preference",
+    # The knowledge layer: reads, plus the two PR-gate writers. The gate is core's, so its writers
+    # are too — a connector reaches it only by returning a note in a job envelope.
+    "find_notes",
+    "expand_note",
+    "gather_evidence",
+    "find_knowledge_gaps",
+    "propose_knowledge_note",
+    "record_confirmed_answer",
+    # The two durable launchers core still owns, and their status tools. `submit_qm_job` needs the
+    # HPC identity bridge rather than a connector; the report's workflow has not moved into a
+    # bundle yet (BACKLOG.md).
+    "submit_qm_job",
+    "get_job_status",
+    "request_development_report",
+    "get_durable_job_status",
 }
 
 
@@ -82,7 +90,7 @@ def test_agent_advertises_the_registered_inprocess_tools() -> None:
 def test_duplicate_registration_is_a_loud_error() -> None:
     """Registering two tools under one name is a programming error (as in `evals.metric`)."""
 
-    async def gather_evidence() -> None:  # shadows an already-registered name on purpose
+    async def gather_evidence() -> None:  # shadows an always-registered name on purpose
         return None
 
     with pytest.raises(ValueError, match="already registered"):

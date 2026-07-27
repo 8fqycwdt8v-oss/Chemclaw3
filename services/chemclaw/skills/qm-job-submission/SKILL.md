@@ -5,15 +5,22 @@ description: >-
   choose the method and basis set before calling submit_qm_job.
 tools:
   - submit_qm_job
-  - get_qm_job_status
+  - get_job_status
 ---
 
 # QM job submission
 
 This skill holds the *judgment* around QM/DFT calculations. The mechanics —
 starting the durable job and polling it — live in the `submit_qm_job` and
-`get_qm_job_status` tools; use this skill to decide **whether** and **how** to
+`get_job_status` tools; use this skill to decide **whether** and **how** to
 call them.
+
+`get_job_status` answers for **every** durable calculation, not only QM. The larger xTB
+tasks (a reaction over several sizeable species, a solvent screen, a long scan) route
+themselves to the same job machinery when they are predicted to take too long to run in
+a turn, and hand back a job id instead of a result. That is not an escalation to DFT and
+does not go through this skill's cost reasoning — it is the same cheap calculation, run
+somewhere it will not block the conversation. Poll it the same way.
 
 ## When a QM calculation is warranted
 
@@ -24,6 +31,16 @@ evidence is unavailable:
   graph / fingerprint search first, once those layers exist).
 - The question needs electronic-structure information: energies, geometries,
   transition states, regioselectivity, spectra.
+- **The fast semiempirical tier has already been tried and is not enough.** GFN2-xTB
+  answers relative stability, frontier orbitals, partial charges and regioselectivity in
+  under a second, and now also optimized geometries, free energies, IR spectra, reaction
+  thermodynamics and torsion barriers in seconds to minutes (`calculation-selection`).
+  That is a much larger set than it used to be, so check it before escalating. Escalate
+  when the decision turns on a difference smaller than the fast method's error bar, or
+  on something semiempirical methods do not provide at all — transition states and
+  activation barriers, excited states, accurate absolute energies — and say which. "The fast answer is
+  good enough for this decision" is the right conclusion more often than it is reached;
+  `computational-evidence` holds that judgment.
 
 For a purely empirical or precedent-based question, answer from existing data
 instead of launching a calculation.
