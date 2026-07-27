@@ -32,6 +32,31 @@ missing prerequisite), in D-092.
 
 The load test's fixes landed (see D-119). What it surfaced and did **not** close:
 
+- [ ] **CHAOS-1 A session whose client walks away mid-turn stays 409 for ~63 s.** Found by the
+      Stage 5e chaos pass. Abandon an SSE turn mid-stream and the same session refuses the next
+      turn — `a turn is already running for this session` — for **63 s measured**, where it should
+      free immediately. A chemist who closes a tab and reopens it cannot resume for a minute.
+
+      The blocker is the in-process `active_turns` set (`service/app.py:757`), whose `discard`
+      lives in the streamed generator's `finally` alongside the durable claim release. Two theories
+      were tested and **both were wrong**, which is why this is open rather than fixed:
+
+      1. *"The `await` in that `finally` is cancelled before it reaches the database."* Plausible —
+         a `finally` that runs during task cancellation cannot reliably await. Detaching the
+         release onto its own task changed the measured time not at all (63.5 s vs 65.1 s). The
+         change was reverted rather than shipped unverified.
+      2. *"The abandoned turn keeps running to completion and holds the session."* Also no: the
+         session's actor produced **zero** `audit_events` rows, so no tool ever ran.
+
+      So the generator's `finally` is not running promptly and neither explanation covers it. Next
+      step is to instrument the teardown directly — log on entry to that `finally` with a timestamp
+      — and find out when it actually fires relative to the disconnect. Reproduction:
+      `scratchpad/disconnect_probe.py`, which prints the recovery time.
+
+      Severity is real but bounded: it costs availability of one conversation for about a minute,
+      never correctness, and the lease/`discard` do eventually fire.
+
+
 - [x] **LIVE-1 The front door shared one chat client across concurrent turns, corrupting streamed
       tool calls.** Closed by D-123: `AgentPool` leases one agent — and with it one chat client —
       per concurrent turn, sized to `service_max_concurrent_turns`.
