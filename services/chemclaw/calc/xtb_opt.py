@@ -281,7 +281,7 @@ def _optimize_with_library(spec: OptSpec, structure: Structure) -> OptimizationR
     # not the ones the constraint is holding.
     free_mask = np.repeat(~frozen, 3)
 
-    initial_energy, _, _ = evaluate_point(calc, positions)
+    initial_energy, initial_gradient, _ = evaluate_point(calc, positions)
     # Trust region, enforced with bounds. L-BFGS-B's first trial step is scaled by
     # 1/|gradient|, which on a strained starting geometry is wildly too large: measured
     # on a water with a 1.6 Angstrom O-H, its opening move collapses the bond to 0.20
@@ -290,8 +290,16 @@ def _optimize_with_library(spec: OptSpec, structure: Structure) -> OptimizationR
     # standard remedy, and costs nothing on a geometry that was already close.
     current = positions.ravel()
     steps = 0
-    max_gradient = float("inf")
-    while steps < spec.max_steps:
+    # Seeded from the *input* geometry, so a structure that is already a minimum runs no leg
+    # at all and comes back byte-identical. Previously the loop was bounded only by the step
+    # count, so it always ran at least one leg and always moved something: re-optimizing a
+    # converged water shifted it 3e-4 Angstrom, and since a structure id is a hash of the
+    # coordinates, every pass minted a new id. That silently forks the cache — the "compute
+    # once" guarantee (D-011) stops holding for every task keyed on a geometry, which is the
+    # property `test_a_converged_structure_is_a_fixed_point` exists to pin. The gradient here
+    # costs nothing: `evaluate_point` above already computed it and threw it away.
+    max_gradient = float(np.max(np.abs(np.where(free_mask, initial_gradient.ravel(), 0.0))))
+    while max_gradient > spec.gradient_tolerance and steps < spec.max_steps:
         # The basis is rebuilt each leg, from the geometry the last one reached: the
         # model Hessian depends on the distances, and a leg can move them enough to
         # matter. It costs one O(N^2) assembly and one eigendecomposition — negligible

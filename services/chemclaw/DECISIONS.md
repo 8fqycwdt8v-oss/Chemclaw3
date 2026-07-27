@@ -3757,6 +3757,25 @@ against one database and confirming both pass and neither leaves residue. A hard
 an orphan schema; it is inert and unmistakably named, which is the right trade against the
 alternative of a shared name that is unsafe by construction.
 
+**5c. A converged geometry was not a fixed point.** Unrelated to the four findings above and
+folded in only because it blocked this branch's CI: `tests/test_xtb_opt.py::test_a_converged_
+structure_is_a_fixed_point` failed identically on pristine `main` (verified in a clean worktree —
+same two structure ids), so it was `main`'s failure, not a merge artifact.
+
+The in-process optimizer's loop was bounded only by the step count, so it always ran at least one
+leg before testing convergence. Re-optimizing an already-relaxed water therefore moved it 3e-4
+Angstrom, and a third pass moved it again. Because a structure id is a hash of the coordinates,
+every pass minted a new id — which silently forks the calculation cache and quietly voids the
+"compute once, never recompute" guarantee (D-011) for every task keyed on a geometry. The test was
+right to call this out; it was pinning a property the code did not have.
+
+The fix seeds the convergence test from the *input* geometry's gradient and makes the loop
+`while max_gradient > tolerance and steps < max_steps`. It costs nothing: `evaluate_point` already
+computed that gradient for the initial energy and discarded it. An already-minimal structure now
+runs zero legs and returns byte-identical. Scoped to the library backend, which is the one
+reachable here; whether the `xtb` binary's own ANCopt has the same property is untested, because
+the binary is not installed in this environment — flagged rather than guessed at.
+
 **6. ADR numbers now have an allocation ledger.** This ADR was written as D-092, renumbered to
 D-095, then to D-109 — three collisions in one day, each found only when a merge conflicted. The
 cause is structural: concurrent branches all append to the end of `DECISIONS.md` and all compute
