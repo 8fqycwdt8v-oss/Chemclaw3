@@ -24,7 +24,7 @@ def test_postgres_audit_sink_persists_an_event() -> None:
         event = AuditEvent(
             correlation_id=correlation_id,
             actor="u-oid-1",
-            tool="submit_qm_job",
+            tool="compute_dft_energy",
             arguments='{"smiles": "CCO"}',
             outcome="ok",
             detail="job qm-1 started",
@@ -46,7 +46,7 @@ def test_postgres_audit_sink_persists_an_event() -> None:
 
         assert row is not None
         assert row[0] == "u-oid-1"
-        assert row[1] == "submit_qm_job"
+        assert row[1] == "compute_dft_energy"
         assert row[2] == '{"smiles": "CCO"}'
         assert row[3] == "ok"
         assert row[4] == "job qm-1 started"

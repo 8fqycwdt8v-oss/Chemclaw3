@@ -67,4 +67,4 @@ State the mode you ranked for and why it matches the chemistry asked about, name
 top sites by their position in the molecule (*para* carbon, carbonyl carbon) rather
 than by bare atom index, and give the caveat that fits the question — usually the
 electronics-only one. If the decision needs more than an ordering, say what would
-settle it: an experiment, or the heavier QM path (`submit_qm_job`).
+settle it: an experiment, or the heavier QM path (`compute_dft_energy`).

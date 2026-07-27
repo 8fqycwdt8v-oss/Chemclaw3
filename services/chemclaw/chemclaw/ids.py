@@ -1,7 +1,7 @@
 """Deterministic content-addressed hashing for identity keys across every layer.
 
 Why one home: the calculation cache key (`calc.store`), the QM workflow id
-(`workflows.models`), BO-candidate note ids (`connectors.bo.knowledge`), and
+(`connectors.qm.specs`), BO-candidate note ids (`connectors.bo.knowledge`), and
 synthesized-memory note ids (`memory.ids`) are all "a stable short hash of some
 canonical value". Before this they were four near-identical helpers that had
 drifted — different digest lengths and, in one case, a weaker algorithm (SHA-1).

@@ -1,12 +1,13 @@
 """One generated agent tool per declared job — the four bespoke adapters, written once.
 
-`agents/qm_tools.py::submit_qm_job` and the three launchers in `agents/durable_tools.py` are the
+`agents/qm_tools.py::submit_qm_job` and the three launchers in `agents/durable_tools.py` were the
 same handful of lines four times: authorize the trigger, refuse under dry-run, demand an actor,
 derive a deterministic workflow id, start the workflow, announce the launch, return the id. Only
 the workflow class and the id derivation differed — and both are now manifest data
 (`JobSpec.workflow`, plus the job name and the arguments the id hashes). So the adapter becomes
 a factory: one function built per declared job, with the shared body written in exactly one
-place.
+place. The QM launcher was the last of the four to go (D-118); this is now the *only* way a
+durable capability is launched from a conversation.
 
 The generated tool is a *first-class* tool, not a special case. It is registered through the
 same `agents.tool_registry.register_tool` a hand-written tool uses, keyed by the manifest's
@@ -34,7 +35,8 @@ from temporalio.exceptions import WorkflowAlreadyStartedError
 
 from agents.authz import authorize_trigger, require_actor
 from agents.dialogue_tools import dry_run_notice, is_dry_run
-from agents.session_context import get_current_session_id
+from agents.harness_todo import mark_awaiting_job
+from agents.session_context import get_current_session, get_current_session_id
 from agents.tool_registry import CapabilityTool
 from agents.turn_signals import record_job_started
 from chemclaw.config import settings
@@ -285,7 +287,7 @@ def build_job_tool(connector: str, job: JobSpec) -> CapabilityTool:
                     return existing
             # Deliberately *not* announced as started — an already-finished run will never emit
             # the matching `job_completed` event, and the surface would show a row that stays
-            # "running" forever (see `agents/qm_tools.py`).
+            # "running" forever.
             return workflow_id
         if job.inline_wait_seconds is not None:
             finished = await _await_briefly(handle, job.inline_wait_seconds)
@@ -293,6 +295,13 @@ def build_job_tool(connector: str, job: JobSpec) -> CapabilityTool:
                 # It answered inside the turn, so there is no background work to announce and
                 # nothing for the chemist to poll — the result *is* the tool's return value.
                 return finished
+        # Two announcements, both only on a *genuine* start. The turn's event stream shows the
+        # launch while the turn is still streaming (D-042); the harness's todo list records that
+        # the plan is blocked on this id, so `todos_remaining` sees "waiting" rather than
+        # re-invoking the model with nothing new (D-040). A re-joined run is deliberately silent:
+        # it may already be finished, and neither surface would ever get the matching
+        # `job_completed` event to clear the row it drew.
+        await _mark_awaiting_if_harness(handle.id, job.name)
         record_job_started(handle.id, job.name)
         return handle.id
 
@@ -300,6 +309,26 @@ def build_job_tool(connector: str, job: JobSpec) -> CapabilityTool:
     launch.__qualname__ = job.name
     launch.__doc__ = _docstring(job)
     return launch
+
+
+async def _mark_awaiting_if_harness(job_id: str, job_name: str) -> None:
+    """Record the harness todo awaiting `job_id`, when the harness's todo list is in play.
+
+    Core's obligation, not a bundle's: a durable launch that leaves the harness's plan open would
+    keep `todos_remaining` re-invoking the model with nothing to report, and no connector can see
+    the turn's todo state to close that itself. It lived in the hand-written QM launcher until the
+    HPC job became a declared job (D-118), which made this the only launcher left to hold it — and
+    fixed the gap that every *other* durable job had never had it at all.
+
+    Silent no-op off the harness path (harness disabled, or no live `AgentSession` ambient — e.g.
+    the CLI, which runs single-shot): writing to a todo list nothing reads would just be dead state.
+    """
+    if not settings.harness_enabled:
+        return
+    session = get_current_session()
+    if session is None:
+        return
+    await mark_awaiting_job(session, job_id, title=f"Await the {job_name} job {job_id}")
 
 
 async def _await_briefly(handle: Any, budget: float) -> ConnectorJobResult | None:

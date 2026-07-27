@@ -33,12 +33,23 @@ from templates.registry import template_tool_names
 # `calc` connector's. Asserted against the union rather than against the agent's own list, because
 # where a tool *runs* is a deployment concern and where it is *reachable from* is the contract.
 _DOMAIN_TOOLS = {
-    "submit_qm_job",
-    "get_job_status",
+    "compute_dft_energy",
+    "get_durable_job_status",
     "find_notes",
     "expand_note",
     "propose_knowledge_note",
 }
+
+
+def _endpoint_bundles() -> set[str]:
+    """Discovered bundles that serve MCP tools — i.e. every one but the jobs-only kind.
+
+    Derived rather than listed, so adding a bundle extends the checks that use it on the day it is
+    created. `qm` is the first bundle with durable work and no endpoint at all.
+    """
+    return {
+        name for name, (_dir, manifest) in discovered().items() if manifest.endpoint is not None
+    }
 
 
 def test_agent_applies_default_generation_options() -> None:
@@ -48,7 +59,7 @@ def test_agent_applies_default_generation_options() -> None:
     assert agent.default_options["max_tokens"] == settings.llm_max_tokens
 
 
-def test_agent_advertises_qm_tools() -> None:
+def test_agent_advertises_the_domain_tools() -> None:
     """All domain tools are registered on the agent under their function names."""
     agent = build_agent(chat_client=object())
     tool_names = {tool.name for tool in agent.default_options["tools"]} | set(
@@ -135,8 +146,10 @@ def test_fingerprint_search_is_reached_through_connectors_not_in_process_tools()
     assert agent.mcp_tools == []  # nothing process-lived
     # Derived from discovery, not a hardcoded pair: a hardcoded one only catches the omissions
     # someone already thought of, and would fail on the day a bundle is added rather than on a bug.
-    assert {tool.name for tool in connector_tools()} == set(discovered())
-    assert {"molfp", "rxnfp"} <= set(discovered())  # the fingerprint capability is among them
+    # A bundle with no `endpoint:` contributes no MCP tool — the `qm` bundle is jobs-only, and its
+    # capability reaches the agent as a generated launcher instead (D-118).
+    assert {tool.name for tool in connector_tools()} == _endpoint_bundles()
+    assert {"molfp", "rxnfp"} <= _endpoint_bundles()  # the fingerprint capability is among them
     function_tool_names = {f.name for f in agent.default_options["tools"]}
     assert {"find_similar_reactions", "find_similar_molecules"} & function_tool_names == set()
 
@@ -207,7 +220,7 @@ def test_harness_agent_keeps_full_capability_toolset(monkeypatch: pytest.MonkeyP
     assert classic <= harness_tools  # every classic capability tool is still present
     # The harness reaches the same connectors the classic path does — per turn, from the same
     # factory.
-    assert set(discovered()) == {tool.name for tool in connector_tools()}
+    assert _endpoint_bundles() == {tool.name for tool in connector_tools()}
 
 
 @pytest.mark.parametrize(

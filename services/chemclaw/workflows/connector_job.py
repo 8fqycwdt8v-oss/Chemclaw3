@@ -13,7 +13,10 @@ core owns the obligations that must never vary per capability:
   `connectors.jobs`, with `ALLOW_DUPLICATE_FAILED_ONLY`, so re-asking joins the existing run and
   only a failed one re-executes (D-011: a stored result is never recomputed).
 - **Attribution** — the requesting actor travels in the payload (F4-T3), exactly as `QMJobInput`
-  carries `requested_by`, so an audit can always name the user behind a durable run.
+  carries `requested_by`, so an audit can always name the user behind a durable run. It is handed
+  down to the child on its **memo**, not in its argument, so a bundle whose backend runs under a
+  shared service identity (the HPC cluster) can still name the user without the actor becoming a
+  field the model could author.
 - **The PR-gate** — a job that produces knowledge returns a `Note` and core publishes it through
   `kg.pr_gate` (via the existing `publish_memory_note_activity`). A connector never writes to the
   graph itself, so "AI proposes, human signs off" cannot be bypassed by adding a connector.
@@ -109,6 +112,13 @@ class ConnectorJobWorkflow:
             id=f"{workflow.info().workflow_id}-run",
             task_queue=job.task_queue,
             result_type=ConnectorJobResult,
+            # The actor, carried as per-execution metadata rather than in the argument. A bundle
+            # whose backend runs under a *shared* service identity — the HPC cluster is the one we
+            # have — must still be able to name the user behind a run, and `payload` is exactly the
+            # model-authored arguments, so putting the actor there would make it a field the LLM
+            # could fill in. A memo is beside the argument, readable with `workflow.memo_value`,
+            # and set once here for every connector job rather than per bundle (D-118).
+            memo={"requested_by": job.requested_by},
             # A child is started once per parent run; a retried parent activity never re-launches
             # it, so rejecting duplicates is the honest policy (a duplicate id here is a bug).
             id_reuse_policy=WorkflowIDReusePolicy.REJECT_DUPLICATE,

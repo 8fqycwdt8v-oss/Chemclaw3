@@ -37,7 +37,7 @@ calculation; this skill assumes that decision is already made.
 - **Conformationally flexible molecule, solution-phase behavior** → `sample_conformers`
   (a CREST metadynamics search, Boltzmann-weighted with rotamer degeneracies, reporting the
   conformational entropy a single-conformer free energy is missing). Minutes on a drug-sized
-  molecule, so it returns a job id above the inline budget — poll with `get_job_status`. Reach
+  molecule, so it returns a job id above the inline budget — poll with `get_durable_job_status`. Reach
   for it instead of `compute_xtb_energy` when a single seeded conformer is unlikely to be
   representative (a flexible chain, multiple accessible rotamers), and read
   `conformational-analysis` first: the search is *sampled*, so a missing conformer is not
@@ -77,7 +77,7 @@ calculation; this skill assumes that decision is already made.
 Roughly: a single point is milliseconds; an optimization is under a second for a small
 molecule; a Hessian is 6N of those; a reaction is that per species; a solvent screen is
 that per solvent. The expensive tools estimate their own cost and, above a threshold,
-return a **job id instead of a result** — report it and poll with `get_job_status`
+return a **job id instead of a result** — report it and poll with `get_durable_job_status`
 rather than treating it as a failure. Prefer `level="quick"` when only an ordering of
 electronic energies is needed; it skips every Hessian.
 - **pH-dependent lipophilicity (logD)** → `predict_logd` (built on `predict_pka`, and it

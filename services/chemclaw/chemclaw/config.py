@@ -147,10 +147,11 @@ class TemporalSettings(BaseSettings):
     temporal_tls_ca: str = ""
     temporal_api_key: str = ""
 
-    # The two task queues from the architecture: heavy HPC jobs vs. light background jobs
-    # (sync/re-index/reports). Names are config so a deployment can shard or rename queues
-    # without touching worker code (D-006).
-    hpc_task_queue: str = "hpc-jobs"
+    # Core's own task queue: the light background jobs (sync, re-index, reports, and the
+    # connector-job wrapper). A name is config so a deployment can shard or rename it without
+    # touching worker code (D-006). There is no second core queue any more — the heavy `hpc-jobs`
+    # queue went with the QM job into `connectors/qm/`, whose worker derives its queue from the
+    # bundle name (`connectors.queues.bundle_queue`, D-118).
     background_task_queue: str = "background-jobs"
 
     # Bound on retries for ordinary activities under the shared bad-data retry policy
@@ -840,7 +841,7 @@ class EntraSettings(BaseSettings):
     entra_jwks_url: str = ""
     entra_issuer: str = ""
     # Authorization for expensive triggers (plan F4-T5): the single fachliche gate. An action
-    # named in `entra_expensive_actions` (comma list, e.g. "submit_qm_job,start_bo_campaign")
+    # named in `entra_expensive_actions` (comma list, e.g. "compute_dft_energy,start_bo_campaign")
     # may run only for a user holding at least one role in `entra_privileged_roles` — so an
     # autonomously-planned todo cannot launch a costly HPC/BO job outside the requesting user's
     # entitlements. Enforced only when `entra_required` (a real deployment with real roles); in
@@ -857,7 +858,7 @@ class EntraSettings(BaseSettings):
     # an `entra_privileged_roles` role out of the box — an explicit entry here overrides that).
     # The built-in write gate only narrows `"allow"`; it never widens `"deny"`. Enforced only
     # when `entra_required` (dev gate is open). ENV override for the gates is JSON, e.g.
-    # CHEMCLAW_TOOL_ROLE_GATES='{"submit_qm_job": ["process-chemist"]}'. Note: `deny` with an
+    # CHEMCLAW_TOOL_ROLE_GATES='{"compute_dft_energy": ["process-chemist"]}'. Note: `deny` with an
     # empty `tool_role_gates` blocks *all* tools — a deliberate lockdown, not a footgun to
     # stumble into.
     tool_role_gates: dict[str, list[str]] = Field(default_factory=dict)

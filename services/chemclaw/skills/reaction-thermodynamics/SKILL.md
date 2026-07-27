@@ -7,7 +7,7 @@ description: >-
 tools:
   - compute_reaction_energy
   - compute_thermochemistry
-  - get_job_status
+  - get_durable_job_status
   - find_notes
   - gather_evidence
 ---
@@ -82,7 +82,7 @@ answer rather than merely widening it.
 
 Large requests return a job id instead of a result — a reaction over several sizeable
 species, or a solvent screen. That is not an error: tell the user it is running, give
-them the id, and check it with `get_job_status`. Do not resubmit while waiting; an
+them the id, and check it with `get_durable_job_status`. Do not resubmit while waiting; an
 identical request returns the same job rather than starting a second one.
 
 ## Precedent still outranks it

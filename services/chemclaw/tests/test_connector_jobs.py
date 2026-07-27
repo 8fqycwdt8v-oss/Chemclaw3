@@ -17,6 +17,7 @@ from typing import Any
 
 import pytest
 from pydantic import BaseModel, ValidationError
+from temporalio.exceptions import WorkflowAlreadyStartedError
 
 from agents.authz import AuthorizationError
 from agents.dialogue_tools import reset_dry_run, set_dry_run
@@ -219,6 +220,88 @@ def test_a_fresh_start_is_announced_to_the_streaming_turn(client: _FakeClient) -
     finally:
         end_turn(token)
     assert signals == [JobSignal(job_id=job_id, kind="run_calculation")]
+
+
+def test_a_fresh_start_blocks_the_harness_plan_on_the_job(
+    client: _FakeClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The harness's todo records that it is waiting on this id, so the loop stops re-invoking.
+
+    Without it, `todos_remaining` sees an open todo every iteration with nothing new to report,
+    and the model cannot tell "still running" from "forgotten" (D-040). This lived in the
+    hand-written QM launcher and reached no other durable job; moving the QM job onto this factory
+    is what gave every job the behaviour rather than taking it away (D-118).
+    """
+    from agent_framework import AgentSession
+
+    from agents.harness_todo import complete_awaiting_job
+    from agents.session_context import reset_current_session, set_current_session
+
+    monkeypatch.setattr("chemclaw.config.settings.harness_enabled", True)
+    tool = build_job_tool("calc", _SPEC)
+    session = AgentSession(session_id="s1")
+    token = set_current_session(session)
+    try:
+        job_id = _launch(tool, smiles="CCO")
+    finally:
+        reset_current_session(token)
+    # Round-tripped through the public bridge rather than a hardcoded description format.
+    assert asyncio.run(complete_awaiting_job(session, job_id, reason="done")) is True
+
+
+def test_a_duplicate_launch_leaves_the_harness_plan_alone(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A re-joined run may already be finished, so an awaiting todo for it would never flip."""
+    from agent_framework import AgentSession
+
+    from agents.harness_todo import complete_awaiting_job
+    from agents.session_context import reset_current_session, set_current_session
+
+    fake = _FakeClient(error=WorkflowAlreadyStartedError("dup", "wf", run_id=None))
+
+    async def _connect() -> _FakeClient:
+        return fake
+
+    monkeypatch.setattr("connectors.jobs.connect", _connect)
+    monkeypatch.setattr("chemclaw.config.settings.harness_enabled", True)
+    tool = build_job_tool("calc", _SPEC)
+    session = AgentSession(session_id="s1")
+    token = set_current_session(session)
+    try:
+        job_id = _launch(tool, smiles="CCO")
+    finally:
+        reset_current_session(token)
+    assert asyncio.run(complete_awaiting_job(session, job_id, reason="done")) is False
+
+
+def test_the_classic_agent_never_writes_to_a_todo_list_nobody_reads(
+    client: _FakeClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """With the harness off (the default), a launch touches no todo state."""
+    from agent_framework import AgentSession
+
+    from agents.harness_todo import complete_awaiting_job
+    from agents.session_context import reset_current_session, set_current_session
+
+    monkeypatch.setattr("chemclaw.config.settings.harness_enabled", False)
+    tool = build_job_tool("calc", _SPEC)
+    session = AgentSession(session_id="s1")
+    token = set_current_session(session)
+    try:
+        job_id = _launch(tool, smiles="CCO")
+    finally:
+        reset_current_session(token)
+    assert asyncio.run(complete_awaiting_job(session, job_id, reason="done")) is False
+
+
+def test_a_launch_with_no_ambient_session_does_not_crash(
+    client: _FakeClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The CLI path: harness on, but no live `AgentSession` to hold a plan."""
+    monkeypatch.setattr("chemclaw.config.settings.harness_enabled", True)
+    tool = build_job_tool("calc", _SPEC)
+    assert _launch(tool, smiles="CCO") == job_workflow_id(
+        "calc", "run_calculation", {"smiles": "CCO"}
+    )
 
 
 def test_dry_run_reports_what_it_would_do_and_starts_nothing(client: _FakeClient) -> None:

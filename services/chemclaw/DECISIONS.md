@@ -4461,3 +4461,63 @@ bo   connector worker connected: queue=connector-bo   workflows=[BoCampaignWorkf
 calc connector worker connected: queue=connector-calc workflows=[CalcJobWorkflow]
      activities=[run_xtb_calculation]
 ```
+
+**The HPC job is a declared connector job, and core's `hpc-jobs` queue is gone with it.**
+
+That was the third kind this ADR opened with, and it cost four hand-written core edits per
+capability: a launcher tool (`agents/qm_tools.py`), a status tool that knew the job's own result
+shape and id prefix (`agents/job_status.py`), a queue (`hpc_task_queue`), and a worker
+(`workers/hpc_worker.py`). `connectors/qm/` replaces all four with a manifest. The move is
+mechanical because the earlier commits made it so — `bundle_queue("qm")` derives the queue, a
+five-line `worker.py` serves whatever the imports registered, and `specs.py`/the rest is the leaf
+split `calc` established.
+
+**The class is not renamed, and that is deliberate.** `@workflow.defn` derives the Temporal type
+name from `__name__`, so a *module* move is invisible to a recorded history while a *class* rename
+is a different command in it. `docs/workflow-versioning.md` already records the
+`QMJobWorkflow` → `CalculationWorkflow` rename as dropped rather than deferred, for exactly this
+reason; `QMJobWorkflow` therefore keeps its name in its new home.
+
+**What the workflow stopped doing is the substance of the change.** It published its own graph note
+and sent its own session push-back. Both are obligations `ConnectorJobWorkflow` — now its parent —
+already owns for every other bundle, so the note is *built* in `connectors/qm/knowledge.py` and
+returned on `ConnectorJobResult.note`, and `write_knowledge_node` (the activity that called
+`propose_note` directly) is deleted. `connectors/qm/knowledge.py` no longer imports `kg.pr_gate` at
+all: a connector reaching around the GxP gate is now structurally impossible rather than merely
+against the rules, which is the same correction `connectors/bo/knowledge.py` took in D-111.
+
+**`requested_by` travels on the run's memo.** The HPC cluster is submitted to under a shared service
+identity, so the requesting user is the only thing that makes a run attributable (F4-T3), and it
+must reach `submit_to_hpc`. It cannot ride on the spec: `params_model` becomes the JSON schema the
+model fills in, so a `requested_by` field there would be one an LLM could author. So
+`ConnectorJobWorkflow` passes `memo={"requested_by": job.requested_by}` on `execute_child_workflow`
+and the bundle reads `workflow.memo_value(...)` — per-execution metadata beside the argument, not
+inside it. `QmJobSpec` is the three scientific fields and nothing else; `QMJobInput` subclasses it
+with the actor, so the two cannot drift.
+
+**`get_durable_job_status` is now the only way a finished job is collected**, and its
+`ValidationError` fallback became a hard error. That branch existed for one job — the QM run, whose
+bespoke result the generic tool could not read — and every launcher in the system returns the
+envelope now. Reporting `completed` with an empty result for a week-long calculation is worse than
+raising.
+
+Two things could not be done as specified, and one gap was found in passing. `JobSpec` has no
+`timeout_seconds` field, so the manifest declares none: a connector job's ceiling is the global
+`connector_job_timeout_seconds` (24 h), which the field's own comment defends as "a bundle in the
+repo must not be able to grant itself unlimited runtime". A DFT run that legitimately needs a week
+therefore needs that number raised at the deployment, not in `connector.yaml`. And the harness's
+awaiting-todo bridge (`mark_awaiting_job`, D-040) turned out to have exactly one caller — the QM
+launcher — so it had never applied to any other durable job; it moved into `connectors/jobs.py`,
+where it now covers all of them.
+
+Verified live against the dev server, end to end through the generated tool:
+
+```
+qm connector worker connected: queue=connector-qm workflows=[QMJobWorkflow]
+   activities=[parse_qm_output, poll_hpc_status, prepare_input, submit_to_hpc]
+
+launched: qm-compute_dft_energy-29776d63ecaa48fb
+status:   completed
+summary:  B3LYP/def2-SVP on CCO: -94.100000 Hartree (converged)
+result:   {... 'requested_by': 'oid-live-check'}
+```

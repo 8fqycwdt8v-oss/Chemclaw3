@@ -1,4 +1,9 @@
-"""Tests for the result→note bridge and the git submitter (plan step 2.8)."""
+"""Tests for the result→note bridge and the git submitter (plan step 2.8).
+
+The bridge is a *mapping* now, not an activity: the `qm` bundle builds the note and core publishes
+it through the PR-gate from the job envelope (D-118), which is why nothing here submits a note on
+the QM job's behalf any more — `tests/test_connector_job_workflow.py` owns that half.
+"""
 
 import asyncio
 import subprocess
@@ -9,16 +14,15 @@ import pytest
 from temporalio.client import Client
 from temporalio.worker import Worker
 
-import workflows.knowledge as knowledge
 from chemclaw.config import settings
+from connectors.qm.knowledge import note_from_qm_result
+from connectors.qm.specs import QMJobResult, QmJobSpec
+from connectors.qm.workflows import QMJobWorkflow
 from kg.git_submitter import GitNoteSubmitter, GitSubmitError
 from kg.note import Note
 from kg.pr_gate import NoteSubmission
-from tests.conftest import FakeSubmitter
 from tests.temporal_env import QM_ACTIVITIES, pydantic_client, start_env_or_skip
-from workflows.knowledge import note_from_qm_result, write_knowledge_node
-from workflows.models import QMJobInput, QMJobResult
-from workflows.qm_job import QMJobWorkflow
+from workflows.connector_job import ConnectorJobResult
 
 _RESULT = QMJobResult(
     molecule_smiles="CCO",
@@ -42,14 +46,19 @@ def test_note_from_qm_result_maps_fields() -> None:
     assert note.outgoing_links() == []
 
 
-def test_write_knowledge_node_uses_the_pr_gate(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The activity proposes the mapped note through the (fake) submitter."""
-    fake = FakeSubmitter()
-    monkeypatch.setattr(knowledge, "default_submitter", lambda: fake)
-    ref = asyncio.run(write_knowledge_node(_RESULT))
+def test_the_bundle_has_no_way_to_write_the_note_itself() -> None:
+    """The QM bundle *builds* a note and cannot *publish* one — the GxP asymmetry, structurally.
 
-    assert ref.startswith("pr://note/job-")
-    assert fake.submissions[0].path.startswith("knowledge/job-result/job-")
+    It used to own a `write_knowledge_node` activity that called `propose_note` directly, which
+    made "AI proposes, human signs off" a convention the bundle chose to honour rather than a
+    boundary it could not cross. Core publishes whatever note the job envelope carries now, so a
+    connector reaching the graph would first have to import the PR-gate — and no bundle does.
+    """
+    import connectors.qm.knowledge as qm_knowledge
+
+    assert not hasattr(qm_knowledge, "write_knowledge_node")
+    source = Path(qm_knowledge.__file__).read_text(encoding="utf-8")
+    assert "pr_gate" not in source and "propose_note" not in source
 
 
 def _clone(remote: Path, dest: Path) -> Path:
@@ -413,39 +422,32 @@ def test_git_command_timeout_kills_the_child_and_raises(
     assert killed["value"] is True
 
 
-def test_qm_workflow_publishes_to_graph(monkeypatch: pytest.MonkeyPatch) -> None:
-    """With publish_to_graph, a completed QM job proposes a note on the bg queue."""
-    fake = FakeSubmitter()
-    monkeypatch.setattr(knowledge, "default_submitter", lambda: fake)
+def test_qm_workflow_hands_its_note_to_core_in_the_envelope() -> None:
+    """A completed QM run returns the note for core to PR-gate, rather than writing it.
 
-    async def _run() -> None:
+    The bundle's half of the publish contract, proven on a real server: whether that note reaches
+    the graph is `publish_to_graph` in `connectors/qm/connector.yaml`, and the publishing itself is
+    `ConnectorJobWorkflow`'s (covered by `tests/test_connector_job_workflow.py`).
+    """
+
+    async def _run() -> ConnectorJobResult:
         async with await start_env_or_skip() as env:
             client: Client = pydantic_client(env)
-            async with (
-                Worker(
-                    client,
-                    task_queue="test-hpc-pub",
-                    workflows=[QMJobWorkflow],
-                    activities=QM_ACTIVITIES,
-                ),
-                Worker(
-                    client,
-                    task_queue=settings.background_task_queue,
-                    activities=[write_knowledge_node],
-                ),
+            async with Worker(
+                client,
+                task_queue="test-qm-pub",
+                workflows=[QMJobWorkflow],
+                activities=QM_ACTIVITIES,
             ):
-                await client.execute_workflow(
+                result: ConnectorJobResult = await client.execute_workflow(
                     QMJobWorkflow.run,
-                    QMJobInput(
-                        molecule_smiles="CCO",
-                        method="B3LYP",
-                        basis_set="def2-SVP",
-                        publish_to_graph=True,
-                    ),
+                    QmJobSpec(molecule_smiles="CCO", method="B3LYP", basis_set="def2-SVP"),
                     id="qm-publish-test",
-                    task_queue="test-hpc-pub",
+                    task_queue="test-qm-pub",
                 )
-        assert len(fake.submissions) == 1  # the completed result was proposed as a note
-        assert fake.submissions[0].path.startswith("knowledge/job-result/job-")
+                return result
 
-    asyncio.run(_run())
+    result = asyncio.run(_run())
+    assert result.note is not None
+    assert result.note.type == "job-result"
+    assert result.note.created_by == "agent"  # so the PR-gate is the only way in

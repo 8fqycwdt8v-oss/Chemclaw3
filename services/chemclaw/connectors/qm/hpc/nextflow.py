@@ -16,7 +16,7 @@ import httpx
 
 from chemclaw.config import settings
 from chemclaw.http import error_detail
-from workflows.models import HpcJobHandle, QMJobInput, qm_job_key
+from connectors.qm.specs import HpcJobHandle, QMJobInput, qm_job_key
 
 
 class NextflowError(RuntimeError):

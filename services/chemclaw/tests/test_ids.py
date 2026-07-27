@@ -19,7 +19,7 @@ from chemclaw.chem import (
     require_canonical_smiles,
 )
 from chemclaw.ids import stable_hash
-from workflows.models import QMJobInput, qm_job_key
+from connectors.qm.specs import QmJobSpec, qm_job_key
 
 
 def test_stable_hash_is_order_independent() -> None:
@@ -75,15 +75,15 @@ def test_require_canonical_smiles_tolerates_surrounding_whitespace() -> None:
 
 def test_qm_job_key_ignores_smiles_spelling() -> None:
     """Same molecule, different SMILES spelling → one QM workflow id (D-011)."""
-    a = QMJobInput(molecule_smiles="CCO", method="B3LYP", basis_set="def2-SVP")
-    b = QMJobInput(molecule_smiles="OCC", method="B3LYP", basis_set="def2-SVP")
+    a = QmJobSpec(molecule_smiles="CCO", method="B3LYP", basis_set="def2-SVP")
+    b = QmJobSpec(molecule_smiles="OCC", method="B3LYP", basis_set="def2-SVP")
     assert qm_job_key(a) == qm_job_key(b)
 
 
 def test_qm_job_key_rejects_invalid_smiles() -> None:
     """An unparseable molecule is rejected at key construction (durable boundary)."""
     with pytest.raises(InvalidSmilesError):
-        qm_job_key(QMJobInput(molecule_smiles="???", method="B3LYP", basis_set="def2-SVP"))
+        qm_job_key(QmJobSpec(molecule_smiles="???", method="B3LYP", basis_set="def2-SVP"))
 
 
 def test_calc_cache_key_collapses_equivalent_smiles() -> None:

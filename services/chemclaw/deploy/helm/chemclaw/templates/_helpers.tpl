@@ -109,8 +109,9 @@ app.kubernetes.io/instance: {{ .Release.Name }}
 
 {{- /* The PR-gate submitter's own writable clone (gap DEP-2). Every component that can call
        `propose_note` needs one — that is the front door (the `propose_knowledge_note` agent tool)
-       and the background worker (job-result / BO / memory publishes), but NOT the hpc worker,
-       which routes its note writes to the background queue. Deliberately a different directory
+       and the background worker (job-result / BO / memory publishes), but NOT a connector's own
+       worker: a bundle returns its note in the job envelope and core publishes it, so no
+       connector process ever touches the note repo. Deliberately a different directory
        from the read replica: `git checkout -B note/<id>` switches a whole working tree. */ -}}
 {{- define "chemclaw.noteRepoInit" -}}
 {{- if .Values.knowledge.sync.enabled }}
@@ -152,7 +153,7 @@ app.kubernetes.io/instance: {{ .Release.Name }}
 {{- define "chemclaw.connectorUrls" -}}
 {{- $urls := dict -}}
 {{- range $name, $cfg := .Values.connectors -}}
-{{- if $cfg.enabled -}}
+{{- if and $cfg.enabled $cfg.server -}}
 {{- $_ := set $urls $name (printf "http://%s-connector-%s:%v/mcp" (include "chemclaw.name" $) $name $.Values.connectorPort) -}}
 {{- end -}}
 {{- end -}}

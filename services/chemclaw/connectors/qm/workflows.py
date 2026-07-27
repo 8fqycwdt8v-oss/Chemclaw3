@@ -1,0 +1,115 @@
+"""The `qm` connector's durable workflow: one QM/DFT calculation on the HPC cluster.
+
+Deterministic orchestration only: it sequences the activities (prepare → submit → poll → parse) and
+owns their timeouts (pulled from `chemclaw.config`, never hardcoded). All non-determinism lives in
+`connectors.qm.activities`. Restarting a worker mid-run must resume from event history without
+re-executing a completed activity — the durability spike verified at CHECKMATE 1.
+
+**What it no longer does is the point of D-118's last commit.** This was the one capability whose
+durable path was hand-written into core: its own launcher tool, its own status tool, its own queue,
+its own worker, and a workflow that published its own graph note and sent its own session push-back.
+Those last two are cross-cutting obligations, and `ConnectorJobWorkflow` — now this run's parent —
+owns them. So the note is *built* here (the QM→note mapping is this domain's knowledge) and
+*published* by core through the PR-gate, and the push-back is core's entirely. What is left is the
+chemistry.
+
+The class keeps its name. `@workflow.defn` derives the Temporal type name from `__name__`, so moving
+the module is invisible to a recorded history while renaming the class is not — which is exactly why
+`docs/workflow-versioning.md` records the `QMJobWorkflow` → `CalculationWorkflow` rename as dropped
+rather than deferred.
+"""
+
+from datetime import timedelta
+
+from temporalio import workflow
+
+# Activities, models, and config are ordinary modules that must bypass the workflow sandbox's
+# re-import isolation (the standard Temporal pattern).
+with workflow.unsafe.imports_passed_through():
+    from chemclaw.config import settings
+    from connectors.qm.activities import (
+        parse_qm_output,
+        poll_hpc_status,
+        prepare_input,
+        submit_to_hpc,
+    )
+    from connectors.qm.knowledge import note_from_qm_result
+    from connectors.qm.specs import QMJobInput, QmJobSpec
+    from workflows.connector_job import ConnectorJobResult
+
+from connectors.queues import bundle_queue
+from workflows.publish import BAD_DATA_RETRY
+from workflows.registry import durable_workflow
+
+
+@durable_workflow(bundle_queue("qm"))
+@workflow.defn
+class QMJobWorkflow:
+    """Run one QM calculation durably and return it in the connector envelope."""
+
+    @workflow.run
+    async def run(self, spec: QmJobSpec) -> ConnectorJobResult:
+        """Execute the QM job end-to-end; safe to replay and to resume after a worker restart.
+
+        The argument is the bare spec — exactly what the model may author — because
+        `ConnectorJobWorkflow` is the parent and already holds the actor and the session. The actor
+        still has to reach `submit_to_hpc`, since the cluster run is launched under the shared HPC
+        *service* identity and the requesting user is the only thing that makes it attributable
+        (F4-T3). It arrives on the run's **memo** rather than on the spec: a memo is per-execution
+        metadata Temporal carries beside the argument, so the identity travels without becoming a
+        field the LLM could fill in. The default keeps the configured service identity for a run
+        started outside the wrapper (tests, a manual re-drive) — the fallback `require_actor` uses.
+        """
+        job = QMJobInput(
+            **spec.model_dump(),
+            requested_by=workflow.memo_value("requested_by", settings.service_actor_id),
+        )
+        activity_timeout = timedelta(seconds=settings.qm_activity_timeout_seconds)
+
+        prepared = await workflow.execute_activity(
+            prepare_input, job, start_to_close_timeout=activity_timeout, retry_policy=BAD_DATA_RETRY
+        )
+        handle = await workflow.execute_activity(
+            submit_to_hpc,
+            prepared,
+            start_to_close_timeout=activity_timeout,
+            retry_policy=BAD_DATA_RETRY,
+        )
+        # The poll's start-to-close budget must cover the *entire* run in one attempt —
+        # heartbeating resets only the heartbeat timeout, never start-to-close. The mock finishes in
+        # `hpc_mock_run_seconds`; a real Nextflow run takes far longer, so the two backends use
+        # different budgets (F5, review finding: a mock-derived 36s cap would kill every real run).
+        if settings.hpc_launch_interface == "nextflow":
+            poll_budget = settings.hpc_run_timeout_seconds
+            poll_heartbeat = settings.hpc_run_heartbeat_timeout_seconds
+        else:
+            poll_budget = settings.hpc_mock_run_seconds + settings.qm_activity_timeout_seconds
+            poll_heartbeat = settings.qm_poll_heartbeat_timeout_seconds
+        raw_output = await workflow.execute_activity(
+            poll_hpc_status,
+            handle,
+            start_to_close_timeout=timedelta(seconds=poll_budget),
+            heartbeat_timeout=timedelta(seconds=poll_heartbeat),
+            retry_policy=BAD_DATA_RETRY,
+        )
+        result = await workflow.execute_activity(
+            parse_qm_output,
+            args=[prepared, raw_output],
+            start_to_close_timeout=activity_timeout,
+            retry_policy=BAD_DATA_RETRY,
+        )
+
+        # The note is *built* here and published by core (step 2.8): the QM→note mapping is this
+        # domain's knowledge, while the PR-gate is the GxP boundary a connector must not be able to
+        # reach around. Returned unconditionally — whether it is published is the manifest's
+        # `publish_to_graph`, which core reads, so this workflow carries no second switch for the
+        # same decision.
+        return ConnectorJobResult(
+            summary=(
+                f"{result.method}/{result.basis_set} on {result.molecule_smiles}: "
+                f"{result.total_energy_hartree:.6f} Hartree "
+                f"({'converged' if result.converged else 'NOT converged'})"
+            ),
+            data=result.model_dump(mode="json"),
+            note=note_from_qm_result(result),
+        )

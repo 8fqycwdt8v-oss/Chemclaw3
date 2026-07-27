@@ -67,7 +67,7 @@ KNOWN_NOTE_TYPES: frozenset[str] = frozenset(
         "playbook",  # a transferable rule distilled across projects (memory/playbook.py)
         "interaction",  # a chemist-confirmed answer (memory/interaction.py)
         "report",  # a drafted development report (report/harness.py)
-        "job-result",  # a durable calculation's result (workflows/knowledge.py)
+        "job-result",  # a durable calculation's result (connectors/qm/knowledge.py)
         "bo-candidate",  # a BO campaign's recommendation (connectors/bo/knowledge.py)
         "failure-mode",  # a negative result worth not repeating (gap KNW-3)
     }

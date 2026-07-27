@@ -10,7 +10,7 @@ tools:
   - compute_xtb_energy
   - compute_electronic_properties
   - predict_site_reactivity
-  - submit_qm_job
+  - compute_dft_energy
   - propose_knowledge_note
 ---
 
@@ -85,7 +85,7 @@ graph full of unremarkable numbers makes the remarkable ones harder to find.
 ## Escalating
 
 The fast tier is the bottom of a ladder. Escalate to the heavier QM path
-(`submit_qm_job`, with `qm-job-submission` for the judgment) when the decision turns on a
+(`compute_dft_energy`, with `qm-job-submission` for the judgment) when the decision turns on a
 difference smaller than the fast method's error bar, or when the question needs something
 semiempirical methods do not provide. Say which it is.
 

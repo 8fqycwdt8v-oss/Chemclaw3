@@ -14,7 +14,7 @@ from temporalio.client import Client
 from temporalio.contrib.pydantic import pydantic_data_converter
 from temporalio.testing import WorkflowEnvironment
 
-from workflows.activities import (
+from connectors.qm.activities import (
     parse_qm_output,
     poll_hpc_status,
     prepare_input,

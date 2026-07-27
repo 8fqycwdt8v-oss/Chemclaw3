@@ -110,7 +110,7 @@ async def run_turn(
     # turn still spent tokens up to the point it broke, so its cost must count toward the next
     # check).
     turn_tokens = 0
-    # Stamp the turn's session so a job-launching tool (submit_qm_job) records push-back to the
+    # Stamp the turn's session so a job-launching tool (compute_dft_energy) records push-back to the
     # right session (F3-T3) — ambient, never a model-supplied argument. Reset on turn teardown.
     session_token = set_current_session_id(session.session_id)
     # The live session object too, so a job-launching tool can mark the harness todo it's

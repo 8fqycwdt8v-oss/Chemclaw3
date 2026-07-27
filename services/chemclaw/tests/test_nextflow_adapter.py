@@ -12,8 +12,8 @@ import httpx
 import pytest
 
 from chemclaw.config import settings
-from workflows.hpc import nextflow
-from workflows.models import HpcJobHandle, QMJobInput, qm_job_key
+from connectors.qm.hpc import nextflow
+from connectors.qm.specs import HpcJobHandle, QMJobInput, qm_job_key
 
 
 @pytest.fixture

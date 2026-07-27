@@ -9,7 +9,8 @@ core differs.
 Note what is *absent*, since that is the point of the seam: no import of the wrapper, no
 knowledge of the PR-gate, no session id, no idempotency logic, no audit. Core owns all of it
 (`workflows/connector_job.py`); a connector author writes a workflow that takes a dict and
-returns an envelope.
+returns an envelope. The one thing it *reads* back from core is the run's memo, which is where
+the requesting actor travels — deliberately beside the payload rather than inside it.
 """
 
 from typing import Any
@@ -27,11 +28,22 @@ class FixtureJobWorkflow:
 
     @workflow.run
     async def run(self, payload: dict[str, Any]) -> ConnectorJobResult:
-        """Return a summary, structured data, and an agent-authored note for the PR-gate."""
+        """Return a summary, structured data, and an agent-authored note for the PR-gate.
+
+        `requested_by` comes off the run's **memo**, not out of `payload`: the payload is exactly
+        the model-authored arguments, so the actor cannot live there without becoming something an
+        LLM could fill in. Core stamps the memo on the child call, and a bundle whose backend runs
+        under a shared service identity — the HPC cluster — reads it here to keep the run
+        attributable (`connectors/qm/workflows.py` is the real case).
+        """
         subject = str(payload["subject"])
         return ConnectorJobResult(
             summary=f"fixture job ran on {subject}",
-            data={"subject": subject, "ran": True},
+            data={
+                "subject": subject,
+                "ran": True,
+                "requested_by": workflow.memo_value("requested_by", ""),
+            },
             note=Note(
                 id=f"fixture-{subject}",
                 type="job-result",

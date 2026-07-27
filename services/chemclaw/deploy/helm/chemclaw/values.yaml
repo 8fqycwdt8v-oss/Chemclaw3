@@ -29,9 +29,9 @@ service:
     maxReplicas: 6
     targetCPUUtilizationPercentage: 70
 
+# Core's own Temporal worker. Only one left: `hpc` went with the QM/DFT job into the `qm`
+# connector bundle below, which is sized for HPC work on its own queue (D-118).
 workers:
-  hpc:
-    replicas: 2 # few, heavy (D-006)
   background:
     # Keep at 1. Light work (sync / re-index / reports), but this worker also submits PR-gate
     # notes, and that checkout lock is host-local (D-069) — a second replica can corrupt a
@@ -61,8 +61,12 @@ knowledge:
   noteRepoPath: /var/lib/chemclaw/note-repo
 
 # Connector bundles (`connectors/<name>/`), each its own Deployment + Service serving that
-# capability's MCP tools over HTTP. One entry per bundle in the repo; `enabled` decides whether it
-# gets pods. The front door's CHEMCLAW_CONNECTOR_URLS is *computed* from this same block
+# capability's MCP tools over HTTP, its own Temporal worker, or both. One entry per bundle in the
+# repo; `enabled` decides whether it gets pods, and `server`/`worker` say which halves it has —
+# they must match the bundle's own `connector.yaml` (an `endpoint:` and a `jobs:` block
+# respectively), which `tests/test_deploy_chart.py` checks in both directions.
+#
+# The front door's CHEMCLAW_CONNECTOR_URLS is *computed* from this same block
 # (`chemclaw.connectorUrls`), so the addresses it dials and the Services that exist cannot disagree.
 #
 # Enabling a connector here is only half the switch: CHEMCLAW_CONNECTORS_ENABLED in `config` below
@@ -71,18 +75,23 @@ knowledge:
 connectors:
   molfp:
     enabled: true
+    server: true
     replicas: 1
   rxnfp:
     enabled: true
+    server: true
     replicas: 1
   safety:
     enabled: true
+    server: true
     replicas: 1
   chem:
     enabled: true
+    server: true
     replicas: 1
   calc:
     enabled: true
+    server: true
     replicas: 1
     # The expensive calculations (reaction energies, solvent screens, scans, CREST searches) run
     # as durable jobs on this bundle's own queue, so it gets a worker Deployment too. Sizing it
@@ -91,10 +100,27 @@ connectors:
     worker: true
   bo:
     enabled: true
+    server: true
     replicas: 1
     # This bundle owns durable work, so it also gets a Temporal worker Deployment polling the queue
     # its manifest declares. Bundles without a `jobs:` entry leave this unset and get only the app.
     worker: true
+  qm:
+    enabled: true
+    # The first jobs-only bundle: it declares no `endpoint:`, so `server: false` and it gets no app
+    # pod and no Service — there is no sub-second QM tool to serve. `replicas` therefore sizes the
+    # worker fleet, at the two core's `hpc` worker used to run.
+    server: false
+    replicas: 2
+    worker: true
+    # HPC-sized, and "heavy" here means *long-lived*, not CPU-hungry: the DFT run is on the
+    # cluster, while this pod holds one activity slot per in-flight job with an open Nextflow poll
+    # for up to `hpc_run_timeout_seconds` (24h). So it needs memory headroom for many concurrent
+    # waits and little CPU — the opposite shape from `resources.worker`, which is why it overrides
+    # it here rather than sharing it.
+    resources:
+      requests: { cpu: "250m", memory: "1Gi" }
+      limits: { cpu: "1", memory: "4Gi" }
 
 # The port every connector container listens on (its own Service maps it 1:1). One value rather than
 # per-connector: they are separate Services, so there is no port to deconflict, and a single number
@@ -105,6 +131,9 @@ resources:
   service:
     requests: { cpu: "250m", memory: "512Mi" }
     limits: { cpu: "1", memory: "1Gi" }
+  # The default for every worker Deployment, core's and a bundle's. A bundle that needs different
+  # sizing overrides it with its own `resources:` under `connectors.<name>` rather than growing a
+  # key here, which is what keeps a capability's operational shape inside its own entry.
   worker:
     requests: { cpu: "500m", memory: "1Gi" }
     limits: { cpu: "2", memory: "4Gi" }

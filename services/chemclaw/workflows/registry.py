@@ -13,13 +13,13 @@ that is written, tested and imported but missing from the worker's list is a wor
 that never runs, and nothing fails until someone submits one and it sits in the queue
 forever.
 
-**Queues are a capability property, not a deployment detail.** `hpc` is for few, heavy
-workers (QM/DFT); `background` is for many light ones (sync, re-index, reports). Which one
-a workflow belongs on follows from what it does, so it belongs with the code that does it —
-see D-006. A connector bundle adds one queue of its own, `connector-<name>`
-(`connectors.queues.bundle_queue`), so the set is open rather than the original two: D-006's
-split moves down one level, from core's two queues to one core queue plus one per bundle,
-each sized for its own work.
+**Queues are a capability property, not a deployment detail.** `background` is core's own —
+many light workers (sync, re-index, reports, the connector-job wrapper). Each connector bundle
+adds one of its own, `connector-<name>` (`connectors.queues.bundle_queue`), sized for that
+capability alone. Which one a workflow belongs on follows from what it does, so it belongs with
+the code that does it — see D-006. The set is open rather than the original two because D-006's
+heavy/light split moved down one level: core's `hpc` queue existed for the single QM/DFT
+workflow, and that is a bundle now (D-118).
 
 **The isolation comes from the import boundary, not from the decorator.** A bundle's heavy
 dependencies stay out of core's worker because core's worker never imports the bundle's
@@ -45,7 +45,7 @@ from typing import Any, TypeVar
 
 logger = logging.getLogger(__name__)
 
-# A task queue name. Core owns two (D-006) and every connector bundle owns one
+# A task queue name. Core owns one (D-006) and every connector bundle owns one
 # (`connectors.queues.bundle_queue`), so this is an open set of strings rather than a closed
 # Literal — a bundle must be able to name its queue without editing core.
 Queue = str

@@ -136,16 +136,29 @@ def test_a_dry_run_does_not_launch_a_durable_job(monkeypatch: pytest.MonkeyPatch
 
 
 def test_a_dry_run_does_not_submit_a_qm_job(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Same guard on the most expensive tool in the system."""
-    from agents import qm_tools
+    """Same guard on the most expensive tool in the system, now that it is a declared job.
+
+    Worth keeping as its own case rather than folding into the generic launcher tests: the QM job
+    is the one whose side effect is a cluster reservation, and a dry run that reached the Temporal
+    client would start one.
+    """
+    from connectors import jobs as connector_jobs
+    from connectors.jobs import build_job_tool
+    from connectors.registry import enabled
+
+    (spec,) = next(m for m in enabled() if m.name == "qm").jobs
 
     async def _explode(*args: Any, **kwargs: Any) -> Any:
         raise AssertionError("a dry run reached the Temporal client")
 
-    monkeypatch.setattr(qm_tools, "connect", _explode)
+    monkeypatch.setattr(connector_jobs, "connect", _explode)
+    tool = build_job_tool("qm", spec)
+    params = tool.__annotations__["params"]
     token = set_dry_run(True)
     try:
-        result = asyncio.run(qm_tools.submit_qm_job("CCO", "B3LYP", "def2-SVP"))
+        result = asyncio.run(
+            tool(params(molecule_smiles="CCO", method="B3LYP", basis_set="def2-SVP"))
+        )
     finally:
         reset_dry_run(token)
-    assert result.startswith("DRY RUN")
+    assert isinstance(result, str) and result.startswith("DRY RUN")
