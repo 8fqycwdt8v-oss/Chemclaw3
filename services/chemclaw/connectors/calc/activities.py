@@ -40,8 +40,11 @@ from connectors.calc.specs import (
     SolventScreenJobSpec,
     XtbJobInput,
 )
+from connectors.queues import bundle_queue
+from workflows.registry import durable_activity
 
 
+@durable_activity(bundle_queue("calc"))
 @activity.defn
 async def run_xtb_calculation(job: XtbJobInput) -> XtbJobResult:
     """Run one durable xTB task and return its typed result.

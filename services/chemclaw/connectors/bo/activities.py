@@ -5,12 +5,16 @@ All the non-deterministic, heavy work lives here — BoFire strategy fitting
 replayable. The objective is resolved by name via `bo.objectives` because a
 workflow cannot pass a Python callable into an activity.
 
-**Deliberately not decorated with `@durable_activity`.** `workflows.registry` assembles core's
-two queues, and these run on this bundle's own worker (`connectors.bo.worker`, queue
-`connector-bo`) — registering them there would put `bofire` and `botorch` back into core's
-background worker, which is exactly the coupling the bundle removed. A connector's worker names
-what it serves explicitly, because its queue is its own contract with the manifest rather than a
-core deployment decision. `tests/test_workflow_registry.py` asserts the *absence*.
+**Registered on this bundle's own queue, not core's.** These carry
+`@durable_activity(bundle_queue("bo"))`, so `connectors.bo.worker` assembles what it serves from
+the registry instead of a hand-written list. They previously carried no decorator at all, on the
+reasoning that registering them would put `bofire` and `botorch` into core's background worker.
+That reasoning was wrong about the mechanism: the registry is populated at *import* time, and
+core's workers never import this module, so the decorator cannot move anything into core — while
+the hand-maintained list it forced re-created, one level down, the "written, imported, absent from
+the worker's list, never runs" failure `workflows.registry` exists to prevent (D-118).
+`tests/test_workflow_registry.py` now asserts the import boundary directly, which is the property
+that was actually doing the work.
 """
 
 import asyncio
@@ -20,12 +24,15 @@ from temporalio import activity
 from bo.engine import initial_candidates, propose_candidates
 from bo.objectives import get_objective
 from bo.problem import Candidate, Observation, OptimizationProblem
+from connectors.queues import bundle_queue
+from workflows.registry import durable_activity
 
 # BoFire fitting is CPU-bound (GP fit + acquisition optimization); run it off the
 # event loop so heartbeats and concurrent activities keep flowing (the same
 # discipline as `calc.store.run_cached`).
 
 
+@durable_activity(bundle_queue("bo"))
 @activity.defn
 async def propose_initial(
     problem: OptimizationProblem, n: int, seed: int | None = None
@@ -34,6 +41,7 @@ async def propose_initial(
     return await asyncio.to_thread(initial_candidates, problem, n, seed)
 
 
+@durable_activity(bundle_queue("bo"))
 @activity.defn
 async def propose_next(
     problem: OptimizationProblem,
@@ -45,6 +53,7 @@ async def propose_next(
     return await asyncio.to_thread(propose_candidates, problem, observations, n, seed)
 
 
+@durable_activity(bundle_queue("bo"))
 @activity.defn
 async def evaluate_candidates(
     objective_name: str, candidates: list[Candidate]

@@ -14,9 +14,20 @@ that never runs, and nothing fails until someone submits one and it sits in the 
 forever.
 
 **Queues are a capability property, not a deployment detail.** `hpc` is for few, heavy
-workers (QM/DFT and the expensive xTB tasks); `background` is for many light ones (sync,
-re-index, reports, BO campaigns). Which one a workflow belongs on follows from what it
-does, so it belongs with the code that does it — see D-006.
+workers (QM/DFT); `background` is for many light ones (sync, re-index, reports). Which one
+a workflow belongs on follows from what it does, so it belongs with the code that does it —
+see D-006. A connector bundle adds one queue of its own, `connector-<name>`
+(`connectors.queues.bundle_queue`), so the set is open rather than the original two: D-006's
+split moves down one level, from core's two queues to one core queue plus one per bundle,
+each sized for its own work.
+
+**The isolation comes from the import boundary, not from the decorator.** A bundle's heavy
+dependencies stay out of core's worker because core's worker never imports the bundle's
+module — the registry is populated at *import* time, so an unimported module registers
+nothing. Bundles used to leave their workflows undecorated to achieve this, which could not
+work for that reason and re-created on the connector side the "written, imported, absent
+from a hand-maintained list, never runs" failure this registry exists to prevent (D-118).
+`tests/test_workflow_registry.py` now asserts the import boundary directly.
 
 The shape deliberately mirrors `agents.tool_registry`: a dict per queue keyed by the name
 Temporal will advertise, insertion-ordered, with a duplicate guard. The one difference is
@@ -28,21 +39,23 @@ the object the worker modules captured at import time.
 """
 
 import logging
+from collections import defaultdict
 from collections.abc import Callable
-from typing import Any, Literal, TypeVar
+from typing import Any, TypeVar
 
 logger = logging.getLogger(__name__)
 
-# The two task queues (D-006). `hpc` runs few, heavy workers; `background` runs many
-# light ones. A third would be a deployment decision, added here and nowhere else.
-Queue = Literal["hpc", "background"]
+# A task queue name. Core owns two (D-006) and every connector bundle owns one
+# (`connectors.queues.bundle_queue`), so this is an open set of strings rather than a closed
+# Literal — a bundle must be able to name its queue without editing core.
+Queue = str
 
 DurableActivity = Callable[..., Any]
 _WorkflowT = TypeVar("_WorkflowT", bound=type)
 _ActivityT = TypeVar("_ActivityT", bound=DurableActivity)
 
-_WORKFLOWS: dict[Queue, dict[str, type]] = {"hpc": {}, "background": {}}
-_ACTIVITIES: dict[Queue, dict[str, DurableActivity]] = {"hpc": {}, "background": {}}
+_WORKFLOWS: dict[Queue, dict[str, type]] = defaultdict(dict)
+_ACTIVITIES: dict[Queue, dict[str, DurableActivity]] = defaultdict(dict)
 
 
 def temporal_name(obj: Any) -> str:

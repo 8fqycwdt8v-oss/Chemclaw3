@@ -4420,3 +4420,44 @@ hardcoded `kind="qm"` and populated only `qm_result` ever since. Nothing wrote o
 `xtb_result` — grep confirms a single occurrence in the whole tree, its own declaration. Removed
 rather than kept as a field whose `None` means "unreachable here"; it was also the last thing
 pulling the `calc.*` result closure into core.
+
+**A bundle's isolation comes from the import boundary, not from withholding a decorator.**
+
+`connectors/bo/activities.py` carried this rationale for leaving its activities undecorated:
+*"registering them there would put `bofire` and `botorch` back into core's background worker, which
+is exactly the coupling the bundle removed."* The conclusion was right and the mechanism was
+backwards. `workflows/registry.py`'s dicts are populated at **import** time, and core's workers
+import only `workflows.*` — so a decorator on a module core never imports cannot move anything into
+core. What kept `bofire` out was the missing import, not the missing decorator.
+
+The cost of getting the mechanism wrong was real: each bundle had to hand-maintain `TASK_QUEUE`,
+`_WORKFLOWS` and `_ACTIVITIES` in its worker module, which re-created one level down the exact
+failure the registry exists to prevent — *a workflow that is written, tested and imported but
+missing from the worker's list never runs, and nothing fails until someone submits one and it waits
+in the queue forever*. And the queue name had three copies that all had to agree (the manifest, the
+worker constant, the Helm component); two that disagree is a job in a queue nobody polls.
+
+So: `Queue` widens from a two-member `Literal` to a string, because a bundle must be able to name
+its queue without editing core. `connectors/queues.py::bundle_queue` derives it from the bundle
+name, so the three copies become one derivation. Bundles decorate normally, and each worker module
+is now five lines — two registration imports and a call — with `connectors/worker.py` holding the
+shared body. That extraction is sanctioned by the file it replaces: `bo/worker.py` said *"the second
+connector worker is when to look at it again"*, and `calc` is the second.
+
+D-006's queue split therefore moves down one level: from core's two queues to one core queue plus
+one per bundle, each sized for its own work in Helm.
+
+`tests/test_workflow_registry.py` swaps an assertion about a decorator's absence for the property
+that was actually doing the work — in a fresh interpreter, importing core's workers must load no
+bundle package and none of `tblite`/`bofire`/`botorch`. The bundle list is derived from
+`connectors.registry.discovered()`, so adding a bundle extends the check on the day it is created.
+
+Verified live against the dev server — both workers connect and serve exactly what the registry
+holds, with nothing hand-listed:
+
+```
+bo   connector worker connected: queue=connector-bo   workflows=[BoCampaignWorkflow]
+     activities=[evaluate_candidates, propose_initial, propose_next]
+calc connector worker connected: queue=connector-calc workflows=[CalcJobWorkflow]
+     activities=[run_xtb_calculation]
+```

@@ -43,17 +43,24 @@ def test_the_calc_connectors_worker_serves_every_expensive_xtb_task() -> None:
     closed union discriminated on `kind` — so the queue choice is made once, not per
     capability.
     """
-    from connectors.calc.worker import CALC_ACTIVITIES, CALC_WORKFLOWS, TASK_QUEUE
+    import connectors.calc.worker  # noqa: F401 — importing it is what registers the bundle
     from connectors.calc.workflows import CalcJobWorkflow
+    from connectors.queues import bundle_queue
     from connectors.registry import discovered
+    from workflows.registry import registered_activities, registered_workflows
 
-    assert CalcJobWorkflow in CALC_WORKFLOWS
-    assert CALC_ACTIVITIES  # a workflow with no activity would be a wiring bug, not a design
-    # The queue is a contract with the manifest, not a local constant: a drift between them
-    # is a job that starts and is never picked up.
+    # Read from the registry, not from module constants. `CALC_WORKFLOWS`/`CALC_ACTIVITIES`/
+    # `TASK_QUEUE` were hand-maintained lists that could silently disagree with what the bundle's
+    # modules actually define — the failure `workflows.registry` exists to prevent, re-created one
+    # level down (D-118). There is nothing left to disagree with.
+    queue = bundle_queue("calc")
+    assert CalcJobWorkflow in registered_workflows(queue)
+    assert registered_activities(queue)  # a workflow with no activity is a wiring bug
+    # The queue is derived from the bundle name, so manifest and worker cannot drift; what is
+    # still worth asserting is that every job routes to the one workflow this bundle serves.
     _, manifest = discovered()["calc"]
     jobs = manifest.jobs
-    assert jobs and {job.task_queue for job in jobs} == {TASK_QUEUE}
+    assert jobs and {job.task_queue for job in jobs} == {queue}
     assert {job.workflow for job in jobs} == {"CalcJobWorkflow"}
 
 
