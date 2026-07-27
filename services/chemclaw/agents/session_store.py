@@ -14,6 +14,7 @@ calculation cache. The MAF `Message` is stored via its own `to_dict()`/`from_dic
 never interprets message shape — a MAF change is a value change, not a schema change.
 """
 
+import logging
 from collections.abc import Sequence
 from datetime import datetime
 from typing import Any, ClassVar
@@ -22,11 +23,20 @@ import psycopg
 from agent_framework import HistoryProvider, Message
 from psycopg.types.json import Jsonb
 
+from agents.message_pairing import strip_unmatched_calls
 from chemclaw import db
 from chemclaw.config import settings
 
+log = logging.getLogger(__name__)
+
 _INSERT = "INSERT INTO session_messages (session_id, message) VALUES (%s, %s)"
 _SELECT = "SELECT message FROM session_messages WHERE session_id = %s ORDER BY id"
+# Row ids come back too, so a repaired message can be written to the row it came from.
+_SELECT_WITH_ID = "SELECT id, message FROM session_messages WHERE session_id = %s ORDER BY id"
+_UPDATE_MESSAGE = "UPDATE session_messages SET message = %s WHERE id = %s"
+_DELETE_IDS = "DELETE FROM session_messages WHERE session_id = %s AND id = ANY(%s)"
+_MAX_ID = "SELECT MAX(id) FROM session_messages WHERE session_id = %s"
+_DELETE_AFTER = "DELETE FROM session_messages WHERE session_id = %s AND id > %s"
 
 _OWNER_INSERT = (
     "INSERT INTO session_owners (session_id, owner) VALUES (%s, %s) "
@@ -68,14 +78,93 @@ class PostgresHistoryProvider(HistoryProvider):
     async def get_messages(
         self, session_id: str | None, *, state: dict[str, Any] | None = None, **kwargs: Any
     ) -> list[Message]:
-        """Load a session's messages in insertion order (empty for an unknown/None session)."""
+        """Load a session's messages in insertion order (empty for an unknown/None session).
+
+        Repairs the history on the way out: a function call with no matching result is dropped,
+        and the stored row is corrected. See `agents.message_pairing` for why this is enforced on
+        read rather than only on write — a `SIGKILL` or pod eviction between the call and its
+        result runs no cleanup handler, and the orphan it leaves behind makes every later turn on
+        that session fail outright. Doing it here also heals sessions already broken in the wild.
+        """
         if not session_id:
             return []
         async with await self._connect() as conn:
             async with conn.cursor() as cur:
-                await cur.execute(_SELECT, (session_id,))
+                await cur.execute(_SELECT_WITH_ID, (session_id,))
                 rows = await cur.fetchall()
-        return [Message.from_dict(row[0]) for row in rows]
+        stored = [(int(row[0]), Message.from_dict(row[1])) for row in rows]
+        repaired = strip_unmatched_calls([message for _, message in stored])
+        if len(repaired) == len(stored) and all(
+            new is old for new, (_, old) in zip(repaired, stored, strict=True)
+        ):
+            return repaired  # untouched — the overwhelmingly common path, no write at all
+        await self._persist_repair(session_id, stored, repaired)
+        return repaired
+
+    async def _persist_repair(
+        self, session_id: str, stored: list[tuple[int, Message]], repaired: list[Message]
+    ) -> None:
+        """Write back a repaired history, so the orphan is removed once rather than re-filtered.
+
+        Best-effort: reading the conversation is the critical path, so a failure here is logged and
+        swallowed — the caller still gets the clean history either way. Idempotent, so two readers
+        racing on the same broken session converge on the same rows.
+        """
+        by_id = dict(zip([row_id for row_id, _ in stored], repaired, strict=False))
+        surviving = {id(message) for message in repaired}
+        deletions = [row_id for row_id, message in stored if id(message) not in surviving]
+        rewrites = [
+            (Jsonb(by_id[row_id].to_dict()), row_id)
+            for row_id, message in stored
+            if row_id in by_id and by_id[row_id] is not message
+        ]
+        try:
+            async with await self._connect() as conn:
+                async with conn.cursor() as cur:
+                    if deletions:
+                        await cur.execute(_DELETE_IDS, (session_id, deletions))
+                    if rewrites:
+                        await cur.executemany(_UPDATE_MESSAGE, rewrites)
+                await conn.commit()
+        except (psycopg.Error, ConnectionError):
+            log.warning(
+                "could not persist history repair for session %s; "
+                "the unmatched tool call was filtered for this turn but remains stored",
+                session_id,
+                exc_info=True,
+            )
+        else:
+            log.warning(
+                "repaired session %s: removed %d unmatched tool call(s) from durable history",
+                session_id,
+                len(deletions) + len(rewrites),
+            )
+
+    async def latest_message_id(self, session_id: str) -> int | None:
+        """Return the highest stored row id for `session_id`, or `None` when it has no history.
+
+        The pre-turn watermark for `rollback_to`.
+        """
+        async with await self._connect() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(_MAX_ID, (session_id,))
+                row = await cur.fetchone()
+        return None if row is None or row[0] is None else int(row[0])
+
+    async def rollback_to(self, session_id: str, watermark: int | None) -> int:
+        """Delete everything stored for `session_id` after `watermark`; return how many rows went.
+
+        The durable half of the turn rollback in `service.runner`: that only restored the
+        in-process session state, which under this provider is not where the messages live — they
+        are already committed, so a half-written turn survived the rollback that was supposed to
+        discard it.
+        """
+        async with await self._connect() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(_DELETE_AFTER, (session_id, watermark or 0))
+                deleted = cur.rowcount
+            await conn.commit()
+        return max(deleted, 0)
 
     async def save_messages(
         self,

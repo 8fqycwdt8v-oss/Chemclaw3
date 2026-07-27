@@ -10,6 +10,7 @@ Errors are turned into a single `ErrorEvent` with a user-safe message rather tha
 stack trace to the browser — a failed turn must not take down the stream or leak internals.
 """
 
+import asyncio
 import copy
 import logging
 from collections.abc import AsyncIterator, Mapping
@@ -69,6 +70,7 @@ async def run_turn(
     roles: frozenset[str] = frozenset(),
     budget: BudgetTracker | None = None,
     dry_run: bool = False,
+    history: Any | None = None,
 ) -> AsyncIterator[Event]:
     """Run one turn and yield its events (tokens, tool calls, approvals, then the answer).
 
@@ -85,6 +87,9 @@ async def run_turn(
         budget: The runaway-cost meter. When set, this turn's reported token usage and its turn
             count are booked against the session/user when the turn ends (the front-door admission
             check reads those counters before the *next* turn). `None` disables metering (test/CLI).
+        history: The session's history provider, when it stores durably. Only used to roll the
+            turn's committed rows back on a client disconnect — under the in-memory provider the
+            state snapshot below is the whole story, but a durable one has already written them.
 
     Yields:
         `service.events.Event` values in the order the model produced them, ending with an
@@ -117,6 +122,22 @@ async def run_turn(
     # the model rejects the thread outright ("tool_use ids found without tool_result blocks"), so
     # one dropped connection permanently bricks the conversation rather than costing it a turn.
     state_snapshot = copy.deepcopy(session.state)
+    # The durable half of that snapshot. `session.state` is not where a Postgres-backed history
+    # lives — `save_messages` has already committed its rows — so restoring the state alone left
+    # the orphaned `tool_use` in the database and bricked the session anyway, which is exactly the
+    # failure the snapshot exists to prevent. A watermark lets the rollback delete what this turn
+    # actually wrote, and nothing else.
+    history_watermark: int | None = None
+    if history is not None and hasattr(history, "latest_message_id"):
+        try:
+            history_watermark = await history.latest_message_id(session.session_id)
+        except Exception:  # noqa: BLE001 - a rollback aid must never fail the turn it guards
+            logger.warning(
+                "could not read the history watermark for session %s; a disconnect this turn "
+                "will not roll durable history back",
+                session.session_id,
+                exc_info=True,
+            )
     try:
         async with AsyncExitStack() as stack:
             # Open each MCP capability server for the duration of the turn, then tear it down — the
@@ -191,6 +212,31 @@ async def run_turn(
         )
         session.state.clear()
         session.state.update(state_snapshot)
+        if history is not None and hasattr(history, "rollback_to"):
+            # Shielded: this generator is already closing, so an inner `await` would otherwise be
+            # cancelled straight away and leave the half-written turn committed after all.
+            try:
+                deleted = await asyncio.shield(
+                    history.rollback_to(session.session_id, history_watermark)
+                )
+                if deleted:
+                    logger.warning(
+                        "rolled %d durable message(s) back for session %s",
+                        deleted,
+                        session.session_id,
+                    )
+            except BaseException:  # noqa: BLE001 - see below; nothing here may escape
+                # `BaseException`, not `Exception`: a disconnect usually cancels this task, so the
+                # shielded await can raise `CancelledError`. Letting that out would replace the
+                # `GeneratorExit` we are handling and leave the generator improperly closed. The
+                # bare `raise` below re-raises the original either way, and the next turn's
+                # read-time repair is the backstop if this cleanup never ran.
+                logger.warning(
+                    "could not roll durable history back for session %s; the next turn's "
+                    "read-time repair will drop any unmatched tool call",
+                    session.session_id,
+                    exc_info=True,
+                )
         raise
     except Exception:
         # One turn's failure becomes one user-safe event, never a 500 mid-stream or a leaked trace.

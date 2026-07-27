@@ -9,10 +9,15 @@ those settings, and it reverts cleanly via monkeypatch after each test.
 instead of redefining an identical fake per file (DRY).
 """
 
+import asyncio
+from collections.abc import Iterator
+
+import psycopg
 import pytest
 
 from chemclaw.config import settings
 from kg.pr_gate import NoteSubmission
+from tests.pg import create_test_schema, drop_test_schema, schema_dsn
 
 
 class FakeSubmitter:
@@ -26,6 +31,39 @@ class FakeSubmitter:
         """Capture the submission and return a fake PR reference."""
         self.submissions.append(submission)
         return f"pr://{submission.branch}"
+
+
+@pytest.fixture(scope="session", autouse=True)
+def isolated_postgres_schema() -> Iterator[None]:
+    """Point every Postgres-backed test at a dedicated schema, and drop it afterwards.
+
+    Session-scoped and autouse so it is impossible to opt out of by forgetting a fixture: the
+    destructive tests (`test_audit_chain` truncates `audit_events`, `test_vector_index`
+    truncates `note_index`) would otherwise run against whatever database the developer's
+    `.env` points at. Redirecting `postgres_dsn` is enough to isolate every store, because
+    they all resolve their own connection from it — see `tests/pg.py`.
+
+    A missing database is not an error here: the per-test `migrated_db_or_skip` already turns
+    that into a skip, so this yields untouched and lets it report the reason.
+    """
+    base_dsn = settings.postgres_dsn
+    try:
+        asyncio.run(create_test_schema(base_dsn))
+    except (psycopg.Error, ConnectionError):  # pragma: no cover - env-dependent
+        yield  # no reachable database; the Postgres tests skip themselves
+        return
+
+    patch = pytest.MonkeyPatch()
+    patch.setattr(settings, "postgres_dsn", schema_dsn(base_dsn))
+    # `session_store_dsn` falls back to `postgres_dsn` only while it is empty; an explicitly
+    # configured one would otherwise escape the redirect and write to the real schema.
+    if settings.session_store_dsn:
+        patch.setattr(settings, "session_store_dsn", schema_dsn(settings.session_store_dsn))
+    try:
+        yield
+    finally:
+        patch.undo()
+        asyncio.run(drop_test_schema(base_dsn))
 
 
 @pytest.fixture(autouse=True)

@@ -118,7 +118,16 @@ _INSTRUCTIONS = (
     "something from earlier that you cannot find, say you don't have that part of the "
     "conversation in view right now and ask the chemist to repeat it — never assert that it "
     "'never happened' or that the current message is 'the first' one; you cannot see far enough "
-    "back to know that, and claiming otherwise misstates the record."
+    "back to know that, and claiming otherwise misstates the record.\n"
+    "Refused tools: a tool result beginning 'Refused:' is an access-control decision about the "
+    "asking chemist's account, not a fault. Relay it as such — name the tool, give the reason "
+    "the result states, and point them at whoever grants access in their organization. Never "
+    "describe it as the tool being 'unavailable' or 'not working', as a configuration issue, or "
+    "as a temporary service problem: all of those send a chemist to debug a system that is "
+    "behaving exactly as intended, and none of them tells them the one thing that would actually "
+    "get them the answer — that they need to request access. Do not retry the call or attempt "
+    "the same action through another tool; report the refusal and continue with whatever else "
+    "the question needs."
 )
 
 
@@ -270,7 +279,7 @@ def _build_harness_agent(
         else settings.harness_autonomy
     )
     start_mode = "plan" if autonomy == "plan_only" else "execute"
-    return create_harness_agent(
+    agent = create_harness_agent(
         client,
         name="chemclaw",
         agent_instructions=instructions,
@@ -293,6 +302,29 @@ def _build_harness_agent(
         loop_max_iterations=settings.harness_max_loop_iterations,
         middleware=middleware,
     )
+    # Two things `create_harness_agent` switches on are individually fine and jointly fatal on the
+    # *streaming* path — which is the only path the front door uses:
+    #
+    #   1. per-service-call history persistence, whose middleware replaces the outgoing messages
+    #      with history+input each model call and signals "stop resending the transcript" by
+    #      stamping a sentinel `conversation_id` on the finalized response;
+    #   2. `MessageInjectionMiddleware`, installed unconditionally, which while streaming returns a
+    #      *new* `ChatResponse` built by `ChatResponse.from_updates()`. The sentinel lived on the
+    #      inner response, never on a streamed update, so the rebuild drops it.
+    #
+    # The function-invocation loop reads that sentinel to decide whether to clear its accumulated
+    # transcript. With it gone the loop re-sent everything *while* history was independently
+    # re-injected, and the duplicate put a `user` block between a `tool_use` and its `tool_result`
+    # — which Anthropic rejects outright ("tool_use ids were found without tool_result blocks
+    # immediately after"). 100% of tool calls, both autonomy modes, so harness mode never worked.
+    #
+    # Turning (1) off breaks the chain at its start: nothing injects, so no sentinel is needed. The
+    # cost is that history is durable per *run* rather than per model call — exactly the classic
+    # path's behaviour, and `harness_enabled` is off by default, so this is not a regression for
+    # anyone. The real fix belongs upstream (preserve `conversation_id` across that finalizer);
+    # `tests/test_harness_execution.py` pins the behaviour so this cannot silently rot.
+    agent.require_per_service_call_history_persistence = False
+    return agent
 
 
 def history_provider() -> HistoryProvider:

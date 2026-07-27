@@ -2654,3 +2654,92 @@ Helm/kubeconform steps (the restructure's Makefile removed the target, and the c
 of the Replit deployment) and `make eval`, whose case-set has three gated failures that predate
 all of this — a gate that is red on arrival trains people to ignore it, and those cases deserve
 their own fix rather than a permanently-failing check.
+
+## D-092 — Four fixes from the live e2e pass, and two root causes that were not what they looked like
+
+**Context.** A nine-stage live pass against the real stack (Postgres+pgvector, Temporal, real
+Anthropic calls, real signed tokens) left four open findings. Fixing them changed the diagnosis of
+two, and the corrected diagnoses are the part worth recording.
+
+**1. Harness mode failed on every tool call — and the test double is why nobody knew.**
+`create_harness_agent` sets `require_per_service_call_history_persistence=True`, whose middleware
+replaces the outgoing messages each model call and signals "stop resending the transcript" with a
+sentinel `conversation_id` on the finalized response. It also installs `MessageInjectionMiddleware`
+unconditionally, which *while streaming* returns a new `ChatResponse` from
+`ChatResponse.from_updates()` — and the sentinel, living on the inner response rather than on any
+streamed update, does not survive. The function-invocation loop therefore re-sent the whole
+transcript while history was independently re-injected, and the duplicate put a `user` block
+between a `tool_use` and its `tool_result`, which Anthropic rejects outright. Both autonomy modes,
+single and parallel calls, 100%.
+
+Chemclaw sets the flag back to `False` after construction. That breaks the chain at its start —
+nothing injects, so no sentinel is needed — at the cost of per-*run* rather than per-model-call
+history durability, which is exactly what the classic path has always done and what
+`harness_enabled=False` (the default) already gives everyone. The correct fix is upstream and is
+recorded in `DEFERRED.md`.
+
+**Decision: treat the test double's class hierarchy as production-relevant.**
+`ScriptedChatClient` derived from `FunctionInvocationLayer + BaseChatClient` and its docstring
+claimed that mirrored a concrete client. It did not: `BaseChatClient` is deliberately the base
+*without* middleware wrapping, and the omitted `ChatMiddlewareLayer` is what consumes
+`client_kwargs["middleware"]`. Every harness test ran a pipeline containing **zero** chat
+middleware — including the two the harness installs — so three tests passed green against
+machinery production never used. Adding the layer reproduces the failure offline with no network.
+A fake that diverges from the real type's *layering*, not just its behaviour, tests nothing; the
+regression tests now assert the wire invariant (every call followed by its result) over the
+messages actually handed to the client.
+
+**2. The suite was destroying live data.** Nine test files wrote to production tables with no
+isolation. `test_audit_chain` truncated `audit_events` — the GxP tamper-evident hash chain — then
+deliberately corrupted a row and left it that way, so `make audit-verify` failed permanently
+afterwards. On the dev database this was not hypothetical: rows 1–3 of the "real" audit trail were
+that test's own fixtures, with row 2 still reading `actor='attacker'`. CI never noticed because its
+database is a per-run container, which is precisely why a shared database was where it bit.
+
+**Decision: isolate by schema, carried on the DSN, not by a parameter threaded through the stores.**
+Every store already resolves its connection from `settings.postgres_dsn`, so redirecting that one
+value (to `options=-c search_path=chemclaw_test,public`) isolates all of them with no schema
+argument anywhere in product code. `public` stays second because `vector` is installed per
+database. The schema name is a constant in `tests/pg.py`, not a `Settings` field: `config.py` is
+the operator-facing deployment surface and its parity tests require every field to appear in
+`.env.example` — a test-only knob does not belong there.
+
+This surfaced a real product bug (**3**): `chemclaw.db.connect` passed `options=` as a psycopg
+keyword, which *overrides* the connection string rather than merging with it — but only when a
+statement timeout was set, since `None` is dropped. An operator's `search_path`, `application_name`
+or `work_mem` therefore vanished on some call sites and survived on others, non-deterministically.
+Now merged, with ours appended last so libpq's last-occurrence-wins keeps our timeout authoritative.
+
+**4. The orphan-`tool_use` rollback protected nothing on the path that ships.** D-091 §2 snapshots
+and restores `session.state` on a client disconnect. Under `session_store="postgres"` the messages
+are not in `session.state` — `save_messages` has already committed them — so the orphan survived
+the rollback meant to discard it, and every later turn on that session replayed it into the same
+400. **Decision: enforce the invariant on read, and make the rollback durable as well.**
+Read-time repair (`PostgresHistoryProvider.get_messages` drops and deletes unanswered calls) is the
+load-bearing half, because the disconnect handler is not the only way a turn dies between writing a
+call and writing its result — a `SIGKILL`, an OOM, or a pod eviction runs no Python cleanup at all,
+and the harness's per-service-call persistence had been *widening* that window by writing the call
+before the tool ran. It also heals sessions already broken in the field. The watermark rollback is
+kept alongside it because the two differ: repair removes orphans, whereas the rollback's contract
+is that a half-written turn is discarded whole.
+
+The pairing rule lives in `agents/message_pairing.py` with two forms, and the distinction is
+load-bearing: `unmatched_call_ids` (by id, order-independent) decides what is safe to *delete from
+storage*, where a merely out-of-order pair is intact history; `calls_without_adjacent_results`
+(the stricter wire rule) validates what is about to be *sent*. Using the lenient one on the wire
+would have missed finding 1 entirely — duplicated history leaves a second, unanswered copy of a
+call whose id does appear answered once.
+
+**5. RBAC denial narration — the reported cause was wrong.** The pass attributed inconsistent
+narration to tool docstrings ("gated" tools explained themselves, others did not). No tool
+docstring mentions gating, permissions, or privileges anywhere. The actual cause: `authorize_tool`
+emits three different messages, and under the shipped default only the five
+`DEFAULT_WRITE_TOOL_GATES` tools can ever be denied — so the self-explaining "lacks a privileged
+role" message was the only one anyone had seen. The deny-default message, "not in the tool
+allowlist (deny by default)", is written from the perspective of whoever edits the config, and the
+model relayed it as "not currently available… a configuration issue" — which sends a chemist to
+report a bug rather than to request access. **Decision: all three refusals share one chemist-facing
+shape** (who, which tool, why), the operator's remedy moves to the docstring and runbook, and
+`_INSTRUCTIONS` gains a passage on narrating a refusal — mirroring the compaction passage, which
+was already the house pattern for honest limitation-reporting. Verified live: all five previously
+vague read tools now state it is an access decision and say how to get access.

@@ -78,7 +78,7 @@ def test_write_tools_are_gated_by_default(monkeypatch: pytest.MonkeyPatch) -> No
 
     denied = set_current_identity("u-6", frozenset({"reader"}))
     try:
-        with pytest.raises(AuthorizationError, match="write tool submit_qm_job"):
+        with pytest.raises(AuthorizationError, match="not authorized to use submit_qm_job"):
             authorize_tool("submit_qm_job")
         with pytest.raises(AuthorizationError):
             authorize_tool("propose_knowledge_note")
@@ -167,9 +167,9 @@ def test_deny_default_refuses_write_tools_even_for_privileged_roles(
     )
     token = set_current_identity("u-10", frozenset({"process-chemist"}))
     try:
-        with pytest.raises(AuthorizationError, match="not in the tool allowlist"):
+        with pytest.raises(AuthorizationError, match="not authorized to use"):
             authorize_tool("submit_qm_job")
-        with pytest.raises(AuthorizationError, match="not in the tool allowlist"):
+        with pytest.raises(AuthorizationError, match="not authorized to use"):
             authorize_tool("propose_knowledge_note")
     finally:
         reset_current_identity(token)
@@ -331,3 +331,64 @@ def test_domain_errors_pass_a_successful_call_through_unchanged() -> None:
 
     _drive_domain_errors(ctx, _ok)
     assert ctx.result == "6.51"
+
+
+# --- the refusal wording the chemist actually reads ------------------------------------
+
+
+def _denial_message(tool: str, monkeypatch: pytest.MonkeyPatch) -> str:
+    """Return the message `authorize_tool` refuses `tool` with, for the configured gate."""
+    monkeypatch.setattr(settings, "entra_required", True)
+    token = set_current_identity("u-7", frozenset({"chemist"}))
+    try:
+        with pytest.raises(AuthorizationError) as exc_info:
+            authorize_tool(tool)
+    finally:
+        reset_current_identity(token)
+    return str(exc_info.value)
+
+
+@pytest.mark.parametrize(
+    ("tool", "configure"),
+    [
+        ("predict_pka", "explicit_gate"),
+        ("predict_pka", "deny_default"),
+        ("submit_qm_job", "write_gate"),
+    ],
+)
+def test_every_denial_reads_as_an_access_decision(
+    tool: str, configure: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """All three refusal paths name the user, name the tool, and say it is an access decision.
+
+    They used to diverge, and the divergence reached the chemist: the deny-default message was
+    phrased for whoever edits the config ("not in the tool allowlist"), so the model relayed a
+    denial as "not currently available… a configuration issue" — sending a chemist to report a
+    bug rather than to request access. The built-in write gate said "lacks a privileged role" and
+    narrated correctly, which is why only the write tools ever explained themselves. One shape for
+    all three, so which gate fired cannot change whether the answer is intelligible.
+    """
+    if configure == "explicit_gate":
+        monkeypatch.setattr(settings, "tool_role_gates", {tool: ["reviewer"]})
+    elif configure == "deny_default":
+        monkeypatch.setattr(settings, "tool_authz_default", "deny")
+    else:
+        monkeypatch.setattr(settings, "entra_privileged_roles", "lead")
+
+    message = _denial_message(tool, monkeypatch)
+
+    assert message.startswith("u-7 is not authorized to use ")  # who, and that it is authorization
+    assert tool in message  # which tool, so the chemist can ask for that access specifically
+    assert ":" in message  # ...followed by the reason
+    # None of the words that previously made this read as a malfunction rather than a decision.
+    lowered = message.lower()
+    for misleading in ("allowlist", "unavailable", "not working", "temporarily", "config"):
+        assert misleading not in lowered, f"{misleading!r} reads as a fault, not an access decision"
+
+
+def test_an_unauthenticated_user_is_named_as_such(monkeypatch: pytest.MonkeyPatch) -> None:
+    """With no identity in context the message says so, rather than naming an empty actor."""
+    monkeypatch.setattr(settings, "entra_required", True)
+    monkeypatch.setattr(settings, "tool_authz_default", "deny")
+    with pytest.raises(AuthorizationError, match="an unauthenticated user is not authorized"):
+        authorize_tool("predict_pka")
