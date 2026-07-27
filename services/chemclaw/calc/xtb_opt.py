@@ -21,6 +21,7 @@ optimization's own key, and the geometry's `origin` records which calculation pr
 it — so the "structure store" X1 deferred turns out to be one field, not a subsystem.
 """
 
+import asyncio
 from typing import Literal
 
 import numpy as np
@@ -484,9 +485,14 @@ async def run_cached_optimization(
     the geometry, not the recipe. The agent-facing entry points build the structure.
     """
     spec = spec or OptSpec()
+    # Off the event loop: deriving the key calls `calc_version()`, whose first call in a
+    # process shells out to `xtb --version` / `crest --version` (`calc.xtb_cli`), and the
+    # hash walks every atom. Both are synchronous, and this runs inside the connector's
+    # one-loop MCP server and inside Temporal activities that are coroutines.
+    key = await asyncio.to_thread(spec.cache_key, structure)
     return await run_cached(
         store,
-        spec.cache_key(structure),
+        key,
         lambda: optimize_structure(spec, structure),
         OptimizationResult,
     )

@@ -32,6 +32,7 @@ a reaction is then a subtraction over values already held. Caching the subtracti
 would add an entry that can never be hit by anything the per-species entries miss.
 """
 
+import asyncio
 from collections import Counter
 from typing import Literal
 
@@ -198,7 +199,11 @@ async def _species_energy(
     reaction whose whole point is that one side is open-shell — needs no extra
     argument to be computable.
     """
-    structure = structure_from_smiles(smiles, multiplicity=None, optimize=True)
+    # Embedding is synchronous RDKit (ETKDG + a force-field cleanup), tens of milliseconds for
+    # a drug-sized molecule; this coroutine shares its loop with every other in-flight request.
+    structure = await asyncio.to_thread(
+        structure_from_smiles, smiles, multiplicity=None, optimize=True
+    )
     ensemble_correction = 0.0
     if conformer_spec is not None:
         ensemble, _ = await run_cached_ensemble(store, structure, conformer_spec)

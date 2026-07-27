@@ -23,6 +23,8 @@ there explicitly rather than through `workflows.registry` — that registry serv
 queues, and a connector's queue is the connector's own business.
 """
 
+import asyncio
+
 from temporalio import activity
 
 from calc.complexes import ComplexSpec, run_cached_interaction
@@ -99,7 +101,11 @@ async def run_xtb_calculation(job: XtbJobInput) -> XtbJobResult:
             solvents=comparison,
         )
     if isinstance(spec, ScanJobSpec):
-        structure = structure_from_smiles(spec.smiles, multiplicity=None, optimize=True)
+        # Activities here are coroutines on the worker's one event loop (no `activity_executor`),
+        # so a synchronous RDKit embed also stalls task polling and heartbeats.
+        structure = await asyncio.to_thread(
+            structure_from_smiles, spec.smiles, multiplicity=None, optimize=True
+        )
         scan_spec = ScanSpec(
             solvent=spec.solvent, atoms=tuple(spec.atoms), values=tuple(spec.values)
         )
@@ -114,7 +120,9 @@ async def run_xtb_calculation(job: XtbJobInput) -> XtbJobResult:
             scan=scan,
         )
     if isinstance(spec, EnsembleJobSpec):
-        structure = structure_from_smiles(spec.smiles, multiplicity=None, optimize=True)
+        structure = await asyncio.to_thread(
+            structure_from_smiles, spec.smiles, multiplicity=None, optimize=True
+        )
         ensemble, _ = await run_cached_ensemble(
             store,
             structure,

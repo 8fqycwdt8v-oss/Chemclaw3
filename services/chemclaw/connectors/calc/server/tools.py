@@ -11,6 +11,8 @@ driver out of the chat service's image (D-110): a calculation's dependencies are
 business, and this capability scales on its own.
 """
 
+import asyncio
+
 from mcp.server.fastmcp import FastMCP
 
 from calc.calibration import (
@@ -285,7 +287,11 @@ async def optimize_geometry(smiles: str, solvent: str | None = None) -> Optimiza
         The converged energy, how much the relaxation lowered it, how far the atoms
         moved, and the id of the resulting geometry.
     """
-    structure = structure_from_smiles(smiles, multiplicity=None, optimize=True)
+    # Embedding is synchronous RDKit (ETKDG + a force-field cleanup), tens of milliseconds for
+    # a drug-sized molecule; this coroutine shares its loop with every other in-flight request.
+    structure = await asyncio.to_thread(
+        structure_from_smiles, smiles, multiplicity=None, optimize=True
+    )
     result, _ = await run_cached_optimization(default_store(), structure, OptSpec(solvent=solvent))
     return OptimizationSummary.of(result)
 
@@ -327,7 +333,11 @@ async def compute_thermochemistry(
         Frequencies with IR intensities, whether the geometry is a minimum, and the
         thermochemistry with the uncertainty to quote alongside it.
     """
-    structure = structure_from_smiles(smiles, multiplicity=None, optimize=True)
+    # Embedding is synchronous RDKit (ETKDG + a force-field cleanup), tens of milliseconds for
+    # a drug-sized molecule; this coroutine shares its loop with every other in-flight request.
+    structure = await asyncio.to_thread(
+        structure_from_smiles, smiles, multiplicity=None, optimize=True
+    )
     spec = ThermoSpec(
         solvent=solvent,
         symmetry_number=symmetry_number,

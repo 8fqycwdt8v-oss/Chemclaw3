@@ -28,6 +28,7 @@ the cache key, so setting it correctly is a recompute rather than a silent corre
 Within a balanced reaction the error partly cancels; between unlike species it does not.
 """
 
+import asyncio
 import math
 from typing import Literal
 
@@ -535,9 +536,14 @@ async def run_cached_thermochemistry(
 ) -> tuple[ThermochemistryResult, bool]:
     """Return the thermochemistry of `structure`, reusing the store on a repeat."""
     spec = spec or ThermoSpec()
+    # Off the event loop: deriving the key calls `calc_version()`, whose first call in a
+    # process shells out to `xtb --version` / `crest --version` (`calc.xtb_cli`), and the
+    # hash walks every atom. Both are synchronous, and this runs inside the connector's
+    # one-loop MCP server and inside Temporal activities that are coroutines.
+    key = await asyncio.to_thread(spec.cache_key, structure)
     return await run_cached(
         store,
-        spec.cache_key(structure),
+        key,
         lambda: compute_thermochemistry(spec, structure),
         ThermochemistryResult,
     )

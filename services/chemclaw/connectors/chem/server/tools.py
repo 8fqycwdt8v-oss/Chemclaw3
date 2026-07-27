@@ -14,7 +14,17 @@ them already existed somewhere in the repo:
 
 All are pure and synchronous: no network, no durable state, no store. They are the cheap half
 of the chemistry surface — the expensive half (xTB, BO, fingerprint search) already existed.
+
+"Cheap" is relative to xTB, not to an event loop. RDKit parsing, `Descriptors.MolWt` and
+especially 2D-coordinate generation plus SVG rendering are CPU-bound C++ that holds the GIL for
+milliseconds to tens of milliseconds, and this server answers every connected chat turn on one
+loop — a load test measured throughput flat from 10 to 50 concurrent users, the signature of
+exactly this. So each tool does its RDKit work in a worker thread (`asyncio.to_thread`, the
+idiom `calc.store` and `report.retrievers` already use) and the coroutine only awaits it. RDKit
+releases the GIL for the heavy passes, so the threads are real parallelism on a multi-CPU pod.
 """
+
+import asyncio
 
 from mcp.server.fastmcp import FastMCP
 from pydantic import BaseModel, Field
@@ -67,7 +77,9 @@ async def resolve_compound(name: str) -> ResolvedCompound | None:
     Returns:
         The canonical structure with the name it was recognised as, or `None` if unknown.
     """
-    return resolve_compound_name(name)
+    # An unrecognised name falls through to an RDKit canonicalisation attempt, so this is not the
+    # dictionary lookup it looks like.
+    return await asyncio.to_thread(resolve_compound_name, name)
 
 
 @server.tool()
@@ -95,6 +107,15 @@ async def stoichiometry_table(
         )
     if basis_mass_g <= 0:
         raise ValueError("basis_mass_g must be positive")
+    # One offload for the whole table rather than one per species: a 10-reagent charge table is
+    # 11 RDKit parses, and hopping to a worker thread per parse would cost more than it saves.
+    return await asyncio.to_thread(_charge_table, basis, basis_mass_g, reagents, equivalents)
+
+
+def _charge_table(
+    basis: str, basis_mass_g: float, reagents: list[str], equivalents: list[float]
+) -> ChargeTable:
+    """The charge table's RDKit-bound body, run in a worker thread (arguments already validated)."""
     anchor = resolve_compound_name(basis)
     if anchor is None:
         raise ValueError(f"could not resolve the limiting reagent {basis!r}")
@@ -195,6 +216,16 @@ async def render_structure(smiles: str) -> str:
 
     Returns:
         An inline SVG document.
+    """
+    return await asyncio.to_thread(_render_svg, smiles)
+
+
+def _render_svg(smiles: str) -> str:
+    """The depiction's RDKit body, run in a worker thread.
+
+    Coordinate generation and rasterising to SVG are the most expensive synchronous work in this
+    module (tens of milliseconds for a drug-sized molecule), and a chat turn that renders a
+    structure would otherwise stall every other turn on the process for that long.
     """
     size = settings.structure_render_size_px
     if ">>" in smiles:

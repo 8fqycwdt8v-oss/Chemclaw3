@@ -28,6 +28,7 @@ Three limits that belong with every number this produces:
   stoichiometry beyond two.
 """
 
+import asyncio
 from typing import Literal
 
 import numpy as np
@@ -35,7 +36,7 @@ from pydantic import BaseModel, Field
 
 from calc import crest_cli
 from calc.crest_cli import CrestEffort
-from calc.store import ResultStore, run_cached
+from calc.store import CalculationKey, ResultStore, run_cached
 from calc.structure import Structure, structure_from_smiles
 from calc.xtb_opt import OptSpec, optimize_structure
 from calc.xtb_spec import CrestSpec
@@ -196,11 +197,23 @@ async def run_cached_interaction(
     """
     spec = spec or ComplexSpec()
     smiles_a, smiles_b = _ordered(smiles_a, smiles_b)
-    monomers = [structure_from_smiles(smiles, optimize=True) for smiles in (smiles_a, smiles_b)]
-    subject = _combine(monomers[0], monomers[1], spec.separation_angstrom)
+    # Both embeddings, the combination and the key derivation in one worker thread: each is
+    # synchronous RDKit/hashing work, and this coroutine runs on the loop that serves every
+    # other request on the process. `calc_version()` also shells out to `crest --version` on
+    # its first call in a process, which must not happen on the loop either.
+    subject, key = await asyncio.to_thread(_interaction_subject, spec, smiles_a, smiles_b)
     return await run_cached(
         store,
-        spec.cache_key(subject),
+        key,
         lambda: compute_interaction(spec, smiles_a, smiles_b),
         InteractionResult,
     )
+
+
+def _interaction_subject(
+    spec: ComplexSpec, smiles_a: str, smiles_b: str
+) -> tuple[Structure, CalculationKey]:
+    """Embed the pair, combine it, and derive its cache key — the blocking half of the wrapper."""
+    monomers = [structure_from_smiles(smiles, optimize=True) for smiles in (smiles_a, smiles_b)]
+    subject = _combine(monomers[0], monomers[1], spec.separation_angstrom)
+    return subject, spec.cache_key(subject)

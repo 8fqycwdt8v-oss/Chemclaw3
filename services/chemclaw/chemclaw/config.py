@@ -759,6 +759,19 @@ class ServiceSettings(BaseSettings):
     # Entra-enforced deployments never need it.
     service_allow_insecure: bool = False
     service_cors_origins: str = ""
+    # How many uvicorn worker *processes* the container starts (`deploy/entrypoint.sh`). One
+    # asyncio event loop saturates one CPU, and a load test measured throughput flat at
+    # ~1.18 turns/s from 10 to 50 concurrent users on a 4-CPU box — a single-loop ceiling.
+    #
+    # **The default stays 1 on purpose.** Two front-door guards are per-process in-memory
+    # structures: `active_turns` (the 409 that stops two turns interleaving on one session's
+    # thread) and the admission semaphore. With N workers each holds 1/N of the picture, so two
+    # turns on one session landing on different workers would both be admitted and interleave —
+    # a correctness regression, not a tuning choice. Raise this only for a deployment whose
+    # ingress pins a session to one worker, or once the guard is moved to shared state; scaling
+    # out with `replicas` (where the same hazard already exists and is tracked) is the supported
+    # path. See `service.app` for the full argument.
+    service_uvicorn_workers: int = Field(default=1, gt=0)
     # Max characters accepted in one chat message at the front door (SEC-4). Bounds the request
     # body at the trust boundary so an oversized POST is a clean 422, not an unbounded
     # allocation. Generous for a real message (~25k tokens); raise it for a workflow that posts
