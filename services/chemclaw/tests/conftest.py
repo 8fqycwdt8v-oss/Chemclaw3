@@ -84,3 +84,31 @@ def loopback_service_host(monkeypatch: pytest.MonkeyPatch) -> None:
     which overrides these settings per test.
     """
     monkeypatch.setattr(settings, "service_host", "127.0.0.1")
+
+
+def pytest_collection_modifyitems(items: list[pytest.Item]) -> None:
+    """Give Temporal-backed tests a `thread`-method timeout, because `signal` cannot reach them.
+
+    `pyproject.toml` sets `timeout_method = signal` deliberately: it fails the one hung test and
+    lets the session continue, rather than `os._exit`-ing everything after it. That reasoning holds
+    for pure-Python hangs and is useless here. `signal` raises from a SIGALRM handler, and the
+    interpreter only runs handlers between bytecodes — a test blocked inside `temporalio`'s Rust
+    core (PyO3) never gets back to run it, so the cap silently does nothing.
+
+    Measured: a workflow submitted to a queue whose worker had not registered it hung
+    `test_bo_knowledge.py` for **28 minutes** past a 600 s cap, until the GitHub job timeout killed
+    the run — no test name, no traceback, and `main` red on every commit since the gates were
+    enabled. The `thread` method fires from a watchdog thread, so it works regardless of what the
+    main thread is stuck in, and it dumps every thread's traceback before exiting.
+
+    Losing "the session continues" costs nothing in this case: a hang that burns the whole job
+    stops everything after it anyway. This trades a silent 30-minute cancellation for a named
+    failure in three minutes.
+
+    Selected by module rather than by marker so a new Temporal test is covered the day it is
+    written: importing `start_env_or_skip` is what makes a module able to hang this way.
+    """
+    for item in items:
+        module = getattr(item, "module", None)
+        if module is not None and hasattr(module, "start_env_or_skip"):
+            item.add_marker(pytest.mark.timeout(method="thread"))
