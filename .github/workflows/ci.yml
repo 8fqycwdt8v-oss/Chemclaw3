@@ -25,13 +25,14 @@ jobs:
     # tests/test_orchestrator.py's fan-out test used to do exactly that). `pytest-timeout`'s
     # per-test cap is the inner bound that names the offending test; this is the outer backstop.
     #
-    # Raised 30 -> 45 because the inner bound now actually works. This job was cancelled here on
-    # every run — including on `main` — from the moment D-117 enabled the real gates, and the outer
-    # bound was the only thing that ever fired: `signal`-based interrupts cannot reach a test
-    # blocked in temporalio's Rust core, so a hung workflow burnt 28 minutes and reported no test
-    # name. `tests/conftest.py` now gives Temporal-backed tests the `thread` method, which fires
-    # regardless. With hangs caught in 180 s and named, this number only has to cover real work.
-    timeout-minutes: 45
+    # Stays at 30 — the number was never the problem. This job was cancelled here on every run,
+    # `main` included, from the moment D-117 enabled the real gates, and the outer bound was the
+    # only thing that ever fired: `signal`-based interrupts cannot reach a test blocked in
+    # temporalio's Rust core, so a hung workflow burnt 28 minutes and reported no test name.
+    # `tests/conftest.py` now gives Temporal-backed tests the `thread` method, which fires
+    # regardless. With the hang fixed, the whole gate — every Temporal test included — runs in
+    # **4m38s**, so 30 is already 6x headroom and raising it would only lengthen the next burn.
+    timeout-minutes: 30
     # Real Postgres so the calculation-store and session-store integration tests run (not skip).
     services:
       postgres:
