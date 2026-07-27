@@ -32,6 +32,36 @@ missing prerequisite), in D-092.
 
 The load test's fixes landed (see D-119). What it surfaced and did **not** close:
 
+- [ ] **AUDIT-1 The tool-audit middleware does not fire, so `audit_events` stays empty even with a
+      durable sink wired.** D-122 fixed the half that was findable by reading: the service passed no
+      sink, so the trail was log-only. With that fixed and `default_audit_sink()` verified to return
+      `PostgresAuditSink` under `session_store=postgres`, a **live turn still writes no row**.
+      Reproduced in-process, outside the service, against the stub model:
+
+      ```
+      agent = build_agent(); await agent.run("find notes about benzene solubility")
+      # stub requests 1458 -> 1460, tool_calls_emitted 599 -> 600
+      # response carries an assistant / tool / assistant message triple
+      # audit_events: 4 -> 4
+      ```
+
+      A `@function_middleware`-typed spy wrapped around `make_audit_middleware` records **zero**
+      invocations, with `harness_enabled` either true or false. The middleware *is* attached — the
+      built agent reports `['surface_authorization_denials', 'surface_domain_errors',
+      'audit_tool_calls', 'enforce_tool_authz']` — and MAF does return a `tool` role message, so a
+      tool call round-trips without any of the four running.
+
+      **This is bigger than the audit trail.** `enforce_tool_authz` is the RBAC gate and
+      `surface_domain_errors` is the typed-error surface; they are registered the same way and would
+      be equally inert. The earlier RBAC matrix run passed, so authorization is enforced *somewhere*
+      — establishing where, and whether the middleware chain is bypassed only on this tool path, is
+      the first step. Do not assume the audit gap is the whole of it.
+
+      No test covers "run a turn, assert a row in `audit_events`": `tests/test_audit.py` drives the
+      middleware directly and `tests/test_audit_store.py` writes to the sink directly, so both pass
+      while the wiring between them is broken. That missing end-to-end assertion is why this
+      survived a CHECKMATE review and a live e2e pass.
+
 - [x] **SCALE-1 The 409 same-session guard is per-process.** Closed by D-121: a turn also takes a
       leased `session_turns` row, refreshed three times per lease and released at the end, so the
       guard holds across workers *and* replicas. The advisory lock stayed rejected for the reason

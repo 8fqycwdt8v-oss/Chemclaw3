@@ -90,11 +90,38 @@ class AuditSink(Protocol):
 
 
 class NullAuditSink:
-    """The default sink: the stdlib log is the only record (no durable store wired)."""
+    """Log-only: the stdlib log is the whole record, because no database is configured."""
 
     async def record(self, event: AuditEvent) -> None:
         """Discard the event — logging in the middleware already recorded it."""
         return None
+
+
+def default_audit_sink() -> AuditSink:
+    """The sink a caller gets when it names none: durable where a database exists, else log-only.
+
+    **The default is here, and not at each entry point, because "each entry point remembers" is
+    exactly what failed.** `PostgresAuditSink`, the tamper-evident hash chain, `infra/sql/011`,
+    `make audit-verify` and `scripts/verify_audit_chain.py` were all built and tested — and the sink
+    was constructed in exactly one place, `agents/cli.py`, behind `--audit-postgres`. The deployed
+    service passed nothing, so this module installed `NullAuditSink()` and the entire GxP trail was
+    log-only in every process a chemist actually talks to. `audit_events` was empty in production
+    while every document called it the compliance record. The Temporal template activities had the
+    same gap, independently.
+
+    Opting *in* to the compliance record, per call site, is the wrong polarity for a GxP control: a
+    forgotten argument must not silently downgrade it. So the durable sink is what you get, and
+    log-only is what a deployment with no database falls back to.
+
+    Gated on `session_store="postgres"` for the same reason `_default_owner_store` is: that switch
+    is the deployment's statement that a Postgres exists and durable records belong in it. Imported
+    lazily so the dev/test path never pulls psycopg for a store it will not use.
+    """
+    if settings.session_store != "postgres":
+        return NullAuditSink()
+    from agents.audit_store import PostgresAuditSink
+
+    return PostgresAuditSink()
 
 
 def _truncate(value: object) -> str:
@@ -125,10 +152,12 @@ def make_audit_middleware(
     build-time value still serves the callers that bind a meaningful one and stamp nothing per turn
     (the Temporal template activities pass the workflow id).
 
-    `sink` is the durable trail — omitted (or `NullAuditSink`) means log-only. A sink failure is
-    logged and swallowed: the audit store must never break a tool call.
+    `sink` is the durable trail. Omitted means `default_audit_sink()` — durable wherever a
+    database is configured — so a caller that forgets downgrades nothing; pass `NullAuditSink()`
+    explicitly to opt out. A sink failure is logged and swallowed: the audit store must never
+    break a tool call.
     """
-    audit_sink: AuditSink = sink if sink is not None else NullAuditSink()
+    audit_sink: AuditSink = sink if sink is not None else default_audit_sink()
     # The revision in effect for this process, captured once at build time (AG-14) — every event
     # this middleware records carries it, so a result ties to the exact version that produced it.
     revision = settings.deployment_revision

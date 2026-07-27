@@ -4694,3 +4694,54 @@ handoff" is never read as "the LLM endpoint is full".
   `--workers 4` run there may simply relocate the ceiling rather than raise it.
 - Renumbered from D-120 during the merge: `claude/datasource-seam` had already published D-120
   (per CLAUDE.md, the branch merging second renumbers).
+
+## D-122 — The GxP audit trail defaults to durable, because opting in per call site did not work
+
+**Context.** `PostgresAuditSink`, the tamper-evident hash chain (`chain_hash`, `row_hash`),
+`infra/sql/011`, `make audit-verify` and `scripts/verify_audit_chain.py` were all built, tested and
+documented as the GxP "who ran what" record. The sink was constructed in exactly **one** place:
+`agents/cli.py`, behind `--audit-postgres`. The deployed service's `_default_agent_factory` called
+`build_agent(profile=…)` with no `audit_sink`, so `agents/audit.py` installed `NullAuditSink()` and
+the compliance record was log-only in the one process chemists actually talk to. The Temporal
+template activities had the same gap, independently, in two more call sites.
+
+Nothing failed and no test noticed: `tests/test_audit.py` drives the middleware directly and
+`tests/test_audit_store.py` writes to the sink directly, so both pass while the wiring between them
+is absent. `audit_events` was simply empty.
+
+**Decision.** The default moves from the call site to the one place that decides.
+`agents.audit.default_audit_sink()` returns `PostgresAuditSink` where `session_store="postgres"`
+and `NullAuditSink` otherwise, and `make_audit_middleware(sink=None)` resolves it.
+
+The polarity is the whole point. Opting *in* to a compliance control, once per entry point, means a
+forgotten keyword argument silently downgrades it — and there is no failure to notice, because the
+downgraded state is "the log still has it". So the durable sink is what a caller gets by default,
+log-only is the fallback where no database is configured, and opting *out* requires passing
+`NullAuditSink()` explicitly, which is a visible act.
+
+Fixing `service/app.py` alone was the obvious change and was rejected: it would have left the
+identical trap set for the template activities and for every entry point added later. The gate is
+`session_store="postgres"` for the same reason `_default_owner_store` uses it — that switch is the
+deployment's statement that a Postgres exists — with a lazy import so the dev/test path never pulls
+psycopg for a store it will not use.
+
+`agents/cli.py --audit-postgres` survives with narrowed meaning: it *forces* the durable sink for an
+operator running a terminal session against a database without switching `session_store`.
+
+**Consequences.**
+
+- Three call sites stop being able to get this wrong, and so does the next one.
+- Verified counterfactually at the decision line rather than by deleting the function: reverting
+  only `sink if sink is not None else default_audit_sink()` back to `NullAuditSink()` fails
+  `test_an_omitted_sink_no_longer_silently_means_log_only` and nothing else.
+
+**This does not yet produce a row, and that is recorded rather than implied.** With the sink
+correctly resolved — `default_audit_sink()` returns `PostgresAuditSink` under the load-test config —
+a live turn still writes nothing to `audit_events`, because the audit middleware **never fires**. A
+`@function_middleware`-typed spy records zero invocations while MAF returns a `tool` role message,
+with the harness enabled or disabled. The four middlewares are attached (`surface_authorization_denials`,
+`surface_domain_errors`, `audit_tool_calls`, `enforce_tool_authz`) and none of them run on that path.
+
+That is a second, separate defect, and a larger one — `enforce_tool_authz` is the RBAC gate. It is
+tracked as **AUDIT-1** in `BACKLOG.md` with the reproduction. This ADR fixes the half that was
+findable by reading the code; the half that needed running it is open.

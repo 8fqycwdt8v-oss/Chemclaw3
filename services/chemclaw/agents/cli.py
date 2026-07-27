@@ -70,6 +70,11 @@ def _build_cli_agent(args: argparse.Namespace, actor: str) -> Any:
     `ANTHROPIC_API_KEY` at construction and fails with a clear message if it is missing (D-037),
     so a credential problem surfaces here, before the prompt.
     """
+    # `--audit-postgres` now only *forces* the durable sink; omitting it no longer means log-only,
+    # because `agents.audit.default_audit_sink` already gives a Postgres-configured deployment the
+    # durable trail. The flag remains for the CLI's real case: an operator pointed at a database
+    # for the calculation cache who wants the audit chain written too, without switching
+    # `session_store` for a terminal session.
     sink: AuditSink | None = PostgresAuditSink() if args.audit_postgres else None
     return build_agent(actor=actor, audit_sink=sink)
 
@@ -162,7 +167,10 @@ def _parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
     parser.add_argument(
         "--audit-postgres",
         action="store_true",
-        help="Persist the tool-audit trail to Postgres (default: log-only).",
+        help=(
+            "Force the tool-audit trail to Postgres. Without it the trail is durable anyway "
+            "wherever CHEMCLAW_SESSION_STORE=postgres, and log-only otherwise."
+        ),
     )
     return parser.parse_args(argv)
 

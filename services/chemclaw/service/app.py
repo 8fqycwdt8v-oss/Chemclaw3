@@ -369,6 +369,12 @@ def _default_agent_factory(profile: str | None) -> Any:
 
     A named adapter rather than a lambda so the app's default factory has the same one-argument
     shape a test's fake does, and so the signature is somewhere a reader can find it.
+
+    No `audit_sink` argument, deliberately: `agents.audit.default_audit_sink` supplies the durable
+    GxP trail wherever a database is configured. This line used to be the whole of the finding —
+    it passed no sink, so the compliance record was log-only in the one process chemists use.
+    Fixing it *here* would have left the same trap set for the Temporal template activities and
+    every future entry point, so the default moved to the one place that decides.
     """
     return build_agent(profile=profile)
 
