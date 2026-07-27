@@ -15,7 +15,7 @@ from typing import Any
 from agent_framework import AgentSession
 from fastapi.testclient import TestClient
 
-from service.app import _LiveSessions, create_app
+from service.app import LiveSession, _LiveSessions, create_app
 
 
 class _SpyMcpTool:
@@ -71,13 +71,23 @@ class _FakeAgent:
         return _gen()
 
 
-def _client(agent: _FakeAgent, connector_factory: Callable[[], list[Any]] = list) -> TestClient:
-    """The app under test, with no connectors by default.
+def _no_connectors(_profile: str | None = None) -> list[Any]:
+    """The default connector factory for these tests: none.
 
     Most tests here are not about connectors, and defaulting to the real set would have every one of
     them dial a connector server that is not running.
     """
-    return TestClient(create_app(agent_factory=lambda: agent, connector_factory=connector_factory))
+    return []
+
+
+def _client(
+    agent: _FakeAgent,
+    connector_factory: Callable[[str | None], list[Any]] = _no_connectors,
+) -> TestClient:
+    """The app under test, with no connectors by default (see `_no_connectors`)."""
+    return TestClient(
+        create_app(agent_factory=lambda _profile: agent, connector_factory=connector_factory)
+    )
 
 
 def test_healthz_is_ok() -> None:
@@ -103,7 +113,7 @@ def test_message_stream_runs_a_turn_and_connects_its_connectors_once() -> None:
     """Create a session, post a message, stream the turn; the turn's connector opens once."""
     agent = _FakeAgent()
     spy = _SpyMcpTool()
-    with _client(agent, connector_factory=lambda: [spy]) as client:
+    with _client(agent, connector_factory=lambda _profile: [spy]) as client:
         session_id = client.post("/sessions").json()["session_id"]
         events = []
         with client.stream(
@@ -170,7 +180,7 @@ def test_turn_is_shed_with_503_at_capacity(monkeypatch) -> None:  # type: ignore
     from chemclaw.config import settings
 
     monkeypatch.setattr(settings, "service_turn_admission_timeout_seconds", 0.05)
-    app = create_app(agent_factory=lambda: _FakeAgent())
+    app = create_app(agent_factory=lambda _profile: _FakeAgent())
     # Zero permits → every turn is shed after the admission timeout (deterministic, no concurrency).
     app.state.turn_semaphore = asyncio.Semaphore(0)
     with TestClient(app) as client:
@@ -191,7 +201,7 @@ def test_permit_is_released_after_each_turn(monkeypatch) -> None:  # type: ignor
     from chemclaw.config import settings
 
     monkeypatch.setattr(settings, "service_turn_admission_timeout_seconds", 1.0)
-    app = create_app(agent_factory=lambda: _FakeAgent())
+    app = create_app(agent_factory=lambda _profile: _FakeAgent())
     app.state.turn_semaphore = asyncio.Semaphore(1)
     with TestClient(app) as client:
         session_id = client.post("/sessions").json()["session_id"]
@@ -227,7 +237,7 @@ def test_a_session_is_owner_scoped() -> None:
     """A user cannot post into or stream a session another user created (review finding)."""
     from service.auth import Principal, require_principal
 
-    app = create_app(agent_factory=lambda: _FakeAgent())
+    app = create_app(agent_factory=lambda _profile: _FakeAgent())
     alice = Principal(oid="alice", upn="alice@corp", roles=frozenset())
     bob = Principal(oid="bob", upn="bob@corp", roles=frozenset())
     client = TestClient(app)
@@ -294,10 +304,10 @@ def test_job_pushback_flips_the_harness_awaiting_todo(monkeypatch) -> None:  # t
 
     monkeypatch.setattr(app_module, "stream_new_events", _fake_stream)
 
-    app = create_app(agent_factory=lambda: _FakeAgent())
+    app = create_app(agent_factory=lambda _profile: _FakeAgent())
     with TestClient(app) as client:
         session_id = client.post("/sessions").json()["session_id"]
-        live_session, _owner = app.state.live_sessions.get(session_id)
+        live_session = app.state.live_sessions.get(session_id).session
         asyncio.run(mark_awaiting_job(live_session, "qm-1", title="Await QM job qm-1"))
 
         with client.stream("GET", f"/sessions/{session_id}/events") as res:
@@ -329,10 +339,10 @@ def test_job_pushback_does_not_touch_todos_when_harness_disabled(monkeypatch) ->
 
     monkeypatch.setattr(app_module, "stream_new_events", _fake_stream)
 
-    app = create_app(agent_factory=lambda: _FakeAgent())
+    app = create_app(agent_factory=lambda _profile: _FakeAgent())
     with TestClient(app) as client:
         session_id = client.post("/sessions").json()["session_id"]
-        live_session, _owner = app.state.live_sessions.get(session_id)
+        live_session = app.state.live_sessions.get(session_id).session
         asyncio.run(mark_awaiting_job(live_session, "qm-1", title="Await QM job qm-1"))
 
         with client.stream("GET", f"/sessions/{session_id}/events") as res:
@@ -388,7 +398,9 @@ def test_session_list_is_owner_scoped_and_newest_first() -> None:
 
     alice = Principal(oid="alice", upn="a@corp", roles=frozenset())
     bob = Principal(oid="bob", upn="b@corp", roles=frozenset())
-    app = create_app(agent_factory=lambda: _FakeAgent(), owner_store=_FakeOwnerStore())
+    app = create_app(
+        agent_factory=lambda _profile: _FakeAgent(), owner_store=_FakeOwnerStore()
+    )
     client = TestClient(app)
 
     app.dependency_overrides[require_principal] = lambda: alice
@@ -414,7 +426,9 @@ def test_session_list_is_empty_without_a_durable_registry() -> None:
     """
     from service.auth import Principal, require_principal
 
-    app = create_app(agent_factory=lambda: _FakeAgent())  # owner_store None under the memory store
+    app = create_app(
+        agent_factory=lambda _profile: _FakeAgent()
+    )  # owner_store None under the memory store
     app.dependency_overrides[require_principal] = lambda: Principal(
         oid="alice", upn="a@corp", roles=frozenset()
     )
@@ -436,7 +450,7 @@ def test_transcript_reads_back_the_stored_thread() -> None:
 
     from service.auth import Principal, require_principal
 
-    app = create_app(agent_factory=lambda: _FakeAgent())
+    app = create_app(agent_factory=lambda _profile: _FakeAgent())
     app.dependency_overrides[require_principal] = lambda: Principal(
         oid="alice", upn="a@corp", roles=frozenset()
     )
@@ -444,7 +458,7 @@ def test_transcript_reads_back_the_stored_thread() -> None:
     session_id = client.post("/sessions").json()["session_id"]
     assert client.get(f"/sessions/{session_id}/messages").json() == []  # nothing said yet
 
-    session, _ = app.state.live_sessions.get(session_id)
+    session = app.state.live_sessions.get(session_id).session
     asyncio.run(
         app.state.history.save_messages(
             session_id,
@@ -475,7 +489,7 @@ def test_session_rehydrates_after_a_restart() -> None:
     from service.auth import Principal, require_principal
 
     owners = _FakeOwnerStore()
-    app = create_app(agent_factory=lambda: _FakeAgent(), owner_store=owners)
+    app = create_app(agent_factory=lambda _profile: _FakeAgent(), owner_store=owners)
     app.dependency_overrides[require_principal] = lambda: Principal(
         oid="alice", upn="alice@corp", roles=frozenset()
     )
@@ -499,7 +513,7 @@ def test_rehydration_is_owner_scoped() -> None:
     from service.auth import Principal, require_principal
 
     owners = _FakeOwnerStore()
-    app = create_app(agent_factory=lambda: _FakeAgent(), owner_store=owners)
+    app = create_app(agent_factory=lambda _profile: _FakeAgent(), owner_store=owners)
     client = TestClient(app)
 
     app.dependency_overrides[require_principal] = lambda: Principal(
@@ -522,7 +536,9 @@ def test_no_rehydration_without_durable_store() -> None:
     """
     from chemclaw.config import settings
 
-    app = create_app(agent_factory=lambda: _FakeAgent())  # owner_store None under the memory store
+    app = create_app(
+        agent_factory=lambda _profile: _FakeAgent()
+    )  # owner_store None under the memory store
     assert app.state.session_owners is None
     with TestClient(app) as client:
         session_id = client.post("/sessions").json()["session_id"]
@@ -574,11 +590,11 @@ def test_live_sessions_evicts_least_recently_used() -> None:
     reg.add("a", "sess-a", "owner-a")
     reg.add("b", "sess-b", "owner-b")
     # Touch "a" so "b" becomes the least-recently-used before the third insert.
-    assert reg.get("a") == ("sess-a", "owner-a")
+    assert reg.get("a") == LiveSession(session="sess-a", owner="owner-a")
     reg.add("c", "sess-c", "owner-c")
     assert reg.get("b") is None  # evicted (LRU)
-    assert reg.get("a") == ("sess-a", "owner-a")  # kept (recently used)
-    assert reg.get("c") == ("sess-c", "owner-c")  # kept (newest)
+    assert reg.get("a") == LiveSession(session="sess-a", owner="owner-a")  # kept (recently used)
+    assert reg.get("c") == LiveSession(session="sess-c", owner="owner-c")  # kept (newest)
 
 
 def test_live_sessions_never_exceeds_capacity() -> None:
@@ -594,7 +610,7 @@ def test_live_sessions_never_exceeds_capacity() -> None:
 
 def _gated_agent_factory(
     gate: asyncio.Event, started: asyncio.Event, blocked_message: str
-) -> Callable[[], _FakeAgent]:
+) -> Callable[[str | None], _FakeAgent]:
     """An agent factory whose turn for `blocked_message` parks on `gate` (concurrency tests).
 
     The sync TestClient runs each request to completion before returning, so it cannot hold one
@@ -619,7 +635,7 @@ def _gated_agent_factory(
 
             return _gen()
 
-    return lambda: _GatedAgent()
+    return lambda _profile: _GatedAgent()
 
 
 def test_concurrent_turn_on_same_session_is_409() -> None:
@@ -705,7 +721,7 @@ def test_stalled_turn_times_out_and_frees_the_permit(monkeypatch) -> None:  # ty
             return _gen()
 
     monkeypatch.setattr(settings, "service_turn_timeout_seconds", 0.2)
-    app = create_app(agent_factory=lambda: _HungAgent())
+    app = create_app(agent_factory=lambda _profile: _HungAgent())
     with TestClient(app) as client:
         session_id = client.post("/sessions").json()["session_id"]
         events = []
@@ -740,7 +756,7 @@ def test_cancelled_admission_wait_does_not_brick_the_session(monkeypatch) -> Non
     monkeypatch.setattr(settings, "service_turn_admission_timeout_seconds", 30.0)
 
     async def _run() -> None:
-        app = create_app(agent_factory=lambda: _FakeAgent())
+        app = create_app(agent_factory=lambda _profile: _FakeAgent())
         # Zero permits: the turn parks on the semaphore *after* taking the session's slot.
         app.state.turn_semaphore = asyncio.Semaphore(0)
         transport = httpx.ASGITransport(app=app)
@@ -787,7 +803,7 @@ def test_event_streams_are_capped_per_user(monkeypatch) -> None:  # type: ignore
     monkeypatch.setattr(settings, "service_max_event_streams_per_user", 1)
 
     async def _run() -> None:
-        app = create_app(agent_factory=lambda: _FakeAgent())
+        app = create_app(agent_factory=lambda _profile: _FakeAgent())
         transport = httpx.ASGITransport(app=app)
         async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
             session_id = (await client.post("/sessions")).json()["session_id"]
@@ -842,7 +858,7 @@ def test_every_session_scoped_route_is_ownership_gated() -> None:
 
     from service.auth import Principal, require_principal
 
-    app = create_app(agent_factory=lambda: _FakeAgent())
+    app = create_app(agent_factory=lambda _profile: _FakeAgent())
     session_routes = [
         route
         for route in app.routes

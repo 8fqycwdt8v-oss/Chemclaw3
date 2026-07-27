@@ -85,10 +85,22 @@ server*, and two concurrent turns proven to keep their own identity.
       placement re-runs at replay against current config).
 - [ ] `qm`/`report` job manifests, once their workflows move and return the envelope directly
 
-## Stage D — agentic workflow configuration
+## Stage D — agentic workflow configuration — DONE
 
-- [ ] profiles loaded from bundles (`AgentProfile` Stage 3)
-- [ ] `POST /sessions {profile}` + one cached agent per profile (Stage 2)
+- [x] Profiles authored as files (`AgentProfile` Stage 3): `profiles/<name>.yaml` for a profile that
+      spans capabilities, `connectors/<name>/profiles/` for one that belongs to a bundle. The stem is
+      the name; a `name:` key is refused; `extra="forbid"` makes a typo'd override a startup error
+      rather than a silent no-op.
+- [x] `POST /sessions {profile}` + one cached agent per profile, with the profile fixed for the
+      session's life and carried on the live-session record so the turn gets the matching agent
+      *and* the matching connector set.
+- [x] `profiles/property-lookup.yaml` — a real worked profile, not a placeholder.
+- [~] Profile-name RBAC gate: deliberately not built. A profile can only attenuate, so gating the
+      *name* protects nothing that `tool_role_gates` does not already protect at call time; it would
+      be usability, and there is no caller asking.
+- [~] A rehydrated session returns on the default profile (the owner row does not record it).
+      Documented in the runbook; persisting it is a migration, and the degradation is to the *full*
+      surface rather than a wrong one.
 
 ## Stage E — step templates
 

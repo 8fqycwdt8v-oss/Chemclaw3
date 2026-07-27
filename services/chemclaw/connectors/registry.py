@@ -1,11 +1,12 @@
 """The connector registry: discover bundles, validate them, and build what the agent advertises.
 
-This is the one place that turns folders on disk into agent capability. It deliberately combines the
-two discovery idioms the repo already trusts, each where it fits: **filesystem discovery** for the
-bundles themselves (a connector is a folder, exactly as a skill is — `FileSkillsSource`), and a
-**config enable-token** for which of the discovered bundles a deployment turns on (exactly as
-`skills_enabled` and `data_sources` do). Discovery is not enablement: a repo can ship every
-connector and a deployment can run the subset it has validated.
+This is the one place that turns folders on disk into agent capability. It deliberately combines
+the two discovery idioms the repo already trusts, each where it fits: **filesystem discovery**
+for the bundles themselves (a connector is a folder, exactly as a skill is —
+`FileSkillsSource`), and a **config enable-token** for which of the discovered bundles a
+deployment turns on (exactly as `skills_enabled` and `data_sources` do). Discovery is not
+enablement: a repo can ship every connector and a deployment can run the subset it has
+validated.
 
 Two products come out of a manifest, and `build_agent` appends both to the in-process tool list:
 
@@ -14,9 +15,9 @@ Two products come out of a manifest, and `build_agent` appends both to the in-pr
 - **Job tools** — one generated launcher per `jobs:` entry (`connectors.jobs`), registered into the
   shared tool registry so audit, authorization and profile narrowing address it like any other tool.
 
-Nothing here decides *whether* a call is allowed. The registry only assembles the offered surface;
-the audit and authorization middlewares wrap the assembled list in `build_agent`, and a profile
-narrows it afterwards — so a connector can add to what is *offered* and never to what is
+Nothing here decides *whether* a call is allowed. The registry only assembles the offered
+surface; the audit and authorization middlewares wrap the assembled list in `build_agent`, and a
+profile narrows it afterwards — so a connector can add to what is *offered* and never to what is
 *permitted*.
 """
 
@@ -44,8 +45,8 @@ logger = logging.getLogger(__name__)
 # `scripts.validate_connectors`) and a typo in either would report "no connectors found".
 MANIFEST_FILENAME = "connector.yaml"
 
-# What one configured connector endpoint becomes, whichever transport it declares. Both are MAF MCP
-# tools with the same agent-facing surface, so callers never branch on the transport.
+# What one configured connector endpoint becomes, whichever transport it declares. Both are MAF
+# MCP tools with the same agent-facing surface, so callers never branch on the transport.
 ConnectorMcpTool = DegradingStdioConnector | DegradingHttpConnector
 
 
@@ -61,9 +62,9 @@ class ConnectorError(ValueError):
 def _bundle_dirs() -> list[Path]:
     """Every connector bundle directory found across the configured connector dirs, sorted by name.
 
-    Sorted rather than filesystem order so the advertised tool order is identical on every machine —
-    tool order is part of the prompt the model sees, and a surface that reshuffles per pod is a
-    reproducibility problem in a GxP system.
+    Sorted rather than filesystem order so the advertised tool order is identical on every
+    machine — tool order is part of the prompt the model sees, and a surface that reshuffles per
+    pod is a reproducibility problem in a GxP system.
     """
     found: dict[str, Path] = {}
     for directory in settings.connectors_dirs:
@@ -72,8 +73,8 @@ def _bundle_dirs() -> list[Path]:
             continue
         for path in sorted(root.iterdir()):
             if (path / MANIFEST_FILENAME).is_file():
-                # First dir wins, so an operator's private connectors dir listed ahead of the repo's
-                # can override a shipped bundle — the same precedence a `PATH` entry has.
+                # First dir wins, so an operator's private connectors dir listed ahead of the
+                # repo's can override a shipped bundle — the same precedence a `PATH` entry has.
                 found.setdefault(path.name, path)
     return [found[name] for name in sorted(found)]
 
@@ -81,10 +82,10 @@ def _bundle_dirs() -> list[Path]:
 def _load_manifest(bundle: Path) -> ConnectorManifest:
     """Parse and validate one bundle's `connector.yaml`, raising `ConnectorError` on any problem.
 
-    The folder name is authoritative: a manifest whose `name` disagrees with its directory would be
-    enabled under one name and looked up under the other, so the mismatch is rejected here rather
-    than surfacing as a connector that silently never loads (the rule `validate_skills` applies to
-    `SKILL.md`).
+    The folder name is authoritative: a manifest whose `name` disagrees with its directory would
+    be enabled under one name and looked up under the other, so the mismatch is rejected here
+    rather than surfacing as a connector that silently never loads (the rule `validate_skills`
+    applies to `SKILL.md`).
     """
     path = bundle / MANIFEST_FILENAME
     try:
@@ -108,9 +109,10 @@ def _load_manifest(bundle: Path) -> ConnectorManifest:
 def discovered() -> dict[str, tuple[Path, ConnectorManifest]]:
     """Every discovered bundle by name, with its directory — validated, regardless of enablement.
 
-    Cached because discovery reads and parses every manifest on disk, while the result is fixed for
-    the process's lifetime (config is read once at import, and bundles do not appear at run time).
-    `discovered.cache_clear()` is the seam a test uses after pointing `connectors_dir` elsewhere.
+    Cached because discovery reads and parses every manifest on disk, while the result is fixed
+    for the process's lifetime (config is read once at import, and bundles do not appear at run
+    time). `discovered.cache_clear()` is the seam a test uses after pointing `connectors_dir`
+    elsewhere.
     """
     return {bundle.name: (bundle, _load_manifest(bundle)) for bundle in _bundle_dirs()}
 
@@ -119,9 +121,9 @@ def enabled() -> list[ConnectorManifest]:
     """The manifests this deployment turns on, in the order the enable-list (or discovery) gives.
 
     An empty `connectors_enabled` means every discovered connector — the same "discovery is
-    enablement until you say otherwise" default `skills_enabled` uses, so a fresh checkout runs the
-    full shipped surface. A name in the list that no bundle provides is a loud error: it would
-    otherwise advertise nothing and look like a capability that simply stopped working.
+    enablement until you say otherwise" default `skills_enabled` uses, so a fresh checkout runs
+    the full shipped surface. A name in the list that no bundle provides is a loud error: it
+    would otherwise advertise nothing and look like a capability that simply stopped working.
     """
     found = discovered()
     names = settings.connectors_enabled_list
@@ -138,16 +140,16 @@ def enabled() -> list[ConnectorManifest]:
 def skills_dirs() -> list[str]:
     """The `skills/` directory of every enabled connector that declares skills.
 
-    A connector's judgment ships with its capability: the `SKILL.md` explaining *when* to trust a
-    similarity hit belongs to the same bundle as the tool that produces one. Appending these to
-    `settings.skills_dirs` means `FileSkillsSource` discovers them with no new machinery, and the
-    existing enable-list and role gates still narrow them — a bundled skill is an ordinary skill in
-    every respect except where it lives.
+    A connector's judgment ships with its capability: the `SKILL.md` explaining *when* to trust
+    a similarity hit belongs to the same bundle as the tool that produces one. Appending these
+    to `settings.skills_dirs` means `FileSkillsSource` discovers them with no new machinery, and
+    the existing enable-list and role gates still narrow them — a bundled skill is an ordinary
+    skill in every respect except where it lives.
 
     Only directories that exist are returned: a manifest may declare skills whose folder a
-    deployment has not mounted, and `make connector-validate` is where that mismatch is reported, so
-    handing a non-existent path to the skills source here would fail the *agent* for a *packaging*
-    problem.
+    deployment has not mounted, and `make connector-validate` is where that mismatch is
+    reported, so handing a non-existent path to the skills source here would fail the *agent*
+    for a *packaging* problem.
     """
     found = discovered()
     dirs = []
@@ -163,9 +165,9 @@ def skills_dirs() -> list[str]:
 def _endpoint_url(manifest: ConnectorManifest, endpoint: HttpEndpoint) -> str:
     """The endpoint URL, after any per-deployment override for this connector.
 
-    A manifest ships a working dev default (a loopback port), but a cluster's address belongs to the
-    deployment, not to a file in the repo. `connector_urls` is that override, so Helm points the
-    front door at an in-cluster Service without patching a bundle.
+    A manifest ships a working dev default (a loopback port), but a cluster's address belongs to
+    the deployment, not to a file in the repo. `connector_urls` is that override, so Helm points
+    the front door at an in-cluster Service without patching a bundle.
     """
     return settings.connector_urls.get(manifest.name, endpoint.url)
 
@@ -173,18 +175,18 @@ def _endpoint_url(manifest: ConnectorManifest, endpoint: HttpEndpoint) -> str:
 def _mcp_tool(manifest: ConnectorManifest, endpoint: Endpoint) -> ConnectorMcpTool:
     """Build one MAF MCP tool for a connector endpoint, dispatching on the transport.
 
-    The transports differ only in how the server is *reached* — a locally spawned subprocess vs. an
-    already-running endpoint. Everything bounding what the agent may do with it (`allowed_tools`,
-    prompts off) is identical on both, so the read/compute-only boundary does not depend on
-    transport. The tool is returned **unconnected**: `service.runner.run_turn` opens each MCP
-    context for the duration of a turn and tears it down after.
+    The transports differ only in how the server is *reached* — a locally spawned subprocess vs.
+    an already-running endpoint. Everything bounding what the agent may do with it
+    (`allowed_tools`, prompts off) is identical on both, so the read/compute-only boundary does
+    not depend on transport. The tool is returned **unconnected**: `service.runner.run_turn`
+    opens each MCP context for the duration of a turn and tears it down after.
     """
     if isinstance(endpoint, HttpEndpoint):
-        # One client carries both halves of what travels with a call (`connectors.identity`): our
-        # own credential as `auth`, so it is present on the MCP handshake too, and the turn's
-        # identity as a request hook, which is the only place that can see the turn's ambient
-        # context — MAF's `header_provider` is invoked in the calling task while the request is
-        # issued by the MCP transport's writer task, so its headers never land.
+        # One client carries both halves of what travels with a call (`connectors.identity`):
+        # our own credential as `auth`, so it is present on the MCP handshake too, and the
+        # turn's identity as a request hook, which is the only place that can see the turn's
+        # ambient context — MAF's `header_provider` is invoked in the calling task while the
+        # request is issued by the MCP transport's writer task, so its headers never land.
         return DegradingHttpConnector(
             name=manifest.name,
             url=_endpoint_url(manifest, endpoint),
@@ -219,12 +221,31 @@ def mcp_tools() -> list[Any]:
     ]
 
 
+def profiles_dirs() -> list[str]:
+    """The `profiles/` directory of every enabled connector that declares profiles.
+
+    The bundle-local half of profile discovery (`agents.profile_discovery`), and the same rule
+    as `skills_dirs`: only directories that exist are returned, because a manifest may declare
+    content a deployment has not mounted and that is `make connector-validate`'s complaint to
+    make, not a reason to fail the agent.
+    """
+    found = discovered()
+    dirs = []
+    for manifest in enabled():
+        if not manifest.profiles:
+            continue
+        candidate = found[manifest.name][0] / "profiles"
+        if candidate.is_dir():
+            dirs.append(str(candidate))
+    return dirs
+
+
 async def open_reachable(stack: AsyncExitStack, tools: Iterable[Any]) -> list[str]:
     """Connect every connector for the caller's scope, and report the ones that did not come up.
 
-    The connector lifecycle in one place, used by all three callers that run a turn — the front-door
-    runner, the CLI, and the harness tests — so "how a turn reaches its connectors" has a single
-    definition rather than three loops that can drift.
+    The connector lifecycle in one place, used by all three callers that run a turn — the
+    front-door runner, the CLI, and the harness tests — so "how a turn reaches its connectors"
+    has a single definition rather than three loops that can drift.
 
     Nothing is caught here: a connector's `connect` is already non-fatal by construction
     (`connectors.transport`), because MAF re-connects an unconnected tool inside `Agent.run` and
@@ -234,7 +255,7 @@ async def open_reachable(stack: AsyncExitStack, tools: Iterable[Any]) -> list[st
 
     Args:
         stack: The caller's exit stack, which owns tearing the connections down.
-        tools: The agent's MCP tools (`agent.mcp_tools`).
+        tools: This turn's connector tools (`agents.chemclaw_agent.connector_tools`).
 
     Returns:
         The names of the connectors that are not connected, for the caller to surface.
@@ -249,9 +270,9 @@ async def open_reachable(stack: AsyncExitStack, tools: Iterable[Any]) -> list[st
 def job_tools() -> list[CapabilityTool]:
     """The generated launcher for every job declared by an enabled connector.
 
-    Two connectors declaring the same job name is a configuration error, not a last-one-wins: the
-    name is the authorization key, so a collision would silently make one connector's gate apply to
-    the other's work.
+    Two connectors declaring the same job name is a configuration error, not a last-one-wins:
+    the name is the authorization key, so a collision would silently make one connector's gate
+    apply to the other's work.
     """
     tools: dict[str, CapabilityTool] = {}
     for manifest in enabled():

@@ -19,6 +19,7 @@ import uuid
 from collections import OrderedDict
 from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Protocol
@@ -44,6 +45,8 @@ from agents.interaction_tools import (
     decide_approval,
     list_pending_approvals,
 )
+from agents.profile_discovery import load_profiles
+from agents.profiles import get_profile
 from agents.session_events import stream_new_events
 from chemclaw.config import settings
 from connectors.health import check_connectors_at_startup, probe_connectors
@@ -64,6 +67,20 @@ _STATIC_DIR = Path(__file__).parent / "static"
 _LOOPBACK_HOSTS = frozenset({"127.0.0.1", "localhost", "::1"})
 
 
+@dataclass(frozen=True)
+class LiveSession:
+    """One live conversation: its MAF session, who owns it, and which profile it runs under.
+
+    A record rather than a tuple because it grew a third field and a fourth is plausible —
+    unpacking `(session, owner)` at five call sites was already the kind of thing that breaks
+    silently when the shape changes.
+    """
+
+    session: Any
+    owner: str | None
+    profile: str | None = None
+
+
 class _LiveSessions:
     """A bounded, LRU cache of the front door's live in-process sessions with their owner (COR-3).
 
@@ -71,28 +88,31 @@ class _LiveSessions:
     for the pod's whole lifetime (a memory leak). This caps it and evicts the least-recently-used
     entry when full — an evicted session's durable history still lives in the session store,
     only the live in-process handle is dropped, so the worst case under memory pressure is a
-    client starting a new session. Session and owner are stored together so the two can never
-    drift.
+    client starting a new session. Session, owner and profile are stored together so they can
+    never drift: the profile decides which agent runs the turn *and* which connectors it gets,
+    so a session that lost it would silently change agent mid-conversation.
     """
 
     def __init__(self, capacity: int) -> None:
         """Create a registry holding at most `capacity` live sessions."""
         self._capacity = capacity
-        self._entries: OrderedDict[str, tuple[Any, str | None]] = OrderedDict()
+        self._entries: OrderedDict[str, LiveSession] = OrderedDict()
 
     def __len__(self) -> int:
         """How many live sessions are held — the source for the `live_sessions` gauge (DEP-4)."""
         return len(self._entries)
 
-    def add(self, session_id: str, session: Any, owner: str | None) -> None:
+    def add(
+        self, session_id: str, session: Any, owner: str | None, profile: str | None = None
+    ) -> None:
         """Register a live session (most-recently-used), evicting the oldest past capacity."""
-        self._entries[session_id] = (session, owner)
+        self._entries[session_id] = LiveSession(session=session, owner=owner, profile=profile)
         self._entries.move_to_end(session_id)
         while len(self._entries) > self._capacity:
             self._entries.popitem(last=False)
 
-    def get(self, session_id: str) -> tuple[Any, str | None] | None:
-        """Return the `(session, owner)` for `session_id` (marking it recently used), or None."""
+    def get(self, session_id: str) -> "LiveSession | None":
+        """Return the live entry for `session_id` (marking it recently used), or None."""
         entry = self._entries.get(session_id)
         if entry is None:
             return None
@@ -158,6 +178,15 @@ class MessageIn(BaseModel):
         return value
 
 
+class SessionIn(BaseModel):
+    """Options for a new session; all optional, so a bodyless `POST /sessions` still works."""
+
+    # Which configured agent this conversation talks to (`agents.profile_discovery`). `None` is
+    # the default profile — today's global agent — so an existing client that sends no body is
+    # unaffected.
+    profile: str | None = None
+
+
 class SessionOut(BaseModel):
     """The identifier of a freshly created session."""
 
@@ -208,32 +237,46 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
     rather than in the readiness route because refusing to *start* is the only way to keep a pod
     with degraded capability out of a rollout.
     """
+    # Register the file-authored profiles before any agent is built, so a session can name one
+    # on its first request. Failing here is the right outcome for a malformed profile: it is a
+    # deployment configuration error, and a front door that started anyway would 400 every
+    # request naming that profile with no hint as to why.
+    load_profiles()
     app.state.connector_health = await check_connectors_at_startup()
     yield
 
 
+def _default_agent_factory(profile: str | None) -> Any:
+    """Build the agent for one profile — `build_agent` with the profile passed by keyword.
+
+    A named adapter rather than a lambda so the app's default factory has the same one-argument
+    shape a test's fake does, and so the signature is somewhere a reader can find it.
+    """
+    return build_agent(profile=profile)
+
+
 def create_app(
-    agent_factory: Callable[[], Any] = build_agent,
+    agent_factory: Callable[[str | None], Any] = _default_agent_factory,
     owner_store: SessionOwners | None = None,
-    connector_factory: Callable[[], list[Any]] = connector_tools,
+    connector_factory: Callable[[str | None], list[Any]] = connector_tools,
 ) -> FastAPI:
     """Build the front-door FastAPI app.
 
     Args:
-        agent_factory: Builds the process's agent. Defaults to `build_agent` (the config-selected
-            provider); tests pass a factory returning a fake streaming agent so the whole HTTP
-            surface is exercised without a live model.
+        agent_factory: Builds the agent for one profile name (`None` = the default profile). Called
+            once per distinct profile and cached, since an agent is configuration rather than
+            per-conversation state. Tests pass a factory returning a fake streaming agent so the
+            whole HTTP surface is exercised without a live model.
         owner_store: The durable session-ownership registry used to reattach a client to its session
             after a pod restart. Defaults to the config-gated store (present only under
             `session_store="postgres"`); tests inject an in-memory fake to exercise rehydration
             without a database.
-        connector_factory: Builds *this turn's* connector tools. A factory rather than a list
-        because
-            a connector's connection must belong to one turn (see
-            `agents.chemclaw_agent.connector_tools`), so the app calls it per turn instead of
-            holding one set. Injectable for the same reason `agent_factory` is: a test drives
-            the whole HTTP surface without a connector server. It is also where per-profile
-            connector selection will attach (plan Stage D).
+        connector_factory: Builds *this turn's* connector tools for one profile name. A factory
+            rather than a list because a connector's connection must belong to a single turn
+            (see `agents.chemclaw_agent.connector_tools`), so the app calls it per turn; and
+            per-profile because the profile narrows the connector surface as well as the
+            in-process one. Injectable for the same reason `agent_factory` is: a test drives the
+            whole HTTP surface without a connector server running.
 
     Returns:
         A configured `FastAPI` application.
@@ -244,8 +287,10 @@ def create_app(
     _add_cors(app)
     # One agent per process, built lazily on first use so importing the app needs no
     # credentials; per-session threads keep conversations apart. F3 replaces the in-memory
-    # session map with a durable store and wires job→session push-back.
-    app.state.agent = None
+    # session map with a durable store and wires job→session push-back. One agent per profile
+    # name, built lazily on first use so importing the app needs no credentials. `None` is the
+    # default profile — the key a session gets when it names none.
+    app.state.agents = {}
     app.state.agent_factory = agent_factory
     # Called once per turn, not once per process — a connector connection belongs to a single turn.
     app.state.connector_factory = connector_factory
@@ -305,8 +350,8 @@ def create_app(
         lambda: float(sum(1 for item in app.state.connector_health if item.state == "unreachable")),
     )
 
-    async def _resolve_session(session_id: str, principal: Principal) -> Any:
-        """Return the caller's session — from the live cache, or rehydrated from durable ownership.
+    async def _resolve_session(session_id: str, principal: Principal) -> LiveSession:
+        """Return the caller's live session — from the cache, or rehydrated from durable ownership.
 
         A live-cache hit is authorized against its stored owner. On a miss, if durable rehydration
         is on (`session_store="postgres"`), the durable owner is looked up: a session the caller
@@ -317,13 +362,12 @@ def create_app(
         """
         entry = app.state.live_sessions.get(session_id)
         if entry is not None:
-            session, owner = entry
-            if owner is not None and owner != principal.oid:
+            if entry.owner is not None and entry.owner != principal.oid:
                 raise HTTPException(status_code=404, detail="unknown session")
-            return session
+            return entry
         return await _rehydrate_session(session_id, principal)
 
-    async def _rehydrate_session(session_id: str, principal: Principal) -> Any:
+    async def _rehydrate_session(session_id: str, principal: Principal) -> LiveSession:
         """Rebuild a live session from its durable owner record, or 404 if it cannot reattach."""
         owners: SessionOwners | None = app.state.session_owners
         if owners is None:
@@ -336,18 +380,35 @@ def create_app(
         # writing outside the cache. The first rehydrator's handle wins; both callers share it.
         entry = app.state.live_sessions.get(session_id)
         if entry is not None:
-            return entry[0]
+            return entry
         # The durable history provider reloads the thread on the session's first use, so
         # rebuilding the handle is enough to resume the conversation; register it so later turns
         # hit the cache.
+        #
+        # A rehydrated session comes back on the *default* profile: the owner row records who
+        # owns a session, not which agent it was talking to, and inventing a column for it would
+        # be a migration in service of a case that degrades gracefully — the conversation
+        # resumes with the full tool surface rather than a narrowed one. Recorded here rather
+        # than left as a surprise; persisting the profile is the fix if a deployment ever needs
+        # the narrowing to survive a restart.
         session = _agent().create_session(session_id=session_id)
         app.state.live_sessions.add(session_id, session, owner)
-        return session
+        return app.state.live_sessions.get(session_id)  # type: ignore[return-value]
 
-    def _agent() -> Any:
-        if app.state.agent is None:
-            app.state.agent = app.state.agent_factory()
-        return app.state.agent
+    def _agent(profile: str | None = None) -> Any:
+        """The process's agent for `profile`, built once and cached under its name.
+
+        One agent per profile rather than one per session: an `Agent` is a configuration (tools,
+        instructions, providers), not per-conversation state — the thread lives in the session —
+        so two sessions on the same profile share it safely, exactly as every session shared the
+        single agent before profiles were selectable. Connectors are the one thing an agent must
+        *not* hold
+        for the process's lifetime, and it does not (`agents.chemclaw_agent.connector_tools`).
+        """
+        agents: dict[str | None, Any] = app.state.agents
+        if profile not in agents:
+            agents[profile] = app.state.agent_factory(profile)
+        return agents[profile]
 
     @app.get("/healthz")
     async def healthz() -> dict[str, str]:
@@ -376,16 +437,35 @@ def create_app(
 
     @app.post("/sessions")
     async def create_session(
+        body: SessionIn | None = None,
         principal: Principal = Depends(require_principal),
     ) -> SessionOut:
-        """Start a new conversation session and return its id (requires an authenticated user)."""
+        """Start a new conversation session and return its id (requires an authenticated user).
+
+        An optional `profile` picks which configured agent the session talks to — the selection
+        step that makes a filesystem-authored profile reachable by a user instead of only by a
+        redeploy. It is resolved here so an unknown name is a 400 at session creation rather
+        than a 500 on the first turn, and it is fixed for the session's life: a conversation
+        whose instructions and tools changed underneath it would have a thread that no longer
+        matches its own history.
+        """
         session_id = uuid.uuid4().hex
+        profile = body.profile if body is not None else None
+        if profile is not None:
+            try:
+                # Resolved here rather than left to the factory: whether a profile name exists
+                # is a property of the registry, not of how this deployment builds agents, and a
+                # test's injected factory must not be able to make an unknown name look valid.
+                get_profile(profile)
+            except ValueError as exc:  # a caller error, not a server fault
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
+        agent = _agent(profile)
         # Persist ownership first (durable path only), so the session reattaches after a restart
         # even if the pod dies before the first turn writes any history.
         if app.state.session_owners is not None:
             await app.state.session_owners.record(session_id, principal.oid)
         app.state.live_sessions.add(
-            session_id, _agent().create_session(session_id=session_id), principal.oid
+            session_id, agent.create_session(session_id=session_id), principal.oid, profile
         )
         return SessionOut(session_id=session_id)
 
@@ -431,8 +511,8 @@ def create_app(
         unchanged under either store — the in-memory provider keeps its messages in
         `session.state`, which is exactly what `_resolve_session` just returned.
         """
-        session = await _resolve_session(session_id, principal)
-        stored = await app.state.history.get_messages(session_id, state=session.state)
+        live = await _resolve_session(session_id, principal)
+        stored = await app.state.history.get_messages(session_id, state=live.session.state)
         return [TranscriptMessage(role=message.role, text=message.text) for message in stored]
 
     @app.post("/sessions/{session_id}/messages")
@@ -452,7 +532,7 @@ def create_app(
         slow-reading client cannot pin a permit forever — on expiry the client gets one error
         event and the permit is released.
         """
-        session = await _resolve_session(session_id, principal)
+        live = await _resolve_session(session_id, principal)
         active_turns: set[str] = app.state.active_turns
         if session_id in active_turns:
             METRICS.increment("chemclaw_turns_conflict_total")
@@ -476,14 +556,18 @@ def create_app(
                     # stream down, and the `finally` still frees the permit either way.
                     async with asyncio.timeout(settings.service_turn_timeout_seconds):
                         async for event in run_turn(
-                            _agent(),
-                            session,
+                            # The session's profile picks both halves of its surface: the agent
+                            # it talks to and the connectors that agent gets. Selecting one
+                            # without the other would advertise a narrowed toolset over the full
+                            # connector set.
+                            _agent(live.profile),
+                            live.session,
                             body.message,
                             actor=principal.oid,
                             roles=principal.roles,
                             budget=app.state.budget,
                             dry_run=body.dry_run,
-                            connectors=app.state.connector_factory(),
+                            connectors=app.state.connector_factory(live.profile),
                         ):
                             if event.type == "error":
                                 METRICS.increment("chemclaw_turns_failed_total")
@@ -588,7 +672,7 @@ def create_app(
                         live_entry = app.state.live_sessions.get(session_id)
                         if live_entry is not None:
                             await complete_awaiting_job(
-                                live_entry[0], job_id, reason=f"QM job {job_id} completed"
+                                live_entry.session, job_id, reason=f"QM job {job_id} completed"
                             )
                     event = JobCompletedEvent(job_id=job_id, summary=pushed.payload)
                     yield {"event": event.type, "data": event.model_dump_json()}

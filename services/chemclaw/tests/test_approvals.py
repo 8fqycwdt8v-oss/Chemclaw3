@@ -64,7 +64,7 @@ def seam(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
 @pytest.fixture
 def client() -> TestClient:
     """The real app with a fake agent factory."""
-    return TestClient(create_app(agent_factory=_FakeAgent))
+    return TestClient(create_app(agent_factory=lambda _profile: _FakeAgent()))
 
 
 def test_a_pending_hold_can_be_listed(client: TestClient, seam: dict[str, Any]) -> None:

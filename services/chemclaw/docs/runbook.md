@@ -173,6 +173,42 @@ reads or writes the turn's own state (`ask_clarifying_question`, attachments, pr
 the durable-job launchers, and the two PR-gate writers, which are the GxP boundary. Those are a
 `@tool` in `agents/` and nothing else.
 
+## (iv-b) Add a specialized agent (a **profile**)
+
+A profile is a named override bundle over the one agent: its instructions, the tools it may use, and
+whether the plan/execute harness runs. It only ever *narrows* — the audit trail, the per-tool
+authorization gate and the skill role gates all run after it — so a profile gives a caller a smaller,
+sharper agent, never a wider one.
+
+**To add one:** drop `profiles/<name>.yaml`. The filename is the profile name (a `name:` key inside
+is refused, so the two cannot disagree). A profile about a single capability goes in that connector's
+bundle instead (`connectors/<name>/profiles/<p>.yaml`, declared in its manifest) so it ships and is
+reviewed with the capability.
+
+```yaml
+instructions: >-
+  You are Chemclaw in property-lookup mode. …
+tool_names:            # spans both halves of the surface: in-process tools AND connector tools
+  - predict_pka        # a `calc` connector tool — `calc` is attached with its allow-list cut to these
+  - ask_clarifying_question
+harness_enabled: true  # optional; omit any field to inherit the global default
+```
+
+`tool_names` narrows the in-process tools *and* each connector's agent-facing allow-list, dropping
+connectors left with nothing; `mcp_server_names` is the coarser dial that selects whole connectors. A
+name nothing provides is a startup error, not a silently smaller agent. See
+`profiles/property-lookup.yaml` for a worked example.
+
+**To use one:** `POST /sessions {"profile": "property-lookup"}`. The profile is fixed for the
+session's life — a conversation whose tools changed underneath it would have a thread that no longer
+matches its own history — and an unknown name is a 400 at session creation. One agent is built and
+cached per profile.
+
+**Known limit:** a session rehydrated after a pod restart comes back on the *default* profile. The
+owner row records who owns a session, not which agent it was talking to; the conversation resumes
+with the full tool surface rather than a narrowed one. Persisting the profile is the fix if a
+deployment needs the narrowing to survive a restart.
+
 ## (v) Re-ingest a rejected ELN entry (after fixing the source record)
 
 The durable sync rejects an entry that fails validation (bad structure, mass-balance
