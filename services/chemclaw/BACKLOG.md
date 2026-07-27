@@ -106,31 +106,23 @@ out-of-tree plugin problem this single-repo app does not have.
 
 ## Open — the connector seam (D-092, docs/connector-plan.md)
 
-Stages A and B are **done** (the seam, the two reference bundles, the durable path). The rest is
-staged in `docs/connector-plan.md` §9, with the trigger for each recorded here rather than left
-implicit.
+Stages A, B, D and E are **done** (the seam, the reference bundles, the durable path, profiles, step
+templates — D-092/D-093/D-094/D-095). Stage C is partly done: `molfp`, `rxnfp`, `safety`, `chem`,
+`calc` and `bo` have moved. What remains is staged in `docs/connector-plan.md` §9, with the trigger
+for each recorded here rather than left implicit.
 
-- [ ] **Stage C — domain connectors** — [L]. Move the capability tools out to their own bundles:
-      `calc`, `chem`, `safety`, then `kg` (deepest coupling — it needs the knowledge tree and the
-      vector index, so decide first whether it also owns re-indexing). `bo` is the one that proves the
-      decoupling is real: its workflow moves to its own worker and task queue, which is a one-line
-      manifest change if the seam is right. This is also where the four bespoke durable adapters
-      (`submit_qm_job`, `request_development_report`, `start_optimization_campaign`) finally migrate —
-      with their code, so the moved workflow returns the `ConnectorJobResult` envelope directly
-      instead of being wrapped a third time. *Trigger: now — the payoff is taking `tblite`/`bofire`/
-      `rdkit` out of the front-door image.*
-- [ ] **Stage D — agentic workflow configuration** — [M]. `AgentProfile` Stage 3 (profiles discovered
-      from `connectors/<name>/profiles/*.yaml`, on the registry that already exists) plus Stage 2
-      (`profile` on `POST /sessions`, one cached agent per profile, and the per-profile connector set
-      through the `connector_factory` seam the front door now owns). *Trigger: a second real use case
-      — the seam is built and the manifest already carries `profiles:`.*
-- [ ] **Stage E — deterministic step templates** — [L]. A declarative multi-step orchestration
-      (`connectors/<name>/workflows/<t>.yaml`: an ordered list of tool/skill/sub-agent steps run by a
-      core `TemplateWorkflow`). Deliberately **not built**: it is a real execution engine with real
-      obligations — replay determinism, workflow versioning (`docs/workflow-versioning.md`), a resume
-      story, per-step authz — and `docs/harness-konzept.md` §11's decision not to build MAF
-      graph-workflows stands until something forces it. *Trigger: a second real use case that a
-      declarative profile provably cannot express.* Until then, a profile is the answer.
+- [ ] **Stage C, remainder — the `kg` bundle** — [M]. The deepest coupling: it needs the knowledge
+      tree and the vector index, so the open question is whether the bundle also owns re-indexing.
+      Everything else in Stage C has landed. *Trigger: an answer to the re-indexing question — the
+      mechanical part is now well-trodden (D-093/D-094).*
+- [ ] **Stage C, remainder — the `qm` and `report` jobs** — [S]. The last two bespoke durable
+      adapters. They follow `bo`'s shape exactly once their workflows move and return the
+      `ConnectorJobResult` envelope directly instead of being wrapped a third time. *Trigger: now;
+      this is mechanical after D-094.*
+- [ ] **A second step template** — [S]. `hazard-briefing` is Stage E's only caller. The engine was
+      built ahead of its recorded trigger at the user's request (D-095), so the "does this earn its
+      keep" question is still open rather than answered. *Trigger: the next procedure whose order
+      must not vary — or, if none appears, a decision to fold it back.*
 - [ ] **Entra auth modes for connectors** — [M]. The manifest's auth union ships `none` and `bearer`.
       `entra_workload` (client credentials over the federated SA assertion) and `entra_obo` are the
       documented extension point, each one variant plus one branch in `connectors.identity.auth_for`.

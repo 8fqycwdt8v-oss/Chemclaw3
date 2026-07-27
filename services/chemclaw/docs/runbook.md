@@ -209,6 +209,48 @@ owner row records who owns a session, not which agent it was talking to; the con
 with the full tool surface rather than a narrowed one. Persisting the profile is the fix if a
 deployment needs the narrowing to survive a restart.
 
+## (iv-c) Add a fixed procedure (a **template**)
+
+Reach for this only when the *order* must not vary. A profile is the first answer — it configures an
+agent and lets the model choose the sequence, which is what you want while a procedure is still being
+figured out. A template pins the sequence and runs it as a durable Temporal job: use it for a
+validated protocol, a standard screening sweep, a report that must always gather the same evidence in
+the same order. `templates/README.md` has the full comparison and the field reference.
+
+**To add one:** drop `templates/<name>.yaml`. The filename is the name here too.
+
+```yaml
+summary: Screen a molecule for hazards and write a briefing.
+inputs:
+  - {name: smiles, type: string, description: The molecule to screen.}
+steps:
+  - id: hazards                      # unique; how later steps refer to this one
+    kind: tool                       # or `job` (await a connector's durable job) or `agent`
+    tool: screen_hazards
+    arguments: {smiles: ["${inputs.smiles}"]}
+  - id: brief
+    kind: agent                      # a model turn — fixed sequence, free reasoning inside a step
+    prompt: "Summarize for a chemist: ${steps.hazards.result}"
+```
+
+Substitution is `${inputs.<name>}` and `${steps.<id>.result}` and nothing else — no conditionals or
+loops by design. A whole-string reference keeps the value's type; one inside a longer string
+interpolates JSON text. Forward references, unknown inputs and duplicate step ids are refused at load.
+
+Run `make template-validate` (CI does): it checks that every step names a tool, job or profile that
+actually exists, so a pinned procedure cannot fail on step four in production.
+
+**To use one:** the template becomes a generated `run_<name>` tool the model can call like any
+durable job — same authorization gate, same audit trail, same dry-run behaviour. It returns a job id;
+poll with `get_durable_job_status`. Re-running with identical inputs returns the existing id rather
+than paying twice.
+
+**Editing one is safe.** A run pins the resolved template into its workflow input, so an edit cannot
+change a run already in flight and there is no migration; the change applies to later runs only.
+
+`CHEMCLAW_TEMPLATES_ENABLED` narrows which discovered templates are advertised (empty = all);
+`CHEMCLAW_TEMPLATE_STEP_TIMEOUT_SECONDS` bounds one step.
+
 ## (v) Re-ingest a rejected ELN entry (after fixing the source record)
 
 The durable sync rejects an entry that fails validation (bad structure, mass-balance

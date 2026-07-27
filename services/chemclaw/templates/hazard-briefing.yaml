@@ -1,0 +1,48 @@
+# A worked template, not a placeholder: the three-step check a chemist runs before proposing a
+# route, in an order that must not vary — screen the species, look for precedent, then write it up.
+#
+# Why this is a template and not a profile: the value is that step 1 always happens before step 3.
+# An agent asked to "check this compound" might reasonably decide the screen is unnecessary for a
+# molecule it recognizes; for a safety brief that is exactly the judgment call nobody wants it
+# making. The reasoning inside the last step is still the model's — the sequence is not.
+summary: Screen a molecule for hazards, find structural precedent, and write a chemist-facing brief.
+description: >-
+  A fixed three-step safety briefing. Runs the structural hazard screen, gathers structurally
+  similar molecules from the indexed corpus for context, then writes the two up together. Use this
+  when a written brief is wanted; for a quick check just call screen_hazards directly.
+
+inputs:
+  - name: smiles
+    type: string
+    description: The molecule to brief on, as SMILES.
+
+steps:
+  - id: hazards
+    kind: tool
+    purpose: The rule-table screen — always first, so nothing downstream can skip it.
+    tool: screen_hazards
+    # A whole-string reference substitutes the value with its type, so the tool receives a
+    # one-element list rather than the text "${inputs.smiles}".
+    arguments:
+      smiles: ["${inputs.smiles}"]
+
+  - id: precedent
+    kind: tool
+    purpose: Structurally similar molecules already in the corpus, as context for the brief.
+    tool: similar_molecules
+    arguments:
+      smiles: "${inputs.smiles}"
+
+  - id: brief
+    kind: agent
+    purpose: Turn the flags and the precedent into something a chemist can act on.
+    prompt: >-
+      Write a short safety briefing for the molecule ${inputs.smiles}.
+
+      Structural hazard flags from the rule table: ${steps.hazards.result}
+      Structurally similar molecules already in the corpus: ${steps.precedent.result}
+
+      Report every flag with its explanation and its citation. If there are no flags, say plainly
+      that no rule in the table matched and that this is not a statement that the chemistry is
+      safe — it assesses no toxicity, exposure, thermal stability or scale. Close by naming what a
+      human still has to check.

@@ -36,7 +36,13 @@ from agents.tool_registry import CapabilityTool
 from chemclaw.config import settings
 from connectors.identity import auth_for, stamp_turn_identity
 from connectors.jobs import build_job_tool
-from connectors.manifest import ConnectorManifest, Endpoint, HttpEndpoint, StdioEndpoint
+from connectors.manifest import (
+    ConnectorManifest,
+    Endpoint,
+    HttpEndpoint,
+    JobSpec,
+    StdioEndpoint,
+)
 from connectors.transport import DegradingHttpConnector, DegradingStdioConnector
 
 logger = logging.getLogger(__name__)
@@ -284,6 +290,22 @@ def job_tools() -> list[CapabilityTool]:
                 )
             tools[job.name] = build_job_tool(manifest.name, job)
     return list(tools.values())
+
+
+def find_job(name: str) -> tuple[str, JobSpec]:
+    """Resolve a declared job name to its connector and spec, or raise naming the valid ones.
+
+    The lookup a template's `job` step needs: it names a job the way the model does, and has to turn
+    that into the connector, workflow type and queue `ConnectorJobWorkflow` requires. Job names are
+    already unique across enabled connectors (`job_tools` refuses a collision), so one name resolves
+    to exactly one job.
+    """
+    for manifest in enabled():
+        for job in manifest.jobs:
+            if job.name == name:
+                return manifest.name, job
+    valid = sorted(job.name for manifest in enabled() for job in manifest.jobs)
+    raise ConnectorError(f"unknown connector job {name!r}; declared jobs: {valid}")
 
 
 def connector_tool_names() -> list[str]:

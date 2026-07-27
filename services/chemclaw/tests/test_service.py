@@ -398,9 +398,7 @@ def test_session_list_is_owner_scoped_and_newest_first() -> None:
 
     alice = Principal(oid="alice", upn="a@corp", roles=frozenset())
     bob = Principal(oid="bob", upn="b@corp", roles=frozenset())
-    app = create_app(
-        agent_factory=lambda _profile: _FakeAgent(), owner_store=_FakeOwnerStore()
-    )
+    app = create_app(agent_factory=lambda _profile: _FakeAgent(), owner_store=_FakeOwnerStore())
     client = TestClient(app)
 
     app.dependency_overrides[require_principal] = lambda: alice

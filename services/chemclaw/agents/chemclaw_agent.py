@@ -56,6 +56,7 @@ from agents.tool_authz import enforce_tool_authz
 from agents.tool_registry import register_tool, registered_tool_names, registered_tools
 from chemclaw.config import settings
 from connectors.registry import connector_tool_names, job_tools, mcp_tools, skills_dirs
+from templates.registry import template_tool_names, template_tools
 
 _INSTRUCTIONS = (
     "You are Chemclaw, a research assistant for pharmaceutical/chemical process R&D. Your job "
@@ -287,8 +288,8 @@ def _capability_tools(profile: AgentProfile | None = None) -> list[Any]:
       when their modules are imported above — the conversation-plumbing tools that read or write
       the turn's own state and therefore cannot live in another process;
     - one generated launcher per durable job declared by an enabled connector
-      (`connectors.jobs`), registered here rather than at import because which connectors are
-      enabled is a deployment's choice;
+      (`connectors.jobs`) and per enabled step template (`templates.registry`), registered here
+      rather than at import because which of them are enabled is a deployment's choice;
     - one MCP tool per enabled connector endpoint (`connectors.registry`), through which every
       out-of-process capability is reached.
 
@@ -309,7 +310,7 @@ def _capability_tools(profile: AgentProfile | None = None) -> list[Any]:
     # against a re-registration when `build_agent` is called for a second profile) is what makes
     # the audit middleware, `tool_role_gates` and the prose-contract validator address them by
     # name.
-    _register_job_tools()
+    _register_generated_tools()
     inprocess = registered_tools()
     if prof.tool_names is not None:
         _reject_unknown_tool_names(prof)
@@ -328,7 +329,7 @@ def _reject_unknown_tool_names(profile: AgentProfile) -> None:
     would make each half reject the other's tools.
     """
     assert profile.tool_names is not None  # only called when the profile narrows
-    available = {*registered_tool_names(), *connector_tool_names()}
+    available = {*registered_tool_names(), *connector_tool_names(), *template_tool_names()}
     unknown = profile.tool_names - available
     if unknown:
         raise ValueError(
@@ -392,8 +393,8 @@ def _narrow_allowed_tools(tools: list[Any], keep: frozenset[str]) -> list[Any]:
     return narrowed
 
 
-def _register_job_tools() -> None:
-    """Register every enabled connector's generated job launcher, exactly once per process.
+def _register_generated_tools() -> None:
+    """Register the generated launchers — connector jobs and templates — exactly once per process.
 
     `build_agent` may run several times (one agent per profile, and once per test), while the
     registry is module state keyed by tool name and rejects a duplicate registration as the
@@ -401,7 +402,7 @@ def _register_job_tools() -> None:
     without weakening that guard for hand-written tools.
     """
     known = set(registered_tool_names())
-    for tool_fn in job_tools():
+    for tool_fn in [*job_tools(), *template_tools()]:
         if tool_fn.__name__ not in known:
             register_tool(tool_fn)
 

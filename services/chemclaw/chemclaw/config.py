@@ -521,6 +521,26 @@ class AgentSettings(BaseSettings):
     # capability lives in that connector's bundle instead and is found there.
     profiles_dir: str = "profiles"
 
+    # Where deterministic step templates are discovered (`templates/`). A template fixes the order
+    # of a procedure and runs it as a durable workflow, where a profile configures an agent and
+    # lets the model choose the order — `templates/README.md` says which to reach for.
+    templates_dir: str = "templates"
+    # Which discovered templates are enabled; empty (the default) means every one found.
+    templates_enabled: str = ""
+    # Per-step wall clock for a template run. Generous because an `agent` step is a model turn and
+    # a `tool` step may be a real calculation, but bounded so one wedged step cannot pin a run.
+    template_step_timeout_seconds: float = Field(default=900.0, gt=0)
+
+    @property
+    def templates_dirs(self) -> list[str]:
+        """The template dirs, split on the OS path separator (like `PATH`), blanks dropped."""
+        return [d for d in self.templates_dir.split(os.pathsep) if d]
+
+    @property
+    def templates_enabled_list(self) -> list[str]:
+        """The explicitly enabled template names; empty means "every discovered template"."""
+        return [t for t in self.templates_enabled.split(os.pathsep) if t]
+
     @property
     def profiles_dirs(self) -> list[str]:
         """The profile directories, split on the OS path separator (like `PATH`), blanks dropped."""

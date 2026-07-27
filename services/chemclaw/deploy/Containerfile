@@ -35,6 +35,12 @@ COPY sources ./sources
 # CHEMCLAW_COMPONENT=connector-<name>), so adding a bundle needs no change here.
 COPY connectors ./connectors
 COPY safety ./safety
+# The two file-defined extension seams beside connectors: `templates/` holds the step templates
+# (code plus the shipped YAML) and `profiles/` the cross-capability agent profiles. Both are
+# discovered from disk at start-up, so an image missing them silently advertises fewer
+# capabilities rather than failing — which is why they are COPYd explicitly.
+COPY templates ./templates
+COPY profiles ./profiles
 # Not optional extras: `skills/` IS the agent's judgment layer (an image without it advertises no
 # skills at all), `scripts/` owns the Temporal Schedules that fire every periodic job, and `evals/`
 # carries the committed case-set + baseline the drift job scores against. `knowledge/` seeds the

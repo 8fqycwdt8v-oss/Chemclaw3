@@ -17,6 +17,7 @@ from agents.tool_registry import (
     tool,
 )
 from connectors.registry import enabled
+from templates.registry import template_tool_names
 
 # The in-process capability tools: the conversation plumbing that reads or writes the turn's own
 # state, plus the two PR-gate writers and the durable launchers core still owns. The domain
@@ -44,19 +45,21 @@ _EXPECTED_INPROCESS_TOOLS = {
 }
 
 
-def test_registry_holds_the_inprocess_tools_and_only_job_launchers_besides() -> None:
-    """Importing the agent registers precisely the in-process tools; building it adds job launchers.
+def test_registry_holds_the_inprocess_tools_and_only_generated_launchers_besides() -> None:
+    """Importing the agent registers precisely the in-process tools; building it adds launchers.
 
-    Two populations share this registry on purpose. The `@tool` functions arrive on import, and the
-    generated launcher for each declared connector job is registered when an agent is built — which
-    is exactly what makes a job tool addressable by `tool_role_gates` and wrapped by the audit
-    middleware like any other. So "exactly the in-process set" is only true before a build, and the
-    invariant worth asserting is that nothing *else* ever appears.
+    Three populations share this registry on purpose. The `@tool` functions arrive on import; the
+    generated launcher for each declared connector job and each enabled step template is registered
+    when an agent is built — which is exactly what makes a generated tool addressable by
+    `tool_role_gates` and wrapped by the audit middleware like any other. So "exactly the
+    in-process set" is only true before a build, and the invariant worth asserting is that nothing
+    *else* ever appears.
     """
     assert _EXPECTED_INPROCESS_TOOLS <= set(registered_tool_names())
     build_agent(chat_client=object())
     extra = set(registered_tool_names()) - _EXPECTED_INPROCESS_TOOLS
-    assert extra == {job for manifest in enabled() for job in (j.name for j in manifest.jobs)}
+    jobs = {job.name for manifest in enabled() for job in manifest.jobs}
+    assert extra == jobs | set(template_tool_names())
 
 
 def test_capability_tools_are_exactly_the_registry() -> None:

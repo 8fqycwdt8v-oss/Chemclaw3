@@ -102,10 +102,45 @@ server*, and two concurrent turns proven to keep their own identity.
       Documented in the runbook; persisting it is a migration, and the degradation is to the *full*
       surface rather than a wrong one.
 
-## Stage E — step templates
+## Stage E — step templates — DONE
 
-- [ ] Specified only. Trigger recorded in `BACKLOG.md`: a second real use case a profile provably
-      cannot express.
+Built at the user's explicit request, ahead of its recorded trigger (see the review below).
+
+- [x] `templates/manifest.py` — `Template` + three step kinds (`tool`/`job`/`agent`) on a
+      discriminated union, with validators that refuse duplicate ids, unknown inputs and forward
+      references at load rather than at run time.
+- [x] `templates/resolve.py` — `${inputs.x}` / `${steps.id.result}` and nothing else. Pure, so it is
+      safe inside the workflow; whole-string references preserve type, embedded ones interpolate JSON.
+- [x] `templates/registry.py` — the same seam shape as connectors and profiles: discovered by folder,
+      one config token to enable, a generated `run_<name>` tool that starts the run.
+- [x] `workflows/template_job.py` + `workflows/template_activities.py` — the sequencer (replayable,
+      with the resolved template pinned into the input) and the two activities that do the I/O.
+      Identity is re-stamped per step and the audit + authz middleware applied by hand, because MAF
+      applies it inside a tool-calling loop a template does not go through.
+- [x] `templates/hazard-briefing.yaml` — a real worked template (screen → precedent → brief).
+- [x] `make template-validate` — CI gate that a step's tool, job or profile actually exists.
+- [x] `templates/README.md` + runbook §(iv-c): when to reach for a template rather than a profile.
+
+## Review — Stages D and E
+
+`make lint type test` green at **1005 passed, 45 skipped** (the skips are the unchanged offline set:
+26 Postgres, 19 Temporal-server). ADR D-095 records the design; three things are worth flagging here.
+
+**The gate found two omissions that would have shipped silently.** The image never `COPY`d
+`templates/` or `profiles/` — both are discovered from disk, so the container would have started
+perfectly and simply advertised less. `test_image_ships_every_first_party_package` caught the first;
+it structurally cannot catch the second (`profiles/` has no `__init__.py`), which is the argument for
+the explicit `COPY` and its comment. Separately, `connectors/` and `templates/` were both missing from
+`make type`'s package list — type-checked transitively but never directly. Both now listed.
+
+**Stage E shipped ahead of its trigger.** The plan gated it on "a second real use case a profile
+provably cannot express"; the user asked for it built, which is their call. `hazard-briefing` is the
+one worked case, so the risk the gate guarded — a step engine with a single caller — is open, not
+retired. If no second template appears, this is the code to reconsider first.
+
+**What was deliberately not built.** No conditionals, loops or expressions in the substitution
+language: that is how a config format becomes a programming language with no debugger. A procedure
+needing them wants an `agent` step or real code in a connector.
 
 ## Review — Stage C (in progress)
 

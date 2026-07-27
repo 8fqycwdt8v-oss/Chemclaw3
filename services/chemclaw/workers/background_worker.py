@@ -57,6 +57,8 @@ from workflows.report_workflow import (
     retrieve_section,
 )
 from workflows.retention import RetentionWorkflow, prune_expired_rows
+from workflows.template_activities import run_agent_step, run_tool_step
+from workflows.template_job import TemplateWorkflow
 
 logger = logging.getLogger(__name__)
 
@@ -81,6 +83,9 @@ BACKGROUND_WORKFLOWS: list[type] = [
     # connector's own worker serves the child workflow — so a new durable capability adds a manifest
     # entry, never a line in this list.
     ConnectorJobWorkflow,
+    # Core's step sequencer. Like the wrapper above it is generic: a new template is a file, never
+    # a line here.
+    TemplateWorkflow,
 ]
 BACKGROUND_ACTIVITIES: Sequence[Callable[..., Any]] = [
     write_knowledge_node,
@@ -103,6 +108,8 @@ BACKGROUND_ACTIVITIES: Sequence[Callable[..., Any]] = [
     record_session_event_activity,
     check_eval_drift,
     resolve_fan_out_limit,
+    run_tool_step,
+    run_agent_step,
 ]
 
 
