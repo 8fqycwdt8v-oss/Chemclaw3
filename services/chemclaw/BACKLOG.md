@@ -173,6 +173,49 @@ Substrate verdict: **evolve the flat `pydantic-settings` singleton additively** 
 discriminated unions); do **not** adopt entry-points/pluggy/Django-apps — all target the
 out-of-tree plugin problem this single-repo app does not have.
 
+## Open — the connector seam (D-109, docs/connector-plan.md)
+
+Stages A, B, D and E are **done** (the seam, the reference bundles, the durable path, profiles, step
+templates — D-109/D-110/D-111/D-112). Stage C is partly done: `molfp`, `rxnfp`, `safety`, `chem`,
+`calc` and `bo` have moved. What remains is staged in `docs/connector-plan.md` §9, with the trigger
+for each recorded here rather than left implicit.
+
+- [x] ~~**Stage C, remainder — the `kg` bundle**~~ — **WON'T BUILD**, and the reason is also the
+      answer to the open question (D-114). The graph is not a peripheral capability; it is core's
+      own data layer. Thirteen core modules import `kg` — the PR-gate, all six memory layers, the
+      report retrievers, the eval verifier, the note index — so a bundle would move three thin read
+      tools and leave every one of those imports where it is: the dependency win is **zero**, and
+      the cost is a second read path to one note tree. Re-indexing stays in core for the same
+      reason, on the background queue, triggered by a merge into the repo core owns. The rule is
+      written down where the next author will read it (`connectors/manifest.py`, runbook §(iv)), so
+      "why isn't `find_notes` behind a connector?" has an answer in place rather than being
+      re-litigated.
+- [ ] **Stage C, remainder — the `report` job** — [S]. The last bespoke durable adapter that can
+      move; it follows `bo`'s shape once its workflow returns the `ConnectorJobResult` envelope
+      directly instead of being wrapped a third time. *Trigger: now; mechanical after D-111/D-113.*
+- [~] **`submit_qm_job` stays in core** — not a Stage C remainder. It needs the HPC identity bridge
+      (a federated credential exchanged per submission), which is core's, not a capability's. The
+      in-process rule covers it: it is plumbing, not chemistry.
+- [ ] **`mcp_servers/molfp|rxnfp` bodies could move into their bundles** — [S]. Cosmetic: both are
+      already *reached* only through their connectors, so this is about there being one obvious
+      place to look, not about behaviour. `mcp_servers/README.md` says so explicitly meanwhile.
+      *Trigger: the next substantive edit to either capability.*
+- [ ] **A second step template** — [S]. `hazard-briefing` is Stage E's only caller. The engine was
+      built ahead of its recorded trigger at the user's request (D-112), so the "does this earn its
+      keep" question is still open rather than answered. *Trigger: the next procedure whose order
+      must not vary — or, if none appears, a decision to fold it back.*
+- [ ] **Entra auth modes for connectors** — [M]. The manifest's auth union ships `none` and `bearer`.
+      `entra_workload` (client credentials over the federated SA assertion) and `entra_obo` are the
+      documented extension point, each one variant plus one branch in `connectors.identity.auth_for`.
+      OBO additionally needs the user's *raw* access token, which `service.auth.Principal` deliberately
+      does not carry — a security-relevant change with no caller today. *Trigger: a real tenant (the
+      same one blocking every other live Entra edge).*
+- [ ] **Concurrent-turn MCP lifecycle, the general case** — [S]. Per-turn connector instances fixed
+      this for connectors (D-109), and the *shape* that caused it — a process-lived tool whose context
+      is entered per turn — should not reappear. A guard test asserting no MCP tool is attached to the
+      process-lived agent would make that structural rather than remembered. *Trigger: next time
+      anything is tempted to put an MCP tool on `build_agent`.*
+
 ## Open — OKF-inspired graph polish (D-074)
 
 Two conventions from Google's Open Knowledge Format, checked against our already-equivalent

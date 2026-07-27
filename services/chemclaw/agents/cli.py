@@ -2,8 +2,8 @@
 
 Why this exists: the production ingress is Teams/Copilot Studio with native Entra-ID SSO
 (architektur.md §7), so day-to-day there is no way to actually *talk* to the wired agent from a
-checkout. This CLI is that seam for development and testing: it builds the same `build_agent`
-the production host builds, opens the MCP capability subprocesses for the session, and runs a
+checkout. This CLI is that seam for development and testing: it builds the same `build_agent` the
+production host builds, opens the MCP capability subprocesses for the session, and runs a
 turn-taking chat (or a single scripted question) against a live model.
 
 Identity is the one thing that differs from production. Entra-ID auth (F4, D-043) is a front-door
@@ -29,10 +29,11 @@ from typing import Any
 
 from agents.audit import AuditSink
 from agents.audit_store import PostgresAuditSink
-from agents.chemclaw_agent import build_agent
+from agents.chemclaw_agent import build_agent, connector_tools
 from agents.identity_context import reset_current_identity, set_current_identity
 from chemclaw.config import settings
 from chemclaw.logging import configure_logging
+from connectors.registry import open_reachable
 
 _EXIT_WORDS = {"exit", "quit", ":q"}
 
@@ -73,14 +74,15 @@ def _build_cli_agent(args: argparse.Namespace, actor: str) -> Any:
     return build_agent(actor=actor, audit_sink=sink)
 
 
-async def converse(agent: Any, prompt: str) -> str:
+async def converse(agent: Any, prompt: str, connectors: Sequence[Any] = ()) -> str:
     """Run one turn against the agent and return its text answer.
 
     The agent's session history provider accumulates the thread across calls, so reusing the same
     `agent` object over successive `converse` calls is a multi-turn conversation (no session
-    plumbing needed here). MCP contexts must already be open (see `_run`).
+    plumbing needed here). The connectors must already be connected (see `_run`); they are passed
+    per call because `Agent.run` is where run-scoped tools attach.
     """
-    response = await agent.run(prompt)
+    response = await agent.run(prompt, tools=list(connectors) or None)
     return str(response.text)
 
 
@@ -89,26 +91,30 @@ async def _run(args: argparse.Namespace) -> None:
 
     Identity is stamped ambient (`agents.identity_context`) for the whole session — a CLI run is
     one actor throughout, unlike the multi-user front door, which stamps it per turn (F2/F4) —
-    and reset on exit. The MCP capability servers are spawned once for the session and torn down
-    on exit (the `async with` over `agent.mcp_tools` the `build_agent` docstring prescribes), so a
-    multi-turn REPL does not re-launch them per turn.
+    and reset on exit. The connectors are connected once for the whole CLI session and torn down on
+    exit, which is sound here for the same reason it is not in the front door: a CLI run is
+    single-user and single-threaded, so one connection cannot be shared across identities. An
+    unreachable connector is skipped with a warning rather than aborting the session — the same
+    degrade-loudly posture the front door takes.
     """
     actor, roles = resolve_identity(admin=args.admin, actor=args.actor)
     identity_token = set_current_identity(actor, roles)
     try:
         agent = _build_cli_agent(args, actor)
+        # The default profile's connectors, matching `_build_cli_agent`, which builds the default
+        # agent. Per-profile CLI selection waits for the front door to grow it (plan Stage D).
+        connectors = connector_tools()
         async with contextlib.AsyncExitStack() as stack:
-            for tool in agent.mcp_tools:
-                await stack.enter_async_context(tool)
+            await open_reachable(stack, connectors)
             if args.message is not None:
-                print((await converse(agent, args.message)).strip())
+                print((await converse(agent, args.message, connectors)).strip())
             else:
-                await _repl(agent)
+                await _repl(agent, connectors)
     finally:
         reset_current_identity(identity_token)
 
 
-async def _repl(agent: Any) -> None:
+async def _repl(agent: Any, connectors: Sequence[Any] = ()) -> None:
     """Read a question, print the answer, repeat — until EOF, Ctrl-C, or an exit word.
 
     Prompts/errors go to stderr so a redirected stdout carries only the answers.
@@ -125,7 +131,7 @@ async def _repl(agent: Any) -> None:
         if prompt.lower() in _EXIT_WORDS:
             return
         try:
-            print((await converse(agent, prompt)).strip())
+            print((await converse(agent, prompt, connectors)).strip())
         except Exception as exc:  # keep the session alive across a single failed turn
             print(f"error: {exc}", file=sys.stderr)
 

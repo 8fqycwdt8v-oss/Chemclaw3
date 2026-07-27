@@ -1,0 +1,24 @@
+# A narrow agent for "what is this compound's pKa / solubility / energy" — the question a chemist
+# asks dozens of times a day and that does not need the research loop, the knowledge graph, or the
+# ability to start a durable job.
+#
+# The file's stem is the profile name. Everything here only ever *narrows*: the audit trail, the
+# per-tool authorization gate and the skill role gates all run after this, so a profile cannot
+# widen what its caller may do — it can only give them a smaller, sharper agent.
+instructions: >-
+  You are Chemclaw in property-lookup mode. Answer questions about calculated molecular properties
+  directly and tersely: compute the value, report it with its units and uncertainty, and say which
+  calculator produced it. Load the calculation-selection skill for which calculator fits and how far
+  to trust it. If a question needs experimental history, past reactions or a literature search, say
+  that it is outside this mode and suggest the chemist start a normal session — do not guess.
+
+# Both halves of the surface, narrowed by one dial: `compute_xtb_energy`, `predict_pka` and
+# `predict_solubility` are the `calc` connector's, `calculator_trust` reads its calibration ledger,
+# and `ask_clarifying_question` is in-process. The `calc` connector is attached with its allow-list
+# cut down to exactly these four; every other connector is dropped.
+tool_names:
+  - compute_xtb_energy
+  - predict_pka
+  - predict_solubility
+  - calculator_trust
+  - ask_clarifying_question

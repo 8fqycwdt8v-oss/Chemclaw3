@@ -74,7 +74,7 @@ def test_a_gauge_reads_its_live_source_each_time() -> None:
 
 def test_the_endpoint_serves_the_prometheus_content_type() -> None:
     """A scraper keys off the content type; the route and the renderer must agree on it."""
-    with TestClient(create_app(agent_factory=_FakeAgent)) as client:
+    with TestClient(create_app(agent_factory=lambda _profile: _FakeAgent())) as client:
         response = client.get("/metrics")
     assert response.status_code == 200
     assert response.headers["content-type"].startswith("text/plain")
@@ -83,7 +83,7 @@ def test_the_endpoint_serves_the_prometheus_content_type() -> None:
 
 def test_the_endpoint_exposes_saturation_not_cpu() -> None:
     """In-flight turns against the cap is the signal the HPA should scale on (gap DEP-4)."""
-    with TestClient(create_app(agent_factory=_FakeAgent)) as client:
+    with TestClient(create_app(agent_factory=lambda _profile: _FakeAgent())) as client:
         body = client.get("/metrics").text
     assert "chemclaw_turns_in_flight" in body
     assert "chemclaw_turn_capacity" in body
@@ -91,7 +91,7 @@ def test_the_endpoint_exposes_saturation_not_cpu() -> None:
 
 def test_metrics_carry_no_identifiers_or_turn_content() -> None:
     """The route is unauthenticated (like /healthz), so it must expose counts and capacity only."""
-    with TestClient(create_app(agent_factory=_FakeAgent)) as client:
+    with TestClient(create_app(agent_factory=lambda _profile: _FakeAgent())) as client:
         client.post("/sessions")
         body = client.get("/metrics").text
     for line in body.splitlines():
@@ -128,7 +128,7 @@ def test_a_merge_notification_triggers_a_rebuild_now(monkeypatch: pytest.MonkeyP
         return "note-reindex-202607250900"
 
     monkeypatch.setattr("service.app.request_note_reindex", _fake_reindex)
-    with TestClient(create_app(agent_factory=_FakeAgent)) as client:
+    with TestClient(create_app(agent_factory=lambda _profile: _FakeAgent())) as client:
         response = client.post("/events/knowledge-merged")
     assert response.status_code == 202
     assert response.json()["workflow_id"].startswith("note-reindex-")

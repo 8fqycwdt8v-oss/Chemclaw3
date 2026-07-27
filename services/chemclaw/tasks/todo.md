@@ -1,114 +1,275 @@
-# Task: five reported issues across Chemclaw3 and Chemclaw3_ui
+# Task: the generic connector seam — one way to add a tool, skill or agentic workflow
 
-Reported 2026-07-26. Each claim verified against the code before being worked.
+Requested 2026-07-26. Design + staging in `docs/connector-plan.md` (deep status-quo analysis,
+eight interview decisions, two verified MAF API findings). This file is the working queue.
 
-## Triage
+Branch: `claude/generic-connector-tools-workflows-uz8afs`.
 
-| # | Repo | Issue | Verdict |
-|---|------|-------|---------|
-| 1 | ui | `happy-dom@^16` blocked by Replit policy | real — pin to 15.x |
-| 2 | ui→**backend** | `GET /sessions`, `GET /sessions/{id}/messages` whitelisted in BFF, missing upstream | real — fix belongs in **Chemclaw3** |
-| 3 | ui→backend | `GET /approvals`, `POST /approvals/{id}/decision` missing | **stale** — both exist (`service/app.py:561,591`) |
-| 4 | backend | bare azide anion not caught by screener | real — SMARTS gap |
-| 5 | backend | `CHEMCLAW_NOTE_REPO_DIR` undocumented in runbook | real — runbook has zero mentions |
+## Decisions driving the work
 
-Issue 2's whitelist entries are already annotated "Added by the companion backend
-change" in `server/routes.ts` — the UI pre-registered routes the backend never grew.
+1. Capability tools move out to connectors; the 11 conversation-plumbing tools stay in core by rule.
+2. Agentic workflows: declarative `AgentProfile` bundles now; deterministic step templates specified
+   and gated (Stage E).
+3. Durable jobs: generic `ConnectorJobWorkflow` in core (idempotency, actor, push-back, PR-gate) over
+   a connector-owned workflow addressed by **type-name string**.
+4. A connector is an in-tree bundle folder + one config enable-token.
+5. One FastAPI app per domain; one composite dev process.
+6. `X-Chemclaw-*` header contract (advisory only) + per-connector auth union.
+7. Unreachable connector ⇒ degrade loudly; `connectors_required` ⇒ fail fast.
+8. `mcp_servers` is **removed**, not deprecated.
 
-## Chemclaw3 (backend)
+## Stage A — the seam (core) — DONE
 
-- [x] Reproduce the azide gap (NaN3 / KN3 / NH4N3 / HN3 screen clean today)
-- [x] Add a `non-carbon-azide` rule — the root cause is that every azide rule
-      assumes carbon attachment, so the salt, the conjugate acid (HN3) and
-      heteroatom azide reagents (TMSN3, DPPA) all fall through together
-- [x] Pin the new rule in `tests/test_safety.py` + `evals/cases/hazard-rule-recall.md`
-      (the table's convention: one reference molecule per rule)
-- [x] Document `CHEMCLAW_NOTE_REPO_DIR` in `docs/runbook.md` — the default `.` is
-      always wrong in a deployment and `git_submitter` hard-fails on it
-- [x] `GET /sessions` — list the caller's sessions (new `list_for_owner` on the store)
-- [x] `GET /sessions/{session_id}/messages` — read a transcript back after a reload
-- [x] Update the session-scoped route inventory test (it forces this consciously)
-- [x] `make lint type test` green
+- [x] `connectors/manifest.py` — `ConnectorManifest`, `EndpointSpec` (stdio|http), `ConnectorAuth`
+      (none|bearer), `JobSpec`, `JobParam`; all `extra="forbid"`
+- [x] `connectors/identity.py` — header provider (reads the ambient ContextVars per call) +
+      `httpx.Auth` per auth mode
+- [x] `connectors/jobs.py` — generated durable tool factory (params model via `create_model`,
+      docstring from the manifest, registered through the existing `register_tool`)
+- [x] `workflows/connector_job.py` — `ConnectorJobWorkflow` + `ConnectorJobInput`/`ConnectorJobResult`
+- [x] `connectors/registry.py` — discover → validate → enable → build (MCP tools + job tools)
+- [x] `connectors/health.py` — bounded startup probe
+- [x] `chemclaw/config.py` — `ConnectorSettings`; delete `mcp_servers` + the three MCP spec models
+- [x] `agents/chemclaw_agent.py` — assemble from the connector registry; delete `_mcp_tool`
+- [x] worker registration for `ConnectorJobWorkflow`
+- [x] `/readyz` detail + `chemclaw_connectors_unhealthy` gauge; `connectors_required` fail-fast
+- [x] `scripts/validate_connectors.py` + `make connector-validate`; retarget `validate_skills` and
+      `validate_prose_contract` off `settings.mcp_servers`
+- [x] tests: manifest validation, registry enable/unknown, header provider, auth, generated job tool
+      (audit+authz wrap it), `ConnectorJobWorkflow` against a real `WorkflowEnvironment`
+- [x] `.env.example`, Helm values/templates, `docs/runbook.md`, `DECISIONS.md` ADRs
 
-## Chemclaw3_ui
+Gate A: `make lint type test` green; audit+authz demonstrably wrap a connector-sourced tool and a
+generated job tool; unknown enabled connector fails loud; non-loopback `auth: none` refused.
 
-- [x] Pin `happy-dom` to the last 15.x
-- [x] Prove vitest 4 still works on it
+## Stage B — reference bundles + the durable path proven — DONE
 
-## Verification
+- [x] `connectors/molfp/`, `connectors/rxnfp/`: manifest + FastAPI app mounting
+      `FastMCP.streamable_http_app()` at `/mcp` plus `/healthz`
+- [x] `scripts/connectors_dev.py` + `make connectors` (its composite must run each mounted app's
+      lifespan — Starlette does not, and a connector's lifespan is what starts its MCP session
+      manager; caught by the transport test)
+- [x] fixture connector (`tests/fixtures/connectors/fixture/`) with its own workflow: the durable
+      contract proven end to end under a real `WorkflowEnvironment` (skipped offline, like every
+      Temporal test here; the wrapper's worker registration and the envelope shape are pinned by
+      sandbox-safe tests that always run)
+- [~] The four bespoke adapters are **deliberately not migrated** — they wrap workflows returning
+      typed domain results, not the envelope. Moves in Stage C with their code (D-110, plan §9).
 
-- [x] backend `make lint type test`
-- [x] ui `vitest run` + `tsc -b`
-- [x] azide: salts/HN3/TMSN3/DPPA flag; organic azides unchanged; benign silent
+Gate B met: fingerprint search reached over HTTP with the identity headers *observed by a live
+server*, and two concurrent turns proven to keep their own identity.
 
-## Mid-task: main was restructured and rewound
+## Stage C — domain connectors
 
-Discovered while pushing: `49cd44c` moved the tree to `services/chemclaw/` but
-filled it from a snapshot of `16b63c2`, dropping everything merged in
-`16b63c2..2fc903a` (21 commits) — 38 Python files, 20 test modules, 8 routes,
-4 of 5 safety pair rules, 462 lines of `DECISIONS.md`. Confirmed by blob-matching
-`service/app.py` to `16b63c2` and diffing all common paths (338 identical / 14 differ).
+- [x] **Safety rubric verified across the process boundary** before moving anything
+      (`tests/test_connector_safety_rubric.py`): a connector tool call is audited with the turn's
+      actor, and `tool_role_gates` denies it by name without the tool body ever running. Neither is
+      inspectable from the wiring — MAF assembles MCP tools separately from the configured ones — so
+      this had to be driven through a real agent against a real server.
+- [x] `safety` — `screen_hazards`, with the `safety-screening` skill in the bundle
+- [x] `chem` — `resolve_compound`, `stoichiometry_table`, `green_metrics`, `render_structure`
+      (takes `rdkit` out of the front-door image)
+- [x] `calc` — the calculators + the calibration ledger, with `calculation-selection` in the bundle
+      (takes `tblite` and the calculation store's driver out)
+- [x] Helm: an entry per bundle; Deployment/Service/NetworkPolicy already generalized in Stage A
+- [~] `kg` — **won't build** (D-115). Thirteen core modules import `kg`, so moving the three read
+      tools out leaves every one of those imports where it is: zero dependency win, plus a second
+      read path to one note tree. Re-indexing stays in core with it. The rule is written into
+      `connectors/manifest.py` and the runbook rather than left as folklore.
+- [x] `bo` — the reference connector-owned durable capability (D-112): its workflow, activities and
+      worker live in the bundle on `connector-bo`, `start_optimization_campaign` is a manifest
+      `jobs:` entry, and the bespoke adapter is deleted. Core serves no BO workflow. The move needed
+      one manifest entry plus the workflow's return type, and no core edit — the property the seam
+      was built to have. `write_campaign_node` is gone: the note *mapping* stayed in the bundle, the
+      *publish* moved to core, so a connector structurally cannot reach the PR-gate.
+      Added `JobSpec.precondition` so the round-ceiling guard survived the migration (every other
+      placement re-runs at replay against current config).
+- [x] `calc`'s expensive half — the five orphaned hybrid tools became `jobs:` entries over
+      `CalcJobWorkflow` on `connector-calc` with `inline_wait_seconds`, so one tool still serves the
+      two-second and the twenty-minute case (D-114). This is what finally took `tblite`, RDKit,
+      SciPy and the `xtb`/`crest` binaries out of the chat image.
+- [~] `report` — **envelope, not a bundle** (D-115). Its closure is what core keeps for
+      `gather_evidence` regardless, so isolation buys nothing; but returning `ConnectorJobResult`
+      closed the hole where `get_durable_job_status` could report `completed` with nothing to hand
+      back. Stays on core's worker.
+- [~] `qm` — stays in core: it needs the HPC identity bridge, which is core's, not a capability's.
 
-- [x] Overlay `2fc903a`'s tree onto `services/chemclaw/` (content only — layout kept)
-- [x] Keep the 6 Replit-only additions; restore the `knowledge` symlink `tar` clobbered
-- [x] Hand-merge the one genuinely new Replit fix (`runner.py` ISSUE-B-10 disconnect
-      rollback) — `runner.py` had moved +110/−16 since the snapshot, so no clean patch
-- [x] Pin that fix with a test; verified it fails when the rollback is removed
-- [x] Restore CI at the repo root — Actions only reads root workflows, so `main` has
-      had none since the restructure
-- [x] Re-apply the five-issue fixes at the new paths
-- [x] `make lint type test` green from `services/chemclaw` (924 passed, 43 skipped)
+## Stage D — agentic workflow configuration — DONE
 
-## Review
+- [x] Profiles authored as files (`AgentProfile` Stage 3): `profiles/<name>.yaml` for a profile that
+      spans capabilities, `connectors/<name>/profiles/` for one that belongs to a bundle. The stem is
+      the name; a `name:` key is refused; `extra="forbid"` makes a typo'd override a startup error
+      rather than a silent no-op.
+- [x] `POST /sessions {profile}` + one cached agent per profile, with the profile fixed for the
+      session's life and carried on the live-session record so the turn gets the matching agent
+      *and* the matching connector set.
+- [x] `profiles/property-lookup.yaml` — a real worked profile, not a placeholder.
+- [~] Profile-name RBAC gate: deliberately not built. A profile can only attenuate, so gating the
+      *name* protects nothing that `tool_role_gates` does not already protect at call time; it would
+      be usability, and there is no caller asking.
+- [~] A rehydrated session returns on the default profile (the owner row does not record it).
+      Documented in the runbook; persisting it is a migration, and the degradation is to the *full*
+      surface rather than a wrong one.
 
-Three of the five reported issues were real in the repo they were filed against.
-Issue 2 was real but filed against the UI when the missing code was the backend's,
-and issue 3 read as stale — both established by reading `server/routes.ts` against
-`service/app.py` rather than taking the reports at face value.
+## Stage E — step templates — DONE
 
-Issue 3 then changed answer underneath the task. The approvals routes *did* exist
-when I checked, so the report was wrong when filed; the restructure landed mid-task
-and removed them, so it is right against `main` as it stands. The restore brings
-them back. Worth recording as a lesson: "already fixed" is a claim about a specific
-tree, and it expires.
+Built at the user's explicit request, ahead of its recorded trigger (see the review below).
 
-The azide fix went wider than the report. The reported symptom was the bare anion,
-but the cause is that `organic-azide` and `acyl-azide` both require a carbon
-neighbour, so one SMARTS ("azide not bonded to carbon") closes the salt, HN3 and
-heteroatom-azide holes together instead of special-casing the one reported input.
+- [x] `templates/manifest.py` — `Template` + three step kinds (`tool`/`job`/`agent`) on a
+      discriminated union, with validators that refuse duplicate ids, unknown inputs and forward
+      references at load rather than at run time.
+- [x] `templates/resolve.py` — `${inputs.x}` / `${steps.id.result}` and nothing else. Pure, so it is
+      safe inside the workflow; whole-string references preserve type, embedded ones interpolate JSON.
+- [x] `templates/registry.py` — the same seam shape as connectors and profiles: discovered by folder,
+      one config token to enable, a generated `run_<name>` tool that starts the run.
+- [x] `workflows/template_job.py` + `workflows/template_activities.py` — the sequencer (replayable,
+      with the resolved template pinned into the input) and the two activities that do the I/O.
+      Identity is re-stamped per step and the audit + authz middleware applied by hand, because MAF
+      applies it inside a tool-calling loop a template does not go through.
+- [x] `templates/hazard-briefing.yaml` — a real worked template (screen → precedent → brief).
+- [x] `make template-validate` — CI gate that a step's tool, job or profile actually exists.
+- [x] `templates/README.md` + runbook §(iv-c): when to reach for a template rather than a profile.
 
-An existing test had to change: `test_an_ordinary_combination_is_not_flagged`
-asserted that sodium azide in MeCN raises *nothing*, which was only true because
-the alert was missing. Its real claim — that swapping DCM for an acceptable solvent
-clears the diazidomethane pair rule — is preserved and still tested; it now asserts
-the pair rule is silent rather than the whole screen.
+## Stage C — completed by the merge with `main` (D-114)
 
-`GET /sessions/{id}/messages` reads through `history_provider()` with the live
-session's `state`: one call path serves both stores, because MAF's in-memory
-provider is stateless and keeps messages in `session.state`. No second SQL reader,
-and the route is not Postgres-only.
+- [x] `calc` is whole. The four calculators `main`'s X8 added, plus `predict_logd` and
+      `predict_developability_profile`, moved into the bundle; the duplicate
+      `mcp_servers/calc/server.py` is deleted (it and the bundle both defined `predict_pka`).
+- [x] The five hybrid inline-or-defer tools (`compute_reaction_energy`, `compare_solvents`,
+      `scan_coordinate`, `sample_conformers`, `compute_interaction_energy`) are `jobs:` entries on
+      the bundle's own workflow, worker and queue. They were the last thing keeping the whole heavy
+      chemistry closure in the chat service's image — and after the merge they were also
+      **orphaned**, registered by nothing.
+- [x] `JobSpec.inline_wait_seconds`: the launcher waits a bounded moment and returns the result or
+      the job id. Replaces a predicted-cost threshold that could only live where the cost model
+      lives, which is what had put chemistry in core.
+- [x] `run_xtb_task` deleted (the five typed jobs cover its union); its role gate moved onto the two
+      CREST searches as `expensive: true` rather than disappearing with it.
+- [x] `get_durable_job_status` returns the result, not just a status word — the connector envelope
+      made the follow-up answerable. `get_job_status` narrowed to HPC/DFT.
+- [x] Adopted `main`'s `workflows/registry.py` for core's two workers; `ConnectorJobWorkflow` and
+      `TemplateWorkflow` register on it (both were missing from a worker list — exactly the bug that
+      registry exists to prevent, found by its own test).
+- [x] Fixed a **pre-existing** bug the merge surfaced: `optimize_structure` tested convergence only
+      *after* a leg, so re-optimizing a converged geometry moved it and changed its `structure_id`
+      — forking the calculation cache for everything downstream. `tests/test_xtb_opt.py` was red on
+      unmodified `main`; the initial gradient was already computed and discarded.
+- [ ] `kg` — the last bundle. Still needs the re-indexing decision.
+- [ ] The `report` job — moves once its workflow returns the envelope directly.
 
-Verified beyond the offline suite: a local Postgres 16 was stood up to exercise the
-new `list_for_owner` SQL directly (the full migration chain needs pgvector >= 0.7 for
-`bit_jaccard_ops` and cannot run here, so the table was created from its own
-migration). Owner scoping, newest-first ordering and the NULL-owner case all hold,
-and the naive `owner = NULL` form was confirmed to return nothing — the bug the
-`IS NOT DISTINCT FROM` comment claims to prevent.
+## Review — reconciliation with `main`, and the two open Stage C points closed
 
-`make eval` reports 3 gated failures (`pharma-solvent-heavy` e_factor/pmi,
-`retrieval-cross-coupling-literal-miss` recall). Confirmed pre-existing by stashing
-the change and re-running: identical on the clean baseline. `hazard_flag_recall`
-stays 1.0, now 11/11 with the new rule pinned.
+`make lint type test` green: **1172 passed, 57 skipped**, every validator passing
+(`connector-`, `template-`, `skill-`, `prose-`). ADRs D-114 (the merge + the calculators) and
+D-115 (the two open points).
 
-The UI fix was also only half of issue 1. `main` there had removed `happy-dom` *and*
-`vitest` as a Replit workaround, so pinning happy-dom alone would have left `npm test`
-failing on a missing binary. Both are restored, and the lockfile is taken from the
-npmjs-resolved side — `main`'s was regenerated behind Replit's package firewall (157
-`resolved` URLs at `package-firewall.replit.local`, 116 integrity hashes differing
-from the npmjs tarballs) and cannot install anywhere else.
+**The merge was two convergent designs, not a conflict.** `main`'s X8 had independently moved seven
+calculators out of the agent's process behind an MCP server, for the same reason the connector seam
+exists — via `settings.mcp_servers`, the mechanism this branch removed. Resolution: `mcp_servers/calc`
+deleted, its tools re-homed in `connectors/calc/`, taking `main`'s bodies wherever they were newer
+(its `predict_pka` carries X11's base support; keeping the bundle's copy would have silently reverted
+a real capability). ADR numbers collided too — mine renumbered D-092…D-095 → D-110…D-113.
 
-Left deliberately undone, and flagged rather than silently skipped:
+**Adopted from `main` rather than merged around:** `workflows/registry.py` (D-099). A workflow
+declaring its own queue at its definition site fixes exactly the failure my new workflows were
+exposed to — written, tested, imported, absent from the worker's list, and therefore never run.
 
+**The defect the merge produced, and the validator that caught it.** Five tools
+(`compute_reaction_energy`, `compare_solvents`, `scan_coordinate`, `sample_conformers`,
+`compute_interaction_energy`) ended up **orphaned**: nothing imported `agents/calc_tools.py`, so they
+were dead code that eleven `SKILL.md` files still declared. `make skill-validate` found it; `make
+test` on either branch alone would not have.
+
+They had stayed in-process because each *predicted* its cost and submitted a job when expensive, and
+submitting needs ambient identity. Sound reason, obsolete conclusion — the generated launcher already
+is the in-process half that holds identity. `JobSpec.inline_wait_seconds` closes the gap: start the
+run, wait a bounded moment, return the result or the job id. Better than the threshold it replaced
+because elapsed time cannot be wrong about what already happened, and because a cost model can only
+live where the chemistry lives — `exceeds_inline_budget` in the agent's process was what kept
+`tblite`/RDKit/SciPy and the `xtb` binaries in the chat image, making the `calc` bundle decorative for
+the expensive half of its own capability.
+
+**Two open points, both answered by measuring:**
+
+- **`kg`: won't build.** Thirteen core modules import `kg`, so a bundle moves three thin read tools
+  and leaves every one of those imports — a zero dependency win plus a second read path to one tree.
+  The rule is now written in `connectors/manifest.py` and the runbook so it is not re-litigated.
+- **`report`: the envelope, not a bundle.** Its closure is what core keeps for `gather_evidence`
+  anyway. But it returned a bare note-ref string, which made it the one job
+  `get_durable_job_status` could report `completed` for with nothing to hand back — so it now returns
+  `ConnectorJobResult` and stays on core's worker.
+
+**Also fixed while here:** `get_durable_job_status` returns the result, not just a status word (the
+hole making the calculators durable would otherwise have opened); `get_job_status` narrowed to the
+HPC job it was always about, its dead `xtb-` branch gone; `run_xtb_task`'s role gate moved onto the
+two CREST searches rather than disappearing with the tool.
+
+## Review — Stages D and E
+
+`make lint type test` green at **1005 passed, 45 skipped** (the skips are the unchanged offline set:
+26 Postgres, 19 Temporal-server). ADR D-113 records the design; three things are worth flagging here.
+
+**The gate found two omissions that would have shipped silently.** The image never `COPY`d
+`templates/` or `profiles/` — both are discovered from disk, so the container would have started
+perfectly and simply advertised less. `test_image_ships_every_first_party_package` caught the first;
+it structurally cannot catch the second (`profiles/` has no `__init__.py`), which is the argument for
+the explicit `COPY` and its comment. Separately, `connectors/` and `templates/` were both missing from
+`make type`'s package list — type-checked transitively but never directly. Both now listed.
+
+**Stage E shipped ahead of its trigger.** The plan gated it on "a second real use case a profile
+provably cannot express"; the user asked for it built, which is their call. `hazard-briefing` is the
+one worked case, so the risk the gate guarded — a step engine with a single caller — is open, not
+retired. If no second template appears, this is the code to reconsider first.
+
+**What was deliberately not built.** No conditionals, loops or expressions in the substitution
+language: that is how a config format becomes a programming language with no debugger. A procedure
+needing them wants an `agent` step or real code in a connector.
+
+## Review — Stage C (in progress)
+
+Three bundles migrated, `make lint type test` green at **977 passed**. Two defects found by the
+existing suite while doing it, both real and both fixed at the root:
+
+1. **Swallowing `CancelledError` in the connector transport broke the front door's turn timeout.**
+   A hung turn ran to completion holding its admission permit — the exact failure
+   `service_turn_timeout_seconds` exists to prevent. MAF swallows it in its own MCP paths on the
+   grounds that an internal cancel scope is indistinguishable from a real one; at this layer it *is*
+   distinguishable (`Task.cancelling()`), and the distinction is load-bearing. Caught by
+   `test_stalled_turn_times_out_and_frees_the_permit`, which is why that test is worth its weight.
+2. **`AgentProfile.tool_names` could no longer reach a migrated tool.** With the domain capabilities
+   behind connectors, a dial that only narrowed the in-process half could not express "a
+   property-lookup agent" at all. `tool_names` now spans both halves — narrowing in-process tools
+   *and* each connector's allow-list, dropping connectors left with nothing — with one unknown-name
+   check over the union, since only that has enough information to tell a typo from a name on the
+   other side of the boundary.
+
+Also: connector expectations in tests now derive from `discovered()` rather than hardcoded names, so
+adding a bundle does not break unrelated tests.
+
+## Review — Stages A and B
+
+`make lint type test` green: **969 passed, 44 skipped** (the skips are the pre-existing offline set —
+26 Postgres, the Temporal-server tests; `temporal.download` and GitHub releases are both blocked by
+this sandbox's proxy, so the end-to-end durable test could not be executed here and is CI-gated like
+its siblings). `make connector-validate`, `make skill-validate` and `make prose-validate` all pass.
+
+Two things were found by measurement rather than reading, and both changed the design (D-110):
+
+1. **MAF's `header_provider` silently delivers nothing over streamable HTTP.** It is invoked with the
+   right values; the server receives no headers, because MAF's ContextVar is set in the calling task
+   while the request is issued by the MCP transport's writer task. A request hook on our own httpx
+   client works. The transport test now asserts the headers *arrive*, which is the only assertion that
+   could have caught this — a unit test of the provider passes either way.
+2. **Connectors cannot be process-lived.** Two concurrent turns sharing one connector tool object
+   **deadlock**, and any request that did get through would carry the other turn's identity. This is a
+   pre-existing hazard on the stdio path (`run_turn` has always entered process-lived tools per turn),
+   surfaced by moving capability to HTTP. Fixed at the root: `connector_tools()` builds per turn and
+   the caller passes them to `Agent.run(tools=…)`. `build_agent` no longer attaches connectors, so
+   profile narrowing of connectors moved to where the set is built.
+
+Cost of that second fix, stated: the front door now owns a `connector_factory` (symmetric with
+`agent_factory`, and where per-profile selection attaches in Stage D), and ~18 fake agents in the
+suite grew `**_run_options` so a fake cannot silently drift from the real call shape again.
 - `deploy.yml` (image build, Helm gate, credentialed rollout) is restored *in tree*
   under `services/chemclaw/.github/` but not re-enabled at the repo root. Its rollout
   job pushes to a registry with secrets; turning that back on is not a call to make
@@ -177,7 +338,7 @@ the skill catalogue says gate 19 of its 28 skills.
       Hartree/Angstrom and the dipole out); friendly failure for an unknown ALPB solvent; the
       spin-polarization contribution for open shells, versioned into the cache key.
 - [x] X3.5 Durable routing (unplanned, see decision 6): `calc/xtb_cost.py`, `XtbJobWorkflow` +
-      activity, `agents/xtb_job_tools.py`, and `get_qm_job_status` generalized to `get_job_status`.
+      activity, the generated job launchers, and `get_qm_job_status` generalized to `get_job_status`.
 - [x] X3.2 `calc/xtb_opt.py`: `OptSpec`, `OptimizationResult`, `optimize_structure`,
       `run_cached_optimization`. Frozen-atom support (bounds), convergence on max |gradient|.
 - [x] X3.3 `calc/xtb_thermo.py`: finite-difference Hessian + dipole derivatives, Eckart projection,
@@ -372,6 +533,7 @@ same terms, so the agent declines rather than reaching for a substitute.
 `main` restored the tree the Replit move had rewound while this branch was building the xTB
 layer, so the merge was a feature set meeting ~38 modules it had never seen. Recorded in D-105.
 
+- [x] ADR renumbering: this branch's ten xTB ADRs D-082…D-091 → **D-113…D-104**, `main`'s
 - [x] ADR renumbering: this branch's ten xTB ADRs D-082…D-091 → **D-095…D-104**, `main`'s
       allocation keeps the numbers. Every citation moved with them; `tests/test_decision_log.py`
       (which `main` added as the fix for the *previous* collision) passes.
@@ -412,6 +574,7 @@ the error the cost model fixed at the large end; re-fitting it is a measurement 
 
 ## Reconciliation with `main` (PR #31) — the process/analytical calculators (D-107)
 
+`main` landed D-110's logD, developability descriptors, exotherm screen and ETKDG conformer
 `main` landed D-092's logD, developability descriptors, exotherm screen and ETKDG conformer
 ensemble, plus two CI fixes. Seven conflicts. Two defects existed **only in the combination**,
 so neither branch's tests could have caught them:
@@ -423,6 +586,7 @@ so neither branch's tests could have caught them:
 - [x] **The logD sign.** `calc.logd` hard-coded the acid Henderson-Hasselbalch form, correct
       when `calc.pka` raised for bases. X11 widened the domain; pyridine at pH 7.4 came out at
       -0.92 against a clogP of 1.08 — two log units, silent. Now branches on `PkaResult.site`.
+- [x] ADR renumbering, third time: this branch's D-110…D-103 → **D-113…D-106**.
 - [x] ADR renumbering, third time: this branch's D-092…D-103 → **D-095…D-106**.
 - [x] `workers/background_worker.py`: registry kept, `main`'s conformer workflow + activities
       decorated. Verified served (15 workflows, 26 activities).
@@ -455,6 +619,7 @@ framework. D-107 had kept both and recorded that a decision was owed; this is it
 
 **Kept, because they were never duplicates:** `predict_logd`,
 `predict_developability_profile`, `generate_screening_design` — genuinely new capability
+from D-110 with no counterpart on this branch.
 from D-092 with no counterpart on this branch.
 
 **Cost accepted and recorded in D-108:** the exotherm screen was seconds on cached single

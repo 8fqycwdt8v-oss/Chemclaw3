@@ -47,7 +47,14 @@ class _EndlessAgent:
 
     mcp_tools: list[Any] = []
 
-    def run(self, message: str, *, stream: bool, session: AgentSession) -> Any:
+    def run(  # noqa: D102 - a fake agent's run, documented by its class
+        self,
+        message: str,
+        *,
+        stream: bool,
+        session: AgentSession,
+        **_run_options: Any,
+    ) -> Any:
         async def _gen() -> Any:
             while True:
                 yield _update("tok", 10)
@@ -65,7 +72,14 @@ class _StatePoisoningAgent:
 
     mcp_tools: list[Any] = []
 
-    def run(self, message: str, *, stream: bool, session: AgentSession) -> Any:
+    def run(  # noqa: D102 - a fake agent's run, documented by its class
+        self,
+        message: str,
+        *,
+        stream: bool,
+        session: AgentSession,
+        **_run_options: Any,
+    ) -> Any:
         async def _gen() -> Any:
             messages = session.state.setdefault("messages", [])
             messages.append({"role": "assistant", "tool_use_id": "call_1"})

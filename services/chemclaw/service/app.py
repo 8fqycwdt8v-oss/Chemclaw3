@@ -1,16 +1,16 @@
 """The ASGI front door (plan step F2-T1/F2-T2): a browser chat surface over the Chemclaw agent.
 
-`create_app` builds a FastAPI app that lets a non-developer chemist open a page, start a session,
-and converse with the agent — watching its plan, tool calls, and cited answer stream in. It owns one
-agent instance for the process and a per-session `AgentSession` (in-memory for F2; F3 makes the
-store durable and adds job→session push-back). The agent factory is injectable so tests drive the
-whole app with a fake streaming agent and no live model or credentials.
+`create_app` builds a FastAPI app that lets a non-developer chemist open a page, start a
+session, and converse with the agent — watching its plan, tool calls, and cited answer stream
+in. It owns one agent instance for the process and a per-session `AgentSession` (in-memory for
+F2; F3 makes the store durable and adds job→session push-back). The agent factory is injectable
+so tests drive the whole app with a fake streaming agent and no live model or credentials.
 
 Routes: `GET /healthz` (liveness), `GET /readyz` (readiness), `POST /sessions` (start a session),
 `GET /sessions` (the caller's conversation list), `POST /sessions/{id}/messages` (send a turn,
 Server-Sent-Events stream of `service.events`), `GET /sessions/{id}/messages` (read the transcript
-back), and the static chat UI at `/`. Identity (Entra OIDC on every non-health route) is layered on
-in F4.
+back), and the static chat UI at `/`. Identity (Entra OIDC on every non-health route) is layered
+on in F4.
 """
 
 import asyncio
@@ -18,6 +18,8 @@ import logging
 import uuid
 from collections import OrderedDict
 from collections.abc import AsyncIterator, Callable
+from contextlib import asynccontextmanager
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Protocol
@@ -33,7 +35,7 @@ from starlette.responses import Response
 
 from agents.attachments import STORE as ATTACHMENTS
 from agents.attachments import AttachmentError, AttachmentSummary, parse_attachment
-from agents.chemclaw_agent import build_agent, history_provider
+from agents.chemclaw_agent import build_agent, connector_tools, history_provider
 from agents.durable_tools import request_note_reindex
 from agents.harness_todo import complete_awaiting_job
 from agents.interaction_tools import (
@@ -43,8 +45,11 @@ from agents.interaction_tools import (
     decide_approval,
     list_pending_approvals,
 )
+from agents.profile_discovery import load_profiles
+from agents.profiles import get_profile
 from agents.session_events import stream_new_events
 from chemclaw.config import settings
+from connectors.health import check_connectors_at_startup, probe_connectors
 from scripts.schedules import ScheduleHealth, describe_schedules
 from service.auth import Principal, require_principal
 from service.budget import BudgetExceeded, BudgetTracker
@@ -56,9 +61,24 @@ logger = logging.getLogger(__name__)
 
 _STATIC_DIR = Path(__file__).parent / "static"
 
-# Loopback interfaces: binding here keeps the unauthenticated dev mode reachable only from the local
-# host, so it is not a network-exposed footgun. Anything else (notably the "0.0.0.0" default) is.
+# Loopback interfaces: binding here keeps the unauthenticated dev mode reachable only from the
+# local host, so it is not a network-exposed footgun. Anything else (notably the "0.0.0.0"
+# default) is.
 _LOOPBACK_HOSTS = frozenset({"127.0.0.1", "localhost", "::1"})
+
+
+@dataclass(frozen=True)
+class LiveSession:
+    """One live conversation: its MAF session, who owns it, and which profile it runs under.
+
+    A record rather than a tuple because it grew a third field and a fourth is plausible —
+    unpacking `(session, owner)` at five call sites was already the kind of thing that breaks
+    silently when the shape changes.
+    """
+
+    session: Any
+    owner: str | None
+    profile: str | None = None
 
 
 class _LiveSessions:
@@ -66,29 +86,33 @@ class _LiveSessions:
 
     The service keeps the live `AgentSession` object per session id; without a bound this map grows
     for the pod's whole lifetime (a memory leak). This caps it and evicts the least-recently-used
-    entry when full — an evicted session's durable history still lives in the session store, only
-    the live in-process handle is dropped, so the worst case under memory pressure is a client
-    starting a new session. Session and owner are stored together so the two can never drift.
+    entry when full — an evicted session's durable history still lives in the session store,
+    only the live in-process handle is dropped, so the worst case under memory pressure is a
+    client starting a new session. Session, owner and profile are stored together so they can
+    never drift: the profile decides which agent runs the turn *and* which connectors it gets,
+    so a session that lost it would silently change agent mid-conversation.
     """
 
     def __init__(self, capacity: int) -> None:
         """Create a registry holding at most `capacity` live sessions."""
         self._capacity = capacity
-        self._entries: OrderedDict[str, tuple[Any, str | None]] = OrderedDict()
+        self._entries: OrderedDict[str, LiveSession] = OrderedDict()
 
     def __len__(self) -> int:
         """How many live sessions are held — the source for the `live_sessions` gauge (DEP-4)."""
         return len(self._entries)
 
-    def add(self, session_id: str, session: Any, owner: str | None) -> None:
+    def add(
+        self, session_id: str, session: Any, owner: str | None, profile: str | None = None
+    ) -> None:
         """Register a live session (most-recently-used), evicting the oldest past capacity."""
-        self._entries[session_id] = (session, owner)
+        self._entries[session_id] = LiveSession(session=session, owner=owner, profile=profile)
         self._entries.move_to_end(session_id)
         while len(self._entries) > self._capacity:
             self._entries.popitem(last=False)
 
-    def get(self, session_id: str) -> tuple[Any, str | None] | None:
-        """Return the `(session, owner)` for `session_id` (marking it recently used), or None."""
+    def get(self, session_id: str) -> "LiveSession | None":
+        """Return the live entry for `session_id` (marking it recently used), or None."""
         entry = self._entries.get(session_id)
         if entry is None:
             return None
@@ -121,8 +145,8 @@ def _default_owner_store() -> SessionOwners | None:
 
     Rehydration is meaningful only when there is durable history to resume, so it is gated on the
     same `session_store="postgres"` switch: under the in-memory store there is nothing to reattach
-    to and a cache miss stays a 404 (today's behavior). Imported lazily so the dev/test path never
-    pulls in psycopg for a store it will not use.
+    to and a cache miss stays a 404 (today's behavior). Imported lazily so the dev/test path
+    never pulls in psycopg for a store it will not use.
     """
     if settings.session_store != "postgres":
         return None
@@ -137,7 +161,8 @@ class MessageIn(BaseModel):
     message: str
     # Plan the turn without launching anything expensive (gap IDEA-4). Every expensive path is
     # idempotent and cached, but there was no way to ask "what would you do, what would it cost"
-    # without doing it — a natural primitive for a deployment whose default autonomy is `plan_only`.
+    # without doing it — a natural primitive for a deployment whose default autonomy is
+    # `plan_only`.
     dry_run: bool = False
 
     @field_validator("message")
@@ -151,6 +176,15 @@ class MessageIn(BaseModel):
         if len(value) > settings.service_max_message_chars:
             raise ValueError(f"message exceeds the {settings.service_max_message_chars}-char limit")
         return value
+
+
+class SessionIn(BaseModel):
+    """Options for a new session; all optional, so a bodyless `POST /sessions` still works."""
+
+    # Which configured agent this conversation talks to (`agents.profile_discovery`). `None` is
+    # the default profile — today's global agent — so an existing client that sends no body is
+    # unaffected.
+    profile: str | None = None
 
 
 class SessionOut(BaseModel):
@@ -169,8 +203,8 @@ class SessionSummary(BaseModel):
 class TranscriptMessage(BaseModel):
     """One stored message of a session's transcript, flattened to what a chat surface renders.
 
-    Role plus text rather than the MAF `Message` shape: the durable row is a MAF serialization, and
-    exposing it would make a MAF version bump a breaking change to the HTTP contract.
+    Role plus text rather than the MAF `Message` shape: the durable row is a MAF serialization,
+    and exposing it would make a MAF version bump a breaking change to the HTTP contract.
     """
 
     role: str
@@ -190,95 +224,150 @@ class ApprovalStatusOut(BaseModel):
     status: str
 
 
+@asynccontextmanager
+async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
+    """Probe the enabled connectors once before serving, so an operator learns it here, not later.
+
+    The probe's *result* only informs (readiness reports it, a gauge counts it) — a missing
+    connector costs capability, not correctness, so the default is to serve anyway.
+    `connectors_required` is the opt-in inversion: it raises here, which fails startup, for a
+    deployment where answering
+    with a
+    silently reduced tool surface is worse than not answering. That check belongs at startup
+    rather than in the readiness route because refusing to *start* is the only way to keep a pod
+    with degraded capability out of a rollout.
+    """
+    # Register the file-authored profiles before any agent is built, so a session can name one
+    # on its first request. Failing here is the right outcome for a malformed profile: it is a
+    # deployment configuration error, and a front door that started anyway would 400 every
+    # request naming that profile with no hint as to why.
+    load_profiles()
+    app.state.connector_health = await check_connectors_at_startup()
+    yield
+
+
+def _default_agent_factory(profile: str | None) -> Any:
+    """Build the agent for one profile — `build_agent` with the profile passed by keyword.
+
+    A named adapter rather than a lambda so the app's default factory has the same one-argument
+    shape a test's fake does, and so the signature is somewhere a reader can find it.
+    """
+    return build_agent(profile=profile)
+
+
 def create_app(
-    agent_factory: Callable[[], Any] = build_agent,
+    agent_factory: Callable[[str | None], Any] = _default_agent_factory,
     owner_store: SessionOwners | None = None,
+    connector_factory: Callable[[str | None], list[Any]] = connector_tools,
 ) -> FastAPI:
     """Build the front-door FastAPI app.
 
     Args:
-        agent_factory: Builds the process's agent. Defaults to `build_agent` (the config-selected
-            provider); tests pass a factory returning a fake streaming agent so the whole HTTP
-            surface is exercised without a live model.
+        agent_factory: Builds the agent for one profile name (`None` = the default profile). Called
+            once per distinct profile and cached, since an agent is configuration rather than
+            per-conversation state. Tests pass a factory returning a fake streaming agent so the
+            whole HTTP surface is exercised without a live model.
         owner_store: The durable session-ownership registry used to reattach a client to its session
             after a pod restart. Defaults to the config-gated store (present only under
             `session_store="postgres"`); tests inject an in-memory fake to exercise rehydration
             without a database.
+        connector_factory: Builds *this turn's* connector tools for one profile name. A factory
+            rather than a list because a connector's connection must belong to a single turn
+            (see `agents.chemclaw_agent.connector_tools`), so the app calls it per turn; and
+            per-profile because the profile narrows the connector surface as well as the
+            in-process one. Injectable for the same reason `agent_factory` is: a test drives the
+            whole HTTP surface without a connector server running.
 
     Returns:
         A configured `FastAPI` application.
     """
     _refuse_unauthenticated_exposure()
-    app = FastAPI(title="Chemclaw", docs_url=None, redoc_url=None)
+    app = FastAPI(title="Chemclaw", docs_url=None, redoc_url=None, lifespan=_lifespan)
     _add_security_headers(app)
     _add_cors(app)
-    # One agent per process, built lazily on first use so importing the app needs no credentials;
-    # per-session threads keep conversations apart. F3 replaces the in-memory session map with a
-    # durable store and wires job→session push-back.
-    app.state.agent = None
+    # One agent per process, built lazily on first use so importing the app needs no
+    # credentials; per-session threads keep conversations apart. F3 replaces the in-memory
+    # session map with a durable store and wires job→session push-back. One agent per profile
+    # name, built lazily on first use so importing the app needs no credentials. `None` is the
+    # default profile — the key a session gets when it names none.
+    app.state.agents = {}
     app.state.agent_factory = agent_factory
+    # Called once per turn, not once per process — a connector connection belongs to a single turn.
+    app.state.connector_factory = connector_factory
     # Bounded LRU of live sessions, each carrying its owner Entra oid so a session can only be
-    # posted to / streamed by its creator (defense-in-depth beyond the unguessable uuid4 id). The
-    # bound keeps the map from growing for the pod's lifetime (COR-3).
+    # posted to / streamed by its creator (defense-in-depth beyond the unguessable uuid4 id).
+    # The bound keeps the map from growing for the pod's lifetime (COR-3).
     app.state.live_sessions = _LiveSessions(settings.service_max_live_sessions)
-    # Durable session-ownership registry (F3): the record a restarted front door rehydrates from so
-    # a returning client reattaches to its session instead of being forced onto a new one. None with
-    # the in-memory session store (nothing durable to reattach to — a cache miss stays a 404).
+    # Durable session-ownership registry (F3): the record a restarted front door rehydrates from
+    # so a returning client reattaches to its session instead of being forced onto a new one.
+    # None with the in-memory session store (nothing durable to reattach to — a cache miss stays
+    # a 404).
     app.state.session_owners = owner_store if owner_store is not None else _default_owner_store()
     # The same history provider the agent writes turns through, used read-only to serve a
-    # transcript back. Shared rather than re-derived per request: the Postgres provider holds only
-    # a DSN and the in-memory one holds nothing at all (its messages live in `session.state`), so
-    # one instance is correct for both and neither carries per-session state.
+    # transcript back. Shared rather than re-derived per request: the Postgres provider holds
+    # only a DSN and the in-memory one holds nothing at all (its messages live in
+    # `session.state`), so one instance is correct for both and neither carries per-session
+    # state.
     app.state.history = history_provider()
-    # Admission control on concurrent turns (AG-15): a bounded permit set caps how many turns hit
-    # the shared LLM endpoint at once. A permit is held for a turn's whole streamed run; a turn that
-    # cannot get one within the admission timeout is shed with 503. Built here so it binds to the
-    # app's event loop on first await.
+    # Admission control on concurrent turns (AG-15): a bounded permit set caps how many turns
+    # hit the shared LLM endpoint at once. A permit is held for a turn's whole streamed run; a
+    # turn that cannot get one within the admission timeout is shed with 503. Built here so it
+    # binds to the app's event loop on first await.
     app.state.turn_semaphore = asyncio.Semaphore(settings.service_max_concurrent_turns)
-    # Per-session turn serialization: session ids with a turn currently in flight. Two concurrent
-    # turns on one session would drive `agent.run` against the same AgentSession state at once,
-    # interleaving two turns' messages in one thread — so a second turn is rejected with 409 while
-    # one runs, matching the admission semaphore's shed-don't-queue semantics (a queued turn would
-    # silently pin a second permit and still interleave from the user's point of view; a 409 tells
-    # the client — a double-submit or a second tab — to wait for the running turn). Check-and-add is
-    # atomic on the event loop (no await between them), so the gate has no race window.
+    # Per-session turn serialization: session ids with a turn currently in flight. Two
+    # concurrent turns on one session would drive `agent.run` against the same AgentSession
+    # state at once, interleaving two turns' messages in one thread — so a second turn is
+    # rejected with 409 while one runs, matching the admission semaphore's shed-don't-queue
+    # semantics (a queued turn would silently pin a second permit and still interleave from the
+    # user's point of view; a 409 tells the client — a double-submit or a second tab — to wait
+    # for the running turn). Check-and-add is atomic on the event loop (no await between them),
+    # so the gate has no race window.
     app.state.active_turns = set()
-    # Per-user count of open push-back event streams. The turn semaphore only guards POSTed turns;
-    # each event stream polls the database for its whole lifetime, so without a cap one user's
-    # scripted (or abandoned-tab) streams could pile up unbounded DB load. Entries are removed when
-    # a user's last stream closes, so the map stays small.
+    # Per-user count of open push-back event streams. The turn semaphore only guards POSTed
+    # turns; each event stream polls the database for its whole lifetime, so without a cap one
+    # user's scripted (or abandoned-tab) streams could pile up unbounded DB load. Entries are
+    # removed when a user's last stream closes, so the map stays small.
     app.state.event_streams = {}
     # Runaway-cost guard (service.budget): meters each turn's token usage and counts turns per
-    # session and per user, refusing a turn (429) that would exceed a configured cap. In-process and
-    # off unless `budget_enabled`; the missing ceiling above the per-turn loop cap.
+    # session and per user, refusing a turn (429) that would exceed a configured cap. In-process
+    # and off unless `budget_enabled`; the missing ceiling above the per-turn loop cap.
     app.state.budget = BudgetTracker()
-    # Gauges read the live structures rather than a mirrored counter, so there is nothing to keep
-    # in sync (gap DEP-4). In-flight turns against the cap is the saturation signal the HPA should
-    # scale on — CPU is close to noise for a stream-bound, model-latency-dominated service.
+    # Gauges read the live structures rather than a mirrored counter, so there is nothing to
+    # keep in sync (gap DEP-4). In-flight turns against the cap is the saturation signal the HPA
+    # should scale on — CPU is close to noise for a stream-bound, model-latency-dominated
+    # service.
     METRICS.bind_gauge("chemclaw_turns_in_flight", lambda: float(len(app.state.active_turns)))
     METRICS.bind_gauge(
         "chemclaw_turn_capacity", lambda: float(settings.service_max_concurrent_turns)
     )
     METRICS.bind_gauge("chemclaw_live_sessions", lambda: float(len(app.state.live_sessions)))
+    # Out-of-process capability is a new failure mode, so it gets a signal an operator can alert
+    # on. Refreshed by the readiness probe (and at startup), read from the snapshot here — a
+    # gauge must not perform network I/O when Prometheus scrapes it.
+    app.state.connector_health = []
+    METRICS.bind_gauge(
+        "chemclaw_connectors_unhealthy",
+        lambda: float(sum(1 for item in app.state.connector_health if item.state == "unreachable")),
+    )
 
-    async def _resolve_session(session_id: str, principal: Principal) -> Any:
-        """Return the caller's session — from the live cache, or rehydrated from durable ownership.
+    async def _resolve_session(session_id: str, principal: Principal) -> LiveSession:
+        """Return the caller's live session — from the cache, or rehydrated from durable ownership.
 
         A live-cache hit is authorized against its stored owner. On a miss, if durable rehydration
         is on (`session_store="postgres"`), the durable owner is looked up: a session the caller
         owns is rebuilt as a live handle over its persisted history, so a pod restart no longer
-        forces the client onto a new session (orphaning its history and unconsumed push-back). An
-        unknown session — or one owned by someone else — is a 404 with no existence leak either way.
+        forces the client onto a new session (orphaning its history and unconsumed push-back).
+        An unknown session — or one owned by someone else — is a 404 with no existence leak
+        either way.
         """
         entry = app.state.live_sessions.get(session_id)
         if entry is not None:
-            session, owner = entry
-            if owner is not None and owner != principal.oid:
+            if entry.owner is not None and entry.owner != principal.oid:
                 raise HTTPException(status_code=404, detail="unknown session")
-            return session
+            return entry
         return await _rehydrate_session(session_id, principal)
 
-    async def _rehydrate_session(session_id: str, principal: Principal) -> Any:
+    async def _rehydrate_session(session_id: str, principal: Principal) -> LiveSession:
         """Rebuild a live session from its durable owner record, or 404 if it cannot reattach."""
         owners: SessionOwners | None = app.state.session_owners
         if owners is None:
@@ -291,17 +380,35 @@ def create_app(
         # writing outside the cache. The first rehydrator's handle wins; both callers share it.
         entry = app.state.live_sessions.get(session_id)
         if entry is not None:
-            return entry[0]
-        # The durable history provider reloads the thread on the session's first use, so rebuilding
-        # the handle is enough to resume the conversation; register it so later turns hit the cache.
+            return entry
+        # The durable history provider reloads the thread on the session's first use, so
+        # rebuilding the handle is enough to resume the conversation; register it so later turns
+        # hit the cache.
+        #
+        # A rehydrated session comes back on the *default* profile: the owner row records who
+        # owns a session, not which agent it was talking to, and inventing a column for it would
+        # be a migration in service of a case that degrades gracefully — the conversation
+        # resumes with the full tool surface rather than a narrowed one. Recorded here rather
+        # than left as a surprise; persisting the profile is the fix if a deployment ever needs
+        # the narrowing to survive a restart.
         session = _agent().create_session(session_id=session_id)
         app.state.live_sessions.add(session_id, session, owner)
-        return session
+        return app.state.live_sessions.get(session_id)  # type: ignore[return-value]
 
-    def _agent() -> Any:
-        if app.state.agent is None:
-            app.state.agent = app.state.agent_factory()
-        return app.state.agent
+    def _agent(profile: str | None = None) -> Any:
+        """The process's agent for `profile`, built once and cached under its name.
+
+        One agent per profile rather than one per session: an `Agent` is a configuration (tools,
+        instructions, providers), not per-conversation state — the thread lives in the session —
+        so two sessions on the same profile share it safely, exactly as every session shared the
+        single agent before profiles were selectable. Connectors are the one thing an agent must
+        *not* hold
+        for the process's lifetime, and it does not (`agents.chemclaw_agent.connector_tools`).
+        """
+        agents: dict[str | None, Any] = app.state.agents
+        if profile not in agents:
+            agents[profile] = app.state.agent_factory(profile)
+        return agents[profile]
 
     @app.get("/healthz")
     async def healthz() -> dict[str, str]:
@@ -310,22 +417,55 @@ def create_app(
 
     @app.get("/readyz")
     async def readyz() -> dict[str, str]:
-        """Readiness: the agent can be built (config/provider resolves)."""
+        """Readiness: the agent can be built, plus each enabled connector's reachability.
+
+        The connector states are *reported*, not required: an unreachable connector costs the
+        agent that capability, and hiding it would leave a chemist wondering why an answer got
+        worse. It is re-probed here rather than read from a startup snapshot so the answer is
+        current, and the probe also refreshes the `chemclaw_connectors_unhealthy` gauge — a
+        readiness probe runs on the cadence a gauge wants anyway, so one bounded sweep serves
+        both. A deployment that would rather not serve at all in this state sets
+        `connectors_required`, which fails startup instead.
+        """
         _agent()
-        return {"status": "ready"}
+        health = await probe_connectors()
+        app.state.connector_health = health
+        return {
+            "status": "ready",
+            "connectors": ", ".join(f"{item.name}={item.state}" for item in health),
+        }
 
     @app.post("/sessions")
     async def create_session(
+        body: SessionIn | None = None,
         principal: Principal = Depends(require_principal),
     ) -> SessionOut:
-        """Start a new conversation session and return its id (requires an authenticated user)."""
+        """Start a new conversation session and return its id (requires an authenticated user).
+
+        An optional `profile` picks which configured agent the session talks to — the selection
+        step that makes a filesystem-authored profile reachable by a user instead of only by a
+        redeploy. It is resolved here so an unknown name is a 400 at session creation rather
+        than a 500 on the first turn, and it is fixed for the session's life: a conversation
+        whose instructions and tools changed underneath it would have a thread that no longer
+        matches its own history.
+        """
         session_id = uuid.uuid4().hex
+        profile = body.profile if body is not None else None
+        if profile is not None:
+            try:
+                # Resolved here rather than left to the factory: whether a profile name exists
+                # is a property of the registry, not of how this deployment builds agents, and a
+                # test's injected factory must not be able to make an unknown name look valid.
+                get_profile(profile)
+            except ValueError as exc:  # a caller error, not a server fault
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
+        agent = _agent(profile)
         # Persist ownership first (durable path only), so the session reattaches after a restart
         # even if the pod dies before the first turn writes any history.
         if app.state.session_owners is not None:
             await app.state.session_owners.record(session_id, principal.oid)
         app.state.live_sessions.add(
-            session_id, _agent().create_session(session_id=session_id), principal.oid
+            session_id, agent.create_session(session_id=session_id), principal.oid, profile
         )
         return SessionOut(session_id=session_id)
 
@@ -335,16 +475,17 @@ def create_app(
     ) -> list[SessionSummary]:
         """The caller's own sessions, newest first — the conversation list.
 
-        Without this a client that lost its local state (a new browser, cleared storage, a second
-        device) could not find sessions it still owns: ids are minted server-side and returned once
-        into the response that created them, so an id the client forgot was unreachable forever
+        Without this a client that lost its local state (a new browser, cleared storage, a
+        second device) could not find sessions it still owns: ids are minted server-side and
+        returned once into the response that created them, so an id the client forgot was
+        unreachable forever
         while its durable history sat in the store.
 
         Read from the durable ownership registry, which is the same record `_resolve_session`
         authorizes against — so this can never list a session the caller would then be refused.
         Empty under the in-memory session store: there is no durable registry to enumerate, and
-        reporting the process's live LRU instead would answer a question about the deployment with
-        a partial, eviction-dependent guess.
+        reporting the process's live LRU instead would answer a question about the deployment
+        with a partial, eviction-dependent guess.
         """
         owners: SessionOwners | None = app.state.session_owners
         if owners is None:
@@ -367,11 +508,11 @@ def create_app(
 
         Read through the agent's own history provider rather than by querying `session_messages`:
         one reader means the write path and the read path cannot drift, and the route works
-        unchanged under either store — the in-memory provider keeps its messages in `session.state`,
-        which is exactly what `_resolve_session` just returned.
+        unchanged under either store — the in-memory provider keeps its messages in
+        `session.state`, which is exactly what `_resolve_session` just returned.
         """
-        session = await _resolve_session(session_id, principal)
-        stored = await app.state.history.get_messages(session_id, state=session.state)
+        live = await _resolve_session(session_id, principal)
+        stored = await app.state.history.get_messages(session_id, state=live.session.state)
         return [TranscriptMessage(role=message.role, text=message.text) for message in stored]
 
     @app.post("/sessions/{session_id}/messages")
@@ -383,15 +524,15 @@ def create_app(
         """Run one turn for the session and stream its events as SSE.
 
         Admission-controlled (AG-15): the turn takes one of the process's turn permits for its
-        whole streamed run, and is shed with 503 if none frees within the admission timeout — so a
-        burst of concurrent turns cannot pile onto the shared internal LLM endpoint. One turn at a
-        time per session: a second concurrent POST to the same session is a 409 (a double-submit
-        cannot interleave two turns into one conversation thread). The permit hold is wall-clock
-        bounded (`service_turn_timeout_seconds`): a hung model stream or a slow-reading client
-        cannot pin a permit forever — on expiry the client gets one error event and the permit is
-        released.
+        whole streamed run, and is shed with 503 if none frees within the admission timeout — so
+        a burst of concurrent turns cannot pile onto the shared internal LLM endpoint. One turn
+        at a time per session: a second concurrent POST to the same session is a 409 (a
+        double-submit cannot interleave two turns into one conversation thread). The permit hold
+        is wall-clock bounded (`service_turn_timeout_seconds`): a hung model stream or a
+        slow-reading client cannot pin a permit forever — on expiry the client gets one error
+        event and the permit is released.
         """
-        session = await _resolve_session(session_id, principal)
+        live = await _resolve_session(session_id, principal)
         active_turns: set[str] = app.state.active_turns
         if session_id in active_turns:
             METRICS.increment("chemclaw_turns_conflict_total")
@@ -410,18 +551,23 @@ def create_app(
                     # The deadline covers the whole streamed run *including* client consumption:
                     # the generator is suspended inside this scope at each `yield`, so a stalled
                     # model stream and a slow-reading client are both bounded (AG-15's missing
-                    # wall-clock half). A stall inside `run_turn` surfaces here as TimeoutError and
-                    # becomes one user-safe error event; a stall in the transport tears the stream
-                    # down, and the `finally` still frees the permit either way.
+                    # wall-clock half). A stall inside `run_turn` surfaces here as TimeoutError
+                    # and becomes one user-safe error event; a stall in the transport tears the
+                    # stream down, and the `finally` still frees the permit either way.
                     async with asyncio.timeout(settings.service_turn_timeout_seconds):
                         async for event in run_turn(
-                            _agent(),
-                            session,
+                            # The session's profile picks both halves of its surface: the agent
+                            # it talks to and the connectors that agent gets. Selecting one
+                            # without the other would advertise a narrowed toolset over the full
+                            # connector set.
+                            _agent(live.profile),
+                            live.session,
                             body.message,
                             actor=principal.oid,
                             roles=principal.roles,
                             budget=app.state.budget,
                             dry_run=body.dry_run,
+                            connectors=app.state.connector_factory(live.profile),
                             history=app.state.history,
                         ):
                             if event.type == "error":
@@ -450,7 +596,8 @@ def create_app(
         handed_off = False
         try:
             # Runaway-cost guard (budget #3): refuse before taking a permit if this session/user
-            # has exhausted its turn or token budget — a clean 429, not a started-then-killed turn.
+            # has exhausted its turn or token budget — a clean 429, not a started-then-killed
+            # turn.
             try:
                 app.state.budget.check(session_id, principal.oid)
             except BudgetExceeded as exc:
@@ -473,8 +620,8 @@ def create_app(
             handed_off = True
             return response
         finally:
-            # try/finally, not `except Exception`: cancellation (a client gone mid-admission)
-            # is a BaseException, and missing it here leaked the session's active-turns entry —
+            # try/finally, not `except Exception`: cancellation (a client gone mid-admission) is
+            # a BaseException, and missing it here leaked the session's active-turns entry —
             # 409-bricking the session until restart. Until the streaming response is handed
             # off, this owns the cleanup; afterwards the generator's own finally does.
             if not handed_off:
@@ -516,16 +663,17 @@ def create_app(
             try:
                 async for pushed in stream_new_events(session_id, kinds=("job_completed",)):
                     job_id = str(pushed.payload.get("job_id", ""))
-                    # Flip the harness todo that was waiting on this job (F3-T3 follow-up), so the
-                    # session's *next* turn sees it as done instead of open forever. The live
-                    # session may already be gone from the LRU cache (`_owned_session` above only
-                    # required it to exist when this stream *started*) — a miss here is a safe
-                    # no-op, matching `complete_awaiting_job`'s own no-op-on-miss contract.
+                    # Flip the harness todo that was waiting on this job (F3-T3 follow-up), so
+                    # the session's *next* turn sees it as done instead of open forever. The
+                    # live session may already be gone from the LRU cache (`_owned_session`
+                    # above only required it to exist when this stream *started*) — a miss here
+                    # is a safe no-op, matching `complete_awaiting_job`'s own no-op-on-miss
+                    # contract.
                     if settings.harness_enabled:
                         live_entry = app.state.live_sessions.get(session_id)
                         if live_entry is not None:
                             await complete_awaiting_job(
-                                live_entry[0], job_id, reason=f"QM job {job_id} completed"
+                                live_entry.session, job_id, reason=f"QM job {job_id} completed"
                             )
                     event = JobCompletedEvent(job_id=job_id, summary=pushed.payload)
                     yield {"event": event.type, "data": event.model_dump_json()}
@@ -538,8 +686,8 @@ def create_app(
             handed_off = True
             return response
         finally:
-            # Mirrors the turn route: any BaseException before the response is handed off
-            # must return the slot, or the user's stream budget leaks toward a permanent 429.
+            # Mirrors the turn route: any BaseException before the response is handed off must
+            # return the slot, or the user's stream budget leaks toward a permanent 429.
             if not handed_off:
                 _release_stream_slot()
 
@@ -566,15 +714,17 @@ def create_app(
         """Attach a working file to a conversation (gap AGT-3).
 
         The only way data entered the system was the scheduled ELN sync, so a chemist could not
-        hand over a CSV of runs or an SOP — the highest-frequency real request for a lab assistant.
+        hand over a CSV of runs or an SOP — the highest-frequency real request for a lab
+        assistant.
 
         Session-scoped and in-memory by design: an attachment is working material for a
         conversation, not knowledge. Anything in it worth keeping goes through the PR-gate like
-        every other machine-touched write; routing uploads into the graph would bypass the GxP line.
+        every other machine-touched write; routing uploads into the graph would bypass the GxP
+        line.
 
         Unsupported formats are refused with a message naming what *is* supported (422), never
-        silently half-parsed — a PDF "read" by scraping whatever bytes look like text would produce
-        confident nonsense a chemist could not tell from a real reading.
+        silently half-parsed — a PDF "read" by scraping whatever bytes look like text would
+        produce confident nonsense a chemist could not tell from a real reading.
         """
         await _resolve_session(session_id, principal)
         raw = await file.read()
@@ -602,8 +752,8 @@ def create_app(
         rebuilt now rather than at the next scheduled sweep — collapsing gap SCH-2's staleness
         window from an interval to seconds.
 
-        Idempotent and cheap to over-call: the reindex is an upsert, and a duplicate delivery just
-        rebuilds an already-current index. Authenticated like every other non-health route.
+        Idempotent and cheap to over-call: the reindex is an upsert, and a duplicate delivery
+        just rebuilds an already-current index. Authenticated like every other non-health route.
         """
         started = await request_note_reindex()
         return {"status": "accepted", "workflow_id": started}
@@ -613,8 +763,9 @@ def create_app(
         """Prometheus exposition for this pod (gap DEP-4).
 
         Unauthenticated on purpose, like `/healthz` and `/readyz`: a scrape happens before and
-        independently of user identity, and the NetworkPolicy is what keeps it inside the cluster.
-        It exposes counts and capacity only — never a session id, a user, or any turn content.
+        independently of user identity, and the NetworkPolicy is what keeps it inside the
+        cluster. It exposes counts and capacity only — never a session id, a user, or any turn
+        content.
         """
         return Response(content=METRICS.render(), media_type=CONTENT_TYPE)
 
@@ -625,12 +776,12 @@ def create_app(
         """Health of every periodic job: when it last ran, and whether it succeeded (gap SCH-4).
 
         Nothing reported this, so an ELN sync failing every run advanced no cursor and raised no
-        alarm — it surfaced weeks later as "the agent doesn't know about recent experiments", the
-        hardest class of problem to attribute.
+        alarm — it surfaced weeks later as "the agent doesn't know about recent experiments",
+        the hardest class of problem to attribute.
 
-        Read from Temporal's own schedule state rather than a second table: Temporal is already the
-        authority on when a Schedule fired and how the run ended, and a mirrored table could only
-        ever drift from it.
+        Read from Temporal's own schedule state rather than a second table: Temporal is already
+        the authority on when a Schedule fired and how the run ended, and a mirrored table could
+        only ever drift from it.
         """
         return await describe_schedules()
 
@@ -689,10 +840,10 @@ def create_app(
     return app
 
 
-# CSP for the self-served chat UI (SEC-5): everything is same-origin except the one inline <style>
-# block in index.html (so style-src needs 'unsafe-inline') and data: images; app.js is external
-# (script-src 'self') and the SSE stream is same-origin (connect-src 'self'). base-uri and
-# frame-ancestors are locked down to blunt injection and clickjacking.
+# CSP for the self-served chat UI (SEC-5): everything is same-origin except the one inline
+# <style> block in index.html (so style-src needs 'unsafe-inline') and data: images; app.js is
+# external (script-src 'self') and the SSE stream is same-origin (connect-src 'self'). base-uri
+# and frame-ancestors are locked down to blunt injection and clickjacking.
 _CONTENT_SECURITY_POLICY = (
     "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; "
     "connect-src 'self'; img-src 'self' data:; base-uri 'none'; frame-ancestors 'none'"
@@ -706,7 +857,8 @@ def _refuse_unauthenticated_exposure() -> None:
     gates are open (SEC-2) — intended for local dev only. Binding that mode to a non-loopback
     interface (the `service_host="0.0.0.0"` default) exposes it to the network, so the service
     refuses to boot rather than leaving the whole deployment's safety to one env var defaulting
-    the insecure way (the earlier warn-and-boot was one missed log line from an open deployment).
+    the insecure way (the earlier warn-and-boot was one missed log line from an open
+    deployment).
     `service_allow_insecure=true` is the explicit, conscious opt-out — it boots with the loud
     warning instead. Loopback dev and Entra-enforced deployments are untouched.
     """
@@ -733,9 +885,9 @@ def _refuse_unauthenticated_exposure() -> None:
 def _add_security_headers(app: FastAPI) -> None:
     """Add the browser security headers to every response, when `service_security_headers` is on.
 
-    Off only when a deployment fronts its own header policy at the ingress/Route; on by default so
-    the app is safe standalone. The headers are static, so a lightweight middleware sets them on
-    every response (including static files and errors) without touching the route handlers.
+    Off only when a deployment fronts its own header policy at the ingress/Route; on by default
+    so the app is safe standalone. The headers are static, so a lightweight middleware sets them
+    on every response (including static files and errors) without touching the route handlers.
     """
     if not settings.service_security_headers:
         return

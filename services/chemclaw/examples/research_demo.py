@@ -11,7 +11,8 @@ without any credentials or database. It answers one concrete question end to end
 Every store is in-memory and the knowledge graph is a temp directory, seeded here; the tools
 (`gather_evidence`, `find_similar_reactions`, `predict_solubility`, `suggest_next_experiment`)
 are the real ones, wired through the module seams tests use — `predict_solubility` now from
-`mcp_servers.calc`, which is where the calculators live since X8 put them in their own process.
+the `calc` connector bundle, which is where the calculators live now that they run in their
+own process.
 
 Run: `python -m examples.research_demo`.
 """
@@ -22,8 +23,7 @@ from pathlib import Path
 
 import agents.research_tools as research_tools
 import agents.search_tools as search_tools
-import mcp_servers.calc.server as calc_tools
-from agents.bo_tools import suggest_next_experiment
+import connectors.calc.server.tools as calc_tools
 from agents.research_tools import gather_evidence
 from agents.search_tools import find_similar_reactions
 from bo.problem import (
@@ -35,7 +35,8 @@ from bo.problem import (
 )
 from calc.store import InMemoryStore
 from chemclaw.config import settings
-from mcp_servers.calc.server import predict_solubility
+from connectors.bo.server.tools import suggest_next_experiment
+from connectors.calc.server.tools import predict_solubility
 from mcp_servers.fpstore import InMemoryFingerprintStore
 from mcp_servers.rxnfp.search import record_for_reaction
 

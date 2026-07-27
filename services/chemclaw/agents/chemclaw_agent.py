@@ -1,18 +1,18 @@
 """The Chemclaw MAF agent (plan step 1.5).
 
 `build_agent` wires the conversation agent: the tools, a `SkillsProvider` that discovers
-`SKILL.md` files under the configured skills directory (progressive disclosure — the model
-sees skill names/descriptions and loads a skill body only when it needs the judgment), an
-in-memory session history so a chat accumulates a thread, and a `CompactionProvider` that
-keeps that thread within a token budget (see `_build_compaction`). The chat client is
-injectable so the wiring can be built and tested without live credentials; the default is the
-config-selected provider (`agents.llm_provider.build_chat_client` — the internal OpenAI-compatible
-endpoint or the Anthropic dev path), so which LLM the agent talks to is a config change, not a code
-edit here.
+`SKILL.md` files under the configured skills directory (progressive disclosure — the model sees
+skill names/descriptions and loads a skill body only when it needs the judgment), an in-memory
+session history so a chat accumulates a thread, and a `CompactionProvider` that keeps that
+thread within a token budget (see `_build_compaction`). The chat client is injectable so the
+wiring can be built and tested without live credentials; the default is the config-selected
+provider (`agents.llm_provider.build_chat_client` — the internal OpenAI-compatible endpoint or
+the Anthropic dev path), so which LLM the agent talks to is a config change, not a code edit
+here.
 """
 
 import uuid
-from typing import Any, assert_never
+from typing import Any
 
 from agent_framework import (
     Agent,
@@ -23,8 +23,6 @@ from agent_framework import (
     FileSkillsSource,
     HistoryProvider,
     InMemoryHistoryProvider,
-    MCPStdioTool,
-    MCPStreamableHTTPTool,
     SkillsProvider,
     SlidingWindowStrategy,
     TokenBudgetComposedStrategy,
@@ -36,14 +34,12 @@ from agent_framework import (
 # package top level, so it is imported from its (experimental) home here.
 from agent_framework._harness._loop import todos_remaining
 
-# Importing each tool module runs its `@tool` decorators, populating the capability-tool registry
-# (a registration side effect, exactly as `evals/__init__.py` seeds the metric registry). With the
-# registry populated, `_capability_tools` assembles the advertised set from it instead of from a
-# hand-maintained list — so adding a tool is a `@tool` at its definition site, not an edit here.
+# Importing each tool module runs its `@tool` decorators, populating the capability-tool
+# registry (a registration side effect, exactly as `evals/__init__.py` seeds the metric
+# registry). With the registry populated, `_capability_tools` assembles the advertised set from
+# it instead of from a hand-maintained list — so adding a tool is a `@tool` at its definition
+# site, not an edit here.
 from agents import attachments as _attachments  # noqa: F401
-from agents import bo_tools as _bo_tools  # noqa: F401
-from agents import calc_tools as _calc_tools  # noqa: F401
-from agents import chem_tools as _chem_tools  # noqa: F401
 from agents import dialogue_tools as _dialogue_tools  # noqa: F401
 from agents import durable_tools as _durable_tools  # noqa: F401
 from agents import graph_tools as _graph_tools  # noqa: F401
@@ -52,9 +48,7 @@ from agents import memory_tools as _memory_tools  # noqa: F401
 from agents import preferences as _preferences  # noqa: F401
 from agents import qm_tools as _qm_tools  # noqa: F401
 from agents import research_tools as _research_tools  # noqa: F401
-from agents import safety_tools as _safety_tools  # noqa: F401
 from agents import subscriptions as _subscriptions  # noqa: F401
-from agents import xtb_expert_tools as _xtb_expert_tools  # noqa: F401
 from agents.audit import AuditSink, make_audit_middleware
 from agents.llm_provider import build_chat_client
 from agents.profiles import AgentProfile, get_profile
@@ -64,17 +58,10 @@ from agents.tool_authz import (
     surface_authorization_denials,
     surface_domain_errors,
 )
-from agents.tool_registry import registered_tools
-from chemclaw.config import (
-    HttpMcpServerSpec,
-    McpServerSpec,
-    StdioMcpServerSpec,
-    settings,
-)
-
-# What one configured MCP capability server becomes, whichever transport it declares. Both are
-# MAF MCP tools with the same agent-facing surface, so callers never branch on the transport.
-McpCapabilityTool = MCPStdioTool | MCPStreamableHTTPTool
+from agents.tool_registry import register_tool, registered_tool_names, registered_tools
+from chemclaw.config import settings
+from connectors.registry import connector_tool_names, job_tools, mcp_tools, skills_dirs
+from templates.registry import template_tool_names, template_tools
 
 _INSTRUCTIONS = (
     "You are Chemclaw, a research assistant for pharmaceutical/chemical process R&D. Your job "
@@ -91,8 +78,12 @@ _INSTRUCTIONS = (
     "substructure_matches find analogous substrates or a functional group (then find_notes on "
     "a hit's SMILES to reach the reactions using it). "
     "(3) For properties use compute_xtb_energy / predict_pka / predict_solubility (inline, "
-    "cached); heavy QM goes through submit_qm_job (returns a job id — report it, poll with "
-    "get_job_status). (4) To answer 'which experiment/condition next', call "
+    "cached). A bigger calculation — compute_reaction_energy, compare_solvents, "
+    "scan_coordinate, sample_conformers, compute_interaction_energy — answers inline when it "
+    "is quick and otherwise returns a job id: report the id as work in progress and poll it "
+    "with get_durable_job_status, which hands back the result once it lands. Heavy QM goes "
+    "through submit_qm_job (a job id too — poll that one with get_job_status). "
+    "(4) To answer 'which experiment/condition next', call "
     "suggest_next_experiment: build the decision space and the runs-so-far from the evidence "
     "you gathered, and it returns the point(s) to try next (proposals a human runs).\n"
     "Be proactive with tools, not just when asked to compute: when a question turns on a "
@@ -143,17 +134,19 @@ def build_agent(
 ) -> Agent:
     """Construct the Chemclaw agent with its tools and skills.
 
-    The structural-search capability is attached as MCP servers (`settings.mcp_servers`), which
-    MAF stores on `agent.mcp_tools`. Construction is lazy — no subprocess is spawned here — so
-    this stays a synchronous, resource-free constructor. The caller that actually *runs* the
-    agent owns the MCP lifecycle: enter each MCP tool's async context (or the agent's) before
-    `agent.run`, e.g. `async with *agent.mcp_tools: await agent.run(...)`, so the servers are
-    spawned for the turn and torn down after.
+    Capability comes from the enabled connectors (`connectors/`), and the agent holds only half
+    of it. Each connector's declared durable jobs become generated launch tools, which are
+    ordinary registry tools and are advertised here. Its *MCP* tools are deliberately **not**
+    attached: a connector's connection belongs to a single turn, and an agent is built once per
+    process, so the
+    turn's caller builds them with `connector_tools()` and passes them to `agent.run(tools=…)` after
+    connecting them (`service.runner.run_turn`, `agents.cli`). Construction here stays lazy —
+    nothing is spawned, nothing is dialed — so this is a synchronous, resource-free constructor.
 
     Args:
         chat_client: A MAF chat client. Injected in tests; when omitted, the
-            config-selected provider client is built via `build_chat_client`
-            (needs its credential at run time, not here).
+            config-selected provider client is built via `build_chat_client` (needs its
+            credential at run time, not here).
         profile: The named agent profile to build (a name, an `AgentProfile`, or `None`
             for the default). A profile *narrows* the instructions/tools/MCP/harness of the
             one agent for a use case; it can only attenuate, never widen — the audit + authz
@@ -176,14 +169,17 @@ def build_agent(
         settings.harness_enabled if prof.harness_enabled is None else prof.harness_enabled
     )
     client = chat_client if chat_client is not None else build_chat_client()
-    # Advertised skills are narrowed twice, both only ever removing: `settings.skills_enabled`
-    # picks which discovered skills this deployment turns on (empty = all, today's behavior), then
+    # Skills are discovered from the configured skills dirs *plus* every enabled connector's own
+    # `skills/` dir — a capability's judgment ships with the capability (`connectors.registry`).
+    # They are then narrowed twice, both only ever removing: `settings.skills_enabled` picks
+    # which discovered skills this deployment turns on (empty = all, today's behavior), then
     # `settings.skill_role_gates` hides gated ones from callers lacking the roles, against the
     # turn's ambient identity (`agents.identity_context`; an empty gate map shows every skill).
     skills = SkillsProvider(
         RoleScopedSkillsSource(
             EnabledSkillsSource(
-                FileSkillsSource(settings.skills_dirs), settings.skills_enabled_list
+                FileSkillsSource([*settings.skills_dirs, *skills_dirs()]),
+                settings.skills_enabled_list,
             ),
             settings.skill_role_gates,
         ),
@@ -258,20 +254,21 @@ def _build_harness_agent(
 ) -> Agent:
     """Wire MAF's Agent Harness over the *same* Chemclaw tools/skills/audit/compaction (F1).
 
-    The harness adds a self-managed todo list, a plan/execute mode, and a bounded completion loop —
-    the autonomous plan/execute experience — while capability stays ours: MAF's generic batteries
-    (file memory/access, web search, shell) are disabled, so the agent reaches structure/property/
-    knowledge tools through our function tools + MCP servers, not the harness built-ins.
+    The harness adds a self-managed todo list, a plan/execute mode, and a bounded completion
+    loop — the autonomous plan/execute experience — while capability stays ours: MAF's generic
+    batteries (file memory/access, web search, shell) are disabled, so the agent reaches
+    structure/property/ knowledge tools through our function tools + MCP servers, not the
+    harness built-ins.
 
     The starting mode comes from the profile's `harness_autonomy` override, or
     `settings.harness_autonomy` when the profile leaves it unset. `plan_only` starts in **plan**
     mode: the agent proposes a plan and waits for human approval before executing — the
-    pre-execution GxP gate — and, because the loop only continues in **execute** mode, it does not
-    auto-run until approval switches it. `execute` starts in execute mode and loops through the
-    todos immediately. Either way the loop is capped by `harness_max_loop_iterations` (the runaway
-    guard). Compaction reuses the classic strategy so context is kept within budget on both paths.
-    `instructions` and `tools` are pre-resolved by `build_agent` from the profile, so this path
-    advertises exactly the profile's (possibly narrowed) surface.
+    pre-execution GxP gate — and, because the loop only continues in **execute** mode, it does
+    not auto-run until approval switches it. `execute` starts in execute mode and loops through
+    the todos immediately. Either way the loop is capped by `harness_max_loop_iterations` (the
+    runaway guard). Compaction reuses the classic strategy so context is kept within budget on
+    both paths. `instructions` and `tools` are pre-resolved by `build_agent` from the profile,
+    so this path advertises exactly the profile's (possibly narrowed) surface.
     """
     strategy, tokenizer = _compaction_strategy()
     instructions = profile.instructions if profile.instructions is not None else _INSTRUCTIONS
@@ -338,8 +335,8 @@ def history_provider() -> HistoryProvider:
     compaction, which reads `history.source_id` — is identical on either path.
 
     Public because the front door reads transcripts back through it (`GET /sessions/{id}/messages`)
-    rather than querying `session_messages` itself: one reader, so the write path and the read path
-    cannot drift, and the route works unchanged under either store.
+    rather than querying `session_messages` itself: one reader, so the write path and the read
+    path cannot drift, and the route works unchanged under either store.
     """
     if settings.session_store == "postgres":
         # Imported lazily so the in-memory/dev path never imports psycopg for a store it won't use.
@@ -352,47 +349,129 @@ def history_provider() -> HistoryProvider:
 def _capability_tools(profile: AgentProfile | None = None) -> list[Any]:
     """The Chemclaw capability tools, shared by the classic and harness agents (one source, DRY).
 
-    The in-process function tools come from the capability-tool registry (`agents.tool_registry`),
-    populated by the `@tool` decorators when their modules are imported above — so adding a tool
-    needs no edit here. Structural fingerprint search (similar_reactions/similar_molecules/
-    substructure_matches) comes from the MCP capability servers, which stay config-driven
-    (`settings.mcp_servers`); they are appended after the in-process tools.
+    Three sources, none of which requires an edit here to grow:
 
-    A profile's `tool_names` / `mcp_server_names` *narrow* the advertised surface to the named
-    subset — attenuation only, never widening. A name that no built tool provides is a loud error
-    (fail-fast) rather than a silently-empty toolset. `None` (the default profile) advertises the
-    full surface, so the classic path and the registry tests build the complete set unchanged.
+    - the capability-tool registry (`agents.tool_registry`), populated by the `@tool` decorators
+      when their modules are imported above — the conversation-plumbing tools that read or write
+      the turn's own state and therefore cannot live in another process;
+    - one generated launcher per durable job declared by an enabled connector
+      (`connectors.jobs`) and per enabled step template (`templates.registry`), registered here
+      rather than at import because which of them are enabled is a deployment's choice;
+    - one MCP tool per enabled connector endpoint (`connectors.registry`), through which every
+      out-of-process capability is reached.
 
-    **`tool_names` narrows across both transports.** A profile names capabilities, not processes:
-    listing `predict_pka` must keep working now that X8 hosts it on `mcp-calc` rather than
-    in-process, or every profile would have become a statement about deployment. So a name that no
-    in-process tool provides is matched against the configured servers' `allowed_tools`, and the
-    server is attached with its allowed set *intersected* down to what the profile asked for.
-    Still attenuation only: naming one tool of a server grants that tool, never the server.
+    A profile's `tool_names` narrows the advertised surface to the named subset — attenuation only,
+    never widening. It spans **both** halves: the in-process tools here and, in `connector_tools`,
+    each connector's agent-facing allow-list. That has to be one dial rather than two, because after
+    the domain capabilities moved to connectors most tools a profile would name live out of process,
+    and a `tool_names` that could only reach the in-process half would be unable to express
+    "a property-lookup agent" at all. `mcp_server_names` remains the coarser dial, selecting whole
+    connectors.
+
+    A name in `tool_names` that nothing at all provides is a loud error (fail-fast) rather than a
+    silently-empty toolset. `None` (the default profile) advertises the full surface, so the classic
+    path and the registry tests build the complete set unchanged.
     """
     prof = profile if profile is not None else get_profile(None)
-    specs = list(settings.mcp_servers)
+    # Job tools are ordinary registry tools: registering them here (once per process, guarded
+    # against a re-registration when `build_agent` is called for a second profile) is what makes
+    # the audit middleware, `tool_role_gates` and the prose-contract validator address them by
+    # name.
+    _register_generated_tools()
     inprocess = registered_tools()
     if prof.tool_names is not None:
-        served = {name for spec in specs for name in (spec.allowed_tools or ())}
-        inprocess = _narrow(inprocess, prof.tool_names, prof.name, "tool", also_known=served)
-        specs = [narrowed for spec in specs if (narrowed := _restrict(spec, prof.tool_names))]
-    mcp: list[Any] = [_mcp_tool(spec) for spec in specs]
-    if prof.mcp_server_names is not None:
-        mcp = _narrow(mcp, prof.mcp_server_names, prof.name, "MCP server")
-    return [*inprocess, *mcp]
+        _reject_unknown_tool_names(prof)
+        # Names belonging to a connector are not missing, just not *here* — `connector_tools`
+        # applies them to the allow-lists. So this half narrows without complaining about them.
+        keep = prof.tool_names & set(registered_tool_names())
+        inprocess = [tool for tool in inprocess if tool.__name__ in keep]
+    return inprocess
 
 
-def _restrict(spec: McpServerSpec, keep: frozenset[str]) -> McpServerSpec | None:
-    """Narrow one server's `allowed_tools` to `keep`, or drop the server if nothing survives.
+def _reject_unknown_tool_names(profile: AgentProfile) -> None:
+    """Fail the build when a profile names a tool neither half of the surface provides.
 
-    A copy rather than a mutation: `settings.mcp_servers` is shared, and a profile must not
-    narrow the surface for everyone else. Returning None for an empty intersection is what stops
-    a profile from attaching a subprocess it will never call.
+    The whole surface, checked in one place, because that is the only place that can tell a typo
+    from a name that merely lives on the other side of the process boundary. Splitting the check
+    would make each half reject the other's tools.
     """
-    allowed = set(spec.allowed_tools or ())
-    kept = sorted(allowed & keep) if allowed else []
-    return spec.model_copy(update={"allowed_tools": kept}) if kept else None
+    assert profile.tool_names is not None  # only called when the profile narrows
+    available = {*registered_tool_names(), *connector_tool_names(), *template_tool_names()}
+    unknown = profile.tool_names - available
+    if unknown:
+        raise ValueError(
+            f"agent profile {profile.name!r} lists unknown tool(s) {sorted(unknown)}; "
+            f"known: {sorted(available)}"
+        )
+
+
+def connector_tools(profile: str | AgentProfile | None = None) -> list[Any]:
+    """The connector MCP tools for one turn, narrowed by the profile — built fresh on every call.
+
+    **Per turn, deliberately, and it is a correctness requirement rather than a preference.** A
+    connector's MCP tool object owns a connection whose lifetime is a turn (the caller opens and
+    closes it around `agent.run`), so one shared object cannot serve two turns at once: measured
+    against a live server, two concurrent turns entering and leaving the same tool's context
+    **deadlock**, and the second turn's calls would in any case travel over a connection
+    established in the first turn's context — attributing them to the wrong user in the
+    connector's own log. Fresh instances give each turn its own connection, which fixes both at
+    once.
+
+    This is why connectors are *not* attached by `build_agent`: an `Agent` is built once per
+    process, which is exactly the lifetime a connector tool must not have. `Agent.run(tools=…)`
+    appends run-scoped tools to the configured ones, so the turn's caller passes these and the
+    model sees one combined surface (`service.runner.run_turn`).
+
+    Both profile dials apply here. `mcp_server_names` selects whole connectors; `tool_names`
+    additionally narrows each surviving connector's agent-facing allow-list, and a connector left
+    with no named tool is dropped rather than attached with an empty surface. That is what lets a
+    profile say "just the two solubility tools" now that those tools live out of process.
+
+    Args:
+        profile: The profile to narrow by (a name, an `AgentProfile`, or `None` for the default,
+            which advertises every enabled connector's full allow-list).
+
+    Returns:
+        Unconnected MCP tools, one per enabled connector with an endpoint. The caller connects them
+        for the turn (`connectors.registry.open_reachable`).
+    """
+    prof = profile if isinstance(profile, AgentProfile) else get_profile(profile)
+    tools: list[Any] = list(mcp_tools())
+    if prof.mcp_server_names is not None:
+        tools = _narrow(tools, prof.mcp_server_names, prof.name, "connector")
+    if prof.tool_names is not None:
+        tools = _narrow_allowed_tools(tools, prof.tool_names)
+    return tools
+
+
+def _narrow_allowed_tools(tools: list[Any], keep: frozenset[str]) -> list[Any]:
+    """Restrict each connector's allow-list to `keep`, dropping connectors left with nothing.
+
+    Mutating `allowed_tools` on the instance is safe precisely because these are per-turn objects
+    (`connector_tools`): there is no shared connector whose surface another turn could see change.
+    """
+    narrowed = []
+    for tool in tools:
+        allowed = sorted(set(tool.allowed_tools or ()) & keep)
+        if not allowed:
+            continue
+        tool.allowed_tools = allowed
+        narrowed.append(tool)
+    return narrowed
+
+
+def _register_generated_tools() -> None:
+    """Register the generated launchers — connector jobs and templates — exactly once per process.
+
+    `build_agent` may run several times (one agent per profile, and once per test), while the
+    registry is module state keyed by tool name and rejects a duplicate registration as the
+    programming error it usually is. The already-registered check makes repeat builds idempotent
+    without weakening that guard for hand-written tools.
+    """
+    known = set(registered_tool_names())
+    for tool_fn in [*job_tools(), *template_tools()]:
+        if tool_fn.__name__ not in known:
+            register_tool(tool_fn)
 
 
 def _narrow(
@@ -404,14 +483,10 @@ def _narrow(
 ) -> list[Any]:
     """Keep only tools whose advertised name is in `keep`, raising if `keep` names an absent tool.
 
-    MAF advertises an in-process tool under its `__name__` and an MCP server under its `.name`;
-    both expose the advertised name, so `getattr(t, "name", t.__name__)` reads either. A profile
-    listing a name nothing provides is a configuration error surfaced at build time, not a tool
-    that silently vanishes from the agent's surface.
-
-    `also_known` are names provided by another transport — the MCP servers' `allowed_tools`. They
-    do not survive *this* filter (they are not in-process tools) but they are not unknown either,
-    and treating them as unknown is how X8 would have broken every profile naming a calculator.
+    MAF advertises an in-process tool under its `__name__` and a connector's MCP tool under its
+    `.name`; both expose the advertised name, so `getattr(t, "name", t.__name__)` reads either.
+    A profile listing a name nothing provides is a configuration error surfaced at build time,
+    not a tool that silently vanishes from the agent's surface.
     """
     available = {getattr(t, "name", None) or t.__name__: t for t in tools}
     unknown = keep - available.keys() - (also_known or set())
@@ -421,45 +496,6 @@ def _narrow(
             f"known: {sorted(available)}"
         )
     return [tool for name, tool in available.items() if name in keep]
-
-
-def _mcp_capability_tools() -> list[McpCapabilityTool]:
-    """Build one MCP tool per configured MCP capability server (unconnected).
-
-    These realise the plan's capability layer: the agent reaches the fingerprint search over
-    the MCP protocol instead of importing it in-process, so adding a capability is a
-    `settings.mcp_servers` entry, not a change here. `allowed_tools` keeps the agent to each
-    server's read/search tools; prompt loading is off (the servers advertise none). The tools
-    are returned unconnected — the run harness opens their contexts (see `build_agent`).
-    """
-    return [_mcp_tool(spec) for spec in settings.mcp_servers]
-
-
-def _mcp_tool(spec: McpServerSpec) -> McpCapabilityTool:
-    """Construct one MCP tool from its config spec, dispatching on the transport.
-
-    The two transports differ only in how the server is *reached* — a locally spawned subprocess
-    vs. an already-running remote endpoint. Everything that bounds what the agent may do with it
-    (`allowed_tools`, prompts off) is identical on both, so the PR-gate/RBAC boundary does not
-    depend on transport.
-    """
-    if isinstance(spec, HttpMcpServerSpec):
-        return MCPStreamableHTTPTool(
-            name=spec.name,
-            url=spec.url,
-            allowed_tools=spec.allowed_tools,
-            request_timeout=spec.request_timeout,
-            load_prompts=False,
-        )
-    if isinstance(spec, StdioMcpServerSpec):
-        return MCPStdioTool(
-            name=spec.name,
-            command=spec.command,
-            args=spec.args,
-            allowed_tools=spec.allowed_tools,
-            load_prompts=False,
-        )
-    assert_never(spec)  # exhaustive over the union — a new transport without a branch is a bug
 
 
 def _build_compaction(history_source_id: str) -> CompactionProvider:
@@ -491,9 +527,9 @@ def _build_compaction(history_source_id: str) -> CompactionProvider:
 def _compaction_strategy() -> tuple[TokenBudgetComposedStrategy, CharacterEstimatorTokenizer]:
     """The token-budget compaction strategy + tokenizer, shared by the classic and harness paths.
 
-    One definition of "reclaim tokens cheapest-first" (collapse stale tool-result dumps, then slide
-    the conversation window, within `agent_context_token_budget`) so the two agent flavors cannot
-    drift in how they keep context bounded (DRY).
+    One definition of "reclaim tokens cheapest-first" (collapse stale tool-result dumps, then
+    slide the conversation window, within `agent_context_token_budget`) so the two agent flavors
+    cannot drift in how they keep context bounded (DRY).
     """
     tokenizer = CharacterEstimatorTokenizer()
     strategy = TokenBudgetComposedStrategy(

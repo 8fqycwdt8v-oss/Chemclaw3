@@ -139,3 +139,10 @@ number is one another session will take.
 | D-107 | Fifth reconciliation with `main` (PR #31): a unit boundary and a sign, both silent |
 | D-108 | One conformer ensemble, one reaction composite: the duplicates are removed |
 | D-109 | Four fixes from the live e2e pass, and two root causes that were not what they looked like |
+| D-110 | The connector seam: one way to add a tool, a skill, or an agentic workflow |
+| D-111 | Stage C: the domain connectors, and two defects the migration surfaced |
+| D-112 | `bo` as the reference connector-owned durable capability |
+| D-113 | Stages D and E: profiles select an agent, templates fix a procedure |
+| D-114 | Sixth reconciliation with `main`: the xTB layer meets the connector seam |
+| D-115 | The two remaining Stage C items, answered: neither becomes a bundle |
+| D-116 | Seventh reconciliation with `main` (PR #30): two capabilities the merge silently restored |

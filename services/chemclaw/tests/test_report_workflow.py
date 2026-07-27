@@ -85,13 +85,16 @@ def test_report_workflow_drafts_and_pr_gates(monkeypatch: pytest.MonkeyPatch) ->
                 workflows=[DevelopmentReportWorkflow, ReportSectionWorkflow],
                 activities=[retrieve_section, propose_report, resolve_fan_out_limit],
             ):
-                ref = await client.execute_workflow(
+                result = await client.execute_workflow(
                     DevelopmentReportWorkflow.run,
                     request,
                     id="report-test",
                     task_queue=settings.background_task_queue,
                 )
-        assert ref.startswith("pr://note/report-")
+        # The envelope, so `get_durable_job_status` can hand the finished report back in one call.
+        assert result.data["note_ref"].startswith("pr://note/report-")
+        assert result.data["sections"] == 2
+        assert "Widget development" in result.summary
         body = fake.submissions[0].content
         assert "[[reaction-a]]" in body  # the supported section cites its source
         assert "No supporting data found" in body  # the safety section is marked, not invented

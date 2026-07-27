@@ -1,0 +1,23 @@
+# The structural hazard screen. Its own bundle rather than part of a broader chemistry connector
+# because it is separately governed: the rule table is a curated, literature-cited artifact, the
+# `safety-screening` skill (bundled here) is the judgment about what a flag means, and an auditor
+# asking "what did the screen say and by which rule" should find one deployable unit to point at.
+name: safety
+description: >-
+  Structural hazard screening: matches molecules and whole reactions against a curated,
+  literature-cited rule table of energetic, shock-sensitive and reactive motifs, plus dangerous
+  combinations between components. Returns advisory flags, never a clearance.
+
+endpoint:
+  transport: http
+  # A loopback dev default; a cluster address is set per deployment via CHEMCLAW_CONNECTOR_URLS.
+  url: http://127.0.0.1:8813/mcp
+  health_url: http://127.0.0.1:8813/healthz
+  request_timeout: 30
+  auth:
+    mode: none
+  tools:
+    - screen_hazards
+
+skills:
+  - safety-screening

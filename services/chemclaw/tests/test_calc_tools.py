@@ -3,22 +3,17 @@
 Uses an in-memory store (swapped in for the production Postgres one) so the tool
 is exercised end-to-end with a real GFN2-xTB calculation and no database.
 
-Since X8 these tools live in `mcp_servers.calc.server` rather than `agents.calc_tools`: they
-compute and need no turn-ambient identity, so they are hosted out of process. The tests are
-unchanged apart from where they import from — which is the point of that move being a
-deployment decision rather than a behavioural one.
+These tools live in the `calc` connector bundle rather than in the agent: they compute and need
+no turn-ambient identity, so they are hosted out of process. The tests are unchanged apart from
+where they import from — which is the point of that move being a deployment decision rather than a
+behavioural one.
 """
 
 import asyncio
 
 import pytest
 
-# Two transports since X8, so two aliases — `calc_tools` is the MCP-hosted calculator
-# surface, `inprocess_tools` the tools that stay in the agent because they route to Temporal
-# or write the prediction ledger. Naming them apart is what keeps a test honest about which
-# process it is exercising.
-import agents.calc_tools as inprocess_tools
-import mcp_servers.calc.server as calc_tools
+import connectors.calc.server.tools as calc_tools
 from calc.store import InMemoryStore
 from chemclaw.config import settings
 
@@ -103,10 +98,10 @@ def test_predict_solubility_tool_reports_uncertainty(monkeypatch: pytest.MonkeyP
 def test_predict_developability_profile_tool_flags_ro5(monkeypatch: pytest.MonkeyPatch) -> None:
     """The developability tool returns the descriptor panel and Ro5/Veber flags."""
     store = InMemoryStore()
-    monkeypatch.setattr(inprocess_tools, "default_store", lambda: store)
+    monkeypatch.setattr(calc_tools, "default_store", lambda: store)
 
     async def _run() -> None:
-        result = await inprocess_tools.predict_developability_profile("CC(=O)Oc1ccccc1C(=O)O")
+        result = await calc_tools.predict_developability_profile("CC(=O)Oc1ccccc1C(=O)O")
         assert result.lipinski_violations == 0
         assert result.veber_pass is True
 
@@ -116,12 +111,12 @@ def test_predict_developability_profile_tool_flags_ro5(monkeypatch: pytest.Monke
 def test_predict_logd_tool_defaults_ph_and_reuses_pka(monkeypatch: pytest.MonkeyPatch) -> None:
     """The logD tool defaults pH and reports the pKa uncertainty it was derived from."""
     store = InMemoryStore()
-    monkeypatch.setattr(inprocess_tools, "default_store", lambda: store)
+    monkeypatch.setattr(calc_tools, "default_store", lambda: store)
 
     async def _run() -> None:
         from chemclaw.config import settings
 
-        result = await inprocess_tools.predict_logd("OC(=O)c1ccccc1")
+        result = await calc_tools.predict_logd("OC(=O)c1ccccc1")
         assert result.ph == settings.logd_default_ph
         assert result.uncertainty > 0
 

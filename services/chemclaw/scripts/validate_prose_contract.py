@@ -15,7 +15,7 @@ observe tool **selection**, but whether a named tool exists at all needs no mode
 Two rules, both deliberately narrow so the check stays true rather than noisy:
 
 1. Every `name(`-style call mentioned in a skill or in the agent instructions must be a registered
-   agent tool, an MCP tool the agent is allowed to call, or an explicitly allowlisted helper.
+   agent tool, a tool an enabled connector advertises, or an explicitly allowlisted helper.
 2. A skill must not direct the agent at a `*Workflow` class. The agent cannot invoke a workflow;
    it can only call a tool. Naming one is always either a dangling pointer or a missing tool.
 
@@ -28,6 +28,8 @@ from pathlib import Path
 
 from agents.chemclaw_agent import _INSTRUCTIONS, _capability_tools
 from chemclaw.config import settings
+from connectors.registry import connector_tool_names
+from connectors.registry import skills_dirs as connector_skills_dirs
 
 # Symbols a skill may legitimately name in call form that are not agent tools: library/graph
 # internals a skill explains conceptually. Kept explicit and short — adding one is a review
@@ -43,23 +45,24 @@ _WORKFLOW = re.compile(r"`([A-Za-z][A-Za-z0-9]*Workflow)`")
 
 
 def _registered_tool_names() -> set[str]:
-    """Every tool the agent can actually call: in-process functions plus allowed MCP tools."""
+    """Every tool the agent can actually call: in-process functions plus every connector tool."""
     names: set[str] = set()
     for tool in _capability_tools():
         name = getattr(tool, "__name__", None)
         if name:
             names.add(name)
-    # MCP capability tools are named by their server's `allowed_tools` allowlist, not by a Python
-    # symbol, so they are collected from config — the same place `build_agent` reads them.
-    for spec in settings.mcp_servers:
-        names.update(spec.allowed_tools or [])
+    # A connector's endpoint tools are named by the manifest's allow-list, not by a Python symbol
+    # this process holds, so they are collected from the manifests — the same place `build_agent`
+    # reads them. `connector_tool_names` also covers the generated job launchers, which *are*
+    # registry tools, so the union is idempotent rather than double-counted.
+    names.update(connector_tool_names())
     return names
 
 
 def _prose_sources() -> dict[str, str]:
     """The agent-facing prose to check: every SKILL.md plus the built-in instructions."""
     sources = {"agents/chemclaw_agent.py::_INSTRUCTIONS": _INSTRUCTIONS}
-    for skills_dir in settings.skills_dirs:
+    for skills_dir in [*settings.skills_dirs, *connector_skills_dirs()]:
         for path in sorted(Path(skills_dir).glob("*/SKILL.md")):
             sources[str(path)] = path.read_text()
     return sources

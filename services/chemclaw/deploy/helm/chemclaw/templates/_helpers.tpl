@@ -62,7 +62,7 @@ app.kubernetes.io/instance: {{ .Release.Name }}
   envFrom:
     {{- include "chemclaw.envFrom" . | nindent 4 }}
   resources:
-    {{- toYaml .Values.resources.mcp | nindent 4 }}
+    {{- toYaml .Values.resources.connector | nindent 4 }}
   volumeMounts:
     {{- include "chemclaw.knowledgeMounts" . | nindent 4 }}
 {{- end }}
@@ -81,7 +81,7 @@ app.kubernetes.io/instance: {{ .Release.Name }}
   envFrom:
     {{- include "chemclaw.envFrom" . | nindent 4 }}
   resources:
-    {{- toYaml .Values.resources.mcp | nindent 4 }}
+    {{- toYaml .Values.resources.connector | nindent 4 }}
   volumeMounts:
     {{- include "chemclaw.knowledgeMounts" . | nindent 4 }}
 {{- end }}
@@ -124,7 +124,7 @@ app.kubernetes.io/instance: {{ .Release.Name }}
   envFrom:
     {{- include "chemclaw.envFrom" . | nindent 4 }}
   resources:
-    {{- toYaml .Values.resources.mcp | nindent 4 }}
+    {{- toYaml .Values.resources.connector | nindent 4 }}
   volumeMounts:
     {{- include "chemclaw.noteRepoMount" . | nindent 4 }}
 {{- end }}
@@ -144,4 +144,17 @@ app.kubernetes.io/instance: {{ .Release.Name }}
 - name: temporal-tls
   mountPath: {{ .Values.secrets.temporalTls.mountPath }}
   readOnly: true
+{{- end -}}
+
+{{- /* CHEMCLAW_CONNECTOR_URLS, computed from the SAME enabled set the connector Deployments come
+       from, so the front door's address map cannot drift from the pods that exist. A bundle's
+       manifest ships a loopback dev default; this is the deployment override that replaces it. */ -}}
+{{- define "chemclaw.connectorUrls" -}}
+{{- $urls := dict -}}
+{{- range $name, $cfg := .Values.connectors -}}
+{{- if $cfg.enabled -}}
+{{- $_ := set $urls $name (printf "http://%s-connector-%s:%v/mcp" (include "chemclaw.name" $) $name $.Values.connectorPort) -}}
+{{- end -}}
+{{- end -}}
+{{- toJson $urls -}}
 {{- end -}}

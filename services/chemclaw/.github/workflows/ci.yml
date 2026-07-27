@@ -58,6 +58,17 @@ jobs:
       - name: Validate skills
         run: make skill-validate
 
+      # The connector seam's own gates (D-109/D-113). Each catches a class of failure that is
+      # invisible to the test suite because it is about the *wiring* between a declaration and the
+      # live surface: a manifest naming a workflow or params model that cannot be built, a skill or
+      # template step naming a tool nothing provides, an inline wait that outlives its turn. All are
+      # read-only and take about a second.
+      - name: Validate the connector bundles
+        run: make connector-validate
+
+      - name: Validate the step templates
+        run: make template-validate
+
       - name: Validate the prose/tool contract
         run: make prose-validate
 

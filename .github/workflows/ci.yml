@@ -76,3 +76,16 @@ jobs:
 
       - name: Validate skills
         run: make skill-validate
+
+      # The three gates the connector seam added (D-109/D-112). Each catches a class of failure
+      # that is invisible at import and only shows up at run time: a bundle whose declared job
+      # cannot be built, a template step naming a tool that does not exist, and prose that promises
+      # the model a tool nobody serves.
+      - name: Validate connectors
+        run: make connector-validate
+
+      - name: Validate step templates
+        run: make template-validate
+
+      - name: Validate the agent's prose contract
+        run: make prose-validate

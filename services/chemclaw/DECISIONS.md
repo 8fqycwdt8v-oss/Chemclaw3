@@ -3814,3 +3814,406 @@ cost — a one-line conflict a grep finds, instead of a ninety-line conflict ins
 where the number is easy to miss. The collision-proof fix is to drop the global sequence for
 date-plus-slug ids; that is a convention change worth making deliberately if this recurs, and it
 is recorded as the escalation rather than done unilaterally here.
+
+## D-110 — The connector seam: one way to add a tool, a skill, or an agentic workflow
+
+**Context.** Five extension seams existed, and adding a capability meant touching four unrelated
+places — a `@tool` function in `agents/`, a `settings.mcp_servers` entry, a bespoke Temporal adapter
+plus a hand-maintained worker list, and a `SKILL.md` folder — three of them Python edits to
+orchestration code. A *capability* was a concept the codebase could not name, and its dependencies
+(`rdkit`, `torch`, `bofire`, `tblite`) all lived in the chat service's image because tools ran
+in-process. `deploy/helm/.../deployment-mcp.yaml` had anticipated the fix and sat inert since F6.
+
+**Decision.** A capability is a **bundle**: `connectors/<name>/connector.yaml` declaring everything it
+contributes — the MCP tools its own FastAPI server serves, the durable jobs its own Temporal worker
+runs, the skills that teach them, the agent profiles they enable. Discovered by folder (as skills
+are), validated by a pydantic manifest with `extra="forbid"` (as `SKILL.md` frontmatter is), enabled
+by one config token (as data sources are), gated by `make connector-validate` in CI (as notes and
+skills are). No new vocabulary: registry + discriminated union + filesystem discovery + enable-token,
+exactly the four shapes D-081 settled on.
+
+`mcp_servers` and its three spec models are **removed**, not deprecated — two mechanisms for
+registering a capability is the problem this solves, so keeping one as a compatibility path would
+preserve it. `molfp`/`rxnfp` are re-hosted as HTTP connector bundles over their existing FastMCP
+capability (`mcp_servers/` unmoved), and the Helm chart now computes `CHEMCLAW_CONNECTOR_URLS` from
+the same `.Values.connectors` block that creates the Services, so the addresses the front door dials
+cannot drift from the pods that exist.
+
+**Durable jobs: core wrapper over a connector-owned workflow.** `ConnectorJobWorkflow` keeps every
+obligation that must not vary per capability — the idempotent workflow id (D-011), `require_actor`
+attribution (F4-T3), the PR-gate publish through the *existing* `publish_memory_note_activity`, and
+session push-back (F3-T3) — while the connector owns the workflow and its worker, addressed by
+**workflow type name + task queue** as strings from the manifest. Core imports nothing from a bundle,
+and moving a workflow between workers is a one-line manifest change. The contract is one envelope
+(`ConnectorJobResult`: summary, data, optional `Note`), and typing the note as the existing frozen
+`Note` means a connector's proposal passes the graph's own validators at the boundary.
+
+A `jobs:` entry declares its arguments either inline (closed scalar types → a generated pydantic
+model → a real typed schema) **or** by a `module:Attribute` reference to an existing model. The second
+is what makes "any tool" true rather than aspirational: `CampaignSpec` nests a discriminated
+optimization problem that YAML cannot re-declare without losing the structure that makes the model
+call it correctly — and re-declaring it would be a second source of truth for a schema that already
+exists in code.
+
+**The four existing bespoke adapters are deliberately not migrated.** `submit_qm_job`,
+`request_development_report` and `start_optimization_campaign` wrap workflows returning typed domain
+results their callers consume, not the envelope. Converting them now means either changing three
+tested durable workflows' return types — orphaning in-flight histories for no functional gain — or
+stacking a third wrapper layer. In Stage C their code moves into its bundle and the moved workflow
+returns the envelope directly: one change instead of two. Until then core durable capabilities and
+connector durable capabilities coexist by design, and the generic path is what every *new* one uses.
+
+**Two findings from measurement, which changed the design.** Both are recorded because both look
+settled from the API surface and are not.
+
+1. **MAF's `header_provider` does not work over streamable HTTP.** It is invoked, with the right
+   values, and the server receives nothing: MAF passes the headers through a `ContextVar` set in
+   `call_tool` while the request is issued by the MCP transport's `post_writer` task, created when the
+   connection opened. A request hook on our own `httpx.AsyncClient` runs *in* that task and works.
+   (MAF documents the sibling trap for auth itself: provider headers are absent during
+   `session.initialize()`, so a credential passed that way 401s at connect. Auth is an `httpx.Auth`
+   on the same client.)
+2. **Connectors must be built per turn, not per process.** A connection's transport tasks inherit the
+   context of whoever opened it, so connect-time identity is only truthful if a connection belongs to
+   one turn. Probing the shared-object shape showed it is worse than inaccurate: **two concurrent
+   turns over one connector tool deadlock** — a pre-existing hazard on the stdio path too, since
+   `run_turn` has always entered process-lived tools' contexts per turn. So connectors are not
+   attached by `build_agent`; `connector_tools()` builds them per turn and the caller passes them to
+   `Agent.run(tools=…)`. One fix for both problems, pinned by a concurrency test.
+
+**Consequences.** The identity headers are advisory and stay that way: audit and per-tool authz run in
+core before a call leaves the process, and a NetworkPolicy restricts connectors to Chemclaw's own
+pods — a connector must never make an access decision on a header's word. The agent-facing `tools`
+allow-list is read/compute-only *by validated contract* (`make connector-validate` refuses a mutating
+name), so mutation stays on the job path or the core PR-gate tools. An unreachable connector costs its
+tools and not the turn, reported by `/readyz` and the `chemclaw_connectors_unhealthy` gauge;
+`connectors_required` inverts that to fail-fast for a deployment that prefers not serving.
+`SkillManifest` drops `mcp_servers` for the finer-grained `tools`, validated against the whole surface
+including out-of-process tools — the coarser field would have passed while the tool it taught was gone.
+
+Design, staging and open questions: `docs/connector-plan.md`. Supersedes the `mcp_servers` half of
+D-029 and D-081's transport union; the rest of D-081 stands.
+
+## D-111 — Stage C: the domain connectors, and two defects the migration surfaced
+
+`safety`, `chem` and `calc` moved out of the agent's process to their own bundles (D-110's seam).
+Five connectors ship now; `rdkit`, `tblite` and the calculation store's driver are no longer the chat
+service's dependencies, which was the operational point of the exercise.
+
+**Verification came first.** Two of the four safety-rubric invariants are MAF function middleware
+over tools we did not write, and MAF assembles MCP tools into a run's tool list separately from the
+configured ones — so whether audit and authz reach a connector's tools is a property of the framework
+that no amount of reading our wiring establishes. `tests/test_connector_safety_rubric.py` drives a
+real agent, MAF's own tool-calling loop and a real connector server, and asserts on the audit sink
+and on what the server observed. Both hold: a connector call is audited with the turn's actor, and a
+`tool_role_gates` denial is recorded as an error while the tool body never runs. Had either failed,
+the migration would have been unsafe and Stage C would not have proceeded.
+
+**Two defects, both found by the existing suite, both fixed at the root:**
+
+1. **Swallowing `CancelledError` in `connectors.transport` broke the front door's turn bound.** The
+   degrade-on-connect-failure mixin caught it — following MAF, which swallows it in its own MCP paths
+   because an internal `anyio` cancel scope is indistinguishable from a real cancellation. At *this*
+   layer it is distinguishable: `Task.cancelling()` is non-zero only when cancellation was requested
+   on this task, which an inner scope never does. Without that check a hung turn ran to completion
+   holding its admission permit — precisely the collapse `service_turn_timeout_seconds` exists to
+   prevent, and a much worse failure than the one the swallow was protecting against.
+
+2. **`AgentProfile.tool_names` could no longer reach a migrated tool.** Profiles had two dials —
+   `tool_names` for in-process tools, `mcp_server_names` for whole connectors — which was coherent
+   while capability lived in-process and became incoherent the moment it did not: a profile could
+   name a whole `calc` connector but not "just the two predictors". `tool_names` now spans both
+   halves, narrowing the in-process tools *and* each connector's agent-facing allow-list, dropping a
+   connector left with no named tool. Mutating `allowed_tools` per instance is safe only because
+   connectors are per-turn objects (D-110) — on a shared connector it would have been a cross-turn
+   surface change. The unknown-name check moved to the union, since only a view of the whole surface
+   can tell a typo from a name that lives on the other side of the boundary.
+
+**A boundary clarification worth stating.** `calc` exposes `report_measurement`, which writes. The
+read/compute-only rule for a connector's agent-facing tools is about the *knowledge graph and the
+fingerprint index* — the paths the PR-gate governs — not about all state: a capability's own store is
+its own business, and the calibration ledger is `calc`'s. What remains structurally impossible from a
+connector is unchanged: it cannot write a graph note (its only route is a job result core publishes)
+and cannot launch durable work (a `jobs:` entry is a core-generated tool).
+
+Remaining in Stage C: `kg` (needs a decision on whether it also owns re-indexing) and `bo` (whose
+workflow moves to its own worker, taking `start_optimization_campaign` onto the generic job path with
+it). See `tasks/todo.md`.
+
+## D-112 — `bo` as the reference connector-owned durable capability
+
+The `bo` bundle is the one that proves the durable half of the seam rather than describing it. It
+owns both flavours: `suggest_next_experiment` is an inline MCP tool on its own FastAPI server, and
+the campaign is a `jobs:` entry whose workflow, activities and **worker** all live in the bundle,
+polling `connector-bo`. Core's background worker no longer serves any BO workflow or activity, and
+`agents/durable_tools.py`'s bespoke campaign launcher is deleted — the manifest replaced it.
+
+**What this establishes.** Moving a durable workflow out of core was one manifest entry plus changing
+the workflow's return type to `ConnectorJobResult`. Nothing in core was edited to accommodate it,
+because `ConnectorJobWorkflow` addresses the child by workflow *type name* and task queue, both
+strings from `connector.yaml` — the property D-110 claimed and this is the first exercise of. The
+practical payoff is that `bofire`/`botorch` now load only in the bundle's two processes.
+
+**The PR-gate split, made structural.** `write_campaign_node` — an activity that both *built* the
+recommendation note and *published* it — is gone. The mapping (BO result → note) stayed in the
+bundle, because that is the domain's knowledge; the publish moved to core, because the PR-gate is the
+GxP boundary. A connector now returns a note in its envelope and cannot reach the gate at all, which
+is a stronger statement than "it is not supposed to".
+
+**One new manifest field, and why it earns its place with a single caller.** The deleted adapter
+enforced `require_rounds_within_ceiling` before starting: a campaign re-sends its whole observation
+history each round, so history grows quadratically and past the ceiling Temporal terminates the run
+mid-flight, losing every already-paid evaluation. Migrating the job would have dropped that guard
+silently. Every other placement is replay-unsafe — a validator on `CampaignSpec` or a check inside
+the workflow re-runs during replay against *current* config, so lowering the ceiling would
+retroactively fail an in-flight campaign that was legal when it started. The launch boundary is the
+only safe place, and after the factory replaced the hand-written adapters that boundary is the
+generated tool. So `JobSpec.precondition` names a `module:function` the factory calls before any
+durable work. It has one caller today and is not speculative: without it, migrating a job to the
+generic path is a silent regression, which is the opposite of what the seam is for.
+
+Remaining in Stage C: the `kg` bundle, and the `qm`/`report` jobs, which follow the same shape once
+their workflows move and return the envelope directly.
+
+## D-113 — Stages D and E: profiles select an agent, templates fix a procedure
+
+The connector seam (D-110) made *capability* one thing to add. These two stages do the same for the
+two ways an "agentic workflow" is configured, and the decision worth recording is that they are two
+things and not one.
+
+**A profile (Stage D) configures an agent; the model still chooses the order.** It is a YAML file
+under `profiles/` — or inside a connector bundle, when it is about that one capability — naming
+instructions, a narrowed tool set, and the harness settings. A session picks one with
+`POST /sessions {"profile": ...}`; an unknown name is a 400, not a silent fallback to the default,
+because a caller that asked for a narrowed agent and quietly got the full one is the failure mode
+worth being loud about. Agents are built once per profile and cached on the app, so the profile is a
+key rather than a per-turn cost.
+
+*The filename is the name.* `profiles/property-lookup.yaml` is `property-lookup`, and a `name:` key
+in the body is refused rather than merged. Two sources of truth for one identity is drift waiting to
+happen, and this is the same rule `skills/` already follows.
+
+**A template (Stage E) fixes the procedure; the model only fills the gaps.** Also a YAML file, also
+discovered, also enabled by one config token — but it runs as a Temporal workflow with an ordered
+step list. Three kinds: `tool` (call anything on the agent's surface), `job` (run a connector's
+durable job and *await* it), `agent` (one model turn under an optional profile). The last is what
+keeps a template agentic rather than a script: the sequence does not vary, the reasoning inside a
+step does.
+
+**Why both, when the user's ask was "configure an agentic workflow easily".** A profile cannot
+express "these five steps, in this order, every time" — the model may reorder or skip, which for a
+safety screen preceding a written brief is precisely the judgment nobody wants delegated. A template
+cannot express open-ended research. The shipped pair demonstrates the split: `property-lookup`
+narrows to four calculators and lets the model work; `hazard-briefing` screens, then searches
+precedent, then writes — in that order, durably, or not at all.
+
+**Substitution is deliberately not a template language.** `${inputs.x}` and `${steps.id.result}`,
+nothing else — no conditionals, loops or expressions. Those are how a config format becomes a
+programming language with no debugger, and a procedure that needs them wants an agent step or real
+code in a connector, not more YAML. Two rules inside that small surface earn their complexity: a
+whole-string reference substitutes the *value* with its type (so a tool wanting `list[str]` does not
+receive the repr of one), while an embedded reference interpolates JSON text (so a prompt reads);
+and an unresolvable reference raises rather than yielding `None`, refused at *validation* time so a
+broken template cannot start rather than dying on step four having already spent the compute.
+
+**The resolved template travels in the workflow input, not its name.** Editing
+`templates/<name>.yaml` therefore cannot change a run already in flight. That is the versioning
+story — no migration, an edit affects only later runs — and simultaneously a hard replay
+requirement: a workflow re-reading a file on replay would diverge from its own history and Temporal
+would reject it.
+
+**Identity travels too, and is re-stamped per step.** A workflow has no request context, so the
+actor and roles ride in each activity's input and are set ambient before the work happens. The part
+that matters is `run_tool_step` applying the audit and authz middleware *by hand*: MAF applies an
+agent's middleware inside its own tool-calling loop, which a template does not go through, so a
+direct `tool.invoke(...)` would run ungoverned. A template must not become a way to run a tool the
+requester could not run directly, and that line is enforced there.
+
+**Two omissions the gate caught, worth naming because both would have shipped silently.** The image
+never `COPY`d `templates/` or `profiles/`: a discovered-from-disk seam that is missing simply
+advertises less, so the container would have started clean and offered fewer capabilities.
+`test_image_ships_every_first_party_package` catches the first by discovery; the second it structurally
+cannot (no `__init__.py`), which is the argument for the explicit `COPY` and the comment above it.
+`connectors/` and `templates/` were also both absent from `make type`'s package list — checked
+transitively, never directly.
+
+**Deviation from the staged plan.** Stage E was gated on "a second real use case a profile provably
+cannot express". The user overrode that gate and asked for it built; `hazard-briefing` is the one
+worked case, not two. The gate existed to prevent building a step engine nobody needed, so the risk
+it was guarding — a second caller failing to materialize — remains open and is noted here rather
+than presented as retired.
+
+## D-114 — Sixth reconciliation with `main`: the xTB layer meets the connector seam
+
+Two branches solved the same problem in the same window without knowing it. `main`'s X8 moved the
+seven calculators out of the agent's process behind an MCP server because "the calculators carry the
+heavy half of this system's dependency closure"; the connector seam (D-110) built the general
+mechanism for exactly that. The merge is where they become one thing, and the interesting part is
+what the merge *exposed* rather than what it moved.
+
+**Convergent evidence, worth stating.** X8's reasoning and D-110's are nearly word-for-word — the
+capability scales on its own pod, judgment stays out, only DTOs cross. Two independent derivations
+of the same boundary is the strongest argument either has, and it settles the "is this seam the
+right shape" question better than another round of design would.
+
+**What was duplicated, and how the merge chose.** `mcp_servers/calc/server.py` and
+`connectors/calc/server/tools.py` both defined `predict_pka`, `predict_solubility` and
+`compute_xtb_energy` — two live definitions of one tool, differing in one place (X11's base-pKa
+support, which the connector's copy lacked). The bundle is the surviving home and took `main`'s
+better bodies plus its four newer calculators. `mcp_servers/calc/` is deleted. `mcp_servers/molfp`
+and `mcp_servers/rxnfp` stay as the implementation modules their bundles wrap — those are one
+capability with one definition, which is not the defect this was.
+
+**The defect the merge exposed, and the reason this ADR is not just a merge note.** Five tools —
+`compute_reaction_energy`, `compare_solvents`, `scan_coordinate`, `sample_conformers`,
+`compute_interaction_energy` — stayed in-process on `main` with an explicit and well-argued
+justification: they submit durable jobs, submitting needs `require_actor()` and
+`get_current_session_id()`, and those are ambient to the turn and never model-supplied (F4-T3). The
+argument is correct. Its conclusion was not, and after the merge the cost was visible: because they
+route by *predicted* cost, they import `calc.xtb_cost`, `calc.reaction`, `calc.complexes` and
+`calc.conformers` — so the chat service's image still loaded the entire heavy chemistry closure, and
+the `calc` connector saved nothing it was built to save. The merge also left them **orphaned**: no
+module imported them any more, so five capabilities were silently absent from the agent, caught by
+`make skill-validate` rather than by anything at run time.
+
+**The fix, and why it is better than what it replaced.** A new `JobSpec.inline_wait_seconds`: the
+generated launcher starts the durable run and waits a bounded moment for it, returning the result if
+it arrives and a job id if it does not. Identity never leaves core — the launcher is core's, running
+in the turn, exactly as before. The capability never leaves the connector. One model-facing tool
+serves both the two-second case and the twenty-minute one.
+
+That it *replaces a prediction with a measurement* is the part worth keeping. A cost model is a
+second model of the calculation and can be wrong in both directions: a mispredicted "cheap" call
+blocks the turn anyway, and a mispredicted "expensive" one is deferred for nothing. Elapsed time
+needs no model and cannot be wrong. And a prediction can only live where the cost model lives, which
+is what had put chemistry in core in the first place — so the simpler mechanism is also the one that
+removes the coupling. The wait is cancel-safe by construction: `asyncio.wait_for` cancels the waiter,
+never the workflow, so an abandoned turn leaves a run that still completes, still caches and still
+pushes back.
+
+All five share one workflow. `XtbJobSpec` was already a closed union discriminated on `kind`, so each
+job references its own member as `params_model` and `CalcJobWorkflow` dispatches — one durable path,
+five separately-documented tools, because "compare these solvents" and "scan this bond" are different
+questions even when the machinery is identical.
+
+**Three consequences, none of them silent.**
+
+1. **`run_xtb_task` is deleted.** X7's expert escape hatch took the raw union; the five typed jobs
+   now cover that union exactly, so it had become a sixth tool doing what the five do, chosen by the
+   model. Its role gate did not vanish with it: it existed for *unbounded* calculations, so it moved
+   onto the two CREST searches (`sample_conformers`, `compute_interaction_energy`) as
+   `expensive: true`. Dropping a gate along with the tool it guarded is how a posture loosens
+   quietly.
+2. **`get_job_status` narrowed to HPC/DFT, and `get_durable_job_status` grew a result.** The former
+   dispatched on an id prefix over two kinds; one of those kinds no longer exists. The latter used
+   to return a bare status word, which left a chemist holding a completed connector job with no tool
+   that could fetch it — the connector envelope made that answerable, so it now reports the summary
+   and the structured result in the same call.
+3. **`main`'s `workflows/registry.py` is adopted, and a connector stays out of it.** The declarative
+   `@durable_workflow(queue)` seam fixes a real failure — a workflow written, tested and imported but
+   missing from a worker's list never runs — and core's two workers now assemble from it.
+   A *connector's* workflows are deliberately not registered there: that registry serves core's
+   queues, and a bundle polling its own queue on its own worker is the whole point. The test asserts
+   the absence rather than the presence, because a connector workflow drifting back onto a core queue
+   is the regression that would quietly restore the coupling this removed.
+
+**ADR renumbering.** The branch's four ADRs were written as D-092…D-095 while `main` independently
+used those numbers. They are D-110…D-113 here, with every in-repo reference updated. Numbering
+collisions are the predictable cost of an append-only log on two branches; the alternative (a
+reservation) is worse than renaming on merge.
+
+**Two production gaps closed while reviewing, both of the same kind — a gate that existed but was
+not wired.** CI ran `make skill-validate` and neither `connector-validate`, `template-validate` nor
+`prose-validate`, so three of the five gates the seam added were enforceable only by hand; they are
+CI steps now. And the image never `COPY`d `templates/` or `profiles/` (D-113) — both discovered from
+disk, so the container would have started clean and simply offered fewer capabilities. A validator
+nobody runs and a directory nobody ships fail the same way: silently, in the direction of less.
+
+## D-115 — The two remaining Stage C items, answered: neither becomes a bundle
+
+Both open points closed by measuring rather than by preference, and the measurement says no in both
+cases. Worth recording because "everything becomes a connector" is the wrong reading of D-110: a
+capability earns a bundle by taking a dependency closure *with* it, and a tool that leaves the
+closure behind gains nothing but a second code path.
+
+**The `kg` bundle: won't build.** The open question was whether it would also own re-indexing. The
+answer is that the question does not arise, because the graph is not a peripheral capability — it is
+core's own data layer. Thirteen core modules import `kg`: the PR-gate, all six memory layers, the
+report retrievers, the eval verifier, the note index. Moving `find_notes`, `expand_note` and
+`find_knowledge_gaps` out would leave every one of those imports where it is, for a dependency win
+of exactly zero, and add a second read path to one note tree. Re-indexing stays in core for the same
+reason and one more: it is triggered by a merge into the note repo, which core owns. The rule is
+written into `connectors/manifest.py`'s docstring and the runbook so the next author who notices
+`find_notes` is not behind a connector finds the answer instead of re-deriving it.
+
+**The `report` job: the envelope, not a bundle.** Its closure — the graph, the retrievers, the
+embedding index — is what core keeps for `gather_evidence` regardless, so the isolation half buys
+nothing. But the *uniformity* half turned out to matter: `DevelopmentReportWorkflow` returned a bare
+note-ref string, which made the report the one durable job `get_durable_job_status` could report
+`completed` for while having nothing to hand back. It now returns `ConnectorJobResult` and stays on
+core's background worker.
+
+It still publishes its own note rather than returning one for core to gate — correct here for
+precisely the reason it would be wrong in a bundle. The note *reference* is the workflow's result, so
+publishing is the work rather than a side effect, and this workflow already sits on the side of the
+boundary the PR-gate lives on. A connector cannot make that claim, which is why D-112 took the
+publish away from `bo`.
+
+**What this leaves in core, as a closed list rather than a backlog:** conversation plumbing, the two
+PR-gate writers, the knowledge-graph reads, `submit_qm_job` (it needs the HPC identity bridge, which
+is core's), the report, and the two status tools. Every one of those is a rule with a reason, and
+`tests/test_tool_registry.py` pins the set so adding to it is a reviewed edit.
+
+## D-116 — Seventh reconciliation with `main` (PR #30): two capabilities the merge silently restored
+
+The e2e-testing branch merged into `main` while this one was open, and the reconciliation is
+mechanical in the direction that matters — `main` does not have the connector seam, so every
+conflict where it re-introduces `settings.mcp_servers`, `agents/calc_tools.py`, `agents/bo_tools.py`
+or `workflows/bo_campaign.py` resolves to this branch. What is worth recording is the two places
+where "resolve to ours" was the *wrong* answer, and the class of defect that produced them.
+
+**A merge that deletes a file on one side and edits it on the other restores the file.** Git reports
+that as `modify/delete` and asks; it does not report the *transitive* case, where the deleted file's
+module is still imported. Four modules came back this way — `workflows/xtb_job.py`,
+`workflows/xtb_activities.py`, `agents/xtb_job_tools.py`, `agents/xtb_expert_tools.py` — all replaced
+by the `calc` bundle's durable half in D-114, none flagged as a conflict, because on this branch they
+simply no longer existed. Two of them were dead-but-harmless; `xtb_job_tools.py` imported a module
+this branch had deleted, so it was an `ImportError` waiting for the first test that touched it.
+
+**The one that would have been a real regression.** `connectors/bo/activities.py` came back carrying
+`@durable_activity("background")`. Git's rename detection had matched it to `main`'s
+`workflows/bo_activities.py`, which legitimately registers on core's queue — so the decorator
+followed the file across the boundary. The effect: core's background worker would have served the BO
+activities again, loading `bofire` and `botorch` into the process the bundle exists to keep them out
+of. Nothing about it looks wrong in a diff; it is three decorator lines in a file whose contents are
+otherwise correct.
+
+`tests/test_workflow_registry.py` caught it, and how it caught it is the lesson. `main`'s
+`test_every_declared_capability_reaches_its_worker` asserts `BACKGROUND_WORKFLOWS ==
+registered_workflows("background")` — a snapshot taken at worker import compared against the live
+registry. A capability registering *after* that snapshot makes the two disagree, which is exactly
+what a stray connector registration does. The absence-assertion added in D-114 covers the same
+boundary from the other side; between them the failure is now caught twice, and the docstring in
+`connectors/bo/activities.py` says why the decorator must not be there.
+
+**Adopted from PR #30, each verified present after resolution rather than assumed:** the two
+error-surfacing middlewares (`surface_authorization_denials`, `surface_domain_errors`) around audit
+and authz — the chain is four deep now, not two; the BO argument coercion, which this branch had to
+*port* into `connectors/bo/server/tools.py` because that file is a rename of the module the fix
+landed in, so the merge kept this branch's older body (a plain "ours" resolution would have dropped a
+live-e2e finding: the model sometimes JSON-encodes the observations array as a string); the report's
+retrievers coming from `sources.registry.active_retrieve_sources()` rather than a hardcoded
+`GraphRetriever()`; `find_notes` matching every query word independently; the xTB fixed-point fix;
+and the registry's re-import safety.
+
+**Two of this branch's own tests were wrong in the same way, and it is worth naming.** Both asserted
+a *count* where they meant a *property*: the middleware chain "has length 2", and an authorization
+message contained one specific phrase. Both broke on additions that were improvements. They now
+assert what they meant — the narrowed agent's chain equals the default agent's (by name, since the
+audit entry is a per-agent closure), and the denial names the actor and the tool. A test that pins an
+incidental number is a test that will one day block a good change and teach nobody anything.
+
+**ADR numbering, per the ledger rule `main` added in the interim.** That rule says the branch merging
+second renumbers; this is that branch. `main` had taken D-109, so this branch's six ADRs moved from
+D-109…D-114 to D-110…D-115, with every in-repo reference updated, and all seven numbers are now
+reserved in `ADR-REGISTRY.md` — which is the mechanism that should make this the last renumber.

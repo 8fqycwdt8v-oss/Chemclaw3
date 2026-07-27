@@ -1,9 +1,9 @@
 """Behavioral tests for structural hazard screening (D-080), all offline.
 
 Three things must hold for an advisory safety screen to be worth having: the rules fire on real
-examples of the motifs they name, they stay quiet on ordinary chemistry (a screen that cries wolf
-is switched off), and nothing anywhere renders "no match" as "safe". The rule table is data, so
-these tests pin its behavior with named molecules rather than mocking the matcher.
+examples of the motifs they name, they stay quiet on ordinary chemistry (a screen that cries
+wolf is switched off), and nothing anywhere renders "no match" as "safe". The rule table is
+data, so these tests pin its behavior with named molecules rather than mocking the matcher.
 """
 
 import asyncio
@@ -11,8 +11,8 @@ from pathlib import Path
 
 import pytest
 
-from agents.safety_tools import screen_hazards
 from chemclaw.config import settings
+from connectors.safety.server.tools import screen_hazards
 from kg.note import Note
 from safety.notes import hazard_problems, structures_in
 from safety.screen import SafetyRulesError, at_least, screen_reaction, screen_structure
@@ -91,8 +91,8 @@ def test_azide_not_bonded_to_carbon_is_flagged(smiles: str, reagent: str) -> Non
     Sodium azide is one of the most-reached-for reagents in the building, and it screened *clean*:
     `organic-azide` and `acyl-azide` both open on `[#6]`, so a salt matched neither and the screen
     reported nothing — which a reader takes as "no hazard found" on a compound that is acutely
-    toxic and liberates explosive HN3 on contact with acid. The same hole swallowed hydrazoic acid
-    and the silyl/phosphoryl azide transfer reagents, so each is pinned here by name.
+    toxic and liberates explosive HN3 on contact with acid. The same hole swallowed hydrazoic
+    acid and the silyl/phosphoryl azide transfer reagents, so each is pinned here by name.
     """
     flags = {flag.rule_id for flag in screen_structure(smiles).flags}
     assert "non-carbon-azide" in flags, f"{reagent} screened clean"
@@ -194,11 +194,17 @@ def test_tool_screens_one_molecule_and_a_reaction() -> None:
     assert [flag.rule_id for flag in reaction.flags] == ["oxidizer-with-reductant"]
 
 
-def test_tool_is_registered_for_the_agent() -> None:
-    """The tool is advertised to the model — an unregistered screen would never be called."""
-    from agents.tool_registry import registered_tool_names
+def test_tool_is_advertised_to_the_agent() -> None:
+    """The screen is on the agent's surface — one nothing advertises would never be called.
 
-    assert "screen_hazards" in registered_tool_names()  # registered on import (top of this file)
+    It lives behind the `safety` connector now, so the check is against the connector surface
+    rather than the in-process registry. That the *bundle* declares it is what puts it in front
+    of the model; that the *server* serves exactly that name is `test_connector_transport.py`'s
+    job.
+    """
+    from connectors.registry import connector_tool_names
+
+    assert "screen_hazards" in connector_tool_names()
 
 
 # --- the kg-validate gate -------------------------------------------------------------

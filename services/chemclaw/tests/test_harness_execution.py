@@ -33,6 +33,7 @@ from agent_framework._tools import FunctionInvocationLayer
 from agents.chemclaw_agent import build_agent
 from agents.message_pairing import calls_without_adjacent_results
 from chemclaw.config import settings
+from connectors.registry import open_reachable
 
 # One scripted turn: given the messages sent to the model, return its next reply.
 _ScriptedTurn = Callable[[list[Message]], ChatResponse]
@@ -129,14 +130,17 @@ def _two_step_script() -> list[_ScriptedTurn]:
 def _run_turn(agent: object, message: str, session: object) -> str:
     """Run one streamed turn to completion and return its final text.
 
-    Opens/closes the agent's MCP capability servers for the turn, exactly as `service.runner.
-    run_turn` and `agents.cli` do — the lifecycle `build_agent`'s docstring leaves to its caller.
+    Connects/closes the agent's connectors for the turn through the same `open_reachable` helper
+    `service.runner.run_turn` and `agents.cli` use — the lifecycle `build_agent`'s docstring leaves
+    to
+    its caller. Sharing the helper is what keeps this test honest: it exercises the real degrade
+    path,
+    so a connector that is not running (none is, here) costs its tools and not the turn.
     """
 
     async def _run() -> str:
         async with AsyncExitStack() as stack:
-            for tool in getattr(agent, "mcp_tools", None) or []:
-                await stack.enter_async_context(tool)
+            await open_reachable(stack, getattr(agent, "mcp_tools", None) or [])
             stream = agent.run(message, stream=True, session=session)  # type: ignore[attr-defined]
             async for _update in stream:
                 pass

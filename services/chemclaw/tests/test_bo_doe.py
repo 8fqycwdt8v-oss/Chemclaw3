@@ -7,9 +7,9 @@ import asyncio
 
 import pytest
 
-from agents.bo_tools import generate_screening_design
 from bo.engine import factorial_design
 from bo.problem import CategoricalParameter, ContinuousParameter, Objective, OptimizationProblem
+from connectors.bo.server.tools import generate_screening_design
 
 
 def _screening_problem() -> OptimizationProblem:

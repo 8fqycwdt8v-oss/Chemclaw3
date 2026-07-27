@@ -262,9 +262,10 @@ def test_status_of_foreign_workflow_is_clear_error(monkeypatch: pytest.MonkeyPat
         return _FakeClient()
 
     monkeypatch.setattr(job_status, "connect", _fake_connect)
-    # A BO campaign id carries neither calculation prefix, so it is rejected before any
-    # deserialization — the id, not the payload, is what says which job kind this is.
-    with pytest.raises(ValueError, match="not a calculation job id"):
+    # A BO campaign id carries no QM prefix, so it is rejected before any deserialization — the
+    # id, not the payload, is what says which subsystem started this run. The message names the
+    # tool that *does* collect it, so a wrong call is one step from the right one.
+    with pytest.raises(ValueError, match="get_durable_job_status"):
         asyncio.run(get_job_status("bo-campaign-1"))
 
 

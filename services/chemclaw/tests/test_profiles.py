@@ -9,7 +9,7 @@ regardless of profile. See `docs/audit/10-config-extensibility.md` §6/§8 (Spik
 
 import pytest
 
-from agents.chemclaw_agent import _INSTRUCTIONS, build_agent
+from agents.chemclaw_agent import _INSTRUCTIONS, build_agent, connector_tools
 from agents.profiles import (
     AgentProfile,
     get_profile,
@@ -29,59 +29,44 @@ def test_default_profile_reproduces_todays_agent() -> None:
         t.name for t in base.default_options["tools"]
     }
     assert {t.name for t in default.mcp_tools} == {t.name for t in base.mcp_tools}
+    # And the default profile's connector set is every enabled connector, as the global agent's is.
+    assert {tool.name for tool in connector_tools()} == {
+        tool.name for tool in connector_tools("default")
+    }
 
 
 def test_profile_narrows_tools_and_swaps_instructions() -> None:
-    """A profile advertises only its named tool subset, across both transports.
+    """A profile advertises only its named tool subset and its own instructions.
 
-    The profile names three capabilities; two of them (`predict_pka`,
-    `predict_solubility`) live on `mcp-calc` since X8 and one is in-process. A profile is
-    a statement about *capabilities*, not about which process hosts them, so naming a
-    calculator must keep working — and the attenuation must be exact: the server is
-    attached with its allowed set intersected down to the two asked for, not with all
-    seven it can serve.
+    `tool_names` spans both halves of the surface, which is what makes a profile expressible at
+    all now that the domain capabilities live behind connectors: `gather_evidence` is in-process,
+    the two predictors are the `calc` connector's, and a profile naming all three must get exactly
+    those — the in-process tools narrowed, and `calc` attached with its allow-list cut to two.
     """
-    agent = build_agent(
-        chat_client=object(),
-        profile=AgentProfile(
-            name="property-lookup",
-            instructions="Answer physical-property questions tersely; cite computed values.",
-            tool_names=frozenset({"predict_pka", "predict_solubility", "gather_evidence"}),
-        ),
+    profile = AgentProfile(
+        name="property-lookup",
+        instructions="Answer physical-property questions tersely; cite computed values.",
+        tool_names=frozenset({"predict_pka", "predict_solubility", "gather_evidence"}),
     )
+    agent = build_agent(chat_client=object(), profile=profile)
     assert {t.name for t in agent.default_options["tools"]} == {"gather_evidence"}
-    assert {t.name for t in agent.mcp_tools} == {"mcp-calc"}
-    allowed = agent.mcp_tools[0].allowed_tools
-    assert allowed is not None
-    assert set(allowed) == {"predict_pka", "predict_solubility"}
     assert agent.default_options["instructions"] != _INSTRUCTIONS
 
+    connectors = connector_tools(profile)
+    assert [connector.name for connector in connectors] == ["calc"]
+    assert set(connectors[0].allowed_tools or ()) == {"predict_pka", "predict_solubility"}
+    # Every other connector is dropped rather than attached with an empty surface.
+    assert "chem" not in {connector.name for connector in connectors}
 
-def test_narrowing_to_one_tool_does_not_attach_the_rest_of_its_server() -> None:
-    """Naming one tool of a server grants that tool, never the server.
 
-    The failure this guards is silent widening: `mcp-calc` serves seven calculators, and a
-    profile scoped to one of them getting all seven would be an attenuation mechanism that
-    quietly does not attenuate. Servers with nothing asked for are not attached at all.
+def test_profile_can_narrow_connectors() -> None:
+    """`mcp_server_names` narrows the turn's connectors to the named subset.
+
+    Narrowing moved with the connectors themselves: they are built per turn rather than attached to
+    the agent, so the profile is applied where the set is built (`connector_tools`).
     """
-    agent = build_agent(
-        chat_client=object(),
-        profile=AgentProfile(name="pka-only", tool_names=frozenset({"predict_pka"})),
-    )
-    assert {t.name for t in agent.mcp_tools} == {"mcp-calc"}
-    allowed = agent.mcp_tools[0].allowed_tools
-    assert allowed is not None
-    assert list(allowed) == ["predict_pka"]
-    assert agent.default_options["tools"] == []
-
-
-def test_profile_can_narrow_mcp_servers() -> None:
-    """`mcp_server_names` narrows the attached MCP capability servers to the named subset."""
-    agent = build_agent(
-        chat_client=object(),
-        profile=AgentProfile(name="mol-only", mcp_server_names=frozenset({"mcp-molfp"})),
-    )
-    assert {t.name for t in agent.mcp_tools} == {"mcp-molfp"}
+    profile = AgentProfile(name="mol-only", mcp_server_names=frozenset({"molfp"}))
+    assert {tool.name for tool in connector_tools(profile)} == {"molfp"}
 
 
 def test_profile_attenuates_but_audit_and_authz_always_attach() -> None:

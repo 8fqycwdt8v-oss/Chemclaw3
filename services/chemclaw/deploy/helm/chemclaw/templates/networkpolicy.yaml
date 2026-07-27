@@ -30,4 +30,41 @@ spec:
           port: {{ .Values.networkPolicy.egressPorts.llm }}
         - protocol: TCP
           port: {{ .Values.networkPolicy.egressPorts.otel }}
+        {{- /* The connector Services. Read from `connectorPort` rather than a second egressPorts
+               entry, so the port the front door is allowed to dial is the port the connector
+               containers actually listen on — one value, no drift. */}}
+        - protocol: TCP
+          port: {{ .Values.connectorPort }}
+---
+{{- /* Connectors accept traffic only from Chemclaw's own pods. This is the boundary that makes the
+       advisory X-Chemclaw-* identity headers safe: they are not authorization, so a connector must
+       not be reachable by anything that could forge them. Authorization itself stays in core
+       (`agents.tool_authz`) — this policy is the second lock, not the first. */ -}}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "chemclaw.name" . }}-connector-ingress
+  labels:
+    {{- include "chemclaw.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchExpressions:
+      - key: app.kubernetes.io/component
+        operator: In
+        values:
+          {{- range $name, $cfg := .Values.connectors }}
+          {{- if $cfg.enabled }}
+          - connector-{{ $name }}
+          {{- end }}
+          {{- end }}
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              {{- include "chemclaw.selectorLabels" . | nindent 14 }}
+      ports:
+        - protocol: TCP
+          port: {{ .Values.connectorPort }}
 {{- end }}

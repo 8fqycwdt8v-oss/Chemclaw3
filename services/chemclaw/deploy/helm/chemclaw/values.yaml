@@ -60,19 +60,46 @@ knowledge:
   # a whole working tree, so the submitter needs a checkout nothing else is reading.
   noteRepoPath: /var/lib/chemclaw/note-repo
 
-# MCP capability servers. The agent spawns these as **stdio subprocesses in its own pod**
-# (`MCPStdioTool`), so standalone Deployments are only meaningful once a networked MCP transport
-# exists — until then they would be pods running a stdio server with no stdin, i.e. a crash loop
-# (gap DEP-3). Enabling one therefore requires `transport: http`, which the template enforces.
-mcp:
+# Connector bundles (`connectors/<name>/`), each its own Deployment + Service serving that
+# capability's MCP tools over HTTP. One entry per bundle in the repo; `enabled` decides whether it
+# gets pods. The front door's CHEMCLAW_CONNECTOR_URLS is *computed* from this same block
+# (`chemclaw.connectorUrls`), so the addresses it dials and the Services that exist cannot disagree.
+#
+# Enabling a connector here is only half the switch: CHEMCLAW_CONNECTORS_ENABLED in `config` below
+# decides which bundles the agent loads at all. Leave it empty (the default) to load every bundle the
+# image ships, which is what matches "enable the pods and it works".
+connectors:
   molfp:
-    enabled: false
+    enabled: true
     replicas: 1
   rxnfp:
-    enabled: false
+    enabled: true
     replicas: 1
-  # "stdio" = the agent spawns them in-process; "http" = standalone Deployments are meaningful.
-  transport: stdio
+  safety:
+    enabled: true
+    replicas: 1
+  chem:
+    enabled: true
+    replicas: 1
+  calc:
+    enabled: true
+    replicas: 1
+    # The expensive calculations (reaction energies, solvent screens, scans, CREST searches) run
+    # as durable jobs on this bundle's own queue, so it gets a worker Deployment too. Sizing it
+    # separately from core's `hpc` worker is the point: this is the only pod that needs the
+    # `xtb`/`crest` binaries and the CPU to saturate with them.
+    worker: true
+  bo:
+    enabled: true
+    replicas: 1
+    # This bundle owns durable work, so it also gets a Temporal worker Deployment polling the queue
+    # its manifest declares. Bundles without a `jobs:` entry leave this unset and get only the app.
+    worker: true
+
+# The port every connector container listens on (its own Service maps it 1:1). One value rather than
+# per-connector: they are separate Services, so there is no port to deconflict, and a single number
+# keeps the computed URL map and the probes trivially consistent.
+connectorPort: 8080
 
 resources:
   service:
@@ -81,7 +108,9 @@ resources:
   worker:
     requests: { cpu: "500m", memory: "1Gi" }
     limits: { cpu: "2", memory: "4Gi" }
-  mcp:
+  # Also used by the knowledge-sync init/sidecar containers: both are small, single-purpose
+  # processes, and giving them one shared budget is why this key is not named per-component.
+  connector:
     requests: { cpu: "100m", memory: "256Mi" }
     limits: { cpu: "500m", memory: "512Mi" }
 

@@ -97,7 +97,7 @@ def test_route_requires_token_when_entra_required(
 ) -> None:
     """With enforcement on, a session route is 401 without a token and 200 with a valid one."""
     monkeypatch.setattr(settings, "entra_required", True)
-    with TestClient(create_app(agent_factory=_FakeAgent)) as client:
+    with TestClient(create_app(agent_factory=lambda _profile: _FakeAgent())) as client:
         assert client.post("/sessions").status_code == 401
         token = _sign(rsa_key, {"oid": "u-9"})
         ok = client.post("/sessions", headers={"Authorization": f"Bearer {token}"})
@@ -111,14 +111,14 @@ def test_route_requires_token_when_entra_required(
 
 def test_dev_mode_allows_no_token() -> None:
     """With enforcement off (local dev), a session route works without a token (dev principal)."""
-    with TestClient(create_app(agent_factory=_FakeAgent)) as client:
+    with TestClient(create_app(agent_factory=lambda _profile: _FakeAgent())) as client:
         assert client.post("/sessions").status_code == 200
 
 
 def test_healthz_never_requires_auth(monkeypatch: pytest.MonkeyPatch) -> None:
     """Liveness must not be gated, even with enforcement on (probes carry no token)."""
     monkeypatch.setattr(settings, "entra_required", True)
-    with TestClient(create_app(agent_factory=_FakeAgent)) as client:
+    with TestClient(create_app(agent_factory=lambda _profile: _FakeAgent())) as client:
         assert client.get("/healthz").status_code == 200
 
 
@@ -144,7 +144,7 @@ def test_token_validation_runs_off_the_event_loop(monkeypatch: pytest.MonkeyPatc
         return Principal(oid="u-thread")
 
     monkeypatch.setattr(auth, "validate_token", _probe)
-    with TestClient(create_app(agent_factory=_FakeAgent)) as client:
+    with TestClient(create_app(agent_factory=lambda _profile: _FakeAgent())) as client:
         res = client.post("/sessions", headers={"Authorization": "Bearer x.y.z"})
     assert res.status_code == 200
     assert on_loop == [False]  # validation ran in a thread, not on the serving loop
@@ -178,7 +178,7 @@ def test_unauthenticated_loopback_boots(monkeypatch: pytest.MonkeyPatch, host: s
     """The local dev flow is untouched: no auth on a loopback bind boots without complaint."""
     monkeypatch.setattr(settings, "entra_required", False)
     monkeypatch.setattr(settings, "service_host", host)
-    with TestClient(create_app(agent_factory=_FakeAgent)) as client:
+    with TestClient(create_app(agent_factory=lambda _profile: _FakeAgent())) as client:
         assert client.get("/healthz").status_code == 200
 
 
@@ -192,7 +192,7 @@ def test_unauthenticated_exposed_refuses_to_boot(monkeypatch: pytest.MonkeyPatch
     monkeypatch.setattr(settings, "service_host", "0.0.0.0")
     monkeypatch.setattr(settings, "service_allow_insecure", False)
     with pytest.raises(RuntimeError, match="CHEMCLAW_ENTRA_REQUIRED"):
-        create_app(agent_factory=_FakeAgent)
+        create_app(agent_factory=lambda _profile: _FakeAgent())
 
 
 def test_unauthenticated_exposed_boots_only_with_explicit_opt_in(
@@ -203,7 +203,7 @@ def test_unauthenticated_exposed_boots_only_with_explicit_opt_in(
     monkeypatch.setattr(settings, "service_host", "0.0.0.0")
     monkeypatch.setattr(settings, "service_allow_insecure", True)
     with caplog.at_level(logging.WARNING, logger="service.app"):
-        app = create_app(agent_factory=_FakeAgent)
+        app = create_app(agent_factory=lambda _profile: _FakeAgent())
     assert any("authorization gates OPEN" in r.message for r in caplog.records)
     with TestClient(app) as client:
         assert client.get("/healthz").status_code == 200
@@ -216,5 +216,5 @@ def test_entra_required_exposed_boots_without_warning(
     monkeypatch.setattr(settings, "entra_required", True)
     monkeypatch.setattr(settings, "service_host", "0.0.0.0")
     with caplog.at_level(logging.WARNING, logger="service.app"):
-        create_app(agent_factory=_FakeAgent)
+        create_app(agent_factory=lambda _profile: _FakeAgent())
     assert not any("authorization gates OPEN" in r.message for r in caplog.records)

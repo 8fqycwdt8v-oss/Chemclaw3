@@ -9,7 +9,7 @@ discovered by name (skills by folder, MCP servers + data sources by config token
 
 The shape deliberately mirrors `evals.metric` (`_REGISTRY` + decorator + duplicate-name guard),
 so no new pattern is introduced. It holds only the in-process function tools; the MCP capability
-servers stay config-driven (`settings.mcp_servers`), and the two shared middlewares (GxP audit +
+capability lives behind a connector bundle (`connectors/`), and the two shared middlewares (audit +
 per-tool authz) still wrap every tool uniformly in `build_agent`. The registry changes *how tools
 are collected*, never how they are gated — the safety rubric is untouched.
 

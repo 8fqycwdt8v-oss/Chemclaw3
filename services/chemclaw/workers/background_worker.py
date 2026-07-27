@@ -1,9 +1,13 @@
 """The `background-jobs` worker (plan step 1.8).
 
-Hosts light, long-running background jobs — starting with the durable BO campaign
-(plan step 1d.4). Run it with `python -m workers.background_worker` (after
-`make up`). Kept separate from the HPC worker so heavy and light work scale
-independently on their own queues (D-006).
+Hosts light, long-running background jobs: ELN sync, note re-indexing, reports, the
+generic connector-job wrapper and template runs. Run it with
+`python -m workers.background_worker` (after `make up`). Kept separate from the HPC
+worker so heavy and light work scale independently on their own queues (D-006).
+
+A *connector's* own workflows are not here: they run on the bundle's own worker and
+queue (`connectors/bo/worker.py` on `connector-bo`), which is the point of the seam —
+this worker never imports a capability's dependency closure.
 """
 
 import asyncio
@@ -22,9 +26,7 @@ from chemclaw.temporal_client import connect
 # populated, the sets this worker serves come from it — so adding a durable capability
 # to one of these modules is a decorator at its definition site, not an edit here.
 from workflows import audit_verify as _audit_verify  # noqa: F401
-from workflows import bo_activities as _bo_activities  # noqa: F401
-from workflows import bo_campaign as _bo_campaign  # noqa: F401
-from workflows import bo_knowledge as _bo_knowledge  # noqa: F401
+from workflows import connector_job as _connector_job  # noqa: F401
 from workflows import digest as _digest  # noqa: F401
 from workflows import eln_sync as _eln_sync  # noqa: F401
 from workflows import eval_drift as _eval_drift  # noqa: F401
@@ -36,6 +38,8 @@ from workflows import notify as _notify  # noqa: F401
 from workflows import orchestrator as _orchestrator  # noqa: F401
 from workflows import report_workflow as _report_workflow  # noqa: F401
 from workflows import retention as _retention  # noqa: F401
+from workflows import template_activities as _template_activities  # noqa: F401
+from workflows import template_job as _template_job  # noqa: F401
 from workflows.registry import describe, registered_activities, registered_workflows
 
 logger = logging.getLogger(__name__)
@@ -46,7 +50,7 @@ BACKGROUND_ACTIVITIES: Sequence[Callable[..., Any]] = registered_activities("bac
 
 
 async def main() -> None:
-    """Connect and poll the background-jobs queue for BO campaigns, graph writes, ELN sync."""
+    """Connect and poll the background-jobs queue: graph writes, ELN sync, jobs, templates."""
     configure_logging()
     configure_telemetry()
     client = await connect()

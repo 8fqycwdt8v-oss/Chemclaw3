@@ -24,8 +24,6 @@ from chemclaw.temporal_client import connect
 # to one of these modules is a decorator at its definition site, not an edit here.
 from workflows import activities as _qm_activities  # noqa: F401
 from workflows import qm_job as _qm_job  # noqa: F401
-from workflows import xtb_activities as _xtb_activities  # noqa: F401
-from workflows import xtb_job as _xtb_job  # noqa: F401
 from workflows.registry import describe, registered_activities, registered_workflows
 
 logger = logging.getLogger(__name__)

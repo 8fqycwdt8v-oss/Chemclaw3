@@ -16,67 +16,68 @@ from agents.tool_registry import (
     registered_tools,
     tool,
 )
+from connectors.registry import enabled
+from templates.registry import template_tool_names
 
 # Every in-process capability tool, spelled out: the registry must reproduce this set, no more and
-# no less (the MCP servers are advertised separately). It started as the old hardcoded list and now
-# grows with each new `@tool`, so adding one is a deliberate, reviewed edit here rather than a
-# silent widening of what the agent can do.
+# no less (a connector's tools are advertised separately, per turn). Adding one is a deliberate,
+# reviewed edit here rather than a silent widening of what the agent can do — and the review that
+# edit invites is "should this be a connector tool instead?", which is the point.
 _EXPECTED_INPROCESS_TOOLS = {
-    "scan_coordinate",
-    "compute_reaction_energy",
-    "compare_solvents",
-    "sample_conformers",
-    "compute_interaction_energy",
-    "run_xtb_task",
-    "submit_qm_job",
-    "get_job_status",
-    "find_notes",
-    "expand_note",
-    "gather_evidence",
-    "suggest_next_experiment",
-    "propose_knowledge_note",
-    "record_confirmed_answer",
-    "screen_hazards",
-    "resolve_compound",
-    "stoichiometry_table",
-    "green_metrics",
-    "render_structure",
-    "request_development_report",
-    "start_optimization_campaign",
-    "get_durable_job_status",
-    "find_knowledge_gaps",
+    # The conversation plumbing: everything that reads or writes the *turn's own* state, which is
+    # by definition unavailable to another process.
     "ask_clarifying_question",
-    "remember_preference",
-    "recall_preferences",
-    "forget_preference",
+    "list_attachments",
+    "read_attachment",
     "watch_for",
     "list_watches",
     "stop_watching",
-    "list_attachments",
-    "read_attachment",
-    "report_measurement",
-    "calculator_trust",
-    "predict_developability_profile",
-    "predict_logd",
-    "generate_screening_design",
+    "remember_preference",
+    "recall_preferences",
+    "forget_preference",
+    # The knowledge layer: reads, plus the two PR-gate writers. The gate is core's, so its writers
+    # are too — a connector reaches it only by returning a note in a job envelope.
+    "find_notes",
+    "expand_note",
+    "gather_evidence",
+    "find_knowledge_gaps",
+    "propose_knowledge_note",
+    "record_confirmed_answer",
+    # The two durable launchers core still owns, and their status tools. `submit_qm_job` needs the
+    # HPC identity bridge rather than a connector; the report's workflow has not moved into a
+    # bundle yet (BACKLOG.md).
+    "submit_qm_job",
+    "get_job_status",
+    "request_development_report",
+    "get_durable_job_status",
 }
 
 
-def test_registry_holds_exactly_the_inprocess_tools() -> None:
-    """Importing the agent populates the registry with precisely the in-process capability tools."""
-    assert set(registered_tool_names()) == _EXPECTED_INPROCESS_TOOLS
+def test_registry_holds_the_inprocess_tools_and_only_generated_launchers_besides() -> None:
+    """Importing the agent registers precisely the in-process tools; building it adds launchers.
+
+    Three populations share this registry on purpose. The `@tool` functions arrive on import; the
+    generated launcher for each declared connector job and each enabled step template is registered
+    when an agent is built — which is exactly what makes a generated tool addressable by
+    `tool_role_gates` and wrapped by the audit middleware like any other. So "exactly the
+    in-process set" is only true before a build, and the invariant worth asserting is that nothing
+    *else* ever appears.
+    """
+    assert _EXPECTED_INPROCESS_TOOLS <= set(registered_tool_names())
+    build_agent(chat_client=object())
+    extra = set(registered_tool_names()) - _EXPECTED_INPROCESS_TOOLS
+    jobs = {job.name for manifest in enabled() for job in manifest.jobs}
+    assert extra == jobs | set(template_tool_names())
 
 
-def test_capability_tools_match_registry_plus_mcp() -> None:
-    """`_capability_tools()` is the registered function tools, then the MCP capability tools."""
-    from agents.chemclaw_agent import _mcp_capability_tools
+def test_capability_tools_are_exactly_the_registry() -> None:
+    """`_capability_tools()` is the registry, whole and in order — connectors are not in it.
 
+    A connector's MCP tools are per-turn (`connector_tools`), not per-process, so the agent's own
+    tool list is the registry and nothing more.
+    """
     tools = _capability_tools()
-    inprocess = registered_tools()
-    # The in-process tools appear first, in registration order, unchanged.
-    assert tools[: len(inprocess)] == inprocess
-    # The tail is exactly the config-driven MCP capability servers.
-    assert len(tools) == len(inprocess) + len(_mcp_capability_tools())
+    assert tools == registered_tools()
 
 
 def test_agent_advertises_the_registered_inprocess_tools() -> None:
@@ -89,11 +90,11 @@ def test_agent_advertises_the_registered_inprocess_tools() -> None:
 def test_duplicate_registration_is_a_loud_error() -> None:
     """Registering two tools under one name is a programming error (as in `evals.metric`)."""
 
-    async def compute_reaction_energy() -> None:  # shadows a registered name on purpose
+    async def gather_evidence() -> None:  # shadows an always-registered name on purpose
         return None
 
     with pytest.raises(ValueError, match="already registered"):
-        register_tool(compute_reaction_energy)
+        register_tool(gather_evidence)
 
 
 def test_decorator_registers_and_returns_function_unchanged() -> None:

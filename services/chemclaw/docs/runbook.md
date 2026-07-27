@@ -87,6 +87,12 @@ restart the agent — discovery is automatic. To add a second skills directory (
 skills), set `CHEMCLAW_SKILLS_DIR` to an OS-path-separator list, like `PATH`
 (`skills:/opt/team-skills`).
 
+A skill that teaches *one capability's* tools belongs in that connector's bundle instead
+(`connectors/<name>/skills/<skill>/`, declared in its `connector.yaml` — see (iv)), so the judgment
+ships and is reviewed with the capability it is about. One that spans several stays in `skills/`.
+Either way `make skill-validate` checks its declared `tools:` against the live surface, in-process
+and out, so a skill cannot outlive the tool it teaches.
+
 ## (ii) Add or repoint a database
 
 Set `CHEMCLAW_POSTGRES_DSN` and run `make db-migrate` (applies `infra/sql/*.sql` in filename
@@ -108,25 +114,164 @@ A *new* ELN source is one new adapter class satisfying the `ElnAdapter` contract
 `DATA_SOURCES` entry in `sources/registry.py` and its key in `CHEMCLAW_DATA_SOURCES`. Validate an
 export with `make eln-validate`.
 
-## (iv) Add a capability/tool the agent can call
+## (iv) Add a capability — a tool, a durable job, and their skills (a **connector**)
 
-The agent reaches the fingerprint search over the **MCP protocol**: each capability is a server
-listed in `CHEMCLAW_MCP_SERVERS` (default `mcp-molfp`, `mcp-rxnfp` in `chemclaw/config.py`), and
-`build_agent` attaches it as an `MCPStdioTool` subprocess. **Adding a capability is a config
-entry**, not agent code:
+A capability is a **connector bundle**: one folder declaring everything it contributes. There is no
+second mechanism — `CHEMCLAW_MCP_SERVERS` is gone (D-110).
 
-1. Write (or reuse) a FastMCP server exposing the tools (see `mcp_servers/molfp/server.py`).
-2. Add `{name, command, args, allowed_tools}` to `CHEMCLAW_MCP_SERVERS` — set `allowed_tools`
-   to the read/search tools the agent may call (keep index/write tools off the chat agent;
-   those writes go through the PR-gate).
-3. Servers are launched from the repo root (`command`/`args`, e.g. `python -m ...`); ensure the
-   process's working directory is the checkout so `-m mcp_servers...` resolves.
+```
+connectors/<name>/
+  connector.yaml      # the manifest — the whole contract
+  server/app.py       # optional: the FastAPI+MCP app, when we own the capability
+  workflows.py        # optional: its Temporal workflow, when the work runs long
+  skills/             # optional: the SKILL.md judgment that belongs to this capability
+  profiles/           # optional: the agent profiles it enables
+```
 
-Some agent tools are still in-process plain functions (calculators, graph, BO) — those are a
-thin wrapper module under `agents/` plus one line in the `build_agent` `tools=[...]` list.
-Troubleshooting: a server that fails to start surfaces in the worker/agent logs; verify it runs
-standalone with `python -m mcp_servers.<name>.server` and that Postgres is reachable (tool
-*discovery* needs no DB, but *invoking* a search does).
+**To add one:**
+
+1. Create the folder with a `connector.yaml`. For an MCP capability, declare an `endpoint:` and the
+   `tools:` the agent may call — read/compute only; `make connector-validate` refuses a mutating
+   name, because mutation belongs on the job path or on a core PR-gate tool.
+2. For a long-running capability, declare a `jobs:` entry naming the Temporal **workflow type** and
+   **task queue** its own worker serves. Its workflow returns a `ConnectorJobResult`
+   (`summary`, `data`, optional `Note`); core's `ConnectorJobWorkflow` supplies the idempotent job
+   id, the actor attribution, the PR-gate publish and the session push-back. A job declares its
+   arguments inline (`params:`) or by reference (`params_model: module:Model`) when the input is a
+   structured domain object. Mark it `expensive: true` to require a privileged role before any
+   durable work starts.
+   *If the same request is sometimes fast and sometimes slow* — a reaction energy over two small
+   species versus eight with Hessians — add `inline_wait_seconds: <n>`. The launcher then waits up
+   to that long and returns the result if it lands, or the job id if it does not, so one tool serves
+   both cases and the model never has to guess a cost. Keep `n` comfortably under
+   `CHEMCLAW_SERVICE_TURN_TIMEOUT_SECONDS`: the wait is spent inside a turn. Cancelling the turn does
+   not cancel the run — it completes, caches and pushes back regardless. `connectors/calc` is the
+   worked example (five jobs, one workflow, one queue, its own worker).
+3. Run `make connector-validate`. It checks the manifest, that declared skills/profiles exist (and
+   that no undeclared ones are hiding in the bundle), the read-only tool surface, and that every
+   job can actually be built.
+4. Nothing to enable: an empty `CHEMCLAW_CONNECTORS_ENABLED` runs every discovered bundle. Set a
+   pathsep list to narrow (and to fix the order — tool order is part of the prompt); an unknown name
+   there is a startup error, not a silently missing capability.
+
+**Running them.** `make connectors` serves every local bundle in one process and prints the
+`CHEMCLAW_CONNECTOR_URLS` to point the front door at. In a cluster, each bundle is its own
+Deployment + Service (`.Values.connectors.<name>.enabled`), and the chart *computes*
+`CHEMCLAW_CONNECTOR_URLS` from that same block, so addresses cannot drift from the pods that exist.
+
+**Configuration.** `CHEMCLAW_CONNECTORS_DIR` (pathsep, like `PATH` — prepend a private bundle dir to
+override a shipped one), `CHEMCLAW_CONNECTORS_ENABLED`, `CHEMCLAW_CONNECTOR_URLS`,
+`CHEMCLAW_CONNECTORS_REQUIRED`, `CHEMCLAW_CONNECTOR_HEALTH_TIMEOUT_SECONDS`,
+`CHEMCLAW_CONNECTOR_JOB_TIMEOUT_SECONDS`. A connector's request timeout and auth mode are per-manifest
+(`endpoint.request_timeout`, `endpoint.auth`); the `bearer` mode names an env var, so no credential is
+ever written into a bundle.
+
+**Troubleshooting.** `GET /readyz` reports each enabled connector as `healthy`, `unreachable` or
+`unprobed` (no `health_url` declared — honest for a third-party server), and
+`chemclaw_connectors_unhealthy` on `/metrics` counts the unreachable ones. An unreachable connector
+costs its tools for that turn, not the turn itself; set `CHEMCLAW_CONNECTORS_REQUIRED=true` to fail
+startup instead. Verify a bundle standalone with `uvicorn connectors.<name>.server.app:app` and check
+`/healthz`; tool *discovery* needs no database, but *invoking* a search does.
+
+**What ships today.** Six bundles: `molfp` and `rxnfp` (fingerprint search), `safety` (the hazard
+screen), `chem` (bench chemistry over RDKit), `calc` (the fast calculators and the calibration
+ledger), and `bo` (Bayesian optimization — the one that also owns durable work, so it runs a second
+Deployment for its own Temporal worker; set `worker: true` on a bundle in the chart to get one). 
+**What stays in core is a rule, not an omission** (D-115), and `tests/test_tool_registry.py` pins the
+set so adding to it is a reviewed edit:
+
+- **Conversation plumbing** — anything reading or writing the turn's own state
+  (`ask_clarifying_question`, attachments, preferences, watches). Another process does not have the
+  turn.
+- **The two PR-gate writers** (`propose_knowledge_note`, `record_confirmed_answer`) — the GxP
+  boundary. A connector reaches the gate only by returning a note in a job envelope, for core to
+  publish.
+- **The knowledge-graph reads** (`find_notes`, `expand_note`, `find_knowledge_gaps`, and the
+  `gather_evidence` sweep over them). The graph is core's *data layer*, not a capability: thirteen
+  core modules import `kg`, so a bundle would move three thin tools and leave every one of those
+  imports behind — a zero dependency win and a second read path to one note tree. Re-indexing stays
+  in core with it.
+- **`submit_qm_job`** and the report — the first needs the HPC identity bridge, the second's closure
+  (retrievers, embedding index) is what core keeps for `gather_evidence` anyway. Both still return
+  results the generic status tools read.
+
+## (iv-b) Add a specialized agent (a **profile**)
+
+A profile is a named override bundle over the one agent: its instructions, the tools it may use, and
+whether the plan/execute harness runs. It only ever *narrows* — the audit trail, the per-tool
+authorization gate and the skill role gates all run after it — so a profile gives a caller a smaller,
+sharper agent, never a wider one.
+
+**To add one:** drop `profiles/<name>.yaml`. The filename is the profile name (a `name:` key inside
+is refused, so the two cannot disagree). A profile about a single capability goes in that connector's
+bundle instead (`connectors/<name>/profiles/<p>.yaml`, declared in its manifest) so it ships and is
+reviewed with the capability.
+
+```yaml
+instructions: >-
+  You are Chemclaw in property-lookup mode. …
+tool_names:            # spans both halves of the surface: in-process tools AND connector tools
+  - predict_pka        # a `calc` connector tool — `calc` is attached with its allow-list cut to these
+  - ask_clarifying_question
+harness_enabled: true  # optional; omit any field to inherit the global default
+```
+
+`tool_names` narrows the in-process tools *and* each connector's agent-facing allow-list, dropping
+connectors left with nothing; `mcp_server_names` is the coarser dial that selects whole connectors. A
+name nothing provides is a startup error, not a silently smaller agent. See
+`profiles/property-lookup.yaml` for a worked example.
+
+**To use one:** `POST /sessions {"profile": "property-lookup"}`. The profile is fixed for the
+session's life — a conversation whose tools changed underneath it would have a thread that no longer
+matches its own history — and an unknown name is a 400 at session creation. One agent is built and
+cached per profile.
+
+**Known limit:** a session rehydrated after a pod restart comes back on the *default* profile. The
+owner row records who owns a session, not which agent it was talking to; the conversation resumes
+with the full tool surface rather than a narrowed one. Persisting the profile is the fix if a
+deployment needs the narrowing to survive a restart.
+
+## (iv-c) Add a fixed procedure (a **template**)
+
+Reach for this only when the *order* must not vary. A profile is the first answer — it configures an
+agent and lets the model choose the sequence, which is what you want while a procedure is still being
+figured out. A template pins the sequence and runs it as a durable Temporal job: use it for a
+validated protocol, a standard screening sweep, a report that must always gather the same evidence in
+the same order. `templates/README.md` has the full comparison and the field reference.
+
+**To add one:** drop `templates/<name>.yaml`. The filename is the name here too.
+
+```yaml
+summary: Screen a molecule for hazards and write a briefing.
+inputs:
+  - {name: smiles, type: string, description: The molecule to screen.}
+steps:
+  - id: hazards                      # unique; how later steps refer to this one
+    kind: tool                       # or `job` (await a connector's durable job) or `agent`
+    tool: screen_hazards
+    arguments: {smiles: ["${inputs.smiles}"]}
+  - id: brief
+    kind: agent                      # a model turn — fixed sequence, free reasoning inside a step
+    prompt: "Summarize for a chemist: ${steps.hazards.result}"
+```
+
+Substitution is `${inputs.<name>}` and `${steps.<id>.result}` and nothing else — no conditionals or
+loops by design. A whole-string reference keeps the value's type; one inside a longer string
+interpolates JSON text. Forward references, unknown inputs and duplicate step ids are refused at load.
+
+Run `make template-validate` (CI does): it checks that every step names a tool, job or profile that
+actually exists, so a pinned procedure cannot fail on step four in production.
+
+**To use one:** the template becomes a generated `run_<name>` tool the model can call like any
+durable job — same authorization gate, same audit trail, same dry-run behaviour. It returns a job id;
+poll with `get_durable_job_status`. Re-running with identical inputs returns the existing id rather
+than paying twice.
+
+**Editing one is safe.** A run pins the resolved template into its workflow input, so an edit cannot
+change a run already in flight and there is no migration; the change applies to later runs only.
+
+`CHEMCLAW_TEMPLATES_ENABLED` narrows which discovered templates are advertised (empty = all);
+`CHEMCLAW_TEMPLATE_STEP_TIMEOUT_SECONDS` bounds one step.
 
 ## (v) Re-ingest a rejected ELN entry (after fixing the source record)
 

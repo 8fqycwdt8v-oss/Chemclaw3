@@ -63,27 +63,28 @@ def test_nonexistent_configured_dir_is_reported(tmp_path: Path) -> None:
     assert any("typo" in p and "does not exist" in p for p in problems)
 
 
-def test_a_declared_tool_resolves_whether_it_is_in_process_or_on_an_mcp_server() -> None:
+def test_a_declared_tool_resolves_wherever_the_capability_lives() -> None:
     """A skill names a capability; which process delivers it is a deployment decision.
 
-    X8 moved seven calculators out to `mcp-calc`, and no skill changed — because a
-    declaration resolves against both registries. If it did not, moving a tool between
-    transports would break every skill that teaches it, which would make the deployment
-    shape a property of the judgment layer.
+    Moving the calculators out to the `calc` connector — and the expensive ones on to its
+    durable jobs — changed no skill, because a declaration resolves against the whole
+    surface: in-process tools, every connector's MCP tools, and every declared job. If it
+    did not, moving a tool across the boundary would break every skill that teaches it,
+    which would make the deployment shape a property of the judgment layer.
     """
     from agents.skill_manifest import SkillManifest
-    from chemclaw.config import settings
+    from connectors.registry import connector_tool_names
     from scripts.validate_skills import _dependency_problems
 
-    served_by_mcp = {
-        name for server in settings.mcp_servers for name in (server.allowed_tools or [])
-    }
-    assert "predict_pka" in served_by_mcp  # moved out of process by X8
+    out_of_process = set(connector_tool_names())
+    assert "predict_pka" in out_of_process  # a connector MCP tool
+    assert "compute_reaction_energy" in out_of_process  # a connector *job*
 
     manifest = SkillManifest(
         name="probe",
         description="probe",
-        tools=["predict_pka", "compute_reaction_energy"],  # one MCP, one in-process
+        # One connector MCP tool, one connector job, one in-process tool.
+        tools=["predict_pka", "compute_reaction_energy", "gather_evidence"],
     )
     assert _dependency_problems(Path("probe/SKILL.md"), manifest) == []
 

@@ -6,7 +6,7 @@
 # 1.29; override (`make helm-validate KUBE_VERSION=1.30.0`) when the target cluster moves.
 KUBE_VERSION ?= 1.29.0
 
-.PHONY: install lint type test cov check chat db-migrate schedules-apply kg-validate eval eln-validate skill-validate prose-validate helm-validate audit-verify reindex up down
+.PHONY: install lint type test cov check chat db-migrate schedules-apply kg-validate eval eln-validate skill-validate connector-validate template-validate connectors prose-validate helm-validate audit-verify reindex up down
 
 install:  ## Sync the venv with runtime + dev dependencies.
 	uv sync
@@ -16,7 +16,7 @@ lint:  ## Ruff lint + format check (no writes; use `uv run ruff format` to fix).
 	uv run ruff format --check .
 
 type:  ## Static type check, strict (all first-party packages).
-	uv run mypy chemclaw agents bo calc eln evals kg mcp_servers memory report safety scripts workflows workers tests
+	uv run mypy chemclaw agents bo calc connectors eln evals kg mcp_servers memory report safety scripts templates workflows workers tests
 
 test:  ## Run the test suite.
 	uv run pytest
@@ -46,6 +46,15 @@ eln-validate:  ## Validate the ELN export's reactions (RDKit structure + mass ba
 
 skill-validate:  ## Validate SKILL.md frontmatter (name/description present, name matches dir).
 	uv run python -m scripts.validate_skills
+
+connector-validate:  ## Validate the connector bundles (manifests, declarations, tool surface, jobs).
+	uv run python -m scripts.validate_connectors
+
+template-validate:  ## Validate the step templates (steps, references, tools/jobs/profiles named).
+	uv run python -m scripts.validate_templates
+
+connectors:  ## Run every enabled local connector's FastAPI app in one dev process.
+	uv run python -m scripts.connectors_dev
 
 prose-validate:  ## Check the agent's prose only names tools that exist (gap IDEA-7).
 	uv run python -m scripts.validate_prose_contract

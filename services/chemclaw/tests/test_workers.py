@@ -12,8 +12,6 @@ from workers.background_worker import BACKGROUND_ACTIVITIES, BACKGROUND_WORKFLOW
 from workers.hpc_worker import HPC_ACTIVITIES, HPC_WORKFLOWS
 from workflows.eln_sync import ElnSyncWorkflow, load_sync_cursor, store_sync_cursor
 from workflows.qm_job import QMJobWorkflow
-from workflows.xtb_activities import run_xtb_calculation
-from workflows.xtb_job import XtbJobWorkflow
 
 
 def _names(items: Iterable[object]) -> list[str]:
@@ -35,17 +33,28 @@ def test_background_worker_registers_eln_sync_with_cursor_activities() -> None:
         assert activity in BACKGROUND_ACTIVITIES
 
 
-def test_the_hpc_worker_registers_the_xtb_job_that_serves_conformer_ensembles() -> None:
-    """Conformer ensembles run on the xTB job, which is an `hpc` capability (D-108).
+def test_the_calc_connectors_worker_serves_every_expensive_xtb_task() -> None:
+    """One durable job on the bundle's own queue serves all five expensive calculations.
 
-    The standalone conformer workflow this replaced sat on `background`, whose workers are
-    many and light. That was the wrong queue for it: a CREST search is minutes of saturated
-    CPU, which is the definition of the `hpc` queue (D-006). One durable job now serves every
-    expensive xTB task — ensemble, reaction, solvent screen, scan, complex — discriminated on
-    its spec, so the queue choice is made once rather than per capability.
+    A CREST search or a multi-species reaction is minutes of saturated CPU, which is why it
+    is durable at all (D-006). What changed is *whose* worker runs it: `connector-calc`, so
+    the queue can be sized for this capability alone and core's workers never load `tblite`
+    or the `xtb`/`crest` binaries. The five tasks share one workflow — `XtbJobSpec` is a
+    closed union discriminated on `kind` — so the queue choice is made once, not per
+    capability.
     """
-    assert XtbJobWorkflow in HPC_WORKFLOWS
-    assert run_xtb_calculation in HPC_ACTIVITIES
+    from connectors.calc.worker import CALC_ACTIVITIES, CALC_WORKFLOWS, TASK_QUEUE
+    from connectors.calc.workflows import CalcJobWorkflow
+    from connectors.registry import discovered
+
+    assert CalcJobWorkflow in CALC_WORKFLOWS
+    assert CALC_ACTIVITIES  # a workflow with no activity would be a wiring bug, not a design
+    # The queue is a contract with the manifest, not a local constant: a drift between them
+    # is a job that starts and is never picked up.
+    _, manifest = discovered()["calc"]
+    jobs = manifest.jobs
+    assert jobs and {job.task_queue for job in jobs} == {TASK_QUEUE}
+    assert {job.workflow for job in jobs} == {"CalcJobWorkflow"}
 
 
 def test_registration_lists_have_no_duplicates() -> None:

@@ -8,7 +8,6 @@ in-process (no Temporal), the same as the campaign tests.
 
 import asyncio
 
-from agents.bo_tools import suggest_next_experiment
 from bo.problem import (
     CategoricalParameter,
     ContinuousParameter,
@@ -16,6 +15,7 @@ from bo.problem import (
     Observation,
     OptimizationProblem,
 )
+from connectors.bo.server.tools import suggest_next_experiment
 
 
 def _problem() -> OptimizationProblem:
@@ -76,7 +76,7 @@ def test_accepts_plain_dicts_as_maf_actually_delivers_them() -> None:
         {"params": {"temperature": 40.0, "solvent": "THF"}, "value": 55.0},
         {"params": {"temperature": 80.0, "solvent": "THF"}, "value": 78.0},
     ]
-    candidates = asyncio.run(suggest_next_experiment(problem, observations))  # type: ignore[arg-type]
+    candidates = asyncio.run(suggest_next_experiment(problem, observations))
     assert len(candidates) == 1
     temperature = candidates[0].params["temperature"]
     assert isinstance(temperature, float) and 20.0 <= temperature <= 120.0

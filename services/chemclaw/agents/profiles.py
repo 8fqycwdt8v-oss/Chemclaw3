@@ -18,13 +18,13 @@ Design (see `docs/audit/10-config-extensibility.md` §6):
   `build_agent` *after* this narrowing, so a profile that names a tool the caller may not use is
   still denied at call time, and a profile that omits the PR-gate tools merely removes capability.
   A profile is a narrowing seam layered *under* RBAC, never a bypass.
-- **Rule of Three.** Only the default profile exists today; the registry and the
-  `build_agent(profile=…)` plumbing are the seam, not speculative profiles. Front-door selection
-  (Stage 2) and filesystem-discovered profiles (Stage 3) wait until a second use case forces them.
+- **Files, not code.** A profile is a YAML file discovered from `profiles/` or from a connector
+  bundle (`agents.profile_discovery`, D-112), selected per session by name. This module holds the
+  model and the registry those files populate; nothing here needs editing to add one.
 
-The registry mirrors `sources.registry` / `bo.objectives` (a `{name: thing}` dict + a resolver
-that raises with the valid keys), and `AgentProfile` mirrors `config.McpServerSpec` (a small
-pydantic spec). No new pattern is introduced.
+The registry mirrors `sources.registry` / `bo.objectives` (a `{name: thing}` dict + a resolver that
+raises with the valid keys), and `AgentProfile` is a small pydantic spec like every other manifest
+in the tree. No new pattern is introduced.
 """
 
 from pydantic import BaseModel, ConfigDict, Field

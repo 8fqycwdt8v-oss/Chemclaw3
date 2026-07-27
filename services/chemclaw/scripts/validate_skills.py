@@ -5,15 +5,16 @@ those to decide when to load a skill (progressive disclosure). A skill missing e
 directory name that disagrees with the declared `name`, silently breaks discovery.
 
 Beyond that shape check, this gate closes the loop between a skill's *judgment* and the
-*capabilities* it is written about: a skill may declare the tools and MCP servers it teaches, and
-those are checked against the live registries (`agents.tool_registry`, `settings.mcp_servers`).
-That catches the drift the frontmatter check cannot see — a skill still instructing the model to
-call a tool that was renamed or removed — which otherwise survives as plausible, stale prose. The
+*capabilities* it is written about: a skill may declare the tools it teaches, and those are checked
+against the live tool surface (`agents.tool_registry`, plus every tool an enabled connector
+advertises). That catches the drift the frontmatter check cannot see — a skill still instructing the
+model to call a tool that was renamed or removed — which otherwise survives as plausible, stale
+prose. The
 configured enable-list (`settings.skills_enabled`) is checked the same way: a name that no
 directory provides would silently advertise nothing at run time, so it is a failure here instead.
 
-This is the `make skill-validate` gate: it exits non-zero listing the problems, so CI catches
-skill drift like `kg-validate` catches note drift. Read-only; touches nothing.
+This is the `make skill-validate` gate: it exits non-zero listing the problems, so CI catches skill
+drift like `kg-validate` catches note drift. Read-only; touches nothing.
 """
 
 import sys
@@ -28,15 +29,17 @@ from agents import chemclaw_agent as _agent  # noqa: F401 — imported for tool 
 from agents.skill_manifest import SkillManifest
 from agents.tool_registry import registered_tool_names
 from chemclaw.config import settings
+from connectors.registry import connector_tool_names
+from connectors.registry import skills_dirs as connector_skills_dirs
 
 
 def validate_skills(skills_dirs: list[str]) -> list[str]:
     """Return a list of problems across every skill under `skills_dirs` (empty = all good).
 
-    Walks the skill *directories* rather than globbing `*/SKILL.md`, because the failures
-    this gate exists to catch are invisible to the glob: a skill directory whose SKILL.md
-    is missing or misnamed, and a configured skills dir that does not exist at all. Each
-    configured dir is checked on its own, so one healthy dir cannot mask another's typo.
+    Walks the skill *directories* rather than globbing `*/SKILL.md`, because the failures this gate
+    exists to catch are invisible to the glob: a skill directory whose SKILL.md is missing or
+    misnamed, and a configured skills dir that does not exist at all. Each configured dir is checked
+    on its own, so one healthy dir cannot mask another's typo.
     """
     problems: list[str] = []
     found_names: set[str] = set()
@@ -88,33 +91,23 @@ def _problems_for(skill_file: Path) -> list[str]:
 
 
 def _dependency_problems(skill_file: Path, manifest: SkillManifest) -> list[str]:
-    """Check a skill's declared tools/MCP servers against what the system actually provides.
+    """Check a skill's declared tools against what the system actually provides.
 
     A declaration is documentation, not a grant (the agent's registry/profile decides what is
     advertised, and `enforce_tool_authz` decides what may run) — but a declaration that no longer
     resolves means the skill is teaching a capability that is gone, which is exactly the stale
     judgment this gate should refuse to ship.
+
+    The known set spans both halves of the tool surface: the in-process registry and everything the
+    enabled connectors advertise (their endpoints' allow-listed tools and their generated job
+    launchers). One set, because a skill's author does not care which side of the process boundary a
+    tool lives on — only that it exists.
     """
-    problems: list[str] = []
-    # A skill names a *capability*, not a transport. Which process delivers a tool — the
-    # agent itself or an MCP server on its own pod — is a deployment decision (X8 moved
-    # seven calculators out), and a skill's judgment about `predict_pka` is the same
-    # judgment either way. So a declaration resolves against both registries, and moving
-    # a tool between them is not a skill edit.
-    known_servers = {server.name for server in settings.mcp_servers}
-    known_tools = set(registered_tool_names()) | {
-        name for server in settings.mcp_servers for name in (server.allowed_tools or [])
-    }
-    for tool in sorted(set(manifest.tools) - known_tools):
-        problems.append(
-            f"{skill_file}: declares unknown tool {tool!r}; available tools: {sorted(known_tools)}"
-        )
-    for server in sorted(set(manifest.mcp_servers) - known_servers):
-        problems.append(
-            f"{skill_file}: declares unknown MCP server {server!r}; "
-            f"configured servers: {sorted(known_servers)}"
-        )
-    return problems
+    known_tools = {*registered_tool_names(), *connector_tool_names()}
+    return [
+        f"{skill_file}: declares unknown tool {tool!r}; available tools: {sorted(known_tools)}"
+        for tool in sorted(set(manifest.tools) - known_tools)
+    ]
 
 
 def _enable_list_problems(found_names: set[str]) -> list[str]:
@@ -132,7 +125,9 @@ def _enable_list_problems(found_names: set[str]) -> list[str]:
 
 def main() -> None:
     """Validate every skill; print problems and exit non-zero if any (the CI gate)."""
-    problems = validate_skills(settings.skills_dirs)
+    # The same dirs `build_agent` discovers from: the configured tree plus every enabled connector
+    # bundle's own `skills/`, so a bundled skill is validated exactly like a shipped one.
+    problems = validate_skills([*settings.skills_dirs, *connector_skills_dirs()])
     if problems:
         print("SKILL.md validation failed:")
         for problem in problems:

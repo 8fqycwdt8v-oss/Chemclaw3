@@ -134,14 +134,20 @@ def test_image_installs_git() -> None:
     assert "dnf install -y git" in (DEPLOY / "Containerfile").read_text()
 
 
-def test_mcp_standalone_pods_require_a_networked_transport() -> None:
-    """Stdio MCP servers must not be deployed as standalone pods — they would crash-loop (DEP-3)."""
-    values = _values()
-    assert values["mcp"]["transport"] == "stdio"
-    for name in ("molfp", "rxnfp"):
-        assert values["mcp"][name]["enabled"] is False, f"{name} would run stdio with no stdin"
-    guard = (CHART / "templates" / "deployment-mcp.yaml").read_text()
-    assert 'eq $.Values.mcp.transport "http"' in guard
+def test_every_shipped_connector_has_a_chart_entry() -> None:
+    """A bundle with no `connectors` entry could never be given pods — DEP-3's successor.
+
+    The old guard here forced the MCP Deployments *off*, because they would have run a stdio server
+    with no stdin. Connectors are HTTP servers with a health route, so the failure mode inverted:
+    the
+    risk is no longer deploying them, it is shipping a bundle the chart cannot deploy at all.
+    """
+    from connectors.registry import discovered
+
+    entries = _values()["connectors"]
+    for name in discovered():
+        assert name in entries, f"connector bundle {name!r} has no entry in values.yaml connectors"
+        assert "enabled" in entries[name] and "replicas" in entries[name]
 
 
 def test_knowledge_volume_is_mounted_on_every_reading_component() -> None:
@@ -175,18 +181,29 @@ def test_push_credential_is_declared() -> None:
     assert "knowledgeRepoToken" in _values()["secrets"]["keys"]
 
 
-def test_mcp_deployments_become_meaningful_once_the_transport_is_networked() -> None:
-    """DEP-3's guard is now satisfiable rather than a permanent off switch (gap TOOL-1).
+def test_connector_urls_are_computed_from_the_deployed_set() -> None:
+    """The address the front door dials must come from the values block that creates the Service.
 
-    Before the streamable-HTTP client existed, `transport: http` was a flag with nothing behind it.
-    The agent can now attach a server it does not spawn, which is what the MCP Deployments were
-    written in anticipation of.
+    Hand-writing `CHEMCLAW_CONNECTOR_URLS` in `config` would let it name a connector with no
+    pods, or
+    miss one that has them — a failure that looks like a capability silently disappearing. The
+    ConfigMap therefore *includes* the helper that ranges over `.Values.connectors`, and the helper
+    builds each URL from the Service name and `connectorPort`.
     """
-    from chemclaw.config import HttpMcpServerSpec
+    config = (CHART / "templates" / "config.yaml").read_text()
+    assert 'CHEMCLAW_CONNECTOR_URLS: {{ include "chemclaw.connectorUrls" . | quote }}' in config
+    helper = (CHART / "templates" / "_helpers.tpl").read_text()
+    assert 'define "chemclaw.connectorUrls"' in helper
+    assert "range $name, $cfg := .Values.connectors" in helper
+    assert "$.Values.connectorPort" in helper
 
-    networked = HttpMcpServerSpec(name="mcp-molfp", url="http://chemclaw-mcp-molfp:8080/mcp")
-    assert networked.transport == "http"
-    assert networked.url
+
+def test_connectors_are_reachable_only_from_chemclaw_pods() -> None:
+    """The identity headers are advisory, so the network boundary is what keeps them meaningful."""
+    policy = (CHART / "templates" / "networkpolicy.yaml").read_text()
+    assert "connector-ingress" in policy
+    # Egress must allow the connector port, or the front door could not dial its own connectors.
+    assert policy.count("{{ .Values.connectorPort }}") >= 2
 
 
 def test_a_comment_never_swallows_the_line_after_it() -> None:

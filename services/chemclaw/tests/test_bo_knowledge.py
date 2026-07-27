@@ -8,14 +8,16 @@ import pytest
 from temporalio.client import Client
 from temporalio.worker import Worker
 
-import workflows.bo_knowledge as bo_knowledge
+import workflows.memory_jobs as memory_jobs
 from bo.problem import CampaignResult, CampaignSpec, Observation
 from chemclaw.config import settings
+from connectors.bo.activities import evaluate_candidates, propose_initial, propose_next
+from connectors.bo.knowledge import note_from_campaign_result
+from connectors.bo.workflows import BoCampaignWorkflow
 from tests.conftest import FakeSubmitter
 from tests.temporal_env import pydantic_client, start_env_or_skip
-from workflows.bo_activities import evaluate_candidates, propose_initial, propose_next
-from workflows.bo_campaign import BoCampaignWorkflow
-from workflows.bo_knowledge import note_from_campaign_result, write_campaign_node
+from workflows.connector_job import ConnectorJobInput, ConnectorJobWorkflow
+from workflows.memory_jobs import publish_memory_note_activity
 
 _BO_ACTIVITIES: Sequence[Callable[..., Any]] = [propose_initial, propose_next, evaluate_candidates]
 
@@ -53,20 +55,11 @@ def test_note_id_is_stable_for_the_same_recommendation() -> None:
     )
 
 
-def test_write_campaign_node_uses_the_pr_gate(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The activity proposes the mapped note through the (fake) submitter."""
-    fake = FakeSubmitter()
-    monkeypatch.setattr(bo_knowledge, "default_submitter", lambda: fake)
-    ref = asyncio.run(write_campaign_node("reizman_suzuki", _RESULT))
-
-    assert ref.startswith("pr://note/bo-reizman_suzuki-")
-    assert fake.submissions[0].path.startswith("knowledge/bo-candidate/bo-reizman_suzuki-")
-
-
 def test_campaign_publishes_recommendation_to_graph(monkeypatch: pytest.MonkeyPatch) -> None:
     """With publish_to_graph, a finished campaign proposes a bo-candidate note (bg queue)."""
     fake = FakeSubmitter()
-    monkeypatch.setattr(bo_knowledge, "default_submitter", lambda: fake)
+    # The gate is core's now, so the submitter is patched where core publishes from.
+    monkeypatch.setattr(memory_jobs, "default_submitter", lambda: fake)
 
     async def _run() -> None:
         from bo.benchmarks.reizman_suzuki import build_problem, load_dataset
@@ -90,14 +83,25 @@ def test_campaign_publishes_recommendation_to_graph(monkeypatch: pytest.MonkeyPa
                 Worker(
                     client,
                     task_queue=settings.background_task_queue,
-                    activities=[write_campaign_node],
+                    activities=[publish_memory_note_activity],
                 ),
             ):
+                # The campaign now *builds* the note and core *publishes* it, so this drives the
+                # whole path: the connector's workflow as a child of core's wrapper, which PR-gates
+                # whatever note the envelope carries (D-093).
                 await client.execute_workflow(
-                    BoCampaignWorkflow.run,
-                    spec,
+                    ConnectorJobWorkflow.run,
+                    ConnectorJobInput(
+                        connector="bo",
+                        job="start_optimization_campaign",
+                        workflow="BoCampaignWorkflow",
+                        task_queue="test-bo-pub",
+                        payload=spec.model_dump(mode="json"),
+                        requested_by="tester",
+                        publish_to_graph=True,
+                    ),
                     id="bo-publish-test",
-                    task_queue="test-bo-pub",
+                    task_queue=settings.background_task_queue,
                 )
         assert len(fake.submissions) == 1  # the recommendation was proposed as a note
         assert fake.submissions[0].path.startswith("knowledge/bo-candidate/bo-")

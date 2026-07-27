@@ -41,7 +41,7 @@ spec:
           envFrom:
             {{- include "chemclaw.envFrom" . | nindent 12 }}
           resources:
-            {{- toYaml .Values.resources.mcp | nindent 12 }}
+            {{- toYaml .Values.resources.connector | nindent 12 }}
           volumeMounts:
             {{- include "chemclaw.tlsMount" . | nindent 12 }}
       volumes:

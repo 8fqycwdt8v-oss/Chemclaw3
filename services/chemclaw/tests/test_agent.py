@@ -23,9 +23,14 @@ from agent_framework._compaction import (
     included_token_count,
 )
 
-from agents.chemclaw_agent import _build_compaction, build_agent
+from agents.chemclaw_agent import _build_compaction, build_agent, connector_tools
 from chemclaw.config import settings
+from connectors.registry import connector_tool_names, discovered
 
+# The domain capability an agent must be able to reach, spanning both halves of the surface: the
+# durable launchers and the knowledge/PR-gate tools are in-process, the property calculators are the
+# `calc` connector's. Asserted against the union rather than against the agent's own list, because
+# where a tool *runs* is a deployment concern and where it is *reachable from* is the contract.
 _DOMAIN_TOOLS = {
     "submit_qm_job",
     "get_job_status",
@@ -45,7 +50,9 @@ def test_agent_applies_default_generation_options() -> None:
 def test_agent_advertises_qm_tools() -> None:
     """All domain tools are registered on the agent under their function names."""
     agent = build_agent(chat_client=object())
-    tool_names = {tool.name for tool in agent.default_options["tools"]}
+    tool_names = {tool.name for tool in agent.default_options["tools"]} | set(
+        connector_tool_names()
+    )
     assert _DOMAIN_TOOLS <= tool_names
 
 
@@ -100,15 +107,19 @@ def test_agent_audits_and_authorizes_every_tool_call() -> None:
     assert enforce_tool_authz in middleware  # the authz gate is wired, not just audit
 
 
-def test_agent_attaches_fingerprint_search_as_mcp_servers() -> None:
-    """Structural search is reached over MCP (servers on `mcp_tools`), not in-process tools.
+def test_fingerprint_search_is_reached_through_connectors_not_in_process_tools() -> None:
+    """Structural search is a connector's capability, not a function tool in the agent's process.
 
-    The in-process search wrappers are no longer registered as function tools; the agent talks
-    to the molfp/rxnfp capability servers over the MCP protocol instead (construction is lazy —
-    no subprocess is spawned here).
+    Connectors are deliberately *not* attached to the agent: a connector's connection belongs to one
+    turn, and an agent is built once per process, so the turn's caller builds and passes them
+    (`connector_tools`). Construction is lazy — nothing is spawned or dialed here.
     """
     agent = build_agent(chat_client=object())
-    assert {t.name for t in agent.mcp_tools} == {"mcp-molfp", "mcp-rxnfp", "mcp-calc"}
+    assert agent.mcp_tools == []  # nothing process-lived
+    # Derived from discovery, not a hardcoded pair: a hardcoded one only catches the omissions
+    # someone already thought of, and would fail on the day a bundle is added rather than on a bug.
+    assert {tool.name for tool in connector_tools()} == set(discovered())
+    assert {"molfp", "rxnfp"} <= set(discovered())  # the fingerprint capability is among them
     function_tool_names = {f.name for f in agent.default_options["tools"]}
     assert {"find_similar_reactions", "find_similar_molecules"} & function_tool_names == set()
 
@@ -117,13 +128,14 @@ def test_instructions_only_name_available_tools() -> None:
     """Every tool the instructions tell the model to call actually exists (no name drift).
 
     Regression guard for the `find_similar_reactions` vs `similar_reactions` class of bug: the
-    agent's advertised surface is the registered function tools plus the allowed MCP tools, and
+    agent's advertised surface is the registered function tools plus the connectors' tools, and
     the instructions must not promise a tool outside that set.
     """
     agent = build_agent(chat_client=object())
     available = {f.name for f in agent.default_options["tools"]}
-    for spec in settings.mcp_servers:
-        available |= set(spec.allowed_tools or [])
+    # A connector's endpoint tools are named in its manifest, not by a Python symbol this process
+    # holds, so the advertised surface is the registered functions plus the connectors' tool names.
+    available |= set(connector_tool_names())
 
     # The tool names the instructions direct the model to use.
     referenced = {
@@ -171,14 +183,16 @@ def test_harness_agent_keeps_full_capability_toolset(monkeypatch: pytest.MonkeyP
     """The harness must not drop Chemclaw's tools — it runs over the *same* capability set.
 
     Regression guard against a harness path that silently ships a reduced toolset: the harness
-    agent advertises every classic function tool and attaches the same MCP capability servers.
+    agent advertises every classic function tool and attaches the same connectors.
     """
     classic = {t.name for t in build_agent(chat_client=object()).default_options["tools"]}
     _enable_harness(monkeypatch)
     harness = build_agent(chat_client=object())
     harness_tools = {t.name for t in harness.default_options["tools"]}
     assert classic <= harness_tools  # every classic capability tool is still present
-    assert {"mcp-molfp", "mcp-rxnfp", "mcp-calc"} == {t.name for t in harness.mcp_tools}
+    # The harness reaches the same connectors the classic path does — per turn, from the same
+    # factory.
+    assert set(discovered()) == {tool.name for tool in connector_tools()}
 
 
 @pytest.mark.parametrize(

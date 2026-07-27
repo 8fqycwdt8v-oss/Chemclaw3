@@ -33,7 +33,14 @@ class _SignallingAgent:
         self._jobs = jobs
         self._proposals = proposals
 
-    def run(self, message: str, *, stream: bool, session: AgentSession) -> Any:
+    def run(  # noqa: D102 - a fake agent's run, documented by its class
+        self,
+        message: str,
+        *,
+        stream: bool,
+        session: AgentSession,
+        **_run_options: Any,
+    ) -> Any:
         async def _gen() -> Any:
             yield SimpleNamespace(text="thinking", contents=[], user_input_requests=[])
             for job_id, kind in self._jobs:
