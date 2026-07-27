@@ -12,11 +12,16 @@ back in insertion order. So a fresh process over the same database resumes the c
 This is the conversation layer, deliberately separate from Temporal job state (D-002) and the
 calculation cache. The MAF `Message` is stored via its own `to_dict()`/`from_dict()`, so the store
 never interprets message shape — a MAF change is a value change, not a schema change.
+
+Three stores live here because they are one session's durable state and must share a database:
+the message history above, `SessionOwnerStore` (who owns a session id — the fact the in-process
+LRU loses on restart), and `SessionTurnClaims` (which process is running a turn on it right now —
+the fact the in-process 409 guard loses at the pod boundary, D-120).
 """
 
 import logging
 from collections.abc import AsyncIterator, Sequence
-from contextlib import asynccontextmanager
+from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from datetime import datetime
 from typing import Any, ClassVar
 
@@ -40,6 +45,26 @@ _DELETE_IDS = "DELETE FROM session_messages WHERE session_id = %s AND id = ANY(%
 _MAX_ID = "SELECT MAX(id) FROM session_messages WHERE session_id = %s"
 _DELETE_AFTER = "DELETE FROM session_messages WHERE session_id = %s AND id > %s"
 
+# The per-session turn claim (D-120). One statement, so the check and the take cannot be
+# interleaved by another process: `ON CONFLICT … DO UPDATE … WHERE` takes the row lock, and the
+# update only fires when the incumbent claim has expired. `RETURNING` is empty exactly when a live
+# claim was left alone, which is the caller's "someone else is running a turn" answer.
+_TURN_CLAIM = (
+    "INSERT INTO session_turns (session_id, holder, expires_at) "
+    "VALUES (%s, %s, now() + make_interval(secs => %s)) "
+    "ON CONFLICT (session_id) DO UPDATE "
+    "SET holder = EXCLUDED.holder, claimed_at = now(), expires_at = EXCLUDED.expires_at "
+    "WHERE session_turns.expires_at <= now() "
+    "RETURNING holder"
+)
+# Guarded by `holder` so a worker whose lease already lapsed and was taken by someone else cannot
+# extend — or delete — the new owner's claim.
+_TURN_REFRESH = (
+    "UPDATE session_turns SET expires_at = now() + make_interval(secs => %s) "
+    "WHERE session_id = %s AND holder = %s"
+)
+_TURN_RELEASE = "DELETE FROM session_turns WHERE session_id = %s AND holder = %s"
+
 _OWNER_INSERT = (
     "INSERT INTO session_owners (session_id, owner) VALUES (%s, %s) "
     "ON CONFLICT (session_id) DO NOTHING"
@@ -52,6 +77,33 @@ _OWNER_LIST = (
     "SELECT session_id, created_at FROM session_owners "
     "WHERE owner IS NOT DISTINCT FROM %s ORDER BY created_at DESC, session_id DESC LIMIT %s"
 )
+
+
+def _session_dsn(dsn: str | None) -> str:
+    """Resolve a session-layer DSN: the caller's, else `session_store_dsn`, else `postgres_dsn`.
+
+    One resolver for all three stores in this module, so they can never end up pointing at
+    different databases — the ownership row, the turn claim and the message history are one
+    session's state and must live together (D-002).
+    """
+    return dsn or settings.session_store_dsn or settings.postgres_dsn
+
+
+@asynccontextmanager
+async def _session_connection(dsn: str) -> AsyncIterator[psycopg.AsyncConnection[TupleRow]]:
+    """Borrow a session-layer connection with the configured per-statement timeout.
+
+    Pooled per process when the process opened a pool (`chemclaw.db.pooling`), so a request path
+    pays no TCP+auth handshake; a dedicated connect otherwise. Either way a down or misconfigured
+    database reports "Postgres unreachable at <host>" rather than a raw psycopg traceback, and a
+    hung query is cancelled rather than pinning the enclosing activity for its whole budget.
+
+    Extracted once the third store in this module needed the identical four lines.
+    """
+    async with db.connection(
+        dsn, statement_timeout_seconds=settings.pg_statement_timeout_seconds
+    ) as conn:
+        yield conn
 
 
 class PostgresHistoryProvider(HistoryProvider):
@@ -69,22 +121,11 @@ class PostgresHistoryProvider(HistoryProvider):
                 `postgres_dsn` when that is empty (one database in the simple deployment).
         """
         super().__init__(source_id=source_id or self.DEFAULT_SOURCE_ID)
-        self._dsn = dsn or settings.session_store_dsn or settings.postgres_dsn
+        self._dsn = _session_dsn(dsn)
 
-    @asynccontextmanager
-    async def _connection(self) -> AsyncIterator[psycopg.AsyncConnection[TupleRow]]:
-        """Borrow a connection with the configured per-statement timeout.
-
-        Pooled per process when the process opened a pool (`chemclaw.db.pooling`), so a
-        request path pays no TCP+auth handshake; a dedicated connect otherwise. Either way a
-        down or misconfigured database reports "Postgres unreachable at <host>" rather than a
-        raw psycopg traceback, and a hung query is cancelled rather than pinning the enclosing
-        activity for its whole budget.
-        """
-        async with db.connection(
-            self._dsn, statement_timeout_seconds=settings.pg_statement_timeout_seconds
-        ) as conn:
-            yield conn
+    def _connection(self) -> AbstractAsyncContextManager[psycopg.AsyncConnection[TupleRow]]:
+        """Borrow a connection on this provider's database (see `_session_connection`)."""
+        return _session_connection(self._dsn)
 
     async def get_messages(
         self, session_id: str | None, *, state: dict[str, Any] | None = None, **kwargs: Any
@@ -215,22 +256,11 @@ class SessionOwnerStore:
 
     def __init__(self, *, dsn: str | None = None) -> None:
         """Bind to the session-store database (falling back to the shared `postgres_dsn`)."""
-        self._dsn = dsn or settings.session_store_dsn or settings.postgres_dsn
+        self._dsn = _session_dsn(dsn)
 
-    @asynccontextmanager
-    async def _connection(self) -> AsyncIterator[psycopg.AsyncConnection[TupleRow]]:
-        """Borrow a connection with the configured per-statement timeout.
-
-        Pooled per process when the process opened a pool (`chemclaw.db.pooling`), so a
-        request path pays no TCP+auth handshake; a dedicated connect otherwise. Either way a
-        down or misconfigured database reports "Postgres unreachable at <host>" rather than a
-        raw psycopg traceback, and a hung query is cancelled rather than pinning the enclosing
-        activity for its whole budget.
-        """
-        async with db.connection(
-            self._dsn, statement_timeout_seconds=settings.pg_statement_timeout_seconds
-        ) as conn:
-            yield conn
+    def _connection(self) -> AbstractAsyncContextManager[psycopg.AsyncConnection[TupleRow]]:
+        """Borrow a connection on this store's database (see `_session_connection`)."""
+        return _session_connection(self._dsn)
 
     async def record(self, session_id: str, owner: str | None) -> None:
         """Record a session's owner at creation (idempotent — the first writer wins)."""
@@ -263,3 +293,68 @@ class SessionOwnerStore:
                 await cur.execute(_OWNER_LIST, (owner, settings.service_max_listed_sessions))
                 rows = await cur.fetchall()
         return [(row[0], row[1]) for row in rows]
+
+
+class SessionTurnClaims:
+    """One turn at a time per session, across every process, as a leased row (D-120).
+
+    The front door refuses a second concurrent turn on a session with a 409, because two turns
+    driving `agent.run` against the same conversation thread interleave their messages into one
+    history. That guard was a `set` in one process's memory, and the shipped chart runs the front
+    door at two replicas — so two turns on one session landing on different pods were both
+    admitted, and raising `service_uvicorn_workers` would add the same hazard inside a pod. This
+    is the same guard at the width the deployment actually has.
+
+    A **lease**, not a lock, and that is the whole design. A Postgres advisory lock (or
+    `SELECT … FOR UPDATE`) lives on a connection or a transaction, so holding one for a turn means
+    pinning a pooled connection for minutes — re-creating the connection starvation that made a
+    bounded pool start raising in the first place. Each of the three operations here is one short
+    statement that borrows a connection and gives it straight back.
+
+    The claim is taken under `expires_at`, refreshed while the turn runs, and deleted when it
+    ends. A worker that is SIGKILLed mid-turn therefore stops blocking its session after one
+    lease, where a lock held by a dead connection waits for the server to notice and an in-memory
+    set needed a process restart. The cost is the standard lease property, stated plainly in
+    `service.app`: exclusion holds as long as the holder is scheduled often enough to refresh.
+    """
+
+    def __init__(self, *, dsn: str | None = None) -> None:
+        """Bind to the session-store database (falling back to the shared `postgres_dsn`)."""
+        self._dsn = _session_dsn(dsn)
+
+    def _connection(self) -> AbstractAsyncContextManager[psycopg.AsyncConnection[TupleRow]]:
+        """Borrow a connection on this store's database (see `_session_connection`)."""
+        return _session_connection(self._dsn)
+
+    async def claim(self, session_id: str, holder: str, lease_seconds: float) -> bool:
+        """Take the session's turn slot for `lease_seconds`; False if someone else holds it.
+
+        One statement, so no other process can observe the gap between the check and the take —
+        the same atomicity the in-process `set` got for free from having no `await` between its
+        membership test and its `add`.
+        """
+        async with self._connection() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(_TURN_CLAIM, (session_id, holder, lease_seconds))
+                taken = await cur.fetchone() is not None
+            await conn.commit()
+        return taken
+
+    async def refresh(self, session_id: str, holder: str, lease_seconds: float) -> None:
+        """Push this holder's claim out by another lease, so a long turn is not stolen from.
+
+        A no-op when the claim is gone or now belongs to someone else: that means this worker was
+        already declared dead, and re-taking the slot behind the live holder's back is exactly
+        the interleaving the guard exists to prevent.
+        """
+        async with self._connection() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(_TURN_REFRESH, (lease_seconds, session_id, holder))
+            await conn.commit()
+
+    async def release(self, session_id: str, holder: str) -> None:
+        """Give the slot back at the end of the turn (idempotent; only this holder's row goes)."""
+        async with self._connection() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(_TURN_RELEASE, (session_id, holder))
+            await conn.commit()

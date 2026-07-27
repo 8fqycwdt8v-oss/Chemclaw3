@@ -763,15 +763,26 @@ class ServiceSettings(BaseSettings):
     # asyncio event loop saturates one CPU, and a load test measured throughput flat at
     # ~1.18 turns/s from 10 to 50 concurrent users on a 4-CPU box — a single-loop ceiling.
     #
-    # **The default stays 1 on purpose.** Two front-door guards are per-process in-memory
-    # structures: `active_turns` (the 409 that stops two turns interleaving on one session's
-    # thread) and the admission semaphore. With N workers each holds 1/N of the picture, so two
-    # turns on one session landing on different workers would both be admitted and interleave —
-    # a correctness regression, not a tuning choice. Raise this only for a deployment whose
-    # ingress pins a session to one worker, or once the guard is moved to shared state; scaling
-    # out with `replicas` (where the same hazard already exists and is tracked) is the supported
-    # path. See `service.app` for the full argument.
+    # The per-session turn guard is no longer among the reasons to keep this at 1: under
+    # `session_store="postgres"` a turn takes a leased row in `session_turns`, so two turns on one
+    # session cannot be admitted by two processes (D-120). What is still per-process is
+    # *capability*, not correctness — the admission semaphore (so the deployment's real cap is
+    # this many times `service_max_concurrent_turns`), the event-stream caps, uploaded attachments
+    # and harness todos, all of which live in one process's memory and are therefore invisible to
+    # a sibling worker. A chemist who uploads a file and then asks about it needs both requests on
+    # the same process, and no ingress can pin below the pod. So the supported way to use more
+    # CPU is still `replicas` with session affinity at the Route; raise this only for a
+    # deployment that does not use attachments or the harness. Under `session_store="memory"`
+    # there is no shared claim at all and this must stay 1.
     service_uvicorn_workers: int = Field(default=1, gt=0)
+    # How long a turn's claim on its session (`session_turns`, D-120) stays valid before another
+    # process may take it. A lease rather than a lock because a lock would have to be held on a
+    # pooled connection for the turn's whole duration; the cost of a lease is that exclusion holds
+    # only while the holder is scheduled often enough to refresh it, which the front door does
+    # every third of this interval. Sized well above the worst measured event-loop scheduling
+    # delay (~10 s under 50 concurrent users) and well below the wall-clock turn timeout, so a
+    # crashed worker frees its session in about a minute rather than at the next restart.
+    service_turn_claim_lease_seconds: float = Field(default=60.0, gt=0)
     # Max characters accepted in one chat message at the front door (SEC-4). Bounds the request
     # body at the trust boundary so an oversized POST is a clean 422, not an unbounded
     # allocation. Generous for a real message (~25k tokens); raise it for a workflow that posts
@@ -851,12 +862,15 @@ class ServiceSettings(BaseSettings):
     # interval — a LISTEN/NOTIFY-free fallback that is simple and correct; lower it for snappier
     # wake-ups.
     session_event_poll_seconds: float = Field(default=2.0, gt=0)
-    # Cap on concurrent push-back event streams (`GET /sessions/{id}/events`) per user. The turn
-    # semaphore only guards POSTed turns; each event stream polls the database for its whole
-    # lifetime, so without a bound one user (or a pile of abandoned tabs) can accumulate
-    # hundreds of forever-polling streams and exhaust Postgres connections for everyone. A real
-    # client needs one stream per open session view; past the cap the request is refused with
-    # 429.
+    # Cap on concurrent push-back event streams (`GET /sessions/{id}/events`) per user, **per
+    # process**. The turn semaphore only guards POSTed turns; each event stream polls the database
+    # for its whole lifetime, so without a bound one user (or a pile of abandoned tabs) can
+    # accumulate hundreds of forever-polling streams and exhaust Postgres connections for
+    # everyone. A real client needs one stream per open session view; past the cap the request is
+    # refused with 429. Per process, not per deployment: a user spread over `replicas ×
+    # service_uvicorn_workers` processes can hold that multiple. Deliberately left that way —
+    # this bounds a *resource*, and paying a durable write plus a heartbeat per stream to make an
+    # approximate ceiling exact would cost more than the thing it protects.
     service_max_event_streams_per_user: int = Field(default=5, gt=0)
     # The same cap across *all* users on this process. The per-user cap alone bounds one client;
     # it does not bound the pod, so 50 concurrent chemists at the per-user cap is 250 forever-

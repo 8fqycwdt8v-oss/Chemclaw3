@@ -151,6 +151,83 @@ class SessionOwners(Protocol):
         ...
 
 
+class SessionTurns(Protocol):
+    """The durable "who is running a turn on this session" claim (D-120).
+
+    A Protocol for the same reason `SessionOwners` is one: the concrete
+    `agents.session_store.SessionTurnClaims` needs a database, so it is imported only on the
+    durable path and a test injects an in-memory fake.
+    """
+
+    async def claim(self, session_id: str, holder: str, lease_seconds: float) -> bool:
+        """Take the session's turn slot for `lease_seconds`; False if someone else holds it."""
+        ...
+
+    async def refresh(self, session_id: str, holder: str, lease_seconds: float) -> None:
+        """Extend this holder's claim, so a long turn is not declared dead and stolen from."""
+        ...
+
+    async def release(self, session_id: str, holder: str) -> None:
+        """Give the slot back when the turn ends."""
+        ...
+
+
+# This process's identity as a claim holder. A fresh id per process (each uvicorn worker imports
+# this module in its own interpreter), so a claim can never be refreshed or released by anyone but
+# the process that took it — including a *previous* incarnation of this pod, whose leftover claims
+# must age out rather than be inherited.
+_WORKER_ID = uuid.uuid4().hex
+
+# The claim is refreshed this many times per lease. Three, so two consecutive refreshes can fail —
+# a slow query, one blocked moment on the loop — before the lease is genuinely at risk. Not a
+# config knob: it is a property of how the lease is maintained, not something a deployment tunes
+# independently of `service_turn_claim_lease_seconds`.
+_CLAIM_REFRESHES_PER_LEASE = 3
+
+
+async def _hold_turn_claim(claims: SessionTurns, session_id: str, lease_seconds: float) -> None:
+    """Keep this turn's claim alive for as long as the turn streams.
+
+    Cancelled by the stream's `finally`, so it lives exactly as long as the turn does. A refresh
+    that fails is logged and counted rather than fatal: killing a chemist's turn because one small
+    UPDATE did not land would trade a real answer for a hazard that also needs a second turn on
+    the same session to arrive inside the remaining lease. It is *counted* because this branch
+    already learned that lesson the expensive way — a guard that quietly switches itself off
+    (D-107's rollback watermark) is worse than one that fails loudly.
+    """
+    interval = lease_seconds / _CLAIM_REFRESHES_PER_LEASE
+    while True:
+        await asyncio.sleep(interval)
+        try:
+            await claims.refresh(session_id, _WORKER_ID, lease_seconds)
+        except (ConnectionError, OSError, RuntimeError):
+            METRICS.increment("chemclaw_turn_claim_refresh_failures_total")
+            logger.warning(
+                "could not refresh the turn claim for session %s; if this keeps failing the "
+                "claim lapses after %ss and another worker may start a turn on this session",
+                session_id,
+                lease_seconds,
+                exc_info=True,
+            )
+
+
+async def _release_turn_claim(claims: SessionTurns, session_id: str) -> None:
+    """Give a session's turn slot back, never failing the turn that is already over.
+
+    The lease is the backstop: a release that cannot reach the database (or a stream torn down so
+    abruptly there is no time to run it) costs the session one lease of unavailability, not a
+    permanent 409 — which is precisely why the claim expires at all.
+    """
+    try:
+        await claims.release(session_id, _WORKER_ID)
+    except (ConnectionError, OSError, RuntimeError):
+        logger.warning(
+            "could not release the turn claim for session %s; it expires on its own",
+            session_id,
+            exc_info=True,
+        )
+
+
 def _default_owner_store() -> SessionOwners | None:
     """The durable session-ownership store, but only when durable sessions are on (else None).
 
@@ -164,6 +241,21 @@ def _default_owner_store() -> SessionOwners | None:
     from agents.session_store import SessionOwnerStore
 
     return SessionOwnerStore()
+
+
+def _default_turn_claims() -> SessionTurns | None:
+    """The durable turn claim, but only where two processes can share one session (else None).
+
+    Gated on the same `session_store="postgres"` switch as ownership, because that switch is
+    exactly the condition under which two processes share a conversation's durable history and can
+    therefore corrupt it. Under the in-memory store each process has its own history and the
+    in-process set already covers everything there is to cover.
+    """
+    if settings.session_store != "postgres":
+        return None
+    from agents.session_store import SessionTurnClaims
+
+    return SessionTurnClaims()
 
 
 class MessageIn(BaseModel):
@@ -285,6 +377,7 @@ def create_app(
     agent_factory: Callable[[str | None], Any] = _default_agent_factory,
     owner_store: SessionOwners | None = None,
     connector_factory: Callable[[str | None], list[Any]] = connector_tools,
+    turn_claims: SessionTurns | None = None,
 ) -> FastAPI:
     """Build the front-door FastAPI app.
 
@@ -303,6 +396,10 @@ def create_app(
             per-profile because the profile narrows the connector surface as well as the
             in-process one. Injectable for the same reason `agent_factory` is: a test drives the
             whole HTTP surface without a connector server running.
+        turn_claims: The durable "one turn at a time per session" claim, which is what makes that
+            guard hold across processes rather than only within one (D-120). Defaults to the
+            config-gated store (present only under `session_store="postgres"`); tests inject an
+            in-memory fake to exercise the cross-process conflict without a database.
 
     Returns:
         A configured `FastAPI` application.
@@ -354,6 +451,12 @@ def create_app(
     # for the running turn). Check-and-add is atomic on the event loop (no await between them),
     # so the gate has no race window.
     app.state.active_turns = set()
+    # The same gate at the width the deployment actually has (D-120). The set above is one
+    # process's view, and the chart runs the front door at two replicas, so the second POST can
+    # land on a process that has never heard of the first. A leased row in `session_turns` is what
+    # both processes can see; None under the in-memory session store, where two processes share no
+    # history to corrupt.
+    app.state.turn_claims = turn_claims if turn_claims is not None else _default_turn_claims()
     # Per-user count of open push-back event streams. The turn semaphore only guards POSTed
     # turns; each event stream polls the database for its whole lifetime, so without a cap one
     # user's scripted (or abandoned-tab) streams could pile up unbounded DB load. Entries are
@@ -605,15 +708,24 @@ def create_app(
 
         Admission-controlled (AG-15): the turn takes one of the process's turn permits for its
         whole streamed run, and is shed with 503 if none frees within the admission timeout — so
-        a burst of concurrent turns cannot pile onto the shared internal LLM endpoint. One turn
-        at a time per session: a second concurrent POST to the same session is a 409 (a
-        double-submit cannot interleave two turns into one conversation thread). The permit hold
-        is wall-clock bounded (`service_turn_timeout_seconds`): a hung model stream or a
+        a burst of concurrent turns cannot pile onto the shared internal LLM endpoint. The permit
+        hold is wall-clock bounded (`service_turn_timeout_seconds`): a hung model stream or a
         slow-reading client cannot pin a permit forever — on expiry the client gets one error
         event and the permit is released.
+
+        **One turn at a time per session**, claimed twice. The in-process `active_turns` set
+        answers a double-submit that lands on this same process with no I/O and no race window
+        (there is no `await` between the test and the add). The durable claim in `session_turns`
+        answers the case that set cannot see: the shipped chart runs two front-door replicas, so
+        the second POST may arrive at a different process entirely, and both would otherwise be
+        admitted and interleave their messages into one conversation thread. Both answer 409.
+        The durable half is present only under `session_store="postgres"` — with the in-memory
+        store there is no shared history for two processes to corrupt.
         """
         live = await _resolve_session(session_id, principal)
         active_turns: set[str] = app.state.active_turns
+        claims: SessionTurns | None = app.state.turn_claims
+        lease = settings.service_turn_claim_lease_seconds
         if session_id in active_turns:
             METRICS.increment("chemclaw_turns_conflict_total")
             raise HTTPException(
@@ -626,6 +738,11 @@ def create_app(
             # Release the permit and the session's turn slot when the stream ends — normal
             # completion, error, timeout, or client disconnect (the generator is closed, running
             # this finally) — so neither is ever leaked.
+            heartbeat = (
+                None
+                if claims is None
+                else asyncio.create_task(_hold_turn_claim(claims, session_id, lease))
+            )
             try:
                 try:
                     # The deadline covers the whole streamed run *including* client consumption:
@@ -669,10 +786,15 @@ def create_app(
                     )
                     yield {"event": timeout_event.type, "data": timeout_event.model_dump_json()}
             finally:
+                if heartbeat is not None:
+                    heartbeat.cancel()
                 semaphore.release()
                 active_turns.discard(session_id)
+                if claims is not None:
+                    await _release_turn_claim(claims, session_id)
 
         acquired = False
+        claimed = False
         handed_off = False
         try:
             # Runaway-cost guard (budget #3): refuse before taking a permit if this session/user
@@ -683,6 +805,16 @@ def create_app(
             except BudgetExceeded as exc:
                 METRICS.increment("chemclaw_turns_refused_budget_total")
                 raise HTTPException(status_code=429, detail=str(exc)) from exc
+            # Claimed before the permit rather than after, so a turn that is already running
+            # elsewhere is refused without first occupying one of this process's permits for the
+            # duration of the admission wait. A failed checkout raises `ConnectionError` and is
+            # shed as a 503 by `_database_unavailable` — the guard fails closed, and retryably.
+            if claims is not None and not await claims.claim(session_id, _WORKER_ID, lease):
+                METRICS.increment("chemclaw_turns_conflict_total")
+                raise HTTPException(
+                    status_code=409, detail="a turn is already running for this session"
+                )
+            claimed = claims is not None
             try:
                 await asyncio.wait_for(
                     semaphore.acquire(), timeout=settings.service_turn_admission_timeout_seconds
@@ -708,6 +840,8 @@ def create_app(
                 active_turns.discard(session_id)
                 if acquired:
                     semaphore.release()
+                if claimed and claims is not None:
+                    await _release_turn_claim(claims, session_id)
 
     @app.get("/sessions/{session_id}/events")
     async def session_events(

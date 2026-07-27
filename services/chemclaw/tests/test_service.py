@@ -465,6 +465,85 @@ class _FakeOwnerStore:
         return sorted(rows, key=lambda row: row[1], reverse=True)
 
 
+class _SharedTurnClaims:
+    """The `session_turns` row, in memory — one instance stands in for the shared database.
+
+    Two apps built over one of these are the faithful model of two uvicorn workers or two pods:
+    separate processes, separate `active_turns` sets, one durable claim between them.
+    """
+
+    def __init__(self) -> None:
+        self.holders: dict[str, str] = {}
+
+    async def claim(self, session_id: str, holder: str, lease_seconds: float) -> bool:
+        if session_id in self.holders:
+            return False
+        self.holders[session_id] = holder
+        return True
+
+    async def refresh(self, session_id: str, holder: str, lease_seconds: float) -> None:
+        pass  # nothing elapses inside a test, so a refresh has nothing to do
+
+    async def release(self, session_id: str, holder: str) -> None:
+        if self.holders.get(session_id) == holder:
+            del self.holders[session_id]
+
+
+def test_a_turn_running_on_another_worker_is_a_409_not_a_second_turn() -> None:
+    """A turn already claimed by another process is refused here, not admitted a second time.
+
+    The 409 guard was a `set` in one process's memory while the shipped chart runs the front door
+    at `minReplicas: 2`, so a double-submit that landed on the other replica was admitted and the
+    two turns interleaved their messages into one conversation thread — the exact corruption the
+    guard exists to prevent. The claim row is the only trace of the sibling process this one can
+    see, so seeding it *is* the other worker, faithfully: nothing else about that turn is
+    observable from here.
+
+    Counterfactual: with only the per-process set this process has no record of the session's
+    running turn and answers 200.
+    """
+    claims = _SharedTurnClaims()
+    app = create_app(
+        agent_factory=lambda _profile: _FakeAgent(),
+        owner_store=_FakeOwnerStore(),
+        connector_factory=_no_connectors,
+        turn_claims=claims,
+    )
+    with TestClient(app) as client:
+        session_id = client.post("/sessions").json()["session_id"]
+        claims.holders[session_id] = "another-worker"  # a turn is in flight over there
+        conflict = client.post(f"/sessions/{session_id}/messages", json={"message": "second"})
+
+    assert conflict.status_code == 409
+    assert conflict.json()["detail"] == "a turn is already running for this session"
+    assert claims.holders == {session_id: "another-worker"}  # the refusal did not steal the slot
+
+
+def test_a_finished_turn_hands_its_cross_process_claim_back() -> None:
+    """The slot is taken for a turn's streamed run and given back when it ends, not leaked.
+
+    A claim that outlived its turn would 409 the session for a whole lease every time — the
+    durable version of the bug that once bricked a session's turns until the pod restarted.
+    """
+    claims = _SharedTurnClaims()
+    app = create_app(
+        agent_factory=lambda _profile: _FakeAgent(),
+        owner_store=_FakeOwnerStore(),
+        connector_factory=_no_connectors,
+        turn_claims=claims,
+    )
+    with TestClient(app) as client:
+        session_id = client.post("/sessions").json()["session_id"]
+        for _ in range(2):  # a second turn proves the first genuinely released
+            with client.stream(
+                "POST", f"/sessions/{session_id}/messages", json={"message": "hello"}
+            ) as res:
+                assert res.status_code == 200
+                for _line in res.iter_lines():
+                    pass
+            assert claims.holders == {}
+
+
 class _UnreachableOwnerStore(_FakeOwnerStore):
     """An ownership registry whose every call fails the way a starved pool checkout does.
 

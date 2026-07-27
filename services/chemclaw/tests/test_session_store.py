@@ -11,7 +11,7 @@ from agent_framework import Content, InMemoryHistoryProvider, Message
 
 from agents.chemclaw_agent import history_provider
 from agents.message_pairing import unmatched_call_ids
-from agents.session_store import PostgresHistoryProvider, SessionOwnerStore
+from agents.session_store import PostgresHistoryProvider, SessionOwnerStore, SessionTurnClaims
 from chemclaw.config import settings
 from tests.pg import migrated_db_or_skip
 
@@ -274,5 +274,65 @@ def test_session_owner_records_null_owner() -> None:
         store = SessionOwnerStore()
         await store.record("sess-owner-null", None)
         assert await store.lookup("sess-owner-null") == (True, None)
+
+    asyncio.run(_run())
+
+
+async def _claims_or_skip() -> SessionTurnClaims:
+    """Return a turn-claim store over a migrated database, or skip if none is reachable."""
+    await migrated_db_or_skip()
+    return SessionTurnClaims()
+
+
+def test_a_second_process_cannot_claim_a_session_that_is_already_running() -> None:
+    """Two *separate* claim stores — the model of two workers — cannot both hold one session.
+
+    This is the guarantee the in-process `active_turns` set could not give: the shipped chart runs
+    two front-door replicas, so the second POST for a session can arrive at a process that has
+    never heard of the first. The claim is one statement so the check and the take cannot be
+    interleaved; releasing hands the slot to the next caller.
+    """
+
+    async def _run() -> None:
+        worker_a = await _claims_or_skip()
+        worker_b = SessionTurnClaims()
+        session_id = "sess-d120-exclusive"
+        await worker_a.release(session_id, "a")  # a previous run's residue must not decide this
+
+        assert await worker_a.claim(session_id, "a", 60.0) is True
+        assert await worker_b.claim(session_id, "b", 60.0) is False
+        await worker_a.release(session_id, "a")
+        assert await worker_b.claim(session_id, "b", 60.0) is True
+        await worker_b.release(session_id, "b")
+
+    asyncio.run(_run())
+
+
+def test_a_crashed_workers_claim_ages_out_and_a_refresh_holds_it() -> None:
+    """An expired lease is takeable; a refreshed one is not — the two halves of the lease.
+
+    Expiry is why this is a lease and not a lock: a worker SIGKILLed mid-turn runs no cleanup, and
+    without expiry its session would 409 forever. Refresh is the other half — a turn that
+    legitimately outlives one lease must not be declared dead while it is still streaming.
+    """
+
+    async def _run() -> None:
+        claims = await _claims_or_skip()
+        session_id = "sess-d120-lease"
+        await claims.release(session_id, "dead")
+
+        # A lease that has already elapsed: the holder is gone and nothing released it.
+        assert await claims.claim(session_id, "dead", -1.0) is True
+        assert await claims.claim(session_id, "live", 60.0) is True  # taken over, not blocked
+
+        # Now the live holder keeps it, and a refresh by the *dead* holder cannot steal it back.
+        assert await claims.claim(session_id, "other", 60.0) is False
+        await claims.refresh(session_id, "dead", 600.0)
+        await claims.release(session_id, "dead")  # wrong holder: must not free someone else's slot
+        assert await claims.claim(session_id, "other", 60.0) is False
+
+        await claims.release(session_id, "live")
+        assert await claims.claim(session_id, "other", 60.0) is True
+        await claims.release(session_id, "other")
 
     asyncio.run(_run())

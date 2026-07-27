@@ -58,6 +58,13 @@ _COUNTERS: dict[str, str] = {
     "chemclaw_db_unavailable_total": (
         "Requests shed with 503 because a pooled Postgres connection could not be obtained."
     ),
+    # Same principle as the watermark counter above: the cross-process turn guard (D-120) is a
+    # lease, so it holds only while its holder keeps refreshing. A refresh that fails is the guard
+    # narrowing, and it must not be something only a log line knows.
+    "chemclaw_turn_claim_refresh_failures_total": (
+        "Failed refreshes of a running turn's session claim (D-120): the claim may lapse and "
+        "another worker start a turn on the same session."
+    ),
     # A guard that switches itself off is worse than one that fails loudly, and this one did
     # exactly that 32 times in a 126-second load test while nothing but a WARNING said so.
     "chemclaw_rollback_watermark_unavailable_total": (

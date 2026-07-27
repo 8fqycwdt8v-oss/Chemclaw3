@@ -12,10 +12,12 @@ case "${component}" in
   service)
     # One asyncio event loop saturates one CPU, so a multi-CPU pod served by a single process
     # leaves the rest idle — a load test measured front-door throughput flat from 10 to 50
-    # concurrent users. CHEMCLAW_SERVICE_UVICORN_WORKERS is the knob for that; it defaults to 1
-    # because `active_turns` (the 409 that keeps two turns from interleaving on one session) and
-    # the admission semaphore are per-process, so N workers each see 1/N of the traffic. Passed
-    # only when raised, so the default keeps today's single-process signal handling and PID 1.
+    # concurrent users. CHEMCLAW_SERVICE_UVICORN_WORKERS is the knob for that. It still defaults
+    # to 1, but no longer because of the turn guard: that is a leased row in `session_turns` now
+    # and every process shares it (D-120). What stays per-process is capability — attachments,
+    # harness todos and the admission cap — and no ingress can pin a request below the pod, so
+    # replicas plus Route affinity remain the supported way to use more CPU. Passed only when
+    # raised, so the default keeps today's single-process signal handling and PID 1.
     args=(--host "${CHEMCLAW_SERVICE_HOST:-0.0.0.0}" --port "${CHEMCLAW_SERVICE_PORT:-8080}")
     if [[ "${CHEMCLAW_SERVICE_UVICORN_WORKERS:-1}" -gt 1 ]]; then
       args+=(--workers "${CHEMCLAW_SERVICE_UVICORN_WORKERS}")
