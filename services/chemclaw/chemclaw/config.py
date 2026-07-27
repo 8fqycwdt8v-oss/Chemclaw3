@@ -864,6 +864,12 @@ class ServiceSettings(BaseSettings):
     # pod-level ceiling, refused with the same 429. Sized as a generous multiple of the per-user
     # cap so it only binds in the aggregate case the per-user cap cannot see.
     service_max_event_streams_total: int = Field(default=200, gt=0)
+    # How long `/readyz` may reuse its connector sweep. The route is unauthenticated by necessity
+    # (a kubelet cannot present a token) and the kubelet probes every 10 s per pod, so an uncached
+    # sweep is an N-connector HTTP fan-out that any caller can trigger at will. The connector
+    # states are *reported*, never gating, so the only cost of caching is that a reported state
+    # can be up to this stale. 0 probes on every request (the pre-cache behavior).
+    service_readiness_cache_seconds: float = Field(default=5.0, ge=0)
 
 
 class EntraSettings(BaseSettings):
@@ -1465,7 +1471,15 @@ class RetrievalSettings(BaseSettings):
     # `kg.graph.invalidate_cache()` after it writes a note, so the authoring loop stays instant.
     # `0` disables the window — every query re-scans, which is the exact pre-DA-5 behavior and
     # the setting to choose where any staleness is unacceptable.
-    graph_cache_ttl_seconds: float = Field(default=5.0, ge=0.0)
+    #
+    # Raised from 5 s to 60 s. At 5 s a busy pod re-ran the O(notes) `rglob` almost continuously —
+    # a load test with 50 concurrent sessions kept it permanently expired, so the "cache" paid its
+    # full scan on essentially every `gather_evidence`/`find_notes`. Nothing was gained for that:
+    # the only *in-process* writer (the PR-gate submitter) calls `invalidate_cache()` explicitly,
+    # so this window governs out-of-process changes only — and those arrive via the knowledge-sync
+    # sidecar, whose own refresh cadence is 300 s. A 5-second window could not make a merged note
+    # visible any sooner than the sync that delivers it; it only bought scans.
+    graph_cache_ttl_seconds: float = Field(default=60.0, ge=0.0)
 
     @property
     def retrieval_source_weights_map(self) -> dict[str, float] | None:

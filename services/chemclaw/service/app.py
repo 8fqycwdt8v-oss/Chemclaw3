@@ -15,6 +15,7 @@ on in F4.
 
 import asyncio
 import logging
+import time
 import uuid
 from collections import OrderedDict
 from collections.abc import AsyncIterator, Callable
@@ -50,7 +51,7 @@ from agents.profiles import get_profile
 from agents.session_events import stream_new_events
 from chemclaw import db
 from chemclaw.config import settings
-from connectors.health import check_connectors_at_startup, probe_connectors
+from connectors.health import ConnectorHealth, check_connectors_at_startup, probe_connectors
 from scripts.schedules import ScheduleHealth, describe_schedules
 from service.auth import Principal, require_principal
 from service.budget import BudgetExceeded, BudgetTracker
@@ -257,6 +258,7 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
     load_profiles()
     async with db.pooling():
         app.state.connector_health = await check_connectors_at_startup()
+        app.state.connector_health_at = time.monotonic()
         yield
 
 
@@ -359,6 +361,11 @@ def create_app(
     # on. Refreshed by the readiness probe (and at startup), read from the snapshot here — a
     # gauge must not perform network I/O when Prometheus scrapes it.
     app.state.connector_health = []
+    # When that snapshot was taken (`time.monotonic`), so the readiness route can reuse it instead
+    # of fanning out to the whole connector fleet on every unauthenticated probe. Negative
+    # infinity, not 0: an empty snapshot must always be treated as stale, and 0 would be "fresh"
+    # for the first `service_readiness_cache_seconds` of process uptime.
+    app.state.connector_health_at = float("-inf")
     METRICS.bind_gauge(
         "chemclaw_connectors_unhealthy",
         lambda: float(sum(1 for item in app.state.connector_health if item.state == "unreachable")),
@@ -439,6 +446,24 @@ def create_app(
         """Liveness: the process is up."""
         return {"status": "ok"}
 
+    async def _connector_health() -> list[ConnectorHealth]:
+        """The connector sweep, re-probed at most once per `service_readiness_cache_seconds`.
+
+        Monotonic, not wall-clock: a clock adjustment must not make the last sweep look
+        arbitrarily fresh. A concurrent second caller inside the window reads the same snapshot;
+        two callers racing past the window both probe once, which is a wasted sweep and not a
+        correctness problem, so it is not worth a lock on a readiness route.
+        """
+        window = settings.service_readiness_cache_seconds
+        now = time.monotonic()
+        if window and now - float(app.state.connector_health_at) < window:
+            cached: list[ConnectorHealth] = app.state.connector_health
+            return cached
+        health = await probe_connectors()
+        app.state.connector_health = health
+        app.state.connector_health_at = now
+        return health
+
     @app.get("/readyz")
     async def readyz() -> dict[str, str]:
         """Readiness: the agent can be built, plus each enabled connector's reachability.
@@ -450,10 +475,16 @@ def create_app(
         readiness probe runs on the cadence a gauge wants anyway, so one bounded sweep serves
         both. A deployment that would rather not serve at all in this state sets
         `connectors_required`, which fails startup instead.
+
+        The sweep is cached for `service_readiness_cache_seconds`. This route is unauthenticated
+        by necessity (a kubelet cannot present a token) and runs every 10 seconds per pod, so an
+        uncached probe is a fan-out any caller can trigger at will — N HTTP round trips per
+        request against the connector fleet. Caching does not weaken the signal: the connector
+        states are reported, never gating, so the only cost is that a reported state can be up to
+        one window stale. Set 0 to probe every time.
         """
         _agent()
-        health = await probe_connectors()
-        app.state.connector_health = health
+        health = await _connector_health()
         return {
             "status": "ready",
             "connectors": ", ".join(f"{item.name}={item.state}" for item in health),

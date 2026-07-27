@@ -49,15 +49,18 @@ class ConnectorsUnavailable(RuntimeError):
     """`connectors_required` is set and at least one enabled connector could not be reached."""
 
 
-async def _probe(name: str, url: str) -> ConnectorHealth:
+async def _probe(client: httpx.AsyncClient, name: str, url: str) -> ConnectorHealth:
     """Probe one connector's health endpoint, bounded by `connector_health_timeout_seconds`.
 
     Any 2xx counts as healthy: a health route's contract is its status, and demanding a body shape
     would couple us to every connector's internals — including third-party servers we do not own.
+
+    The client is passed in rather than built here: one per connector meant six TCP setups (and,
+    behind an mTLS ingress, six handshakes) on every readiness probe, which the kubelet runs every
+    10 seconds per pod.
     """
     try:
-        async with httpx.AsyncClient(timeout=settings.connector_health_timeout_seconds) as client:
-            response = await client.get(url)
+        response = await client.get(url)
     except httpx.HTTPError as exc:
         return ConnectorHealth(
             name=name, state="unreachable", detail=f"{type(exc).__name__}: {exc}"
@@ -73,19 +76,25 @@ async def probe_connectors() -> list[ConnectorHealth]:
     """Probe every enabled connector concurrently; never raises, so a caller can always report.
 
     Concurrent because probes are independent and a serial sweep would make startup wait for the sum
-    of the timeouts rather than the slowest one.
+    of the timeouts rather than the slowest one. One `httpx.AsyncClient` for the whole sweep, so a
+    fleet of N connectors costs one client rather than N.
     """
-    probes = []
+    targets: list[tuple[str, str]] = []
     unprobed = []
     for manifest in enabled():
         endpoint = manifest.endpoint
         if isinstance(endpoint, HttpEndpoint) and endpoint.health_url:
-            probes.append(_probe(manifest.name, endpoint.health_url))
+            targets.append((manifest.name, endpoint.health_url))
         else:
             # No endpoint (a jobs-only connector), stdio (spawned per turn, nothing to probe), or an
             # HTTP endpoint that declares no health route.
             unprobed.append(ConnectorHealth(name=manifest.name, state="unprobed"))
-    probed = await asyncio.gather(*probes) if probes else []
+    probed: list[ConnectorHealth] = []
+    if targets:
+        async with httpx.AsyncClient(timeout=settings.connector_health_timeout_seconds) as client:
+            probed = list(
+                await asyncio.gather(*(_probe(client, name, url) for name, url in targets))
+            )
     return sorted([*probed, *unprobed], key=lambda health: health.name)
 
 
