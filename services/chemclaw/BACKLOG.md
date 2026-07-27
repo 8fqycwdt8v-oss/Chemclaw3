@@ -28,6 +28,32 @@ missing prerequisite), in D-092.
 > `tasks/todo.md`). Verdicts: 8 BUILD (waves A/B/C), 14 DEFER, 5 DROP, 12 BLOCKED. The DROP verdicts are
 > corrected in place below, because they were claims about the tree that are no longer true.
 
+## Open — Production scale, after the 50-user load test (2026-07-27, D-119)
+
+The load test's fixes landed (see D-119). What it surfaced and did **not** close:
+
+- [ ] **SCALE-1 The 409 same-session guard is per-process, and so is admission control.**
+      `service/app.py`'s `active_turns` and the admission semaphore live in one process's memory.
+      That is already only per-*pod* under `service.replicas: 2`, and `service_uvicorn_workers`
+      (default 1) would widen it to per-*worker*. Until the guard survives a process boundary,
+      raising either number trades a correctness guarantee for throughput. A Postgres advisory lock
+      is the obvious mechanism and was rejected for now: it is connection-scoped, so it would pin a
+      pooled connection for a turn's whole duration. A short-lived `session_turns` row with an owner
+      and a heartbeat is the shape that would work.
+- [ ] **SCALE-2 The HPA still scales on CPU.** `values.yaml` documents this as the wrong signal for
+      a stream-bound service and now has better ones to use: `chemclaw_turns_in_flight` against
+      `chemclaw_turn_capacity`, and the new `chemclaw_turn_duration_seconds` histogram. Needs a
+      Prometheus adapter in the cluster.
+- [ ] **SCALE-3 `service_max_concurrent_turns` is still a guess (8).** At 50 users it shed 75% of
+      turns; at 64 it shed none but p50 went to 37 s. The measured value depends on the fixes in
+      D-119, so it should be re-derived from the next load test, not from this one.
+- [ ] **SCALE-4 Make the rollback watermark unnecessary rather than merely loud.** Having
+      `save_messages` remember the ids it inserted would remove the pre-turn read entirely, but the
+      history provider is shared across every session on the pod, so it needs per-turn state that
+      does not collide. Counted for now (`chemclaw_rollback_watermark_unavailable_total`).
+- [ ] **SCALE-5 Not yet measured:** the live-Anthropic 50-session run, the multi-replica run, and
+      the chaos scenarios.
+
 ## Open — Live e2e testing pass (2026-07-27, D-109)
 
 Nine stages against the real running stack (Postgres+pgvector, Temporal, real Anthropic calls,

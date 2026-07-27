@@ -120,3 +120,23 @@ def test_pool_exhaustion_surfaces_as_a_connection_error(monkeypatch: pytest.Monk
         assert "chemclaw:chemclaw" not in str(exc_info.value)
 
     asyncio.run(_run())
+
+
+def test_pool_saturation_is_visible_as_a_gauge() -> None:
+    """`requests_waiting` above zero is the only reading that says "the pool is too small".
+
+    Without it, an undersized pool looks exactly like an unreachable database from the outside —
+    which is the confusion the load test ran into, where connects timed out against an idle server.
+    """
+
+    async def _run() -> None:
+        await migrated_db_or_skip()
+        assert db.pool_stats() == {"pool_size": 0, "pool_available": 0, "requests_waiting": 0}
+        async with db.pooling():
+            async with db.connection(settings.postgres_dsn):
+                stats = db.pool_stats()
+        assert stats["pool_size"] >= 1
+        # Borrowed for the duration of the block, so it is not among the available ones.
+        assert stats["pool_available"] < stats["pool_size"]
+
+    asyncio.run(_run())

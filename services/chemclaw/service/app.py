@@ -51,6 +51,7 @@ from agents.profiles import get_profile
 from agents.session_events import stream_new_events
 from chemclaw import db
 from chemclaw.config import settings
+from chemclaw.logging import configure_logging, configure_telemetry
 from connectors.health import ConnectorHealth, check_connectors_at_startup, probe_connectors
 from scripts.schedules import ScheduleHealth, describe_schedules
 from service.auth import Principal, require_principal
@@ -255,6 +256,13 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
     # on its first request. Failing here is the right outcome for a malformed profile: it is a
     # deployment configuration error, and a front door that started anyway would 400 every
     # request naming that profile with no hint as to why.
+    # The front door never configured either of these, so it ran on Python's default root logger
+    # (WARNING, no format) while every worker honoured `CHEMCLAW_LOG_LEVEL`/`LOG_FORMAT`, and
+    # `CHEMCLAW_OTEL_ENABLED` was simply inert here — the one process a chemist actually talks to
+    # was the one with no observability wiring. Called at startup rather than in `create_app`
+    # because this is the "about to serve" moment, matching each worker's `main()`.
+    configure_logging()
+    configure_telemetry()
     load_profiles()
     async with db.pooling():
         app.state.connector_health = await check_connectors_at_startup()
@@ -366,6 +374,16 @@ def create_app(
     # infinity, not 0: an empty snapshot must always be treated as stale, and 0 would be "fresh"
     # for the first `service_readiness_cache_seconds` of process uptime.
     app.state.connector_health_at = float("-inf")
+    # Pool saturation (D-119). Read live from the pools rather than mirrored, like every other
+    # gauge here; `requests_waiting` above zero is what "the pool is too small" looks like, and it
+    # is the only reading that distinguishes it from an unreachable database.
+    METRICS.bind_gauge("chemclaw_pg_pool_size", lambda: float(db.pool_stats()["pool_size"]))
+    METRICS.bind_gauge(
+        "chemclaw_pg_pool_available", lambda: float(db.pool_stats()["pool_available"])
+    )
+    METRICS.bind_gauge(
+        "chemclaw_pg_pool_requests_waiting", lambda: float(db.pool_stats()["requests_waiting"])
+    )
     METRICS.bind_gauge(
         "chemclaw_connectors_unhealthy",
         lambda: float(sum(1 for item in app.state.connector_health if item.state == "unreachable")),

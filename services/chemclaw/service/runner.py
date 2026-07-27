@@ -13,6 +13,8 @@ stack trace to the browser — a failed turn must not take down the stream or le
 import asyncio
 import copy
 import logging
+import time
+import uuid
 from collections.abc import AsyncIterator, Mapping, Sequence
 from contextlib import AsyncExitStack
 from typing import Any
@@ -23,7 +25,12 @@ from agents.chemclaw_agent import connector_tools
 from agents.dialogue_tools import reset_dry_run, set_dry_run
 from agents.framing import frame_untrusted
 from agents.harness_todo import todo_titles
-from agents.identity_context import reset_current_identity, set_current_identity
+from agents.identity_context import (
+    reset_current_correlation_id,
+    reset_current_identity,
+    set_current_correlation_id,
+    set_current_identity,
+)
 from agents.job_results import await_job_results
 from agents.session_context import (
     reset_current_session,
@@ -106,6 +113,7 @@ async def run_turn(
         `service.events.Event` values in the order the model produced them, ending with an
         `AnswerEvent` on success or an `ErrorEvent` on failure.
     """
+    turn_started = time.perf_counter()
     answer_parts: list[str] = []
     # Metered across the turn's updates and booked once on teardown (even on failure — a failed
     # turn still spent tokens up to the point it broke, so its cost must count toward the next
@@ -120,6 +128,11 @@ async def run_turn(
     live_session_token = set_current_session(session)
     # Stamp the authenticated identity (F4) so audit/authorization/attribution see the user.
     identity_token = set_current_identity(actor, roles) if actor is not None else None
+    # One correlation id per *turn*, stamped here rather than bound inside `build_agent`: agents
+    # are cached per profile for the process's lifetime, so a build-time id was shared by every
+    # turn from every user on the pod — the audit trail could not tell two conversations apart,
+    # which is the one thing a correlation id exists to do.
+    correlation_token = set_current_correlation_id(uuid.uuid4().hex)
     # Buffer for what tools learn mid-turn that the stream must surface (started jobs, PR-gate
     # proposals) — the runner only sees the model's updates, so tools hand these over out of
     # band.
@@ -290,10 +303,18 @@ async def run_turn(
     finally:
         if budget is not None:
             budget.record(session.session_id, actor, turn_tokens)
+        # Observed on every path — success, failure and disconnect — because a turn that failed
+        # after 40 s is exactly the sample an operator needs, and excluding it would make the
+        # histogram look best when the service is worst. The token counter is the same number the
+        # budget guard meters, published as a rate rather than only used to refuse.
+        METRICS.observe("chemclaw_turn_duration_seconds", time.perf_counter() - turn_started)
+        if turn_tokens:
+            METRICS.increment("chemclaw_tokens_total", float(turn_tokens))
         end_turn(signals_token)
         reset_dry_run(dry_run_token)
         reset_current_session_id(session_token)
         reset_current_session(live_session_token)
+        reset_current_correlation_id(correlation_token)
         if identity_token is not None:
             reset_current_identity(identity_token)
 

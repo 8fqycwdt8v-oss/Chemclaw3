@@ -20,30 +20,48 @@ contain PII. `agent_audit_max_arg_chars` bounds what is stored; treat the trail 
 import logging
 import time
 from collections.abc import Awaitable, Callable
-from typing import Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
 from agent_framework import FunctionInvocationContext, function_middleware
 from pydantic import BaseModel
 
-from agents.identity_context import get_current_actor
+from agents.identity_context import get_current_actor, get_current_correlation_id
 from chemclaw.config import settings
+
+if TYPE_CHECKING:  # the front door's registry; `agents` must not import `service` at runtime
+    from service.metrics import Metrics
 
 logger = logging.getLogger(__name__)
 
 
-def _count_sink_failure() -> None:
-    """Increment the audit-sink failure counter, tolerating an unimportable metrics registry.
+def _record_metric(update: "Callable[[Metrics], None]") -> None:
+    """Apply `update` to the process metrics registry, tolerating one that cannot be imported.
 
     `agents` must not hard-depend on `service`: the workers import this module and never build the
     front door. A missing registry means "no scrape target in this process", which is fine — the
-    ERROR log remains the record either way.
+    log remains the record either way. Written once because there are two of these now (the
+    audit-sink failure counter and the tool-latency histogram) and a second copy of a swallow-all
+    try block is exactly where a real error goes to hide.
     """
     try:
         from service.metrics import METRICS
 
-        METRICS.increment("chemclaw_audit_sink_failures_total")
+        update(METRICS)
     except Exception:  # pragma: no cover - defensive; metrics must never break the audit path
         pass
+
+
+def _observe_tool_latency(elapsed_ms: float) -> None:
+    """Record one tool call's duration in the process histogram.
+
+    Here rather than in `service.runner` because this is the only place that sees a tool call
+    *complete* — the runner sees the model announce one and never learns when it returned. Failed
+    calls are observed too: a tool that fails after 30 s is exactly the sample that explains a slow
+    turn, and dropping it would make the histogram flatter the worse things get.
+    """
+    _record_metric(
+        lambda metrics: metrics.observe("chemclaw_tool_duration_seconds", elapsed_ms / 1000.0)
+    )
 
 
 class AuditEvent(BaseModel):
@@ -99,11 +117,16 @@ def make_audit_middleware(
 ) -> Callable[[FunctionInvocationContext, Callable[[], Awaitable[None]]], Awaitable[None]]:
     """Build the tool-audit middleware bound to one conversation's identity.
 
-    `correlation_id` ties every event to a single agent conversation; `actor` is the fallback
-    identity used when no authenticated user is ambient — the turn's real Entra user
-    (`agents.identity_context`) takes precedence per call (F4-T5). `sink` is the durable trail —
-    omitted (or `NullAuditSink`) means log-only. A sink failure is logged and swallowed: the audit
-    store must never break a tool call.
+    `correlation_id` and `actor` are both *fallbacks*, used only when the call has no ambient one
+    (`agents.identity_context`): the turn's real Entra user takes precedence per call (F4-T5), and
+    so does the turn's correlation id. The id has to work that way because agents are cached per
+    profile for the process's lifetime — an id bound here would be shared by every turn from every
+    user on the pod, which would make the audit trail unable to separate two conversations. The
+    build-time value still serves the callers that bind a meaningful one and stamp nothing per turn
+    (the Temporal template activities pass the workflow id).
+
+    `sink` is the durable trail — omitted (or `NullAuditSink`) means log-only. A sink failure is
+    logged and swallowed: the audit store must never break a tool call.
     """
     audit_sink: AuditSink = sink if sink is not None else NullAuditSink()
     # The revision in effect for this process, captured once at build time (AG-14) — every event
@@ -121,16 +144,19 @@ def make_audit_middleware(
         # The real actor is the turn's authenticated Entra user (F4-T5); fall back to the static
         # `actor` bound at build time when there is none (tests, the non-service caller).
         event_actor = get_current_actor() or actor
+        # Same precedence, same reason: per-turn if a turn stamped one, else the build-time id.
+        event_cid = get_current_correlation_id() or correlation_id
         start = time.perf_counter()
         try:
             await call_next()
         except Exception as exc:
             elapsed_ms = (time.perf_counter() - start) * 1000.0
+            _observe_tool_latency(elapsed_ms)
             logger.warning(
                 "tool %s failed after %.0f ms [cid=%s actor=%s]: %s (args=%s)",
                 name,
                 elapsed_ms,
-                correlation_id,
+                event_cid,
                 event_actor,
                 exc,
                 args,
@@ -138,7 +164,7 @@ def make_audit_middleware(
             await _emit(
                 audit_sink,
                 AuditEvent(
-                    correlation_id=correlation_id,
+                    correlation_id=event_cid,
                     actor=event_actor,
                     tool=name,
                     arguments=args,
@@ -150,19 +176,20 @@ def make_audit_middleware(
             )
             raise
         elapsed_ms = (time.perf_counter() - start) * 1000.0
+        _observe_tool_latency(elapsed_ms)
         detail = _truncate(context.result) if context.result is not None else ""
         logger.info(
             "tool %s ok in %.0f ms [cid=%s actor=%s] (args=%s)",
             name,
             elapsed_ms,
-            correlation_id,
+            event_cid,
             event_actor,
             args,
         )
         await _emit(
             audit_sink,
             AuditEvent(
-                correlation_id=correlation_id,
+                correlation_id=event_cid,
                 actor=event_actor,
                 tool=name,
                 arguments=args,
@@ -184,7 +211,7 @@ async def _emit(sink: AuditSink, event: AuditEvent) -> None:
         # Counted as well as logged (gap DEP-4): the ERROR marker is alertable only if something
         # is watching the logs, whereas an incomplete GxP trail should be visible on the same
         # dashboard as everything else.
-        _count_sink_failure()
+        _record_metric(lambda metrics: metrics.increment("chemclaw_audit_sink_failures_total"))
         # Swallow-and-continue keeps availability, but a lost GxP audit record must be ALERTABLE,
         # not a generic warning (SEC-3): log at ERROR with a stable `audit_sink_failure` marker and
         # the trail identifiers, so monitoring can fire on the marker and name the affected trail.

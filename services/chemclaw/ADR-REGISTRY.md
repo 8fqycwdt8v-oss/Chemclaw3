@@ -148,3 +148,4 @@ number is one another session will take.
 | D-116 | Seventh reconciliation with `main` (PR #30): two capabilities the merge silently restored |
 | D-117 | Consolidating the outstanding branches, and deleting what four generations of the design left behind |
 | D-118 | One connector seam for MCP, Temporal and long-running HPC tools |
+| D-119 | Production scale: the event loop, the connection pool, and a guard that switched itself off |
