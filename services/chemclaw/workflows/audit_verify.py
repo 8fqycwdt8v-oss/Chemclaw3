@@ -22,6 +22,7 @@ from temporalio import activity, workflow
 with workflow.unsafe.imports_passed_through():
     from chemclaw.config import settings
     from scripts.verify_audit_chain import verify_chain
+    from workflows.registry import durable_activity, durable_workflow
 
 from workflows.notify import notify_session
 from workflows.publish import BAD_DATA_RETRY
@@ -31,12 +32,14 @@ from workflows.publish import BAD_DATA_RETRY
 AUDIT_ALERT_CHANNEL = "system-audit-integrity"
 
 
+@durable_activity("background")
 @activity.defn
 async def check_audit_chain() -> list[str]:
     """Verify the audit hash chain; return one problem string per break (empty means intact)."""
     return await verify_chain()
 
 
+@durable_workflow("background")
 @workflow.defn
 class AuditChainVerifyWorkflow:
     """Verify the audit chain on a cadence and alert on any break (gap SCH-5)."""

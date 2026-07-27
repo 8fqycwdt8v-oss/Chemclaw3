@@ -19,6 +19,7 @@ through the stores, because every store already resolves its own connection from
 parameter anywhere in product code. `tests/conftest.py` owns that redirect.
 """
 
+import os
 from urllib.parse import quote
 
 import psycopg
@@ -31,7 +32,13 @@ from chemclaw.db import connect
 # Not a `Settings` field on purpose: `chemclaw/config.py` is the operator-facing deployment
 # surface, and its parity tests (DA-1) require every field to be documented in `.env.example`.
 # A test-only knob does not belong there.
-TEST_SCHEMA = "chemclaw_test"
+#
+# Suffixed with the pid so two pytest runs against one database cannot collide: the session
+# fixture *drops* its schema on the way out, so a fixed name means a second run deletes the first
+# run's tables mid-flight. Found the hard way — running a single test file while the full suite
+# was going did exactly that. A hard kill can leave an orphan schema behind; it is inert, named
+# unmistakably, and dropped by the next run that happens to reuse the pid.
+TEST_SCHEMA = f"chemclaw_test_{os.getpid()}"
 
 
 def schema_dsn(dsn: str, schema: str = TEST_SCHEMA) -> str:

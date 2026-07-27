@@ -13,12 +13,14 @@ from temporalio import activity
 from bo.engine import initial_candidates, propose_candidates
 from bo.objectives import get_objective
 from bo.problem import Candidate, Observation, OptimizationProblem
+from workflows.registry import durable_activity
 
 # BoFire fitting is CPU-bound (GP fit + acquisition optimization); run it off the
 # event loop so heartbeats and concurrent activities keep flowing (the same
 # discipline as `calc.store.run_cached`).
 
 
+@durable_activity("background")
 @activity.defn
 async def propose_initial(
     problem: OptimizationProblem, n: int, seed: int | None = None
@@ -27,6 +29,7 @@ async def propose_initial(
     return await asyncio.to_thread(initial_candidates, problem, n, seed)
 
 
+@durable_activity("background")
 @activity.defn
 async def propose_next(
     problem: OptimizationProblem,
@@ -38,6 +41,7 @@ async def propose_next(
     return await asyncio.to_thread(propose_candidates, problem, observations, n, seed)
 
 
+@durable_activity("background")
 @activity.defn
 async def evaluate_candidates(
     objective_name: str, candidates: list[Candidate]

@@ -10,11 +10,17 @@ caching — the expensive half (the xTB pKa) is already memoized by `run_cached_
 is a sub-millisecond descriptor, so wrapping the composition in its own store entry would add a
 second cache for no benefit.
 
-Domain: `calc.pka` only covers neutral O-H/S-H **acids** (carboxylic acids, phenols, alcohols,
-thiols); logD here inherits that restriction and raises rather than silently mishandling a base
-or a molecule with no acidic site (gate G4) — `calc.pka`'s own `ValueError` propagates unchanged.
-A logD for basic (amine) sites follows once `calc.pka` itself covers N-H/C-H acids (noted there
-as a later extension).
+**Domain, inherited wholesale from `calc.pka`.** Neutral O-H/S-H **acids** (carboxylic acids,
+phenols, alcohols, thiols) and the conjugate acid of **aromatic or aryl nitrogen** (pyridines,
+azoles, anilines). Aliphatic amines and molecules with neither site raise — `calc.pka`'s own
+`ValueError` propagates unchanged (gate G4).
+
+That domain widened underneath this module in X11, and the widening had teeth: `predict_pka`
+began returning bases where it previously raised, and the Henderson-Hasselbalch correction runs
+in the *opposite direction* for one. `PkaResult.site` is what makes the two distinguishable, and
+`predict_logd` branches on it. Depending on a collaborator's domain is fine; depending on it
+without reading which half of the domain you were handed is what produced a two-log-unit error
+that raised nothing.
 """
 
 import math
@@ -65,7 +71,16 @@ async def predict_logd(store: ResultStore, job: LogdInput) -> LogdResult:
     mol = Chem.MolFromSmiles(pka_result.smiles)
     assert mol is not None  # pragma: no cover - guaranteed by run_cached_pka's own validation
     clogp = Crippen.MolLogP(mol)
-    log_d = clogp - math.log10(1 + 10 ** (ph - pka_result.pka))
+    # Henderson-Hasselbalch, and the sign of this exponent is the entire content of it.
+    #   acid  HA  <-> A- + H+ : the ionized fraction *rises* with pH  -> 10**(pH - pKa)
+    #   base  BH+ <-> B  + H+ : the ionized fraction *falls* with pH  -> 10**(pKa - pH)
+    # Written as a branch on `site` rather than one formula because getting it wrong is
+    # silent: before this, a base took the acid form and pyridine at pH 7.4 came out two
+    # log units too lipophobic while looking entirely ordinary. `calc.pka` only began
+    # returning bases in X11, so the acid-only formula was correct when it was written and
+    # became wrong when the predictor's domain widened underneath it.
+    exponent = ph - pka_result.pka if pka_result.site == "acid" else pka_result.pka - ph
+    log_d = clogp - math.log10(1 + 10**exponent)
     return LogdResult(
         smiles=pka_result.smiles,
         ph=ph,

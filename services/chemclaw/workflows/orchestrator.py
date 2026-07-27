@@ -23,10 +23,12 @@ from temporalio.common import RetryPolicy
 
 with workflow.unsafe.imports_passed_through():
     from chemclaw.config import settings
+    from workflows.registry import durable_activity
 
 from workflows.publish import BAD_DATA_RETRY
 
 
+@durable_activity("background")
 @activity.defn
 async def resolve_fan_out_limit() -> int:
     """Resolve the configured fan-out concurrency bound — outside workflow code, on purpose.

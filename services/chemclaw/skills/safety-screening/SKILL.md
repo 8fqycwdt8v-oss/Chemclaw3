@@ -67,3 +67,11 @@ transport classification, thermal-stability data (DSC/ARC), incompatibilities be
 the table, quantities and scale, or engineering controls. Those need an SDS, the site's EHS
 function, and — for anything energetic — a process-safety review. When a question turns on one of
 them, say so and point there rather than guessing.
+
+**Computation does not extend the screen either.** A semiempirical calculation can estimate a
+decomposition energy or the stability of an energetic motif, and a user will eventually ask for
+one. It may be used to *triage* — to decide which compounds get sent for calorimetry first — and
+it may never appear in an answer as reassurance. A computed number is not a DSC, an ARC, or a
+process-safety assessment, and "the calculation says it is fine" is exactly the false clearance
+the rule above forbids. Report the calculation as what it is, keep the screen's language
+unchanged, and still point at the process-safety review.

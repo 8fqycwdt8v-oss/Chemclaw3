@@ -35,6 +35,7 @@ class AuthorizationError(Exception):
 DEFAULT_WRITE_TOOL_GATES: frozenset[str] = frozenset(
     {
         "submit_qm_job",  # launches a durable (potentially HPC) job
+        "run_xtb_task",  # the expert escape hatch: runs a calculation the shaped tools declined
         "propose_knowledge_note",  # pushes a branch to the knowledge repo
         "record_confirmed_answer",  # pushes a branch to the knowledge repo
         "index_molecule",  # mutates the fingerprint index

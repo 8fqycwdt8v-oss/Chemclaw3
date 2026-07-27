@@ -22,6 +22,7 @@ with workflow.unsafe.imports_passed_through():
     from agents.session_events import record_session_event
     from chemclaw.config import settings
     from workflows.publish import BAD_DATA_RETRY
+    from workflows.registry import durable_activity
 
 
 class SessionEventInput(BaseModel):
@@ -51,6 +52,7 @@ def _dedupe_key(workflow_id: str, run_id: str, kind: str, payload: dict[str, Any
     return f"{workflow_id}:{run_id}:{kind}:{digest}"
 
 
+@durable_activity("background")
 @activity.defn
 async def record_session_event_activity(event: SessionEventInput) -> None:
     """Persist a push-back event for a session (called by a completing workflow).

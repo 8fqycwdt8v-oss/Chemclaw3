@@ -44,16 +44,17 @@ from agents import attachments as _attachments  # noqa: F401
 from agents import bo_tools as _bo_tools  # noqa: F401
 from agents import calc_tools as _calc_tools  # noqa: F401
 from agents import chem_tools as _chem_tools  # noqa: F401
-from agents import conformer_tools as _conformer_tools  # noqa: F401
 from agents import dialogue_tools as _dialogue_tools  # noqa: F401
 from agents import durable_tools as _durable_tools  # noqa: F401
 from agents import graph_tools as _graph_tools  # noqa: F401
+from agents import job_status as _job_status  # noqa: F401
 from agents import memory_tools as _memory_tools  # noqa: F401
 from agents import preferences as _preferences  # noqa: F401
 from agents import qm_tools as _qm_tools  # noqa: F401
 from agents import research_tools as _research_tools  # noqa: F401
 from agents import safety_tools as _safety_tools  # noqa: F401
 from agents import subscriptions as _subscriptions  # noqa: F401
+from agents import xtb_expert_tools as _xtb_expert_tools  # noqa: F401
 from agents.audit import AuditSink, make_audit_middleware
 from agents.llm_provider import build_chat_client
 from agents.profiles import AgentProfile, get_profile
@@ -91,7 +92,7 @@ _INSTRUCTIONS = (
     "a hit's SMILES to reach the reactions using it). "
     "(3) For properties use compute_xtb_energy / predict_pka / predict_solubility (inline, "
     "cached); heavy QM goes through submit_qm_job (returns a job id — report it, poll with "
-    "get_qm_job_status). (4) To answer 'which experiment/condition next', call "
+    "get_job_status). (4) To answer 'which experiment/condition next', call "
     "suggest_next_experiment: build the decision space and the runs-so-far from the evidence "
     "you gathered, and it returns the point(s) to try next (proposals a human runs).\n"
     "Be proactive with tools, not just when asked to compute: when a question turns on a "
@@ -361,27 +362,59 @@ def _capability_tools(profile: AgentProfile | None = None) -> list[Any]:
     subset — attenuation only, never widening. A name that no built tool provides is a loud error
     (fail-fast) rather than a silently-empty toolset. `None` (the default profile) advertises the
     full surface, so the classic path and the registry tests build the complete set unchanged.
+
+    **`tool_names` narrows across both transports.** A profile names capabilities, not processes:
+    listing `predict_pka` must keep working now that X8 hosts it on `mcp-calc` rather than
+    in-process, or every profile would have become a statement about deployment. So a name that no
+    in-process tool provides is matched against the configured servers' `allowed_tools`, and the
+    server is attached with its allowed set *intersected* down to what the profile asked for.
+    Still attenuation only: naming one tool of a server grants that tool, never the server.
     """
     prof = profile if profile is not None else get_profile(None)
+    specs = list(settings.mcp_servers)
     inprocess = registered_tools()
     if prof.tool_names is not None:
-        inprocess = _narrow(inprocess, prof.tool_names, prof.name, "tool")
-    mcp: list[Any] = list(_mcp_capability_tools())
+        served = {name for spec in specs for name in (spec.allowed_tools or ())}
+        inprocess = _narrow(inprocess, prof.tool_names, prof.name, "tool", also_known=served)
+        specs = [narrowed for spec in specs if (narrowed := _restrict(spec, prof.tool_names))]
+    mcp: list[Any] = [_mcp_tool(spec) for spec in specs]
     if prof.mcp_server_names is not None:
         mcp = _narrow(mcp, prof.mcp_server_names, prof.name, "MCP server")
     return [*inprocess, *mcp]
 
 
-def _narrow(tools: list[Any], keep: frozenset[str], profile_name: str, kind: str) -> list[Any]:
+def _restrict(spec: McpServerSpec, keep: frozenset[str]) -> McpServerSpec | None:
+    """Narrow one server's `allowed_tools` to `keep`, or drop the server if nothing survives.
+
+    A copy rather than a mutation: `settings.mcp_servers` is shared, and a profile must not
+    narrow the surface for everyone else. Returning None for an empty intersection is what stops
+    a profile from attaching a subprocess it will never call.
+    """
+    allowed = set(spec.allowed_tools or ())
+    kept = sorted(allowed & keep) if allowed else []
+    return spec.model_copy(update={"allowed_tools": kept}) if kept else None
+
+
+def _narrow(
+    tools: list[Any],
+    keep: frozenset[str],
+    profile_name: str,
+    kind: str,
+    also_known: set[str] | None = None,
+) -> list[Any]:
     """Keep only tools whose advertised name is in `keep`, raising if `keep` names an absent tool.
 
     MAF advertises an in-process tool under its `__name__` and an MCP server under its `.name`;
     both expose the advertised name, so `getattr(t, "name", t.__name__)` reads either. A profile
     listing a name nothing provides is a configuration error surfaced at build time, not a tool
     that silently vanishes from the agent's surface.
+
+    `also_known` are names provided by another transport — the MCP servers' `allowed_tools`. They
+    do not survive *this* filter (they are not in-process tools) but they are not unknown either,
+    and treating them as unknown is how X8 would have broken every profile naming a calculator.
     """
     available = {getattr(t, "name", None) or t.__name__: t for t in tools}
-    unknown = keep - available.keys()
+    unknown = keep - available.keys() - (also_known or set())
     if unknown:
         raise ValueError(
             f"agent profile {profile_name!r} lists unknown {kind}(s) {sorted(unknown)}; "

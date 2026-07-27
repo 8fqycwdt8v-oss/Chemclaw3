@@ -13,7 +13,7 @@ import psycopg
 from psycopg.rows import TupleRow
 from psycopg.types.json import Jsonb
 
-from calc.store import CalculationKey, StoredResult
+from calc.store import CalculationKey, ResultStore, StoredResult
 from chemclaw import db
 from chemclaw.config import settings
 
@@ -86,3 +86,16 @@ class PostgresStore:
                     ),
                 )
             await conn.commit()
+
+
+def default_store() -> ResultStore:
+    """Return the production result store.
+
+    The one place that names the production backend, so a tool module does not have to
+    know which one it is. Every tool that needs a store imports this and tests swap it at
+    the importing module (`monkeypatch.setattr(<module>, "default_store", ...)`) — it lives
+    here rather than in one tool module because storage is not a calculator concept, and
+    the BO featurizer needs the same seam as the calculators (Rule of Three: two callers
+    plus the test seam, one definition).
+    """
+    return PostgresStore()

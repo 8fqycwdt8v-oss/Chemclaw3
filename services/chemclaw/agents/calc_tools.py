@@ -1,68 +1,63 @@
-"""Agent tools for the fast calculators (plan step 1c.5).
+"""Agent tools for the calculations that submit durable jobs (plan 1c.5, xTB X8).
 
-Exposes cached calculators to the MAF agent as callable tools. Unlike the QM/HPC
-path, fast calculators run **inline** (sub-second) — no durable workflow is
-needed; the calculation store (Phase 1b) already makes a repeat call free and
-idempotent. `default_store` names the production backend and is the seam tests
-swap for an in-memory store.
+What is left here after the calculators moved to `mcp_servers/calc` (X8): the five tools that
+route to Temporal above a cost threshold, plus the prediction ledger (`report_measurement`,
+`calculator_trust`), which records and scores what the calculators claimed rather than computing
+anything itself.
+
+The job-routing five stay in-process for one reason, and it is not chemistry — submitting a
+durable job needs `require_actor()` and `get_current_session_id()`, the turn's authenticated user
+and the conversation to notify. Both are **ambient**, and the F4-T3 rule is that they are never
+model-supplied; an MCP server has neither and could only receive them as arguments, which would
+make identity a model-authored value.
+
+So these are the tools that *decide and delegate* rather than compute: they price the request
+(`calc.xtb_cost`), run it inline when it is cheap, and hand back a job id when it is not. The
+computation itself is the same `calc/` code the MCP server hosts.
+
+**`_log_prediction` went with the calculators.** It hooks `predict_pka` and `predict_solubility`,
+and those are `mcp-calc` tools since X8 — so the hook lives at *that* tool layer
+(`mcp_servers/calc/server.py`), which is still the boundary where a prediction becomes advice.
+It needs no ambient identity: the ledger is keyed on the canonical SMILES, not on who asked.
 """
 
+import numpy as np
+
 from agents.tool_registry import tool
-from calc.calibration import (
-    Calibration,
-    PredictionRecord,
-    calibration_for,
-    record_observation,
-    record_prediction,
-)
+from agents.xtb_job_tools import DeferredJob, defer_to_job
+from calc.calibration import Calibration, calibration_for, record_observation
+from calc.complexes import ComplexSpec, InteractionResult, run_cached_interaction
+from calc.conformers import ConformerEnsemble, ConformerSpec, run_cached_ensemble
+from calc.crest_cli import CrestEffort, EnsembleSearch
 from calc.descriptors import DescriptorInput, DescriptorProfile, run_cached_descriptor_profile
 from calc.logd import LogdInput, LogdResult
 from calc.logd import predict_logd as _predict_logd
-from calc.pka import PkaInput, PkaResult, run_cached_pka
-from calc.postgres_store import PostgresStore
-from calc.reaction_energy import (
-    ReactionEnergyInput,
+from calc.postgres_store import default_store
+from calc.reaction import (
     ReactionEnergyResult,
-    ReactionSpecies,
+    ReactionLevel,
+    SolventComparisonResult,
+    compare_solvent_effects,
 )
-from calc.reaction_energy import (
-    estimate_reaction_energy as _estimate_reaction_energy,
+from calc.reaction import compute_reaction_energy as _compute_reaction_energy
+from calc.structure import structure_from_smiles
+from calc.xtb_cost import (
+    ensemble_seconds,
+    exceeds_inline_budget,
+    reaction_seconds,
+    scan_seconds,
 )
-from calc.solubility import SolubilityInput, SolubilityResult, run_cached_solubility
-from calc.store import ResultStore
-from calc.xtb import XtbInput, XtbResult, run_cached_xtb
+from calc.xtb_scan import ScanResult, ScanSpec, run_cached_scan
 from chemclaw.chem import canonical_smiles
+from chemclaw.config import settings
 from chemclaw.ids import stable_hash
-
-
-def default_store() -> ResultStore:
-    """Return the production result store (Postgres). Overridden in tests."""
-    return PostgresStore()
-
-
-async def _log_prediction(
-    calc_type: str, smiles: str, value: float, uncertainty: float | None, unit: str
-) -> None:
-    """Record a prediction for later reconciliation against a measurement (gap IDEA-2).
-
-    Hooked at the *tool* layer rather than inside the calculators, because this is the boundary
-    where a prediction becomes advice a chemist acts on — a cache hit deep in a workflow does not
-    need re-logging, and the ledger is keyed on the input, not on how often it was read.
-
-    The subject key is the canonical SMILES, the same identity the calculation cache uses, so a
-    measurement of the same molecule meets its prediction without a second naming scheme.
-    """
-    canonical = canonical_smiles(smiles)
-    await record_prediction(
-        PredictionRecord(
-            calc_type=calc_type,
-            input_hash=stable_hash(canonical),
-            subject=canonical,
-            predicted_value=value,
-            predicted_uncertainty=uncertainty,
-            unit=unit,
-        )
-    )
+from workflows.models import (
+    ComplexJobSpec,
+    EnsembleJobSpec,
+    ReactionJobSpec,
+    ScanJobSpec,
+    SolventScreenJobSpec,
+)
 
 
 @tool
@@ -120,61 +115,266 @@ async def calculator_trust(property_name: str) -> Calibration:
 
 
 @tool
-async def compute_xtb_energy(smiles: str, charge: int = 0) -> XtbResult:
-    """Compute the GFN2-xTB total energy of a molecule (fast, semiempirical).
+async def scan_coordinate(
+    smiles: str,
+    atoms: list[int],
+    start: float,
+    stop: float,
+    points: int = 13,
+    solvent: str | None = None,
+) -> ScanResult | DeferredJob:
+    """Map the energy along one bond, angle or torsion while everything else relaxes.
 
-    Runs a quick semiempirical single point (no HPC). Results are cached, so
-    repeating the same molecule and charge is free and returns instantly.
+    Answers the shape questions a single optimization cannot: how high is the barrier
+    to rotating a bond (an atropisomer that interconverts freely is not a separate
+    stereoisomer; one that does not, is), which torsion angles a molecule actually
+    adopts, and how the energy rises as a ring closes or a bond stretches.
+
+    Give two atom indices for a bond length (Angstrom), three for an angle or four for
+    a torsion (degrees). They must be bonded in sequence. Indices match the heavy atoms
+    of the canonical SMILES, with hydrogens following them — check them with
+    `compute_electronic_properties` if you are unsure which atom is which.
+
+    The highest point of the profile is an estimate of a rotational barrier, not an
+    optimized transition state; for a bond being broken, treat it as a sketch only.
 
     Args:
         smiles: The molecule as a SMILES string.
-        charge: Net molecular charge (0 = neutral).
+        atoms: Two, three or four atom indices defining the coordinate.
+        start: First value of the coordinate (Angstrom or degrees).
+        stop: Last value of the coordinate.
+        points: How many evenly spaced values to compute, `start` to `stop` inclusive.
+        solvent: Optional implicit solvent name; omit for gas phase.
 
     Returns:
-        The method, charge, and total energy in Hartree.
+        The relaxed energy profile in kcal/mol relative to its own lowest point, the
+        coordinate value at that minimum, and the highest point of the profile.
     """
-    result, _ = await run_cached_xtb(default_store(), XtbInput(smiles=smiles, charge=charge))
+    if points < 2 or points > settings.xtb_scan_max_points:
+        raise ValueError(f"points must be between 2 and {settings.xtb_scan_max_points}")
+    values = [float(value) for value in np.linspace(start, stop, points)]
+    predicted = scan_seconds(smiles, points)
+    if exceeds_inline_budget(predicted):
+        return await defer_to_job(
+            ScanJobSpec(smiles=smiles, atoms=atoms, values=values, solvent=solvent), predicted
+        )
+    structure = structure_from_smiles(smiles, multiplicity=None, optimize=True)
+    spec = ScanSpec(solvent=solvent, atoms=tuple(atoms), values=tuple(values))
+    result, _ = await run_cached_scan(default_store(), structure, spec)
     return result
 
 
 @tool
-async def predict_solubility(smiles: str) -> SolubilityResult:
-    """Predict aqueous solubility (log S, mol/L) of a molecule, with uncertainty.
+async def compute_reaction_energy(
+    reactants: list[str],
+    products: list[str],
+    solvent: str | None = None,
+    temperature_k: float = 0.0,
+    level: ReactionLevel = "standard",
+) -> ReactionEnergyResult | DeferredJob:
+    """Compute the energy, enthalpy and free energy of a balanced reaction (GFN2-xTB).
 
-    Uses a fast property model; the result reports an uncertainty that you should
-    pass on to the user rather than treating the value as exact. Cached, so repeats
-    are free.
+    The composite that answers "does this go?". Every species is optimized the same
+    way, in the same solvent, and — at `standard` level — given its own frequency
+    calculation, so the comparison is internally consistent. List each species once per
+    stoichiometric equivalent (two waters is `["O", "O"]`).
+
+    The equation must balance in atoms and charge; an unbalanced one is rejected rather
+    than returning a difference that includes the missing atoms. Radicals written with
+    explicit radical electrons (`[CH3]`, `[OH]`) are handled, so homolysis and bond
+    dissociation energies work.
+
+    A negative ΔG means products are favoured *at equilibrium*. It says nothing about
+    rate: there are no transition states here, so a strongly downhill reaction may
+    still not happen at room temperature. Quote the reported uncertainty — a
+    semiempirical reaction free energy is for comparing related reactions, not for a
+    number in a report.
 
     Args:
-        smiles: The molecule as a SMILES string.
+        reactants: SMILES of each reactant, repeated per equivalent.
+        products: SMILES of each product, repeated per equivalent.
+        solvent: Optional implicit solvent name; omit for gas phase.
+        temperature_k: Temperature for the thermal corrections; 0 uses 298.15 K.
+        level: "standard" gives ΔE, ΔH and ΔG; "quick" optimizes only and gives ΔE.
 
     Returns:
-        The predicted log solubility, its uncertainty, and the model used.
+        The deltas in kcal/mol, the per-species breakdown, how many species were served
+        from cache, the method uncertainty, and any warnings about the calculation.
     """
-    result, _ = await run_cached_solubility(default_store(), SolubilityInput(smiles=smiles))
-    await _log_prediction(
-        "solubility", smiles, result.log_s_mol_per_l, result.uncertainty_log, "log S"
+    predicted = reaction_seconds(
+        reactants + products, hessian=level != "quick", ensemble=level == "thorough"
+    )
+    if exceeds_inline_budget(predicted):
+        return await defer_to_job(
+            ReactionJobSpec(
+                reactants=reactants,
+                products=products,
+                solvent=solvent,
+                temperature_k=temperature_k or None,
+                level=level,
+            ),
+            predicted,
+        )
+    return await _compute_reaction_energy(
+        default_store(), reactants, products, solvent, temperature_k or None, level
+    )
+
+
+@tool
+async def compare_solvents(
+    reactants: list[str],
+    products: list[str],
+    solvents: list[str],
+    temperature_k: float = 0.0,
+    level: ReactionLevel = "standard",
+) -> SolventComparisonResult | DeferredJob:
+    """Rank solvents by how far each pushes the same reaction toward its products.
+
+    Runs the reaction in each solvent plus the gas phase and orders them by free
+    energy. Useful for the thermodynamic half of a solvent choice — which medium
+    stabilizes the products relative to the starting materials.
+
+    It is an implicit continuum model: it sees the solvent's polarity and nothing else.
+    Specific hydrogen bonding, coordination, ion pairing, phase behaviour and
+    solubility are invisible, and those often decide a real solvent choice. Check
+    `spread_kcal` against the uncertainty before believing an ordering — when the
+    solvents span less than the method's error, the calculation has not distinguished
+    them and saying so is the correct answer.
+
+    Args:
+        reactants: SMILES of each reactant, repeated per equivalent.
+        products: SMILES of each product, repeated per equivalent.
+        solvents: Implicit solvent names to compare (e.g. ["water", "thf", "toluene"]).
+        temperature_k: Temperature for the thermal corrections; 0 uses 298.15 K.
+        level: "standard" gives ΔG; "quick" optimizes only and ranks on ΔE.
+
+    Returns:
+        One entry per solvent plus the gas phase, most favourable first, with the
+        spread across them and a warning when that spread is inside the uncertainty.
+    """
+    predicted = reaction_seconds(
+        reactants + products,
+        hessian=level != "quick",
+        repeats=len(solvents) + 1,
+        ensemble=level == "thorough",
+    )
+    if exceeds_inline_budget(predicted):
+        return await defer_to_job(
+            SolventScreenJobSpec(
+                reactants=reactants,
+                products=products,
+                solvents=solvents,
+                temperature_k=temperature_k or None,
+                level=level,
+            ),
+            predicted,
+        )
+    return await compare_solvent_effects(
+        default_store(), reactants, products, solvents, temperature_k or None, level
+    )
+
+
+@tool
+async def compute_interaction_energy(
+    smiles_a: str,
+    smiles_b: str,
+    solvent: str | None = None,
+    effort: CrestEffort = "quick",
+) -> InteractionResult | DeferredJob:
+    """Find how two molecules bind to each other, and how strongly (GFN2-xTB + CREST).
+
+    The only tool here that answers a question about **two molecules together**. Use it
+    for an API with an excipient, a substrate with a catalyst or additive, a solute with
+    a solvent molecule, a host with a guest — anything where the question is association
+    rather than reaction. It searches binding modes rather than assuming one, so the
+    answer describes how the pair actually arranges itself.
+
+    Read the number with three limits. It is an **energy, not a free energy**: two
+    molecules becoming one costs entropy, and that term is not included — a favourable
+    interaction energy does not by itself mean the complex exists at room temperature,
+    and for weak pairs the missing term is comparable to the whole interaction. The
+    search is **stochastic**, so a mode that was not sampled is not reported. And it is
+    one isolated pair in a continuum: no bulk, no competing solvent, no stoichiometry
+    beyond two.
+
+    Validated against high-level reference values: the water dimer comes out at −4.97
+    against a reference −5.0 kcal/mol, ammonia dimer −2.9 against −3.1, methane dimer
+    −0.4 against −0.5. Treat magnitudes of a few kcal/mol as meaningful and differences
+    below ~0.5 as noise.
+
+    Args:
+        smiles_a: The first molecule as a SMILES string.
+        smiles_b: The second molecule as a SMILES string.
+        solvent: Optional implicit solvent name; omit for gas phase.
+        effort: "quick" for screening; raise it when a missed binding mode matters.
+
+    Returns:
+        The interaction energy in kcal/mol (negative = bound), how many binding modes
+        were found, and the geometry of the best one.
+    """
+    # Priced on the *pair*, not on the two monomers summed. The search runs over the
+    # combined system, and the cost model's exponent is ~3 (D-100) — so two 30-atom
+    # partners cost 60^3, roughly four times the 2 x 30^3 that summing them predicts.
+    # Under-pricing here would run a minutes-long search inline instead of deferring it.
+    predicted = ensemble_seconds(f"{smiles_a}.{smiles_b}")
+    if exceeds_inline_budget(predicted):
+        return await defer_to_job(
+            ComplexJobSpec(smiles_a=smiles_a, smiles_b=smiles_b, solvent=solvent, effort=effort),
+            predicted,
+        )
+    result, _ = await run_cached_interaction(
+        default_store(), smiles_a, smiles_b, ComplexSpec(solvent=solvent, effort=effort)
     )
     return result
 
 
 @tool
-async def predict_pka(smiles: str) -> PkaResult:
-    """Predict the pKa of a molecule's most acidic O-H/S-H site via GFN2-xTB.
+async def sample_conformers(
+    smiles: str,
+    search: EnsembleSearch = "conformers",
+    solvent: str | None = None,
+    effort: CrestEffort = "quick",
+) -> ConformerEnsemble | DeferredJob:
+    """Search a molecule's conformers, tautomers or protonation sites (CREST).
 
-    Uses a semiempirical solvated deprotonation-energy method with a linear
-    calibration; the result reports an uncertainty (~1.6 pKa units) that you
-    should pass on. Only O-H/S-H acids (carboxylic acids, phenols, alcohols,
-    thiols) are supported; an error is returned if there is no such site. Cached.
+    Every other calculation here describes **one** shape of the molecule. This searches
+    the space properly by metadynamics and returns what is actually populated, with
+    Boltzmann populations at room temperature.
+
+    Choose `search` by the question:
+    - "conformers": which 3D shapes the molecule adopts, and in what proportion. Also
+      gives the conformational entropy that every single-conformer free energy is missing.
+    - "tautomers": which tautomer dominates. Worth asking *first* about any molecule with
+      an amide, an enol, or a heterocyclic N-H, because every other number — a pKa, a
+      reactivity ranking, a reaction energy — describes whichever tautomer was drawn.
+    - "protomers" / "deprotomers": where the molecule protonates or deprotonates, ranked.
+
+    Two things to read carefully. The search is **stochastic**: it samples rather than
+    enumerates, so populations are approximate and two runs differ slightly (results are
+    cached, so a given molecule stays consistent once computed). And it is by far the
+    most expensive calculation available here — minutes for a small molecule, longer for
+    a real substrate — so it will usually return a job id rather than a result.
 
     Args:
         smiles: The molecule as a SMILES string.
+        search: Which space to sample.
+        solvent: Optional implicit solvent name; omit for gas phase.
+        effort: "quick" for screening, "normal" or "extensive" when a missed conformer
+            would change the answer.
 
     Returns:
-        The predicted pKa, the deprotonation energy, and the uncertainty.
+        The populated members with their relative energies and populations, the
+        conformational entropy, and how many were found in total.
     """
-    result, _ = await run_cached_pka(default_store(), PkaInput(smiles=smiles))
-    await _log_prediction("pka", smiles, result.pka, result.uncertainty, "pKa")
+    predicted = ensemble_seconds(smiles)
+    if exceeds_inline_budget(predicted):
+        return await defer_to_job(
+            EnsembleJobSpec(smiles=smiles, search=search, solvent=solvent, effort=effort),
+            predicted,
+        )
+    structure = structure_from_smiles(smiles, multiplicity=None, optimize=True)
+    spec = ConformerSpec(search=search, solvent=solvent, effort=effort)
+    result, _ = await run_cached_ensemble(default_store(), structure, spec)
     return result
 
 
@@ -217,30 +417,3 @@ async def predict_logd(smiles: str, ph: float | None = None) -> LogdResult:
         uncertainty (state it — this is not an exact value).
     """
     return await _predict_logd(default_store(), LogdInput(smiles=smiles, ph=ph))
-
-
-@tool
-async def estimate_reaction_energy(
-    reactants: list[ReactionSpecies], products: list[ReactionSpecies]
-) -> ReactionEnergyResult:
-    """Estimate a reaction's GFN2-xTB electronic energy and flag if it is strongly exothermic.
-
-    A process-safety screening signal, not a validated heat of reaction: it omits entropy,
-    solvation beyond xTB's implicit model, and phase changes. Use it the way the structural
-    hazard screen is used — to flag attention, never to certify a reaction is safe to scale.
-    Each species is a cached xTB single point, so reactions sharing species with an
-    earlier one are mostly free to re-score.
-
-    Args:
-        reactants: The reactant side, each species with its SMILES, net charge, and
-            stoichiometric coefficient (must be a balanced equation — this does not check
-            atom/mass balance for you).
-        products: The product side, same shape as `reactants`.
-
-    Returns:
-        The reaction electronic energy in kcal/mol, whether it crosses the configured
-        exotherm threshold, and the threshold itself so the flag can be checked.
-    """
-    return await _estimate_reaction_energy(
-        default_store(), ReactionEnergyInput(reactants=reactants, products=products)
-    )

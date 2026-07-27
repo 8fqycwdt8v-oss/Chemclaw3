@@ -61,3 +61,41 @@ def test_nonexistent_configured_dir_is_reported(tmp_path: Path) -> None:
     good.write_text("---\nname: good-skill\ndescription: works\n---\nBody.\n", encoding="utf-8")
     problems = validate_skills([str(tmp_path / "real"), str(tmp_path / "typo")])
     assert any("typo" in p and "does not exist" in p for p in problems)
+
+
+def test_a_declared_tool_resolves_whether_it_is_in_process_or_on_an_mcp_server() -> None:
+    """A skill names a capability; which process delivers it is a deployment decision.
+
+    X8 moved seven calculators out to `mcp-calc`, and no skill changed — because a
+    declaration resolves against both registries. If it did not, moving a tool between
+    transports would break every skill that teaches it, which would make the deployment
+    shape a property of the judgment layer.
+    """
+    from agents.skill_manifest import SkillManifest
+    from chemclaw.config import settings
+    from scripts.validate_skills import _dependency_problems
+
+    served_by_mcp = {
+        name for server in settings.mcp_servers for name in (server.allowed_tools or [])
+    }
+    assert "predict_pka" in served_by_mcp  # moved out of process by X8
+
+    manifest = SkillManifest(
+        name="probe",
+        description="probe",
+        tools=["predict_pka", "compute_reaction_energy"],  # one MCP, one in-process
+    )
+    assert _dependency_problems(Path("probe/SKILL.md"), manifest) == []
+
+
+def test_an_invented_tool_is_still_rejected() -> None:
+    """Widening the lookup must not weaken it: an unknown name is still a failure."""
+    from agents.skill_manifest import SkillManifest
+    from scripts.validate_skills import _dependency_problems
+
+    problems = _dependency_problems(
+        Path("probe/SKILL.md"),
+        SkillManifest(name="probe", description="probe", tools=["no_such_tool"]),
+    )
+    assert len(problems) == 1
+    assert "no_such_tool" in problems[0]
