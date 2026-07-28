@@ -174,27 +174,35 @@ the gold corpus outside `knowledge_dir` is what makes recall/precision reproduci
 of the live graph. The seed corpus was written alongside it instead, and a test asserts they share
 no ids.
 
-## 7. DEP-1 — how `knowledge_dir` is populated in a cluster
+## 7. How `knowledge_dir` is populated in a cluster — and what the seed corpus changes
 
-Assessed rather than solved, because the answer is a deployment decision and not a code change.
+**Correction.** An earlier revision of this section said this was "assessed rather than solved" and
+that "nothing in this repository does that pull today". That was wrong, and it was wrong because it
+was reasoned from `settings.knowledge_path` and `kg/git_submitter.py` without reading `deploy/`.
+DEP-1 and DEP-2 were closed in Wave 0 (`BACKLOG.md`, "Done — W0 deployment truth"), and the shape
+they took is the one this section went on to recommend.
 
-Readers resolve `settings.knowledge_path` = `note_repo_dir / knowledge_dir`. `note_repo_dir` must
-be a **dedicated clone** of the knowledge repository — `kg/git_submitter.py` refuses the process's
-own checkout, because every submission runs `reset --hard` + `clean -fd`. So in a cluster the notes
-arrive by *cloning that repository into the pod*, and staying current means pulling it: nothing in
-this repository does that pull today.
+**What actually exists.** `deploy/knowledge-sync.sh` runs in three modes off one clone-or-refresh
+core: `once` as an init container (so a pod never serves traffic against an empty graph), `loop` as
+a refresh sidecar on `knowledge.sync.intervalSeconds` (so a merged note reaches a live pod without
+a redeploy), and `checkout` to provision the background worker's separate *writable* clone for the
+PR-gate submitter. The refresh is `fetch` + `reset --hard`, never `pull`, because a read replica
+must not be able to land on a merge conflict; the submitter's clone is a different directory,
+because `git checkout -B` switches a whole working tree. `tests/test_deploy_chart.py` gates both.
 
-The three viable shapes, in the order they should be considered:
+**What the seed corpus adds, which is new and worth stating plainly.** The published tree is
+written with `rsync -a --delete`, so the two configurations differ in a way that is silent:
 
-1. **An init container that clones, plus a sidecar that pulls on a schedule.** Simplest, matches
-   the existing `note_repo_dir` contract exactly, and every pod gets a consistent tree. The
-   staleness window is the pull interval.
-2. **A `ReadWriteMany` volume shared by the pods that read and the pod that submits.** Removes the
-   duplication, but requires an RWX storage class, which no OpenShift default guarantees — the same
-   objection that ruled out a filesystem CAS in D-124.
-3. **A periodic Temporal job doing the pull on `background-jobs`,** reusing the machinery already
-   there. Attractive because it needs no new infrastructure, but it makes the chat pod's evidence
-   depend on a worker pod's schedule, which is a coupling worth naming before choosing it.
+| `knowledge.sync.repoUrl` | What a pod serves |
+|---|---|
+| empty (default) | the corpus baked into the image — now the 37 seed notes rather than an empty directory |
+| set | the remote branch's `knowledge/` subtree, which **replaces** the shipped corpus on the first sync |
 
-The seed corpus makes this pressing in a way an empty `knowledge/` did not: there is now content
-whose absence in a pod would be visible.
+So a deployment that points `repoUrl` at its own knowledge repository loses the seed notes unless
+it commits them there. That is the right default — the remote is the source of truth, and a pod
+silently merging image content into a curated corpus would be worse — but it is the kind of thing
+that is obvious only after it happens. It is now recorded in `knowledge/README.md` as well.
+
+The seed corpus also makes the empty-`repoUrl` path genuinely useful for the first time: a
+dev or demo deployment now gets a graph with real shape instead of one that validates because it
+contains nothing.
