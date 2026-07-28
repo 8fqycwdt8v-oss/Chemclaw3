@@ -132,6 +132,43 @@ def test_a_pool_must_hold_at_least_one_agent() -> None:
         AgentPool(lambda _profile: _Agent(0), size=0)
 
 
+def test_a_failing_factory_does_not_burn_a_slot() -> None:
+    """A factory that raises must not consume pool capacity — or the pod deadlocks permanently.
+
+    Counting the agent before building it meant a raising factory left `_built` describing an
+    agent that was never created and never returned to the free queue. After `size` such failures
+    the pool could neither build (it believed it was full) nor hand one out (nothing was ever put),
+    so every later turn blocked until the front door's turn timeout, forever, on a pod still
+    reporting healthy.
+
+    This is reachable: `build_agent` constructs the chat client, which reads the TLS CA bundle from
+    disk and requires a credential — so a pod taking its first turns before its secret volume is
+    populated hits exactly this. The failures here exhaust `size` twice over to prove the slot is
+    genuinely reclaimed rather than merely delayed.
+    """
+    attempts = 0
+
+    def _factory(_profile: str | None) -> _Agent:
+        nonlocal attempts
+        attempts += 1
+        if attempts <= 4:  # twice the pool size, all failing
+            raise RuntimeError("credential volume not ready")
+        return _Agent(attempts)
+
+    pool = AgentPool(_factory, size=2)
+
+    async def _run() -> object:
+        for _ in range(4):
+            with pytest.raises(RuntimeError, match="credential volume not ready"):
+                async with pool.lease():
+                    pass
+        # The pool must still be able to build once the transient cause clears.
+        async with pool.lease() as agent:
+            return agent
+
+    assert asyncio.run(asyncio.wait_for(_run(), timeout=5)) is not None
+
+
 async def _gather(turn: object, count: int) -> None:
     """Run `count` copies of `turn` concurrently."""
     await asyncio.gather(*(turn() for _ in range(count)))  # type: ignore[operator]

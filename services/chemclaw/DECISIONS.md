@@ -5487,3 +5487,135 @@ conflict, calculation crosslinks including an artifact reference. The original p
 directory's README states it is kept outside `knowledge_dir` precisely so the recall/precision
 numbers stay independent of the live graph. The two are separate, and a test asserts they share no
 ids.
+## D-136 — The shipped defaults were never executed: three configurations that fail on first contact
+
+An intense review of the agentic system, asked to find ways to make it faster *and* more reliable
+at once. The performance leads it started from were mostly already fixed (D-119 pooling, D-121
+multi-process, the gathered retriever fan-out), so what it found instead was a class of defect the
+1176-test suite is structurally unable to see, and three live instances of it.
+
+**The class: a value that is only wrong at a boundary no test crosses.** Every test injects a fake
+chat client, so no test has ever sent a generation parameter to a real model endpoint. Every chart
+test constructs `Settings(**helm_values)`, so no test has ever *executed* a production config
+value. Both suites are green, thorough, and blind in the same direction — they validate shapes,
+and these defects are all about what happens when a shape meets a real system.
+
+**Instance 1 — the default config could not complete a single turn.** `build_agent` always put
+`temperature` on the wire from `llm_temperature` (default `0.0`). The shipped `agent_model`,
+claude-sonnet-5, rejects it: `400 invalid_request_error: temperature is deprecated for this
+model`. Every turn on the default Anthropic path failed on first contact. Found by capturing the
+real outgoing request for one turn. `llm_temperature` is now `float | None`, unset by default, and
+the key is omitted from `ChatOptions` entirely when None — omitting is not the same as sending
+null, which the API also rejects.
+
+**Instance 2 — the shipped chart could not start a pod.** `values.yaml` sets
+`CHEMCLAW_OTEL_ENABLED: "true"`; no OpenTelemetry SDK or OTLP exporter was declared in
+`pyproject.toml`. `configure_telemetry()` runs unconditionally at process start in the front door,
+the background worker and every connector worker, so all of them raised and the ASGI lifespan
+returned `lifespan.startup.failed`. On a real cluster the whole deployment CrashLoopBackOffs;
+only the six connector MCP servers stay up, serving tools no agent can reach. The dependencies are
+now declared, and the new test *executes* `configure_telemetry()` under the shipped value.
+
+**Instance 3 — a raising agent factory deadlocked the pod permanently.** `AgentPool._checkout`
+incremented `_built` before calling the factory, so a factory that raised burned a slot: the pool
+counted an agent that never existed and never reached the free queue. After `size` such failures
+it could neither build nor hand one out, and every later turn blocked for the full
+`service_turn_timeout_seconds`, forever, on a pod still reporting healthy. Reachable: the factory
+reads the TLS CA bundle from disk and requires a credential, so a cold pod taking its first turns
+before its secret volume is populated hits exactly this. The count is now committed only after the
+agent exists.
+
+**Also landed, from the same review — the per-turn connector seam, three consequences of one
+design decision.** A connector tool is built fresh per turn, which is a correctness requirement
+(D-118). Three things followed from it that were not intended:
+
+- *Every connector call was capped at 5 s.* The per-turn `httpx.AsyncClient` was constructed with
+  no `timeout=`, so httpx's 5 s default applied to every phase, while `request_timeout` bounded
+  only the MCP application-level wait. Measured against a real server: an 8 s tool call had its
+  HTTP stream torn down at 5 s, the MCP response never arrived, and the caller then blocked for the
+  *full* `request_timeout` before failing — 60 s for calc, holding an admission permit and an agent
+  lease throughout. `request_timeout` was not preventing a hang; it was setting its length. A tool
+  slower than 5 s is ordinary here: an uncached `predict_pka` runs xTB inline.
+- *Six `httpx.AsyncClient`s leaked per turn.* Neither layer below takes ownership of a
+  caller-supplied client — MCP enters it into an exit stack only when it created it, and MAF's
+  `close()` never touches it. The same leak class D-119 fixed for Postgres, on the connector side.
+  `DegradingHttpConnector` now closes what it was handed.
+- *The six connects were serial.* `connectors.health.probe_connectors` already gathers its probes
+  with the rationale "the sum of the timeouts rather than the slowest one"; the path every turn
+  actually takes did not. Gathering is safe for the per-turn-instance rule, which is about object
+  lifetime rather than connect ordering, and MAF runs each connector's lifecycle on its own task.
+
+**Measured, and the reason caching is the next thing worth doing.** Capturing the real request for
+one turn: the fixed prefix is **14,595 tokens** before the chemist says anything — 3,463 of system
+instructions plus skills manifest, 11,132 of tool schemas — rising to ~20.5 k once the connector
+MCP tools are attached. There is no prompt caching anywhere in first-party code (`cache_control`
+appears zero times), so that prefix is re-paid on every model call, and up to 25 times per turn in
+harness mode. This is recorded rather than fixed: MAF's Anthropic client exposes structured
+instruction blocks, which reaches the system half, but offers no `cache_control` hook for `tools`
+— the 11 k that dominates. See `BACKLOG.md`.
+
+**What this changes about how to test this system.** A green suite proved these paths were
+*shaped* correctly. The gap is that a shipped default is a claim about the world, and the only way
+to check it is to run it. The new tests execute production values rather than validating them; the
+chart parity test should grow the same property.
+
+## D-137 — The plan the model could approve for itself: a pre-execution gate that is not a tool
+
+`SECURITY.md`, `docs/harness-konzept.md` §6 and `build_agent`'s docstring all described a GxP
+pre-execution gate: in `plan_only` the agent proposes a plan and waits for a human before
+executing. The shipped production configuration runs exactly that (`harness_enabled=true`,
+`harness_autonomy=plan_only`).
+
+**The gate did not exist.** MAF's `AgentModeProvider.before_run` injects a `mode_set` tool into the
+model's own tool surface on every run, declared `approval_mode="never_require"`, and its
+instructions tell the model to use it: *"When approval is granted, always switch to execute mode
+(using the `mode_set` tool)"* — where "approval is granted" is the model's own reading of the
+conversation. `grep set_agent_mode` returned zero callers in the repository. `plan_mode_required_for`,
+which `harness-konzept.md` §6 specifies as the enforcement mechanism, exists nowhere in the code.
+
+Three properties were missing, and the third is the one that makes this worse than a missing
+control rather than merely equal to one:
+
+1. Nothing stopped the model changing its own mode.
+2. Nothing bound an approval to a *particular* plan, so a plan approved and then rewritten kept
+   its authorization.
+3. The audit middleware attributes every tool call to the ambient actor — so the trail recorded the
+   agent's self-authorization under the **chemist's** Entra oid. An attributable-looking approval
+   with no human act behind it is evidence of the wrong thing.
+
+**The fix, and why it is shaped this way.**
+
+*Retract, do not reimplement.* `PlanApprovalModeProvider` runs MAF's `before_run` unchanged and
+then removes `mode_set` from the invocation's tool list. The same method also injects `mode_get`,
+the mode instructions, and the external-change notification; a reimplementation would silently drop
+whichever of those upstream adds next. `mode_get` stays — reading the mode is harmless, and a model
+that cannot see its own mode behaves worse, not better.
+
+*Use the supported external seam.* MAF ships `set_agent_mode` precisely for callers outside the
+model, and it records the previous mode so the next `before_run` tells the agent the mode changed
+underneath it. Writing session state directly would have skipped that and left the agent anchored
+to what it last believed.
+
+*Bind the approval to a plan hash.* An approval recording only "this session may execute" would
+authorize whatever the plan later became. The hash is over the rendered todo lines — exactly the
+strings the surfaces display (`todo_titles` feeds `PlanEvent`) — so what was approved and what was
+shown cannot diverge. Hashing richer internal state would let the authorized artifact drift from the
+displayed one. A changed plan is a different hash and is unapproved; the decision route answers 409
+rather than silently approving the current plan.
+
+*Persist it.* `plan_approvals` is append-only: each row is a GxP record of something a person did at
+a moment, so a second decision is a second row and the read path takes the latest — a rejection
+after an approval revokes it. It is durable rather than session state because the mode it authorizes
+is *already* durable: an approval that vanished on an LRU eviction while its effect persisted would
+leave a session running in execute mode with nothing recording who allowed it.
+
+*Not an agent tool.* `POST /sessions/{id}/plan/decision` is owner-scoped and reachable only by an
+authenticated principal, for the same reason `POST /approvals/{id}/decision` is not a tool (D-005).
+
+**Why the existing tests could not see it.** Two tests asserted the gate. One checked
+`mode_provider.default_mode` — the initial value. One checked that the loop does not *auto*-start.
+Neither ever had the model call `mode_set`, which was the only thing that broke it. A test for an
+access-control property has to attempt the access. `tests/test_harness_mode.py` now does, and it
+also pins the upstream behaviour: if MAF ever stops injecting `mode_set`, the assertion that it is
+absent would start passing vacuously, so a second test asserts stock `AgentModeProvider` still
+advertises it. That failing is a signal to re-decide, not a bug.

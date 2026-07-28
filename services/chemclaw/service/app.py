@@ -40,7 +40,8 @@ from agents.attachments import STORE as ATTACHMENTS
 from agents.attachments import AttachmentError, AttachmentSummary, parse_attachment
 from agents.chemclaw_agent import build_agent, connector_tools, history_provider
 from agents.durable_tools import request_note_reindex
-from agents.harness_todo import complete_awaiting_job
+from agents.harness_mode import current_plan_hash, grant_execute, session_mode
+from agents.harness_todo import complete_awaiting_job, todo_titles
 from agents.interaction_tools import (
     PendingApproval,
     approval_owner,
@@ -48,6 +49,7 @@ from agents.interaction_tools import (
     decide_approval,
     list_pending_approvals,
 )
+from agents.plan_approval_store import PlanApprovalStore
 from agents.profile_discovery import load_profiles
 from agents.profiles import get_profile
 from agents.session_events import stream_new_events
@@ -368,6 +370,29 @@ class ApprovalStatusOut(BaseModel):
     status: str
 
 
+class PlanDecisionIn(BaseModel):
+    """The human Yes/No on a harness plan, bound to the exact plan that was shown.
+
+    `plan_hash` is required and is not defaulted to "whatever the plan is now": the whole point of
+    the binding is that a plan which changed after being displayed is a different plan. A client
+    posts back the hash it received with the plan.
+    """
+
+    approved: bool
+    plan_hash: str
+
+
+class PlanStatusOut(BaseModel):
+    """The plan a session is currently proposing, its hash, and who (if anyone) approved it."""
+
+    session_id: str
+    plan_hash: str
+    plan: list[str]
+    mode: str
+    approved: bool
+    decided_by: str | None = None
+
+
 @asynccontextmanager
 async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
     """Open this process's Postgres pool, then probe the connectors once before serving.
@@ -483,6 +508,7 @@ def create_app(
     # only a DSN and the in-memory one holds nothing at all (its messages live in
     # `session.state`), so one instance is correct for both and neither carries per-session
     # state.
+    app.state.plan_approvals = PlanApprovalStore()
     app.state.history = history_provider()
     # One agent — and therefore one chat client — per concurrent turn (D-123). The cached
     # `_agent()` below still serves everything that does not stream; only a streaming turn needs
@@ -593,6 +619,15 @@ def create_app(
         # the narrowing to survive a restart.
         session = _agent().create_session(session_id=session_id)
         return _live_sessions().add(session_id, session, owner)
+
+    def _plan_approvals() -> PlanApprovalStore:
+        """The durable plan-approval store, read through one annotated accessor.
+
+        Built once on `app.state` beside the other stores: it holds only a DSN, so one instance
+        serves every request and there is no per-session state to keep straight.
+        """
+        store: PlanApprovalStore = app.state.plan_approvals
+        return store
 
     def _live_sessions() -> _LiveSessions:
         """The live-session cache, read through one annotated accessor.
@@ -1110,6 +1145,55 @@ def create_app(
             await decide_approval(approval_id, body.approved)
         except ValueError as exc:
             raise HTTPException(status_code=404, detail="no such approval hold") from exc
+        return Response(status_code=204)
+
+    @app.get("/sessions/{session_id}/plan")
+    async def get_plan(
+        session_id: str,
+        principal: Principal = Depends(require_principal),
+    ) -> PlanStatusOut:
+        """The plan awaiting a decision, with the hash a client must post back to approve it."""
+        live = await _resolve_session(session_id, principal)
+        plan = await todo_titles(live.session)
+        plan_hash = await current_plan_hash(live.session)
+        decision = await _plan_approvals().decision(session_id, plan_hash)
+        return PlanStatusOut(
+            session_id=session_id,
+            plan_hash=plan_hash,
+            plan=plan,
+            mode=session_mode(live.session),
+            approved=bool(decision and decision[0]),
+            decided_by=decision[1] if decision else None,
+        )
+
+    @app.post("/sessions/{session_id}/plan/decision", status_code=204)
+    async def decide_plan(
+        session_id: str,
+        body: PlanDecisionIn,
+        principal: Principal = Depends(require_principal),
+    ) -> Response:
+        """Approve (or reject) a harness plan — the pre-execution GxP gate, finally enforced.
+
+        Deliberately an HTTP route and **not** an agent tool, for the same reason
+        `POST /approvals/{id}/decision` is not (D-005): MAF advertises a `mode_set` tool to the
+        model by default, so until this existed the agent moved itself out of plan mode and the
+        audit trail recorded that under the asking chemist's identity. `PlanApprovalModeProvider`
+        retracts that tool; this is the only remaining path into execute mode.
+
+        The posted `plan_hash` must match the plan the session is proposing *now*. A mismatch is a
+        409, not a silent approval of the current plan: it means the plan changed between being
+        shown and being approved, and the human agreed to something else.
+        """
+        live = await _resolve_session(session_id, principal)
+        plan_hash = await current_plan_hash(live.session)
+        if body.plan_hash != plan_hash:
+            raise HTTPException(
+                status_code=409,
+                detail="the plan changed since it was shown; re-read it and decide again",
+            )
+        await _plan_approvals().record(session_id, plan_hash, principal.oid or "", body.approved)
+        if body.approved:
+            grant_execute(live.session)
         return Response(status_code=204)
 
     if _STATIC_DIR.is_dir():

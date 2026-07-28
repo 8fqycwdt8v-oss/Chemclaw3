@@ -16,7 +16,6 @@ from typing import Any
 
 from agent_framework import (
     Agent,
-    AgentModeProvider,
     CharacterEstimatorTokenizer,
     ChatOptions,
     CompactionProvider,
@@ -48,6 +47,7 @@ from agents import preferences as _preferences  # noqa: F401
 from agents import research_tools as _research_tools  # noqa: F401
 from agents import subscriptions as _subscriptions  # noqa: F401
 from agents.audit import AuditSink, make_audit_middleware
+from agents.harness_mode import PlanApprovalModeProvider
 from agents.llm_provider import build_chat_client
 from agents.profiles import AgentProfile, get_profile
 from agents.skill_access import EnabledSkillsSource, RoleScopedSkillsSource
@@ -218,10 +218,15 @@ def build_agent(
     ]
     # Default generation params from config (F0.3), applied to every turn unless a run overrides
     # them — so temperature/length are a deployment setting, not a per-call literal.
-    options = ChatOptions(
-        temperature=settings.llm_temperature,
-        max_tokens=settings.llm_max_tokens,
-    )
+    #
+    # `temperature` is passed only when configured. Sending it unconditionally broke every turn on
+    # the default Anthropic path: claude-sonnet-5 answers `400 invalid_request_error: temperature
+    # is deprecated for this model`, so the shipped default config could not complete a single
+    # turn. Omitting the key is not the same as sending None — the wire payload must not carry the
+    # field at all — hence the dict rather than a literal `temperature=` argument.
+    options = ChatOptions(max_tokens=settings.llm_max_tokens)
+    if settings.llm_temperature is not None:
+        options["temperature"] = settings.llm_temperature
     tools = _capability_tools(prof)
     if harness_enabled:
         return _build_harness_agent(client, skills, history, middleware, options, prof, tools)
@@ -260,13 +265,23 @@ def _build_harness_agent(
 
     The starting mode comes from the profile's `harness_autonomy` override, or
     `settings.harness_autonomy` when the profile leaves it unset. `plan_only` starts in **plan**
-    mode: the agent proposes a plan and waits for human approval before executing — the
-    pre-execution GxP gate — and, because the loop only continues in **execute** mode, it does
-    not auto-run until approval switches it. `execute` starts in execute mode and loops through
-    the todos immediately. Either way the loop is capped by `harness_max_loop_iterations` (the
-    runaway guard). Compaction reuses the classic strategy so context is kept within budget on
-    both paths. `instructions` and `tools` are pre-resolved by `build_agent` from the profile,
-    so this path advertises exactly the profile's (possibly narrowed) surface.
+    mode: the agent proposes a plan and waits for human approval before executing, and because the
+    loop only continues in **execute** mode it does not auto-run until an approval switches it.
+
+    That approval is the pre-execution GxP gate, and it is enforced by
+    `PlanApprovalModeProvider` (D-137) rather than by the starting mode alone. Until that provider
+    existed this docstring described a gate the code did not implement: MAF advertises a `mode_set`
+    tool to the model, so the agent moved *itself* out of plan mode and the audit trail recorded
+    that under the asking chemist's identity. The provider retracts that tool; the only path into
+    execute mode is now `POST /sessions/{id}/plan/decision`, which is owner-scoped, records who
+    decided, and is bound to a hash of the plan they were shown.
+
+    `execute` starts in execute mode and loops through the todos immediately. Either way the
+    loop is capped by `harness_max_loop_iterations` (the runaway guard), which is passed
+    unconditionally — it bounds both modes, not only `execute`. Compaction reuses the classic
+    strategy so context is kept within budget on both paths. `instructions` and `tools` are
+    pre-resolved by `build_agent` from the profile, so this path advertises exactly the
+    profile's (possibly narrowed) surface.
     """
     strategy, tokenizer = _compaction_strategy()
     instructions = profile.instructions if profile.instructions is not None else _INSTRUCTIONS
@@ -293,7 +308,7 @@ def _build_harness_agent(
         after_compaction_strategy=strategy,
         tokenizer=tokenizer,
         # Plan/execute mode: start in plan for approval-first autonomy, execute for autonomous runs.
-        mode_provider=AgentModeProvider(default_mode=start_mode),
+        mode_provider=PlanApprovalModeProvider(default_mode=start_mode),
         # Loop only in execute mode while todos remain — so plan_only stops for approval — capped.
         loop_should_continue=todos_remaining(looping_modes=["execute"]),
         loop_max_iterations=settings.harness_max_loop_iterations,

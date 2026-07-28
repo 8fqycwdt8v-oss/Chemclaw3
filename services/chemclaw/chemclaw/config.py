@@ -527,7 +527,15 @@ class LlmSettings(BaseSettings):
     llm_tls_ca_bundle: str = ""
     llm_timeout_seconds: float = Field(default=60.0, gt=0)
     llm_max_retries: int = Field(default=3, ge=0)
-    llm_temperature: float = Field(default=0.0, ge=0)
+    # Unset by default, and that default is load-bearing: current frontier models (the shipped
+    # `agent_model`, claude-sonnet-5) reject an explicit `temperature` outright —
+    # `400 invalid_request_error: temperature is deprecated for this model` — so a config that
+    # always sent one failed *every* turn on the default Anthropic path. No test caught it
+    # because every test injects a fake chat client, so the parameter never reached a real API.
+    # `None` means "send no temperature and let the model use its own default"; a deployment on a
+    # model that still accepts one sets it explicitly. Threaded into the agent by `build_agent`,
+    # which omits the key entirely when this is None (F0.3).
+    llm_temperature: float | None = Field(default=None, ge=0)
     llm_max_tokens: int = Field(default=4096, gt=0)
     # Per-task model routing (plan F10-E). Maps a task name to the model id to use for it, so a
     # cheap model can run high-throughput/secondary steps (verification, classification) while
@@ -1577,6 +1585,12 @@ class SafetySettings(BaseSettings):
     safety_gate_enabled: bool = True
 
 
+# The `vector(N)` width in `infra/sql/012_note_index.sql`. Duplicated here rather than parsed
+# out of the SQL because the migration is the source of truth and this is the assertion
+# against it — the validator below fails startup if the two disagree.
+_NOTE_INDEX_VECTOR_DIM = 1536
+
+
 class Settings(
     ObservabilitySettings,
     TemporalSettings,
@@ -1616,6 +1630,60 @@ class Settings(
         env_file_encoding="utf-8",
         extra="forbid",
     )
+
+    @model_validator(mode="after")
+    def _guards_that_the_comments_already_demand(self) -> Self:
+        """Four combinations whose prose already forbids them, now enforced at startup.
+
+        Each of these was documented in a field comment as "must stay below" / "this must stay 1"
+        and enforced by nothing, so a deployment could set it and find out in production. A rule
+        worth writing down is worth failing on.
+
+        - **`session_store="memory"` with more than one uvicorn worker.** Each process would hold
+          its own conversation history and its own turn guard, so two turns on one session would
+          interleave into different threads. The durable turn claim (D-121) is what makes multiple
+          workers safe, and it exists only on the Postgres path.
+        - **Mid-turn resume outliving the turn.** A resume wait longer than the turn deadline can
+          never complete; it just burns the turn's remaining time holding an admission permit.
+        - **Budgets enabled with every cap at zero.** `0` means unlimited for each cap, so this is
+          a guard that guards nothing while reporting itself as on.
+        - **`embedding_dim` disagreeing with the `vector(N)` column** in migration 012, *while
+          the vector data source is enabled*. pgvector rejects the insert at write time, so the
+          mismatch surfaces as a failed reindex rather than as the configuration error it is.
+          Scoped to the enabled case deliberately: the embedder is used on its own (the hash
+          embedder's unit tests pick a small dim and touch no database), so an unconditional check
+          would reject configurations that cannot reach pgvector at all.
+        """
+        if self.session_store == "memory" and self.service_uvicorn_workers > 1:
+            raise ValueError(
+                "session_store='memory' cannot serve service_uvicorn_workers>1: each process would "
+                "keep its own history and turn guard. Use session_store='postgres' (D-121)."
+            )
+        if self.mid_turn_resume_enabled and (
+            self.mid_turn_resume_timeout_seconds >= self.service_turn_timeout_seconds
+        ):
+            raise ValueError(
+                "mid_turn_resume_timeout_seconds must be smaller than service_turn_timeout_seconds"
+            )
+        if self.budget_enabled and not any(
+            (
+                self.budget_max_turns_per_session,
+                self.budget_max_tokens_per_session,
+                self.budget_max_turns_per_user,
+                self.budget_max_tokens_per_user,
+            )
+        ):
+            raise ValueError(
+                "budget_enabled=true with every cap at 0 (unlimited) guards nothing; set at least "
+                "one budget_max_* cap or disable budgets"
+            )
+        if "vector" in self.data_source_list and self.embedding_dim != _NOTE_INDEX_VECTOR_DIM:
+            raise ValueError(
+                f"embedding_dim={self.embedding_dim} disagrees with the note_index vector column "
+                f"({_NOTE_INDEX_VECTOR_DIM}, infra/sql/012_note_index.sql); pgvector would reject "
+                "every write. Change both together, or drop 'vector' from data_sources."
+            )
+        return self
 
 
 settings = Settings()
