@@ -98,6 +98,11 @@ function applyEvent(evt, answerEl) {
     case "approval_request":
       addApproval(evt);
       return answerEl;
+    case "tool_failed":
+      // In the trace, not the error lane: the step failed, the turn did not. Without this the
+      // transcript showed a silent gap wherever a tool raised.
+      add("trace", `✗ ${evt.tool} failed — ${evt.message}`);
+      return answerEl;
     case "answer":
       if (!answerEl) add("assistant", evt.text);
       return answerEl;

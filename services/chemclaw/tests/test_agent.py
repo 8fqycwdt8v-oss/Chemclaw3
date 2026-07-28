@@ -142,8 +142,9 @@ def test_skills_load_and_read_without_an_unanswerable_approval() -> None:
 
 
 def test_agent_audits_and_authorizes_every_tool_call() -> None:
-    """Four middlewares attach: both error-surfacing layers, the GxP audit trail, per-tool authz."""
+    """Five middlewares attach: both surfacing layers, audit, per-tool authz, failure announcing."""
     from agents.tool_authz import (
+        announce_tool_failures,
         enforce_tool_authz,
         surface_authorization_denials,
         surface_domain_errors,
@@ -151,10 +152,14 @@ def test_agent_audits_and_authorizes_every_tool_call() -> None:
 
     agent = build_agent(chat_client=object())
     middleware = list(agent.middleware or [])
-    assert len(middleware) == 4  # denial + domain-error surfacing + audit + per-tool authorization
+    assert len(middleware) == 5
     assert middleware[0] is surface_authorization_denials  # outermost: sees audit's re-raise
     assert middleware[1] is surface_domain_errors
     assert enforce_tool_authz in middleware  # the authz gate is wired, not just audit
+    # Innermost, closest to the tool body: it must see the raw exception from *every* failure,
+    # including the two the layers above convert into results, or the chemist's trace would show
+    # a gap where a step failed (D-138).
+    assert middleware[-1] is announce_tool_failures
 
 
 def test_fingerprint_search_is_reached_through_connectors_not_in_process_tools() -> None:

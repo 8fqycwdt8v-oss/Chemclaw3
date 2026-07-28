@@ -60,7 +60,27 @@ class ApprovalSignal(BaseModel):
     approval_id: str
 
 
-Signal = JobSignal | ProposalSignal | QuestionSignal | ApprovalSignal
+class ToolFailureSignal(BaseModel):
+    """A tool that raised during this turn, so the chemist can see why an answer went thin.
+
+    Until this existed a failing tool was visible in three places — the model's context, the
+    server log, and the audit trail — and in none of them to the person who asked. A live run
+    caught the shape that makes it matter: a job launcher raised on every attempt, MAF stopped
+    the tool loop after three consecutive errors, and the turn ended on the model's last words
+    before the final failure — "Let me try the carboxylic acid acetylation:" — with no answer,
+    no error, and nothing to say why (D-138). The turn had not crashed, so `ErrorEvent` was
+    right to stay silent; what was missing was the *trace* being honest about a step that did
+    not work.
+
+    A signal rather than a return value, for the reason every other member of this union is one:
+    it must come from the failing call itself, never from anything the model can author.
+    """
+
+    tool: str
+    message: str
+
+
+Signal = JobSignal | ProposalSignal | QuestionSignal | ApprovalSignal | ToolFailureSignal
 
 
 # One buffer per turn, holding every kind in the order they occurred. A single list (rather than one
@@ -104,6 +124,13 @@ def record_approval_request(prompt: str, approval_id: str) -> None:
     buffer = _signals.get()
     if buffer is not None:
         buffer.append(ApprovalSignal(prompt=prompt, approval_id=approval_id))
+
+
+def record_tool_failure(tool: str, message: str) -> None:
+    """Note that `tool` raised. A no-op off the request path (CLI, tests)."""
+    buffer = _signals.get()
+    if buffer is not None:
+        buffer.append(ToolFailureSignal(tool=tool, message=message))
 
 
 def set_job_sink() -> object:

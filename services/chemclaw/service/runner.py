@@ -12,6 +12,7 @@ stack trace to the browser — a failed turn must not take down the stream or le
 
 import asyncio
 import copy
+import json
 import logging
 import time
 import uuid
@@ -43,6 +44,7 @@ from agents.turn_signals import (
     JobSignal,
     QuestionSignal,
     Signal,
+    ToolFailureSignal,
     begin_turn,
     drain,
     end_turn,
@@ -62,6 +64,7 @@ from service.events import (
     QuestionEvent,
     TokenEvent,
     ToolCallEvent,
+    ToolFailedEvent,
 )
 from service.metrics import METRICS
 
@@ -193,6 +196,7 @@ async def run_turn(
             stream = agent.run(
                 user_message, stream=True, session=session, tools=turn_connectors or None
             )
+            tool_trace = _ToolCallTrace()
             async for update in stream:
                 turn_tokens += _usage_tokens(update)
                 # Drain *before* this update's own content: a tool that ran while the model was
@@ -206,8 +210,8 @@ async def run_turn(
                 if text:
                     answer_parts.append(text)
                     yield TokenEvent(text=text)
-                for tool_name, arguments in _tool_calls_in(update):
-                    yield ToolCallEvent(tool=tool_name, arguments=arguments)
+                for call in tool_trace.feed(update):
+                    yield call
                 for request in getattr(update, "user_input_requests", None) or []:
                     yield ApprovalRequestEvent(prompt=_approval_prompt(request))
                 plan = await _current_plan(session)
@@ -216,7 +220,10 @@ async def run_turn(
                     yield PlanEvent(todos=plan)
             # A signal recorded while producing the *final* update has no next iteration to
             # carry it, so drain once more before the answer — otherwise the last job started or
-            # note proposed in a turn would be silently dropped.
+            # note proposed in a turn would be silently dropped. The same is true of a tool call
+            # whose arguments finished on that update: nothing follows to close it out.
+            for call in tool_trace.flush():
+                yield call
             for signal in drain():
                 if isinstance(signal, JobSignal):
                     started_jobs.append(signal.job_id)
@@ -421,14 +428,17 @@ async def _resume(
         "The durable job(s) you started have completed. Their results follow as data; continue "
         "your answer using them.\n" + frame_untrusted(summary, note_id="job-results")
     )
+    tool_trace = _ToolCallTrace()
     async for update in agent.run(message, stream=True, session=session, tools=connectors or None):
         for signal in drain():
             yield _signal_event(signal)
         text = getattr(update, "text", "") or ""
         if text:
             yield TokenEvent(text=text)
-        for tool_name, arguments in _tool_calls_in(update):
-            yield ToolCallEvent(tool=tool_name, arguments=arguments)
+        for call in tool_trace.feed(update):
+            yield call
+    for call in tool_trace.flush():
+        yield call
 
 
 def _signal_event(signal: Signal) -> Event:
@@ -443,6 +453,8 @@ def _signal_event(signal: Signal) -> Event:
         # *other* kind of approval — a plan prompt, which has no hold and is answered by the next
         # turn — and deliberately leaves `approval_id` empty to mark that difference.
         return ApprovalRequestEvent(prompt=signal.prompt, approval_id=signal.approval_id)
+    if isinstance(signal, ToolFailureSignal):
+        return ToolFailedEvent(tool=signal.tool, message=signal.message)
     return NoteProposedEvent(note_id=signal.note_id, reference=signal.reference)
 
 
@@ -468,24 +480,84 @@ def _usage_tokens(update: Any) -> int:
     return total
 
 
-def _tool_calls_in(update: Any) -> list[tuple[str, str]]:
-    """Best-effort extract (tool_name, arg_preview) for any function call in a streamed update.
+class _ToolCallTrace:
+    """Reassemble a streamed function call, so `tool_call` can carry the arguments it promises.
 
-    Duck-typed on purpose: MAF's function-call content class is not a stable top-level export
-    and its shape varies by version, so we match by structure (a named content carrying
-    arguments/a call id) rather than importing a concrete type. Plain-text content has no `name`
-    and is skipped.
+    A streamed call does not arrive as one object. The provider sends the *name* first, on a
+    content whose `arguments` is still empty, and then streams the argument JSON as fragments on
+    further contents that carry only the `call_id` — no name. Reading name-and-arguments off a
+    single content, as this did, therefore matched exactly the one content that never has any
+    arguments, and skipped every fragment for want of a name: `ToolCallEvent.arguments` was empty
+    on every call ever emitted, and could not have been anything else (D-138). The field is
+    documented as "a short argument preview" and read by the UI trace, so this was a promise the
+    stream never kept.
+
+    Fragments for one call arrive contiguously, so a call is complete once an update goes by
+    without adding to it — that is the flush condition, and it needs no knowledge of which
+    content type terminates a call. The event therefore lands slightly later than before: after
+    the arguments rather than after the name. That is the more truthful order anyway, because a
+    tool cannot run before its arguments are complete.
+
+    Still duck-typed: MAF's function-call content class is not a stable top-level export and its
+    shape varies by version, so this matches on structure (a `call_id`/`arguments` pair) rather
+    than importing a concrete type.
     """
-    calls: list[tuple[str, str]] = []
-    for content in getattr(update, "contents", None) or []:
-        name = getattr(content, "name", None)
-        if not name:
-            continue
-        if not (hasattr(content, "arguments") or hasattr(content, "call_id")):
-            continue
-        arguments = str(getattr(content, "arguments", "") or "")[:_ARG_PREVIEW_CHARS]
-        calls.append((str(name), arguments))
-    return calls
+
+    def __init__(self) -> None:
+        self._names: dict[str, str] = {}
+        self._fragments: dict[str, list[str]] = {}
+
+    def feed(self, update: Any) -> list[ToolCallEvent]:
+        """Take one streamed update; return the calls it completed, in order."""
+        growing: set[str] = set()
+        done: set[str] = set()
+        for content in getattr(update, "contents", None) or []:
+            if not (hasattr(content, "arguments") or hasattr(content, "call_id")):
+                continue
+            name = str(getattr(content, "name", "") or "")
+            key = str(getattr(content, "call_id", "") or "") or name
+            if not key:
+                continue
+            if name:
+                self._names.setdefault(key, name)
+            if key not in self._names:
+                continue  # a fragment for a call whose opening content we never saw
+            arguments = getattr(content, "arguments", None)
+            if arguments is None:
+                # The call id with no arguments field at all: this is the call's *result* coming
+                # back, so it must not count as the call still growing. Note the test is `is
+                # None` and not falsiness — an empty string is a real fragment of the argument
+                # stream, and treating it as the end flushed the call before its arguments had
+                # arrived, which is how this reached a second live run still empty.
+                continue
+            if name and arguments:
+                # The name and the complete arguments in one content: the call arrived whole
+                # rather than streamed, so it is finished now, and waiting would only delay it
+                # behind the next update's text. The streamed shape never looks like this — its
+                # named content carries empty arguments and its fragments carry no name.
+                self._fragments[key] = [
+                    json.dumps(arguments) if isinstance(arguments, Mapping) else str(arguments)
+                ]
+                done.add(key)
+            else:
+                fragments = self._fragments.setdefault(key, [])
+                if isinstance(arguments, str) and arguments:
+                    fragments.append(arguments)
+                elif isinstance(arguments, Mapping) and arguments:
+                    fragments[:] = [json.dumps(arguments)]
+            growing.add(key)
+        return self._take((set(self._fragments) - growing) | done)
+
+    def flush(self) -> list[ToolCallEvent]:
+        """Emit whatever is still open — the stream ended before an untouched update arrived."""
+        return self._take(set(self._fragments))
+
+    def _take(self, keys: set[str]) -> list[ToolCallEvent]:
+        events = []
+        for key in [k for k in self._fragments if k in keys]:
+            arguments = "".join(self._fragments.pop(key))[:_ARG_PREVIEW_CHARS]
+            events.append(ToolCallEvent(tool=self._names.pop(key, key), arguments=arguments))
+        return events
 
 
 def _approval_prompt(request: Any) -> str:

@@ -18,7 +18,12 @@ from collections.abc import Awaitable, Callable
 from agent_framework import FunctionInvocationContext, function_middleware
 
 from agents.authz import AuthorizationError, authorize_tool
+from agents.turn_signals import record_tool_failure
 from chemclaw.errors import ChemclawError
+
+# How much of a failure message reaches the trace. Long enough for a chemist to recognise the
+# problem, short enough that an unexpected exception's text cannot flood the stream.
+_FAILURE_CHARS = 300
 
 
 @function_middleware
@@ -95,3 +100,31 @@ async def surface_domain_errors(
         await call_next()
     except ChemclawError as exc:
         context.result = f"Error: {exc}"
+
+
+@function_middleware
+async def announce_tool_failures(
+    context: FunctionInvocationContext,
+    call_next: Callable[[], Awaitable[None]],
+) -> None:
+    """Tell the turn's event stream that a tool raised, then let the exception continue untouched.
+
+    The two `surface_*` middlewares above decide what the *model* is told about a failed call;
+    this decides what the *chemist* is told, which until now was nothing. The failure was already
+    logged and audited, but the transcript the person actually reads showed only a gap — a turn
+    that trailed off after three failing launches with no answer and no error was the live finding
+    that motivated this (D-138).
+
+    Attached innermost, closest to the tool body, so it sees the raw exception before either
+    converter turns it into a result: whether the model was handed a readable explanation is a
+    separate question from whether the step worked. Nothing is altered — the exception is
+    re-raised, so audit still records the `error` outcome and the converters still run exactly as
+    before. `str(exc)` is not shown to the model here and is only ever rendered in the trace, but
+    it is truncated for the same reason `agents.audit` truncates: an unexpected exception's text
+    can be long and is not written to be read.
+    """
+    try:
+        await call_next()
+    except Exception as exc:
+        record_tool_failure(context.function.name, f"{type(exc).__name__}: {exc}"[:_FAILURE_CHARS])
+        raise

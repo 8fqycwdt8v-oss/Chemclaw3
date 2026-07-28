@@ -3,6 +3,42 @@
 Prioritized open action items. Top = next. Keep in sync with `docs/implementation-plan.md`
 (phase/step numbers) at session end.
 
+## Open — Fifty live expert questions (2026-07-28, D-138)
+
+Full record: `docs/vibe-test-2026-07.md`. Fifty questions from a process/analytical development
+scientist and their project manager, asked against the running stack. Five defects found, five
+fixed; two left open below with the reason. Method note worth keeping: four of the five were
+invisible to 1450 passing tests because in each case *the test supplied the thing the system was
+supposed to supply*.
+
+- [ ] **VIBE-1 — a durable job's domain error does not reach the model.** With the launcher fixed,
+      `compute_reaction_energy` launched and `CalcJobWorkflow` correctly rejected an unbalanced
+      equation, but the tool raised `WorkflowFailureError: Workflow execution failed` and the
+      actionable message — "reaction is not atom-balanced (reactants minus products): C +2, H +4,
+      O +2" (`calc/reaction.py:178`) — stayed in the worker log, so the model could not repair its
+      own input. Two parts, and they are separable: (a) the balance/charge check is a
+      *precondition* in the sense `JobSpec.precondition` means, so running it before launch would
+      both relay the message through `surface_domain_errors` today and stop the five pointless
+      Temporal retries; (b) relaying a workflow's failure text in general is a policy decision
+      about what is safe to surface — the question `surface_domain_errors` answers by naming
+      known-safe types — and wants deciding, not patching. Do (a) first; it may be enough.
+- [ ] **VIBE-2 — `resolve_compound` knows solvents and bases, not substrates.**
+      `chemclaw/reagents.py` holds 87 spellings, almost all reagents. Every substrate in the
+      corpus misses (`4-bromoanisole`, `phenylboronic acid`, `salicylic acid`,
+      `4-methoxybiphenyl`), and the model then supplies the structure from memory — right each
+      time observed, which is precisely the risk, since a wrong structure propagates silently into
+      every downstream calculation and search. The structures exist: `knowledge/compound/*.md`
+      carries `compound_smiles`, and several notes even carry an `also written:` line nothing
+      parses. The reason this is a design question and not an oversight: the resolver runs inside
+      the `chem` bundle, which must not import the knowledge graph (D-115), so the fix is about
+      *how* project vocabulary reaches a connector — a generated overlay, a config-pointed
+      synonyms file, or a core-side resolution step — not about adding names to a dict.
+- [ ] **VIBE-3 — the answer event carries the model's inter-tool narration.** `AnswerEvent.text`
+      concatenates every assistant text block in the turn, so an answer reads "I'll resolve the
+      compound…Let me correct that…Perfect. Here's what you have:" before it starts. Harmless when
+      the turn succeeds; it is what made the failed Q11 read as a broken thought stream. Decide
+      whether the final block alone is the answer and the rest is trace.
+
 ## Open — Agentic system review (2026-07-28, D-136/D-137)
 
 Full record: `docs/audit/2026-07-agentic-system-review.md`. Three shipped defaults were fatal on

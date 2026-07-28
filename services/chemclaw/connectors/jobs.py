@@ -27,7 +27,7 @@ would advertise "pass anything", which is precisely how a model calls a tool wro
 import asyncio
 from collections.abc import Callable
 from importlib import import_module
-from typing import Any, cast
+from typing import Any
 
 from pydantic import BaseModel, Field, create_model
 from temporalio.common import WorkflowIDReusePolicy
@@ -233,6 +233,15 @@ def build_job_tool(connector: str, job: JobSpec) -> CapabilityTool:
     precondition = resolve_precondition(job.precondition) if job.precondition else None
 
     async def launch(params: params_model) -> str | ConnectorJobResult:  # type: ignore[valid-type]
+        # **Validate here, because nothing upstream does** (D-138). The annotation above is a
+        # pydantic model and MAF publishes its JSON schema, but MAF hands the body the decoded
+        # JSON *object* — a plain `dict` — rather than constructing the model from it. Until this
+        # call existed every declared job died on `'dict' object has no attribute 'model_dump'`
+        # the first time a chemist asked for one, and the precondition below was handed a dict
+        # whose attributes it could not read. Accept an already-built model too: a caller that
+        # holds one (a test, a template step) is not wrong, and `model_validate` is the one entry
+        # point that takes either.
+        spec = params_model.model_validate(params)
         # Authorize the expensive trigger against the turn's user *before* any durable work
         # (F4-T5), so an autonomously-planned todo cannot start a costly run outside the user's
         # entitlements.
@@ -242,11 +251,8 @@ def build_job_tool(connector: str, job: JobSpec) -> CapabilityTool:
         # `JobSpec.precondition` records: this is the only replay-safe place such a check can
         # live.
         if precondition is not None:
-            precondition(params)
-        # `params` is an instance of the model built above; mypy sees only the local alias, so
-        # the `model_dump` call needs the cast. Validation has already happened — MAF constructs
-        # the model from the tool call's arguments before the body runs.
-        payload: dict[str, Any] = cast(BaseModel, params).model_dump(mode="json", exclude_none=True)
+            precondition(spec)
+        payload: dict[str, Any] = spec.model_dump(mode="json", exclude_none=True)
         workflow_id = job_workflow_id(connector, job.name, payload)
         if is_dry_run():
             return dry_run_notice(f"start the {job.name} job", _detail(connector, payload))

@@ -111,6 +111,19 @@ class AnswerEvent(BaseModel):
     review_required: bool = False
 
 
+class ToolFailedEvent(BaseModel):
+    """One tool call raised. The turn continues — this is a step that did not work, not a failure.
+
+    Distinct from `ErrorEvent`, which ends the turn. A tool can fail and the answer still be good
+    (the model routes around it), or the answer can go thin without the turn ever erroring — and
+    in that second case this is the only event that says why (D-138).
+    """
+
+    type: Literal["tool_failed"] = "tool_failed"
+    tool: str
+    message: str
+
+
 class ErrorEvent(BaseModel):
     """The turn failed; the message is safe to show the user (no stack traces)."""
 
@@ -130,5 +143,6 @@ Event = (
     | NoteProposedEvent
     | QuestionEvent
     | AnswerEvent
+    | ToolFailedEvent
     | ErrorEvent
 )
