@@ -15,6 +15,7 @@ closed-shell parent (the ions' doublet state is then unambiguous), and the ranki
 they produce compares sites *within* one molecule and never across molecules.
 """
 
+import asyncio
 from typing import Literal
 
 import numpy as np
@@ -264,11 +265,16 @@ async def run_cached_properties(
     store: ResultStore, smiles: str, solvent: str | None = None
 ) -> tuple[ElectronicProperties, bool]:
     """Return the electronic properties of `smiles`, reusing the store on a repeat."""
-    structure = _property_structure(smiles)
+    structure = await asyncio.to_thread(_property_structure, smiles)
     spec = XtbSpec(task="properties", solvent=solvent)
+    # Off the event loop: deriving the key calls `calc_version()`, whose first call in a
+    # process shells out to `xtb --version` / `crest --version` (`calc.xtb_cli`), and the
+    # hash walks every atom. Both are synchronous, and this runs inside the connector's
+    # one-loop MCP server and inside Temporal activities that are coroutines.
+    key = await asyncio.to_thread(spec.cache_key, structure)
     return await run_cached(
         store,
-        spec.cache_key(structure),
+        key,
         lambda: compute_properties(spec, structure),
         ElectronicProperties,
     )
@@ -283,11 +289,16 @@ async def run_cached_fukui(
     the cache key covers the *calculation* and the mode is applied to the cached
     result. Asking the same molecule for a second mode is therefore free.
     """
-    structure = _property_structure(smiles)
+    structure = await asyncio.to_thread(_property_structure, smiles)
     spec = XtbSpec(task="fukui", solvent=solvent)
+    # Off the event loop: deriving the key calls `calc_version()`, whose first call in a
+    # process shells out to `xtb --version` / `crest --version` (`calc.xtb_cli`), and the
+    # hash walks every atom. Both are synchronous, and this runs inside the connector's
+    # one-loop MCP server and inside Temporal activities that are coroutines.
+    key = await asyncio.to_thread(spec.cache_key, structure)
     result, was_cached = await run_cached(
         store,
-        spec.cache_key(structure),
+        key,
         lambda: compute_fukui(spec, structure, mode),
         SiteReactivityResult,
     )

@@ -17,6 +17,8 @@ scores), noted where it is defined.
 import asyncio
 import math
 import re
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Protocol, runtime_checkable
 
@@ -196,17 +198,26 @@ class PostgresNoteIndex:
             f"WHERE lexeme @@ query {scope}ORDER BY score DESC, note_id LIMIT %(k)s"
         )
 
-    async def _connect(self) -> psycopg.AsyncConnection[TupleRow]:
-        """Open a fail-fast connection with the configured per-statement timeout (DRY via db)."""
-        return await db.connect(
+    @asynccontextmanager
+    async def _connection(self) -> AsyncIterator[psycopg.AsyncConnection[TupleRow]]:
+        """Borrow a connection with the configured per-statement timeout.
+
+        Pooled per process when the process opened a pool (`chemclaw.db.pooling`), so a
+        request path pays no TCP+auth handshake; a dedicated connect otherwise. Either way a
+        down or misconfigured database reports "Postgres unreachable at <host>" rather than a
+        raw psycopg traceback, and a hung query is cancelled rather than pinning the enclosing
+        activity for its whole budget.
+        """
+        async with db.connection(
             self._dsn, statement_timeout_seconds=settings.pg_statement_timeout_seconds
-        )
+        ) as conn:
+            yield conn
 
     async def upsert(self, records: list[NoteRecord]) -> None:
         """Insert or replace each record (embedding + tsvector) by note id."""
         if not records:
             return
-        async with await self._connect() as conn:
+        async with self._connection() as conn:
             for record in records:
                 await conn.execute(
                     self._upsert,
@@ -228,7 +239,7 @@ class PostgresNoteIndex:
         if not any(query_embedding):
             return []
         params = {"q": _vector_literal(query_embedding), "k": top_k, "ids": _scope_array(within)}
-        async with await self._connect() as conn:
+        async with self._connection() as conn:
             async with conn.cursor() as cur:
                 await cur.execute(self._dense, params)
                 rows = await cur.fetchall()
@@ -238,7 +249,7 @@ class PostgresNoteIndex:
         self, query: str, top_k: int, within: set[str] | None = None
     ) -> list[IndexHit]:
         """Rank notes by full-text `ts_rank` against the terms in `query`."""
-        async with await self._connect() as conn:
+        async with self._connection() as conn:
             async with conn.cursor() as cur:
                 await cur.execute(
                     self._lexical, {"q": query, "k": top_k, "ids": _scope_array(within)}

@@ -21,11 +21,18 @@ offline**, each phase ADR'd (D-039…D-050) and green under `make lint type test
 - **F5** real Nextflow (Seqera/Tower) launcher behind the QM activities (mock kept for CI).
 - **F6** OpenShift delivery: one rootless image, Helm chart, CI, three-secret model, Temporal self-hosted.
 - **F7** the generic `DataSource` seam (`sources/`) — ELN re-hosted unchanged; a new source is one
-  registry entry + one config token. First live connector (deferred): a custom Snowflake ELN source.
+  `sources/<name>/datasource.yaml` folder plus its name in `CHEMCLAW_DATA_SOURCES`, with **zero**
+  core edits (D-120). First live connector (deferred): a custom Snowflake ELN source.
 
 **Live edges remain open** (need a real Entra tenant / Temporal broker / OpenShift cluster): real token
 validation, federation/OBO exchanges, live cluster durability + `helm`/`kubeconform` render. See
-`BACKLOG.md` for the exact list. The design and staged build order remain the source of truth:
+`BACKLOG.md` for the exact list.
+
+**On the design documents below: they are historical, not current.** `docs/architektur.md` is
+pre-implementation design and contains **zero** references to connectors — the seam that now carries
+every tool, job and skill (D-118) — so it describes a system that no longer exists in its details
+while remaining right about the four layers. Read it for intent; read `DECISIONS.md`, the package
+READMEs and `docs/runbook.md` for what is true today.
 
 - `docs/architektur.md` — the four-layer architecture (§6 = the real OpenShift/Nextflow/internal-LLM
   deployment; §7/§8 = Entra durchgängig).
@@ -68,11 +75,16 @@ everywhere (job results, reports, distilled playbooks). See `docs/architektur.md
 
 ## Commands
 
-The toolchain is fixed by the plan (Phase 0) but not yet scaffolded. Once it exists, use the
-`Makefile`/`justfile` targets rather than raw invocations:
+The toolchain is scaffolded and `make help` (the default goal) lists all 23 targets. Use them rather than raw
+invocations — CI runs exactly these, so a green `make` locally means a green CI.
 
-- `make lint` — ruff (lint + format). `make type` — `mypy --strict`. `make test` — pytest.
-- `make up` — `docker-compose` (self-hosted Temporal dev cluster + Postgres/pgvector).
+- **The gate**: `make lint` (ruff lint + format) · `make type` (`mypy --strict`, every first-party
+  package) · `make test` (pytest) · `make check` runs all three · `make cov` adds the coverage floor.
+- **The validators**, each guarding a declaration against the live surface: `kg-validate`,
+  `skill-validate`, `connector-validate`, `template-validate`, `prose-validate`, `eln-validate`,
+  `helm-validate`, `audit-verify`. (`datasource-validate` joins them with D-120.)
+- **Running things**: `make up` (docker-compose: Temporal + Postgres/pgvector) · `make connectors`
+  (every enabled connector in one dev process) · `make chat` · `make db-migrate`.
 - Single test: `pytest path/to/test_file.py::test_name` or `pytest -k "name substring"`.
 
 A step is done only when its acceptance check passes **and** `make lint type test` is green.

@@ -19,6 +19,8 @@ from agent_framework import FunctionInvocationContext
 
 from agents.audit import (
     AuditEvent,
+    NullAuditSink,
+    default_audit_sink,
     make_audit_middleware,
 )
 from chemclaw.config import settings
@@ -33,7 +35,12 @@ def _ctx(name: str, arguments: object, result: object = None) -> FunctionInvocat
 
 
 def _drive(ctx: FunctionInvocationContext, call_next: Callable[[], Awaitable[None]]) -> None:
-    """Run a log-only middleware (no sink, no conversation) over a stand-in context."""
+    """Run the middleware with no explicit sink over a stand-in context.
+
+    Log-only in practice because the test config leaves `session_store="memory"`, which is what
+    `default_audit_sink` resolves to — not because omitting `sink` means log-only (it no longer
+    does; see `test_an_omitted_sink_no_longer_silently_means_log_only`).
+    """
     mw = make_audit_middleware(correlation_id="-", actor=settings.service_actor_id)
 
     async def _run() -> None:
@@ -180,3 +187,58 @@ def test_sink_failure_does_not_break_the_tool_call(caplog: pytest.LogCaptureFixt
     record = next(r for r in caplog.records if "audit_sink_failure" in r.getMessage())
     assert record.levelno == logging.ERROR
     assert getattr(record, "event", None) == "audit_sink_failure"
+
+
+def test_a_postgres_deployment_gets_the_durable_trail_without_asking(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The GxP trail is durable wherever a database is configured — opting in is not required.
+
+    The regression test for the pass's highest-ranked finding. `PostgresAuditSink`, the
+    tamper-evident chain, `infra/sql/011` and `make audit-verify` were all built and tested, and
+    the sink was constructed in exactly one place — `agents/cli.py`, behind a flag. The deployed
+    service passed no sink, so the middleware installed `NullAuditSink()` and `audit_events` was
+    empty in production while every document called it the compliance record.
+
+    Asserted at `default_audit_sink` rather than at a call site on purpose: fixing the service's
+    factory alone would have left the identical trap set for the Temporal template activities
+    (which had it independently) and for every entry point added later.
+    """
+    from agents.audit_store import PostgresAuditSink
+
+    monkeypatch.setattr(settings, "session_store", "postgres")
+    assert isinstance(default_audit_sink(), PostgresAuditSink)
+
+
+def test_a_deployment_with_no_database_falls_back_to_log_only(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Without Postgres the sink is log-only, not a sink that raises on every tool call."""
+    monkeypatch.setattr(settings, "session_store", "memory")
+    assert isinstance(default_audit_sink(), NullAuditSink)
+
+
+def test_an_omitted_sink_no_longer_silently_means_log_only(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`make_audit_middleware()` with no `sink` resolves the default, not `NullAuditSink`.
+
+    The polarity that matters for a GxP control: a forgotten argument must not downgrade the
+    compliance record. Opting *out* stays possible by passing `NullAuditSink()` explicitly.
+    """
+    recorded: list[str] = []
+
+    class _Marker:
+        async def record(self, event: AuditEvent) -> None:
+            recorded.append(event.tool)
+
+    monkeypatch.setattr("agents.audit.default_audit_sink", lambda: _Marker())
+    middleware = make_audit_middleware(correlation_id="c", actor="a")
+    context = _ctx("compute_xtb_energy", {"smiles": "CCO"})
+
+    async def _run() -> None:
+        await middleware(context, _ok)
+
+    asyncio.run(_run())
+
+    assert recorded == ["compute_xtb_energy"], "the default sink was not consulted"

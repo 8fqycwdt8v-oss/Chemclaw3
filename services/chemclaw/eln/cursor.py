@@ -27,7 +27,7 @@ _UPSERT = (
 async def load_cursor(source: str, dsn: str | None = None) -> datetime:
     """Return the stored high-water cursor for `source`, or the epoch if none yet."""
     target = dsn if dsn is not None else settings.postgres_dsn
-    async with await db.connect(
+    async with db.connection(
         target, statement_timeout_seconds=settings.pg_statement_timeout_seconds
     ) as conn:
         cursor = await conn.execute(_SELECT, (source,))
@@ -38,7 +38,7 @@ async def load_cursor(source: str, dsn: str | None = None) -> datetime:
 async def store_cursor(source: str, cursor: datetime, dsn: str | None = None) -> None:
     """Persist the advanced high-water `cursor` for `source` (upsert)."""
     target = dsn if dsn is not None else settings.postgres_dsn
-    async with await db.connect(
+    async with db.connection(
         target, statement_timeout_seconds=settings.pg_statement_timeout_seconds
     ) as conn:
         await conn.execute(_UPSERT, (source, cursor))

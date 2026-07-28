@@ -19,6 +19,7 @@ from typing import Any
 
 from temporalio.worker import Worker
 
+from chemclaw import db
 from chemclaw.config import settings
 from chemclaw.logging import configure_logging, configure_telemetry
 from chemclaw.temporal_client import connect
@@ -68,7 +69,11 @@ async def main() -> None:
         settings.background_task_queue,
         describe("background"),
     )
-    await worker.run()
+    # Every activity here is a coroutine on this process's one event loop, so a per-call Postgres
+    # handshake is loop time stolen from task polling and heartbeats. Pooled for the worker's
+    # whole life and closed on shutdown.
+    async with db.pooling():
+        await worker.run()
 
 
 if __name__ == "__main__":

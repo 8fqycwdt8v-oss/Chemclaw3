@@ -15,6 +15,7 @@ on in F4.
 
 import asyncio
 import logging
+import time
 import uuid
 from collections import OrderedDict
 from collections.abc import AsyncIterator, Callable
@@ -28,11 +29,13 @@ from fastapi import Depends, FastAPI, HTTPException, UploadFile
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, field_validator
 from sse_starlette.sse import EventSourceResponse
-from starlette.middleware.base import BaseHTTPMiddleware
+from starlette.datastructures import MutableHeaders
 from starlette.middleware.cors import CORSMiddleware
 from starlette.requests import Request
-from starlette.responses import Response
+from starlette.responses import JSONResponse, Response
+from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
+from agents.agent_pool import AgentPool
 from agents.attachments import STORE as ATTACHMENTS
 from agents.attachments import AttachmentError, AttachmentSummary, parse_attachment
 from agents.chemclaw_agent import build_agent, connector_tools, history_provider
@@ -48,8 +51,10 @@ from agents.interaction_tools import (
 from agents.profile_discovery import load_profiles
 from agents.profiles import get_profile
 from agents.session_events import stream_new_events
+from chemclaw import db
 from chemclaw.config import settings
-from connectors.health import check_connectors_at_startup, probe_connectors
+from chemclaw.logging import configure_logging, configure_telemetry
+from connectors.health import ConnectorHealth, check_connectors_at_startup, probe_connectors
 from scripts.schedules import ScheduleHealth, describe_schedules
 from service.auth import Principal, require_principal
 from service.budget import BudgetExceeded, BudgetTracker
@@ -147,6 +152,83 @@ class SessionOwners(Protocol):
         ...
 
 
+class SessionTurns(Protocol):
+    """The durable "who is running a turn on this session" claim (D-121).
+
+    A Protocol for the same reason `SessionOwners` is one: the concrete
+    `agents.session_store.SessionTurnClaims` needs a database, so it is imported only on the
+    durable path and a test injects an in-memory fake.
+    """
+
+    async def claim(self, session_id: str, holder: str, lease_seconds: float) -> bool:
+        """Take the session's turn slot for `lease_seconds`; False if someone else holds it."""
+        ...
+
+    async def refresh(self, session_id: str, holder: str, lease_seconds: float) -> None:
+        """Extend this holder's claim, so a long turn is not declared dead and stolen from."""
+        ...
+
+    async def release(self, session_id: str, holder: str) -> None:
+        """Give the slot back when the turn ends."""
+        ...
+
+
+# This process's identity as a claim holder. A fresh id per process (each uvicorn worker imports
+# this module in its own interpreter), so a claim can never be refreshed or released by anyone but
+# the process that took it — including a *previous* incarnation of this pod, whose leftover claims
+# must age out rather than be inherited.
+_WORKER_ID = uuid.uuid4().hex
+
+# The claim is refreshed this many times per lease. Three, so two consecutive refreshes can fail —
+# a slow query, one blocked moment on the loop — before the lease is genuinely at risk. Not a
+# config knob: it is a property of how the lease is maintained, not something a deployment tunes
+# independently of `service_turn_claim_lease_seconds`.
+_CLAIM_REFRESHES_PER_LEASE = 3
+
+
+async def _hold_turn_claim(claims: SessionTurns, session_id: str, lease_seconds: float) -> None:
+    """Keep this turn's claim alive for as long as the turn streams.
+
+    Cancelled by the stream's `finally`, so it lives exactly as long as the turn does. A refresh
+    that fails is logged and counted rather than fatal: killing a chemist's turn because one small
+    UPDATE did not land would trade a real answer for a hazard that also needs a second turn on
+    the same session to arrive inside the remaining lease. It is *counted* because this branch
+    already learned that lesson the expensive way — a guard that quietly switches itself off
+    (D-107's rollback watermark) is worse than one that fails loudly.
+    """
+    interval = lease_seconds / _CLAIM_REFRESHES_PER_LEASE
+    while True:
+        await asyncio.sleep(interval)
+        try:
+            await claims.refresh(session_id, _WORKER_ID, lease_seconds)
+        except (ConnectionError, OSError, RuntimeError):
+            METRICS.increment("chemclaw_turn_claim_refresh_failures_total")
+            logger.warning(
+                "could not refresh the turn claim for session %s; if this keeps failing the "
+                "claim lapses after %ss and another worker may start a turn on this session",
+                session_id,
+                lease_seconds,
+                exc_info=True,
+            )
+
+
+async def _release_turn_claim(claims: SessionTurns, session_id: str) -> None:
+    """Give a session's turn slot back, never failing the turn that is already over.
+
+    The lease is the backstop: a release that cannot reach the database (or a stream torn down so
+    abruptly there is no time to run it) costs the session one lease of unavailability, not a
+    permanent 409 — which is precisely why the claim expires at all.
+    """
+    try:
+        await claims.release(session_id, _WORKER_ID)
+    except (ConnectionError, OSError, RuntimeError):
+        logger.warning(
+            "could not release the turn claim for session %s; it expires on its own",
+            session_id,
+            exc_info=True,
+        )
+
+
 def _default_owner_store() -> SessionOwners | None:
     """The durable session-ownership store, but only when durable sessions are on (else None).
 
@@ -160,6 +242,21 @@ def _default_owner_store() -> SessionOwners | None:
     from agents.session_store import SessionOwnerStore
 
     return SessionOwnerStore()
+
+
+def _default_turn_claims() -> SessionTurns | None:
+    """The durable turn claim, but only where two processes can share one session (else None).
+
+    Gated on the same `session_store="postgres"` switch as ownership, because that switch is
+    exactly the condition under which two processes share a conversation's durable history and can
+    therefore corrupt it. Under the in-memory store each process has its own history and the
+    in-process set already covers everything there is to cover.
+    """
+    if settings.session_store != "postgres":
+        return None
+    from agents.session_store import SessionTurnClaims
+
+    return SessionTurnClaims()
 
 
 class MessageIn(BaseModel):
@@ -233,24 +330,39 @@ class ApprovalStatusOut(BaseModel):
 
 @asynccontextmanager
 async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
-    """Probe the enabled connectors once before serving, so an operator learns it here, not later.
+    """Open this process's Postgres pool, then probe the connectors once before serving.
 
-    The probe's *result* only informs (readiness reports it, a gauge counts it) — a missing
-    connector costs capability, not correctness, so the default is to serve anyway.
+    The pool belongs here because it belongs to one process and one event loop, and because
+    everything below `chemclaw.db.connection` inherits it with no plumbing: the session store,
+    the ownership registry, the push-back tailer and the rollback watermark all stop paying a
+    TCP+auth handshake per call. That churn — measured at ~2.7 connects per turn — was what made
+    a connect fail to be scheduled inside its timeout under load, which silently disarmed the
+    non-fatal rollback-watermark guard (D-107).
+
+    The connector probe's *result* only informs (readiness reports it, a gauge counts it) — a
+    missing connector costs capability, not correctness, so the default is to serve anyway.
     `connectors_required` is the opt-in inversion: it raises here, which fails startup, for a
-    deployment where answering
-    with a
-    silently reduced tool surface is worse than not answering. That check belongs at startup
-    rather than in the readiness route because refusing to *start* is the only way to keep a pod
-    with degraded capability out of a rollout.
+    deployment where answering with a silently reduced tool surface is worse than not answering.
+    That check belongs at startup rather than in the readiness route because refusing to *start*
+    is the only way to keep a pod with degraded capability out of a rollout.
     """
+    # First, so everything below is logged the way the operator asked. The front door never
+    # configured either of these, so it ran on Python's default root logger (WARNING, no format)
+    # while every worker honoured `CHEMCLAW_LOG_LEVEL`/`LOG_FORMAT`, and `CHEMCLAW_OTEL_ENABLED`
+    # was simply inert here — the one process a chemist actually talks to was the one with no
+    # observability wiring. Here rather than in `create_app` because this is the "about to serve"
+    # moment, matching each worker's `main()`.
+    configure_logging()
+    configure_telemetry()
     # Register the file-authored profiles before any agent is built, so a session can name one
     # on its first request. Failing here is the right outcome for a malformed profile: it is a
     # deployment configuration error, and a front door that started anyway would 400 every
     # request naming that profile with no hint as to why.
     load_profiles()
-    app.state.connector_health = await check_connectors_at_startup()
-    yield
+    async with db.pooling():
+        app.state.connector_health = await check_connectors_at_startup()
+        app.state.connector_health_at = time.monotonic()
+        yield
 
 
 def _default_agent_factory(profile: str | None) -> Any:
@@ -258,6 +370,12 @@ def _default_agent_factory(profile: str | None) -> Any:
 
     A named adapter rather than a lambda so the app's default factory has the same one-argument
     shape a test's fake does, and so the signature is somewhere a reader can find it.
+
+    No `audit_sink` argument, deliberately: `agents.audit.default_audit_sink` supplies the durable
+    GxP trail wherever a database is configured. This line used to be the whole of the finding —
+    it passed no sink, so the compliance record was log-only in the one process chemists use.
+    Fixing it *here* would have left the same trap set for the Temporal template activities and
+    every future entry point, so the default moved to the one place that decides.
     """
     return build_agent(profile=profile)
 
@@ -266,6 +384,7 @@ def create_app(
     agent_factory: Callable[[str | None], Any] = _default_agent_factory,
     owner_store: SessionOwners | None = None,
     connector_factory: Callable[[str | None], list[Any]] = connector_tools,
+    turn_claims: SessionTurns | None = None,
 ) -> FastAPI:
     """Build the front-door FastAPI app.
 
@@ -284,6 +403,10 @@ def create_app(
             per-profile because the profile narrows the connector surface as well as the
             in-process one. Injectable for the same reason `agent_factory` is: a test drives the
             whole HTTP surface without a connector server running.
+        turn_claims: The durable "one turn at a time per session" claim, which is what makes that
+            guard hold across processes rather than only within one (D-121). Defaults to the
+            config-gated store (present only under `session_store="postgres"`); tests inject an
+            in-memory fake to exercise the cross-process conflict without a database.
 
     Returns:
         A configured `FastAPI` application.
@@ -292,6 +415,11 @@ def create_app(
     app = FastAPI(title="Chemclaw", docs_url=None, redoc_url=None, lifespan=_lifespan)
     _add_security_headers(app)
     _add_cors(app)
+    # One handler rather than a try/except per route: every route that touches durable session
+    # state can hit the pool, and `chemclaw.db` already funnels both "no database" and "no free
+    # connection in time" into `ConnectionError` precisely because a caller cannot act on the
+    # difference. See `_database_unavailable`.
+    app.add_exception_handler(ConnectionError, _database_unavailable)
     # One agent per process, built lazily on first use so importing the app needs no
     # credentials; per-session threads keep conversations apart. F3 replaces the in-memory
     # session map with a durable store and wires job→session push-back. One agent per profile
@@ -316,6 +444,10 @@ def create_app(
     # `session.state`), so one instance is correct for both and neither carries per-session
     # state.
     app.state.history = history_provider()
+    # One agent — and therefore one chat client — per concurrent turn (D-123). The cached
+    # `_agent()` below still serves everything that does not stream; only a streaming turn needs
+    # exclusivity, because that is where the Anthropic client keeps tool-call identity on itself.
+    app.state.agent_pool = AgentPool(app.state.agent_factory, settings.service_max_concurrent_turns)
     # Admission control on concurrent turns (AG-15): a bounded permit set caps how many turns
     # hit the shared LLM endpoint at once. A permit is held for a turn's whole streamed run; a
     # turn that cannot get one within the admission timeout is shed with 503. Built here so it
@@ -330,6 +462,12 @@ def create_app(
     # for the running turn). Check-and-add is atomic on the event loop (no await between them),
     # so the gate has no race window.
     app.state.active_turns = set()
+    # The same gate at the width the deployment actually has (D-121). The set above is one
+    # process's view, and the chart runs the front door at two replicas, so the second POST can
+    # land on a process that has never heard of the first. A leased row in `session_turns` is what
+    # both processes can see; None under the in-memory session store, where two processes share no
+    # history to corrupt.
+    app.state.turn_claims = turn_claims if turn_claims is not None else _default_turn_claims()
     # Per-user count of open push-back event streams. The turn semaphore only guards POSTed
     # turns; each event stream polls the database for its whole lifetime, so without a cap one
     # user's scripted (or abandoned-tab) streams could pile up unbounded DB load. Entries are
@@ -352,6 +490,21 @@ def create_app(
     # on. Refreshed by the readiness probe (and at startup), read from the snapshot here — a
     # gauge must not perform network I/O when Prometheus scrapes it.
     app.state.connector_health = []
+    # When that snapshot was taken (`time.monotonic`), so the readiness route can reuse it instead
+    # of fanning out to the whole connector fleet on every unauthenticated probe. Negative
+    # infinity, not 0: an empty snapshot must always be treated as stale, and 0 would be "fresh"
+    # for the first `service_readiness_cache_seconds` of process uptime.
+    app.state.connector_health_at = float("-inf")
+    # Pool saturation (D-119). Read live from the pools rather than mirrored, like every other
+    # gauge here; `requests_waiting` above zero is what "the pool is too small" looks like, and it
+    # is the only reading that distinguishes it from an unreachable database.
+    METRICS.bind_gauge("chemclaw_pg_pool_size", lambda: float(db.pool_stats()["pool_size"]))
+    METRICS.bind_gauge(
+        "chemclaw_pg_pool_available", lambda: float(db.pool_stats()["pool_available"])
+    )
+    METRICS.bind_gauge(
+        "chemclaw_pg_pool_requests_waiting", lambda: float(db.pool_stats()["requests_waiting"])
+    )
     METRICS.bind_gauge(
         "chemclaw_connectors_unhealthy",
         lambda: float(sum(1 for item in app.state.connector_health if item.state == "unreachable")),
@@ -432,6 +585,24 @@ def create_app(
         """Liveness: the process is up."""
         return {"status": "ok"}
 
+    async def _connector_health() -> list[ConnectorHealth]:
+        """The connector sweep, re-probed at most once per `service_readiness_cache_seconds`.
+
+        Monotonic, not wall-clock: a clock adjustment must not make the last sweep look
+        arbitrarily fresh. A concurrent second caller inside the window reads the same snapshot;
+        two callers racing past the window both probe once, which is a wasted sweep and not a
+        correctness problem, so it is not worth a lock on a readiness route.
+        """
+        window = settings.service_readiness_cache_seconds
+        now = time.monotonic()
+        if window and now - float(app.state.connector_health_at) < window:
+            cached: list[ConnectorHealth] = app.state.connector_health
+            return cached
+        health = await probe_connectors()
+        app.state.connector_health = health
+        app.state.connector_health_at = now
+        return health
+
     @app.get("/readyz")
     async def readyz() -> dict[str, str]:
         """Readiness: the agent can be built, plus each enabled connector's reachability.
@@ -443,10 +614,16 @@ def create_app(
         readiness probe runs on the cadence a gauge wants anyway, so one bounded sweep serves
         both. A deployment that would rather not serve at all in this state sets
         `connectors_required`, which fails startup instead.
+
+        The sweep is cached for `service_readiness_cache_seconds`. This route is unauthenticated
+        by necessity (a kubelet cannot present a token) and runs every 10 seconds per pod, so an
+        uncached probe is a fan-out any caller can trigger at will — N HTTP round trips per
+        request against the connector fleet. Caching does not weaken the signal: the connector
+        states are reported, never gating, so the only cost is that a reported state can be up to
+        one window stale. Set 0 to probe every time.
         """
         _agent()
-        health = await probe_connectors()
-        app.state.connector_health = health
+        health = await _connector_health()
         return {
             "status": "ready",
             "connectors": ", ".join(f"{item.name}={item.state}" for item in health),
@@ -542,15 +719,24 @@ def create_app(
 
         Admission-controlled (AG-15): the turn takes one of the process's turn permits for its
         whole streamed run, and is shed with 503 if none frees within the admission timeout — so
-        a burst of concurrent turns cannot pile onto the shared internal LLM endpoint. One turn
-        at a time per session: a second concurrent POST to the same session is a 409 (a
-        double-submit cannot interleave two turns into one conversation thread). The permit hold
-        is wall-clock bounded (`service_turn_timeout_seconds`): a hung model stream or a
+        a burst of concurrent turns cannot pile onto the shared internal LLM endpoint. The permit
+        hold is wall-clock bounded (`service_turn_timeout_seconds`): a hung model stream or a
         slow-reading client cannot pin a permit forever — on expiry the client gets one error
         event and the permit is released.
+
+        **One turn at a time per session**, claimed twice. The in-process `active_turns` set
+        answers a double-submit that lands on this same process with no I/O and no race window
+        (there is no `await` between the test and the add). The durable claim in `session_turns`
+        answers the case that set cannot see: the shipped chart runs two front-door replicas, so
+        the second POST may arrive at a different process entirely, and both would otherwise be
+        admitted and interleave their messages into one conversation thread. Both answer 409.
+        The durable half is present only under `session_store="postgres"` — with the in-memory
+        store there is no shared history for two processes to corrupt.
         """
         live = await _resolve_session(session_id, principal)
         active_turns: set[str] = app.state.active_turns
+        claims: SessionTurns | None = app.state.turn_claims
+        lease = settings.service_turn_claim_lease_seconds
         if session_id in active_turns:
             METRICS.increment("chemclaw_turns_conflict_total")
             raise HTTPException(
@@ -563,6 +749,11 @@ def create_app(
             # Release the permit and the session's turn slot when the stream ends — normal
             # completion, error, timeout, or client disconnect (the generator is closed, running
             # this finally) — so neither is ever leaked.
+            heartbeat = (
+                None
+                if claims is None
+                else asyncio.create_task(_hold_turn_claim(claims, session_id, lease))
+            )
             try:
                 try:
                     # The deadline covers the whole streamed run *including* client consumption:
@@ -571,13 +762,21 @@ def create_app(
                     # wall-clock half). A stall inside `run_turn` surfaces here as TimeoutError
                     # and becomes one user-safe error event; a stall in the transport tears the
                     # stream down, and the `finally` still frees the permit either way.
-                    async with asyncio.timeout(settings.service_turn_timeout_seconds):
+                    async with (
+                        asyncio.timeout(settings.service_turn_timeout_seconds),
+                        # Exclusive for this turn (D-123). Two turns streaming through one chat
+                        # client interleave its tool-call bookkeeping and emit a `tool_use` block
+                        # with an empty name, which Anthropic rejects — 20% of turns in a live
+                        # 50-user run. The lease is returned even if the turn raises or the client
+                        # disconnects, so a pod cannot bleed capacity.
+                        app.state.agent_pool.lease(live.profile) as turn_agent,
+                    ):
                         async for event in run_turn(
                             # The session's profile picks both halves of its surface: the agent
                             # it talks to and the connectors that agent gets. Selecting one
                             # without the other would advertise a narrowed toolset over the full
                             # connector set.
-                            _agent(live.profile),
+                            turn_agent,
                             live.session,
                             body.message,
                             actor=principal.oid,
@@ -606,10 +805,15 @@ def create_app(
                     )
                     yield {"event": timeout_event.type, "data": timeout_event.model_dump_json()}
             finally:
+                if heartbeat is not None:
+                    heartbeat.cancel()
                 semaphore.release()
                 active_turns.discard(session_id)
+                if claims is not None:
+                    await _release_turn_claim(claims, session_id)
 
         acquired = False
+        claimed = False
         handed_off = False
         try:
             # Runaway-cost guard (budget #3): refuse before taking a permit if this session/user
@@ -620,6 +824,16 @@ def create_app(
             except BudgetExceeded as exc:
                 METRICS.increment("chemclaw_turns_refused_budget_total")
                 raise HTTPException(status_code=429, detail=str(exc)) from exc
+            # Claimed before the permit rather than after, so a turn that is already running
+            # elsewhere is refused without first occupying one of this process's permits for the
+            # duration of the admission wait. A failed checkout raises `ConnectionError` and is
+            # shed as a 503 by `_database_unavailable` — the guard fails closed, and retryably.
+            if claims is not None and not await claims.claim(session_id, _WORKER_ID, lease):
+                METRICS.increment("chemclaw_turns_conflict_total")
+                raise HTTPException(
+                    status_code=409, detail="a turn is already running for this session"
+                )
+            claimed = claims is not None
             try:
                 await asyncio.wait_for(
                     semaphore.acquire(), timeout=settings.service_turn_admission_timeout_seconds
@@ -645,6 +859,8 @@ def create_app(
                 active_turns.discard(session_id)
                 if acquired:
                     semaphore.release()
+                if claimed and claims is not None:
+                    await _release_turn_claim(claims, session_id)
 
     @app.get("/sessions/{session_id}/events")
     async def session_events(
@@ -653,15 +869,20 @@ def create_app(
     ) -> EventSourceResponse:
         """Stream async job push-back for the session (F3-T3): a finished job wakes the chat.
 
-        Bounded per user (`service_max_event_streams_per_user`): each stream polls the database
-        for its whole lifetime, so unbounded streams are a connection-exhaustion vector (429 past
-        the cap). The claim is scoped to `job_completed` in the SQL itself — the claim is
+        Bounded twice, because one bound does not imply the other: per user
+        (`service_max_event_streams_per_user`) so no single client can fan out, and across all
+        users on this process (`service_max_event_streams_total`) because 50 chemists each within
+        their per-user cap is still 250 forever-polling tasks on one event loop. Each stream
+        polls the database for its whole lifetime, so unbounded streams are a load vector (429
+        past either cap). The claim is scoped to `job_completed` in the SQL itself — the claim is
         destructive (at-most-once), so filtering after it would silently destroy events of any
         other kind meant for another consumer.
         """
         await _resolve_session(session_id, principal)
         streams: dict[str, int] = app.state.event_streams
-        if streams.get(principal.oid, 0) >= settings.service_max_event_streams_per_user:
+        at_user_cap = streams.get(principal.oid, 0) >= settings.service_max_event_streams_per_user
+        at_pod_cap = sum(streams.values()) >= settings.service_max_event_streams_total
+        if at_user_cap or at_pod_cap:
             METRICS.increment("chemclaw_event_streams_rejected_total")
             raise HTTPException(
                 status_code=429, detail="too many concurrent event streams; close one and retry"
@@ -866,6 +1087,37 @@ _CONTENT_SECURITY_POLICY = (
     "connect-src 'self'; img-src 'self' data:; base-uri 'none'; frame-ancestors 'none'"
 )
 
+# The full header set, as the `(name, value)` pairs the ASGI response-start message wants. A
+# tuple rather than four `setdefault` calls so adding a header is one line and the middleware
+# stays a loop.
+_SECURITY_HEADERS: tuple[tuple[str, str], ...] = (
+    ("Content-Security-Policy", _CONTENT_SECURITY_POLICY),
+    ("X-Content-Type-Options", "nosniff"),
+    ("X-Frame-Options", "DENY"),
+    ("Strict-Transport-Security", "max-age=63072000; includeSubDomains"),
+)
+
+
+async def _database_unavailable(request: Request, exc: Exception) -> Response:
+    """Turn a failed Postgres checkout into a retryable 503 instead of an unhandled 500.
+
+    `create_session` writes the session's owner row before returning an id, so it needs a
+    connection; under load 16 of those writes raised `psycopg_pool.PoolTimeout` and, with no
+    handler anywhere, became HTTP 500s. A 500 tells a client "this request is broken, do not
+    retry" — the opposite of the truth. The pool was not even exhausted: it held 13 of a
+    permitted 64 connections and opened none during the run, so the callers were waiting for a
+    connection that was *available* and could not be handed to them, which is the same event-loop
+    starvation that used to show up as a connect timeout.
+
+    Answered with the admission path's wording on purpose. "Server at capacity; retry shortly" is
+    what a shed turn already says, the client behaviour is identical (back off and retry), and a
+    browser has no business learning which piece of infrastructure is behind it — while a
+    misconfigured DSN still names itself loudly in the log line below.
+    """
+    METRICS.increment("chemclaw_db_unavailable_total")
+    logger.warning("shedding %s %s: %s", request.method, request.url.path, exc)
+    return JSONResponse(status_code=503, content={"detail": "server at capacity; retry shortly"})
+
 
 def _refuse_unauthenticated_exposure() -> None:
     """Fail closed when the app would run unauthenticated (`entra_required` off) network-exposed.
@@ -899,27 +1151,58 @@ def _refuse_unauthenticated_exposure() -> None:
     )
 
 
+class _SecurityHeaders:
+    """Stamp the browser security headers onto every response — pure ASGI, never buffering (SEC-5).
+
+    Pure ASGI rather than `BaseHTTPMiddleware`, which is what this used to be. That wrapper runs
+    the downstream app as a *second task* and pipes its ASGI messages through a memory stream, so
+    a request that ends without ever sending a response — a client that gives up while waiting
+    for an admission permit, a pod draining mid-stream on a rolling deploy, anything that
+    cancels the handler — reaches `call_next` as a closed stream and is re-raised as
+    `RuntimeError("No response returned.")`: a 500 with a traceback where the honest outcome is
+    a closed connection. A 50-user load run logged 44 of them, every one on the SSE turn route,
+    and the same wrapper is why an `EventSourceResponse` cannot be run under more than one
+    uvicorn worker safely.
+
+    This wraps only `send`, mutating the `http.response.start` headers in place. The body is
+    never re-tasked, never buffered, and a long-lived SSE stream is byte-for-byte what the route
+    produced.
+    """
+
+    def __init__(self, app: ASGIApp) -> None:
+        """Wrap `app`, the rest of the ASGI stack below this middleware."""
+        self._app = app
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        """Pass the call through, adding the headers to the response-start message.
+
+        Non-HTTP scopes (lifespan, websocket) carry no response headers, so they pass straight
+        through — a middleware that assumed `http` would break startup.
+        """
+        if scope["type"] != "http":
+            await self._app(scope, receive, send)
+            return
+
+        async def _send(message: Message) -> None:
+            if message["type"] == "http.response.start":
+                headers = MutableHeaders(scope=message)
+                for name, value in _SECURITY_HEADERS:
+                    # setdefault, so a route that deliberately sets its own policy still wins.
+                    headers.setdefault(name, value)
+            await send(message)
+
+        await self._app(scope, receive, _send)
+
+
 def _add_security_headers(app: FastAPI) -> None:
     """Add the browser security headers to every response, when `service_security_headers` is on.
 
     Off only when a deployment fronts its own header policy at the ingress/Route; on by default
-    so the app is safe standalone. The headers are static, so a lightweight middleware sets them
+    so the app is safe standalone. The headers are static, so one pure-ASGI middleware sets them
     on every response (including static files and errors) without touching the route handlers.
     """
-    if not settings.service_security_headers:
-        return
-
-    async def _set_headers(request: Request, call_next: Callable[[Request], Any]) -> Response:
-        response: Response = await call_next(request)
-        response.headers.setdefault("Content-Security-Policy", _CONTENT_SECURITY_POLICY)
-        response.headers.setdefault("X-Content-Type-Options", "nosniff")
-        response.headers.setdefault("X-Frame-Options", "DENY")
-        response.headers.setdefault(
-            "Strict-Transport-Security", "max-age=63072000; includeSubDomains"
-        )
-        return response
-
-    app.add_middleware(BaseHTTPMiddleware, dispatch=_set_headers)
+    if settings.service_security_headers:
+        app.add_middleware(_SecurityHeaders)
 
 
 def _add_cors(app: FastAPI) -> None:

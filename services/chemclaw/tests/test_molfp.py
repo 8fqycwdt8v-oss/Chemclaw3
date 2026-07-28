@@ -8,7 +8,8 @@ The Postgres backend reproduces the same ranking in SQL (tested in CI).
 
 import asyncio
 import time
-from collections.abc import Callable
+from collections.abc import AsyncIterator, Callable
+from contextlib import asynccontextmanager
 
 import pytest
 
@@ -381,21 +382,27 @@ def test_postgres_store_applies_the_configured_statement_timeout(
 ) -> None:
     """The Postgres backend must bound its (slow HNSW) queries like every other store (COR-5/CON-2).
 
-    A regression pin for the fpstore-only omission: `_connect` must forward
-    `pg_statement_timeout_seconds` to the shared `db.connect`, so a long similarity scan is
+    A regression pin for the fpstore-only omission: `_connection` must forward
+    `pg_statement_timeout_seconds` to the shared `db.connection`, so a long similarity scan is
     cancelled rather than pinning its worker. Verified offline by capturing the connect call.
     """
     captured: dict[str, object] = {}
 
-    async def _fake_connect(dsn: str, **kwargs: object) -> object:
+    @asynccontextmanager
+    async def _fake_connection(dsn: str, **kwargs: object) -> AsyncIterator[object]:
         captured["dsn"] = dsn
         captured.update(kwargs)
-        return object()
+        yield object()
 
-    monkeypatch.setattr(db, "connect", _fake_connect)
+    monkeypatch.setattr(db, "connection", _fake_connection)
     store = PostgresFingerprintStore(
         "molecule_fingerprints", settings.ecfp_bits, molecule_definition()
     )
-    asyncio.run(store._connect())
+
+    async def _enter() -> None:
+        async with store._connection():
+            pass
+
+    asyncio.run(_enter())
 
     assert captured["statement_timeout_seconds"] == settings.pg_statement_timeout_seconds

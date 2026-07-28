@@ -17,6 +17,7 @@ import logging
 
 from temporalio.worker import Worker
 
+from chemclaw import db
 from chemclaw.logging import configure_logging, configure_telemetry
 from chemclaw.temporal_client import connect
 from connectors.queues import bundle_queue
@@ -44,7 +45,11 @@ async def run_bundle_worker(connector: str) -> None:
         activities=registered_activities(queue),
     )
     logger.info("%s connector worker connected: queue=%s %s", connector, queue, describe(queue))
-    await worker.run()
+    # Every activity here is a coroutine on this process's one event loop, so a per-call Postgres
+    # handshake is loop time stolen from task polling and heartbeats. Pooled for the worker's
+    # whole life and closed on shutdown.
+    async with db.pooling():
+        await worker.run()
 
 
 def main(connector: str) -> None:

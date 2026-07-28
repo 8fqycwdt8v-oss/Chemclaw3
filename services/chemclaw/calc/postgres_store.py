@@ -8,6 +8,8 @@ The DSN comes from the one config source.
 """
 
 import json
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 
 import psycopg
 from psycopg.rows import TupleRow
@@ -42,22 +44,24 @@ class PostgresStore:
         """Use the given DSN, or the configured one by default."""
         self._dsn = dsn if dsn is not None else settings.postgres_dsn
 
-    async def _connect(self) -> psycopg.AsyncConnection[TupleRow]:
-        """Open a connection that fails fast, with a clear message, on an unreachable database.
+    @asynccontextmanager
+    async def _connection(self) -> AsyncIterator[psycopg.AsyncConnection[TupleRow]]:
+        """Borrow a connection with the configured per-statement timeout.
 
-        Delegates to the shared `chemclaw.db.connect`, which applies the configured
-        connect timeout and turns a raw psycopg failure into a "Postgres unreachable at
-        <host>" `ConnectionError` (the bound belongs to the connect, not the activity).
-        Also applies the configured per-statement timeout so a hung query is cancelled
-        rather than pinning the enclosing activity for its whole budget.
+        Pooled per process when the process opened a pool (`chemclaw.db.pooling`), so a
+        request path pays no TCP+auth handshake; a dedicated connect otherwise. Either way a
+        down or misconfigured database reports "Postgres unreachable at <host>" rather than a
+        raw psycopg traceback, and a hung query is cancelled rather than pinning the enclosing
+        activity for its whole budget.
         """
-        return await db.connect(
+        async with db.connection(
             self._dsn, statement_timeout_seconds=settings.pg_statement_timeout_seconds
-        )
+        ) as conn:
+            yield conn
 
     async def get(self, key: CalculationKey) -> StoredResult | None:
         """Return the stored result for `key`, or None on a miss."""
-        async with await self._connect() as conn:
+        async with self._connection() as conn:
             async with conn.cursor() as cur:
                 await cur.execute(_SELECT, (key.as_str(),))
                 row = await cur.fetchone()
@@ -71,7 +75,7 @@ class PostgresStore:
     async def put(self, stored: StoredResult) -> None:
         """Persist `stored`, overwriting any existing result for its key."""
         key = stored.key
-        async with await self._connect() as conn:
+        async with self._connection() as conn:
             async with conn.cursor() as cur:
                 await cur.execute(
                     _UPSERT,

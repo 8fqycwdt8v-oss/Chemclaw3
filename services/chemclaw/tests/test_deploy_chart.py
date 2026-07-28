@@ -243,6 +243,22 @@ def test_schedules_are_applied_by_a_post_install_hook() -> None:
     assert '"python", "-m", "scripts.schedules"' in job
 
 
+def test_the_route_pins_a_browser_to_one_front_door_pod() -> None:
+    """Session affinity is a correctness requirement of the front door, not a tuning preference.
+
+    The chart runs the front door at two replicas and autoscales to six. The per-session turn
+    guard is durable now (`session_turns`, D-121), but a conversation still depends on state that
+    lives only in the process that created it: uploaded attachments, the harness todo list, and
+    the live `AgentSession` handle. Land the follow-up request on a sibling pod and the agent
+    simply cannot see the file the chemist just uploaded.
+
+    Asserted rather than left to the haproxy router's default, because a default that is silently
+    flipped cluster-wide would break attachments with no change to this repository.
+    """
+    route = (CHART / "templates" / "service-route.yaml").read_text()
+    assert 'haproxy.router.openshift.io/disable_cookies: "false"' in route
+
+
 def test_push_credential_is_declared() -> None:
     """Every agent-authored note fails at push without a git credential in the chart (DEP-2)."""
     assert "knowledgeRepoToken" in _values()["secrets"]["keys"]

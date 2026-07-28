@@ -30,7 +30,7 @@ from typing import NamedTuple
 from agents.audit import AuditEvent
 from agents.audit_store import chain_hash
 from chemclaw.config import settings
-from chemclaw.db import connect
+from chemclaw.db import connection
 
 
 class ChainRow(NamedTuple):
@@ -89,7 +89,7 @@ async def verify_chain(dsn: str | None = None) -> list[str]:
     """Fetch the whole audit trail and check its hash chain; return the problems found."""
     target = dsn if dsn is not None else settings.postgres_dsn
     rows: list[ChainRow] = []
-    async with await connect(
+    async with connection(
         target, statement_timeout_seconds=settings.pg_statement_timeout_seconds
     ) as conn:
         cursor = await conn.execute(_SELECT_ALL)

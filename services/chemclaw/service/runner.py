@@ -13,6 +13,8 @@ stack trace to the browser — a failed turn must not take down the stream or le
 import asyncio
 import copy
 import logging
+import time
+import uuid
 from collections.abc import AsyncIterator, Mapping, Sequence
 from contextlib import AsyncExitStack
 from typing import Any
@@ -23,7 +25,12 @@ from agents.chemclaw_agent import connector_tools
 from agents.dialogue_tools import reset_dry_run, set_dry_run
 from agents.framing import frame_untrusted
 from agents.harness_todo import todo_titles
-from agents.identity_context import reset_current_identity, set_current_identity
+from agents.identity_context import (
+    reset_current_correlation_id,
+    reset_current_identity,
+    set_current_correlation_id,
+    set_current_identity,
+)
 from agents.job_results import await_job_results
 from agents.session_context import (
     reset_current_session,
@@ -56,6 +63,7 @@ from service.events import (
     TokenEvent,
     ToolCallEvent,
 )
+from service.metrics import METRICS
 
 logger = logging.getLogger(__name__)
 
@@ -105,6 +113,7 @@ async def run_turn(
         `service.events.Event` values in the order the model produced them, ending with an
         `AnswerEvent` on success or an `ErrorEvent` on failure.
     """
+    turn_started = time.perf_counter()
     answer_parts: list[str] = []
     # Metered across the turn's updates and booked once on teardown (even on failure — a failed
     # turn still spent tokens up to the point it broke, so its cost must count toward the next
@@ -119,6 +128,11 @@ async def run_turn(
     live_session_token = set_current_session(session)
     # Stamp the authenticated identity (F4) so audit/authorization/attribution see the user.
     identity_token = set_current_identity(actor, roles) if actor is not None else None
+    # One correlation id per *turn*, stamped here rather than bound inside `build_agent`: agents
+    # are cached per profile for the process's lifetime, so a build-time id was shared by every
+    # turn from every user on the pod — the audit trail could not tell two conversations apart,
+    # which is the one thing a correlation id exists to do.
+    correlation_token = set_current_correlation_id(uuid.uuid4().hex)
     # Buffer for what tools learn mid-turn that the stream must surface (started jobs, PR-gate
     # proposals) — the runner only sees the model's updates, so tools hand these over out of
     # band.
@@ -141,14 +155,28 @@ async def run_turn(
     # the orphaned `tool_use` in the database and bricked the session anyway, which is exactly the
     # failure the snapshot exists to prevent. A watermark lets the rollback delete what this turn
     # actually wrote, and nothing else.
+    #
+    # The read stays non-fatal, and that is a decision rather than an omission. Failing the turn
+    # would trade a *conditional* future fault — this session breaks only if the client also
+    # disconnects mid-tool-call — for a *certain* immediate one: every turn on the pod fails
+    # whenever the session store hiccups, including the turns that would have completed fine. The
+    # guard is a mitigation, not the thing being guarded.
+    #
+    # What was wrong is that it was silent. A load test ran 32 turns unguarded in 126 seconds and
+    # said so only in a WARNING nobody scrapes. It is now an ERROR *and* a counter, so "the
+    # rollback guard is off" is alertable — which is the property that lets an operator act before
+    # a chemist finds a bricked session. (The cause was connect churn; that is fixed by pooling in
+    # the previous commit. This is the part that must not depend on having fixed the cause.)
     history_watermark: int | None = None
     if history is not None and hasattr(history, "latest_message_id"):
         try:
             history_watermark = await history.latest_message_id(session.session_id)
         except Exception:  # noqa: BLE001 - a rollback aid must never fail the turn it guards
-            logger.warning(
-                "could not read the history watermark for session %s; a disconnect this turn "
-                "will not roll durable history back",
+            METRICS.increment("chemclaw_rollback_watermark_unavailable_total")
+            logger.error(
+                "could not read the history watermark for session %s; this turn runs WITHOUT the "
+                "durable-history rollback guard, so a client disconnect during it can leave an "
+                "orphaned tool_use and brick the session",
                 session.session_id,
                 exc_info=True,
             )
@@ -275,10 +303,18 @@ async def run_turn(
     finally:
         if budget is not None:
             budget.record(session.session_id, actor, turn_tokens)
+        # Observed on every path — success, failure and disconnect — because a turn that failed
+        # after 40 s is exactly the sample an operator needs, and excluding it would make the
+        # histogram look best when the service is worst. The token counter is the same number the
+        # budget guard meters, published as a rate rather than only used to refuse.
+        METRICS.observe("chemclaw_turn_duration_seconds", time.perf_counter() - turn_started)
+        if turn_tokens:
+            METRICS.increment("chemclaw_tokens_total", float(turn_tokens))
         end_turn(signals_token)
         reset_dry_run(dry_run_token)
         reset_current_session_id(session_token)
         reset_current_session(live_session_token)
+        reset_current_correlation_id(correlation_token)
         if identity_token is not None:
             reset_current_identity(identity_token)
 

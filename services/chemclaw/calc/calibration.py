@@ -107,7 +107,7 @@ async def record_prediction(record: PredictionRecord) -> None:
     if not settings.calibration_enabled:
         return
     try:
-        async with await db.connect(
+        async with db.connection(
             settings.postgres_dsn, statement_timeout_seconds=settings.pg_statement_timeout_seconds
         ) as conn:
             async with conn.cursor() as cur:
@@ -144,7 +144,7 @@ async def record_observation(
     if not settings.calibration_enabled:
         return 0
     try:
-        async with await db.connect(
+        async with db.connection(
             settings.postgres_dsn, statement_timeout_seconds=settings.pg_statement_timeout_seconds
         ) as conn:
             async with conn.cursor() as cur:
@@ -200,7 +200,7 @@ async def calibration_for(calc_type: str, *, unit: str = "") -> Calibration:
     if not settings.calibration_enabled:
         return Calibration(calc_type=calc_type, n=0, unit=unit)
     try:
-        async with await db.connect(
+        async with db.connection(
             settings.postgres_dsn, statement_timeout_seconds=settings.pg_statement_timeout_seconds
         ) as conn:
             async with conn.cursor() as cur:

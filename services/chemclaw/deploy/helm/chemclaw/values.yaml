@@ -129,8 +129,13 @@ connectorPort: 8080
 
 resources:
   service:
-    requests: { cpu: "250m", memory: "512Mi" }
-    limits: { cpu: "1", memory: "1Gi" }
+    # Raised from 1 CPU. The front door does real CPU work off its event loop now (RDKit, cache-key
+    # hashing and token validation run in worker threads), and CHEMCLAW_SERVICE_UVICORN_WORKERS can
+    # add processes on top — both are pointless against a 1-CPU limit, which was the ceiling a load
+    # test hit. The request stays modest so scheduling density is unchanged; only the burst headroom
+    # grows.
+    requests: { cpu: "500m", memory: "512Mi" }
+    limits: { cpu: "2", memory: "1Gi" }
   # The default for every worker Deployment, core's and a bundle's. A bundle that needs different
   # sizing overrides it with its own `resources:` under `connectors.<name>` rather than growing a
   # key here, which is what keeps a capability's operational shape inside its own entry.
@@ -140,8 +145,13 @@ resources:
   # Also used by the knowledge-sync init/sidecar containers: both are small, single-purpose
   # processes, and giving them one shared budget is why this key is not named per-component.
   connector:
+    # The limit is 2 CPUs rather than 500m because the `chem` and `calc` connectors are where the
+    # synchronous RDKit work lives (depiction, embedding, descriptors) and it now runs in worker
+    # threads — which buys nothing under a half-CPU limit. The request is unchanged: the
+    # knowledge-sync containers that share this key are still tiny, and a limit they never
+    # approach costs nothing.
     requests: { cpu: "100m", memory: "256Mi" }
-    limits: { cpu: "500m", memory: "512Mi" }
+    limits: { cpu: "2", memory: "512Mi" }
 
 # Non-secret config → ConfigMap → CHEMCLAW_* env. Keys mirror chemclaw/config.Settings exactly.
 config:

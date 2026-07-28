@@ -13,6 +13,8 @@ single point — its input and result shape — which is exactly how much code a
 should be.
 """
 
+import asyncio
+
 from pydantic import BaseModel, Field
 
 from calc.store import ResultStore, run_cached
@@ -93,8 +95,11 @@ async def run_cached_xtb(store: ResultStore, job: XtbInput) -> tuple[XtbResult, 
     stale value. `structure_from_smiles` canonicalizes before embedding, so two
     spellings of one molecule cannot produce two different energies (D-011).
     """
-    structure = _sp_structure(job.smiles, job.charge)
+    structure = await asyncio.to_thread(_sp_structure, job.smiles, job.charge)
     spec = XtbSpec(task="sp")
-    return await run_cached(
-        store, spec.cache_key(structure), lambda: _energy(spec, structure), XtbResult
-    )
+    # Off the event loop: deriving the key calls `calc_version()`, whose first call in a
+    # process shells out to `xtb --version` / `crest --version` (`calc.xtb_cli`), and the
+    # hash walks every atom. Both are synchronous, and this runs inside the connector's
+    # one-loop MCP server and inside Temporal activities that are coroutines.
+    key = await asyncio.to_thread(spec.cache_key, structure)
+    return await run_cached(store, key, lambda: _energy(spec, structure), XtbResult)

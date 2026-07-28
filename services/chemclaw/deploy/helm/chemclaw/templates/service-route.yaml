@@ -20,6 +20,21 @@ metadata:
   name: {{ include "chemclaw.name" . }}
   labels:
     {{- include "chemclaw.labels" . | nindent 4 }}
+  annotations:
+    # Pin a browser to one front-door pod (D-121). Not a performance preference — a correctness
+    # one. The per-session turn guard is durable now (`session_turns`), but three things a
+    # conversation depends on still live in one process's memory and are invisible to a sibling
+    # replica: uploaded attachments (`agents.attachments`, session-scoped and in-memory by
+    # design), the harness todo list (MAF `session.state` on the live handle), and the live
+    # `AgentSession` itself. A chemist who uploads a CSV and then asks about it must reach the pod
+    # that holds it; without affinity that fails once per replica out of N, and it fails by the
+    # agent simply not seeing the file.
+    #
+    # The haproxy router sets its balancing cookie by default, so this is written down explicitly
+    # rather than left to a default that a cluster-wide change could flip silently. `leastconn`
+    # rather than round-robin because turns are long-lived and wildly uneven in duration.
+    haproxy.router.openshift.io/disable_cookies: "false"
+    haproxy.router.openshift.io/balance: leastconn
 spec:
   {{- if .Values.route.host }}
   host: {{ .Values.route.host }}

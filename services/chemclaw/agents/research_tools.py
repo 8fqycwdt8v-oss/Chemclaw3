@@ -15,6 +15,10 @@ evidenced fact from transferred analogy, and drafting new protocols — lives in
 `deep-research` skill, not here. This tool only gathers.
 """
 
+import asyncio
+from collections.abc import Coroutine
+from typing import Any
+
 from agents.framing import frame_untrusted
 from agents.tool_registry import tool
 from chemclaw.config import settings
@@ -88,12 +92,19 @@ async def gather_evidence(
         filters["tag"] = tag
 
     # One ordered hit-list per source; each retriever ranks its own hits (best first).
-    ranked_lists: list[list[EvidenceChunk]] = [
-        await retriever.retrieve(query, filters) for retriever in _text_retrievers()
+    #
+    # Gathered, not awaited in sequence. The sources are independent — the knowledge graph reads
+    # the note tree, the vector index and the fingerprint store each hit Postgres — so a list
+    # comprehension made this tool cost the *sum* of their latencies when it only needs the
+    # maximum. `gather` preserves argument order, which the fusion below relies on for its
+    # per-source weights.
+    searches: list[Coroutine[Any, Any, list[EvidenceChunk]]] = [
+        retriever.retrieve(query, filters) for retriever in _text_retrievers()
     ]
     if reaction_smiles is not None:
         reaction_retriever = FingerprintReactionRetriever(_reaction_store())
-        ranked_lists.append(await reaction_retriever.retrieve(reaction_smiles, {}))
+        searches.append(reaction_retriever.retrieve(reaction_smiles, {}))
+    ranked_lists: list[list[EvidenceChunk]] = list(await asyncio.gather(*searches))
 
     # `hybrid` fuses the per-source rankings (a note any source ranks highly rises); `graph` (the
     # default) keeps the flat union + dedup. Either way graph expansion stays the reasoning path.

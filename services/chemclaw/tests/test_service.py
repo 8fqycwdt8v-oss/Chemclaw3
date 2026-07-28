@@ -8,14 +8,33 @@ per turn via a spy tool.
 
 import asyncio
 import json
-from collections.abc import Callable
+from collections.abc import Callable, MutableMapping
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
+import pytest
 from agent_framework import AgentSession
 from fastapi.testclient import TestClient
 
 from service.app import LiveSession, _LiveSessions, create_app
+from service.metrics import METRICS
+
+# A minimal ASGI HTTP scope, for the one test that drives the app below `TestClient` (which
+# cannot express "the handler was cancelled and nothing was ever sent").
+_ASGI_GET_SCOPE: dict[str, Any] = {
+    "type": "http",
+    "asgi": {"version": "3.0", "spec_version": "2.1"},
+    "http_version": "1.1",
+    "method": "GET",
+    "scheme": "http",
+    "path": "/drained",
+    "raw_path": b"/drained",
+    "query_string": b"",
+    "root_path": "",
+    "headers": [(b"host", b"testserver")],
+    "client": ("127.0.0.1", 1234),
+    "server": ("testserver", 80),
+}
 
 
 class _SpyMcpTool:
@@ -107,6 +126,66 @@ def test_static_chat_page_is_served() -> None:
         assert res.headers["X-Frame-Options"] == "DENY"
         assert "frame-ancestors 'none'" in res.headers["Content-Security-Policy"]
         assert "Strict-Transport-Security" in res.headers
+
+
+def test_security_headers_reach_a_streaming_sse_response() -> None:
+    """The SSE turn stream carries the same headers as a static page.
+
+    The static-page test above passes under *any* middleware implementation; a streamed
+    `EventSourceResponse` is the case that distinguishes them, because it is the response whose
+    headers are sent long before its body exists.
+    """
+    agent = _FakeAgent()
+    with _client(agent) as client:
+        session_id = client.post("/sessions").json()["session_id"]
+        with client.stream(
+            "POST", f"/sessions/{session_id}/messages", json={"message": "hello"}
+        ) as res:
+            assert res.status_code == 200
+            assert res.headers["X-Frame-Options"] == "DENY"
+            assert "frame-ancestors 'none'" in res.headers["Content-Security-Policy"]
+
+
+def test_a_cancelled_request_closes_the_connection_instead_of_500ing() -> None:
+    """A handler cancelled before it responds must not be turned into a 500 with a traceback.
+
+    This is the multi-worker blocker, and it is not hypothetical: a 50-user load run logged 44
+    `RuntimeError("No response returned.")` tracebacks, every one on the SSE turn route, each
+    served to a chemist as an HTTP 500. `BaseHTTPMiddleware` produced them — it runs the app in a
+    second task and pipes its ASGI messages through a memory stream, so a handler that ends
+    without responding (a pod draining mid-stream, a client that gave up waiting for an
+    admission permit) reaches `call_next` as a closed stream and is re-raised as a server error.
+
+    Driven at the raw ASGI level rather than through `TestClient`, because the distinction *is*
+    the ASGI contract: cancellation must propagate out of the app (the server then simply closes
+    the connection) rather than being converted into a response. Counterfactual: with the old
+    `BaseHTTPMiddleware` this raises `RuntimeError`, not `CancelledError`.
+    """
+    app = create_app(agent_factory=lambda _profile: _FakeAgent(), connector_factory=_no_connectors)
+
+    @app.get("/drained")
+    async def drained() -> dict[str, str]:
+        """Stand in for a handler the server cancels mid-request."""
+        raise asyncio.CancelledError
+
+    # The static UI is mounted at "/" and would otherwise swallow the path, since Starlette
+    # matches routes in registration order.
+    app.router.routes.insert(0, app.router.routes.pop())
+
+    sent: list[MutableMapping[str, Any]] = []
+
+    async def _send(message: MutableMapping[str, Any]) -> None:
+        sent.append(message)
+
+    async def _receive() -> MutableMapping[str, Any]:
+        return {"type": "http.request", "body": b"", "more_body": False}
+
+    async def _drive() -> None:
+        with pytest.raises(asyncio.CancelledError):
+            await app(_ASGI_GET_SCOPE, _receive, _send)
+
+    asyncio.run(_drive())
+    assert sent == [], f"a cancelled handler still emitted a response: {sent}"
 
 
 def test_message_stream_runs_a_turn_and_connects_its_connectors_once() -> None:
@@ -384,6 +463,122 @@ class _FakeOwnerStore:
     async def list_for_owner(self, owner: str | None) -> list[tuple[str, datetime]]:
         rows = [(sid, self.created[sid]) for sid, own in self.owners.items() if own == owner]
         return sorted(rows, key=lambda row: row[1], reverse=True)
+
+
+class _SharedTurnClaims:
+    """The `session_turns` row, in memory — one instance stands in for the shared database.
+
+    Two apps built over one of these are the faithful model of two uvicorn workers or two pods:
+    separate processes, separate `active_turns` sets, one durable claim between them.
+    """
+
+    def __init__(self) -> None:
+        self.holders: dict[str, str] = {}
+
+    async def claim(self, session_id: str, holder: str, lease_seconds: float) -> bool:
+        if session_id in self.holders:
+            return False
+        self.holders[session_id] = holder
+        return True
+
+    async def refresh(self, session_id: str, holder: str, lease_seconds: float) -> None:
+        pass  # nothing elapses inside a test, so a refresh has nothing to do
+
+    async def release(self, session_id: str, holder: str) -> None:
+        if self.holders.get(session_id) == holder:
+            del self.holders[session_id]
+
+
+def test_a_turn_running_on_another_worker_is_a_409_not_a_second_turn() -> None:
+    """A turn already claimed by another process is refused here, not admitted a second time.
+
+    The 409 guard was a `set` in one process's memory while the shipped chart runs the front door
+    at `minReplicas: 2`, so a double-submit that landed on the other replica was admitted and the
+    two turns interleaved their messages into one conversation thread — the exact corruption the
+    guard exists to prevent. The claim row is the only trace of the sibling process this one can
+    see, so seeding it *is* the other worker, faithfully: nothing else about that turn is
+    observable from here.
+
+    Counterfactual: with only the per-process set this process has no record of the session's
+    running turn and answers 200.
+    """
+    claims = _SharedTurnClaims()
+    app = create_app(
+        agent_factory=lambda _profile: _FakeAgent(),
+        owner_store=_FakeOwnerStore(),
+        connector_factory=_no_connectors,
+        turn_claims=claims,
+    )
+    with TestClient(app) as client:
+        session_id = client.post("/sessions").json()["session_id"]
+        claims.holders[session_id] = "another-worker"  # a turn is in flight over there
+        conflict = client.post(f"/sessions/{session_id}/messages", json={"message": "second"})
+
+    assert conflict.status_code == 409
+    assert conflict.json()["detail"] == "a turn is already running for this session"
+    assert claims.holders == {session_id: "another-worker"}  # the refusal did not steal the slot
+
+
+def test_a_finished_turn_hands_its_cross_process_claim_back() -> None:
+    """The slot is taken for a turn's streamed run and given back when it ends, not leaked.
+
+    A claim that outlived its turn would 409 the session for a whole lease every time — the
+    durable version of the bug that once bricked a session's turns until the pod restarted.
+    """
+    claims = _SharedTurnClaims()
+    app = create_app(
+        agent_factory=lambda _profile: _FakeAgent(),
+        owner_store=_FakeOwnerStore(),
+        connector_factory=_no_connectors,
+        turn_claims=claims,
+    )
+    with TestClient(app) as client:
+        session_id = client.post("/sessions").json()["session_id"]
+        for _ in range(2):  # a second turn proves the first genuinely released
+            with client.stream(
+                "POST", f"/sessions/{session_id}/messages", json={"message": "hello"}
+            ) as res:
+                assert res.status_code == 200
+                for _line in res.iter_lines():
+                    pass
+            assert claims.holders == {}
+
+
+class _UnreachableOwnerStore(_FakeOwnerStore):
+    """An ownership registry whose every call fails the way a starved pool checkout does.
+
+    `chemclaw.db.connection` maps both `PoolTimeout` and an unreachable server to
+    `ConnectionError`, so this is exactly what a route sees when no pooled connection can be
+    handed over in time.
+    """
+
+    async def record(self, session_id: str, owner: str | None) -> None:
+        raise ConnectionError("Postgres unreachable at host=db: couldn't get a connection")
+
+
+def test_a_failed_postgres_checkout_sheds_with_503_and_is_counted() -> None:
+    """Creating a session when no connection can be got is a retryable 503, never a 500.
+
+    `create_session` writes the owner row before it returns an id, and under load 16 of those
+    writes raised `psycopg_pool.PoolTimeout` with no handler anywhere — HTTP 500, which tells a
+    client the request is broken and must not be retried. It is the opposite: the pool held 13 of
+    a permitted 64 connections and opened none, so the caller was waiting for a connection that
+    was free, and retrying is precisely the right move.
+
+    Counterfactual: without the `ConnectionError` handler this call raises out of the app and
+    `TestClient` re-raises it (a 500 in production), and the counter stays at 0.
+    """
+    before = METRICS.value("chemclaw_db_unavailable_total")
+    app = create_app(
+        agent_factory=lambda _profile: _FakeAgent(),
+        owner_store=_UnreachableOwnerStore(),
+        connector_factory=_no_connectors,
+    )
+    with TestClient(app) as client:
+        res = client.post("/sessions")
+    assert res.status_code == 503
+    assert res.json()["detail"] == "server at capacity; retry shortly"
+    assert METRICS.value("chemclaw_db_unavailable_total") == before + 1
 
 
 def test_session_list_is_owner_scoped_and_newest_first() -> None:

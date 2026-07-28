@@ -28,6 +28,14 @@ class MigrationError(RuntimeError):
     """A migration cannot be applied safely (e.g. an applied file was edited)."""
 
 
+def _read_sql_files() -> dict[str, str]:
+    """Read every `infra/sql/*.sql` file into `{filename: text}` (the blocking half of `migrate`).
+
+    One function so the whole directory is read in a single thread hop rather than one per file.
+    """
+    return {path.name: path.read_text() for path in sorted(_SQL_DIR.glob("*.sql"))}
+
+
 def _checksum(text: str) -> str:
     """SHA-256 of a migration file's text, to detect edits after it was applied.
 
@@ -47,31 +55,37 @@ async def migrate(dsn: str | None = None) -> list[str]:
     """
     target = dsn if dsn is not None else settings.postgres_dsn
     applied: list[str] = []
+    # Every file read up front, in one worker thread. Migrations run at service startup (the
+    # front door and each worker migrate before serving), so a per-file blocking read is loop
+    # time nothing else can use — and there are ~20 files. `connect`, not `connection`: a
+    # migration wants its own connection with no statement timeout (an index build may run
+    # long), which is precisely what the pool must not hand out to a request path.
+    sources = await asyncio.to_thread(_read_sql_files)
     async with await connect(target) as conn:
         # Bootstrap the ledger before anything can be tracked against it.
-        await conn.execute((_SQL_DIR / _LEDGER_FILE).read_text())
-        for path in sorted(_SQL_DIR.glob("*.sql")):
-            if path.name == _LEDGER_FILE:
+        await conn.execute(sources[_LEDGER_FILE])
+        for name in sorted(sources):
+            if name == _LEDGER_FILE:
                 continue
-            text = path.read_text()
+            text = sources[name]
             checksum = _checksum(text)
             cursor = await conn.execute(
-                "SELECT checksum FROM schema_migrations WHERE filename = %s", (path.name,)
+                "SELECT checksum FROM schema_migrations WHERE filename = %s", (name,)
             )
             row = await cursor.fetchone()
             if row is not None:
                 if row[0] != checksum:
                     raise MigrationError(
-                        f"migration {path.name} was edited after being applied "
+                        f"migration {name} was edited after being applied "
                         f"(recorded checksum differs); add a new migration file instead"
                     )
                 continue
             await conn.execute(text)
             await conn.execute(
                 "INSERT INTO schema_migrations (filename, checksum) VALUES (%s, %s)",
-                (path.name, checksum),
+                (name, checksum),
             )
-            applied.append(path.name)
+            applied.append(name)
         await conn.commit()
     return applied
 

@@ -10,8 +10,19 @@ component="${CHEMCLAW_COMPONENT:-service}"
 
 case "${component}" in
   service)
-    exec uvicorn service.app:create_app --factory \
-      --host "${CHEMCLAW_SERVICE_HOST:-0.0.0.0}" --port "${CHEMCLAW_SERVICE_PORT:-8080}"
+    # One asyncio event loop saturates one CPU, so a multi-CPU pod served by a single process
+    # leaves the rest idle — a load test measured front-door throughput flat from 10 to 50
+    # concurrent users. CHEMCLAW_SERVICE_UVICORN_WORKERS is the knob for that. It still defaults
+    # to 1, but no longer because of the turn guard: that is a leased row in `session_turns` now
+    # and every process shares it (D-121). What stays per-process is capability — attachments,
+    # harness todos and the admission cap — and no ingress can pin a request below the pod, so
+    # replicas plus Route affinity remain the supported way to use more CPU. Passed only when
+    # raised, so the default keeps today's single-process signal handling and PID 1.
+    args=(--host "${CHEMCLAW_SERVICE_HOST:-0.0.0.0}" --port "${CHEMCLAW_SERVICE_PORT:-8080}")
+    if [[ "${CHEMCLAW_SERVICE_UVICORN_WORKERS:-1}" -gt 1 ]]; then
+      args+=(--workers "${CHEMCLAW_SERVICE_UVICORN_WORKERS}")
+    fi
+    exec uvicorn service.app:create_app --factory "${args[@]}"
     ;;
   background-worker)
     exec python -m workers.background_worker

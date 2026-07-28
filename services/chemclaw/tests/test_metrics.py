@@ -11,6 +11,7 @@ model uses almost no CPU while being completely full. In-flight turns against th
 the signal that actually describes saturation.
 """
 
+import re
 from typing import Any
 
 import pytest
@@ -97,8 +98,14 @@ def test_metrics_carry_no_identifiers_or_turn_content() -> None:
     for line in body.splitlines():
         if line.startswith("#"):
             continue
-        # Every series is `name value` — no labels at all, so no id can leak through one.
-        assert "{" not in line, f"unexpected label set: {line}"
+        # The only label in the whole exposition is a histogram's `le` bucket boundary, which is
+        # a number from `_BUCKETS`. Anything else would be a label carrying turn-derived data,
+        # and this route is unauthenticated.
+        label = re.search(r"\{(.*)\}", line)
+        if label is not None:
+            assert re.fullmatch(r'le="(\+Inf|[0-9.]+)"', label.group(1)), (
+                f"unexpected label set: {line}"
+            )
 
 
 def test_a_swallowed_audit_sink_failure_is_counted() -> None:
@@ -107,11 +114,11 @@ def test_a_swallowed_audit_sink_failure_is_counted() -> None:
     `agents.audit` imports the registry lazily and tolerates its absence, because the workers
     import that module without ever building the front door.
     """
-    from agents.audit import _count_sink_failure
+    from agents.audit import _record_metric
     from service.metrics import METRICS
 
     before = METRICS.value("chemclaw_audit_sink_failures_total")
-    _count_sink_failure()
+    _record_metric(lambda metrics: metrics.increment("chemclaw_audit_sink_failures_total"))
     assert METRICS.value("chemclaw_audit_sink_failures_total") == before + 1
 
 

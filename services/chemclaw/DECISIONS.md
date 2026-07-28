@@ -4522,6 +4522,75 @@ summary:  B3LYP/def2-SVP on CCO: -94.100000 Hartree (converged)
 result:   {... 'requested_by': 'oid-live-check'}
 ```
 
+## D-119 — Production scale: the event loop, the connection pool, and a guard that switched itself off
+
+**Context.** A 50-concurrent-user load test against the live stack (Postgres 16 + pgvector,
+Temporal, the connector fleet, 50 signed identities, `session_store=postgres`) with a stub LLM at a
+fixed 400 ms think-time measured three things the code review had only inferred.
+
+Throughput was **flat at ~1.18 turns/s from 10 concurrent users to 50** — five times the load for
+1.7% more work and 5× the latency (p50 7.4 s → 37.3 s). That is a serialization point, not a
+resource limit: added concurrency became queueing. The box had 4 CPUs and the service used one.
+
+**32 Postgres connect timeouts** occurred while peak concurrent connections was 28 of
+`max_connections=100`. The database was idle. The connects timed out because the single event loop
+could not schedule them inside `pg_connect_timeout_seconds`. The real load was churn: **401
+connections opened for 150 turns**.
+
+And every one of those 32 failures was the same call site — the rollback watermark (D-107), whose
+handler is deliberately non-fatal. So the churn did not merely cost latency: it **silently disarmed
+a correctness guard**, precisely under the conditions (loaded server, slow turns, impatient users)
+that make the failure it guards against likely.
+
+**Decision.**
+
+1. *Blocking work leaves the loop.* RDKit depiction, parsing and descriptors in the `chem`
+   connector; `structure_from_smiles(..., optimize=True)` at every async call site; and
+   `spec.cache_key(structure)` in all eight `run_cached_*` wrappers — the last of which was
+   invisible, being an argument expression evaluated before `run_cached`'s own offload, and which
+   shells out to `xtb --version` on its first call in a process. The long `subprocess.run` in
+   `xtb_cli`/`crest_cli` was already offloaded; only the version probe was not. `gather_evidence`
+   moves from a sequential list comprehension to `asyncio.gather`.
+
+2. *Connections are pooled per process.* `chemclaw/db.py` gains `connection()` and `pooling()`,
+   entered once by the front door's lifespan, each worker, and each connector app. Pools are keyed
+   by `(dsn, merged libpq options)` so a migration's untimed connection cannot share a pool with a
+   request path's bounded one, and `_merged_options` (D-107) is unchanged, so a DSN's own
+   `search_path` still survives — the test-schema isolation depends on it. Pool exhaustion raises
+   `ConnectionError`, the same retryable infrastructure fault an unreachable database raises.
+
+3. *The disarmed guard becomes loud, and stays non-fatal.* Failing the turn would trade a
+   conditional future fault (this session breaks only if the client also disconnects mid-tool-call)
+   for a certain immediate one (every turn fails whenever the session store hiccups). A mitigation
+   must not take down what it mitigates. What was wrong was the silence, so it is now an ERROR plus
+   `chemclaw_rollback_watermark_unavailable_total`.
+
+**The one thing deliberately not done.** `service_uvicorn_workers` exists and defaults to **1**.
+`active_turns` — the 409 that stops two turns interleaving on one session's thread — and the
+admission semaphore are per-process in-memory guards; with N workers each sees 1/N of the traffic,
+so two turns on one session landing on different workers would both be admitted and corrupt the
+thread. Moving the guard to a Postgres advisory lock was considered and rejected: the lock is
+connection-scoped, so it would pin one pooled connection for a turn's whole duration —
+reintroducing exactly the exhaustion this ADR removes. Threads, not processes, are what the change
+actually buys, and they touch neither guard. The same hazard already exists across `replicas` and
+remains tracked in `BACKLOG.md`.
+
+**Guarantees traded, in full.** A connector state reported by `/readyz` may be up to
+`service_readiness_cache_seconds` (5 s) stale. A note changed *outside* this process may be
+invisible for up to `graph_cache_ttl_seconds`, raised 5 s → 60 s — which costs nothing real,
+because the only out-of-process writer is the knowledge-sync sidecar on a 300 s cadence, so the
+shorter window bought scans and no freshness. Both are settable to 0. Nothing else changed
+behaviour.
+
+**Also landed.** One Temporal client per process instead of one gRPC channel (and, under mTLS, one
+TLS handshake plus three blocking PEM reads) per job launch and status poll. One `httpx.AsyncClient`
+per readiness sweep instead of one per connector. `configure_logging`/`configure_telemetry` at the
+front door, which had never called either — so `CHEMCLAW_OTEL_ENABLED` was inert at the one process
+a chemist talks to. And the correlation id becomes per-turn ambient state
+(`agents.identity_context`) rather than a value bound inside `build_agent`: agents are cached per
+profile for the pod's life, so every turn from every user had been sharing one id, which made the
+GxP audit trail unable to separate two conversations.
+
 ## D-120 — A data source becomes a manifest: the second config-side union replaced by a folder
 
 **Context.** The user's direction for this pass named data sources beside tools: *"For anything
@@ -4600,3 +4669,240 @@ active retrieve source genuinely needs it — the win there is structural (a fut
 driver no longer lands in the chat pod), not a number today, and claiming otherwise would be
 dishonest. The Snowflake ELN source remains deferred; it is now a manifest and an adapter class,
 with nothing owed by core.
+## D-121 — The front door as a multi-process service: pure-ASGI headers, a durable turn claim, a pool timeout that sheds
+
+**Context.** D-119 pooled Postgres and got the blocking work off the event loop. A 50-user load run
+against that branch showed what those fixes did and did not buy: connection churn gone (401 opened
+connections for 150 turns became zero — the pool reused what it had), p50 down 30 % and p95 down
+50 %, and **throughput unchanged at ~1.18 turns/s from 10 users to 50**. Five times the load, 1.7 %
+more work. The serialization point was neither the database nor the offloaded CPU: it was the single
+event loop, and the box had four idle CPUs beside it.
+
+The decisive experiment — `--workers 4` — was recorded as failing outright for all 50 users. It did
+not fail; **it never ran.** The 4-worker server's own log opens with `ERROR: [Errno 98] Address
+already in use`: the previous single-worker service still held the port. The 50 clients' errors are
+`status=0, All connection attempts failed` — nothing was listening — and the 44
+`RuntimeError("No response returned.")` tracebacks in that log belong to the *previous* process,
+being torn down with streams still open. So the recorded conclusion "multi-process does not work at
+all" was not measured. What the log does prove is worse in one way and better in another: the
+`BaseHTTPMiddleware` defect is real and fires on **one** worker, on every stream that outlives its
+server; and nothing at all is known against multi-process from that run.
+
+Three real blockers stood between the branch and a multi-process front door, and they are what this
+ADR records.
+
+**1. `BaseHTTPMiddleware` cannot carry an SSE stream.** `_add_security_headers` was one, which runs
+the downstream app as a second task and pipes its ASGI messages through a memory object stream. A
+request that ends without ever sending a response — a pod draining mid-stream, a client that gave up
+waiting for an admission permit, any cancelled handler — reaches `call_next` as a closed stream and
+is re-raised as `RuntimeError("No response returned.")`. That is an HTTP 500 with a traceback where
+the honest outcome is a closed connection.
+
+Not hypothetical, and not a multi-worker problem at all: the **single-worker** process logged 44 of
+them, every one on the SSE turn route, as it was shut down with streams open. That is what a rolling
+deploy does to every in-flight conversation.
+
+*Decision:* pure ASGI middleware that wraps only `send` and stamps the headers onto the
+`http.response.start` message. The body is never re-tasked and never buffered, so an SSE stream is
+byte-for-byte what the route produced.
+
+**2. The per-session turn guard was per-process.** `active_turns` is a Python set in one process's
+memory and the shipped chart runs the front door at `minReplicas: 2` — so a double-submit landing on
+the other replica **has always been admitted twice**, and the two turns interleaved their messages
+into one conversation thread. That is the exact corruption the 409 exists to prevent, and it was
+live before any of this work; raising the worker count would have added the same hazard inside a pod.
+
+*Decision:* a turn also takes a **leased row** in `session_turns`, under the same
+`session_store="postgres"` gate as session ownership — that switch is precisely the condition under
+which two processes share a conversation's durable history and can corrupt it.
+
+A lease, not a lock. An advisory lock and `SELECT … FOR UPDATE` are both connection- or
+transaction-scoped, so holding one for a turn means pinning a pooled connection for minutes,
+re-creating the starvation this work exists to remove. Claim, refresh and release are one short
+statement each: borrow a connection, give it straight back. The claim is a single
+`INSERT … ON CONFLICT DO UPDATE … WHERE expires_at <= now()`, so the check and the take cannot be
+interleaved, and a process SIGKILLed mid-turn stops blocking its session after one lease rather than
+until a restart.
+
+The in-process set is kept and checked first, so the single-worker guarantee is byte-for-byte what
+it was — no I/O, no race window, no lease involved. The lease adds the cross-process half, with the
+property every lease has: exclusion holds while the holder is scheduled often enough to refresh,
+which the front door does three times per lease. A failed refresh is **counted, not swallowed** —
+D-107 already taught this branch that a guard which quietly switches itself off is worse than one
+that fails loudly.
+
+**3. A pool timeout surfaced as a 500.** The run's 16 HTTP 500s were all `psycopg_pool.PoolTimeout`
+at `create_session` → `SessionOwnerStore.record`, and the pool was **never exhausted**: 13 of a
+permitted 64 connections, zero opened during the run. Callers waited >10 s for a connection that was
+*available* and could not be handed over, because the loop could not schedule the handoff. Raising
+`pg_pool_max_size` 16 → 64 changed nothing, which is the whole story — this is the same starvation
+that used to appear as a connect timeout, made user-visible because a bounded pool raises where an
+unbounded connect eventually succeeded.
+
+*Decision:* one `ConnectionError` handler on the app, not a try/except per route — `chemclaw.db`
+already funnels "no database" and "no free connection in time" into that one exception precisely
+because no caller can act on the difference, and every route touching durable session state can hit
+it. It answers **503** with the admission path's own wording, so a client's back-off behaviour is
+identical and a browser learns nothing about the infrastructure. Counted as
+`chemclaw_db_unavailable_total`, separate from the admission shed, so "the loop could not schedule a
+handoff" is never read as "the LLM endpoint is full".
+
+**Consequences.**
+
+- `CHEMCLAW_SERVICE_UVICORN_WORKERS` still defaults to **1**, but no longer because of the turn
+  guard. What remains per-process is *capability*, not correctness of durable history: attachments,
+  harness todos and the live `AgentSession`. No ingress can pin a request below the pod, so replicas
+  plus Route affinity stay the supported way to use more CPU, and the Route now states that affinity
+  explicitly instead of relying on the haproxy router's default. A chart test holds it.
+- `infra/sql/018_session_turns.sql` is the new migration.
+- The 44 spurious 500s per run disappear, independently of worker count.
+- **Verified live, not inferred.** The real front door on `--workers 4` against the live stack
+  (Postgres, Temporal, the connector fleet, the stub LLM) served 8 concurrent streaming turns to
+  completion with the security headers on every stream, and 6 out of 6 pairs of concurrent turns on
+  *one* session answered `[200, 409]`. The same 6 pairs run with `session_store=memory` — where no
+  shared claim exists — answered `[200, 404]` or `[404, 404]` every time, which is how we know the
+  two requests really did land on different workers and that the 409 came from the durable claim
+  rather than from either worker's own `active_turns`.
+- **Not claimed here:** that throughput improves much. A smoke check (24 concurrent turns, not the
+  load harness) measured 0.92 turns/s on one worker against 1.33 on four — real, and far short of
+  4×. On this box it cannot be more: four CPUs are shared with Postgres, Temporal, the background
+  worker and, above all, `scripts.connectors_dev`, which serves all six connector bundles from **one
+  uvicorn process on one event loop**. In production each bundle is its own Deployment; in the load
+  harness it is a single loop that every tool call from every turn passes through, so a
+  `--workers 4` run there may simply relocate the ceiling rather than raise it.
+- Renumbered from D-120 during the merge: `claude/datasource-seam` had already published D-120
+  (per CLAUDE.md, the branch merging second renumbers).
+
+## D-122 — The GxP audit trail defaults to durable, because opting in per call site did not work
+
+**Context.** `PostgresAuditSink`, the tamper-evident hash chain (`chain_hash`, `row_hash`),
+`infra/sql/011`, `make audit-verify` and `scripts/verify_audit_chain.py` were all built, tested and
+documented as the GxP "who ran what" record. The sink was constructed in exactly **one** place:
+`agents/cli.py`, behind `--audit-postgres`. The deployed service's `_default_agent_factory` called
+`build_agent(profile=…)` with no `audit_sink`, so `agents/audit.py` installed `NullAuditSink()` and
+the compliance record was log-only in the one process chemists actually talk to. The Temporal
+template activities had the same gap, independently, in two more call sites.
+
+Nothing failed and no test noticed: `tests/test_audit.py` drives the middleware directly and
+`tests/test_audit_store.py` writes to the sink directly, so both pass while the wiring between them
+is absent. `audit_events` was simply empty.
+
+**Decision.** The default moves from the call site to the one place that decides.
+`agents.audit.default_audit_sink()` returns `PostgresAuditSink` where `session_store="postgres"`
+and `NullAuditSink` otherwise, and `make_audit_middleware(sink=None)` resolves it.
+
+The polarity is the whole point. Opting *in* to a compliance control, once per entry point, means a
+forgotten keyword argument silently downgrades it — and there is no failure to notice, because the
+downgraded state is "the log still has it". So the durable sink is what a caller gets by default,
+log-only is the fallback where no database is configured, and opting *out* requires passing
+`NullAuditSink()` explicitly, which is a visible act.
+
+Fixing `service/app.py` alone was the obvious change and was rejected: it would have left the
+identical trap set for the template activities and for every entry point added later. The gate is
+`session_store="postgres"` for the same reason `_default_owner_store` uses it — that switch is the
+deployment's statement that a Postgres exists — with a lazy import so the dev/test path never pulls
+psycopg for a store it will not use.
+
+`agents/cli.py --audit-postgres` survives with narrowed meaning: it *forces* the durable sink for an
+operator running a terminal session against a database without switching `session_store`.
+
+**Consequences.**
+
+- Three call sites stop being able to get this wrong, and so does the next one.
+- Verified counterfactually at the decision line rather than by deleting the function: reverting
+  only `sink if sink is not None else default_audit_sink()` back to `NullAuditSink()` fails
+  `test_an_omitted_sink_no_longer_silently_means_log_only` and nothing else.
+
+**Verified end to end.** `audit_events: 4 -> 5` on a live turn against the stub model, with
+`default_audit_sink()` resolving to `PostgresAuditSink` under the load-test config.
+
+That verification took two attempts, and the first one was wrong in a way worth recording. It
+reported that the middleware never fires and warned that `enforce_tool_authz` — the RBAC gate,
+registered the same way — might be inert too. The cause was the *test harness*: the stub model sent
+`{"query": "benzene"}` while `find_notes` takes `text`, so every call failed argument validation
+inside `agent_framework._tools._auto_invoke_function` and returned at the parse-error branch, which
+sits before the middleware branch. No tool body ran, so nothing was audited. With the stub
+corrected: `PIPELINE.EXECUTE fired n=4`, `exc=None`, and the row lands. RBAC was never affected.
+
+What survives is smaller and is tracked separately in `BACKLOG.md`: a call rejected for bad
+arguments is not audited at all (**AUDIT-2**), so the trail cannot answer "what did the agent
+attempt and get wrong" — and the load runs' "100 tool calls" were all parse failures, so their
+tool-path claim is being re-measured (**LOAD-1**).
+
+## D-123 — One agent per concurrent turn: a shared chat client corrupts streamed tool calls
+
+**Context.** The live 50-user run (Haiku, 4 workers, 50 signed identities) admitted every turn —
+150/150, no shed, no conflict, no transport error — and then lost **30 of them (20 %)** to an
+Anthropic 400:
+
+```
+messages.1.content.3.tool_use.name: String should have at least 1 character
+```
+
+**The cause, isolated by elimination.** Eight live attempts per configuration:
+
+| Variant | Setup | Result |
+|---|---|---|
+| A | bare `agent_framework`, 3 tools, sequential | 0/8 fail |
+| B | + the 6 MCP connectors, sequential | 0/8 fail |
+| C | full `build_agent()` + connectors, sequential | 0/8 fail |
+| **D** | full `build_agent()`, 8 turns **concurrent, one shared agent** | **8/8 fail** |
+| **E** | identical, but **one agent per turn** | 0/8 fail |
+| **F** | **per-turn agents, one shared *client*** | **8/8 fail** |
+
+E and F differ only in whether the *client* is shared, which is what names the client rather than
+the agent. `agent_framework_anthropic/_chat_client.py` keeps the tool call it is currently parsing
+on the instance:
+
+```python
+case "tool_use":
+    self._last_call_id_name = (content_block.id, content_block.name)
+...
+case "input_json_delta":
+    call_id = self._last_call_id_name[0] if self._last_call_id_name else ""
+    contents.append(Content.from_function_call(call_id=call_id, name="", ...))
+```
+
+An argument delta carries `name=""` **by design** and recovers its identity from that attribute. Two
+turns streaming through one client interleave: B's `tool_use` overwrites the attribute between A's
+`tool_use` and A's deltas, A's arguments are filed under B's call id, and A's assistant message goes
+out carrying a `tool_use` block with an empty name. It needs two or more tool calls in one message
+to show, which is why every failure named `content.2` or `content.3`.
+
+**Decision.** `agents/agent_pool.py::AgentPool` leases one agent — and with it one chat client — to
+one turn at a time, sized to `service_max_concurrent_turns`. The front door leases around the
+streamed run; everything that does not stream (session creation, `/readyz`) keeps the cached
+per-profile agent, because only a stream can interleave.
+
+A pool rather than per-turn construction: building is cheap enough (~90 ms agent, ~95 ms client) but
+a fresh client is a fresh `AsyncAnthropic`, hence a fresh connection pool and TLS handshake on every
+turn — reintroducing exactly the per-call handshake churn D-119 removed from Postgres. A lease keeps
+connections warm across turns while guaranteeing no two *concurrent* turns share one.
+
+Sized to the admission cap so the pool is never the queue: the semaphore already bounds concurrency
+at the same number, so a lease does not block in normal operation.
+
+**Result, measured on the same live run:**
+
+| | before | after |
+|---|---|---|
+| answers / errors | 120 / **30** | **150 / 0** |
+| empty `tool_use` names in the log | 30 | **0** |
+| p50 | 19.8 s | 16.9 s |
+| throughput | 1.76/s | 1.99/s |
+| tool calls | 151 | 208 |
+
+Latency and throughput improved as well, which follows: a turn that died at its first tool call was
+finishing early, and 208 tool calls against 151 is the count of tools that now run to completion.
+
+**Why no test caught it.** Every stub run reported a clean 150/150 because the stub emits exactly
+one tool call per response, and a single `tool_use` block has nothing to interleave with. Only a
+real model making *parallel* calls under *concurrency* reaches it — the intersection of two
+conditions, neither of which a unit test has.
+
+`tests/test_agent_pool.py` asserts the property that makes the corruption impossible — no agent held
+by two turns at once — rather than the corruption itself, which is upstream code.
+
+**This is a workaround, written to be deleted.** The real fix is for the parser to hold that state
+per stream. `DEFERRED.md` records the trigger: when it does, the pool collapses back to one shared
+agent per profile and `agents/agent_pool.py` goes away.

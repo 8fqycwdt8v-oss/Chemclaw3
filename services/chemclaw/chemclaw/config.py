@@ -151,6 +151,36 @@ class StoreSettings(BaseSettings):
     # start-to-close budget. 0 disables it; migrations deliberately connect without a statement
     # timeout (an index build may be slow).
     pg_statement_timeout_seconds: float = Field(default=30.0, ge=0)
+    # Per-process connection pool (`chemclaw.db.pooling`). Connect-per-call was measured at ~2.7
+    # TCP+auth handshakes per chat turn, and the cost lands on the event loop rather than on the
+    # database — a connect that cannot be scheduled inside `pg_connect_timeout_seconds` fails,
+    # which is how a non-fatal correctness guard got silently disarmed under load.
+    #
+    # `min_size` connections are kept warm so the first request after an idle period does not pay
+    # a handshake. `max_size` bounds one process; the deployment total is
+    # `max_size × distinct DSNs × processes` (front-door replicas × `service_uvicorn_workers`,
+    # plus the workers), which must stay under the server's `max_connections`.
+    pg_pool_min_size: int = Field(default=2, ge=0)
+    pg_pool_max_size: int = Field(default=16, gt=0)
+    # Close a connection idle beyond this, so a burst does not pin `max_size` sockets forever.
+    pg_pool_max_idle_seconds: float = Field(default=300.0, gt=0)
+    # How long a caller waits for a free pooled connection before the request fails as a
+    # transient infrastructure fault (a `ConnectionError`, which Temporal retries).
+    pg_pool_timeout_seconds: float = Field(default=10.0, gt=0)
+
+    @model_validator(mode="after")
+    def _pool_bounds_are_orderable(self) -> "StoreSettings":
+        """A pool whose floor exceeds its ceiling cannot be built; say so at startup, not later.
+
+        psycopg_pool raises on construction, which in a worker means a crash on the first query
+        rather than at boot — and the misconfiguration is a single reversed pair of numbers.
+        """
+        if self.pg_pool_min_size > self.pg_pool_max_size:
+            raise ValueError(
+                f"pg_pool_min_size ({self.pg_pool_min_size}) exceeds "
+                f"pg_pool_max_size ({self.pg_pool_max_size})"
+            )
+        return self
 
 
 class HpcSettings(BaseSettings):
@@ -691,6 +721,30 @@ class ServiceSettings(BaseSettings):
     # Entra-enforced deployments never need it.
     service_allow_insecure: bool = False
     service_cors_origins: str = ""
+    # How many uvicorn worker *processes* the container starts (`deploy/entrypoint.sh`). One
+    # asyncio event loop saturates one CPU, and a load test measured throughput flat at
+    # ~1.18 turns/s from 10 to 50 concurrent users on a 4-CPU box — a single-loop ceiling.
+    #
+    # The per-session turn guard is no longer among the reasons to keep this at 1: under
+    # `session_store="postgres"` a turn takes a leased row in `session_turns`, so two turns on one
+    # session cannot be admitted by two processes (D-121). What is still per-process is
+    # *capability*, not correctness — the admission semaphore (so the deployment's real cap is
+    # this many times `service_max_concurrent_turns`), the event-stream caps, uploaded attachments
+    # and harness todos, all of which live in one process's memory and are therefore invisible to
+    # a sibling worker. A chemist who uploads a file and then asks about it needs both requests on
+    # the same process, and no ingress can pin below the pod. So the supported way to use more
+    # CPU is still `replicas` with session affinity at the Route; raise this only for a
+    # deployment that does not use attachments or the harness. Under `session_store="memory"`
+    # there is no shared claim at all and this must stay 1.
+    service_uvicorn_workers: int = Field(default=1, gt=0)
+    # How long a turn's claim on its session (`session_turns`, D-121) stays valid before another
+    # process may take it. A lease rather than a lock because a lock would have to be held on a
+    # pooled connection for the turn's whole duration; the cost of a lease is that exclusion holds
+    # only while the holder is scheduled often enough to refresh it, which the front door does
+    # every third of this interval. Sized well above the worst measured event-loop scheduling
+    # delay (~10 s under 50 concurrent users) and well below the wall-clock turn timeout, so a
+    # crashed worker frees its session in about a minute rather than at the next restart.
+    service_turn_claim_lease_seconds: float = Field(default=60.0, gt=0)
     # Max characters accepted in one chat message at the front door (SEC-4). Bounds the request
     # body at the trust boundary so an oversized POST is a clean 422, not an unbounded
     # allocation. Generous for a real message (~25k tokens); raise it for a workflow that posts
@@ -770,13 +824,28 @@ class ServiceSettings(BaseSettings):
     # interval — a LISTEN/NOTIFY-free fallback that is simple and correct; lower it for snappier
     # wake-ups.
     session_event_poll_seconds: float = Field(default=2.0, gt=0)
-    # Cap on concurrent push-back event streams (`GET /sessions/{id}/events`) per user. The turn
-    # semaphore only guards POSTed turns; each event stream polls the database for its whole
-    # lifetime, so without a bound one user (or a pile of abandoned tabs) can accumulate
-    # hundreds of forever-polling streams and exhaust Postgres connections for everyone. A real
-    # client needs one stream per open session view; past the cap the request is refused with
-    # 429.
+    # Cap on concurrent push-back event streams (`GET /sessions/{id}/events`) per user, **per
+    # process**. The turn semaphore only guards POSTed turns; each event stream polls the database
+    # for its whole lifetime, so without a bound one user (or a pile of abandoned tabs) can
+    # accumulate hundreds of forever-polling streams and exhaust Postgres connections for
+    # everyone. A real client needs one stream per open session view; past the cap the request is
+    # refused with 429. Per process, not per deployment: a user spread over `replicas ×
+    # service_uvicorn_workers` processes can hold that multiple. Deliberately left that way —
+    # this bounds a *resource*, and paying a durable write plus a heartbeat per stream to make an
+    # approximate ceiling exact would cost more than the thing it protects.
     service_max_event_streams_per_user: int = Field(default=5, gt=0)
+    # The same cap across *all* users on this process. The per-user cap alone bounds one client;
+    # it does not bound the pod, so 50 concurrent chemists at the per-user cap is 250 forever-
+    # polling streams on one event loop — each a task and a periodic pooled query. This is the
+    # pod-level ceiling, refused with the same 429. Sized as a generous multiple of the per-user
+    # cap so it only binds in the aggregate case the per-user cap cannot see.
+    service_max_event_streams_total: int = Field(default=200, gt=0)
+    # How long `/readyz` may reuse its connector sweep. The route is unauthenticated by necessity
+    # (a kubelet cannot present a token) and the kubelet probes every 10 s per pod, so an uncached
+    # sweep is an N-connector HTTP fan-out that any caller can trigger at will. The connector
+    # states are *reported*, never gating, so the only cost of caching is that a reported state
+    # can be up to this stale. 0 probes on every request (the pre-cache behavior).
+    service_readiness_cache_seconds: float = Field(default=5.0, ge=0)
 
 
 class EntraSettings(BaseSettings):
@@ -1386,7 +1455,15 @@ class RetrievalSettings(BaseSettings):
     # `kg.graph.invalidate_cache()` after it writes a note, so the authoring loop stays instant.
     # `0` disables the window — every query re-scans, which is the exact pre-DA-5 behavior and
     # the setting to choose where any staleness is unacceptable.
-    graph_cache_ttl_seconds: float = Field(default=5.0, ge=0.0)
+    #
+    # Raised from 5 s to 60 s. At 5 s a busy pod re-ran the O(notes) `rglob` almost continuously —
+    # a load test with 50 concurrent sessions kept it permanently expired, so the "cache" paid its
+    # full scan on essentially every `gather_evidence`/`find_notes`. Nothing was gained for that:
+    # the only *in-process* writer (the PR-gate submitter) calls `invalidate_cache()` explicitly,
+    # so this window governs out-of-process changes only — and those arrive via the knowledge-sync
+    # sidecar, whose own refresh cadence is 300 s. A 5-second window could not make a merged note
+    # visible any sooner than the sync that delivers it; it only bought scans.
+    graph_cache_ttl_seconds: float = Field(default=60.0, ge=0.0)
 
     @property
     def retrieval_source_weights_map(self) -> dict[str, float] | None:

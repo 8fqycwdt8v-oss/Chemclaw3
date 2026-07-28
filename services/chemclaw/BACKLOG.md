@@ -28,6 +28,152 @@ missing prerequisite), in D-092.
 > `tasks/todo.md`). Verdicts: 8 BUILD (waves A/B/C), 14 DEFER, 5 DROP, 12 BLOCKED. The DROP verdicts are
 > corrected in place below, because they were claims about the tree that are no longer true.
 
+## Open — Production scale, after the 50-user load test (2026-07-27, D-119)
+
+The load test's fixes landed (see D-119). What it surfaced and did **not** close:
+
+- [ ] **CHAOS-1 A session whose client walks away mid-turn stays 409 for ~63 s.** Found by the
+      Stage 5e chaos pass. Abandon an SSE turn mid-stream and the same session refuses the next
+      turn — `a turn is already running for this session` — for **63 s measured**, where it should
+      free immediately. A chemist who closes a tab and reopens it cannot resume for a minute.
+
+      The blocker is the in-process `active_turns` set (`service/app.py:757`), whose `discard`
+      lives in the streamed generator's `finally` alongside the durable claim release. Two theories
+      were tested and **both were wrong**, which is why this is open rather than fixed:
+
+      1. *"The `await` in that `finally` is cancelled before it reaches the database."* Plausible —
+         a `finally` that runs during task cancellation cannot reliably await. Detaching the
+         release onto its own task changed the measured time not at all (63.5 s vs 65.1 s). The
+         change was reverted rather than shipped unverified.
+      2. *"The abandoned turn keeps running to completion and holds the session."* Also no: the
+         session's actor produced **zero** `audit_events` rows, so no tool ever ran.
+
+      So the generator's `finally` is not running promptly and neither explanation covers it. Next
+      step is to instrument the teardown directly — log on entry to that `finally` with a timestamp
+      — and find out when it actually fires relative to the disconnect. Reproduction:
+      `scratchpad/disconnect_probe.py`, which prints the recovery time.
+
+      Severity is real but bounded: it costs availability of one conversation for about a minute,
+      never correctness, and the lease/`discard` do eventually fire.
+
+
+- [x] **STREAM-1 The front door shared one chat client across concurrent turns, corrupting streamed
+      tool calls.** Closed by D-123: `AgentPool` leases one agent — and with it one chat client —
+      per concurrent turn, sized to `service_max_concurrent_turns`.
+
+      Root-caused by elimination (8 live attempts each): sequential turns never failed across three
+      variants; 8 concurrent turns on one shared agent failed 8/8; per-turn agents passed 8/8; and
+      per-turn agents with a **shared client** failed 8/8 — which named the client.
+      `agent_framework_anthropic` keeps the tool call it is parsing on the client instance, and an
+      argument delta carries `name=""` and recovers its identity from it, so two interleaved streams
+      file one turn's arguments under the other's call id.
+
+      Verified on the same live 50-user run that exposed it: **150 answers / 0 errors** (was 120/30),
+      zero empty `tool_use` names, p50 19.8 s → 16.9 s, throughput 1.76 → 1.99 turns/s, and 208 tool
+      calls against 151 — the count of tools that now run to completion rather than dying with their
+      turn. The upstream fix is tracked in `DEFERRED.md`; when it lands the pool goes away.
+
+- [x] **CI-1 `main` was red from D-117 until PR #37. Fixed: `check` is cancelled at the
+      30-minute job timeout, every run.** Runs on `main` at `5f95166`, `5e0827a` and `33d454e` all
+      end `cancelled` after exactly 30:00, and so does every PR run since. This is a regression from
+      D-117 — the gates it moved into the root workflow are correct, but nobody checked the job
+      could finish inside `timeout-minutes: 30`.
+
+      It is a **hang, not slowness**. The log stops dead:
+
+      ```
+      17:54:52  tests/test_bo_campaign.py ................  [  8%]
+      17:54:52  tests/test_bo_doe.py ...                    [  8%]
+      17:54:58  tests/test_bo_featurize.py .............     [  9%]
+      18:22:46  ##[error]The operation was canceled.
+      ```
+
+      28 minutes of silence at 9 %, and the orphan-process list at cleanup is
+      `make`, `uv`, `pytest`, `temporal-test-server-sdk-python-1.30.0` — so it hangs on the first
+      test needing the Temporal test server.
+
+      **`timeout = 180` did not fire, and that is the second half of the bug.** pyproject picks the
+      `signal` method deliberately (to fail one test rather than `os._exit` the session). SIGALRM is
+      delivered to the main thread, but `temporalio` blocks inside its Rust core via PyO3, so the
+      interpreter never gets back to run the handler. The one guard against exactly this failure is
+      inert against exactly this failure.
+
+      Not reproducible locally: the Temporal tests **skip** in this sandbox (the test server cannot
+      be downloaded), which is why 1277-passing local runs say nothing about it. Fixing it needs a
+      runner or an equivalent, and the first step is naming the test — `--timeout-method=thread` in
+      CI would at least fail loudly with a name instead of burning the job silently.
+
+- [x] **AUDIT-1 — RETRACTED. The middleware fires; my harness was sending invalid arguments.**
+      I reported that the `@function_middleware` chain records zero invocations and warned that
+      `enforce_tool_authz`, the RBAC gate, might therefore be inert. **That was wrong, and the error
+      was mine.** The stub model sent `{"query": "benzene"}` while `find_notes` takes `text`, so
+      every tool call failed argument validation inside `_auto_invoke_function` and returned at the
+      parse-error branch — which sits *before* the middleware branch. No tool body ever ran, so of
+      course nothing was audited.
+
+      With the stub corrected, on the D-122 tree: `PIPELINE.EXECUTE fired n=4`, the tool returned
+      `exc=None`, and `audit_events: 4 -> 5`. The GxP trail works end to end. RBAC is not affected.
+
+      Two real things survive it, both smaller than the retracted claim:
+
+- [ ] **AUDIT-2 A tool call rejected for bad arguments is neither audited nor authorization-checked.**
+      `_auto_invoke_function` returns the parse error before reaching the middleware pipeline, so
+      "the model asked for `find_notes` with arguments it could not satisfy" leaves no trace in
+      `audit_events`. Authorization not running is harmless (nothing executed); the *audit* gap is
+      not, for a GxP trail whose purpose is to answer "what did the agent attempt". Upstream
+      behaviour in `agent_framework._tools`, so the fix is either a wrapper or an upstream change.
+
+- [x] **LOAD-1 Re-state the load-test tool claim.** Closed by the re-run with the stub fixed (150/150, 2.08 turns/s, 100 tool bodies actually executing, cross-checked against `audit_events`). The runs reported "100 tool calls" and "the
+      tool path genuinely exercised". Both are wrong for the same reason: those calls were
+      dispatched and every one failed argument validation, so no tool body — no RDKit, no note
+      scan, no database read — ever executed. The infrastructure findings (pool, event loop,
+      worker count) stand, since they concern the request path rather than the tool body, but the
+      absolute throughput numbers are optimistic and are being re-measured with the stub fixed.
+
+- [x] **SCALE-1 The 409 same-session guard is per-process.** Closed by D-121: a turn also takes a
+      leased `session_turns` row, refreshed three times per lease and released at the end, so the
+      guard holds across workers *and* replicas. The advisory lock stayed rejected for the reason
+      recorded here — connection-scoped, so it would pin a pooled connection for the whole turn.
+      **Admission control is deliberately still per-process**: it bounds load on the shared LLM
+      endpoint, and the deployment's real ceiling is `service_max_concurrent_turns × workers ×
+      replicas`. Making it exact would cost a durable write and a heartbeat per turn to bound a
+      *resource*, which is a worse trade than tuning the per-process number (SCALE-3).
+- [ ] **SCALE-1b Attachments and harness todos are still per-process, and always were.**
+      `agents.attachments.STORE` and the harness `TodoProvider` state live on the live
+      `AgentSession` in one process's memory, so a chemist who uploads a CSV and then asks about it
+      must reach the same pod. The Route now asserts session affinity (D-121), which pins to a
+      *pod* — nothing can pin below one, which is why `service_uvicorn_workers` still defaults to 1
+      for any deployment that uses uploads or the harness. Making attachments durable is the fix if
+      intra-pod workers are ever wanted.
+- [ ] **SCALE-2 The HPA still scales on CPU.** `values.yaml` documents this as the wrong signal for
+      a stream-bound service and now has better ones to use: `chemclaw_turns_in_flight` against
+      `chemclaw_turn_capacity`, and the new `chemclaw_turn_duration_seconds` histogram. Needs a
+      Prometheus adapter in the cluster.
+- [ ] **SCALE-3 `service_max_concurrent_turns` is still a guess (8).** At 50 users it shed 75% of
+      turns; at 64 it shed none but p50 went to 37 s. The measured value depends on the fixes in
+      D-119, so it should be re-derived from the next load test, not from this one.
+- [ ] **SCALE-4 Make the rollback watermark unnecessary rather than merely loud.** Having
+      `save_messages` remember the ids it inserted would remove the pre-turn read entirely, but the
+      history provider is shared across every session on the pod, so it needs per-turn state that
+      does not collide. Counted for now (`chemclaw_rollback_watermark_unavailable_total`).
+- [ ] **SCALE-5 A turn still opens and tears down one MCP session per connector.**
+      `connectors.registry.open_reachable` enters every connector tool for the turn and closes it
+      after, because a connector's connection must belong to exactly one turn
+      (`agents.chemclaw_agent.connector_tools`). At six connectors that is ~900 MCP handshakes for
+      150 turns. **Measured, and it is not the ceiling:** against the live fleet the six handshakes
+      cost 139–198 ms per turn, ~0.6 % of a 26.7 s p50 — so the "most likely remaining per-turn
+      fixed cost" is noise, and pooling the connections across turns (which would trade a real
+      isolation guarantee for it) is not worth doing. Connecting the six *concurrently* instead of
+      sequentially is the cheap, isolation-preserving half; it measured no better here only because
+      the dev fleet is one process serving all six, which is also why a `--workers 4` load run may
+      find its ceiling in `scripts.connectors_dev` rather than in the front door.
+- [x] **SCALE-6 All three measured.** The live-Anthropic 50-session run (150/150 answered after
+      D-123, p50 16.9 s, 1.99 turns/s), the multi-replica run (two processes, one database: the
+      cross-process turn guard held 6/6, rehydration 6/6, cross-talk 0/6) and the chaos pass
+      (connector killed mid-flight — turn still answers and `/readyz` names it; Postgres bounced —
+      pool recovered with no restart; client disconnect — **CHAOS-1**, open). Full record in
+      `docs/load-test-2026-07.md`.
+
 ## Open — Live e2e testing pass (2026-07-27, D-109)
 
 Nine stages against the real running stack (Postgres+pgvector, Temporal, real Anthropic calls,
