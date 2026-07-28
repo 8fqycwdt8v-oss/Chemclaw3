@@ -10,11 +10,13 @@ interface with swappable backends (in-memory for tests, Postgres for real), and
 
 import asyncio
 import logging
+import time
 from collections.abc import Awaitable, Callable
 from typing import Any, Protocol, TypeVar, runtime_checkable
 
 from pydantic import BaseModel
 
+from calc.artifacts import ArtifactStore, put_all
 from chemclaw.ids import stable_hash
 
 logger = logging.getLogger(__name__)
@@ -72,6 +74,11 @@ class StoredResult(BaseModel):
     key: CalculationKey
     result: ResultPayload
     provenance: str = "computed"
+    # Wall time the calculation took on the miss that produced it, or None for a result that
+    # arrived some other way (a measured value, a backfill). This is the cost policy
+    # `workflows/retention.py` says a cache needs and refuses to fake with an age cutoff: it is
+    # what an artifact eviction orders by, and what tells an operator what the cache is worth.
+    compute_seconds: float | None = None
 
 
 @runtime_checkable
@@ -134,8 +141,11 @@ async def cached_compute(
         logger.debug("calc cache hit: %s", key.as_str())
         return hit.result, True
     logger.debug("calc cache miss, computing: %s", key.as_str())
+    # Monotonic, so a clock adjustment mid-calculation cannot record a negative or absurd cost.
+    started = time.perf_counter()
     result = await compute()
-    await store.put(StoredResult(key=key, result=result))
+    elapsed = time.perf_counter() - started
+    await store.put(StoredResult(key=key, result=result, compute_seconds=elapsed))
     return result, False
 
 
@@ -174,4 +184,59 @@ async def run_cached(
         return (await asyncio.to_thread(compute)).model_dump()
 
     payload, was_cached = await cached_compute(store, key, _compute)
+    return result_type.model_validate(payload), was_cached
+
+
+async def run_cached_with_artifacts(
+    store: ResultStore,
+    artifacts: ArtifactStore,
+    key: CalculationKey,
+    compute: Callable[[], tuple[ResultT, dict[str, bytes]]],
+    result_type: type[ResultT],
+) -> tuple[ResultT, bool]:
+    """`run_cached`, for a calculator that also leaves files worth keeping (D-124).
+
+    The typed result still goes to the result store; the raw by-products the run produced —
+    a Hessian, an optimized geometry, a conformer ensemble — go to the artifact store keyed by the
+    same `CalculationKey`, so the two halves of one calculation stay addressable together.
+
+    The hit/miss decision is delegated to `cached_compute`, unchanged: it stays the single
+    lookup-before-compute path, and this only adds what to do with the bytes a miss produced. On a
+    hit nothing is written, because the artifacts of that key are already stored.
+
+    Args:
+        store: The result backend to read from and write to.
+        artifacts: Where the run's raw by-products are persisted.
+        key: The versioned identity of this calculation.
+        compute: Zero-arg *synchronous* callable returning `(result, {filename: bytes})`.
+        result_type: The pydantic model to reconstruct from the stored payload.
+
+    Returns:
+        `(result, was_cached)` — identical in shape to `run_cached`, so a caller that does not
+        care about artifacts reads the same tuple.
+    """
+    captured: dict[str, bytes] = {}
+    elapsed: float | None = None
+
+    def _run() -> ResultT:
+        nonlocal captured, elapsed
+        started = time.perf_counter()
+        result, files = compute()
+        elapsed = time.perf_counter() - started
+        captured = files
+        return result
+
+    async def _compute() -> ResultPayload:
+        return (await asyncio.to_thread(_run)).model_dump()
+
+    payload, was_cached = await cached_compute(store, key, _compute)
+    if not was_cached and captured:
+        try:
+            await put_all(artifacts, key.as_str(), captured, compute_seconds=elapsed)
+        except Exception:  # noqa: BLE001 — see below
+            # An artifact is a by-product: losing it costs a future recomputation, while
+            # propagating this would discard a calculation that already succeeded and is already
+            # in the result store. The failure is logged loudly rather than raised, which is the
+            # write-side half of the "an artifact is optional by construction" contract.
+            logger.warning("could not store artifacts for %s", key.as_str(), exc_info=True)
     return result_type.model_validate(payload), was_cached

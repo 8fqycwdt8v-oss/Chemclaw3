@@ -167,6 +167,27 @@ class StoreSettings(BaseSettings):
     # How long a caller waits for a free pooled connection before the request fails as a
     # transient infrastructure fault (a `ConnectionError`, which Temporal retries).
     pg_pool_timeout_seconds: float = Field(default=10.0, gt=0)
+    # Artifact store (D-124): a calculation's by-products — Hessians, optimized geometries,
+    # conformer ensembles — kept past the temporary directory that used to delete them.
+    # On by default because the value is immediate (a Hessian reused instead of recomputed) and
+    # the cost is bounded by the cap below; a deployment that wants none sets `enabled=false`.
+    artifact_store_enabled: bool = True
+    # Per-artifact ceiling, checked before the file is read so an outsized one never enters RAM.
+    # An artifact over the cap is *skipped with a warning*, never an error: capturing a
+    # by-product must not be able to fail the calculation it is a by-product of. 0 disables.
+    artifact_max_bytes: int = Field(default=33_554_432, ge=0)
+    # zlib level for stored artifacts; 0 stores raw. 6 is zlib's own default — the knee of the
+    # ratio/CPU curve on the text formats these artifacts actually are.
+    artifact_compression_level: int = Field(default=6, ge=0, le=9)
+    # Eviction budget in stored bytes, and the idle window a blob must exceed to be a candidate.
+    # Both 0 = off, so the sweep is inert until an operator opts in — matching `retention_*_days`.
+    # Eviction targets blobs only; `calculation_results` is never evicted (D-011).
+    artifact_store_max_bytes: int = Field(default=0, ge=0)
+    artifact_evict_idle_days: int = Field(default=0, ge=0)
+    # How stale a blob's access stamp must be before a read bothers to refresh it. Bumping on
+    # every hit would turn each read into a write on the reuse hot path; at most one write per
+    # blob per window is enough for an idle-based eviction decision.
+    artifact_access_stamp_seconds: float = Field(default=3600.0, ge=0)
 
     @model_validator(mode="after")
     def _pool_bounds_are_orderable(self) -> "StoreSettings":

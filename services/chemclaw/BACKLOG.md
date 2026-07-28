@@ -3,6 +3,57 @@
 Prioritized open action items. Top = next. Keep in sync with `docs/implementation-plan.md`
 (phase/step numbers) at session end.
 
+## Open — Storage & knowledge substrate (docs/audit/13-storage-and-knowledge-audit.md)
+
+The layer under retrieval and capability, audited as one system for the first time: what the
+system writes down, what it throws away, and what it cannot reconstruct. Ordered by the audit's
+own dependency chain — the reuse items are what make the artifact store worth having, and the
+seed corpus is last because it is only worth pinning once the shapes it must contain exist.
+
+- [x] **STO-1 [High] Every expensive by-product was deleted with its tempdir.** `calc/xtb_cli.py`
+      parsed the Hessian into numbers and lost the file. **Done (D-124):** content-addressed
+      `artifact_blobs` + `calculation_artifacts` (migration 019), `calc/artifacts.py` +
+      `calc/postgres_artifacts.py`, capture derived from `_REQUIRED_OUTPUTS`, wired into the
+      thermochemistry path. Remaining: the optimizer and CREST paths capture but do not persist;
+      the eviction sweep is designed, not built.
+- [ ] **STO-2 [High] A stored Hessian cannot be reused** — [M]. `ThermoSpec` puts `temperature_k`,
+      `pressure_pa`, `symmetry_number` and `rrho_cutoff_cm` in the cache key, so thermochemistry
+      at a second temperature is a miss that recomputes a temperature-independent quantity. Split
+      `HessianSpec` from the RRHO block that reads it. **The highest-value item in the audit.**
+- [ ] **STO-3 [High] `max_members` is in the conformer cache key** — [S]. It only truncates a
+      list, so "show me 20 instead of 10" re-runs CREST. Drop it from the key; truncate at read.
+- [ ] **STO-4 [Med] No cross-method geometry reuse** — [M]. Keyed on coordinates, so the same
+      SMILES from a different embedding re-optimizes. A subject-keyed geometry pointer is itself a
+      cached calculation — no new table.
+- [ ] **STO-5 [Med] No converged electronic structure kept** — [L]. Deferred with DFT (D-010);
+      D-124 defines the media type and link role, nothing more.
+- [ ] **STO-6 [Med] Artifact eviction sweep** — [S]. `compute_seconds` now exists (D-124); the
+      sweep that orders by it does not. Evicts blobs only, never `calculation_results`.
+- [ ] **STO-7 [High] Computed results are graph islands** — [M]. `connectors/qm/knowledge.py`
+      cannot wikilink a compound note that may not exist. Needs `calc_ref`/`artifact_refs` on
+      `Note` and a multi-file `NoteSubmission` so a note lands with its dependencies —
+      `memory/supersede.py` is the second caller that already wanted this.
+- [ ] **STO-8 [High] Graph edges carry no relation** — [M]. `kg/graph.py:150` adds a bare edge.
+      `[[rel:target]]` is free to take: `_SLUG` excludes `:`, so it currently fails validation.
+      Vocabulary from RXNO/CHMO/CHEMINF/OntoRXN, enforced at `kg-validate` like `KNOWN_NOTE_TYPES`.
+- [ ] **STO-9 [Med] Bi-temporality stops at the node** — [S]. `valid_from`/`valid_to` exist on
+      notes, not on edges.
+- [ ] **STO-10 [Med] `knowledge/` is empty** — [M]. `make kg-validate` validates `.gitkeep`. Seed
+      ~35 notes covering every type and relation. Do **not** promote `evals/retrieval_corpus/` —
+      it sits outside `knowledge_dir` so its pinned recall/precision numbers stay reproducible.
+- [ ] **STO-12 [Low] `embed_texts` re-embeds the same query every retrieval** — [S]. A bounded
+      LRU. Note the assessment: tool-result caching is otherwise a **non-gap** — every `calc`
+      connector tool already routes through `run_cached`, and the `chem` tools are RDKit calls a
+      Postgres round trip would make slower.
+- [ ] **STO-14 [Med] Vendored reference data** — [M]. The one sanctioned escalation of D-089
+      (no runtime egress): an ontology/reagent corpus baked into the image at build time, behind
+      the existing `sources/registry.py` seam, with a checksummed manifest and an extended (not
+      relaxed) `tests/test_no_egress.py`.
+
+**Closed as not-gaps:** STO-11 (`embedding_provider="hash"` is the documented offline dev path),
+STO-13 (audit-trail disposal stays refused — deleting from a hash chain is indistinguishable from
+the tampering it detects; needs an ADR with QA sign-off, already in `DEFERRED.md`).
+
 ## Done — Process/analytical-development capability research (2026-07-26, D-092)
 
 A survey of open-source ML/cheminformatics and fast-ab-initio packages for chemical and analytical
