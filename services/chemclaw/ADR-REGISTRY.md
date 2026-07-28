@@ -154,8 +154,3 @@ number is one another session will take.
 | D-122 | The GxP audit trail defaults to durable, because opting in per call site did not work |
 | D-123 | One agent per concurrent turn: a shared chat client corrupts streamed tool calls |
 | D-124 | The artifact store: a calculation's by-products outlive its tempdir, and the cost policy the cache lacked |
-| D-125 | Splitting the Hessian from the thermochemistry that reads it, and the ensemble from its presentation |
-| D-126 | Crosslinking the calculation store and the graph; the PR-gate learns to submit a note's dependencies with it |
-| D-127 | Typed edges: a relation in the wikilink, a validity window in the frontmatter |
-| D-128 | A conflict signal that ranks rather than arbitrates, and the negative-feedback half of the loop |
-| D-129 | Vendored reference data: the one sanctioned escalation of the no-external-sources rule |
