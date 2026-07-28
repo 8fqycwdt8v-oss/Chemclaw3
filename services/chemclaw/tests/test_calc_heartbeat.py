@@ -16,6 +16,7 @@ have succeeded.
 import asyncio
 
 import pytest
+from temporalio import activity
 
 from chemclaw.config import settings
 from connectors.calc import activities
@@ -37,7 +38,7 @@ def test_a_long_crest_run_heartbeats_while_it_runs(monkeypatch: pytest.MonkeyPat
     # 4 s timeout -> a 1 s beat interval (the helper divides, with a 1 s floor so production never
     # beats more often than that). The sleep must clear one interval for a beat to be observable.
     monkeypatch.setattr(settings, "xtb_job_heartbeat_timeout_seconds", 4.0)
-    monkeypatch.setattr(activities.activity, "heartbeat", lambda *a: beats.append(str(a[0])))
+    monkeypatch.setattr(activity, "heartbeat", lambda *a: beats.append(str(a[0])))
 
     async def _slow() -> str:
         await asyncio.sleep(1.3)
@@ -53,7 +54,7 @@ def test_beating_returns_immediately_for_quick_work(monkeypatch: pytest.MonkeyPa
     """A fast run pays nothing: no spurious beats, and the result comes straight back."""
     beats: list[str] = []
     monkeypatch.setattr(settings, "xtb_job_heartbeat_timeout_seconds", 600.0)
-    monkeypatch.setattr(activities.activity, "heartbeat", lambda *a: beats.append(str(a[0])))
+    monkeypatch.setattr(activity, "heartbeat", lambda *a: beats.append(str(a[0])))
 
     async def _quick() -> str:
         return "fast"
@@ -65,7 +66,7 @@ def test_beating_returns_immediately_for_quick_work(monkeypatch: pytest.MonkeyPa
 def test_beating_propagates_the_failure_it_wraps(monkeypatch: pytest.MonkeyPatch) -> None:
     """The heartbeat wrapper must not swallow the calculation's error."""
     monkeypatch.setattr(settings, "xtb_job_heartbeat_timeout_seconds", 600.0)
-    monkeypatch.setattr(activities.activity, "heartbeat", lambda *a: None)
+    monkeypatch.setattr(activity, "heartbeat", lambda *a: None)
 
     async def _boom() -> str:
         raise ValueError("crest failed")
