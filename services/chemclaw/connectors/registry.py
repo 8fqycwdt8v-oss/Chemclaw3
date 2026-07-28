@@ -22,6 +22,7 @@ profile narrows it afterwards — so a connector can add to what is *offered* an
 """
 
 import logging
+import os.path
 from collections.abc import Iterable
 from contextlib import AsyncExitStack
 from functools import cache
@@ -176,6 +177,46 @@ def _endpoint_url(manifest: ConnectorManifest, endpoint: HttpEndpoint) -> str:
     the front door at an in-cluster Service without patching a bundle.
     """
     return settings.connector_urls.get(manifest.name, endpoint.url)
+
+
+def health_url(manifest: ConnectorManifest) -> str | None:
+    """Where to probe this connector, moved to wherever its endpoint actually is (D-131).
+
+    Public because the startup probe is a second caller and it must not read `health_url` off the
+    manifest directly — **which is exactly the bug this exists to fix.** `connector_urls` moved the
+    *tool* endpoint to the deployment's real address and left the probe pointed at the manifest's
+    loopback dev default. The shipped chart always sets that override (it computes one Service URL
+    per enabled bundle), so in a cluster the front door probed `127.0.0.1:881x` — its own pod, where
+    nothing listens. Every connector therefore reported `unreachable` on `/readyz` and in
+    `chemclaw_connectors_unhealthy` however healthy it was, and under `connectors_required: true`
+    — the GxP fail-fast posture — startup would have failed every time. Found by re-running the
+    Stage 5e connector-kill scenario, which could not tell "killed" from "never probed correctly".
+
+    The move is a suffix replacement rather than an origin swap, because the two deployments that
+    exist put the connector in different *places*, not merely on different hosts: Helm gives each
+    bundle its own Service (`…:8814/mcp` + `…:8814/healthz`) while `scripts.connectors_dev` mounts
+    them all under one port by name (`…:8810/chem/mcp` + `…:8810/chem/healthz`). Taking the health
+    path verbatim would be right for the first and wrong for the second. So the manifest's own two
+    URLs define the relationship — whatever distinguishes its health URL from its endpoint URL —
+    and that difference is re-applied at the effective address.
+
+    Returns None when the bundle declares no health route (a third-party MCP server may expose
+    none), which the probe reports as `unprobed` rather than guessing a path.
+    """
+    endpoint = manifest.endpoint
+    if not isinstance(endpoint, HttpEndpoint) or endpoint.health_url is None:
+        return None
+    effective = _endpoint_url(manifest, endpoint)
+    if effective == endpoint.url:
+        return endpoint.health_url
+    shared = len(os.path.commonprefix([endpoint.url, endpoint.health_url]))
+    endpoint_tail, health_tail = endpoint.url[shared:], endpoint.health_url[shared:]
+    if not effective.endswith(endpoint_tail):
+        # The override does not end the way the manifest's own endpoint does, so there is nothing
+        # to re-root against. Probing the declared URL is the honest fallback: it may be wrong, but
+        # inventing a path from an address we do not understand would be wrong *and* silent.
+        return endpoint.health_url
+    return effective.removesuffix(endpoint_tail) + health_tail
 
 
 def _mcp_tool(manifest: ConnectorManifest, endpoint: Endpoint) -> ConnectorMcpTool:

@@ -154,3 +154,5 @@ number is one another session will take.
 | D-122 | The GxP audit trail defaults to durable, because opting in per call site did not work |
 | D-123 | One agent per concurrent turn: a shared chat client corrupts streamed tool calls |
 | D-124 | The artifact store: a calculation's by-products outlive its tempdir, and the cost policy the cache lacked |
+| D-130 | Turn teardown runs in a cancelled task, so its cleanup has to be shielded to happen at all |
+| D-131 | The connector health probe follows the address override, instead of probing the pod itself |

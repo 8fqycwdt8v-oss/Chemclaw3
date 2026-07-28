@@ -25,8 +25,7 @@ import httpx
 from pydantic import BaseModel, ConfigDict
 
 from chemclaw.config import settings
-from connectors.manifest import HttpEndpoint
-from connectors.registry import enabled
+from connectors.registry import enabled, health_url
 
 logger = logging.getLogger(__name__)
 
@@ -82,9 +81,12 @@ async def probe_connectors() -> list[ConnectorHealth]:
     targets: list[tuple[str, str]] = []
     unprobed = []
     for manifest in enabled():
-        endpoint = manifest.endpoint
-        if isinstance(endpoint, HttpEndpoint) and endpoint.health_url:
-            targets.append((manifest.name, endpoint.health_url))
+        # Through the registry, never off the manifest: the deployment's `connector_urls` override
+        # moves where a connector actually is, and reading the declared URL here probed the
+        # loopback dev default in every cluster (D-131).
+        probe_url = health_url(manifest)
+        if probe_url:
+            targets.append((manifest.name, probe_url))
         else:
             # No endpoint (a jobs-only connector), stdio (spawned per turn, nothing to probe), or an
             # HTTP endpoint that declares no health route.
