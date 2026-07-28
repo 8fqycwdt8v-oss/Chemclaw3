@@ -8,7 +8,7 @@ so a future refactor could silently reintroduce exactly the leak that was allege
 `await` added to the runner's `finally`, or an `except Exception` widened to `BaseException`,
 would do it, and both look harmless in review.
 
-**Correction (D-124): this suite used to simulate the disconnect wrongly, and hid a real defect.**
+**Correction (D-130): this suite used to simulate the disconnect wrongly, and hid a real defect.**
 Every case below closed the stream with `aclose()` and called that "what sse-starlette does when
 the client disconnects". It is not. sse-starlette answers `http.disconnect` by cancelling its task
 group and never calls `aclose()` on the body iterator at all, so a real disconnect raises

@@ -188,7 +188,7 @@ def test_connector_urls_override_the_manifest_address(
 def test_the_health_probe_follows_the_address_override(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The probe must go where the tools go, or readiness reports on the wrong host (D-125).
+    """The probe must go where the tools go, or readiness reports on the wrong host (D-131).
 
     The shipped chart always sets `connector_urls`, so before this the front door probed the
     manifest's loopback dev default in every cluster: every connector read `unreachable` however

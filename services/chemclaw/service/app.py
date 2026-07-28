@@ -202,7 +202,7 @@ async def _hold_turn_claim(claims: SessionTurns, session_id: str, lease_seconds:
         try:
             await claims.refresh(session_id, _WORKER_ID, lease_seconds)
         except Exception:  # noqa: BLE001 - a dead heartbeat task is worse than a logged refresh
-            # Widened for the reason the release below it was (D-124): this runs in a task the
+            # Widened for the reason the release below it was (D-130): this runs in a task the
             # turn only ever cancels, never awaits, so an exception the tuple did not name would
             # kill the heartbeat silently *and* surface later as an unretrieved-exception
             # traceback. `psycopg.Error` is the concrete case — the store raises it and the old
@@ -220,7 +220,7 @@ async def _hold_turn_claim(claims: SessionTurns, session_id: str, lease_seconds:
 async def _release_turn_claim(claims: SessionTurns, session_id: str) -> None:
     """Give a session's turn slot back, surviving the cancellation that usually causes it.
 
-    **Shielded, and that is the entire point of this function** (D-124). Both callers reach it from
+    **Shielded, and that is the entire point of this function** (D-130). Both callers reach it from
     a `finally` that runs *because* their task was cancelled — a chemist closed the tab mid-turn —
     and a bare `await` inside a cancelled task raises at its first suspension point. The release
     therefore started on every abandoned turn and finished on none: measured on the real path, the

@@ -486,7 +486,7 @@ is invisible to a different owner.
 > **Correction (see the re-run below).** The first row is half wrong and the readings are kept as
 > written so the mistake is legible. The turn did answer, but `/readyz` naming the connector
 > unreachable proved nothing: it said `unreachable` *before* the kill as well, because the probe was
-> pointed at the wrong address entirely (D-125). The signal was not being read — it was constant.
+> pointed at the wrong address entirely (D-131). The signal was not being read — it was constant.
 
 ## CHAOS-1, and two wrong theories
 
@@ -576,7 +576,7 @@ C4 was not a confirmation — it **found the third defect**. The first run produ
 the release caught. Shielding had turned a failure that used to be discarded with its `finally` into
 one nobody was left to read. Widened, re-run, clean.
 
-C3 could not be read at all until the probe was fixed (D-125): `/readyz` reported `unreachable` for
+C3 could not be read at all until the probe was fixed (D-131): `/readyz` reported `unreachable` for
 every connector before and after the kill, because `connector_urls` moves the tool endpoint and the
 probe was still reading the manifest's loopback dev default. The shipped chart always sets that
 override, so in a cluster the readiness signal was constant — and under `connectors_required: true`

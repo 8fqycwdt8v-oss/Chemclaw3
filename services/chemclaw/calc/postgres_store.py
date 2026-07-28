@@ -21,15 +21,18 @@ from chemclaw.config import settings
 
 _UPSERT = """
     INSERT INTO calculation_results
-        (key, calc_type, calc_version, input_hash, params_hash, result, provenance)
-    VALUES (%s, %s, %s, %s, %s, %s, %s)
+        (key, calc_type, calc_version, input_hash, params_hash, result, provenance, compute_seconds)
+    VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
     ON CONFLICT (key) DO UPDATE SET
         result = EXCLUDED.result,
         provenance = EXCLUDED.provenance,
+        -- Keep the recorded cost when a rewrite does not carry one, so a backfill or a
+        -- re-`put` of an existing payload cannot erase what the original miss measured.
+        compute_seconds = COALESCE(EXCLUDED.compute_seconds, calculation_results.compute_seconds),
         created_at = now()
 """
 
-_SELECT = "SELECT result, provenance FROM calculation_results WHERE key = %s"
+_SELECT = "SELECT result, provenance, compute_seconds FROM calculation_results WHERE key = %s"
 
 
 class PostgresStore:
@@ -67,10 +70,12 @@ class PostgresStore:
                 row = await cur.fetchone()
         if row is None:
             return None
-        result, provenance = row
+        result, provenance, compute_seconds = row
         # JSONB comes back already parsed by psycopg; str only if driver differs.
         payload = result if isinstance(result, dict) else json.loads(result)
-        return StoredResult(key=key, result=payload, provenance=provenance)
+        return StoredResult(
+            key=key, result=payload, provenance=provenance, compute_seconds=compute_seconds
+        )
 
     async def put(self, stored: StoredResult) -> None:
         """Persist `stored`, overwriting any existing result for its key."""
@@ -87,6 +92,7 @@ class PostgresStore:
                         key.params_hash,
                         Jsonb(stored.result),
                         stored.provenance,
+                        stored.compute_seconds,
                     ),
                 )
             await conn.commit()

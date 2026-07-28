@@ -38,7 +38,9 @@ from rdkit import Chem
 from scipy.linalg import null_space
 
 from calc import xtb_cli
-from calc.store import ResultStore, run_cached
+from calc.artifacts import ArtifactStore
+from calc.postgres_artifacts import default_artifact_store
+from calc.store import ResultStore, run_cached_with_artifacts
 from calc.structure import Structure
 from calc.xtb_engine import evaluate_point, make_calculator
 from calc.xtb_opt import OptimizationResult, OptSpec, run_cached_optimization
@@ -177,8 +179,8 @@ def _atomic_masses(elements: list[int]) -> np.ndarray:
 
 def _second_derivatives(
     spec: ThermoSpec, structure: Structure
-) -> tuple[np.ndarray, np.ndarray | None, float]:
-    """The Hessian, IR intensities and energy, from whichever backend the spec names.
+) -> tuple[np.ndarray, np.ndarray | None, float, dict[str, bytes]]:
+    """The Hessian, IR intensities, energy and raw by-products, from the spec's backend.
 
     The `xtb` binary computes both the Hessian and the IR intensities itself and is far
     faster at it — measured, a 76-atom Hessian in 26 s against 218 s of finite
@@ -188,7 +190,9 @@ def _second_derivatives(
     the two comparable.
 
     The in-process path returns `None` for intensities, because it derives them from the
-    dipole derivatives it collected while displacing — a separate step the caller runs.
+    dipole derivatives it collected while displacing — a separate step the caller runs. It also
+    returns no artifacts: it computes in memory and writes no files, so there is nothing to keep
+    (D-124). Only the binary leaves a `hessian` and a `vibspectrum` behind.
     """
     if spec.for_structure(structure).engine == "xtb":
         outcome = xtb_cli.run(structure, task="hess", method=spec.method, solvent=spec.solvent)
@@ -196,6 +200,7 @@ def _second_derivatives(
             np.asarray(outcome.hessian),
             np.asarray(outcome.ir_intensities),
             (outcome.energy_hartree),
+            outcome.artifacts,
         )
     hessian, dipole_derivatives = _finite_difference(spec, structure)
     calc = make_calculator(
@@ -208,7 +213,7 @@ def _second_derivatives(
     _, positions = structure.arrays()
     energy, _, _ = evaluate_point(calc, positions)
     _CACHED_DIPOLE_DERIVATIVES[structure.structure_id] = dipole_derivatives
-    return hessian, None, energy
+    return hessian, None, energy, {}
 
 
 # The in-process Hessian produces dipole derivatives as a by-product; the two-step shape
@@ -441,6 +446,18 @@ def _vibrational(
 def compute_thermochemistry(spec: ThermoSpec, structure: Structure) -> ThermochemistryResult:
     """Hessian, frequencies, IR intensities and RRHO thermochemistry for `structure`.
 
+    The plain form, for the callers that want only the answer. `compute_thermochemistry_with_
+    artifacts` is the same calculation, additionally handing back the raw files the run produced
+    so a cached caller can keep them (D-124).
+    """
+    return compute_thermochemistry_with_artifacts(spec, structure)[0]
+
+
+def compute_thermochemistry_with_artifacts(
+    spec: ThermoSpec, structure: Structure
+) -> tuple[ThermochemistryResult, dict[str, bytes]]:
+    """The thermochemistry, plus the raw by-products of the run that produced it.
+
     `structure` should be a converged minimum (`calc.xtb_opt`); if it is not, the
     result says so through `is_minimum` rather than refusing, because "this geometry
     is a saddle point" is a useful answer and often the question.
@@ -456,7 +473,7 @@ def compute_thermochemistry(spec: ThermoSpec, structure: Structure) -> Thermoche
         )
     masses = _atomic_masses(structure.elements)
     _, positions = structure.arrays()
-    hessian, intensities, electronic = _second_derivatives(spec, structure)
+    hessian, intensities, electronic, artifacts = _second_derivatives(spec, structure)
     wavenumbers, vectors = _normal_modes(hessian, masses, positions)
     if intensities is None:
         intensities = _ir_intensities(_dipole_derivatives(spec, structure), vectors, masses)
@@ -500,7 +517,7 @@ def compute_thermochemistry(spec: ThermoSpec, structure: Structure) -> Thermoche
         if imaginary
         else None
     )
-    return ThermochemistryResult(
+    result = ThermochemistryResult(
         smiles=structure.smiles,
         structure_id=structure.structure_id,
         method=spec.method,
@@ -529,22 +546,33 @@ def compute_thermochemistry(spec: ThermoSpec, structure: Structure) -> Thermoche
         uncertainty_kcal=settings.xtb_reaction_uncertainty_kcal,
         imaginary_displacement=displacement,
     )
+    return result, artifacts
 
 
 async def run_cached_thermochemistry(
-    store: ResultStore, structure: Structure, spec: ThermoSpec | None = None
+    store: ResultStore,
+    structure: Structure,
+    spec: ThermoSpec | None = None,
+    artifacts: ArtifactStore | None = None,
 ) -> tuple[ThermochemistryResult, bool]:
-    """Return the thermochemistry of `structure`, reusing the store on a repeat."""
+    """Return the thermochemistry of `structure`, reusing the store on a repeat.
+
+    The Hessian the binary wrote is kept alongside the cached answer (D-124), so a later question
+    about the same geometry has the expensive half already on disk. `artifacts` defaults to the
+    production artifact store; pass an explicit one (or an `InMemoryArtifactStore`) to redirect it.
+    """
     spec = spec or ThermoSpec()
+    artifacts = artifacts if artifacts is not None else default_artifact_store()
     # Off the event loop: deriving the key calls `calc_version()`, whose first call in a
     # process shells out to `xtb --version` / `crest --version` (`calc.xtb_cli`), and the
     # hash walks every atom. Both are synchronous, and this runs inside the connector's
     # one-loop MCP server and inside Temporal activities that are coroutines.
     key = await asyncio.to_thread(spec.cache_key, structure)
-    return await run_cached(
+    return await run_cached_with_artifacts(
         store,
+        artifacts,
         key,
-        lambda: compute_thermochemistry(spec, structure),
+        lambda: compute_thermochemistry_with_artifacts(spec, structure),
         ThermochemistryResult,
     )
 

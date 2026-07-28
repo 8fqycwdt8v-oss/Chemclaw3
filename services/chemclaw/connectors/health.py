@@ -83,7 +83,7 @@ async def probe_connectors() -> list[ConnectorHealth]:
     for manifest in enabled():
         # Through the registry, never off the manifest: the deployment's `connector_urls` override
         # moves where a connector actually is, and reading the declared URL here probed the
-        # loopback dev default in every cluster (D-125).
+        # loopback dev default in every cluster (D-131).
         probe_url = health_url(manifest)
         if probe_url:
             targets.append((manifest.name, probe_url))

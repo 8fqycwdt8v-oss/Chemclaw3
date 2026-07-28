@@ -1,4 +1,4 @@
-"""A client that walks away mid-turn frees its session immediately (D-124).
+"""A client that walks away mid-turn frees its session immediately (D-130).
 
 Driven through the **real ASGI contract** — a genuine `http.disconnect` message handed to the real
 app — because that is precisely where this defect lived and why it survived a suite that already

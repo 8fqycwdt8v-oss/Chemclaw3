@@ -180,7 +180,7 @@ def _endpoint_url(manifest: ConnectorManifest, endpoint: HttpEndpoint) -> str:
 
 
 def health_url(manifest: ConnectorManifest) -> str | None:
-    """Where to probe this connector, moved to wherever its endpoint actually is (D-125).
+    """Where to probe this connector, moved to wherever its endpoint actually is (D-131).
 
     Public because the startup probe is a second caller and it must not read `health_url` off the
     manifest directly — **which is exactly the bug this exists to fix.** `connector_urls` moved the

@@ -257,7 +257,7 @@ async def run_turn(
         # re-raised so the generator still closes and a timeout still surfaces as one.
         #
         # **`CancelledError` belongs here and its absence made this clause dead code on the only
-        # path that matters** (D-124). sse-starlette answers `http.disconnect` by cancelling its
+        # path that matters** (D-130). sse-starlette answers `http.disconnect` by cancelling its
         # task group; it never calls `aclose()` on the body iterator, so a real disconnect
         # delivers `CancelledError` and this rollback was skipped every single time. It looked
         # covered because the suite closed the stream by hand — the one thing production does
@@ -280,7 +280,7 @@ async def run_turn(
                 Shielded by the caller, so this runs as a task that outlives the cancelled turn —
                 a plain `await` here would be cancelled at its first suspension point and leave
                 the half-written turn committed after all. It swallows its own errors for the same
-                reason the durable claim release does (D-124): once the awaiting task is
+                reason the durable claim release does (D-130): once the awaiting task is
                 cancelled, `shield` stops collecting the inner result, so a failure raised here
                 would surface only as an unattributed `Task exception was never retrieved`.
                 """
