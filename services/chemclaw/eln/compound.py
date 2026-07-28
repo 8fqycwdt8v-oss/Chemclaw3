@@ -74,3 +74,30 @@ def compound_note(smiles: str) -> Note:
         tags=["compound"],
         body=body,
     )
+
+
+def compound_dependencies(note: Note) -> list[Note]:
+    """The compound notes `note` links to that a submission must carry with it (STO-7).
+
+    The rule that unblocked crosslinking, stated once and applied at the gate rather than in every
+    note-minting connector: **a note that links a compound note gets that compound note.** Because
+    `compound_id` is derived from the canonical structure, the target is fully determined by the
+    SMILES the note already carries — so the note can honestly write `[[compound-<hash>]]` and the
+    PR-gate makes the link resolve, instead of the note avoiding the link because the target might
+    not exist yet (`connectors/qm/knowledge.py` documented exactly that avoidance).
+
+    Returns an empty list for a note with no `compound_smiles` or one that does not link its
+    compound. Re-proposing a compound note that is already merged is a no-op: it renders
+    byte-identically, so the submission produces no diff for it.
+    """
+    if not note.compound_smiles:
+        return []
+    try:
+        wanted = compound_id(note.compound_smiles)
+    except ValueError:
+        # An unparseable SMILES is the note's own problem to report; it is not this function's
+        # place to fail a submission over a field it only reads opportunistically.
+        return []
+    if wanted not in note.outgoing_links():
+        return []
+    return [compound_note(note.compound_smiles)]

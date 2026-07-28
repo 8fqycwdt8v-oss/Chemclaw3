@@ -78,7 +78,7 @@ def test_start_signal_query_drives_the_hold(monkeypatch: pytest.MonkeyPatch) -> 
                 assert await approval_status(approval_id) == "approved"
 
         assert len(fake.submissions) == 1  # Yes opened exactly one PR
-        assert "reaction-eln-2026-001" in fake.submissions[0].content
+        assert "reaction-eln-2026-001" in fake.submissions[0].files[0].content
 
     asyncio.run(_run())
 

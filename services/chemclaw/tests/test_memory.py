@@ -308,7 +308,7 @@ def test_synthesize_campaigns_proposes_notes_via_pr_gate() -> None:
     sub = FakeSubmitter()
     refs = asyncio.run(synthesize_campaigns([a, b], sub))
     assert len(refs) == 1
-    assert sub.submissions[0].path.startswith("knowledge/campaign/campaign-")
+    assert sub.submissions[0].files[0].path.startswith("knowledge/campaign/campaign-")
 
 
 def test_distill_playbooks_proposes_evidence_backed_notes() -> None:
@@ -318,8 +318,11 @@ def test_distill_playbooks_proposes_evidence_backed_notes() -> None:
     sub = FakeSubmitter()
     refs = asyncio.run(distill_playbooks([ester_x, ester_y], sub))
     assert len(refs) == 1
-    assert sub.submissions[0].path.startswith("knowledge/playbook/playbook-")
-    assert "proj-x" in sub.submissions[0].content and "proj-y" in sub.submissions[0].content
+    assert sub.submissions[0].files[0].path.startswith("knowledge/playbook/playbook-")
+    assert (
+        "proj-x" in sub.submissions[0].files[0].content
+        and "proj-y" in sub.submissions[0].files[0].content
+    )
 
 
 def test_build_campaign_notes_is_the_pure_half_of_synthesis() -> None:
@@ -338,7 +341,7 @@ def test_build_campaign_notes_is_the_pure_half_of_synthesis() -> None:
     asyncio.run(synthesize_campaigns([a, b], sub))
     # The builder yields exactly the notes the publish path submits (same ids, in order).
     assert len(notes) == len(sub.submissions)
-    assert all(n.id in s.path for n, s in zip(notes, sub.submissions, strict=True))
+    assert all(n.id in s.files[0].path for n, s in zip(notes, sub.submissions, strict=True))
     assert all(n.type == "campaign" for n in notes)
 
 
@@ -372,5 +375,5 @@ def test_record_confirmed_answer_tool_uses_gate(monkeypatch: pytest.MonkeyPatch)
     )
     assert ref == "pr://note/interaction-q-42"
     submitted = fake.submissions[0]
-    assert submitted.path.endswith("interaction/interaction-q-42.md")
-    assert "reaction-eln-2026-002" in submitted.content
+    assert submitted.files[0].path.endswith("interaction/interaction-q-42.md")
+    assert "reaction-eln-2026-002" in submitted.files[0].content

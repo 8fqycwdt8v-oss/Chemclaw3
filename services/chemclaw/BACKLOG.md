@@ -3,52 +3,77 @@
 Prioritized open action items. Top = next. Keep in sync with `docs/implementation-plan.md`
 (phase/step numbers) at session end.
 
-## Open — Storage & knowledge substrate (docs/audit/13-storage-and-knowledge-audit.md)
+## Storage & knowledge substrate (docs/audit/13-storage-and-knowledge-audit.md)
 
 The layer under retrieval and capability, audited as one system for the first time: what the
-system writes down, what it throws away, and what it cannot reconstruct. Ordered by the audit's
-own dependency chain — the reuse items are what make the artifact store worth having, and the
-seed corpus is last because it is only worth pinning once the shapes it must contain exist.
+system writes down, what it throws away, and what it cannot reconstruct. Twelve of the fourteen
+findings are closed (D-124, D-132, D-133, D-134, D-135); what remains is listed at the end of the
+section, and STO-5/11/13 stay deliberately open.
 
-- [x] **STO-1 [High] Every expensive by-product was deleted with its tempdir.** `calc/xtb_cli.py`
-      parsed the Hessian into numbers and lost the file. **Done (D-124):** content-addressed
-      `artifact_blobs` + `calculation_artifacts` (migration 019), `calc/artifacts.py` +
-      `calc/postgres_artifacts.py`, capture derived from `_REQUIRED_OUTPUTS`, wired into the
-      thermochemistry path. Remaining: the optimizer and CREST paths capture but do not persist;
-      the eviction sweep is designed, not built.
-- [ ] **STO-2 [High] A stored Hessian cannot be reused** — [M]. `ThermoSpec` puts `temperature_k`,
-      `pressure_pa`, `symmetry_number` and `rrho_cutoff_cm` in the cache key, so thermochemistry
-      at a second temperature is a miss that recomputes a temperature-independent quantity. Split
-      `HessianSpec` from the RRHO block that reads it. **The highest-value item in the audit.**
-- [ ] **STO-3 [High] `max_members` is in the conformer cache key** — [S]. It only truncates a
-      list, so "show me 20 instead of 10" re-runs CREST. Drop it from the key; truncate at read.
-- [ ] **STO-4 [Med] No cross-method geometry reuse** — [M]. Keyed on coordinates, so the same
-      SMILES from a different embedding re-optimizes. A subject-keyed geometry pointer is itself a
-      cached calculation — no new table.
-- [ ] **STO-5 [Med] No converged electronic structure kept** — [L]. Deferred with DFT (D-010);
-      D-124 defines the media type and link role, nothing more.
-- [ ] **STO-6 [Med] Artifact eviction sweep** — [S]. `compute_seconds` now exists (D-124); the
-      sweep that orders by it does not. Evicts blobs only, never `calculation_results`.
-- [ ] **STO-7 [High] Computed results are graph islands** — [M]. `connectors/qm/knowledge.py`
-      cannot wikilink a compound note that may not exist. Needs `calc_ref`/`artifact_refs` on
-      `Note` and a multi-file `NoteSubmission` so a note lands with its dependencies —
-      `memory/supersede.py` is the second caller that already wanted this.
-- [ ] **STO-8 [High] Graph edges carry no relation** — [M]. `kg/graph.py:150` adds a bare edge.
-      `[[rel:target]]` is free to take: `_SLUG` excludes `:`, so it currently fails validation.
-      Vocabulary from RXNO/CHMO/CHEMINF/OntoRXN, enforced at `kg-validate` like `KNOWN_NOTE_TYPES`.
-- [ ] **STO-9 [Med] Bi-temporality stops at the node** — [S]. `valid_from`/`valid_to` exist on
-      notes, not on edges.
-- [ ] **STO-10 [Med] `knowledge/` is empty** — [M]. `make kg-validate` validates `.gitkeep`. Seed
-      ~35 notes covering every type and relation. Do **not** promote `evals/retrieval_corpus/` —
-      it sits outside `knowledge_dir` so its pinned recall/precision numbers stay reproducible.
-- [ ] **STO-12 [Low] `embed_texts` re-embeds the same query every retrieval** — [S]. A bounded
-      LRU. Note the assessment: tool-result caching is otherwise a **non-gap** — every `calc`
-      connector tool already routes through `run_cached`, and the `chem` tools are RDKit calls a
-      Postgres round trip would make slower.
-- [ ] **STO-14 [Med] Vendored reference data** — [M]. The one sanctioned escalation of D-089
-      (no runtime egress): an ontology/reagent corpus baked into the image at build time, behind
-      the existing `sources/registry.py` seam, with a checksummed manifest and an extended (not
-      relaxed) `tests/test_no_egress.py`.
+- [x] **STO-1 [High] Every expensive by-product was deleted with its tempdir.** **Done (D-124,
+      read path added by D-132):** content-addressed `artifact_blobs` + `calculation_artifacts`
+      (migration 019), `calc/artifacts.py` + `calc/postgres_artifacts.py`, capture derived from
+      `_REQUIRED_OUTPUTS`. Correction to the original finding: the optimizer and CREST have **no**
+      by-product worth keeping — `xtbopt.xyz` and the CREST ensemble are parsed in full into the
+      cached result, so capturing them would be a second copy of the cache (`_ALREADY_STORED`).
+- [x] **STO-2 [High] A stored Hessian could not be reused.** **Done (D-132):** `HessianSpec` split
+      out of `ThermoSpec` (`calc/xtb_hessian.py`); the matrix is a `.npy` artifact and the row
+      holds its address. A second temperature is now a miss on the thermochemistry and a hit on the
+      Hessian. A cached row whose artifact is gone is treated as a miss, which is what keeps
+      eviction a reclaim rather than data loss.
+- [x] **STO-3 [High] `max_members` was in the conformer cache key.** **Done (D-132):** excluded via
+      `XtbSpec.unkeyed_fields()`; `run_cached_ensemble` truncates at read. Cold-starts existing
+      `xtb.conformers` rows and stores the whole ensemble, which `total_found` already counted.
+- [x] **STO-4 [Med] No cross-method geometry reuse.** **Done (D-132):** `calc/geometry.py` records
+      a subject-keyed pointer as an ordinary cached calculation. `run_cached_optimization` writes
+      it and deliberately does not read it — the reuse is an explicit `starting_geometry` lookup,
+      so a cache key always names what actually ran.
+- [ ] **STO-5 [Med] No converged electronic structure kept** — [L]. Deferred with DFT (D-010).
+      D-124/D-132 define the media types (`density.restart`, `orbitals.molden`) and the link role;
+      nothing writes them. Published measurement: reusing a converged density cuts mean SCF
+      iterations from ~33 to ~2.
+- [x] **STO-6 [Med] The cache had no cost policy.** **Done (D-124/D-132):** `compute_seconds` is
+      recorded on every miss and `workflows/artifact_eviction.py` consumes it — evicting blobs by
+      cost-over-idle-time and by size ceiling, never `calculation_results`, so D-011 and
+      `workflows/retention.py`'s standing refusal both remain literally true.
+- [x] **STO-7 [High] Computed results were graph islands.** **Done (D-133):** `NoteSubmission`
+      carries `files: list[NoteFile]`, so a note lands with the notes its links depend on;
+      `eln.compound.compound_dependencies` applies the rule once at the gate; `calc_refs`/
+      `artifact_refs` are shape-validated frontmatter (not wikilinks — they point out of the
+      graph); `kg/crosslink.py` is the reverse lookup.
+- [x] **STO-8 [High] Graph edges carried no relation.** **Done (D-134):** `[[rel:target]]` plus a
+      frontmatter `relations:` list; vocabulary in `kg/relations.py` adopted from
+      RXNO/CHMO/CHEMINF/OntoRXN and enforced at `kg-validate` like `KNOWN_NOTE_TYPES`. Stayed on
+      `nx.DiGraph` with a tuple of relations per edge rather than moving to `MultiDiGraph`.
+- [x] **STO-9 [Med] Bi-temporality stopped at the node.** **Done (D-134):** `Relation` carries its
+      own `valid_from`/`valid_to`, honoured by `kg.graph.related(..., as_of=)`.
+- [x] **STO-10 [Med] `knowledge/` was empty.** **Done (D-135):** 37 seed notes covering all ten
+      types and all fourteen relations, with real instances of the awkward cases (a superseded
+      pair, a declared conflict, calculation crosslinks). `evals/retrieval_corpus/` was correctly
+      **not** promoted — a test asserts the two share no ids.
+- [x] **STO-12 [Low] `embed_texts` re-embedded every query.** **Done (D-135):** bounded cache keyed
+      on provider+model+dimension+text. The rest of "tool result caching" is confirmed a **non-gap**
+      and left alone: every `calc` connector tool already routes through `run_cached`, and the
+      `chem` tools are RDKit calls a Postgres round trip would make slower.
+- [x] **STO-14 [Med] Vendored reference data.** **Done (D-135):** `sources/vendored/` behind the
+      manifest seam, checksummed and licence-labelled, retrieve-only, off by default;
+      `tests/test_no_egress.py` extended (not relaxed) to assert it can make no request. Ships the
+      mechanism plus a first-party `common-reagents` table — **no third-party dataset is vendored
+      yet**, which is a build-pipeline step plus a licence review.
+
+**Follow-ups this work leaves open (not blockers):**
+
+- [ ] **Vendor a real third-party reference corpus** — [M]. The mechanism is in place and
+      documented (`data/vendored/README.md`); what remains is choosing a licence-clean source and
+      adding the build step that installs it.
+- [ ] **DEP-1: decide how `knowledge_dir` is populated in a cluster** — [M]. Assessed in
+      `docs/audit/13-storage-and-knowledge-audit.md` §7: three viable shapes (init container +
+      pulling sidecar, RWX volume, periodic Temporal pull), none implemented. More pressing now
+      that a seed corpus exists whose absence in a pod would be visible.
+- [ ] **Reconcile the ADR-number convention with its own test** — [S]. `CLAUDE.md` says "reserve it
+      in your first commit, not your last"; `tests/test_decision_log.py` requires the registry and
+      the log to name exactly the same set, which forbids reserving ahead. The test wins because it
+      runs. Raised twice now.
 
 **Closed as not-gaps:** STO-11 (`embedding_provider="hash"` is the documented offline dev path),
 STO-13 (audit-trail disposal stays refused — deleting from a hash chain is indistinguishable from

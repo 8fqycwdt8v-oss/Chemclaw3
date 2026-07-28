@@ -40,19 +40,23 @@ def test_a_value_that_could_be_read_as_a_flag_is_rejected() -> None:
 def test_capture_keeps_a_tasks_by_products_and_skips_an_oversized_one(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The by-products a task is defined by are read out of the workdir; `sp`'s JSON is not.
+    """The by-products a task is defined by are read out of the workdir; the redundant ones are not.
 
     Runs against a synthetic directory rather than the binary, so the capture manifest — the one
     thing that decides what outlives the tempdir — is measured even where xtb is not installed.
+
+    The two exclusions are the finding, not an omission. `xtbout.json` is parsed in full into
+    `CliResult.properties` and `xtbopt.xyz` into `OptimizationResult.structure`; both are already
+    persisted by the cached result, so keeping the files would be a second copy of the cache. That
+    leaves an `opt` run with **nothing** worth capturing, which the audit had assumed was untrue of
+    every task.
     """
     for name in ("xtbopt.xyz", "hessian", "vibspectrum", "xtbout.json"):
         (tmp_path / name).write_bytes(b"x" * 32)
 
-    assert sorted(xtb_cli._capture(tmp_path, "ohess")) == ["hessian", "vibspectrum", "xtbopt.xyz"]
+    assert sorted(xtb_cli._capture(tmp_path, "ohess")) == ["hessian", "vibspectrum"]
     assert sorted(xtb_cli._capture(tmp_path, "hess")) == ["hessian", "vibspectrum"]
-    assert sorted(xtb_cli._capture(tmp_path, "opt")) == ["xtbopt.xyz"]
-    # `sp` is the deliberate exclusion: `xtbout.json` is parsed in full into the cached result,
-    # so keeping the file too would be a second copy of the cache.
+    assert xtb_cli._capture(tmp_path, "opt") == {}
     assert xtb_cli._capture(tmp_path, "sp") == {}
 
     monkeypatch.setattr(settings, "artifact_max_bytes", 8)

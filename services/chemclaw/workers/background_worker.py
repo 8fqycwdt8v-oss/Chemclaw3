@@ -28,6 +28,7 @@ from chemclaw.temporal_client import connect
 # side-effect pattern `agents.chemclaw_agent` uses for tools). With the registry
 # populated, the sets this worker serves come from it — so adding a durable capability
 # to one of these modules is a decorator at its definition site, not an edit here.
+from workflows import artifact_eviction as _artifact_eviction  # noqa: F401
 from workflows import audit_verify as _audit_verify  # noqa: F401
 from workflows import connector_job as _connector_job  # noqa: F401
 from workflows import digest as _digest  # noqa: F401

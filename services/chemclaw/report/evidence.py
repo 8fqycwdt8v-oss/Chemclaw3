@@ -27,6 +27,12 @@ class EvidenceChunk(BaseModel):
     # explicitly, so this only governs a future retriever that forgets to — and neutral keeps such
     # a chunk in the middle of the ranking rather than silently pinning it last (and truncated).
     score: float = Field(default=0.5, ge=0.0, le=1.0)
+    # Notes this chunk's source note is known or suspected to disagree with (`kg.conflicts`,
+    # KM-8). A *flag*, never a filter: retrieval has no basis for deciding which of two curated
+    # notes is right, and silently returning both is what made two contradictory notes read as
+    # corroboration. Empty for the ordinary case, so a reader sees the marker only when there is
+    # something to see.
+    conflicts_with: list[str] = Field(default_factory=list)
 
 
 @runtime_checkable

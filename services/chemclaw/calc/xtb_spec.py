@@ -115,6 +115,21 @@ class XtbSpec(BaseModel):
         """
         return f"{self.method}+{self.engine}+{backend_version(self.engine)}"
 
+    @classmethod
+    def unkeyed_fields(cls) -> set[str]:
+        """Fields that must *not* enter `params` — because they are keyed elsewhere or not at all.
+
+        `task` names the calculation type, and `method`/`engine` are already in `calc_version`, so
+        all three would be recorded twice. A subclass extends this set for a field that genuinely
+        does not change what is computed — see `ConformerSpec.max_members`, which only decides how
+        much of a finished ensemble is handed back.
+
+        Overriding this rather than overriding `cache_key` is deliberate: the key derivation stays
+        in one place, so a new field is still keyed by construction (D-011) and *excluding* one is
+        the visible, deliberate act rather than the silent default.
+        """
+        return {"task", "method", "engine"}
+
     def cache_key(self, structure: Structure) -> CalculationKey:
         """The versioned identity of running this spec on `structure`.
 
@@ -134,7 +149,7 @@ class XtbSpec(BaseModel):
                 "charge": structure.charge,
                 "multiplicity": structure.multiplicity,
             },
-            params=self.model_dump(exclude={"task", "method", "engine"}),
+            params=self.model_dump(exclude=self.unkeyed_fields()),
         )
 
 

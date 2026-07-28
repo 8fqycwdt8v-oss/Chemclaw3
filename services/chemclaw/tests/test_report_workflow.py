@@ -95,7 +95,7 @@ def test_report_workflow_drafts_and_pr_gates(monkeypatch: pytest.MonkeyPatch) ->
         assert result.data["note_ref"].startswith("pr://note/report-")
         assert result.data["sections"] == 2
         assert "Widget development" in result.summary
-        body = fake.submissions[0].content
+        body = fake.submissions[0].files[0].content
         assert "[[reaction-a]]" in body  # the supported section cites its source
         assert "No supporting data found" in body  # the safety section is marked, not invented
 
@@ -129,7 +129,7 @@ def test_failed_section_is_marked_not_dropped(monkeypatch: pytest.MonkeyPatch) -
                     id="report-fail-test",
                     task_queue=settings.background_task_queue,
                 )
-        body = fake.submissions[0].content
+        body = fake.submissions[0].files[0].content
         assert "## Yield" in body  # the section still appears (not dropped)
         assert "Retrieval failed" in body  # and is explicitly marked incomplete
 

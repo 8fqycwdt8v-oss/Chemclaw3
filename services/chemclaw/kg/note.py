@@ -17,10 +17,46 @@ import yaml
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
 
 from chemclaw.errors import ChemclawError
+from kg import relations
 
 # [[target]] wikilinks in the body. Targets are note ids; `[[ ... ]]` only. Public because
 # the report layer strips the same markup from evidence excerpts — one pattern, no drift.
 WIKILINK = re.compile(r"\[\[([^\[\]]+)\]\]")
+
+
+def split_link(target: str) -> tuple[str, str]:
+    """Split a wikilink's inside into `(relation, note id)`.
+
+    `[[precursor-of:compound-x]]` is a *typed* edge; a bare `[[compound-x]]` is a citation and
+    yields `DEFAULT_RELATION`. The syntax was free to take: `_SLUG` excludes `:`, so a colon form
+    previously parsed as one dangling id and failed `kg-validate` — nothing in any corpus could
+    already be relying on it (STO-8).
+
+    A target containing a colon but no relation before it (`[[:x]]`), or no id after it
+    (`[[rel:]]`), is returned as a plain citation of the whole string, which then fails the
+    unknown-note check with the text the author actually wrote rather than a silently repaired
+    version of it.
+    """
+    relation, separator, note_id = target.partition(":")
+    relation, note_id = relation.strip(), note_id.strip()
+    if not separator or not relation or not note_id:
+        return relations.DEFAULT_RELATION, target.strip()
+    return relation, note_id
+
+
+def cited_links(text: str) -> list[tuple[str, str]]:
+    """Every `(relation, note id)` a body cites, deduplicated by pair in first-seen order.
+
+    Deduplicated on the *pair*, not the id: a note may legitimately stand in two relations to the
+    same target (a compound that is both a precursor and a product of a reaction), and collapsing
+    those would lose the very information typing the edges exists to record.
+    """
+    ordered: dict[tuple[str, str], None] = {}
+    for match in WIKILINK.findall(text):
+        relation, note_id = split_link(match)
+        if note_id:
+            ordered.setdefault((relation, note_id), None)
+    return list(ordered)
 
 
 def cited_ids(text: str) -> list[str]:
@@ -30,12 +66,14 @@ def cited_ids(text: str) -> list[str]:
     each target is stripped (a padded `[[ id ]]` resolves to `id`, matching the slug schema) and
     empties are dropped, preserving first-seen order so a repeated citation yields one id. Kept here
     beside `WIKILINK` so the pattern and its normalization have exactly one home and cannot drift.
+
+    Relation-typed links contribute their *target*, so a caller asking "what does this note point
+    at" is unaffected by whether the author typed the edge — which is what let typed links land
+    without touching `kg.validate`'s dangling-link check or the answer verifier.
     """
     ordered: dict[str, None] = {}
-    for match in WIKILINK.findall(text):
-        target = match.strip()
-        if target:
-            ordered.setdefault(target, None)
+    for _, note_id in cited_links(text):
+        ordered.setdefault(note_id, None)
     return list(ordered)
 
 
@@ -46,6 +84,13 @@ def cited_ids(text: str) -> list[str]:
 # `_` is included because BO note ids embed registry objective names (e.g.
 # `bo-reizman_suzuki-<sha>`).
 _SLUG = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")
+
+# `CalculationKey.as_str()`: `calc_type@calc_version:input_hash:params_hash`. The version segment
+# is the loose one on purpose — it carries a method name and a build string
+# (`GFN2-xTB+tblite+0.4.0`), so it is matched as "anything but a colon" rather than enumerated.
+# The point of validating the shape at all is that a note citing `"the GFN2 run"` in this field is
+# a crosslink nothing can resolve, and it should fail at the PR-gate rather than silently.
+_CALC_REF = re.compile(r"^[^\s@:]+@[^\s:]+:[0-9a-f]+:[0-9a-f]+$")
 
 
 # Every note type this system mints, with what it means. Previously `type` was an unconstrained
@@ -72,6 +117,51 @@ KNOWN_NOTE_TYPES: frozenset[str] = frozenset(
         "failure-mode",  # a negative result worth not repeating (gap KNW-3)
     }
 )
+
+
+class Relation(BaseModel):
+    """One typed edge to another note, optionally scoped in time and confidence (STO-8/STO-9).
+
+    Two ways to write an edge exist because they serve different authors. A `[[rel:target]]` in
+    the body is what a person writing prose reaches for; this frontmatter form is what a machine
+    emits and the only place per-edge metadata can live.
+
+    **Validity belongs on the edge, not only on the note.** `Note.valid_from`/`valid_to` can say
+    that a *fact* stopped being true; nothing could say that a *relation* did — that this catalyst
+    was used for that transformation until the process changed, while both notes remain perfectly
+    current. Bi-temporal edges with invalidation rather than deletion are how Graphiti/Zep model
+    exactly this, and the node half was already here.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    rel: str = Field(min_length=1)
+    to: str = Field(min_length=1)
+    confidence: float | None = Field(default=None, ge=0.0, le=1.0)
+    valid_from: date | None = None
+    valid_to: date | None = None
+
+    @model_validator(mode="after")
+    def _valid_interval(self) -> "Relation":
+        """An edge's validity window must not end before it starts — as a note's must not."""
+        if (
+            self.valid_from is not None
+            and self.valid_to is not None
+            and self.valid_to < self.valid_from
+        ):
+            raise ValueError(
+                f"relation {self.rel} -> {self.to}: valid_to {self.valid_to} is before "
+                f"valid_from {self.valid_from}"
+            )
+        return self
+
+    def is_current(self, as_of: date) -> bool:
+        """Whether this edge is inside its validity window on `as_of` (bounds inclusive)."""
+        if self.valid_from is not None and as_of < self.valid_from:
+            return False
+        if self.valid_to is not None and as_of > self.valid_to:
+            return False
+        return True
 
 
 class Note(BaseModel):
@@ -121,7 +211,43 @@ class Note(BaseModel):
     confidence: float | None = Field(default=None, ge=0.0, le=1.0)
     valid_from: date | None = None
     valid_to: date | None = None
+    # Calculations and stored by-products this note's claims rest on (STO-7). These are
+    # `CalculationKey.as_str()` and `ArtifactRef.as_str()` values — they point *out* of the graph
+    # into the calculation store, which is exactly why they are frontmatter fields and not
+    # `[[wikilinks]]`: an edge to something the graph does not contain is a dangling link, and
+    # `kg-validate` would fail the very PR that added the note. Shape-validated here; whether the
+    # target exists is a question only a database can answer, and `kg-validate` runs without one.
+    calc_refs: list[str] = Field(default_factory=list)
+    artifact_refs: list[str] = Field(default_factory=list)
+    # Typed edges in structured form, for the metadata a body wikilink cannot carry (STO-8/9).
+    # Additive: a note may use body links, this field, or both.
+    relations: list[Relation] = Field(default_factory=list)
     body: str = ""
+
+    @field_validator("calc_refs")
+    @classmethod
+    def _calc_ref_shape(cls, values: list[str]) -> list[str]:
+        """Reject anything that is not a `calc_type@version:input_hash:params_hash` key."""
+        for value in values:
+            if not _CALC_REF.fullmatch(value):
+                raise ValueError(
+                    f"{value!r} is not a calculation key (expected "
+                    "'calc_type@version:input_hash:params_hash', as CalculationKey.as_str() writes)"
+                )
+        return values
+
+    @field_validator("artifact_refs")
+    @classmethod
+    def _artifact_ref_shape(cls, values: list[str]) -> list[str]:
+        """Reject anything that is not a `<calculation key>#<artifact name>` reference."""
+        for value in values:
+            key, separator, name = value.rpartition("#")
+            if not separator or not name or not _CALC_REF.fullmatch(key):
+                raise ValueError(
+                    f"{value!r} is not an artifact reference (expected "
+                    "'<calculation key>#<name>', as ArtifactRef.as_str() writes)"
+                )
+        return values
 
     @model_validator(mode="after")
     def _valid_interval(self) -> "Note":
@@ -141,12 +267,36 @@ class Note(BaseModel):
         return self
 
     def outgoing_links(self) -> list[str]:
-        """The ids this note links to, from `[[wikilinks]]` in its body.
+        """The ids this note links to, from its body `[[wikilinks]]` and its `relations:`.
 
-        Deduplicated, preserving first-seen order, so a note that references the
-        same target twice yields one edge.
+        Deduplicated, preserving first-seen order, so a note that references the same target twice
+        yields one id. This is the *untyped* view — what `kg.validate` checks for dangling targets
+        and what the answer verifier resolves — and it deliberately treats both forms alike, so a
+        frontmatter relation to a note that does not exist fails validation exactly as a body link
+        would.
         """
-        return cited_ids(self.body)
+        ordered: dict[str, None] = dict.fromkeys(cited_ids(self.body))
+        for relation in self.relations:
+            ordered.setdefault(relation.to, None)
+        return list(ordered)
+
+    def outgoing_relations(self) -> list[Relation]:
+        """Every typed edge this note asserts, from both forms, body links first.
+
+        A body `[[rel:target]]` becomes a `Relation` with no confidence or validity — that is all
+        the syntax can express, and inventing values for the rest would be a lie about what the
+        author wrote. A frontmatter entry is taken as given.
+
+        Deduplicated by `(rel, to)` with the body form winning, so writing an edge both ways is
+        harmless rather than a doubled edge; a frontmatter entry that adds metadata to a link also
+        written in the body should therefore be the *only* place that pair appears.
+        """
+        seen: dict[tuple[str, str], Relation] = {}
+        for rel, target in cited_links(self.body):
+            seen.setdefault((rel, target), Relation(rel=rel, to=target))
+        for relation in self.relations:
+            seen.setdefault((relation.rel, relation.to), relation)
+        return list(seen.values())
 
     def is_current(self, as_of: date) -> bool:
         """Whether the note is inside its validity window on `as_of` (bounds inclusive).

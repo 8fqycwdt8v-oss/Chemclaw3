@@ -57,20 +57,20 @@ prose form of the same constraint demonstrably did not.
 
 | ID | Capability | Current state | What's missing | Why it matters | Severity | Effort |
 |---|---|---|---|---|---|---|
-| STO-1 | Expensive by-products | **Addressed (D-124)** — content-addressed artifact store; xTB Hessian/vibspectrum/geometry captured before the tempdir dies | wiring for the optimizer and CREST paths; the eviction sweep | A 76-atom Hessian costs 26 s (binary) / 218 s (finite difference) and was deleted every time | High | M |
-| STO-2 | Reuse of a stored Hessian | **Open** — `ThermoSpec` puts `temperature_k`, `pressure_pa`, `symmetry_number`, `rrho_cutoff_cm` in the cache key, so thermochemistry at a second temperature recomputes the Hessian | split `HessianSpec` from the RRHO block that reads it | The single highest-value item in this audit: recomputing a temperature-independent quantity to answer a temperature question | High | M |
-| STO-3 | Conformer-ensemble reuse | **Open** — `ConformerSpec` keys on `max_members`, which only truncates a list | drop it from the key; truncate at read | "show me 20 instead of 10" re-runs CREST, the module's own docstring's "most expensive single calculation in the system" | High | S |
-| STO-4 | Cross-method geometry reuse | **Open** — keyed on coordinates, so the same SMILES from a different embedding re-optimizes | a subject-keyed geometry pointer (itself a cached calculation, no new table) | A converged GFN-FF minimum cannot seed a GFN2 run | Med | M |
+| STO-1 | Expensive by-products | **Addressed (D-124/D-132)** — content-addressed artifact store, now on the read path too | nothing (see below: the optimizer and CREST have no by-product worth keeping) | A 76-atom Hessian costs 26 s (binary) / 218 s (finite difference) and was deleted every time | High | M |
+| STO-2 | Reuse of a stored Hessian | **Addressed (D-132)** — `HessianSpec` split out of `ThermoSpec`; the matrix is an artifact, the row holds its address | nothing | The highest-value item in this audit: a second temperature now recomputes partition functions, not second derivatives | High | M |
+| STO-3 | Conformer-ensemble reuse | **Addressed (D-132)** — `max_members` left the cache key via `unkeyed_fields()`; truncation happens at read | nothing | "Show me 20 instead of 10" is a cache hit rather than a second CREST search | High | S |
+| STO-4 | Cross-method geometry reuse | **Addressed (D-132)** — `calc/geometry.py`, a subject-keyed pointer that is itself a cached calculation | callers opting into `starting_geometry` | A converged GFN-FF minimum can seed a GFN2 run; consulting the pointer provably cannot change a cache key | Med | M |
 | STO-5 | Converged electronic structure | **Contract only** — no density/orbital set is stored | a media type and link role for DFT restart files | Published measurement: reusing a converged density cut mean SCF iterations ~33 → ~2. Deferred with DFT (D-010) | Med | L |
-| STO-6 | Cache cost policy | **Addressed (D-124)** — `compute_seconds` recorded on every miss | the eviction sweep that consumes it | `workflows/retention.py` named the missing policy and correctly refused to fake it with an age cutoff | Med | S |
-| STO-7 | Calc ↔ graph crosslink | **Open** — `connectors/qm/knowledge.py` deliberately emits no wikilink, because the compound note may not exist and a dangling link fails `kg-validate` on the PR it opens | `calc_ref`/`artifact_refs` frontmatter; a multi-file `NoteSubmission` so a note and its dependencies land together | Computed results are graph islands: "what we computed" and "what we know" are disjoint stores | High | M |
-| STO-8 | Typed edges | **Open** — `kg/graph.py:150` is `graph.add_edge(note.id, target)` with no attributes | a relation in the wikilink (`[[rel:target]]`) plus optional per-edge validity | No relation can say *precursor-of*, *contradicts*, *measured-by*, *computed-from*. Every graph query is structurally blind | High | M |
-| STO-9 | Edge-level bi-temporality | **Open** — `valid_from`/`valid_to` exist on nodes only | validity on the edge | A fact that stopped being true is expressible; a *relation* that stopped being true is not | Med | S |
-| STO-10 | Seed corpus | **Open** — `knowledge/` holds only `.gitkeep` | ~35 notes covering every type and relation | `make kg-validate` currently validates an empty directory; every retrieval number is measured against fixtures, never real content | Med | M |
+| STO-6 | Cache cost policy | **Addressed (D-124/D-132)** — `compute_seconds` recorded, and `workflows/artifact_eviction.py` consumes it | nothing | Evicts blobs ordered by cost/idle time and never touches `calculation_results`, so D-011 and `retention.py`'s refusal both stay literally true | Med | S |
+| STO-7 | Calc ↔ graph crosslink | **Addressed (D-133)** — multi-file `NoteSubmission`; `calc_refs`/`artifact_refs`; `kg/crosslink.py` reverse lookup | nothing | A job result now wikilinks its compound and both land in one PR; the two halves of the system's memory can cite each other | High | M |
+| STO-8 | Typed edges | **Addressed (D-134)** — `[[rel:target]]` plus a frontmatter `relations:` list, vocabulary from RXNO/CHMO/CHEMINF/OntoRXN | nothing | `related(graph, id, "precursor-of")` is a query that can be asked | High | M |
+| STO-9 | Edge-level bi-temporality | **Addressed (D-134)** — `valid_from`/`valid_to` on a `Relation`, honoured by `related(..., as_of=)` | nothing | A relation that stopped holding is expressible without deleting it | Med | S |
+| STO-10 | Seed corpus | **Addressed (D-135)** — 37 notes covering every type and every relation, plus the awkward cases | growth from real use | `make kg-validate` validates something; retrieval and conflict properties are measurable on real content | Med | M |
 | STO-11 | Semantic retrieval default | **Open by design** — `embedding_provider` defaults to `hash`, a feature-hash stand-in | nothing in code; a deployment must point it at a real model | Token-overlap cosine is not neural-semantic retrieval, and the default is silent about it | Low | — |
-| STO-12 | Tool-result caching | **Assessed — largely a non-gap** | three memoizations, not a subsystem | Every `connectors/calc` tool already routes through `run_cached`; the chem tools are RDKit calls cheaper than a Postgres round trip. The real win is `embed_texts`, which re-embeds the same query every retrieval | Low | S |
+| STO-12 | Tool-result caching | **Addressed (D-135), largely as a non-gap** — `embed_texts` cached, keyed on provider+model+dim | nothing | The chem tools are correctly left alone: a Postgres round trip is slower than the RDKit call it would cache | Low | S |
 | STO-13 | Audit-trail disposal | **Open, correctly refused** | archive-then-reseal with an out-of-band genesis anchor | Deleting from a hash chain is indistinguishable from the tampering it detects; needs an ADR with QA sign-off, not a cleanup job | Med | L |
-| STO-14 | Vendored reference data | **Open** — the one sanctioned escalation of D-089 | a build-time-vendored ontology/reagent corpus behind the existing source seam | `chemclaw/reagents.py` is a hand-maintained name→SMILES table, and that is the ceiling on `resolve_compound` | Med | M |
+| STO-14 | Vendored reference data | **Addressed (D-135)** — `sources/vendored/` behind the manifest seam, checksummed and licence-labelled | a third-party dataset, which is a build step plus a licence review | Raises the ceiling `chemclaw/reagents.py` puts on `resolve_compound`; `tests/test_no_egress.py` extended, never relaxed | Med | M |
 
 ---
 
@@ -136,9 +136,65 @@ default (STO-11 — it is the offline dev path, and it says so in its own docstr
 
 ## 5. Recommended order
 
-`STO-1` (done) → `STO-2`/`STO-3` (the reuse that pays for it) → `STO-7` (crosslink) → `STO-8`/
-`STO-9` (typed edges) → conflict signal → `STO-12` → `STO-14` → `STO-10` (the seed corpus last,
-because it is only worth pinning once the shapes it must contain exist).
+All of it landed, in this order: `STO-1` (D-124) → `STO-2`/`STO-3`/`STO-4` (D-132) → `STO-7`
+(D-133) → `STO-8`/`STO-9` + the conflict signal (D-134) → `STO-12`/`STO-14`/`STO-10` (D-135).
 
-`STO-1` is load-bearing. Everything in the reuse column depends on the bytes being kept, and the
-crosslink's `artifact_refs` field means nothing without them.
+`STO-1` was load-bearing and stayed that way: everything in the reuse column depends on the bytes
+being kept, and `artifact_refs` would mean nothing without them.
+
+**Still open, and deliberately so.** `STO-5` (DFT wavefunctions — contract and media types only,
+gated on D-010), `STO-11` (the `hash` embedding default, which is the offline dev path and says so),
+and `STO-13` (audit-trail disposal, which needs archive-then-reseal with QA sign-off, not a cleanup
+job). Two things the vendored-data work leaves for a later pull request: a genuine third-party
+dataset, and the DEP-1 question of how `knowledge_dir` is populated in a cluster — see below.
+
+
+---
+
+## 6. What the implementation changed about the audit itself
+
+Three findings only appeared once the code was written, and they are recorded here rather than
+quietly absorbed.
+
+**Not every task has a by-product worth keeping.** The audit assumed the optimizer and CREST paths
+merely needed capture wiring. They do not: `xtbopt.xyz` is parsed in full into
+`OptimizationResult.structure` and CREST's ensemble file into `ConformerEnsemble.conformers`, both
+of which the result cache already persists. Capturing them would be a second copy of the cache.
+`_ALREADY_STORED` in `calc/xtb_cli.py` names them, and an `opt` run now captures nothing. The
+Turbomole `hessian`/`vibspectrum` are the genuine exception and are kept alongside the `.npy`,
+because the two serve different readers.
+
+**A cached row is not a cache hit when its artifact is gone.** This was not in the audit at all,
+and it is the detail that keeps the whole design honest — without it the eviction sweep STO-6 asked
+for would be data loss rather than a reclaim. See D-132.
+
+**The seed corpus must not absorb the eval corpus.** The plan proposed promoting
+`evals/retrieval_corpus/` into `knowledge/`. That directory's own README explains why not: keeping
+the gold corpus outside `knowledge_dir` is what makes recall/precision reproducible and independent
+of the live graph. The seed corpus was written alongside it instead, and a test asserts they share
+no ids.
+
+## 7. DEP-1 — how `knowledge_dir` is populated in a cluster
+
+Assessed rather than solved, because the answer is a deployment decision and not a code change.
+
+Readers resolve `settings.knowledge_path` = `note_repo_dir / knowledge_dir`. `note_repo_dir` must
+be a **dedicated clone** of the knowledge repository — `kg/git_submitter.py` refuses the process's
+own checkout, because every submission runs `reset --hard` + `clean -fd`. So in a cluster the notes
+arrive by *cloning that repository into the pod*, and staying current means pulling it: nothing in
+this repository does that pull today.
+
+The three viable shapes, in the order they should be considered:
+
+1. **An init container that clones, plus a sidecar that pulls on a schedule.** Simplest, matches
+   the existing `note_repo_dir` contract exactly, and every pod gets a consistent tree. The
+   staleness window is the pull interval.
+2. **A `ReadWriteMany` volume shared by the pods that read and the pod that submits.** Removes the
+   duplication, but requires an RWX storage class, which no OpenShift default guarantees — the same
+   objection that ruled out a filesystem CAS in D-124.
+3. **A periodic Temporal job doing the pull on `background-jobs`,** reusing the machinery already
+   there. Attractive because it needs no new infrastructure, but it makes the chat pod's evidence
+   depend on a worker pod's schedule, which is a coupling worth naming before choosing it.
+
+The seed corpus makes this pressing in a way an empty `knowledge/` did not: there is now content
+whose absence in a pod would be visible.

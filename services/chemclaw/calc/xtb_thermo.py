@@ -37,12 +37,11 @@ from pydantic import BaseModel, Field
 from rdkit import Chem
 from scipy.linalg import null_space
 
-from calc import xtb_cli
 from calc.artifacts import ArtifactStore
 from calc.postgres_artifacts import default_artifact_store
-from calc.store import ResultStore, run_cached_with_artifacts
+from calc.store import ResultPayload, ResultStore, cached_compute
 from calc.structure import Structure
-from calc.xtb_engine import evaluate_point, make_calculator
+from calc.xtb_hessian import Hessian, HessianSpec, compute_hessian, run_cached_hessian
 from calc.xtb_opt import OptimizationResult, OptSpec, run_cached_optimization
 from calc.xtb_spec import XtbSpec
 from chemclaw.config import settings
@@ -72,11 +71,17 @@ _LINEAR_INERTIA_RATIO = 1e-4
 
 
 class ThermoSpec(XtbSpec):
-    """Settings of one Hessian + thermochemistry calculation.
+    """Settings of one thermochemistry calculation, Hessian settings included.
 
     Like `OptSpec`, every field enters the cache key automatically. `symmetry_number`
     is here rather than applied afterwards for that reason: it changes the entropy, so
     a result computed at sigma=1 must not be served for a request at sigma=2.
+
+    **The state variables are keyed here and nowhere else.** The Hessian underneath is a
+    separate cached calculation (`calc.xtb_hessian`) keyed only on what can move the matrix, so
+    this spec's `temperature_k` correctly forces a recomputation of the *thermochemistry* while
+    leaving the expensive second derivatives a cache hit (STO-2). `hessian_spec` is the projection
+    from one to the other, and is the only place the two specs are related.
     """
 
     task: Literal["hess"] = "hess"
@@ -89,6 +94,20 @@ class ThermoSpec(XtbSpec):
         default_factory=lambda: settings.xtb_hessian_displacement, gt=0
     )
     rrho_cutoff_cm: float = Field(default_factory=lambda: settings.xtb_rrho_cutoff_cm, gt=0)
+
+    def hessian_spec(self) -> HessianSpec:
+        """The second-derivative calculation this thermochemistry is computed over.
+
+        Carries only the fields a Hessian actually depends on. Two `ThermoSpec`s differing solely
+        in temperature, pressure, symmetry number or RRHO cutoff project onto the *same*
+        `HessianSpec`, which is precisely what makes the second question cheap.
+        """
+        return HessianSpec(
+            method=self.method,
+            engine=self.engine,
+            solvent=self.solvent,
+            displacement_angstrom=self.displacement_angstrom,
+        )
 
 
 class VibrationalMode(BaseModel):
@@ -177,57 +196,6 @@ def _atomic_masses(elements: list[int]) -> np.ndarray:
     return np.array([table.GetAtomicWeight(number) for number in elements])
 
 
-def _second_derivatives(
-    spec: ThermoSpec, structure: Structure
-) -> tuple[np.ndarray, np.ndarray | None, float, dict[str, bytes]]:
-    """The Hessian, IR intensities, energy and raw by-products, from the spec's backend.
-
-    The `xtb` binary computes both the Hessian and the IR intensities itself and is far
-    faster at it — measured, a 76-atom Hessian in 26 s against 218 s of finite
-    differences. What it does *not* get to supply is the thermochemistry over them: that
-    stays here, so the symmetry number remains an explicit input and the quasi-RRHO
-    treatment is identical whichever backend ran, which is what keeps free energies from
-    the two comparable.
-
-    The in-process path returns `None` for intensities, because it derives them from the
-    dipole derivatives it collected while displacing — a separate step the caller runs. It also
-    returns no artifacts: it computes in memory and writes no files, so there is nothing to keep
-    (D-124). Only the binary leaves a `hessian` and a `vibspectrum` behind.
-    """
-    if spec.for_structure(structure).engine == "xtb":
-        outcome = xtb_cli.run(structure, task="hess", method=spec.method, solvent=spec.solvent)
-        return (
-            np.asarray(outcome.hessian),
-            np.asarray(outcome.ir_intensities),
-            (outcome.energy_hartree),
-            outcome.artifacts,
-        )
-    hessian, dipole_derivatives = _finite_difference(spec, structure)
-    calc = make_calculator(
-        spec.method,
-        *structure.arrays(),
-        charge=structure.charge,
-        uhf=structure.uhf,
-        solvent=spec.solvent,
-    )
-    _, positions = structure.arrays()
-    energy, _, _ = evaluate_point(calc, positions)
-    _CACHED_DIPOLE_DERIVATIVES[structure.structure_id] = dipole_derivatives
-    return hessian, None, energy, {}
-
-
-# The in-process Hessian produces dipole derivatives as a by-product; the two-step shape
-# of `compute_thermochemistry` (Hessian, then modes, then intensities) means they have to
-# survive one call. A one-entry handoff rather than a wider return type, because nothing
-# else ever wants them.
-_CACHED_DIPOLE_DERIVATIVES: dict[str, np.ndarray] = {}
-
-
-def _dipole_derivatives(spec: ThermoSpec, structure: Structure) -> np.ndarray:
-    """The dipole derivatives the in-process Hessian collected for this structure."""
-    return _CACHED_DIPOLE_DERIVATIVES.pop(structure.structure_id)
-
-
 def _align_intensities(intensities: np.ndarray, modes: int, structure: Structure) -> np.ndarray:
     """Drop xtb's projected-out external modes so intensities pair with our own modes.
 
@@ -243,42 +211,6 @@ def _align_intensities(intensities: np.ndarray, modes: int, structure: Structure
             f"for {structure.smiles or structure.structure_id}"
         )
     return intensities[external:]
-
-
-def _finite_difference(spec: ThermoSpec, structure: Structure) -> tuple[np.ndarray, np.ndarray]:
-    """Central-difference Hessian and dipole derivatives at `structure`'s geometry.
-
-    Returns `(hessian, dipole_derivatives)` with the Hessian in Hartree/Angstrom^2,
-    shape (3N, 3N), and the dipole derivatives in Debye/Angstrom, shape (3N, 3).
-
-    Cost is 6N single points: the gradient is analytic, so only *first* derivatives
-    need differencing. The Hessian is symmetrized afterwards — central differences of
-    an exact gradient give a nearly symmetric matrix, and forcing the symmetry removes
-    the small asymmetry that would otherwise put a spurious imaginary component into
-    the eigenvalues.
-    """
-    numbers, positions = structure.arrays()
-    calc = make_calculator(
-        spec.method,
-        numbers,
-        positions,
-        charge=structure.charge,
-        uhf=structure.uhf,
-        solvent=spec.solvent,
-    )
-    size = positions.size
-    hessian = np.zeros((size, size))
-    dipole_derivatives = np.zeros((size, 3))
-    step = spec.displacement_angstrom
-    for index in range(size):
-        shifted = positions.copy().ravel()
-        shifted[index] += step
-        _, gradient_plus, dipole_plus = evaluate_point(calc, shifted.reshape(-1, 3))
-        shifted[index] -= 2 * step
-        _, gradient_minus, dipole_minus = evaluate_point(calc, shifted.reshape(-1, 3))
-        hessian[index] = (gradient_plus.ravel() - gradient_minus.ravel()) / (2 * step)
-        dipole_derivatives[index] = (dipole_plus - dipole_minus) * _AU_TO_DEBYE / (2 * step)
-    return 0.5 * (hessian + hessian.T), dipole_derivatives
 
 
 def _inertia(masses: np.ndarray, positions: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
@@ -446,39 +378,47 @@ def _vibrational(
 def compute_thermochemistry(spec: ThermoSpec, structure: Structure) -> ThermochemistryResult:
     """Hessian, frequencies, IR intensities and RRHO thermochemistry for `structure`.
 
-    The plain form, for the callers that want only the answer. `compute_thermochemistry_with_
-    artifacts` is the same calculation, additionally handing back the raw files the run produced
-    so a cached caller can keep them (D-124).
+    The self-contained form: it computes its own Hessian and consults no cache, which is what a
+    test or a one-shot script wants. `run_cached_thermochemistry` is the path that reuses a stored
+    Hessian, and is what every agent-facing caller should go through.
+
+    Raises `ValueError` above `settings.xtb_hessian_max_atoms` (raised by `compute_hessian`, where
+    the cost is actually paid).
     """
-    return compute_thermochemistry_with_artifacts(spec, structure)[0]
+    hessian, _ = compute_hessian(spec.hessian_spec(), structure)
+    return thermochemistry_from_hessian(spec, structure, hessian)
 
 
-def compute_thermochemistry_with_artifacts(
-    spec: ThermoSpec, structure: Structure
-) -> tuple[ThermochemistryResult, dict[str, bytes]]:
-    """The thermochemistry, plus the raw by-products of the run that produced it.
+def thermochemistry_from_hessian(
+    spec: ThermoSpec, structure: Structure, hessian: Hessian
+) -> ThermochemistryResult:
+    """RRHO thermochemistry over an already-computed Hessian — the arithmetic, and only that.
 
-    `structure` should be a converged minimum (`calc.xtb_opt`); if it is not, the
-    result says so through `is_minimum` rather than refusing, because "this geometry
-    is a saddle point" is a useful answer and often the question.
+    Separated from the second derivatives so the two can be cached independently (STO-2): this
+    part is milliseconds and genuinely depends on the temperature, while the Hessian is minutes and
+    does not. Every caller of both goes through here, so the quasi-RRHO treatment and the symmetry
+    handling have exactly one implementation regardless of which backend produced the matrix.
 
-    Raises `ValueError` above `settings.xtb_hessian_max_atoms`: the cost is 6N single
-    points, and blocking an agent turn for minutes is a worse failure than saying the
-    calculation needs the durable job path.
+    `structure` should be a converged minimum (`calc.xtb_opt`); if it is not, the result says so
+    through `is_minimum` rather than refusing, because "this geometry is a saddle point" is a
+    useful answer and often the question.
     """
-    if len(structure.elements) > settings.xtb_hessian_max_atoms:
-        raise ValueError(
-            f"a Hessian on {len(structure.elements)} atoms exceeds the inline limit of "
-            f"{settings.xtb_hessian_max_atoms}: submit it as a durable QM job instead"
-        )
     masses = _atomic_masses(structure.elements)
     _, positions = structure.arrays()
-    hessian, intensities, electronic, artifacts = _second_derivatives(spec, structure)
-    wavenumbers, vectors = _normal_modes(hessian, masses, positions)
-    if intensities is None:
-        intensities = _ir_intensities(_dipole_derivatives(spec, structure), vectors, masses)
+    wavenumbers, vectors = _normal_modes(hessian.matrix, masses, positions)
+    electronic = hessian.electronic_energy_hartree
+    if hessian.ir_intensities is not None:
+        intensities = _align_intensities(hessian.ir_intensities, wavenumbers.size, structure)
+    elif hessian.dipole_derivatives is not None:
+        intensities = _ir_intensities(hessian.dipole_derivatives, vectors, masses)
     else:
-        intensities = _align_intensities(intensities, wavenumbers.size, structure)
+        # Unreachable through `compute_hessian`, which always populates one of the two. Stated
+        # rather than assumed, because a Hessian with neither would silently produce a spectrum of
+        # zero-intensity bands instead of failing.
+        raise ValueError(
+            f"the Hessian for {structure.smiles or structure.structure_id} carries neither IR "
+            "intensities nor dipole derivatives, so no spectrum can be derived from it"
+        )
 
     temperature = spec.temperature_k
     translation_energy, translation_entropy = _translational(
@@ -517,7 +457,7 @@ def compute_thermochemistry_with_artifacts(
         if imaginary
         else None
     )
-    result = ThermochemistryResult(
+    return ThermochemistryResult(
         smiles=structure.smiles,
         structure_id=structure.structure_id,
         method=spec.method,
@@ -546,7 +486,6 @@ def compute_thermochemistry_with_artifacts(
         uncertainty_kcal=settings.xtb_reaction_uncertainty_kcal,
         imaginary_displacement=displacement,
     )
-    return result, artifacts
 
 
 async def run_cached_thermochemistry(
@@ -557,9 +496,20 @@ async def run_cached_thermochemistry(
 ) -> tuple[ThermochemistryResult, bool]:
     """Return the thermochemistry of `structure`, reusing the store on a repeat.
 
-    The Hessian the binary wrote is kept alongside the cached answer (D-124), so a later question
-    about the same geometry has the expensive half already on disk. `artifacts` defaults to the
-    production artifact store; pass an explicit one (or an `InMemoryArtifactStore`) to redirect it.
+    **Two caches, one call.** The thermochemistry is cached under the full spec, because the answer
+    genuinely depends on the temperature; the Hessian underneath is cached under
+    `spec.hessian_spec()`, which carries none of the state variables. So the same geometry at a
+    second temperature misses here (correctly — it is a different answer) and hits there (the
+    point of STO-2), turning what used to be minutes of second derivatives into milliseconds of
+    partition functions.
+
+    `artifacts` defaults to the production artifact store; pass an explicit one (or an
+    `InMemoryArtifactStore`) to redirect it. Note that the Hessian is only reusable if the artifact
+    store keeps it: with artifacts disabled this behaves exactly as it did before the split.
+
+    Returns `(result, was_cached)`, where `was_cached` refers to the thermochemistry — a run that
+    reused a stored Hessian but recomputed the RRHO arithmetic reports `False`, because the value
+    handed back was in fact computed now.
     """
     spec = spec or ThermoSpec()
     artifacts = artifacts if artifacts is not None else default_artifact_store()
@@ -568,13 +518,14 @@ async def run_cached_thermochemistry(
     # hash walks every atom. Both are synchronous, and this runs inside the connector's
     # one-loop MCP server and inside Temporal activities that are coroutines.
     key = await asyncio.to_thread(spec.cache_key, structure)
-    return await run_cached_with_artifacts(
-        store,
-        artifacts,
-        key,
-        lambda: compute_thermochemistry_with_artifacts(spec, structure),
-        ThermochemistryResult,
-    )
+
+    async def _compute() -> ResultPayload:
+        hessian, _ = await run_cached_hessian(store, artifacts, structure, spec.hessian_spec())
+        result = await asyncio.to_thread(thermochemistry_from_hessian, spec, structure, hessian)
+        return result.model_dump()
+
+    payload, was_cached = await cached_compute(store, key, _compute)
+    return ThermochemistryResult.model_validate(payload), was_cached
 
 
 async def relax_to_minimum(
