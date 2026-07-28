@@ -78,7 +78,36 @@ def _is_really_cancelled() -> bool:
 
 
 class DegradingHttpConnector(_DegradeOnConnectFailure, MCPStreamableHTTPTool):
-    """An HTTP connector whose unavailability costs its tools, not the turn."""
+    """An HTTP connector whose unavailability costs its tools, not the turn.
+
+    It also closes the `httpx.AsyncClient` it was handed, which nothing else does. Ownership of a
+    caller-supplied client is explicitly *not* taken by either layer below: the MCP library enters
+    its client into an exit stack only when it created the client itself
+    (`mcp/client/streamable_http.py` — `client_provided = http_client is not None`), and MAF's
+    `close()` tears down the exit stack without touching `self._httpx_client`. Since a connector
+    tool is built fresh per turn (`connectors.registry.connector_tools`), that left one abandoned
+    client with a live connection pool per connector per turn — six per turn, reclaimed only
+    whenever the garbage collector got to them. This is the same leak class D-119 fixed for
+    Postgres, on the connector side.
+
+    The client is kept on our own attribute rather than read back off MAF's private one, so this
+    cannot silently stop working when that internal name changes.
+    """
+
+    def __init__(self, *args: Any, http_client: Any = None, **kwargs: Any) -> None:
+        """Record the client we own so `close` can release it."""
+        super().__init__(*args, http_client=http_client, **kwargs)
+        self._owned_http_client = http_client
+
+    async def close(self) -> None:
+        """Close the MCP session, then the client we supplied — even if the session close fails."""
+        try:
+            await super().close()
+        finally:
+            client = self._owned_http_client
+            self._owned_http_client = None
+            if client is not None:
+                await client.aclose()
 
 
 class DegradingStdioConnector(_DegradeOnConnectFailure, MCPStdioTool):
