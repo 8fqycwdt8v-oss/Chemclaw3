@@ -1,0 +1,13 @@
+# Dense-embedding entry point into the same note tree (F10-A). Off unless a deployment adds
+# `vector` to CHEMCLAW_DATA_SOURCES — registry membership is the enable switch, so there is no
+# second boolean to disagree with it (D-018).
+#
+# An *entry point* into the graph, not a replacement (D-004): it surfaces notes semantically
+# related to a query that share no substring with it, which the agent then expands via
+# `expand_note`. Reads the derived note index that `report.vector_index.reindex_notes` populates.
+name: vector
+description: >-
+  Semantic search over the knowledge graph by embedding similarity. Finds notes related in meaning
+  rather than wording; requires the note index to have been built.
+
+retrieve: report.retrievers:VectorRetriever

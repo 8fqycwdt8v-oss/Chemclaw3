@@ -1,0 +1,11 @@
+# The Markdown knowledge graph in git — core's own note tree, read through the retriever seam.
+#
+# Retrieve-only, and that asymmetry is deliberate rather than an omission: notes are written
+# through the PR-gate (a human signs off before a merge), never "ingested". A source cannot
+# smuggle a write path in by declaring an `ingest:` half.
+name: graph
+description: >-
+  The curated Markdown knowledge graph: reaction notes, conditions, hazards and their wikilinks.
+  Substring and wikilink matching over the note tree; the default evidence source.
+
+retrieve: report.retrievers:GraphRetriever

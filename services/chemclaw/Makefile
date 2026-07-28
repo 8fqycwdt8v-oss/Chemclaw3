@@ -8,7 +8,7 @@ KUBE_VERSION ?= 1.29.0
 
 .DEFAULT_GOAL := help
 
-.PHONY: help install lint type test cov check chat db-migrate schedules-apply kg-validate eval eln-validate skill-validate connector-validate template-validate connectors prose-validate helm-validate audit-verify reindex up down
+.PHONY: help install lint type test cov check chat db-migrate schedules-apply kg-validate eval eln-validate skill-validate connector-validate datasource-validate template-validate connectors prose-validate helm-validate audit-verify reindex up down
 
 help:  ## List every target with its one-line description (the default).
 	@# Reads the `## ` comments beside each target, so a new target documents itself the day it is
@@ -58,6 +58,9 @@ skill-validate:  ## Validate SKILL.md frontmatter (name/description present, nam
 
 connector-validate:  ## Validate the connector bundles (manifests, declarations, tool surface, jobs).
 	uv run python -m scripts.validate_connectors
+
+datasource-validate:  ## Validate the data-source manifests (halves resolve, config binds, names exist).
+	uv run python -m scripts.validate_datasources
 
 template-validate:  ## Validate the step templates (steps, references, tools/jobs/profiles named).
 	uv run python -m scripts.validate_templates
