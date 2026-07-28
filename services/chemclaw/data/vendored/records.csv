@@ -1,0 +1,36 @@
+name,smiles,role,synonyms
+acetonitrile,CC#N,solvent,MeCN; ACN
+dichloromethane,ClCCl,solvent,DCM; methylene chloride
+N N-dimethylformamide,CN(C)C=O,solvent,DMF
+dimethyl sulfoxide,CS(C)=O,solvent,DMSO
+tetrahydrofuran,C1CCOC1,solvent,THF
+1 4-dioxane,C1COCCO1,solvent,dioxane
+toluene,Cc1ccccc1,solvent,PhMe
+2-methyltetrahydrofuran,CC1CCCO1,solvent,2-MeTHF
+triethylamine,CCN(CC)CC,base,TEA; Et3N
+N N-diisopropylethylamine,CCN(C(C)C)C(C)C,base,DIPEA; Hunig's base
+1 8-diazabicyclo[5.4.0]undec-7-ene,C1CCC2=NCCCN2CC1,base,DBU
+4-dimethylaminopyridine,CN(C)c1ccncc1,catalyst,DMAP
+potassium carbonate,[K+].[K+].[O-]C([O-])=O,base,K2CO3
+caesium carbonate,[Cs+].[Cs+].[O-]C([O-])=O,base,Cs2CO3
+sodium tert-butoxide,[Na+].CC(C)(C)[O-],base,NaOtBu
+tetrakis(triphenylphosphine)palladium(0),,catalyst,Pd(PPh3)4
+palladium(II) acetate,CC(=O)O[Pd]OC(C)=O,catalyst,Pd(OAc)2
+1 1'-bis(diphenylphosphino)ferrocene,,ligand,dppf
+2-dicyclohexylphosphino-2' 6'-dimethoxybiphenyl,,ligand,SPhos
+tri-tert-butylphosphine,CC(C)(C)P(C(C)(C)C)C(C)(C)C,ligand,PtBu3
+1-ethyl-3-(3-dimethylaminopropyl)carbodiimide,CCN=C=NCCCN(C)C,coupling reagent,EDC; EDCI
+1-hydroxybenzotriazole,On1nnc2ccccc21,additive,HOBt
+N N N' N'-tetramethyl-O-(benzotriazol-1-yl)uronium hexafluorophosphate,,coupling reagent,HBTU
+propylphosphonic anhydride,,coupling reagent,T3P
+trifluoroacetic acid,OC(=O)C(F)(F)F,acid,TFA
+methanesulfonic acid,CS(=O)(=O)O,acid,MsOH
+para-toluenesulfonic acid,Cc1ccc(cc1)S(=O)(=O)O,acid,pTSA; TsOH
+sodium borohydride,[Na+].[BH4-],reductant,NaBH4
+lithium aluminium hydride,[Li+].[AlH4-],reductant,LAH; LiAlH4
+sodium triacetoxyborohydride,,reductant,STAB
+meta-chloroperoxybenzoic acid,OOC(=O)c1cccc(Cl)c1,oxidant,mCPBA
+Dess-Martin periodinane,,oxidant,DMP
+2 2 6 6-tetramethylpiperidin-1-yl oxidanyl,CC1(C)CCCC(C)(C)N1[O],oxidant,TEMPO
+N-bromosuccinimide,BrN1C(=O)CCC1=O,reagent,NBS
+di-tert-butyl dicarbonate,CC(C)(C)OC(=O)OC(=O)OC(C)(C)C,protecting reagent,Boc2O

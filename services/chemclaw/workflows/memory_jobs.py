@@ -16,6 +16,7 @@ from temporalio import activity, workflow
 with workflow.unsafe.imports_passed_through():
     from chemclaw.config import settings
     from chemclaw.errors import ChemclawError
+    from eln.compound import compound_dependencies
     from eln.ord import OrdReaction
     from kg.git_submitter import default_submitter
     from kg.note import Note
@@ -84,8 +85,13 @@ async def build_optimization_notes_activity() -> list[Note]:
 @durable_activity("background")
 @activity.defn
 async def publish_memory_note_activity(note: Note) -> str:
-    """PR-gate one already-built memory note; return its reference (the fan-out publish step)."""
-    return await propose_note(note, default_submitter())
+    """PR-gate one already-built memory note; return its reference (the fan-out publish step).
+
+    Any compound note the note links is minted into the same submission (STO-7). Applying that rule
+    here, at the one gate every machine-written note passes through, is what keeps it out of each
+    connector: a note author states the link, and the gate makes it resolve.
+    """
+    return await propose_note(note, default_submitter(), dependencies=compound_dependencies(note))
 
 
 @durable_workflow("background")

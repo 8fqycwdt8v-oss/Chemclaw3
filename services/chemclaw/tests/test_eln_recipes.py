@@ -355,6 +355,6 @@ def test_ord_recipe_flows_through_sync() -> None:
         assert summary.ingested == ["ord-2026-001"]
         assert summary.rejected == []
         assert len(sub.submissions) == 1
-        assert "## Procedure" in sub.submissions[0].content  # recipe reached the note
+        assert "## Procedure" in sub.submissions[0].files[0].content  # recipe reached the note
 
     asyncio.run(_run())

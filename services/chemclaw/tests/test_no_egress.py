@@ -120,4 +120,42 @@ def test_the_source_registry_offers_no_external_source() -> None:
         "lexical",
         "eln-json",
         "eln-ord",
+        # Reads a corpus baked into the image at build time (STO-14). Named here rather than
+        # exempted: it is the one sanctioned escalation of D-089's scope, and it earns its place
+        # by being *local* — the two tests below hold it to that.
+        "vendored",
     }
+
+
+def test_the_vendored_source_cannot_make_a_request() -> None:
+    """The vendored dataset is a file on disk, and this is what makes that structural.
+
+    D-089's real subject is a *runtime* dependency on somebody else's service. A build-time
+    dataset has none — but "we intend to only read from disk" is prose, and prose is exactly what
+    D-089 already learned does not hold (TOOL-6 sat in `DEFERRED.md` as an invitation and duly got
+    built). So the constraint is enforced: the module may not import an HTTP client, which means
+    it cannot acquire one by accident during a later edit either.
+    """
+    source = (_ROOT / "sources" / "vendored_dataset.py").read_text(encoding="utf-8")
+    for client in ("httpx", "requests", "urllib", "aiohttp", "socket"):
+        assert f"import {client}" not in source, (
+            f"sources/vendored_dataset.py imports {client}: a vendored dataset is installed at "
+            "build time and read from local disk, and the moment it can make a request it is an "
+            "external data source (D-089)"
+        )
+
+
+def test_the_vendored_dataset_declares_its_provenance() -> None:
+    """A shipped corpus carries a licence, a version and a checksum, or it does not load.
+
+    The escalation D-089 permits is "reviewed once, in a pull request, by a person who can read
+    its licence". That review is only meaningful if the thing reviewed is identifiable later, so
+    the manifest fields are required by the schema rather than encouraged by a README.
+    """
+    import json
+
+    manifest = json.loads(
+        (_ROOT / "data" / "vendored" / "dataset.json").read_text(encoding="utf-8")
+    )
+    for field in ("name", "version", "licence", "retrieved_from", "sha256"):
+        assert manifest.get(field), f"vendored dataset manifest is missing {field}"

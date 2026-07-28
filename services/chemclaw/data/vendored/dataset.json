@@ -1,0 +1,10 @@
+{
+  "name": "common-reagents",
+  "version": "0.1.0",
+  "licence": "CC0-1.0 (public domain dedication) — this file is first-party content",
+  "retrieved_from": "hand-authored in this repository; no third-party corpus has been vendored yet",
+  "description": "A starter reagent, solvent, base, ligand and coupling-reagent table with the trivial names and abbreviations chemists actually write. Ships as the worked example of the vendored-dataset mechanism, and is directly useful: it more than doubles what resolve_compound recognises.",
+  "sha256": "6ad32488283032cac1b0f25af16fea93bd30adb44315029ce3b09f7a5c3b211e",
+  "text_column": "name",
+  "smiles_column": "smiles"
+}

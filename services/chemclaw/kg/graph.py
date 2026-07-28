@@ -8,12 +8,14 @@ graph traversal (D-004), so this indexer is the substrate the query skill walks
 
 import threading
 import time
+from collections import defaultdict
+from datetime import date
 from pathlib import Path
 
 import networkx as nx
 
 from chemclaw.config import settings
-from kg.note import Note, NoteError, read_note
+from kg.note import Note, NoteError, Relation, read_note
 
 # A directory's stat fingerprint: (path, mtime_ns, size) per note file. Cheap *per file* (stat only,
 # no read/parse) and busts on any add, edit, or delete — so the cache below skips the expensive
@@ -141,13 +143,29 @@ def load_notes(notes_dir: Path) -> list[Note]:
 
 
 def _assemble_graph(notes: list[Note]) -> nx.DiGraph:
-    """Assemble the directed note graph from already-parsed notes."""
+    """Assemble the directed note graph from already-parsed notes, edges carrying their relations.
+
+    Every edge gets a `relations` attribute: the tuple of `Relation` objects asserted between those
+    two notes (STO-8). Until this, `add_edge(note.id, target)` recorded no attributes at all, so
+    nothing could ask for a compound's precursors or for the note that contradicts another — the
+    links existed and the relations did not.
+
+    **Kept on `nx.DiGraph` with a tuple per edge, rather than moved to `nx.MultiDiGraph`.** A
+    multigraph models parallel edges properly, and would change the meaning of `graph[a][b]` for
+    every existing reader — `neighborhood`, `kg.analytics`, the retrievers — to solve a case that
+    does not arise: two notes standing in several relations at once is rare, and a tuple represents
+    it exactly as well for every query anyone actually runs. The cost is that an edge is a set of
+    relations rather than one, which is why the attribute is named in the plural.
+    """
     graph: nx.DiGraph = nx.DiGraph()
     for note in notes:
         graph.add_node(note.id, note=note)
     for note in notes:
-        for target in note.outgoing_links():
-            graph.add_edge(note.id, target)
+        by_target: dict[str, list[Relation]] = defaultdict(list)
+        for relation in note.outgoing_relations():
+            by_target[relation.to].append(relation)
+        for target, edges in by_target.items():
+            graph.add_edge(note.id, target, relations=tuple(edges))
     return graph
 
 
@@ -178,6 +196,32 @@ def build_graph(notes_dir: Path) -> nx.DiGraph:
     with _CACHE_LOCK:
         _GRAPH_CACHE[key] = (fingerprint, graph)
     return graph
+
+
+def related(graph: nx.DiGraph, note_id: str, rel: str, as_of: date | None = None) -> list[str]:
+    """The ids `note_id` points at through relation `rel`, ordered, newest edges included.
+
+    The query typed edges exist to make possible: "what are this compound's precursors", "what does
+    this note contradict". Directed on purpose, unlike `neighborhood` — a relation has a direction
+    and a *reversed* one usually means something different (`precursor-of` reversed is not
+    `precursor-of`), so the caller asks about the direction it means.
+
+    `as_of` applies the edge's own validity window (STO-9), so a relation that stopped holding is
+    excluded from a current-evidence query while remaining in git and in the graph. Omit it to see
+    every asserted edge regardless of when it held.
+    """
+    if note_id not in graph:
+        raise KeyError(f"unknown note id: {note_id!r}")
+    found = []
+    for _, target, data in graph.out_edges(note_id, data=True):
+        for relation in data.get("relations", ()):
+            if relation.rel != rel:
+                continue
+            if as_of is not None and not relation.is_current(as_of):
+                continue
+            found.append(target)
+            break
+    return sorted(found)
 
 
 def neighborhood(graph: nx.DiGraph, note_id: str, hops: int = 1) -> set[str]:

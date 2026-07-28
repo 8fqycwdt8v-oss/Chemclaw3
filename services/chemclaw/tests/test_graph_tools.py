@@ -191,4 +191,4 @@ def test_propose_knowledge_note_uses_gate(monkeypatch: pytest.MonkeyPatch) -> No
         )
     )
     assert ref == "pr://note/reaction-x"
-    assert fake.submissions[0].path.endswith("reaction/reaction-x.md")
+    assert fake.submissions[0].files[0].path.endswith("reaction/reaction-x.md")

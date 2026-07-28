@@ -29,6 +29,31 @@ from chemclaw.config import settings
 _TOKEN = re.compile(r"[a-z0-9]+")
 
 
+# Recently embedded texts, keyed by (provider, model, dim, text) — see `embed_texts`. A plain
+# dict with FIFO eviction rather than `functools.lru_cache`: the API is a *batch*, and memoizing
+# the batch would only ever hit on an identical list, which is not what repeats. Bounded, because
+# an unbounded map of every text ever embedded is a slow memory leak in a long-lived retrieval
+# process.
+_CacheKey = tuple[str, str, int, str]
+_CACHE: dict[_CacheKey, list[float]] = {}
+
+
+def _cache_key(text: str) -> _CacheKey:
+    """The identity of one embedding: the text *and the configuration that produced it*.
+
+    Keying on the provider, model and dimension is the same lesson the calculation cache learned
+    the hard way (D-011): a vector is only reusable for the configuration that made it. Pointing a
+    deployment at a different embedding model and serving the old model's vectors would corrupt
+    every similarity comparison, silently and unrecoverably.
+    """
+    return (
+        settings.embedding_provider,
+        settings.embedding_model,
+        settings.embedding_dim,
+        text,
+    )
+
+
 def embed_texts(texts: list[str]) -> list[list[float]]:
     """Embed each text into an `embedding_dim`-length vector (provider selected by config).
 
@@ -40,12 +65,51 @@ def embed_texts(texts: list[str]) -> list[list[float]]:
 
     A half-configured `openai_compatible` selection (missing `llm_base_url`/`embedding_model`)
     is rejected at startup by the config validator, so this path can rely on both being set.
+
+    **Repeats are served from memory (STO-12).** Every retrieval embeds its query, and the same
+    query recurs constantly — a refined report run, a retried turn, a user asking again. Under the
+    real provider each of those was a network round trip on the interactive path. Only the misses
+    are sent, so a batch that is half cached costs half a request rather than a whole one. Set
+    `embedding_cache_size` to 0 to disable.
     """
     if not texts:
         return []
+    size = settings.embedding_cache_size
+    if size <= 0:
+        return _embed_uncached(texts)
+
+    keys = [_cache_key(text) for text in texts]
+    missing = [text for text, key in zip(texts, keys, strict=True) if key not in _CACHE]
+    if missing:
+        # Deduplicated before the call: a batch naming the same text twice should cost one
+        # embedding, not two, whichever provider is behind it.
+        unique = list(dict.fromkeys(missing))
+        for text, vector in zip(unique, _embed_uncached(unique), strict=True):
+            _CACHE[_cache_key(text)] = vector
+        # FIFO, oldest first. Not LRU: keeping a recency order costs a move per *hit*, on the hot
+        # path, to better serve a workload — repeated identical queries — that a FIFO of this size
+        # already serves. A cheaper policy that is right for the actual access pattern.
+        while len(_CACHE) > size:
+            del _CACHE[next(iter(_CACHE))]
+    return [_CACHE[key] for key in keys]
+
+
+def _embed_uncached(texts: list[str]) -> list[list[float]]:
+    """Embed `texts` through the configured provider, with no cache in the way."""
     if settings.embedding_provider == "openai_compatible":
         return _openai_compatible_embeddings(texts)
     return [_hash_embedding(text) for text in texts]
+
+
+def clear_embedding_cache() -> None:
+    """Drop every cached vector.
+
+    A config change cannot serve a stale vector — the configuration is *in* the key — so this is
+    not a correctness hook. It exists because the cache outlives an individual test: a test that
+    counts how many times the provider was called needs to start from empty, or it measures the
+    previous test's leftovers. Production never calls it; a config change there is a restart.
+    """
+    _CACHE.clear()
 
 
 def _hash_embedding(text: str) -> list[float]:

@@ -18,9 +18,10 @@ from chemclaw.config import settings
 from connectors.qm.knowledge import note_from_qm_result
 from connectors.qm.specs import QMJobResult, QmJobSpec
 from connectors.qm.workflows import QMJobWorkflow
+from eln.compound import compound_dependencies, compound_id
 from kg.git_submitter import GitNoteSubmitter, GitSubmitError
 from kg.note import Note
-from kg.pr_gate import NoteSubmission
+from kg.pr_gate import NoteFile, NoteSubmission
 from tests.temporal_env import QM_ACTIVITIES, pydantic_client, start_env_or_skip
 from workflows.connector_job import ConnectorJobResult
 
@@ -42,8 +43,27 @@ def test_note_from_qm_result_maps_fields() -> None:
     assert note.compound_smiles == "CCO"
     assert note.source == "qm:oid-42"  # provenance carried
     assert note.id.startswith("job-")
-    # No dangling wikilink to a non-existent compound note (would fail kg-validate).
-    assert note.outgoing_links() == []
+
+
+def test_a_job_result_links_its_compound_and_brings_it_along() -> None:
+    """The crosslink, and the reason it is now safe to make (STO-7).
+
+    This assertion used to read `note.outgoing_links() == []`, with a comment explaining that a
+    wikilink to a possibly-absent compound note would dangle and fail `kg-validate` on the very PR
+    that added it. That was true, and it made every computed result a graph island — the
+    calculation store and the note graph could not reference each other in either direction.
+
+    What changed is the PR-gate: a submission carries a note *with its dependencies*, so the link
+    and its target land together and the link resolves on the branch it is proposed on.
+    """
+    note = note_from_qm_result(_RESULT)
+    expected = compound_id("CCO")
+    assert note.outgoing_links() == [expected]
+
+    # ...and the note it links is minted into the same submission, so the link is not dangling.
+    dependencies = compound_dependencies(note)
+    assert [dependency.id for dependency in dependencies] == [expected]
+    assert dependencies[0].type == "compound"
 
 
 def test_the_bundle_has_no_way_to_write_the_note_itself() -> None:
@@ -86,8 +106,7 @@ def _note_submission(note_id: str, content: str = "body\n") -> NoteSubmission:
     """A minimal job-result submission for `note_id` with the standard layout."""
     return NoteSubmission(
         branch=f"note/{note_id}",
-        path=f"knowledge/job-result/{note_id}.md",
-        content=content,
+        files=[NoteFile(path=f"knowledge/job-result/{note_id}.md", content=content)],
         title=f"Add job-result note: {note_id}",
         body="review please",
     )
@@ -269,7 +288,7 @@ def test_repropose_updated_note_from_fresh_clone(tmp_path: Path) -> None:
     asyncio.run(submitter_a.submit(v1))
 
     work_b = _clone(remote, tmp_path / "fresh")  # fresh clone: no origin/note/job-x ref
-    v2 = v1.model_copy(update={"content": "v2\n"})
+    v2 = v1.model_copy(update={"files": [NoteFile(path=v1.files[0].path, content="v2\n")]})
     submitter_b = GitNoteSubmitter(repo_dir=str(work_b), base_branch="main", remote="origin")
     assert asyncio.run(submitter_b.submit(v2)) == "note/job-x"
 
@@ -288,8 +307,7 @@ def test_submitter_refuses_path_escaping_the_checkout(tmp_path: Path) -> None:
     submitter = GitNoteSubmitter(repo_dir=str(work), base_branch="main", remote="origin")
     evil = NoteSubmission(
         branch="note/evil",
-        path="../evil.md",
-        content="x\n",
+        files=[NoteFile(path="../evil.md", content="x\n")],
         title="evil",
         body="b",
     )

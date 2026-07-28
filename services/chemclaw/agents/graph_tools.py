@@ -18,6 +18,7 @@ from agents.tool_registry import tool
 from agents.turn_signals import record_proposal
 from chemclaw.config import settings
 from chemclaw.errors import ChemclawError
+from eln.compound import compound_dependencies
 from kg.analytics import GraphGaps, analyze
 from kg.git_submitter import default_submitter
 from kg.graph import build_graph, load_notes, neighborhood
@@ -217,7 +218,11 @@ async def propose_knowledge_note(
         source=source,
         created_by="agent",
     )
-    reference = await propose_note(note, default_submitter())
+    # A compound note the agent linked is minted into the same PR (STO-7), so the agent can cite
+    # the molecule it is writing about without first checking whether that note exists.
+    reference = await propose_note(
+        note, default_submitter(), dependencies=compound_dependencies(note)
+    )
     # Surface the opened branch on the turn's stream (gap RCH-4) — see `agents.turn_signals`.
     record_proposal(note.id, reference)
     return reference

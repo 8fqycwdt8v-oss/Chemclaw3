@@ -46,7 +46,7 @@ def test_gate_submits_agent_note() -> None:
     assert ref == "pr://note/job-123"
     submission = fake.submissions[0]
     assert submission.branch == "note/job-123"
-    assert submission.path == "knowledge/job-result/job-123.md"
+    assert submission.files[0].path == "knowledge/job-result/job-123.md"
     assert "job-123" in submission.title
     assert "human review" in submission.body.lower()
     assert "qm" in submission.body  # provenance carried into the PR body

@@ -13,6 +13,7 @@ from pathlib import Path
 
 from chemclaw.config import settings
 from kg.note import KNOWN_NOTE_TYPES, Note, NoteError, read_note
+from kg.relations import KNOWN_RELATIONS
 from safety.notes import hazard_problems
 
 
@@ -47,7 +48,25 @@ def validate(notes_dir: Path) -> list[str]:
     # Whole-corpus check (gap KNW-6): a note type outside the registry is almost always a typo,
     # and any retrieval filter keyed on type would then miss it silently.
     problems.extend(_unknown_types(notes, id_to_path))
+    problems.extend(_unknown_relations(notes, id_to_path))
     return problems
+
+
+def _unknown_relations(notes: list[Note], id_to_path: dict[str, Path]) -> list[str]:
+    """Flag any edge whose relation is not in the vocabulary (STO-8).
+
+    The same placement argument as `_unknown_types`, one level down: checked here rather than in
+    the `Note` schema so the agent can propose a genuinely new relation and a human sees it at the
+    PR-gate — while a typo, which would make the edge unfindable by every relation-aware query,
+    cannot reach the graph.
+    """
+    return [
+        f"note {note.id!r} in {id_to_path.get(note.id, Path('?'))} uses unknown relation "
+        f"{relation.rel!r} (add it to kg.relations.KNOWN_RELATIONS if intended)"
+        for note in notes
+        for relation in note.outgoing_relations()
+        if relation.rel not in KNOWN_RELATIONS
+    ]
 
 
 def _unknown_types(notes: list[Note], id_to_path: dict[str, Path]) -> list[str]:

@@ -43,6 +43,10 @@ _BAD_DATA_TYPES = [
     "NoteError",
     "EvalCaseError",
     "SafetyRulesError",
+    # A vendored dataset that is absent, malformed, or does not match its manifest checksum
+    # (D-135). Emphatically not transient: a retry re-reads the same bytes from the same image
+    # layer and reaches the same conclusion, and the fix is a rebuild.
+    "VendoredDatasetError",
 ]
 
 # Bad data is non-retryable by type; `maximum_attempts` bounds the *transient* retries

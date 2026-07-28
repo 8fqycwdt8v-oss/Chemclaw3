@@ -83,7 +83,7 @@ def test_yes_proposes_reject_and_timeout_do_not(monkeypatch: pytest.MonkeyPatch)
         assert expired_status == "expired"
         # Only the Yes reached the PR-gate, citing its evidence.
         assert len(fake.submissions) == 1
-        assert "reaction-eln-2026-002" in fake.submissions[0].content
+        assert "reaction-eln-2026-002" in fake.submissions[0].files[0].content
 
     asyncio.run(_run())
 
