@@ -8,10 +8,21 @@ so a future refactor could silently reintroduce exactly the leak that was allege
 `await` added to the runner's `finally`, or an `except Exception` widened to `BaseException`,
 would do it, and both look harmless in review.
 
+**Correction (D-130): this suite used to simulate the disconnect wrongly, and hid a real defect.**
+Every case below closed the stream with `aclose()` and called that "what sse-starlette does when
+the client disconnects". It is not. sse-starlette answers `http.disconnect` by cancelling its task
+group and never calls `aclose()` on the body iterator at all, so a real disconnect raises
+`CancelledError` inside the turn — while `aclose()` raises `GeneratorExit`. The runner caught only
+the latter, so its rollback was dead code on the only path that matters, and this suite reported
+green throughout. Both teardowns are now exercised: `aclose()` is still reachable (sse-starlette
+uses it on a send timeout) and cancellation is the common case.
+
 What is pinned here:
-  1. Closing the stream mid-turn still books the tokens metered so far (no free abandoned turns).
-  2. Closing the stream releases the admission permit and the session's active-turn slot, so the
+  1. Abandoning a turn still books the tokens metered so far (no free abandoned turns).
+  2. Abandoning a turn releases the admission permit and the session's active-turn slot, so the
      session is not 409-bricked and capacity is returned.
+  3. A half-written turn is rolled back under *both* teardowns, not just the one a test can reach
+     by hand.
 """
 
 import asyncio
@@ -20,6 +31,7 @@ from collections.abc import AsyncGenerator, AsyncIterator
 from types import SimpleNamespace
 from typing import Any, cast
 
+import pytest
 from agent_framework import AgentSession
 
 from service.budget import BudgetTracker
@@ -30,10 +42,36 @@ from service.runner import run_turn
 def _closable(stream: AsyncIterator[Event]) -> AsyncGenerator[Event, None]:
     """`run_turn` is typed as an AsyncIterator; the concrete object is an async *generator*.
 
-    sse-starlette closes it on disconnect, which is exactly the path under test, so the cast is
-    narrowing the declared type to the real one rather than papering over a mismatch.
+    The cast narrows the declared type to the real one rather than papering over a mismatch:
+    sse-starlette does call `aclose()` when a send times out, so this teardown is reachable — it
+    is simply not the one a client disconnect takes (see the module docstring).
     """
     return cast(AsyncGenerator[Event, None], stream)
+
+
+async def _cancel_mid_turn(stream: AsyncIterator[Event], stalled: asyncio.Event) -> None:
+    """Consume the turn until it stalls, then tear it down the way a real disconnect does.
+
+    The consumption runs in its own task so it can be *cancelled* rather than closed — the whole
+    distinction this helper exists to preserve, since cancelling is what uvicorn plus sse-starlette
+    actually produce.
+
+    Waiting for `stalled` is not politeness, it is the test's correctness condition. The cancel has
+    to land while the consumer is suspended *inside* the turn; if it lands in the consumer's own
+    frame instead, the abandoned generator is finalised later by `asyncio.run`'s async-generator
+    shutdown, which delivers `GeneratorExit` — and a test written that way passes against the very
+    bug it is meant to catch. (It did. That is how this was found.)
+    """
+
+    async def _consume() -> None:
+        async for _event in stream:
+            pass
+
+    task = asyncio.create_task(_consume())
+    await stalled.wait()
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
 
 
 def _update(text: str, tokens: int) -> Any:
@@ -90,6 +128,44 @@ class _StatePoisoningAgent:
         return _gen()
 
 
+class _StallingAgent:
+    """Emits a fixed number of updates and then blocks, announcing that it has.
+
+    The block is what lets a test cancel the turn *from inside*: while it holds, the consumer is
+    suspended in the agent's own frame, so `CancelledError` is delivered where a real disconnect
+    delivers it. `stalled` makes that deterministic — no sleep long enough to "probably" be enough.
+    """
+
+    mcp_tools: list[Any] = []
+
+    def __init__(self, *, updates: int = 1, poison: bool = False) -> None:
+        self.stalled = asyncio.Event()
+        self._updates = updates
+        self._poison = poison
+
+    def run(  # noqa: D102 - a fake agent's run, documented by its class
+        self,
+        message: str,
+        *,
+        stream: bool,
+        session: AgentSession,
+        **_run_options: Any,
+    ) -> Any:
+        async def _gen() -> Any:
+            if self._poison:
+                # The shape of the real failure (ISSUE-B-10): a `tool_use` block whose
+                # `tool_result` never arrives, because the client left in between.
+                session.state.setdefault("messages", []).append(
+                    {"role": "assistant", "tool_use_id": "call_1"}
+                )
+            for _ in range(self._updates):
+                yield _update("tok", 10)
+            self.stalled.set()
+            await asyncio.sleep(3600)
+
+        return _gen()
+
+
 class _RecordingBudget(BudgetTracker):
     """A tracker that remembers what the runner booked, so the test can assert on it."""
 
@@ -121,7 +197,7 @@ def test_abandoned_turn_still_books_its_tokens() -> None:
             consumed += 1
             if consumed == 3:
                 break
-        await stream.aclose()  # what sse-starlette does when the client disconnects
+        await stream.aclose()  # sse-starlette's send-timeout teardown
 
     asyncio.run(_abandon())
 
@@ -180,9 +256,57 @@ def test_client_disconnect_rolls_back_a_half_written_turn() -> None:
         stream = _closable(run_turn(_StatePoisoningAgent(), session, "hi"))
         async for _event in stream:
             break  # the client goes away after the first token
-        await stream.aclose()  # what sse-starlette does on disconnect
+        await stream.aclose()  # sse-starlette's send-timeout teardown
 
     asyncio.run(_abandon())
 
     assert session.state == before, "the half-written turn was left in the session thread"
     assert session.state["messages"] == [{"role": "user", "text": "an earlier, completed turn"}]
+
+
+def test_a_cancelled_turn_rolls_back_a_half_written_turn() -> None:
+    """The same rollback, reached the way a real disconnect reaches it: by cancellation.
+
+    This is the case that was missing, and its absence is why the runner's rollback clause could
+    catch `GeneratorExit` alone for as long as it did. Counterfactual: with
+    `except GeneratorExit:` instead of `except (GeneratorExit, asyncio.CancelledError):`, the
+    poisoned `tool_use` survives here while the `aclose()` test above still passes.
+    """
+    session = AgentSession(session_id="s4")
+    session.state["messages"] = [{"role": "user", "text": "an earlier, completed turn"}]
+    before = copy.deepcopy(session.state)
+
+    async def _drive() -> None:
+        agent = _StallingAgent(poison=True)
+        await _cancel_mid_turn(run_turn(agent, session, "hi"), agent.stalled)
+        # Asserted *inside* the loop. After `asyncio.run` returns, its async-generator shutdown has
+        # closed every abandoned generator, which restores the state by the other path and would
+        # make this pass no matter what the runner does with cancellation.
+        assert session.state == before, "a cancelled turn left half-written state in the thread"
+        assert session.state["messages"] == [{"role": "user", "text": "an earlier, completed turn"}]
+
+    asyncio.run(_drive())
+
+
+def test_a_cancelled_turn_still_books_its_tokens() -> None:
+    """Cancellation is not a cheaper way to abandon a turn than closing the stream.
+
+    The budget booking lives in the runner's `finally`, which runs under both teardowns — but
+    "runs" is not "completes" when the task is cancelled, and that distinction is exactly what
+    cost the durable claim release. Pinning it here means a future `await` added to that `finally`
+    fails a test rather than silently making abandoned turns free.
+    """
+    budget = _RecordingBudget()
+    session = AgentSession(session_id="s5")
+
+    async def _drive() -> None:
+        agent = _StallingAgent(updates=3)
+        await _cancel_mid_turn(
+            run_turn(agent, session, "hi", actor="u1", budget=budget), agent.stalled
+        )
+        assert budget.booked, "a cancelled turn booked nothing at all"
+        booked_session, user_id, tokens = budget.booked[0]
+        assert (booked_session, user_id) == ("s5", "u1")
+        assert tokens >= 30, f"only {tokens} of the ~30 metered tokens were booked"
+
+    asyncio.run(_drive())

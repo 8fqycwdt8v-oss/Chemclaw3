@@ -22,6 +22,7 @@ from connectors.registry import (
     connector_tool_names,
     discovered,
     enabled,
+    health_url,
     job_tools,
     mcp_tools,
     skills_dirs,
@@ -182,6 +183,57 @@ def test_connector_urls_override_the_manifest_address(
     )
     (tool,) = mcp_tools()
     assert tool.url == "http://alpha.svc:8080/mcp"
+
+
+def test_the_health_probe_follows_the_address_override(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The probe must go where the tools go, or readiness reports on the wrong host (D-131).
+
+    The shipped chart always sets `connector_urls`, so before this the front door probed the
+    manifest's loopback dev default in every cluster: every connector read `unreachable` however
+    healthy it was, and `connectors_required: true` would have failed startup outright.
+    """
+    _bundle(tmp_path, "alpha", _http_manifest("alpha"))
+    _use(monkeypatch, tmp_path)
+    monkeypatch.setattr(
+        "chemclaw.config.settings.connector_urls",
+        {"alpha": "http://alpha-connector.svc:8814/mcp"},
+    )
+    (manifest,) = enabled()
+    assert health_url(manifest) == "http://alpha-connector.svc:8814/healthz"
+
+
+def test_the_health_probe_follows_an_override_that_moves_the_path_too(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`scripts.connectors_dev` mounts every bundle under one port by name, so the path moves.
+
+    Swapping only the origin would give `/healthz`, which that composite serves as a 404 — the
+    reason the dev topology could not tell a killed connector from a mis-probed one.
+    """
+    _bundle(tmp_path, "alpha", _http_manifest("alpha"))
+    _use(monkeypatch, tmp_path)
+    monkeypatch.setattr(
+        "chemclaw.config.settings.connector_urls", {"alpha": "http://127.0.0.1:8810/alpha/mcp"}
+    )
+    (manifest,) = enabled()
+    assert health_url(manifest) == "http://127.0.0.1:8810/alpha/healthz"
+
+
+def test_a_connector_declaring_no_health_route_stays_unprobed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A third-party MCP server may expose nothing; guessing a path would be a false alarm."""
+    _bundle(
+        tmp_path,
+        "alpha",
+        "name: alpha\ndescription: the alpha capability\n"
+        "endpoint:\n  transport: http\n  url: http://127.0.0.1:9001/mcp\n  tools:\n    - search\n",
+    )
+    _use(monkeypatch, tmp_path)
+    (manifest,) = enabled()
+    assert health_url(manifest) is None
 
 
 def test_a_jobs_only_connector_contributes_a_tool_and_no_mcp_server(

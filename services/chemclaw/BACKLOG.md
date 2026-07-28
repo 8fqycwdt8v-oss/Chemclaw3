@@ -3,7 +3,7 @@
 Prioritized open action items. Top = next. Keep in sync with `docs/implementation-plan.md`
 (phase/step numbers) at session end.
 
-## Open — Agentic system review (2026-07-28, D-124)
+## Open — Agentic system review (2026-07-28, D-132)
 
 Full record: `docs/audit/2026-07-agentic-system-review.md`. Three shipped defaults were fatal on
 first contact and are fixed; the rest is open, in priority order. The review's method note is the
@@ -94,6 +94,56 @@ claim about the world is to run it.
       `docs/harness-konzept.md`, and the cap applies in both modes, not only execute.
       `workflows/template_job.py` calls its own lookup "I/O-free". `agents/chemclaw_agent.py`
       calls `plan_only` "the pre-execution GxP gate" (REV-1).
+## Open — Storage & knowledge substrate (docs/audit/13-storage-and-knowledge-audit.md)
+
+The layer under retrieval and capability, audited as one system for the first time: what the
+system writes down, what it throws away, and what it cannot reconstruct. Ordered by the audit's
+own dependency chain — the reuse items are what make the artifact store worth having, and the
+seed corpus is last because it is only worth pinning once the shapes it must contain exist.
+
+- [x] **STO-1 [High] Every expensive by-product was deleted with its tempdir.** `calc/xtb_cli.py`
+      parsed the Hessian into numbers and lost the file. **Done (D-124):** content-addressed
+      `artifact_blobs` + `calculation_artifacts` (migration 019), `calc/artifacts.py` +
+      `calc/postgres_artifacts.py`, capture derived from `_REQUIRED_OUTPUTS`, wired into the
+      thermochemistry path. Remaining: the optimizer and CREST paths capture but do not persist;
+      the eviction sweep is designed, not built.
+- [ ] **STO-2 [High] A stored Hessian cannot be reused** — [M]. `ThermoSpec` puts `temperature_k`,
+      `pressure_pa`, `symmetry_number` and `rrho_cutoff_cm` in the cache key, so thermochemistry
+      at a second temperature is a miss that recomputes a temperature-independent quantity. Split
+      `HessianSpec` from the RRHO block that reads it. **The highest-value item in the audit.**
+- [ ] **STO-3 [High] `max_members` is in the conformer cache key** — [S]. It only truncates a
+      list, so "show me 20 instead of 10" re-runs CREST. Drop it from the key; truncate at read.
+- [ ] **STO-4 [Med] No cross-method geometry reuse** — [M]. Keyed on coordinates, so the same
+      SMILES from a different embedding re-optimizes. A subject-keyed geometry pointer is itself a
+      cached calculation — no new table.
+- [ ] **STO-5 [Med] No converged electronic structure kept** — [L]. Deferred with DFT (D-010);
+      D-124 defines the media type and link role, nothing more.
+- [ ] **STO-6 [Med] Artifact eviction sweep** — [S]. `compute_seconds` now exists (D-124); the
+      sweep that orders by it does not. Evicts blobs only, never `calculation_results`.
+- [ ] **STO-7 [High] Computed results are graph islands** — [M]. `connectors/qm/knowledge.py`
+      cannot wikilink a compound note that may not exist. Needs `calc_ref`/`artifact_refs` on
+      `Note` and a multi-file `NoteSubmission` so a note lands with its dependencies —
+      `memory/supersede.py` is the second caller that already wanted this.
+- [ ] **STO-8 [High] Graph edges carry no relation** — [M]. `kg/graph.py:150` adds a bare edge.
+      `[[rel:target]]` is free to take: `_SLUG` excludes `:`, so it currently fails validation.
+      Vocabulary from RXNO/CHMO/CHEMINF/OntoRXN, enforced at `kg-validate` like `KNOWN_NOTE_TYPES`.
+- [ ] **STO-9 [Med] Bi-temporality stops at the node** — [S]. `valid_from`/`valid_to` exist on
+      notes, not on edges.
+- [ ] **STO-10 [Med] `knowledge/` is empty** — [M]. `make kg-validate` validates `.gitkeep`. Seed
+      ~35 notes covering every type and relation. Do **not** promote `evals/retrieval_corpus/` —
+      it sits outside `knowledge_dir` so its pinned recall/precision numbers stay reproducible.
+- [ ] **STO-12 [Low] `embed_texts` re-embeds the same query every retrieval** — [S]. A bounded
+      LRU. Note the assessment: tool-result caching is otherwise a **non-gap** — every `calc`
+      connector tool already routes through `run_cached`, and the `chem` tools are RDKit calls a
+      Postgres round trip would make slower.
+- [ ] **STO-14 [Med] Vendored reference data** — [M]. The one sanctioned escalation of D-089
+      (no runtime egress): an ontology/reagent corpus baked into the image at build time, behind
+      the existing `sources/registry.py` seam, with a checksummed manifest and an extended (not
+      relaxed) `tests/test_no_egress.py`.
+
+**Closed as not-gaps:** STO-11 (`embedding_provider="hash"` is the documented offline dev path),
+STO-13 (audit-trail disposal stays refused — deleting from a hash chain is indistinguishable from
+the tampering it detects; needs an ADR with QA sign-off, already in `DEFERRED.md`).
 
 ## Done — Process/analytical-development capability research (2026-07-26, D-092)
 
@@ -124,29 +174,36 @@ missing prerequisite), in D-092.
 
 The load test's fixes landed (see D-119). What it surfaced and did **not** close:
 
-- [ ] **CHAOS-1 A session whose client walks away mid-turn stays 409 for ~63 s.** Found by the
-      Stage 5e chaos pass. Abandon an SSE turn mid-stream and the same session refuses the next
-      turn — `a turn is already running for this session` — for **63 s measured**, where it should
-      free immediately. A chemist who closes a tab and reopens it cannot resume for a minute.
+- [x] **CHAOS-1 A session whose client walks away mid-turn stayed 409 for ~63 s.** Closed by D-130:
+      **60.9 s → 0.0 s measured**, and 409 → 200 on a second replica.
 
-      The blocker is the in-process `active_turns` set (`service/app.py:757`), whose `discard`
-      lives in the streamed generator's `finally` alongside the durable claim release. Two theories
-      were tested and **both were wrong**, which is why this is open rather than fixed:
+      Three theories were tested across two sessions and **all three were wrong** — the in-process
+      `active_turns` entry leaking, the abandoned turn running on, and the claim release simply
+      needing to be detached. What settled it was sampling both guards once per second while
+      polling: `chemclaw_turns_in_flight` was 0 from the first sample (the `finally` *did* run
+      promptly) while the `session_turns` row counted down from exactly 60 s with no refresh. The
+      recovery time was the lease, so the release had never landed. Tracing the store then showed
+      it *entered* on every abandoned turn and *completed* on none: a bare `await` in a cancelled
+      task raises at its first suspension point. Shielded now, with the error handling inside the
+      shielded task so it cannot end as a stray `Task exception was never retrieved`.
 
-      1. *"The `await` in that `finally` is cancelled before it reaches the database."* Plausible —
-         a `finally` that runs during task cancellation cannot reliably await. Detaching the
-         release onto its own task changed the measured time not at all (63.5 s vs 65.1 s). The
-         change was reverted rather than shipped unverified.
-      2. *"The abandoned turn keeps running to completion and holds the session."* Also no: the
-         session's actor produced **zero** `audit_events` rows, so no tool ever ran.
+- [x] **CHAOS-1b The disconnect rollback was dead code on the only path that reaches it.** Found by
+      the same trace, closed by D-130. `service/runner.py` rolled a half-written turn back under
+      `except GeneratorExit:` — what `aclose()` raises. sse-starlette answers `http.disconnect` by
+      cancelling its task group and never calls `aclose()` on the body iterator, so the real path
+      delivers `CancelledError` and the rollback never ran. It looked covered because
+      `tests/test_turn_cancellation.py` tore every stream down by hand under the comment *"what
+      sse-starlette does when the client disconnects"*. It is not. Both teardowns are now
+      exercised; the clause also brings the turn deadline under the same rollback.
 
-      So the generator's `finally` is not running promptly and neither explanation covers it. Next
-      step is to instrument the teardown directly — log on entry to that `finally` with a timestamp
-      — and find out when it actually fires relative to the disconnect. Reproduction:
-      `scratchpad/disconnect_probe.py`, which prints the recovery time.
-
-      Severity is real but bounded: it costs availability of one conversation for about a minute,
-      never correctness, and the lease/`discard` do eventually fire.
+- [x] **CHAOS-1c The connector health probe ignored the deployment's address override.** Found by
+      re-running the Stage 5e connector-kill scenario, which could not tell a killed connector from
+      a mis-probed one. Closed by D-131. `connector_urls` moved the tool endpoint and left the probe
+      on the manifest's loopback dev default; the shipped chart always sets that override, so in a
+      cluster `/readyz` reported every connector unreachable however healthy it was — and under
+      `connectors_required: true` the front door would have failed to start every time. Measured
+      before/after on the running stack: all six `unreachable` → all six `healthy`, and they now
+      flip back when the fleet is killed.
 
 
 - [x] **STREAM-1 The front door shared one chat client across concurrent turns, corrupting streamed

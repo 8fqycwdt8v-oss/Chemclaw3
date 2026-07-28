@@ -6,6 +6,9 @@ are the ones that matter most: the argv boundary, and that the backend never rea
 cache key as "auto".
 """
 
+from pathlib import Path
+
+import numpy as np
 import pytest
 
 from calc import crest_cli, xtb_cli
@@ -14,6 +17,7 @@ from calc.structure import structure_from_smiles
 from calc.xtb_opt import OptSpec, optimize_structure
 from calc.xtb_spec import XtbSpec, backend_version, resolve_backend
 from calc.xtb_thermo import ThermoSpec, compute_thermochemistry
+from chemclaw.config import settings
 
 needs_xtb = pytest.mark.skipif(not xtb_cli.is_available(), reason="the xtb binary is not installed")
 needs_crest = pytest.mark.skipif(
@@ -31,6 +35,48 @@ def test_a_value_that_could_be_read_as_a_flag_is_rejected() -> None:
     with pytest.raises(ValueError, match="may not start with"):
         xtb_cli._safe("--define-a-flag", "solvent")
     assert xtb_cli._safe("water", "solvent") == "water"
+
+
+def test_capture_keeps_a_tasks_by_products_and_skips_an_oversized_one(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The by-products a task is defined by are read out of the workdir; `sp`'s JSON is not.
+
+    Runs against a synthetic directory rather than the binary, so the capture manifest — the one
+    thing that decides what outlives the tempdir — is measured even where xtb is not installed.
+    """
+    for name in ("xtbopt.xyz", "hessian", "vibspectrum", "xtbout.json"):
+        (tmp_path / name).write_bytes(b"x" * 32)
+
+    assert sorted(xtb_cli._capture(tmp_path, "ohess")) == ["hessian", "vibspectrum", "xtbopt.xyz"]
+    assert sorted(xtb_cli._capture(tmp_path, "hess")) == ["hessian", "vibspectrum"]
+    assert sorted(xtb_cli._capture(tmp_path, "opt")) == ["xtbopt.xyz"]
+    # `sp` is the deliberate exclusion: `xtbout.json` is parsed in full into the cached result,
+    # so keeping the file too would be a second copy of the cache.
+    assert xtb_cli._capture(tmp_path, "sp") == {}
+
+    monkeypatch.setattr(settings, "artifact_max_bytes", 8)
+    assert xtb_cli._capture(tmp_path, "ohess") == {}
+    monkeypatch.setattr(settings, "artifact_store_enabled", False)
+    assert xtb_cli._capture(tmp_path, "hess") == {}
+
+
+@needs_xtb
+def test_a_real_hessian_survives_the_directory_that_produced_it(tmp_path: Path) -> None:
+    """End to end: the file xtb wrote is still parseable after its tempdir is gone (D-124).
+
+    The point of the artifact store in one assertion — the captured bytes reparse to the same
+    matrix the in-process result carries, so a stored Hessian is a usable Hessian and not just
+    a blob that happens to be the right length.
+    """
+    structure = structure_from_smiles("O", optimize=True)
+    result = xtb_cli.run(structure, task="hess", method="GFN2-xTB")
+
+    assert set(result.artifacts) == {"hessian", "vibspectrum"}
+    captured = tmp_path / "hessian"
+    captured.write_bytes(result.artifacts["hessian"])
+    reparsed = xtb_cli._read_hessian(captured, 3 * len(structure.elements))
+    assert np.allclose(reparsed, result.hessian)
 
 
 def test_auto_never_reaches_a_cache_key() -> None:

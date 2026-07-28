@@ -201,7 +201,12 @@ async def _hold_turn_claim(claims: SessionTurns, session_id: str, lease_seconds:
         await asyncio.sleep(interval)
         try:
             await claims.refresh(session_id, _WORKER_ID, lease_seconds)
-        except (ConnectionError, OSError, RuntimeError):
+        except Exception:  # noqa: BLE001 - a dead heartbeat task is worse than a logged refresh
+            # Widened for the reason the release below it was (D-130): this runs in a task the
+            # turn only ever cancels, never awaits, so an exception the tuple did not name would
+            # kill the heartbeat silently *and* surface later as an unretrieved-exception
+            # traceback. `psycopg.Error` is the concrete case — the store raises it and the old
+            # tuple did not cover it.
             METRICS.increment("chemclaw_turn_claim_refresh_failures_total")
             logger.warning(
                 "could not refresh the turn claim for session %s; if this keeps failing the "
@@ -213,20 +218,55 @@ async def _hold_turn_claim(claims: SessionTurns, session_id: str, lease_seconds:
 
 
 async def _release_turn_claim(claims: SessionTurns, session_id: str) -> None:
-    """Give a session's turn slot back, never failing the turn that is already over.
+    """Give a session's turn slot back, surviving the cancellation that usually causes it.
 
-    The lease is the backstop: a release that cannot reach the database (or a stream torn down so
-    abruptly there is no time to run it) costs the session one lease of unavailability, not a
-    permanent 409 — which is precisely why the claim expires at all.
+    **Shielded, and that is the entire point of this function** (D-130). Both callers reach it from
+    a `finally` that runs *because* their task was cancelled — a chemist closed the tab mid-turn —
+    and a bare `await` inside a cancelled task raises at its first suspension point. The release
+    therefore started on every abandoned turn and finished on none: measured on the real path, the
+    session then answered 409 to its own owner for the **full 60-second lease**, so reopening a
+    closed tab was refused for a minute. `shield` runs the release as an independent task that
+    outlives this frame, which is what makes the DELETE actually land.
+
+    Cancellation still propagates out of here — the caller's task is being torn down and must
+    continue to be. Only the *release* is protected, not the caller.
+
+    The lease remains the backstop for what shielding cannot cover (the process being killed, the
+    loop closing under it): a release that never lands costs the session one lease of
+    unavailability, not a permanent 409 — which is precisely why the claim expires at all.
     """
-    try:
-        await claims.release(session_id, _WORKER_ID)
-    except (ConnectionError, OSError, RuntimeError):
-        logger.warning(
-            "could not release the turn claim for session %s; it expires on its own",
-            session_id,
-            exc_info=True,
-        )
+
+    async def _release() -> None:
+        """The release itself — the part that must survive, so it owns its own error handling.
+
+        Handling the failure *inside* the shielded task rather than around the `await` is not a
+        style choice: when the caller is cancelled, `shield` drops its bookkeeping callback on the
+        inner task, so an exception raised there afterwards is never retrieved and asyncio reports
+        it as a bare `Task exception was never retrieved` traceback with nothing tying it to a
+        session. A task that cannot fail cannot produce one.
+        """
+        try:
+            await claims.release(session_id, _WORKER_ID)
+        except Exception:  # noqa: BLE001 - see below; this task must not be able to fail
+            # `Exception`, not a tuple of the connection errors. The narrow tuple was written when
+            # a failure here could only propagate into a `finally` that was about to be discarded
+            # anyway; shielding turned it into a task nobody awaits, where anything uncaught
+            # becomes an unattributed `Task exception was never retrieved`. Chaos scenario C4 —
+            # Postgres stopped at the instant of the disconnect — produced exactly that, because
+            # the store raises `psycopg.errors.AdminShutdown`, which is a `psycopg.Error` and
+            # matched none of `(ConnectionError, OSError, RuntimeError)`.
+            #
+            # Breadth is the correct contract here rather than a concession: this function's whole
+            # promise is that a release which cannot happen costs the session one lease, and there
+            # is no failure mode for which crashing an orphan task is a better answer than saying
+            # so in the log.
+            logger.warning(
+                "could not release the turn claim for session %s; it expires on its own",
+                session_id,
+                exc_info=True,
+            )
+
+    await asyncio.shield(_release())
 
 
 def _default_owner_store() -> SessionOwners | None:

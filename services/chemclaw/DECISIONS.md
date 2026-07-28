@@ -4907,7 +4907,294 @@ by two turns at once — rather than the corruption itself, which is upstream co
 per stream. `DEFERRED.md` records the trigger: when it does, the pool collapses back to one shared
 agent per profile and `agents/agent_pool.py` goes away.
 
-## D-124 — The shipped defaults were never executed: three configurations that fail on first contact
+## D-124 — A calculation's by-products outlive the directory it ran in
+
+`calc/xtb_cli.py` runs xtb inside a `tempfile.TemporaryDirectory`. It writes `input.xyz`, the
+binary writes `hessian`, `vibspectrum`, `xtbopt.xyz`, `xtbout.json`, `_collect` parses them into a
+`CliResult`, and then the `with` block ends and every file is deleted. The system kept one JSON
+summary per calculation and threw away everything else it had paid for.
+
+That is affordable for a single point. It is not affordable for a Hessian. D-092 measured one at 26 s
+on 76 atoms through the binary and 218 s through finite differences, and `ThermoSpec` puts
+`temperature_k` in the cache key — so asking the *same* molecule for thermochemistry at 350 K after
+298 K is a cache miss that recomputes the Hessian, a quantity that does not depend on temperature at
+all. The expensive half was being recomputed to answer a question about the cheap half.
+
+### Two tables, because a blob and its role are different facts
+
+`artifact_blobs` is keyed by the SHA-256 of the artifact's **uncompressed** bytes.
+`calculation_artifacts` maps `(calc_key, name)` to that hash. Content addressing gives dedup for
+free — two runs that converge to the same geometry write one copy of it — and the link row is what
+makes a blob reachable *from* a calculation rather than only by its hash. The split is DataJoint's
+hash-addressed model, and it is what keeps the design open: a DFT wavefunction or SCF restart file
+is another `(calc_key, name)` row over the same blob table, not a new mechanism.
+
+The address is over the uncompressed bytes deliberately, so it does not change when the compression
+level does. `ON DELETE CASCADE` from blob to link is load-bearing: evicting a blob removes the rows
+that point at it, so `list_for` can never hand back a ref whose bytes are gone.
+
+### Postgres `BYTEA`, and why not the three alternatives
+
+The artifacts this system actually produces are kilobytes to a few megabytes — a Turbomole `hessian`
+is repetitive numeric text that deflates several-fold. That is squarely `BYTEA` territory, and
+Postgres is the only durable store the deployment already has.
+
+*Not an object store.* It adds an infrastructure dependency, a fourth secret to the three-secret
+model, a client library, and a bucket-endpoint host literal that muddies `tests/test_no_egress.py`
+for no gain at this size. *Not a shared filesystem CAS.* The service and the workers are separate
+pods, so it needs an RWX volume no OpenShift storage class guarantees, plus its own GC and backup
+story. *Not `hpc_artifact_store_url`* — that is a **read** endpoint the Nextflow launcher fetches
+finished-run blobs from, not a store this system writes to.
+
+The `ArtifactStore` Protocol is the seam. When DFT lands and a wavefunction is 200 MB rather than
+2 MB, a third backend is one class and no caller changes.
+
+zlib rather than zstd: Python 3.11 has no stdlib zstd, and a dependency for the remaining ~15% on
+text is not a trade this codebase makes. The codec is recorded per row, so changing it later is a new
+value, never a migration. Compression that does not shrink a payload is not applied — an
+already-compressed artifact would otherwise be stored *larger* than it arrived.
+
+### An artifact is optional by construction
+
+`put` returns `None` — it does not raise — when the store is disabled or the payload exceeds
+`artifact_max_bytes`, and the capture path `stat`s every file before reading it so an outsized one
+never enters memory. When the *store itself* fails, `run_cached_with_artifacts` logs a warning and
+returns the result anyway.
+
+This is the whole contract, and it is deliberate in both directions. Losing an artifact costs a
+future recomputation. Propagating the failure would discard a calculation that had already succeeded
+and was already in the result store — trading a cheap loss for an expensive one. Capturing a
+by-product must never be able to fail the thing it is a by-product of.
+
+Capture happens *after* `_collect` succeeds, so a parse failure raises exactly as it did before this
+existed. The cost is that the raw files are then unavailable for a post-mortem on a parse failure.
+Plumbing bytes onto an exception to fix that is not worth it; the trade is recorded rather than
+hidden.
+
+### The capture manifest is derived, not restated
+
+`_REQUIRED_OUTPUTS` already declares what each task must leave behind for its run to have succeeded.
+`_CAPTURED` is that same map minus `sp`, so the two cannot drift — adding a task declares both facts
+once.
+
+`sp` is the one exclusion, and the reason is exact: its `xtbout.json` is parsed *in full* into
+`CliResult.properties`, which lands in the cached JSON result. Storing the file too would be a second
+copy of the cache with none of the value.
+
+### The cost policy `retention.py` asked for, and the eviction it unblocks
+
+`workflows/retention.py` refuses to age-prune `calculation_results` and says why: a cache is bounded
+by cost policy, not by a retention clock, and evicting a cached result silently converts a hit into a
+recomputation. It then names the policy it would need — "LRU by access, or by compute cost" — and
+declines to invent it.
+
+`cached_compute` now times every miss and stores `compute_seconds`. That is the missing number, and
+it resolves the tension rather than reopening it: **eviction targets blobs, never results.** The JSON
+result is the *answer*, and evicting it would void D-011. A blob is a *by-product* from which the
+answer can be regenerated, so evicting one costs recompute time on a future reuse and nothing else.
+`retention.py`'s refusal therefore stays literally true.
+
+There is deliberately no `last_access_at` on `calculation_results`. Nothing evicts it, so nothing
+would keep the column current, and an access stamp on the cache-hit path is a write on the hottest
+read in the system. On `artifact_blobs`, where eviction does need it, the stamp is refreshed lazily —
+only once the recorded value is already older than `artifact_access_stamp_seconds` — so a read on the
+reuse path stays a read.
+
+### What this does not yet do
+
+The store is wired into the thermochemistry path, which is the one that pays for it. The optimizer
+and the conformer ensemble capture their files but do not yet persist them, and the eviction sweep
+is designed here but not built. The reuse that makes the stored Hessian *worth* storing — thermo at a
+second temperature without recomputing — is D-125's, and is the reason this landed first.
+
+The end-to-end assertion that a captured Hessian reparses to the same matrix is written and
+`@needs_xtb`-gated; it does not run where the binary is absent, which includes this session's
+environment. It is a real test of a real property, and it is unverified here.
+
+## D-130 — Turn teardown runs in a cancelled task, so its cleanup has to be shielded to happen at all
+
+> **On the number.** This was written as D-124 and renumbered on merging second, per `CLAUDE.md`.
+> The gap to D-130 is deliberate rather than an accident of the merge. The procedure says "highest
+> allocated + 1", which is D-125 — but D-125…D-129 are *intended* by the in-flight storage and
+> knowledge-substrate sequence, which reserved them, was forced by `tests/test_decision_log.py` to
+> un-reserve them (the registry may not name an ADR that does not exist yet), and still forward-
+> references D-125 from the merged body of D-124. Taking D-125 would have followed the letter of a
+> rule whose entire purpose is to avoid collisions while causing one, and would have made an
+> already-merged ADR's citation wrong. Gaps are explicitly harmless (`CLAUDE.md` rule 4); a
+> renumbered neighbour is not.
+>
+> That contradiction — reserve early, but the test forbids reserving what you have not written — is
+> a real defect in the convention, already flagged by the session that hit it (`8f6a319`). It is not
+> mine to resolve unilaterally: whoever owns `CLAUDE.md` should decide whether the ledger gains a
+> "reserved" state or the advice changes. Recorded here so the next session that trips on it finds
+> two witnesses rather than one.
+
+**Context.** Stage 5e's chaos pass found CHAOS-1: abandon an SSE turn mid-stream and the same
+session refuses its owner's next turn — `a turn is already running for this session` — for **63
+seconds measured**. A chemist who closed a tab could not reopen the conversation for a minute.
+
+The finding stayed open across two sessions because two explanations were tested and **both were
+wrong**. Detaching the durable claim release onto its own task changed the measured time not at all
+(63.5 s vs 65.1 s). The theory that the abandoned turn simply ran on to completion was refuted by
+its actor producing zero `audit_events` rows. The written next step — instrument the teardown — is
+what finally settled it, and the instrument mattered more than the reasoning did.
+
+**What it actually was.** Two guards can hold that 409, and no previous measurement separated them.
+Sampling both once per second while polling settles it in one run:
+
+```
+t+ 0.0s  POST=409  in_flight=0.0  claim=81d518@+59.9s
+t+30.9s  POST=409  in_flight=0.0  claim=81d518@+28.9s
+t+59.9s  POST=409  in_flight=0.0  claim=81d518@+0.0s
+t+60.9s  POST=200  in_flight=0.0  claim=81d518@+60.0s
+```
+
+`in_flight` is 0 from the first sample: the in-process `active_turns` set was freed *immediately*,
+so the generator's `finally` did run promptly — the third disproved theory. The durable claim's
+`expires_at` counts monotonically down from 60 s and is never refreshed, so the heartbeat was
+cancelled too. The recovery time is exactly `service_turn_claim_lease_seconds`. **The release never
+landed**, and the lease — designed as the backstop — was carrying the whole path.
+
+Tracing the claim store proves the mechanism rather than inferring it:
+
+```
+CLAIMTRACE t+ 0.75s claim(71743695) -> True
+STREAMTRACE agent stream got CancelledError
+CLAIMTRACE t+ 0.75s release(71743695) ENTERED
+CLAIMTRACE t+ 0.76s claim(71743695) -> False        <- and no COMPLETED, ever
+```
+
+The release is *entered* on every abandoned turn and *completes* on none. sse-starlette answers
+`http.disconnect` by cancelling its task group; a bare `await` inside a cancelled task raises at its
+first suspension point, so `_release_turn_claim` reached the database call and died there. The
+earlier "detach it onto a task" experiment was the right idea measured on the wrong branch.
+
+**Decision.** Shield the release, and give the shielded coroutine its own error handling:
+
+```python
+async def _release() -> None:
+    try:
+        await claims.release(session_id, _WORKER_ID)
+    except (ConnectionError, OSError, RuntimeError):
+        logger.warning("could not release the turn claim for session %s; it expires on its own", ...)
+
+await asyncio.shield(_release())
+```
+
+`shield` runs the release as an independent task that outlives the cancelled frame. The error
+handling belongs *inside* that task rather than around the `await`: once the awaiting task is
+cancelled, `shield` drops its bookkeeping callback on the inner task, so a failure raised afterwards
+is never retrieved and asyncio reports it as a bare `Task exception was never retrieved` with
+nothing tying it to a session. A task that cannot fail cannot produce one. The same restructuring is
+applied to the runner's pre-existing `rollback_to` shield, which had the identical hazard.
+
+The lease stays as the backstop for what shielding cannot cover — the process being killed, the loop
+closing under it. It is now what it was always meant to be: the exceptional path, not the only one.
+
+**The second defect, found by the same instrument.** The trace line `agent stream got
+CancelledError` is the answer to a question nobody had asked: which exception does a real disconnect
+deliver? `service/runner.py` rolled a half-written turn back under `except GeneratorExit:` — the
+exception `aclose()` raises. sse-starlette **never calls `aclose()` on the body iterator** on the
+disconnect path; it cancels. So the rollback that exists to stop one dropped connection from
+poisoning a conversation with an orphaned `tool_use` was **dead code on the only path that reaches
+it**, and had been since it was written. The clause now catches `(GeneratorExit,
+asyncio.CancelledError)`, which also brings the front door's whole-turn deadline under the same
+rollback — a timed-out turn is half-written in exactly the same way.
+
+This was a silent weakness rather than an outage only because `agents.session_store` repairs
+unmatched tool calls at read time. That backstop strips the orphan; only the rollback discards the
+rest of the abandoned turn.
+
+**Why no test caught either.** `tests/test_turn_cancellation.py` had three tests about abandoned
+turns, every one of them tearing the stream down with `await stream.aclose()` under the comment
+*"what sse-starlette does when the client disconnects"*. It is not what sse-starlette does. The
+suite simulated the one teardown production never takes, and reported green while the real path was
+unhandled — the same shape as LIVE-1, where `ScriptedChatClient` derived from the base class
+*without* middleware and so tested a pipeline production never ran.
+
+Writing the regression test reproduced the trap once more, and that is worth recording. The first
+version cancelled the consuming task while it sat in its own frame rather than inside the turn; the
+abandoned generator was then finalised by `asyncio.run`'s async-generator shutdown, which raises
+`GeneratorExit` — so the test passed against the unfixed code. It now waits for the agent to signal
+that it has stalled, guaranteeing the cancel lands inside the turn, and asserts *before* the loop
+closes.
+
+**Result, measured on the real stack** (live Anthropic, Postgres sessions, disconnect after a
+`tool_call` event was seen on the wire):
+
+| | before | after |
+|---|---|---|
+| single replica: session freed after | **60.9 s** | **0.0 s** |
+| two replicas, next turn on the other process | **HTTP 409** | HTTP 200, answered in 4.8 s |
+| unmatched `tool_use` ids left in durable history | — | none |
+
+The two-replica row is the one that matters for the shipped chart: a process that never served the
+abandoned turn has only the `session_turns` row to go on, so the durable claim is the entire guard
+there and its release is the entire fix.
+
+**Cost.** Cleanup now outlives the request that scheduled it, by one task and typically ~140 ms.
+That is the price of cleanup that runs at all, and it is bounded: the task does one DELETE and
+cannot fail outward.
+
+## D-131 — The connector health probe follows the address override, instead of probing the pod itself
+
+**Context.** Re-running Stage 5e's connector-kill scenario after D-130 produced a result that could
+not be read: `/readyz` reported every connector `unreachable` **both before and after** the fleet
+was SIGKILLed mid-turn. The scenario exists to prove the unreachable signal is loud (the failure
+D-118 called out, where an agent silently runs with only its in-process tools), and it could not
+distinguish a killed connector from one that was never probed correctly.
+
+It was the latter, and not only in dev. `connectors/registry.py` applied the deployment's
+`connector_urls` override to the connector's *tool* endpoint and nowhere else, while
+`connectors/health.py` read `manifest.endpoint.health_url` straight off the file. A bundle's
+manifest ships a loopback dev default, so the two disagreed the moment the override was set — and
+**the shipped chart always sets it**: `chemclaw.connectorUrls` computes one in-cluster Service URL
+per enabled bundle precisely so the front door does not have to be patched per environment.
+
+The consequence in a cluster is that the front door probed `http://127.0.0.1:881x/healthz` — its own
+pod, where nothing listens. Every connector read `unreachable` however healthy it was, so `/readyz`
+and the `chemclaw_connectors_unhealthy` gauge were decorative; and under `connectors_required: true`
+— the GxP fail-fast posture, the one a regulated deployment would pick — the probe raises at
+startup, so the front door would have failed to start every time, with a message blaming connectors
+that were fine.
+
+**Decision.** One public `connectors.registry.health_url(manifest)`, and the probe goes through it.
+The probe is a second caller of the override, so the override is what it must ask.
+
+The move is a **suffix replacement, not an origin swap**, because the two deployments that exist put
+a connector in different *places* rather than merely on different hosts:
+
+| | endpoint | health |
+|---|---|---|
+| Helm (per-bundle Service) | `http://…-connector-chem:8814/mcp` | `…:8814/healthz` |
+| `scripts.connectors_dev` (one port, mounted by name) | `http://127.0.0.1:8810/chem/mcp` | `…/chem/healthz` |
+
+Keeping the health path verbatim is right for the first and wrong for the second — `…:8810/healthz`
+is a 404 there, which is exactly why the dev topology never revealed the bug. So the manifest's own
+two URLs define the relationship (whatever distinguishes its health URL from its endpoint URL), and
+that difference is re-applied at the effective address. An override that does not end the way the
+manifest's endpoint does falls back to the declared URL: possibly wrong, but not silently invented.
+
+**Result, measured on the running stack** with the dev composite serving all six bundles:
+
+| | before | after |
+|---|---|---|
+| `/readyz` with every connector healthy | `bo=unreachable, calc=unreachable, chem=unreachable, molfp=unreachable, rxnfp=unreachable, safety=unreachable` | `bo=healthy, calc=healthy, chem=healthy, molfp=healthy, rxnfp=healthy, safety=healthy` |
+| `/readyz` after the fleet is killed mid-turn | (unchanged — indistinguishable) | all six flip to `unreachable` |
+
+With the signal working, the scenario finally reports something: the turn whose connector died at
+2.7 s still **answered**, retrying tools three times against a dead server and finishing in 39 s, and
+the next turn completed on the reduced surface. Losing a connector costs capability, not the
+conversation — which is what `connectors_required: false` promises and what had never actually been
+observed end to end.
+
+**Why no test caught it.** Every registry test asserted the override on the tool URL
+(`test_connector_urls_override_the_manifest_address`) and no test asserted anything about the probe
+URL at all, so the two halves of one address were covered asymmetrically. `tests/test_deploy_chart.py`
+checks that the chart *computes* the URLs; nothing checked that everything reading an address goes
+through the same function. Three tests now pin it, including the path-moving case that the naive
+origin swap would fail.
+## D-132 — The shipped defaults were never executed: three configurations that fail on first contact
 
 An intense review of the agentic system, asked to find ways to make it faster *and* more reliable
 at once. The performance leads it started from were mostly already fixed (D-119 pooling, D-121
