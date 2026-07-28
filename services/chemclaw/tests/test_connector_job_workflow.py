@@ -23,6 +23,7 @@ Temporal-backed test here.
 """
 
 import asyncio
+import inspect
 from pathlib import Path
 from typing import Any
 
@@ -30,8 +31,11 @@ import pytest
 from temporalio.client import Client
 from temporalio.worker import Worker
 
+from agents.session_events import record_session_event
 from connectors.jobs import build_job_tool, job_workflow_id
 from connectors.registry import discovered, enabled
+from kg.note import Note
+from kg.pr_gate import propose_note
 from tests.fixtures.connectors.fixture.workflows import FixtureJobWorkflow
 from tests.temporal_env import pydantic_client, start_env_or_skip
 from workflows.connector_job import ConnectorJobResult, ConnectorJobWorkflow
@@ -56,6 +60,40 @@ def test_the_wrapper_is_served_by_the_background_worker() -> None:
     from workers.background_worker import BACKGROUND_WORKFLOWS
 
     assert ConnectorJobWorkflow in BACKGROUND_WORKFLOWS
+
+
+def test_the_publish_activity_calls_the_pr_gate_the_way_the_pr_gate_expects(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Sandbox-safe for the same reason as the test above, and written because that gap bit.
+
+    `publish_memory_note_activity` is the single path every machine-written note takes to the
+    graph, and the only test exercising it needed a Temporal server — so it skipped on every local
+    run. When `propose_note` gained a `dependencies` argument (D-133) and the end-to-end test's
+    stub did not, nothing local failed: the drift only surfaced in CI, as a note that was silently
+    never published.
+
+    This calls the activity directly with the gate stubbed, so the call shape is checked wherever
+    the suite runs. `bind` against the real signature is the assertion — it fails on a missing,
+    misspelled or reordered argument without restating the signature here and inviting the same
+    drift one level down.
+    """
+    seen: dict[str, Any] = {}
+
+    async def _capture(*args: Any, **kwargs: Any) -> str:
+        bound = inspect.signature(propose_note).bind(*args, **kwargs)
+        seen.update(bound.arguments)
+        return "pr://note/n"
+
+    monkeypatch.setattr("workflows.memory_jobs.propose_note", _capture)
+    monkeypatch.setattr("workflows.memory_jobs.default_submitter", lambda: object())
+
+    note = Note(id="n", type="job-result", created_by="agent", body="no links")
+    assert asyncio.run(publish_memory_note_activity(note)) == "pr://note/n"
+    assert seen["note"] is note
+    # The dependency list is passed, not omitted — a note that links a compound must carry it into
+    # the same PR or the link dangles on the branch it is proposed on.
+    assert seen["dependencies"] == []
 
 
 def test_a_connector_workflow_returns_a_well_formed_envelope(
@@ -107,16 +145,37 @@ def test_a_connector_job_runs_its_own_workflow_and_core_does_the_rest(
     published: list[Any] = []
     notified: list[tuple[str, str, dict[str, Any]]] = []
 
-    async def _fake_propose(note: Any, _submitter: Any) -> str:
-        """Capture the PR-gate proposal instead of pushing a git branch."""
-        published.append(note)
+    async def _fake_propose(*args: Any, **kwargs: Any) -> str:
+        """Capture the PR-gate proposal instead of pushing a git branch.
+
+        Bound against the *real* `propose_note` signature rather than restating it. A hand-written
+        stub signature is invisible to `mypy --strict` (the patched attribute is untyped) and only
+        executes where a Temporal server exists — so when `propose_note` gained a `dependencies`
+        argument, this stub raised `TypeError` inside the activity, the note was never published,
+        and the failure surfaced as `[] == ['fixture-benzene']` in CI alone. Binding makes the drift
+        impossible to reintroduce: the stub accepts exactly what the real function accepts.
+        """
+        bound = inspect.signature(propose_note).bind(*args, **kwargs)
+        note = bound.arguments["note"]
+        published.append((note, bound.arguments.get("dependencies")))
         return f"note/{note.id}"
 
-    async def _fake_record(
-        session_id: str, kind: str, payload: dict[str, Any], *, dedupe_key: str | None = None
-    ) -> None:
-        """Capture the push-back event instead of inserting a `session_events` row."""
-        notified.append((session_id, kind, payload))
+    async def _fake_record(*args: Any, **kwargs: Any) -> None:
+        """Capture the push-back event instead of inserting a `session_events` row.
+
+        Bound for the same reason as the stub above. Its hand-written signature happens to be
+        correct today, which is exactly why it is worth converting: nothing would report it
+        drifting, and the failure mode — a session that is silently never woken — reads as a
+        Temporal timing problem rather than as a broken stub.
+        """
+        bound = inspect.signature(record_session_event).bind(*args, **kwargs)
+        notified.append(
+            (
+                bound.arguments["session_id"],
+                bound.arguments["kind"],
+                bound.arguments["payload"],
+            )
+        )
 
     # Stub what the activities *do*, not the activities themselves — see the module docstring.
     monkeypatch.setattr("workflows.memory_jobs.propose_note", _fake_propose)
@@ -183,8 +242,12 @@ def test_a_connector_job_runs_its_own_workflow_and_core_does_the_rest(
     # only thing that makes it attributable (F4-T3, D-118).
     assert result.data["requested_by"] == _ACTOR
     # Core PR-gated the note the connector produced; the connector never touched the graph itself.
-    assert [note.id for note in published] == ["fixture-benzene"]
-    assert published[0].created_by == "agent"  # so a human must sign it off at the gate
+    assert [note.id for note, _ in published] == ["fixture-benzene"]
+    assert published[0][0].created_by == "agent"  # so a human must sign it off at the gate
+    # And it went through the gate as a note *with its dependencies* (D-133): the fixture note
+    # links no compound, so the list is empty — but it is a list, which is what proves core passed
+    # the argument at all rather than falling back to the single-file submission this replaced.
+    assert published[0][1] == []
     # Core woke the launching session, through the one existing push-back channel.
     assert len(notified) == 1
     session_id, kind, payload = notified[0]
