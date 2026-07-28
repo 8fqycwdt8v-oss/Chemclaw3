@@ -62,7 +62,9 @@ def test_llm_provider_defaults_to_anthropic() -> None:
     """The default provider is the dev path, so the config singleton is valid with no endpoint."""
     settings = Settings(_env_file=None)  # type: ignore[call-arg]
     assert settings.llm_provider == "anthropic"
-    assert settings.llm_temperature == 0.0
+    # Unset, not 0.0: the default `agent_model` rejects an explicit temperature outright, so a
+    # default of 0.0 made the shipped config fail every live turn with a 400.
+    assert settings.llm_temperature is None
     assert settings.llm_max_tokens == 4096
 
 

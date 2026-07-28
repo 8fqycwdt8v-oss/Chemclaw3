@@ -506,7 +506,15 @@ class LlmSettings(BaseSettings):
     llm_tls_ca_bundle: str = ""
     llm_timeout_seconds: float = Field(default=60.0, gt=0)
     llm_max_retries: int = Field(default=3, ge=0)
-    llm_temperature: float = Field(default=0.0, ge=0)
+    # Unset by default, and that default is load-bearing: current frontier models (the shipped
+    # `agent_model`, claude-sonnet-5) reject an explicit `temperature` outright —
+    # `400 invalid_request_error: temperature is deprecated for this model` — so a config that
+    # always sent one failed *every* turn on the default Anthropic path. No test caught it
+    # because every test injects a fake chat client, so the parameter never reached a real API.
+    # `None` means "send no temperature and let the model use its own default"; a deployment on a
+    # model that still accepts one sets it explicitly. Threaded into the agent by `build_agent`,
+    # which omits the key entirely when this is None (F0.3).
+    llm_temperature: float | None = Field(default=None, ge=0)
     llm_max_tokens: int = Field(default=4096, gt=0)
     # Per-task model routing (plan F10-E). Maps a task name to the model id to use for it, so a
     # cheap model can run high-throughput/secondary steps (verification, classification) while

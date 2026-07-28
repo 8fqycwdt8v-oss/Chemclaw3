@@ -153,3 +153,4 @@ number is one another session will take.
 | D-121 | The front door as a multi-process service: pure-ASGI headers, a durable turn claim, a pool timeout that sheds |
 | D-122 | The GxP audit trail defaults to durable, because opting in per call site did not work |
 | D-123 | One agent per concurrent turn: a shared chat client corrupts streamed tool calls |
+| D-124 | The shipped defaults were never executed: three configurations that fail on first contact |

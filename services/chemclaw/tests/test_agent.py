@@ -55,8 +55,30 @@ def _endpoint_bundles() -> set[str]:
 def test_agent_applies_default_generation_options() -> None:
     """Config-driven temperature/max-tokens are threaded onto the agent's default options (F0.3)."""
     agent = build_agent(chat_client=object())
-    assert agent.default_options["temperature"] == settings.llm_temperature
     assert agent.default_options["max_tokens"] == settings.llm_max_tokens
+    if settings.llm_temperature is not None:
+        assert agent.default_options["temperature"] == settings.llm_temperature
+
+
+def test_agent_omits_temperature_when_unset(monkeypatch: pytest.MonkeyPatch) -> None:
+    """An unset `llm_temperature` must not put `temperature` on the wire at all.
+
+    The shipped default model (claude-sonnet-5) rejects an explicit temperature with
+    `400 invalid_request_error: temperature is deprecated for this model`, so a payload carrying
+    the key — even as null — fails every turn. Sending *no* key is the only correct behaviour, and
+    this pins it: `in` rather than a value comparison, because `temperature=None` would satisfy an
+    equality check while still breaking the real API call.
+    """
+    monkeypatch.setattr(settings, "llm_temperature", None)
+    agent = build_agent(chat_client=object())
+    assert "temperature" not in agent.default_options
+
+
+def test_agent_sends_temperature_when_configured(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A deployment on a model that still accepts a temperature can set one and have it applied."""
+    monkeypatch.setattr(settings, "llm_temperature", 0.2)
+    agent = build_agent(chat_client=object())
+    assert agent.default_options["temperature"] == 0.2
 
 
 def test_agent_advertises_the_domain_tools() -> None:

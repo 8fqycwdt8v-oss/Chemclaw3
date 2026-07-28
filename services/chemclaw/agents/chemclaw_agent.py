@@ -218,10 +218,15 @@ def build_agent(
     ]
     # Default generation params from config (F0.3), applied to every turn unless a run overrides
     # them — so temperature/length are a deployment setting, not a per-call literal.
-    options = ChatOptions(
-        temperature=settings.llm_temperature,
-        max_tokens=settings.llm_max_tokens,
-    )
+    #
+    # `temperature` is passed only when configured. Sending it unconditionally broke every turn on
+    # the default Anthropic path: claude-sonnet-5 answers `400 invalid_request_error: temperature
+    # is deprecated for this model`, so the shipped default config could not complete a single
+    # turn. Omitting the key is not the same as sending None — the wire payload must not carry the
+    # field at all — hence the dict rather than a literal `temperature=` argument.
+    options = ChatOptions(max_tokens=settings.llm_max_tokens)
+    if settings.llm_temperature is not None:
+        options["temperature"] = settings.llm_temperature
     tools = _capability_tools(prof)
     if harness_enabled:
         return _build_harness_agent(client, skills, history, middleware, options, prof, tools)
