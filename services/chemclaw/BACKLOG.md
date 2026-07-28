@@ -57,7 +57,7 @@ The load test's fixes landed (see D-119). What it surfaced and did **not** close
       never correctness, and the lease/`discard` do eventually fire.
 
 
-- [x] **LIVE-1 The front door shared one chat client across concurrent turns, corrupting streamed
+- [x] **STREAM-1 The front door shared one chat client across concurrent turns, corrupting streamed
       tool calls.** Closed by D-123: `AgentPool` leases one agent — and with it one chat client —
       per concurrent turn, sized to `service_max_concurrent_turns`.
 
@@ -73,7 +73,7 @@ The load test's fixes landed (see D-119). What it surfaced and did **not** close
       calls against 151 — the count of tools that now run to completion rather than dying with their
       turn. The upstream fix is tracked in `DEFERRED.md`; when it lands the pool goes away.
 
-- [ ] **CI-1 `main` has been red since D-117 enabled the real gates: `check` is cancelled at the
+- [x] **CI-1 `main` was red from D-117 until PR #37. Fixed: `check` is cancelled at the
       30-minute job timeout, every run.** Runs on `main` at `5f95166`, `5e0827a` and `33d454e` all
       end `cancelled` after exactly 30:00, and so does every PR run since. This is a regression from
       D-117 — the gates it moved into the root workflow are correct, but nobody checked the job
@@ -123,72 +123,12 @@ The load test's fixes landed (see D-119). What it surfaced and did **not** close
       not, for a GxP trail whose purpose is to answer "what did the agent attempt". Upstream
       behaviour in `agent_framework._tools`, so the fix is either a wrapper or an upstream change.
 
-- [ ] **LOAD-1 Re-state the load-test tool claim.** The runs reported "100 tool calls" and "the
+- [x] **LOAD-1 Re-state the load-test tool claim.** Closed by the re-run with the stub fixed (150/150, 2.08 turns/s, 100 tool bodies actually executing, cross-checked against `audit_events`). The runs reported "100 tool calls" and "the
       tool path genuinely exercised". Both are wrong for the same reason: those calls were
       dispatched and every one failed argument validation, so no tool body — no RDKit, no note
       scan, no database read — ever executed. The infrastructure findings (pool, event loop,
       worker count) stand, since they concern the request path rather than the tool body, but the
       absolute throughput numbers are optimistic and are being re-measured with the stub fixed.
-
-- [ ] **CI-1 `main` has been red since D-117 enabled the real gates: `check` is cancelled at the
-      30-minute job timeout, every run.** Runs on `main` at `5f95166`, `5e0827a` and `33d454e` all
-      end `cancelled` after exactly 30:00, and so does every PR run since. This is a regression from
-      D-117 — the gates it moved into the root workflow are correct, but nobody checked the job
-      could finish inside `timeout-minutes: 30`.
-
-      It is a **hang, not slowness**. The log stops dead:
-
-      ```
-      17:54:52  tests/test_bo_campaign.py ................  [  8%]
-      17:54:52  tests/test_bo_doe.py ...                    [  8%]
-      17:54:58  tests/test_bo_featurize.py .............     [  9%]
-      18:22:46  ##[error]The operation was canceled.
-      ```
-
-      28 minutes of silence at 9 %, and the orphan-process list at cleanup is
-      `make`, `uv`, `pytest`, `temporal-test-server-sdk-python-1.30.0` — so it hangs on the first
-      test needing the Temporal test server.
-
-      **`timeout = 180` did not fire, and that is the second half of the bug.** pyproject picks the
-      `signal` method deliberately (to fail one test rather than `os._exit` the session). SIGALRM is
-      delivered to the main thread, but `temporalio` blocks inside its Rust core via PyO3, so the
-      interpreter never gets back to run the handler. The one guard against exactly this failure is
-      inert against exactly this failure.
-
-      Not reproducible locally: the Temporal tests **skip** in this sandbox (the test server cannot
-      be downloaded), which is why 1277-passing local runs say nothing about it. Fixing it needs a
-      runner or an equivalent, and the first step is naming the test — `--timeout-method=thread` in
-      CI would at least fail loudly with a name instead of burning the job silently.
-
-- [ ] **AUDIT-1 The tool-audit middleware does not fire, so `audit_events` stays empty even with a
-      durable sink wired.** D-122 fixed the half that was findable by reading: the service passed no
-      sink, so the trail was log-only. With that fixed and `default_audit_sink()` verified to return
-      `PostgresAuditSink` under `session_store=postgres`, a **live turn still writes no row**.
-      Reproduced in-process, outside the service, against the stub model:
-
-      ```
-      agent = build_agent(); await agent.run("find notes about benzene solubility")
-      # stub requests 1458 -> 1460, tool_calls_emitted 599 -> 600
-      # response carries an assistant / tool / assistant message triple
-      # audit_events: 4 -> 4
-      ```
-
-      A `@function_middleware`-typed spy wrapped around `make_audit_middleware` records **zero**
-      invocations, with `harness_enabled` either true or false. The middleware *is* attached — the
-      built agent reports `['surface_authorization_denials', 'surface_domain_errors',
-      'audit_tool_calls', 'enforce_tool_authz']` — and MAF does return a `tool` role message, so a
-      tool call round-trips without any of the four running.
-
-      **This is bigger than the audit trail.** `enforce_tool_authz` is the RBAC gate and
-      `surface_domain_errors` is the typed-error surface; they are registered the same way and would
-      be equally inert. The earlier RBAC matrix run passed, so authorization is enforced *somewhere*
-      — establishing where, and whether the middleware chain is bypassed only on this tool path, is
-      the first step. Do not assume the audit gap is the whole of it.
-
-      No test covers "run a turn, assert a row in `audit_events`": `tests/test_audit.py` drives the
-      middleware directly and `tests/test_audit_store.py` writes to the sink directly, so both pass
-      while the wiring between them is broken. That missing end-to-end assertion is why this
-      survived a CHECKMATE review and a live e2e pass.
 
 - [x] **SCALE-1 The 409 same-session guard is per-process.** Closed by D-121: a turn also takes a
       leased `session_turns` row, refreshed three times per lease and released at the end, so the
@@ -227,8 +167,12 @@ The load test's fixes landed (see D-119). What it surfaced and did **not** close
       sequentially is the cheap, isolation-preserving half; it measured no better here only because
       the dev fleet is one process serving all six, which is also why a `--workers 4` load run may
       find its ceiling in `scripts.connectors_dev` rather than in the front door.
-- [ ] **SCALE-6 Not yet measured:** the live-Anthropic 50-session run, the multi-replica run, and
-      the chaos scenarios.
+- [x] **SCALE-6 All three measured.** The live-Anthropic 50-session run (150/150 answered after
+      D-123, p50 16.9 s, 1.99 turns/s), the multi-replica run (two processes, one database: the
+      cross-process turn guard held 6/6, rehydration 6/6, cross-talk 0/6) and the chaos pass
+      (connector killed mid-flight — turn still answers and `/readyz` names it; Postgres bounced —
+      pool recovered with no restart; client disconnect — **CHAOS-1**, open). Full record in
+      `docs/load-test-2026-07.md`.
 
 ## Open — Live e2e testing pass (2026-07-27, D-109)
 

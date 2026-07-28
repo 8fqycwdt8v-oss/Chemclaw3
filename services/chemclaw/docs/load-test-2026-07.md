@@ -406,7 +406,7 @@ It is a *different* fault from the harness streaming 400 already in `DEFERRED.md
 one is on the **classic path with `harness_enabled` off** — the shipped default — and it is in
 `agent_framework`'s accumulation of streamed tool-call deltas, not in code this repo owns.
 
-Tracked as **LIVE-1**. It is the highest-severity open item, and nothing but a live run finds it:
+Tracked as **STREAM-1** (`LIVE-1` was already taken by the earlier e2e pass). It is the highest-severity open item, and nothing but a live run finds it:
 the stub emits one tool call per response and never validates the assistant message it is handed
 back, so every stub run above reported a clean 150/150.
 
@@ -417,12 +417,12 @@ The stub run proves the **infrastructure** carries 50 concurrent users: 150/150,
 model** — 150/150 admitted, same absence of infrastructure failures, 1.76 turns/s — and that a
 one-in-five turn is then lost to a client-library defect between us and the provider.
 
-Fixing LIVE-1 is what stands between "50 chemists can use this" and "50 chemists can use this
+Fixing STREAM-1 is what stands between "50 chemists can use this" and "50 chemists can use this
 reliably". Everything under it is now measured rather than assumed.
 
 ---
 
-# LIVE-1 FIXED: the same run, 150 answers and zero errors
+# STREAM-1 FIXED: the same run, 150 answers and zero errors
 
 `AgentPool` (D-123) leases one agent — and with it one chat client — per concurrent turn. Same
 harness, same stack, same 50 live users:
