@@ -58,6 +58,7 @@ from typing import Any, Literal
 import numpy as np
 from pydantic import BaseModel
 
+from calc.artifacts import too_large
 from calc.structure import Structure
 from chemclaw.config import settings
 
@@ -127,6 +128,11 @@ class CliResult(BaseModel):
     ir_intensities: list[float] | None = None
     cycles: int | None = None
     properties: dict[str, Any] = {}
+    # Raw files the run left behind, read before the temporary directory is destroyed (D-124).
+    # This model is an in-process value — the cache stores `OptimizationResult` and
+    # `ThermochemistryResult`, never this — so carrying bytes here changes no persisted payload.
+    # The cached caller hands them to the artifact store.
+    artifacts: dict[str, bytes] = {}
 
 
 @lru_cache(maxsize=1)
@@ -353,7 +359,12 @@ def run(
                 task,
                 completed.returncode,
             )
-        return _collect(directory, structure, task, completed.stdout)
+        # Capture *after* `_collect` succeeds, so a parse failure raises exactly as it did
+        # before this existed. The trade-off is deliberate: the raw files are then unavailable
+        # for a post-mortem on a parse failure, which is not worth plumbing bytes onto an
+        # exception to fix.
+        result = _collect(directory, structure, task, completed.stdout)
+        return result.model_copy(update={"artifacts": _capture(directory, task)})
 
 
 # What each task must leave behind for its run to have succeeded. Checked because xtb's
@@ -372,6 +383,46 @@ _REQUIRED_OUTPUTS: dict[CliTask, tuple[str, ...]] = {
 def _produced_everything(directory: Path, task: CliTask) -> bool:
     """Whether the run left every file its task is defined by."""
     return all((directory / name).exists() for name in _REQUIRED_OUTPUTS[task])
+
+
+# What is worth keeping past the temporary directory (D-124). Derived from `_REQUIRED_OUTPUTS`
+# rather than restated — the declaration that says what a task must produce is the same one that
+# says what there is to keep, so the two cannot drift.
+#
+# `sp` is the one exclusion: its `xtbout.json` is already parsed *in full* into
+# `CliResult.properties` and lands in the cached JSON result, so storing the file too would be a
+# second copy of the cache with none of the value.
+_CAPTURED: dict[CliTask, tuple[str, ...]] = {
+    task: names for task, names in _REQUIRED_OUTPUTS.items() if task != "sp"
+}
+
+
+def _capture(directory: Path, task: CliTask) -> dict[str, bytes]:
+    """Read the run's keepable by-products before its temporary directory is destroyed.
+
+    Every file is `stat`ed before it is read, so an artifact over `artifact_max_bytes` is skipped
+    without ever entering memory. A missing or unreadable file is skipped silently: these are
+    by-products, and `_produced_everything` has already decided whether the run itself succeeded.
+    """
+    if not settings.artifact_store_enabled:
+        return {}
+    captured: dict[str, bytes] = {}
+    for name in _CAPTURED.get(task, ()):
+        path = directory / name
+        try:
+            size = path.stat().st_size
+        except OSError:
+            continue
+        if too_large(size):
+            logger.warning(
+                "xtb %s: %s is %d bytes, over the artifact cap — not captured", task, name, size
+            )
+            continue
+        try:
+            captured[name] = path.read_bytes()
+        except OSError:
+            continue
+    return captured
 
 
 def _collect(directory: Path, structure: Structure, task: CliTask, log: str) -> CliResult:
