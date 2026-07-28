@@ -249,42 +249,69 @@ async def run_turn(
                     last_plan = current_plan
                     yield PlanEvent(todos=last_plan)
         yield await _answer_event("".join(answer_parts))
-    except GeneratorExit:
-        # The client went away mid-turn, so this generator is being closed. Roll the session
-        # back to its pre-turn state: a half-written turn is worth less than the conversation it
-        # would otherwise poison (see the snapshot above). Needs its own clause because
-        # GeneratorExit derives from BaseException, not Exception; re-raised so the generator
-        # still closes.
+    except (GeneratorExit, asyncio.CancelledError):
+        # The turn is being torn down from outside — the client went away, or the front door's
+        # wall-clock deadline expired. Roll the session back to its pre-turn state: a half-written
+        # turn is worth less than the conversation it would otherwise poison (see the snapshot
+        # above). Needs its own clause because both derive from BaseException, not Exception;
+        # re-raised so the generator still closes and a timeout still surfaces as one.
+        #
+        # **`CancelledError` belongs here and its absence made this clause dead code on the only
+        # path that matters** (D-124). sse-starlette answers `http.disconnect` by cancelling its
+        # task group; it never calls `aclose()` on the body iterator, so a real disconnect
+        # delivers `CancelledError` and this rollback was skipped every single time. It looked
+        # covered because the suite closed the stream by hand — the one thing production does
+        # not do. Measured on a live front door: the agent's stream received `CancelledError`,
+        # never `GeneratorExit`. The read-time repair in `agents.session_store` is why this was a
+        # silent weakness rather than an outage; it strips the unmatched tool call on the next
+        # read, but only the rollback discards the rest of the abandoned turn.
         logger.warning(
-            "client disconnected during turn for session %s; rolling session state back",
+            "turn for session %s was torn down before it answered (client disconnect or the "
+            "front door's turn deadline); rolling session state back",
             session.session_id,
         )
         session.state.clear()
         session.state.update(state_snapshot)
         if history is not None and hasattr(history, "rollback_to"):
-            # Shielded: this generator is already closing, so an inner `await` would otherwise be
-            # cancelled straight away and leave the half-written turn committed after all.
-            try:
-                deleted = await asyncio.shield(
-                    history.rollback_to(session.session_id, history_watermark)
-                )
+
+            async def _roll_back() -> None:
+                """Delete this turn's committed rows, reporting its own failure.
+
+                Shielded by the caller, so this runs as a task that outlives the cancelled turn —
+                a plain `await` here would be cancelled at its first suspension point and leave
+                the half-written turn committed after all. It swallows its own errors for the same
+                reason the durable claim release does (D-124): once the awaiting task is
+                cancelled, `shield` stops collecting the inner result, so a failure raised here
+                would surface only as an unattributed `Task exception was never retrieved`.
+                """
+                try:
+                    deleted = await history.rollback_to(session.session_id, history_watermark)
+                except Exception:  # noqa: BLE001 - a cleanup aid must not replace the teardown
+                    logger.warning(
+                        "could not roll durable history back for session %s; the next turn's "
+                        "read-time repair will drop any unmatched tool call",
+                        session.session_id,
+                        exc_info=True,
+                    )
+                    return
                 if deleted:
                     logger.warning(
                         "rolled %d durable message(s) back for session %s",
                         deleted,
                         session.session_id,
                     )
+
+            try:
+                await asyncio.shield(_roll_back())
             except BaseException:  # noqa: BLE001 - see below; nothing here may escape
-                # `BaseException`, not `Exception`: a disconnect usually cancels this task, so the
-                # shielded await can raise `CancelledError`. Letting that out would replace the
-                # `GeneratorExit` we are handling and leave the generator improperly closed. The
-                # bare `raise` below re-raises the original either way, and the next turn's
-                # read-time repair is the backstop if this cleanup never ran.
-                logger.warning(
-                    "could not roll durable history back for session %s; the next turn's "
-                    "read-time repair will drop any unmatched tool call",
+                # `BaseException`, not `Exception`: the teardown that brought us here cancels this
+                # task, so the shielded await raises `CancelledError` as soon as it suspends —
+                # while the rollback itself carries on in its own task. Letting that out would
+                # replace the teardown exception we are handling and leave the generator
+                # improperly closed. The bare `raise` below re-raises the original either way.
+                logger.debug(
+                    "the rollback for session %s outlived its turn; it completes on its own task",
                     session.session_id,
-                    exc_info=True,
                 )
         raise
     except Exception:
