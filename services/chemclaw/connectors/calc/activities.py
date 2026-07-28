@@ -24,6 +24,7 @@ queues, and a connector's queue is the connector's own business.
 """
 
 import asyncio
+from typing import Any
 
 from temporalio import activity
 
@@ -33,6 +34,7 @@ from calc.postgres_store import default_store
 from calc.reaction import compare_solvent_effects, compute_reaction_energy
 from calc.structure import structure_from_smiles
 from calc.xtb_scan import ScanSpec, run_cached_scan
+from chemclaw.config import settings
 from connectors.calc.results import XtbJobResult
 from connectors.calc.specs import (
     ComplexJobSpec,
@@ -47,6 +49,43 @@ from workflows.registry import durable_activity
 
 
 @durable_activity(bundle_queue("calc"))
+async def _beating(awaitable: Any, what: str) -> Any:
+    """Await `awaitable` while heartbeating, so a long opaque run is not declared dead.
+
+    The other xTB tasks report progress *between* units of work — one species, one solvent, one
+    scan point — and pass `activity.heartbeat` down as that callback. The two CREST searches
+    cannot: each is a single subprocess with no unit boundary to report at, so `run_cached_ensemble`
+    and `run_cached_interaction` take no `progress` argument at all. That left the only heartbeat
+    on these two paths the `"starting {kind}"` line at the top of the activity.
+
+    Which is the wrong way round. These are the only two jobs marked `expensive: true`, and their
+    own manifest says a search's cost "is not bounded by the input's size". Against
+    `xtb_job_heartbeat_timeout_seconds` (600 s) a CREST run over ten minutes was declared dead and
+    retried — up to `activity_max_attempts` times, each restarting from zero because the store is
+    written only on completion. Roughly fifty minutes of saturated CPU spent to fail a calculation
+    that would have succeeded.
+
+    A timer rather than a progress callback because there is genuinely nothing to report: the
+    honest signal is "still running", and pretending to know how far along it is would be a worse
+    lie than saying nothing. The beat interval is derived from the configured heartbeat timeout so
+    the two cannot drift apart — a deployment that shortens the timeout shortens the beat with it.
+    """
+    task = asyncio.ensure_future(awaitable)
+    interval = max(1.0, settings.xtb_job_heartbeat_timeout_seconds / _HEARTBEATS_PER_TIMEOUT)
+    elapsed = 0.0
+    while True:
+        done, _ = await asyncio.wait({task}, timeout=interval)
+        if done:
+            return await task
+        elapsed += interval
+        activity.heartbeat(f"{what}: still running after {elapsed:.0f}s")
+
+
+# Beats per heartbeat timeout. Several, not one: a single beat at the deadline leaves no margin
+# for scheduling jitter, and Temporal only needs to hear *something* before the timeout lapses.
+_HEARTBEATS_PER_TIMEOUT = 4.0
+
+
 @activity.defn
 async def run_xtb_calculation(job: XtbJobInput) -> XtbJobResult:
     """Run one durable xTB task and return its typed result.
@@ -123,10 +162,13 @@ async def run_xtb_calculation(job: XtbJobInput) -> XtbJobResult:
         structure = await asyncio.to_thread(
             structure_from_smiles, spec.smiles, multiplicity=None, optimize=True
         )
-        ensemble, _ = await run_cached_ensemble(
-            store,
-            structure,
-            ConformerSpec(search=spec.search, solvent=spec.solvent, effort=spec.effort),
+        ensemble, _ = await _beating(
+            run_cached_ensemble(
+                store,
+                structure,
+                ConformerSpec(search=spec.search, solvent=spec.solvent, effort=spec.effort),
+            ),
+            f"{spec.search} of {spec.smiles}",
         )
         return XtbJobResult(
             kind=spec.kind,
@@ -137,11 +179,14 @@ async def run_xtb_calculation(job: XtbJobInput) -> XtbJobResult:
             ensemble=ensemble,
         )
     if isinstance(spec, ComplexJobSpec):
-        interaction, _ = await run_cached_interaction(
-            store,
-            spec.smiles_a,
-            spec.smiles_b,
-            ComplexSpec(solvent=spec.solvent, effort=spec.effort),
+        interaction, _ = await _beating(
+            run_cached_interaction(
+                store,
+                spec.smiles_a,
+                spec.smiles_b,
+                ComplexSpec(solvent=spec.solvent, effort=spec.effort),
+            ),
+            f"interaction of {spec.smiles_a} and {spec.smiles_b}",
         )
         return XtbJobResult(
             kind=spec.kind,
