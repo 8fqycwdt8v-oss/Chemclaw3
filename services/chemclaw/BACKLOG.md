@@ -3,6 +3,98 @@
 Prioritized open action items. Top = next. Keep in sync with `docs/implementation-plan.md`
 (phase/step numbers) at session end.
 
+## Open — Agentic system review (2026-07-28, D-124)
+
+Full record: `docs/audit/2026-07-agentic-system-review.md`. Three shipped defaults were fatal on
+first contact and are fixed; the rest is open, in priority order. The review's method note is the
+part worth keeping: a shipped default is a claim about the world, and the only way to check a
+claim about the world is to run it.
+
+- [ ] **REV-1 [Critical] The pre-execution approval gate does not exist.** MAF injects `mode_set`
+      into the model's own tool surface with `approval_mode="never_require"`, so in `plan_only` —
+      the shipped production configuration — the model flips itself to execute. Nothing binds an
+      approval to a plan, and the audit trail records the flip under the *chemist's* Entra oid.
+      `plan_mode_required_for`, which `docs/harness-konzept.md` §6 specifies, exists nowhere in the
+      code. Fix shape: drop `mode_set` from the injected surface, move the flip to an owner-scoped
+      route recording `(session_id, plan_hash, actor, decided_at)` — mirroring
+      `POST /approvals/{id}/decision`, which already got this right for jobs. Needs an ADR.
+- [ ] **REV-2 [High] Nothing scrapes `/metrics`.** No ServiceMonitor, PodMonitor or scrape
+      annotation anywhere under `deploy/`. Every metric in the system is uncollected in production.
+- [ ] **REV-3 [High] The two `expensive: true` CREST jobs heartbeat once** against a 600 s
+      heartbeat timeout. `run_cached_ensemble`/`run_cached_interaction` have no `progress`
+      parameter at all, so this is plumbing, not a kwarg. Each retry restarts CREST from zero
+      (the store is written only on completion): ~50 min of saturated CPU to fail a job that would
+      have succeeded. Third instance: `calc/reaction.py` at `level="thorough"`.
+- [ ] **REV-4 [High] After-run compaction is a silent no-op under `session_store=postgres`** (the
+      production default). MAF reads `session.state[source_id]["messages"]`, whose only writer is
+      `InMemoryHistoryProvider`. So `session_messages` is read with no LIMIT every turn and a
+      long-lived session re-reads its whole history before every model call. The docstring promises
+      the opposite. *Confirm on a real deployment before acting.*
+- [ ] **REV-5 [High] `retrieval_recall`/`retrieval_precision` are absent from `evals/baseline.json`**,
+      so the only metrics that run a live retriever have zero drift coverage — verified by
+      collapsing both to 0.0 and getting no alert. Also give `save_baseline` a Makefile target; it
+      has no caller today, which is how the two metrics drifted out.
+- [ ] **REV-6 [Med] `open_reachable`'s unreachable-connector list is discarded by all four
+      callers**, though its docstring says it is "for the caller to surface". A turn answers with a
+      silently degraded capability set; in `template_activities` the output enters the PR-gate with
+      no marker.
+- [ ] **REV-7 [Med] Job→session push-back is at-most-once.** Rows are marked `consumed_at` by the
+      claiming UPDATE before any is yielded, so a consumer lost between claim and yield loses them
+      permanently. The digest subsystem chose at-least-once for the same problem.
+- [ ] **REV-8 [Med] CHAOS-1: the blocker named in this file is the wrong object.** Not the
+      in-process `active_turns` set (`discard` is synchronous, before the await) — it is the 60 s
+      `session_turns` lease. `_release_turn_claim` catches `RuntimeError`, which is what Python
+      raises when a closing async generator awaits something that suspends. The measured 63 s
+      matches `service_turn_claim_lease_seconds`. Both previously discarded theories were about the
+      wrong object; the detached-task experiment failed because the task had no strong reference.
+- [ ] **REV-9 [Med] Prompt caching: ~14.6 k fixed prefix per model call** (measured; ~20.5 k with
+      connector tools), re-paid every call and up to 25× per turn in harness mode, with zero
+      `cache_control` in first-party code. Blocked on three things that must be decided together:
+      MAF exposes no `cache_control` hook for `tools` (the 11 k that dominates), production is
+      `openai_compatible`, and the prefix is not byte-stable because `tools/list` is re-fetched per
+      turn — one flapping connector invalidates the whole prefix.
+- [ ] **REV-10 [Med] Token accounting is priced-blind.** `chemclaw_tokens_total` collapses input
+      and output before the counter sees it; cache-read/write are not read at all; the registry
+      supports no labels, so no per-model or per-profile attribution. AG-11 (cost) still open. MAF
+      already implements the full GenAI token model — reachable now that OTel can start.
+- [ ] **REV-11 [Med] `correlation_id` stops at the process boundary.** Not in the connector
+      identity headers, not in `ConnectorJobInput`, not into HPC. ~4 lines to make the audit trail
+      joinable across all four runtimes. Note that fixing OTel does not fix this.
+- [ ] **REV-12 [Med] Prediction calibration pools every calculator version.** `calc_version` is
+      never passed when recording, so the unique index degenerates and a v2 prediction destroys
+      v1's row; the read path has no version predicate either. `calculator_trust` reports the
+      pooled figure. Dormant while `calibration_enabled` is off.
+- [ ] **REV-13 [Med] `find_job` does filesystem I/O inside workflow code**, and the comment above
+      it says it is I/O-free. `ConnectorError` is a `ValueError`, not a `FailureError`, and no
+      `failure_exception_types` is declared — so it fails the *workflow task* and Temporal retries
+      indefinitely. The run hangs rather than failing. No test constructs a `JobStep`.
+- [ ] **REV-14 [Med] Rehydrated and LRU-evicted sessions revert to the default profile**,
+      permanently. The profile is never persisted. Eviction matters more than restart: no TTL, so
+      session 1001 evicts session 1. All three rehydration tests discard the profile argument.
+- [ ] **REV-15 [Med] Chart parity test proves nothing about behaviour.** It constructs
+      `Settings(**helm_values)`; `otel_enabled=True` constructs perfectly and then kills the pod.
+      Two holes: keys from `templates/config.yaml` (`note_repo_dir`, `connector_urls`) are outside
+      it, and there is no inverse test that a production value is *executed*. This is the test
+      class that would have caught two of the three Criticals.
+- [ ] **REV-16 [Med] Dark-by-default flags that arguably should not be.** `budget_enabled` off
+      (the load test that validated the system ran with budgets *on*); `audit_verify_enabled` off,
+      so the tamper-evident chain is never verified; `connectors_required` off.
+- [ ] **REV-17 [Med] `deployment_revision` can never be set in production** — no chart key,
+      Containerfile ARG or build step sets it, though its docstring says the image build injects
+      the digest. AG-14 is unmet while reading as done.
+- [ ] **REV-18 [Low] Missing validators** for combinations the config comments already forbid in
+      prose: `session_store="memory"` with `uvicorn_workers > 1`, `mid_turn_resume_timeout >=
+      turn_timeout`, `budget_enabled` with all caps zero, `embedding_dim` vs the `vector(N)` column.
+- [ ] **REV-19 [Low] `chemclaw_jobs_started_total` and `chemclaw_notes_proposed_total` are never
+      incremented** — a permanent `0`. The gauge path refuses to fabricate zeros; counters get no
+      such protection. Increment them or delete them.
+- [ ] **REV-20 [Low] Anthropic client ignores `llm_timeout_seconds`/`llm_max_retries`/CA bundle.**
+      Actual timeout is the SDK's 600 s, not the configured 60 s. Default for CLI and dev.
+- [ ] **REV-21 [Low] Docs disagree with code:** `harness_max_loop_iterations` is 25, not the 15 in
+      `docs/harness-konzept.md`, and the cap applies in both modes, not only execute.
+      `workflows/template_job.py` calls its own lookup "I/O-free". `agents/chemclaw_agent.py`
+      calls `plan_only` "the pre-execution GxP gate" (REV-1).
+
 ## Done — Process/analytical-development capability research (2026-07-26, D-092)
 
 A survey of open-source ML/cheminformatics and fast-ab-initio packages for chemical and analytical
