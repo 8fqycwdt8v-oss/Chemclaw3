@@ -469,7 +469,7 @@ def test_ingest_indexes_and_proposes() -> None:
         assert ref == "pr://note/reaction-rxn-1"
         assert len(await rxn.all_records()) == 1  # the reaction fingerprint
         assert len(await mol.all_records()) == 3  # ethanol, acetic acid, ethyl acetate
-        assert sub.submissions[0].path.startswith("knowledge/reaction/reaction-rxn-1")
+        assert sub.submissions[0].files[0].path.startswith("knowledge/reaction/reaction-rxn-1")
 
     asyncio.run(_run())
 

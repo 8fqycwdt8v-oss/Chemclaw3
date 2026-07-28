@@ -1,4 +1,4 @@
-"""Durable record of the human decision on a harness plan (REV-1, D-132).
+"""Durable record of the human decision on a harness plan (REV-1, D-137).
 
 The store behind `plan_approvals`. Kept beside `agents.session_store` and using the same DSN
 resolution, because a plan approval is durable session-scoped evidence with exactly the lifetime

@@ -567,6 +567,11 @@ class LlmSettings(BaseSettings):
     embedding_provider: Literal["hash", "openai_compatible"] = "hash"
     embedding_model: str = ""
     embedding_dim: int = Field(default=1536, gt=0)
+    # How many embedded texts to keep in memory (STO-12). Every retrieval embeds its query, and
+    # the same query recurs constantly, so under `openai_compatible` each repeat was a network
+    # round trip on the interactive path. Entries are keyed by provider+model+dim as well as the
+    # text, so a config change can never serve the previous model's vectors. 0 disables the cache.
+    embedding_cache_size: int = Field(default=2048, ge=0)
 
     @model_validator(mode="after")
     def _llm_provider_config(self) -> Self:
@@ -1271,6 +1276,26 @@ class SourcesSettings(BaseSettings):
     # error, not a corpus that silently stops being searched.
     data_sources: str = "graph,eln-json"
 
+    # Where the build baked a vendored reference dataset (STO-14). A *local* path by construction:
+    # the corpus is installed into the image at build time, reviewed once in a pull request like
+    # any other pinned dependency, and read from disk at runtime. D-089's "no external data
+    # sources" is about a runtime dependency on somebody else's service, and there is none here.
+    vendored_dataset_dir: str = "data/vendored"
+    # Check `records.csv` against the checksum in its manifest on load. On by default: the whole
+    # value of vendoring is that the shipped data is provably what was reviewed, and a corpus that
+    # silently drifted from its manifest is worth less than none.
+    vendored_dataset_verify: bool = True
+
+    @property
+    def vendored_dataset_path(self) -> Path:
+        """Where the vendored reference dataset was baked into the image (STO-14).
+
+        A plain path, resolved relative to the process CWD unless set absolutely — unlike
+        `knowledge_path` there is no second location to reconcile, because nothing ever writes
+        here. The corpus is installed by the build and read-only at runtime.
+        """
+        return Path(self.vendored_dataset_dir)
+
     @property
     def data_sources_dirs(self) -> list[str]:
         """The data-source directories, split on the OS path separator (like `PATH`)."""
@@ -1466,6 +1491,17 @@ class RetrievalSettings(BaseSettings):
     # note `confidence` (this default when a note has none), structural hits by their similarity
     # — so a broad sweep drops the least-supported evidence first, not whatever parsed last.
     retrieval_default_confidence: float = Field(default=0.5, ge=0.0, le=1.0)
+    # How far two same-compound, same-type notes' stated confidences must diverge before
+    # `kg.conflicts` calls the pair suspicious (KM-8). Not a claim that they conflict — a claim
+    # that a reader should look. Set low and the flag is noise on every ordinary pair of notes;
+    # set to 1.0 and only a certain/impossible pair trips it. 0.3 is roughly "one note is
+    # confident and the other is hedging".
+    conflict_confidence_gap: float = Field(default=0.3, gt=0.0, le=1.0)
+    # Whether retrieval flags disagreeing notes at all. On by default — two contradictory notes
+    # returned without comment read as corroboration, which is the failure KM-8 names. The switch
+    # exists because detection walks the whole current corpus per query; a deployment measuring a
+    # retrieval regression wants to be able to take it out of the picture.
+    conflict_detection_enabled: bool = True
     # Cache the parsed knowledge graph so interactive retrieval does not re-read + re-parse the
     # whole `knowledge_dir` on every query (KM-14). The cache is keyed by a cheap stat
     # fingerprint of the note tree (path + mtime + size), so any add/edit/delete of a note busts

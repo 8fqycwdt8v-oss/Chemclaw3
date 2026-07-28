@@ -197,3 +197,39 @@ introduced (units, ownership of a cache key, who resolves identity) and check th
 code against each one directly. A clean textual merge says nothing about them. Where the
 invariant is a unit, put it in the *name* — `positions_bohr` vs `conformer_positions` — so
 the next reader cannot get it wrong silently.
+
+## A test double's signature is untyped, and untested where it cannot run (2026-07-28)
+
+`propose_note` gained a `dependencies` argument (D-133). One test stubbed it —
+`tests/test_connector_job_workflow.py` — with a hand-written `_fake_propose(note, _submitter)`.
+The stub then raised `TypeError` inside the activity, the note was never published, and the
+end-to-end assertion failed as `[] == ['fixture-benzene']`.
+
+Two guards that should have caught it did not, for the same underlying reason each time:
+
+- **`mypy --strict` cannot see it.** `monkeypatch.setattr("module.propose_note", stub)` replaces
+  an attribute by string name; there is no typed edge between the stub and the function it
+  stands in for, so a signature mismatch is invisible to static checking.
+- **The suite could not run it.** That test needs a Temporal server, which the offline sandbox
+  cannot fetch, so it skipped on *every* local run — 18 Temporal tests and 38 Postgres tests
+  skip here. Local green meant nothing about them, and I reported "green" without qualifying it.
+
+I merged the regression because I read `make lint type test` passing as proof, when the only
+authority for those 56 tests is CI. I had even written "migration 019 has never actually run" in
+the PR body — the same class of gap — without drawing the general conclusion.
+
+**Rules:**
+
+1. **When changing a function's signature, grep for stubs of it**, not just callers:
+   `git grep -n 'setattr.*<name>"' && git grep -n 'def _fake_<name>'`. A stub is a caller that
+   type-checking cannot see.
+2. **Bind a stub against the real signature** rather than restating it:
+   `inspect.signature(real).bind(*args, **kwargs)`. The double then accepts exactly what the real
+   function accepts, and drift becomes impossible rather than merely detectable.
+3. **When a behaviour's only test is infrastructure-gated, add a sandbox-safe sibling.** This
+   file's own precedent is `test_the_wrapper_is_served_by_the_background_worker`, whose docstring
+   states the argument outright. Calling the activity directly with its one dependency stubbed
+   costs four lines and runs everywhere.
+4. **Never report a suite as green without naming what skipped.** "1377 passed, 69 skipped" is
+   only a claim about 1377 tests. Say which subsystems the skips cover and that CI is their only
+   verification.

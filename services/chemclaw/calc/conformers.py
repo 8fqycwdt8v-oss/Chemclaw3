@@ -71,6 +71,21 @@ class ConformerSpec(CrestSpec):
     # are the populated ones, and a hundred geometries is not something a reader uses.
     max_members: int = Field(default_factory=lambda: settings.crest_max_members, gt=0)
 
+    @classmethod
+    def unkeyed_fields(cls) -> set[str]:
+        """`max_members` is excluded: it truncates a finished ensemble, it does not search (STO-3).
+
+        Every other field here moves the search — `effort` distinguishes a quick pass from an
+        extensive one, `temperature_k` weights the populations — but `max_members` is applied after
+        the fact, in `run_cached_ensemble`. Keying on it meant "show me 20 instead of 10" re-ran
+        CREST, which this module's own docstring calls the most expensive single calculation in the
+        system, to obtain an answer already sitting in the cache.
+
+        The stored ensemble is therefore the *whole* ensemble the search found. `total_found`
+        already reported that number honestly; now the row holds what it counted.
+        """
+        return super().unkeyed_fields() | {"max_members"}
+
 
 class Conformer(BaseModel):
     """One member of an ensemble, with what it contributes.
@@ -146,7 +161,13 @@ def _conformational_entropy(populations: list[float], degeneracies: list[int]) -
 
 
 def compute_ensemble(spec: ConformerSpec, structure: Structure) -> ConformerEnsemble:
-    """Search conformational space around `structure` and weight what was found."""
+    """Search conformational space around `structure` and weight what was found.
+
+    Returns **every** member the search found, not `spec.max_members` of them: the truncation is a
+    presentation choice and belongs to the reader, so it happens in `run_cached_ensemble` where it
+    cannot poison the cache key (STO-3). The populations and the conformational entropy were always
+    computed over the full set — only the returned list was cut — so no number changes here.
+    """
     members = crest_cli.run(
         structure,
         search=spec.search,
@@ -177,7 +198,7 @@ def compute_ensemble(spec: ConformerSpec, structure: Structure) -> ConformerEnse
                 structure=member.structure,
             )
             for energy, population, member in zip(relative, populations, members, strict=True)
-        ][: spec.max_members],
+        ],
         total_found=len(members),
         conformational_entropy_cal_per_mol_k=round(entropy, 3),
         ensemble_correction_kcal=round(-spec.temperature_k * entropy / 1000.0, 3),
@@ -192,6 +213,10 @@ async def run_cached_ensemble(
     Worth caching more than anything else here: a CREST search is the most expensive
     single calculation in the system, and a molecule's ensemble is reused by every
     question anyone later asks about it.
+
+    `max_members` is applied **here**, to the cached ensemble, rather than inside the search: it
+    decides how much of a finished answer a reader sees, so asking for more of one already computed
+    is a cache hit rather than a second search (STO-3).
     """
     spec = spec or ConformerSpec()
     # Off the event loop: deriving the key calls `calc_version()`, whose first call in a
@@ -199,9 +224,22 @@ async def run_cached_ensemble(
     # hash walks every atom. Both are synchronous, and this runs inside the connector's
     # one-loop MCP server and inside Temporal activities that are coroutines.
     key = await asyncio.to_thread(spec.cache_key, structure)
-    return await run_cached(
+    ensemble, was_cached = await run_cached(
         store,
         key,
         lambda: compute_ensemble(spec, structure),
         ConformerEnsemble,
     )
+    return truncated(ensemble, spec.max_members), was_cached
+
+
+def truncated(ensemble: ConformerEnsemble, max_members: int) -> ConformerEnsemble:
+    """The ensemble with at most `max_members` conformers, everything else untouched.
+
+    `total_found`, the populations and the conformational entropy are all properties of the *whole*
+    ensemble and are deliberately left alone — truncating them would turn "here are the 10 that
+    matter out of 47" into a quietly wrong claim that there were 10.
+    """
+    if len(ensemble.conformers) <= max_members:
+        return ensemble
+    return ensemble.model_copy(update={"conformers": ensemble.conformers[:max_members]})

@@ -28,7 +28,7 @@ import numpy as np
 from pydantic import BaseModel, Field
 from scipy.optimize import OptimizeResult, minimize
 
-from calc import anc, xtb_cli
+from calc import anc, geometry, xtb_cli
 from calc.store import ResultStore, run_cached
 from calc.structure import Structure
 from calc.xtb_engine import Calculator, evaluate_point, make_calculator
@@ -483,6 +483,12 @@ async def run_cached_optimization(
     Takes a `Structure` rather than a SMILES because the callers that matter compose:
     `calc.reaction` optimizes each species it was handed, and `calc.xtb_thermo` needs
     the geometry, not the recipe. The agent-facing entry points build the structure.
+
+    Every converged result is also offered to the cross-method geometry pointer
+    (`calc.geometry`, STO-4), so a later caller asking for "a good geometry of this compound" can
+    find this one. That write never changes what this function computes or the key it computes it
+    under — the reuse is a separate, explicit lookup, deliberately not a hook that would silently
+    swap a caller's input.
     """
     spec = spec or OptSpec()
     # Off the event loop: deriving the key calls `calc_version()`, whose first call in a
@@ -490,9 +496,19 @@ async def run_cached_optimization(
     # hash walks every atom. Both are synchronous, and this runs inside the connector's
     # one-loop MCP server and inside Temporal activities that are coroutines.
     key = await asyncio.to_thread(spec.cache_key, structure)
-    return await run_cached(
+    result, was_cached = await run_cached(
         store,
         key,
         lambda: optimize_structure(spec, structure),
         OptimizationResult,
     )
+    if not was_cached:
+        await geometry.record_optimization(
+            store,
+            result.structure,
+            method=result.method,
+            energy_hartree=result.energy_hartree,
+            solvent=result.solvent,
+            origin=key,
+        )
+    return result, was_cached

@@ -1,4 +1,4 @@
--- The pre-execution approval a human gives a harness plan (D-132 / REV-1).
+-- The pre-execution approval a human gives a harness plan (D-137 / REV-1).
 --
 -- `SECURITY.md` and `docs/harness-konzept.md` §6 describe a GxP gate: in `plan_only` the agent
 -- proposes and waits for a human before executing. In practice MAF injected a `mode_set` tool into

@@ -1,4 +1,4 @@
-"""The pre-execution approval gate: the model cannot authorize its own execution (REV-1, D-132).
+"""The pre-execution approval gate: the model cannot authorize its own execution (REV-1, D-137).
 
 These tests exist because the two that were already here could not see the defect. One asserted
 `mode_provider.default_mode` — the *initial* value — and one asserted the loop does not

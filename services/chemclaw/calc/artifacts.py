@@ -227,6 +227,16 @@ _MEDIA_TYPES: dict[str, str] = {
     "crest_conformers.xyz": "chemical/x-xyz",
     "crest_rotamers.xyz": "chemical/x-xyz",
     "cre_members": "text/plain",
+    # Packed numeric arrays this system writes itself rather than captures — the Hessian in the
+    # form `calc.xtb_hessian` reads back (STO-2), and the dipole derivatives the in-process
+    # backend needs to derive IR intensities from it.
+    "hessian.npy": "application/x-npy",
+    "dipole_derivatives.npy": "application/x-npy",
+    # Reserved for the DFT tier (STO-5, gated on D-010): a converged density or orbital set, whose
+    # reuse cuts mean SCF iterations from ~33 to ~2 in published measurement. The name and role are
+    # fixed now so the contract exists before the implementation does; nothing writes these yet.
+    "density.restart": "application/x-scf-restart",
+    "orbitals.molden": "chemical/x-molden",
 }
 
 

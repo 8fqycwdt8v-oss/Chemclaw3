@@ -12,17 +12,26 @@ connector must not be able to reach around the gate, and now it structurally can
 """
 
 from connectors.qm.specs import QMJobResult, QmJobSpec, qm_job_key
+from eln.compound import compound_id
 from kg.note import Note
 
 
 def note_from_qm_result(result: QMJobResult) -> Note:
     """Map a QM job result to an agent-authored `job-result` note.
 
-    The molecule is identified structurally via the `compound_smiles` field and named in the body.
-    It deliberately does *not* wikilink to a compound note that may not exist — a dangling link
-    would fail `kg.validate` on the very PR this opens; linking compound notes is a separate step
-    once they are created. The note id is the calculation key, so re-writing the same calculation
-    is idempotent.
+    **The note links its compound.** It used to refuse to, and said so: a wikilink to a compound
+    note that might not exist yet would dangle and fail `kg.validate` on the very PR this opens.
+    The consequence was that every computed result was a graph island — the calculation store and
+    the knowledge graph, the two halves of the system's memory, could not reference each other in
+    either direction (STO-7).
+
+    What changed is not this module's confidence but the PR-gate's shape: a `NoteSubmission` now
+    carries a note *with its dependencies*, and `eln.compound.compound_dependencies` mints the
+    compound note into the same PR. So the link resolves on the branch it is proposed on. Because
+    `compound_id` is derived from the canonical structure, the target here is the same id that
+    helper will produce — one derivation, used twice.
+
+    The note id is the calculation key, so re-writing the same calculation is idempotent.
     """
     spec = QmJobSpec(
         molecule_smiles=result.molecule_smiles,
@@ -30,8 +39,8 @@ def note_from_qm_result(result: QMJobResult) -> Note:
         basis_set=result.basis_set,
     )
     body = (
-        f"Calculation for `{result.molecule_smiles}`, "
-        f"method {result.method}/{result.basis_set}.\n\n"
+        f"Calculation for [[{compound_id(result.molecule_smiles)}]] "
+        f"(`{result.molecule_smiles}`), method {result.method}/{result.basis_set}.\n\n"
         f"- total energy: {result.total_energy_hartree:.6f} Hartree\n"
         f"- converged: {result.converged}\n"
     )

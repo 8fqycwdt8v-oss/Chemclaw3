@@ -1067,7 +1067,7 @@ def test_every_session_scoped_route_is_ownership_gated() -> None:
         ("/sessions/{session_id}/messages", "GET"),
         ("/sessions/{session_id}/events", "GET"),
         ("/sessions/{session_id}/attachments", "POST"),
-        # The pre-execution approval gate (REV-1, D-132). Both must be owner-scoped: reading a
+        # The pre-execution approval gate (REV-1, D-137). Both must be owner-scoped: reading a
         # plan leaks what another chemist is doing, and deciding on one would let a stranger
         # authorize it.
         ("/sessions/{session_id}/plan", "GET"),

@@ -89,7 +89,7 @@ def test_job_pr_gates_one_note_per_campaign() -> None:
         refs = await synthesize_optimization_campaigns(reactions, submitter)
         assert len(refs) == 1
         assert len(submitter.submissions) == 1
-        assert submitter.submissions[0].path.startswith("knowledge/optimization-campaign/")
+        assert submitter.submissions[0].files[0].path.startswith("knowledge/optimization-campaign/")
 
     asyncio.run(_run())
 

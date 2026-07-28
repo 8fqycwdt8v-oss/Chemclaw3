@@ -5194,7 +5194,300 @@ URL at all, so the two halves of one address were covered asymmetrically. `tests
 checks that the chart *computes* the URLs; nothing checked that everything reading an address goes
 through the same function. Three tests now pin it, including the path-moving case that the naive
 origin swap would fail.
-## D-132 — The shipped defaults were never executed: three configurations that fail on first contact
+
+---
+
+## D-132 — The Hessian is its own calculation: splitting the matrix from the thermochemistry computed over it
+
+**Context.** D-124 kept the by-products a calculation used to destroy. Keeping them was worth
+nothing until something read one back, and the first thing worth reading back was the Hessian.
+
+The defect the storage audit found is narrow and expensive. `ThermoSpec` carried
+`temperature_k`, `pressure_pa`, `symmetry_number`, `rrho_cutoff_cm` *and* `displacement_angstrom`
+in one model, and `XtbSpec.cache_key` keys on every field via `model_dump()`. So asking for
+thermochemistry at 350 K after 298 K was a cache miss that recomputed the second derivatives —
+a quantity that does not depend on temperature at all. Measured in D-092, that matrix costs 26 s
+on 76 atoms through the binary and 218 s through finite differences. **The one question a stored
+Hessian answers trivially was the exact question that forced a full recomputation.**
+
+**Decision.** A Hessian becomes a cached calculation in its own right (`calc/xtb_hessian.py`),
+keyed by `HessianSpec` — the geometry, the method, the displacement, and nothing else.
+`ThermoSpec` is unchanged and keeps every field it had; it gains `hessian_spec()`, the projection
+onto what a Hessian actually depends on. Two `ThermoSpec`s differing only in a state variable
+project onto the *same* `HessianSpec`.
+
+So a second temperature is a miss on the thermochemistry — correct, the free energy really does
+differ — and a hit on the Hessian. Minutes of second derivatives become milliseconds of partition
+functions.
+
+**The matrix lives in the artifact store, not in the result row.** A 76-atom Hessian is 228x228
+float64: 416 kB, which has no business in JSONB. The row (`HessianResult`) holds content
+addresses; the arrays are `.npy` blobs beside the Turbomole `hessian` and `vibspectrum` files the
+binary wrote. This is what makes D-124 load-bearing rather than decorative — the artifact store is
+now on the read path, not only the write path.
+
+**A cached row whose artifact is gone is a miss, not a hit.** This is the load-bearing detail and
+the reason `run_cached_hessian` is not built on `run_cached_with_artifacts`: those decide hit
+versus miss from the result row alone, and here the row is only half the result. Artifacts are
+optional by construction (D-124) — the store can be disabled, an artifact can exceed the cap, the
+eviction sweep may reclaim a blob — so the read path verifies it can load the matrix before
+claiming a hit, and a shape disagreeing with `atom_count` is rejected too. Without this, eviction
+would be data loss and a mismatched blob would produce plausible, wrong frequencies.
+
+A deployment with `artifact_store_enabled=False` therefore caches no Hessians and recomputes
+exactly as it did before this split. That is a stated consequence, not a silent degradation.
+
+**Two things this deleted.** `_CACHED_DIPOLE_DERIVATIVES` was a module-global dict handing
+tblite's dipole derivatives across one call; with the Hessian cached, a hit would find it empty
+and the IR intensities would break, so the derivatives became an artifact and the global went
+away. And `compute_thermochemistry_with_artifacts` — added a week ago by D-124 — is gone, because
+artifacts now belong to the layer that produces them.
+
+**Also in this decision.**
+
+- **`max_members` left the conformer cache key (STO-3).** It truncates a finished ensemble; it
+  does not search. Keying on it meant "show me 20 instead of 10" re-ran CREST — by
+  `calc/conformers.py`'s own docstring the most expensive single calculation in the system — to
+  obtain an answer already in the store. `XtbSpec.unkeyed_fields()` is the seam: overriding it
+  keeps the key derivation in one place, so a new field is still keyed by construction and
+  *excluding* one is the visible, deliberate act.
+
+- **A cross-method geometry pointer (STO-4), opt-in by construction.** The optimization cache keys
+  on coordinates, so two RDKit embeddings of one molecule miss each other and a GFN-FF minimum
+  cannot seed a GFN2 run. `calc/geometry.py` records the best known geometry per *subject*
+  (canonical SMILES + charge + multiplicity + solvent) as an ordinary cached calculation — no new
+  table. `run_cached_optimization` writes to it and deliberately does **not** read from it:
+  silently swapping a caller's starting geometry would make one request return different answers
+  under one key depending on what the store happened to hold, which is precisely the cache
+  dishonesty `calc/xtb_spec.py` was written to prevent. The reuse is an explicit lookup that
+  resolves a subject and *then* optimizes normally, so the key always names what really ran.
+
+**Costs, stated rather than discovered.** Existing `xtb.hess` and `xtb.conformers` cache rows
+cold-start: the key shapes changed, and there is no migration path that would be honest about what
+the old rows contain. A stored conformer ensemble is now the whole ensemble rather than a
+truncated one, so those rows are larger — `total_found` already reported the true count, so
+nothing starts lying; the row simply holds what it counted.
+
+**A finding that revised the plan.** The audit assumed every task had by-products worth keeping and
+that the optimizer's capture path merely needed wiring. It does not: `xtbopt.xyz` is parsed in full
+into `OptimizationResult.structure`, which the cache already persists, so capturing it would be a
+second copy of the cache. `_ALREADY_STORED` names it alongside `xtbout.json` and an `opt` run
+captures nothing. The same reasoning applies to CREST, whose ensemble file is now fully represented
+in the result row. `hessian`/`vibspectrum` are *not* on that list even though the `.npy` holds the
+same numbers: the two serve different readers — the `.npy` is this system's read path, the
+Turbomole files are what every other quantum chemistry program can open — and content addressing
+means two runs over an identical geometry share one copy of each.
+
+**Alternatives rejected.** Putting the matrix in JSONB (a 416 kB row on the hot path, and Postgres
+would TOAST it anyway with none of the dedup). Making artifacts mandatory once something reads them
+(it would turn the eviction sweep D-124 built into data loss). Keying the Hessian on the full
+`ThermoSpec` and post-correcting the thermochemistry (the recomputation is exactly what this
+removes).
+
+**Verification.** `tests/test_xtb_hessian.py` asserts the property end to end as a call count on
+the expensive half: two thermochemistry requests differing only in temperature produce two
+different free energies and exactly **one** Hessian. Also pinned: the negative control
+(`displacement_angstrom` still forces a recomputation), the evicted-artifact fallback, the
+disabled-store behaviour, and the shape check. `tests/test_conformers.py` and
+`tests/test_geometry.py` cover STO-3 and STO-4, including that consulting the geometry pointer
+never changes an optimization's cache key.
+
+**Not covered here.** The end-to-end assertions that need the `xtb`/`crest` binaries are
+`@needs_xtb`/`@needs_crest` and do not run in the environment this was written in. Every logic path
+that does not need a binary is tested by a test that actually runs.
+
+---
+
+## D-133 — A submission is a note and what it needs, so a computed result can cite the compound it is about
+
+**Context.** `connectors/qm/knowledge.py` documented its own limitation precisely: it emitted no
+wikilink to the compound a calculation was about, because a dangling link fails `kg-validate` on
+the very PR that adds the note. The compound note might not exist yet, and there was no way to
+create it in the same change.
+
+That single constraint made the calculation store and the knowledge graph disjoint. "What we
+computed" and "what we know" could not reference each other in either direction — a stale
+calculation could not be traced to the conclusions drawn from it, and a conclusion could not be
+traced to the run behind it. In a GxP system that is a provenance gap, not an ergonomic one.
+`memory/supersede.py` hit the same wall and worked around it by naming a replacement in plain text.
+
+The cause was one field. `NoteSubmission` was exactly one `path` plus one `content`.
+
+**Decision.** A submission carries `files: list[NoteFile]` — the note first, then whatever it
+depends on. `propose_note(..., dependencies=[...])` lays them into one PR, so a note and its
+targets land in one reviewable unit and one human signs off on both. A dependency already merged
+renders byte-identically and produces no diff, so the submission stays idempotent.
+
+The rule is applied **once, at the gate**, not in each connector: `eln.compound.compound_dependencies`
+mints the compound note a note links, and `publish_memory_note_activity` (the one path every
+machine-written note takes) calls it. A note author states the link; the gate makes it resolve.
+Because `compound_id` is derived from the canonical structure, the target is fully determined by
+the SMILES the note already carries.
+
+**`calc_refs` and `artifact_refs` are frontmatter, deliberately not wikilinks.** They point *out*
+of the graph into Postgres. Making them edges would reintroduce, from the other side, the exact
+dangling-link failure this decision removes. They are shape-validated at the schema — prose like
+`"the GFN2 run"` in a provenance field is a crosslink nothing can resolve, and it should fail at
+the gate rather than pass review looking informative. Whether the target *exists* is a question
+only a database can answer, and `kg-validate` runs in CI without one; making it need a database
+would be a worse regression than the gap it closes.
+
+`kg/crosslink.py` is the reverse direction — calculation key to the notes resting on it — and is
+nine lines over the already-cached parsed notes rather than an index, because a second store here
+would be a derived index of a derived index. An `artifact_refs` entry contributes the key of the
+run that produced it, so a note citing only a Hessian is still found by a question about its
+calculation.
+
+**Rejected: convenience `path`/`content` properties on `NoteSubmission`.** They were written and
+removed. A read-only property shadows anything `model_copy(update=...)` writes, so the old field
+names kept resolving and silently ignored the update — a real test caught it. One shape, no
+aliases.
+
+**Left alone: `memory/supersede.py`.** Its plain-text replacement marker could now be a
+`superseded-by` edge, but its choice is deliberate and documented: the replacement is itself an
+unmerged proposal in the same run, published as a separate note by the fan-out, so a link would
+dangle if a reviewer merged the supersede PR first. Churning a working GxP path for a marginal gain
+is not warranted; D-134 makes the alternative available when the fan-out is revisited.
+
+**Verification.** `tests/test_crosslink.py` writes both files of a real submission to disk and runs
+the actual validator over them — no dangling link — with the negative control that the note alone
+would have failed. The assertion in `tests/test_knowledge.py` that used to read
+`note.outgoing_links() == []`, with a comment explaining why the link was impossible, now asserts
+the link and its dependency.
+
+---
+
+## D-134 — Edges carry relations and their own validity, so the graph stops being a citation network
+
+**Context.** `kg/graph.py:150` was `graph.add_edge(note.id, target)`. No attributes at all. Nothing
+could say *precursor-of*, *contradicts*, *measured-by* or *computed-from*, so every graph query was
+structurally blind to what a connection meant, and the retrieval layer treated the graph as what it
+was: a citation network. Separately, `valid_from`/`valid_to` existed on nodes, so a *fact* that
+stopped being true was expressible while a *relation* that stopped being true was not.
+
+**Decision.** Two syntaxes, because they serve different authors:
+
+- **Body:** `[[rel:target]]`. The syntax was free to take — `_SLUG` excludes `:`, so
+  `[[precursor-of:x]]` previously parsed as one dangling id and failed `kg-validate`, meaning no
+  corpus could be relying on it.
+- **Frontmatter:** `relations: [{rel, to, confidence?, valid_from?, valid_to?}]` — the structured
+  form, and the only place per-edge metadata can live.
+
+`cited_ids` and `outgoing_links` keep returning bare targets, so `kg.validate`'s dangling-link
+check and the answer verifier work unchanged through one code path rather than two. A bare
+`[[link]]` still means exactly what it always meant (`cites`), which is asserted against the
+shipped corpus rather than assumed.
+
+`kg/relations.py` holds `KNOWN_RELATIONS`, **adopted from RXNO / CHMO / CHEMINF / OntoRXN** rather
+than invented, so it maps to a standard later instead of being one more thing to reconcile.
+Enforced by `kg.validate`, not by the schema — exactly as `KNOWN_NOTE_TYPES` is, and for the same
+reason: the agent must be able to propose a genuinely new relation, and the PR-gate is where a
+human decides.
+
+**Kept on `nx.DiGraph`, with a tuple of relations per edge.** A `MultiDiGraph` models parallel
+edges properly and would change the meaning of `graph[a][b]` for every existing reader —
+`neighborhood`, `kg.analytics`, the retrievers — to solve a case that barely arises. The cost is
+that an edge holds a *set* of relations rather than one, which is why the attribute is plural and
+why a compound that is both precursor and product of one reaction is tested.
+
+**A bug this created, and fixed.** `report/retrievers.py:_excerpt` did `WIKILINK.sub(r"\1", ...)`,
+which would have rendered `[[precursor-of:x]]` into a report a person reads as
+`precursor-of:x`. It now strips to the target through the same shared splitter the indexer uses.
+
+**Downstream in the same decision.**
+
+- **Conflict signalling (KM-8).** Retrieval used to return two contradictory notes with no marker,
+  which reads as corroboration — worse than returning neither. `kg/conflicts.py` reports a
+  `declared` conflict (a `contradicts`/`supersedes` edge, now expressible) and a `suspected` one
+  (same type, same compound, overlapping validity, materially different confidence). There is
+  deliberately **no property extractor**: parsing "the yield was 82%" out of prose and comparing it
+  across notes is a natural-language problem this layer would get subtly wrong, and a false
+  conflict is as damaging as a missed one. A conflict is a **flag** on the evidence
+  (`EvidenceChunk.conflicts_with`), never a filter — dropping one side would be retrieval deciding
+  which of two curated notes is right, and it has no basis for that.
+
+- **Negative feedback (KM-12).** `failure-mode` sat in `KNOWN_NOTE_TYPES` with nothing minting one.
+  `memory/failure.py` builds it, carrying a `contradicts` relation to what it refutes — which is
+  what makes the feedback actually feed back, since before typed edges a correction could only be
+  prose and `find_conflicts` could not see it. It goes through the PR-gate like everything else: a
+  machine-written note asserting that curated knowledge is wrong needs *more* human sign-off, not
+  less. The refuted note is never edited or deleted.
+
+**Verification.** `tests/test_relations.py` pins backward compatibility against the real shipped
+fixture corpus (every pre-existing edge is still exactly `cites`), the new syntax, both forms
+producing one edge, an unknown relation failing validation, every known relation passing, and an
+edge whose validity has lapsed dropping out of a time-scoped query while both its notes stay
+current. `tests/test_conflicts.py` covers the detector, including the cases it must *not* report.
+
+---
+
+## D-135 — A dataset may be vendored into the image at build time — the one amendment to D-089's scope
+
+**Context.** D-089 fixed the scope: this system takes no external data sources, and
+`tests/test_no_egress.py` enforces it because the prose form of the same constraint demonstrably
+did not (TOOL-6 sat in `DEFERRED.md` as "blocked on choosing a source", which reads as an
+invitation, and duly got built).
+
+That decision is right about what it rules out: a *runtime* dependency on somebody else's service —
+an address in first-party code, a network call on the retrieval path, an availability and licensing
+question the deployment cannot answer. What it was never meant to rule out is knowing things. The
+gap that leaves is concrete: `chemclaw/reagents.py` is a hand-maintained name→SMILES table and it
+is the hard ceiling on `resolve_compound`, so a chemist naming an ordinary reagent gets nothing
+back. Every fix for that is a dataset.
+
+**Decision.** A dataset may arrive the way a dependency arrives: **installed into the container
+image at build time**, pinned to a version, checksummed, licence-labelled, and reviewed once in a
+pull request by a person who can read its licence. At runtime it is a file on local disk.
+`sources/vendored/` attaches it through the existing manifest seam (D-120) with zero core edits.
+
+The escalation is narrow, and three things keep it that way:
+
+1. **No network path exists.** `tests/test_no_egress.py` is *extended, never relaxed*: a new test
+   asserts `sources/vendored_dataset.py` imports no HTTP client, so it cannot acquire one by
+   accident in a later edit either. The source is also named in the registry assertion rather than
+   exempted from it.
+2. **Provenance is required by the schema.** `name`, `version`, `licence`, `retrieved_from`,
+   `description` and `sha256` are all mandatory. A corpus with no recorded licence is a legal
+   question nobody can answer later; one with no checksum cannot be shown to be what the review
+   approved. `retrieved_from` is documentation — nothing reads it as an address and nothing can
+   fetch it.
+3. **Retrieve-only.** Vendored data is reference material, not experiments. An ingest half would
+   give unreviewed third-party records a write path into the knowledge graph behind the PR-gate's
+   back, which is a much larger decision than reading a table.
+
+A checksum mismatch refuses to load and names both hashes, because the tempting fix — editing the
+manifest to agree with the bytes — defeats the mechanism entirely. A missing dataset yields no
+evidence rather than raising: an optional corpus that is not installed must not break every query
+in the process. Citations read `vendored:<dataset>:<row>` rather than posing as note ids: a
+citation must resolve to something a reader can check, and for vendored data that is the row.
+
+**What actually ships, stated plainly.** The mechanism, plus `common-reagents` v0.1.0 — a
+first-party, hand-authored reagent/solvent/base/ligand table under the trivial names chemists write
+(`DIPEA`, `Cs2CO3`, `mCPBA`, `T3P`). It carries no licensing question at all and is independently
+useful. **No third-party dataset has been vendored.** Doing so is a build-pipeline step plus a
+licence review and belongs to whoever adds one; `data/vendored/README.md` says how. Not enabled by
+default — a deployment shipping no dataset is unaffected by the mechanism existing.
+
+**Also in this decision: the embedding cache (STO-12).** The audit's finding on "tool result
+caching" was largely that it is *not* a gap — every calculator already routes through `run_cached`,
+and the RDKit chem tools are cheaper than the Postgres round trip a cache would add, so building a
+caching subsystem there would have been ceremony. Saying so is the finding. The one genuine
+repetition is `embed_texts`: every retrieval embeds its query, the same query recurs constantly,
+and under a real provider each repeat is a network round trip on the interactive path paid by all
+three graph-backed retrievers. It is now cached, bounded, keyed on **provider + model + dimension +
+text** — the same lesson D-011 taught, since serving one model's vectors after a switch would
+corrupt every similarity comparison silently.
+
+**And the seed corpus (STO-10).** `knowledge/` held `.gitkeep`, so `make kg-validate` passed by
+validating nothing and every retrieval, crosslink and conflict property was measured against
+fixtures. It now holds 37 seed notes covering all ten note types and all fourteen relations, with
+real instances of the awkward cases: a superseded pair with a closed `valid_to`, a declared
+conflict, calculation crosslinks including an artifact reference. The original plan proposed
+*promoting* `evals/retrieval_corpus/` into it; that was wrong and is recorded as such — that
+directory's README states it is kept outside `knowledge_dir` precisely so the recall/precision
+numbers stay independent of the live graph. The two are separate, and a test asserts they share no
+ids.
+## D-136 — The shipped defaults were never executed: three configurations that fail on first contact
 
 An intense review of the agentic system, asked to find ways to make it faster *and* more reliable
 at once. The performance leads it started from were mostly already fixed (D-119 pooling, D-121
@@ -5266,7 +5559,7 @@ instruction blocks, which reaches the system half, but offers no `cache_control`
 to check it is to run it. The new tests execute production values rather than validating them; the
 chart parity test should grow the same property.
 
-## D-133 — The plan the model could approve for itself: a pre-execution gate that is not a tool
+## D-137 — The plan the model could approve for itself: a pre-execution gate that is not a tool
 
 `SECURITY.md`, `docs/harness-konzept.md` §6 and `build_agent`'s docstring all described a GxP
 pre-execution gate: in `plan_only` the agent proposes a plan and waits for a human before

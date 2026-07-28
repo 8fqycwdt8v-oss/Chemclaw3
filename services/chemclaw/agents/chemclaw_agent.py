@@ -269,7 +269,7 @@ def _build_harness_agent(
     loop only continues in **execute** mode it does not auto-run until an approval switches it.
 
     That approval is the pre-execution GxP gate, and it is enforced by
-    `PlanApprovalModeProvider` (D-133) rather than by the starting mode alone. Until that provider
+    `PlanApprovalModeProvider` (D-137) rather than by the starting mode alone. Until that provider
     existed this docstring described a gate the code did not implement: MAF advertises a `mode_set`
     tool to the model, so the agent moved *itself* out of plan mode and the audit trail recorded
     that under the asking chemist's identity. The provider retracts that tool; the only path into

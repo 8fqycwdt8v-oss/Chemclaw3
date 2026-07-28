@@ -367,7 +367,7 @@ def _clear_prefixed_env() -> Iterator[None]:
     ("name", "overrides"),
     [
         # Each of these was already forbidden in a field comment and enforced by nothing, so a
-        # deployment could set it and find out in production (REV-18, D-132).
+        # deployment could set it and find out in production (REV-18, D-136).
         (
             "memory store cannot serve multiple workers",
             {"session_store": "memory", "service_uvicorn_workers": 4},

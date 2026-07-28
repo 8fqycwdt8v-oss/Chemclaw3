@@ -385,15 +385,27 @@ def _produced_everything(directory: Path, task: CliTask) -> bool:
     return all((directory / name).exists() for name in _REQUIRED_OUTPUTS[task])
 
 
+# Outputs that are already persisted in full by the cached result, so capturing them would be a
+# second copy of the cache with none of the value:
+#
+# - `xtbout.json` is parsed in full into `CliResult.properties`.
+# - `xtbopt.xyz` is parsed in full into `OptimizationResult.structure` — the optimized geometry is
+#   a *field* of the cached result (see `calc.xtb_opt`'s D-011 note), not something the tempdir
+#   was the only copy of. So an `opt` run has no by-product worth keeping, and that is a finding
+#   rather than an omission: the audit assumed every task had one.
+#
+# `hessian` and `vibspectrum` are not on this list even though `calc.xtb_hessian` stores the same
+# matrix as a compact `.npy`. The two serve different readers — the `.npy` is this system's read
+# path, the Turbomole files are what every other quantum chemistry program can open — and
+# content-addressing means two runs over an identical geometry share one copy of each.
+_ALREADY_STORED: frozenset[str] = frozenset({"xtbout.json", "xtbopt.xyz"})
+
 # What is worth keeping past the temporary directory (D-124). Derived from `_REQUIRED_OUTPUTS`
 # rather than restated — the declaration that says what a task must produce is the same one that
 # says what there is to keep, so the two cannot drift.
-#
-# `sp` is the one exclusion: its `xtbout.json` is already parsed *in full* into
-# `CliResult.properties` and lands in the cached JSON result, so storing the file too would be a
-# second copy of the cache with none of the value.
 _CAPTURED: dict[CliTask, tuple[str, ...]] = {
-    task: names for task, names in _REQUIRED_OUTPUTS.items() if task != "sp"
+    task: tuple(name for name in names if name not in _ALREADY_STORED)
+    for task, names in _REQUIRED_OUTPUTS.items()
 }
 
 

@@ -1,4 +1,4 @@
-"""Regenerate `evals/baseline.json` from a real scoring run (REV-5, D-132).
+"""Regenerate `evals/baseline.json` from a real scoring run (REV-5, D-136).
 
 `evals.baseline.save_baseline` existed with **no caller anywhere in the repository**, so the
 committed baseline was hand-maintained. That is how it came to be missing `retrieval_recall` and

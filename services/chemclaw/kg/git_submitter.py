@@ -207,10 +207,14 @@ class GitNoteSubmitter:
         await self._git("reset", "--hard")
         await self._git("clean", "-fd")
         await self._git("checkout", "-B", submission.branch, f"{self._remote}/{self._base}")
-        note_path = self._contained_note_path(submission.path)
 
-        note_path.parent.mkdir(parents=True, exist_ok=True)
-        note_path.write_text(submission.content, encoding="utf-8")
+        # Every file in the submission, not just the subject note: a note and the notes its links
+        # depend on land together or the links dangle (STO-7, see `NoteSubmission`). Each path is
+        # containment-checked independently — a dependency is no more trusted than the note.
+        for file in submission.files:
+            note_path = self._contained_note_path(file.path)
+            note_path.parent.mkdir(parents=True, exist_ok=True)
+            note_path.write_text(file.content, encoding="utf-8")
         # This process just changed the note tree, so do not make a subsequent read wait out the
         # `graph_cache_ttl_seconds` scan window (DA-5) — the authoring loop must see its own write
         # immediately. Also needed because the `checkout -B`/`reset --hard` above rewrite the tree
@@ -218,7 +222,7 @@ class GitNoteSubmitter:
         # cached graph would otherwise describe a tree that no longer exists.
         invalidate_cache()
 
-        await self._git("add", submission.path)
+        await self._git("add", *(file.path for file in submission.files))
         # Idempotent: if the note is byte-identical to what the base already has,
         # there is nothing to commit — re-proposing it is a no-op, not an error.
         returncode, _ = await self._run("diff", "--cached", "--quiet")

@@ -14,8 +14,9 @@ from typing import Any
 
 from chemclaw.config import settings
 from chemclaw.embeddings import embed_texts
+from kg.conflicts import conflicts_by_note, find_conflicts
 from kg.graph import load_notes
-from kg.note import WIKILINK, Note
+from kg.note import WIKILINK, Note, split_link
 from mcp_servers.fpstore import FingerprintError, FingerprintStore
 from mcp_servers.rxnfp.search import find_similar_reactions
 from report.evidence import EvidenceChunk
@@ -28,8 +29,14 @@ def _excerpt(body: str) -> str:
     An excerpt must not carry a source note's `[[links]]` verbatim into the report body —
     that would add unintended (possibly dangling) graph edges — so the shared `kg.note.WIKILINK`
     brackets are stripped, keeping the link target as plain text.
+
+    Strips to the *target*, via `kg.note.split_link`, not to the whole bracket contents: with typed
+    edges a link may read `[[precursor-of:compound-x]]`, and substituting the raw group would drop
+    `precursor-of:compound-x` into prose a person reads. One shared splitter, so the report layer
+    and the graph indexer cannot disagree about what a link points at.
     """
-    return WIKILINK.sub(r"\1", body.strip())[: settings.note_excerpt_chars]
+    stripped = WIKILINK.sub(lambda match: split_link(match.group(1))[1], body.strip())
+    return stripped[: settings.note_excerpt_chars]
 
 
 async def _eligible_notes(directory: Path, filters: dict[str, Any]) -> dict[str, Note]:
@@ -58,6 +65,29 @@ async def _eligible_notes(directory: Path, filters: dict[str, Any]) -> dict[str,
     return notes
 
 
+async def _conflict_index(directory: Path) -> dict[str, list[str]]:
+    """Map each note id to the ids it is known or suspected to disagree with (KM-8).
+
+    Computed over the *whole* current corpus rather than over the notes a query happened to match:
+    a chunk must be flagged even when the note it conflicts with was not itself retrieved, which is
+    exactly the case where a reader would otherwise see one side and assume it settled. Reads
+    through the shared parsed-note cache, so this costs a stat scan on a warm query, not a parse.
+    """
+    if not directory.exists() or not settings.conflict_detection_enabled:
+        return {}
+    notes = await asyncio.to_thread(load_notes, directory)
+    index = conflicts_by_note(find_conflicts(notes, as_of=date.today()))
+    return {
+        note_id: sorted(
+            {
+                conflict.other_id if conflict.note_id == note_id else conflict.note_id
+                for conflict in conflicts
+            }
+        )
+        for note_id, conflicts in index.items()
+    }
+
+
 class GraphRetriever:
     """Retrieve evidence from the Markdown knowledge graph. A `SourceRetriever`."""
 
@@ -78,6 +108,7 @@ class GraphRetriever:
         """
         needle = query.lower()
         chunks: list[EvidenceChunk] = []
+        conflicts = await _conflict_index(self._dir)
         for note in (await _eligible_notes(self._dir, filters)).values():
             # Same haystack the dense/lexical index build from (`note_text`), so all three entry
             # points agree on what "the note's content" is and cannot drift.
@@ -97,6 +128,7 @@ class GraphRetriever:
                         source_note_id=note.id,
                         retriever=self.name,
                         score=score,
+                        conflicts_with=conflicts.get(note.id, []),
                     )
                 )
         # RRF reads each source's list as ranked best-first, so the list must be ordered by this
@@ -145,7 +177,10 @@ class FingerprintReactionRetriever:
 
 
 def _chunks_from_hits(
-    hits: list[IndexHit], notes: dict[str, Note], retriever_name: str
+    hits: list[IndexHit],
+    notes: dict[str, Note],
+    retriever_name: str,
+    conflicts: dict[str, list[str]] | None = None,
 ) -> list[EvidenceChunk]:
     """Map index hits to cited evidence chunks, dropping any hit whose note no longer loads.
 
@@ -166,6 +201,7 @@ def _chunks_from_hits(
                 source_note_id=note.id,
                 retriever=retriever_name,
                 score=min(max(hit.score, 0.0), 1.0),
+                conflicts_with=(conflicts or {}).get(note.id, []),
             )
         )
     return chunks
@@ -200,7 +236,7 @@ class VectorRetriever:
         hits = await self._index.search_dense(
             query_embedding, settings.retrieval_top_k, within=set(notes)
         )
-        return _chunks_from_hits(hits, notes, self.name)
+        return _chunks_from_hits(hits, notes, self.name, await _conflict_index(self._dir))
 
 
 class LexicalRetriever:
@@ -226,4 +262,4 @@ class LexicalRetriever:
             return []
         # Scoped to the eligible notes for the same recall reason as the dense retriever.
         hits = await self._index.search_lexical(query, settings.retrieval_top_k, within=set(notes))
-        return _chunks_from_hits(hits, notes, self.name)
+        return _chunks_from_hits(hits, notes, self.name, await _conflict_index(self._dir))

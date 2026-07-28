@@ -121,6 +121,6 @@ def test_campaign_publishes_recommendation_to_graph(monkeypatch: pytest.MonkeyPa
                     task_queue=settings.background_task_queue,
                 )
         assert len(fake.submissions) == 1  # the recommendation was proposed as a note
-        assert fake.submissions[0].path.startswith("knowledge/bo-candidate/bo-")
+        assert fake.submissions[0].files[0].path.startswith("knowledge/bo-candidate/bo-")
 
     asyncio.run(_run())

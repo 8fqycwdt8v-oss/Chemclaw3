@@ -1,4 +1,4 @@
-"""The two CREST jobs heartbeat while they run (REV-3, D-132).
+"""The two CREST jobs heartbeat while they run (REV-3, D-136).
 
 Every other xTB task reports progress *between* units of work — one species, one solvent, one scan
 point — and passes `activity.heartbeat` down as that callback. A CREST search has no unit boundary:
