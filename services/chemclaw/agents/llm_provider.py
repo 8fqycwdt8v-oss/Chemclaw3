@@ -98,5 +98,19 @@ def _anthropic_client(model: str | None = None) -> Any:
             "or pass an explicit chat_client to build_agent (as the tests do)."
         )
     from agent_framework.anthropic import AnthropicClient
+    from anthropic import AsyncAnthropic
 
-    return AnthropicClient(model=model or settings.agent_model)
+    # Transport carried explicitly, exactly as the openai_compatible branch does. `AnthropicClient`
+    # takes no timeout/retry arguments of its own, so a config that set them was silently ignored
+    # here: the real timeout was the SDK's 600 s default against a configured 60 s, and
+    # `llm_tls_ca_bundle` did nothing at all. The only bound left was the front door's turn
+    # deadline, which is a much blunter instrument than a per-call timeout — it kills the whole
+    # turn rather than retrying one stalled call.
+    return AnthropicClient(
+        model=model or settings.agent_model,
+        anthropic_client=AsyncAnthropic(
+            timeout=settings.llm_timeout_seconds,
+            max_retries=settings.llm_max_retries,
+            http_client=_tls_http_client(),
+        ),
+    )

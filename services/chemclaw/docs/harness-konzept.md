@@ -206,7 +206,7 @@ keine „für später"-Settings):
 |---|---|---|
 | `harness_enabled` | Master-Schalter (Fallback: klassischer `Agent`) | `false` |
 | `harness_autonomy` | `plan_only` (interaktiv) \| `execute` (Loop im Execute-Modus) | `plan_only` |
-| `harness_max_loop_iterations` | Runaway-Loop-Bremse; greift nur bei `execute` | `15` |
+| `harness_max_loop_iterations` | Runaway-Loop-Bremse; als `loop_max_iterations` unbedingt gesetzt (nicht nur im `execute`-Modus) | `25` |
 
 **Bewusst (noch) nicht als Config verdrahtet** — jeweils mit Grund, statt spekulativem Feld:
 - *`max_todos`*: Der `TodoProvider` nimmt keine Obergrenze entgegen; eine künstliche Kappung

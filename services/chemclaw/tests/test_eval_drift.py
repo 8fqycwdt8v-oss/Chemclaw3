@@ -137,3 +137,27 @@ def test_no_drift_logs_nothing(caplog: pytest.LogCaptureFixture) -> None:
     with caplog.at_level(logging.WARNING):
         assert asyncio.run(check_eval_drift()) == []
     assert caplog.text == ""
+
+
+def test_the_live_retriever_metrics_are_under_drift_detection() -> None:
+    """`retrieval_recall`/`retrieval_precision` must be in the baseline, or they have no signal.
+
+    `detect_drift` iterates the *baseline*, not the run, so a metric missing from `baseline.json`
+    is not weakly covered — it is uncovered. These two are the only metrics that run a live
+    retriever, and `retrieval_recall` is the gated one, so their absence meant the system's core
+    quality signal could regress silently. It did: collapsing both to 0.0 produced no alert.
+
+    Asserted by name rather than by count so adding an unrelated metric cannot satisfy it.
+    """
+    baseline = load_baseline(settings.eval_baseline_path)
+    assert {"retrieval_recall", "retrieval_precision"} <= baseline.metrics.keys()
+
+
+def test_a_collapsed_retrieval_score_now_raises_an_alert() -> None:
+    """The regression that was previously silent now fires — the behavioural half of the fix."""
+    baseline = load_baseline(settings.eval_baseline_path)
+    collapsed = dict(baseline.metrics, retrieval_recall=0.0, retrieval_precision=0.0)
+    alerts = {
+        alert.metric for alert in detect_drift(baseline, collapsed, settings.eval_drift_epsilon)
+    }
+    assert {"retrieval_recall", "retrieval_precision"} <= alerts

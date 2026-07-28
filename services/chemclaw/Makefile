@@ -8,7 +8,7 @@ KUBE_VERSION ?= 1.29.0
 
 .DEFAULT_GOAL := help
 
-.PHONY: help install lint type test cov check chat db-migrate schedules-apply kg-validate eval eln-validate skill-validate connector-validate datasource-validate template-validate connectors prose-validate helm-validate audit-verify reindex up down
+.PHONY: help install lint type test cov check chat db-migrate schedules-apply kg-validate eval eval-baseline eln-validate skill-validate connector-validate datasource-validate template-validate connectors prose-validate helm-validate audit-verify reindex up down
 
 help:  ## List every target with its one-line description (the default).
 	@# Reads the `## ` comments beside each target, so a new target documents itself the day it is
@@ -49,6 +49,9 @@ kg-validate:  ## Validate the knowledge graph (schema, duplicate ids, broken lin
 
 eval:  ## Score the versioned eval case-set and print the citable report (Phase 2b).
 	uv run python -m evals.harness
+
+eval-baseline:  ## Regenerate evals/baseline.json from a scoring run (after a reviewed change).
+	uv run python -m scripts.refresh_baseline
 
 eln-validate:  ## Validate the ELN export's reactions (RDKit structure + mass balance).
 	uv run python -m eln.validate

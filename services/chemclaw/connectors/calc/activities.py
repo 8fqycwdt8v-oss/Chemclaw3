@@ -47,8 +47,9 @@ from connectors.calc.specs import (
 from connectors.queues import bundle_queue
 from workflows.registry import durable_activity
 
+_HEARTBEATS_PER_TIMEOUT = 4.0
 
-@durable_activity(bundle_queue("calc"))
+
 async def _beating(awaitable: Any, what: str) -> Any:
     """Await `awaitable` while heartbeating, so a long opaque run is not declared dead.
 
@@ -83,9 +84,9 @@ async def _beating(awaitable: Any, what: str) -> Any:
 
 # Beats per heartbeat timeout. Several, not one: a single beat at the deadline leaves no margin
 # for scheduling jitter, and Temporal only needs to hear *something* before the timeout lapses.
-_HEARTBEATS_PER_TIMEOUT = 4.0
 
 
+@durable_activity(bundle_queue("calc"))
 @activity.defn
 async def run_xtb_calculation(job: XtbJobInput) -> XtbJobResult:
     """Run one durable xTB task and return its typed result.

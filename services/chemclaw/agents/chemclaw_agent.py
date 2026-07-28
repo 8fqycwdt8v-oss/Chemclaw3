@@ -265,13 +265,23 @@ def _build_harness_agent(
 
     The starting mode comes from the profile's `harness_autonomy` override, or
     `settings.harness_autonomy` when the profile leaves it unset. `plan_only` starts in **plan**
-    mode: the agent proposes a plan and waits for human approval before executing — the
-    pre-execution GxP gate — and, because the loop only continues in **execute** mode, it does
-    not auto-run until approval switches it. `execute` starts in execute mode and loops through
-    the todos immediately. Either way the loop is capped by `harness_max_loop_iterations` (the
-    runaway guard). Compaction reuses the classic strategy so context is kept within budget on
-    both paths. `instructions` and `tools` are pre-resolved by `build_agent` from the profile,
-    so this path advertises exactly the profile's (possibly narrowed) surface.
+    mode: the agent proposes a plan and waits for human approval before executing, and because the
+    loop only continues in **execute** mode it does not auto-run until an approval switches it.
+
+    That approval is the pre-execution GxP gate, and it is enforced by
+    `PlanApprovalModeProvider` (D-133) rather than by the starting mode alone. Until that provider
+    existed this docstring described a gate the code did not implement: MAF advertises a `mode_set`
+    tool to the model, so the agent moved *itself* out of plan mode and the audit trail recorded
+    that under the asking chemist's identity. The provider retracts that tool; the only path into
+    execute mode is now `POST /sessions/{id}/plan/decision`, which is owner-scoped, records who
+    decided, and is bound to a hash of the plan they were shown.
+
+    `execute` starts in execute mode and loops through the todos immediately. Either way the
+    loop is capped by `harness_max_loop_iterations` (the runaway guard), which is passed
+    unconditionally — it bounds both modes, not only `execute`. Compaction reuses the classic
+    strategy so context is kept within budget on both paths. `instructions` and `tools` are
+    pre-resolved by `build_agent` from the profile, so this path advertises exactly the
+    profile's (possibly narrowed) surface.
     """
     strategy, tokenizer = _compaction_strategy()
     instructions = profile.instructions if profile.instructions is not None else _INSTRUCTIONS
