@@ -62,7 +62,9 @@ def test_llm_provider_defaults_to_anthropic() -> None:
     """The default provider is the dev path, so the config singleton is valid with no endpoint."""
     settings = Settings(_env_file=None)  # type: ignore[call-arg]
     assert settings.llm_provider == "anthropic"
-    assert settings.llm_temperature == 0.0
+    # Unset, not 0.0: the default `agent_model` rejects an explicit temperature outright, so a
+    # default of 0.0 made the shipped config fail every live turn with a 400.
+    assert settings.llm_temperature is None
     assert settings.llm_max_tokens == 4096
 
 
@@ -359,3 +361,47 @@ def _clear_prefixed_env() -> Iterator[None]:
         del os.environ[key]
     yield
     os.environ.update(saved)
+
+
+@pytest.mark.parametrize(
+    ("name", "overrides"),
+    [
+        # Each of these was already forbidden in a field comment and enforced by nothing, so a
+        # deployment could set it and find out in production (REV-18, D-136).
+        (
+            "memory store cannot serve multiple workers",
+            {"session_store": "memory", "service_uvicorn_workers": 4},
+        ),
+        (
+            "a mid-turn resume cannot outlive its turn",
+            {
+                "mid_turn_resume_enabled": True,
+                "mid_turn_resume_timeout_seconds": 900.0,
+                "service_turn_timeout_seconds": 600.0,
+            },
+        ),
+        (
+            "budgets on with every cap unlimited guards nothing",
+            {
+                "budget_enabled": True,
+                "budget_max_turns_per_session": 0,
+                "budget_max_tokens_per_session": 0,
+                "budget_max_turns_per_user": 0,
+                "budget_max_tokens_per_user": 0,
+            },
+        ),
+        (
+            "embedding_dim must match the note_index vector column when vector search is on",
+            {"embedding_dim": 768, "data_sources": "graph,vector"},
+        ),
+    ],
+)
+def test_configurations_the_comments_forbid_are_rejected(name: str, overrides: dict) -> None:  # type: ignore[type-arg]
+    """A rule worth writing in a comment is worth failing on at startup."""
+    with pytest.raises(ValueError):
+        Settings(_env_file=None, **overrides)  # type: ignore[call-arg]
+
+
+def test_the_shipped_defaults_still_construct() -> None:
+    """The new guards must not reject the configuration the repository actually ships."""
+    assert Settings(_env_file=None) is not None  # type: ignore[call-arg]

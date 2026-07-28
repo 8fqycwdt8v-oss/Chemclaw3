@@ -154,7 +154,8 @@ class TemplateWorkflow:
         one place that owns them.
         """
         # Imported inside the workflow's sandbox-passthrough at call time rather than at module
-        # scope: the job lookup reads the connector registry, which is I/O-free but not something a
+        # scope: the job lookup reads the connector registry, which does filesystem + YAML I/O on a
+        # cold process (`discovered()` is `@cache`d, so once per worker) and is not something a
         # workflow module should pull in for a step kind most templates never use.
         with workflow.unsafe.imports_passed_through():
             from connectors.registry import find_job

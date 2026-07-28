@@ -77,11 +77,23 @@ class AgentPool:
             free = self._free.setdefault(profile, asyncio.LifoQueue())
             built = self._built.get(profile, 0)
             if free.empty() and built < self._size:
-                self._built[profile] = built + 1
                 # Built outside the queue so a first turn does not wait on a `put`; released back
                 # into it when the turn ends, like any other member.
                 logger.debug("building agent %d/%d for profile %r", built + 1, self._size, profile)
-                return self._factory(profile)
+                # The count is committed only once the agent exists. Incrementing first burned the
+                # slot permanently when the factory raised: `_built` counted an agent that was
+                # never created and never reached `_free`, so after `size` such failures the guard
+                # above was false forever and the wait below blocked on a queue nothing would ever
+                # fill — for the full `service_turn_timeout_seconds`, on every subsequent turn,
+                # until the pod restarted, all while `/healthz` stayed green.
+                #
+                # The factory does raise in reachable situations: `build_agent` builds the chat
+                # client, which reads the TLS CA bundle from disk (a projected-secret swap during
+                # cert rotation) and requires a credential to be present. A cold pod whose burst of
+                # first turns arrives before its secret volume is populated is exactly the case.
+                agent = self._factory(profile)
+                self._built[profile] = built + 1
+                return agent
         # Pool is at size: wait for a turn to finish. Under normal operation this does not block,
         # because admission control already caps concurrency at the same number.
         return await self._free[profile].get()

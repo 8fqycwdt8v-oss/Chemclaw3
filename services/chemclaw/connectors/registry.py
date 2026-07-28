@@ -21,6 +21,7 @@ profile narrows it afterwards — so a connector can add to what is *offered* an
 *permitted*.
 """
 
+import asyncio
 import logging
 import os.path
 from collections.abc import Iterable
@@ -51,6 +52,13 @@ logger = logging.getLogger(__name__)
 # The manifest filename inside a bundle. A constant because two modules look for it (here and
 # `scripts.validate_connectors`) and a typo in either would report "no connectors found".
 MANIFEST_FILENAME = "connector.yaml"
+
+# How long to wait for the TCP/TLS handshake to a connector, as distinct from how long its tools
+# may take to answer (the manifest's `request_timeout`, which bounds the read). Deliberately not a
+# config field: it is a property of "is this host there at all", the same for every bundle, and a
+# deployment that needs a longer one has a network problem a setting would only hide. Short,
+# because a dark connector must degrade quickly — the whole point of `DegradingHttpConnector`.
+_CONNECT_TIMEOUT_SECONDS = 5.0
 
 # What one configured connector endpoint becomes, whichever transport it declares. Both are MAF
 # MCP tools with the same agent-facing surface, so callers never branch on the transport.
@@ -244,6 +252,20 @@ def _mcp_tool(manifest: ConnectorManifest, endpoint: Endpoint) -> ConnectorMcpTo
                 auth=auth_for(endpoint.auth, manifest.name),
                 follow_redirects=True,
                 event_hooks={"request": [stamp_turn_identity]},
+                # Without this, httpx applies its own 5 s default to *every* phase, and the
+                # manifest's `request_timeout` — which this module's docstring credits with
+                # "keeping an unreachable host from hanging a turn" — did the opposite. Measured
+                # against a real server: an 8 s tool call had its HTTP stream torn down at 5 s, the
+                # MCP response then never arrived, and the caller blocked for the full
+                # `request_timeout` (60 s for calc, 120 s for bo) before surfacing an opaque
+                # failure — holding an admission permit and an agent lease the whole time. A tool
+                # slower than 5 s is not exotic here: an uncached `predict_pka` runs xTB inline.
+                # `request_timeout` now bounds the read, which is the phase a slow tool occupies;
+                # connect stays short so a dead host still degrades fast.
+                timeout=httpx.Timeout(
+                    endpoint.request_timeout,
+                    connect=_CONNECT_TIMEOUT_SECONDS,
+                ),
             ),
         )
     if isinstance(endpoint, StdioEndpoint):
@@ -307,8 +329,19 @@ async def open_reachable(stack: AsyncExitStack, tools: Iterable[Any]) -> list[st
     Returns:
         The names of the connectors that are not connected, for the caller to surface.
     """
-    for tool in tools:
-        await stack.enter_async_context(tool)
+    # Concurrently, because these are independent hosts and the wait is the *sum* of their
+    # latencies otherwise. On the healthy path that is a few hundred milliseconds; the case that
+    # matters is the tail, where a dark fleet cost six sequential connect timeouts before the model
+    # was called at all. `connectors.health.probe_connectors` already gathers its probes for
+    # exactly this reason ("the sum of the timeouts rather than the slowest one") — this is the
+    # same argument on the path every turn actually takes.
+    #
+    # Gathering is safe for the per-turn-instance rule this seam depends on
+    # (`agents.chemclaw_agent.connector_tools`): that rule is about object *lifetime*, not connect
+    # ordering, and MAF runs each connector's lifecycle on its own task, so no cancel scope is
+    # shared between them. Cancellation still propagates — `gather` cancels children with
+    # `task.cancel()`, which is precisely what `_is_really_cancelled` reads.
+    await asyncio.gather(*(stack.enter_async_context(tool) for tool in tools))
     return [
         getattr(tool, "name", "?") for tool in tools if not getattr(tool, "is_connected", False)
     ]

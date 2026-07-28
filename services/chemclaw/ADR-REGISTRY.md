@@ -166,7 +166,12 @@ written up leaves a gap, and a gap is harmless (`CLAUDE.md`, rule 4).
 | D-124 | The artifact store: a calculation's by-products outlive its tempdir, and the cost policy the cache lacked |
 | D-130 | Turn teardown runs in a cancelled task, so its cleanup has to be shielded to happen at all |
 | D-131 | The connector health probe follows the address override, instead of probing the pod itself |
+<<<<<<< HEAD
+=======
 | D-132 | The Hessian is its own calculation: splitting the matrix from the thermochemistry computed over it |
 | D-133 | A submission is a note and what it needs, so a computed result can cite the compound it is about |
 | D-134 | Edges carry relations and their own validity, so the graph stops being a citation network |
 | D-135 | A dataset may be vendored into the image at build time — the one amendment to D-089's scope |
+| D-136 | The shipped defaults were never executed: three configurations that fail on first contact |
+| D-137 | The plan the model could approve for itself: a pre-execution gate that is not a tool |
+>>>>>>> origin/main
