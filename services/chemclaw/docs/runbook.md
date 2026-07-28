@@ -102,17 +102,37 @@ must match `CHEMCLAW_ECFP_BITS` / `CHEMCLAW_DRFP_BITS` (see `config.py`). Applie
 recorded in the `schema_migrations` ledger with a checksum (D-034), so re-running is safe and an
 edited already-applied file is flagged as drift rather than silently skipped.
 
-## (iii) Add / switch an ELN source
+## (iii) Add / switch a data source (an ELN, a warehouse, a retrieval index)
 
-Sources live on the generic seam (`sources/registry.py`): `eln-json` (free-text export) and
-`eln-ord` (native ORD) are the ingest sources, `graph` the retrieve source. Set which are active
-with `CHEMCLAW_DATA_SOURCES` (a comma list, e.g. `graph,eln-json,eln-ord`) plus each ingest
-source's export directory (`CHEMCLAW_ELN_EXPORT_DIR` / `CHEMCLAW_ORD_EXPORT_DIR`). The durable sync
-ingests **every** active ingest source, each with its own high-water cursor (keyed by registry
-name in `sync_cursors`), so sources advance independently; the memory jobs read the same active set.
-A *new* ELN source is one new adapter class satisfying the `ElnAdapter` contract plus one
-`DATA_SOURCES` entry in `sources/registry.py` and its key in `CHEMCLAW_DATA_SOURCES`. Validate an
-export with `make eln-validate`.
+A source is a folder with a `datasource.yaml`, exactly as a capability is a folder with a
+`connector.yaml` (D-120). The shipped ones are under `sources/`: `eln-json` (free-text export) and
+`eln-ord` (native ORD) are ingest-only, `graph` (plus the off-by-default `vector`/`lexical`) is
+retrieve-only. Set which are active with `CHEMCLAW_DATA_SOURCES` (a comma list, e.g.
+`graph,eln-json,eln-ord`). The durable sync ingests **every** active ingest source, each with its
+own high-water cursor keyed by source name in `sync_cursors`, so sources advance independently; the
+memory jobs read the same active set.
+
+**A new source is a folder and a config token — no core edit.** Write the adapter (satisfying
+`ElnAdapter` for ingest or `SourceRetriever` for retrieval), declare it, enable it. See
+`sources/README.md` for the manifest fields; `make datasource-validate` checks that every declared
+half resolves and that its `config:` binds to the callable's signature.
+
+**A second instance of an existing adapter needs no code at all** — for example a staging ELN drop
+beside the production one. Mount a directory of manifests and put it first in
+`CHEMCLAW_DATA_SOURCES_DIR` (OS-pathsep list, earlier wins), so a deployment can also override a
+shipped source without rebuilding the image:
+
+```yaml
+# /etc/chemclaw/sources/eln-json-staging/datasource.yaml
+name: eln-json-staging
+description: The staging ELN drop.
+ingest: eln.json_adapter:JsonExportAdapter
+config:
+  export_dir: /mnt/eln/staging
+```
+
+The bare `eln-json`/`eln-ord` sources carry no `config:`, so they fall back to
+`CHEMCLAW_ELN_EXPORT_DIR` / `CHEMCLAW_ORD_EXPORT_DIR`. Validate an export with `make eln-validate`.
 
 ## (iv) Add a capability — a tool, a durable job, and their skills (a **connector**)
 

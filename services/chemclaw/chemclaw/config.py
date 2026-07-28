@@ -23,71 +23,33 @@ validator lives in the section that owns the relationship.
 
 House rule for a *collection* field — pick by what the elements are, not by taste:
 
-- **Typed JSON list** (`data_source_specs`, `connector_urls`) when each element *carries its own
-  config*. The element gets a pydantic model, so it is validated, documented by its type, and
-  can grow fields without a parsing change. Where the elements vary by kind, discriminate them
-  (`Field(discriminator=...)` / `Discriminator`) rather than widening one model with optional
-  fields that only apply sometimes.
-- **Delimited string** (`skills_dir`, `data_sources`, `skills_enabled`, `entra_expensive_actions`)
-  when the elements are *bare keys* — names resolved against a registry, or paths. An admin sets
-  these like `PATH`, with no JSON quoting, and a bare key has nothing to validate beyond
-  resolving. Expose the parsed value through a derived `*_list`/`*_dirs` property and read that,
-  never the raw string.
+- **Delimited string** (`skills_dir`, `data_sources`, `data_sources_dir`, `connectors_dir`,
+  `skills_enabled`, `entra_expensive_actions`) when the elements are *bare keys* — names resolved
+  against a registry, or paths. An admin sets these like `PATH`, with no JSON quoting, and a bare
+  key has nothing to validate beyond resolving. Expose the parsed value through a derived
+  `*_list`/`*_dirs` property and read that, never the raw string.
+- **Plain mapping** (`connector_urls`) for a per-name deployment override of one scalar.
 
-The two idioms coexist on purpose (a bare-key source should not pay the JSON-spec tax); existing
-fields are **not** migrated to match — that would be churn without a defect to fix.
+There used to be a third: a **typed JSON list** whose elements each carried their own config, as a
+discriminated union of pydantic models — `McpServerSpec`, then `DataSourceSpec`. Both are gone, and
+they went the same way rather than by coincidence. Each described a *thing attached to this
+deployment* (an MCP server; an ELN drop directory), and each made attaching one an edit to this
+file: a new model, a new arm of the union, and a new branch at the single place that built from it.
+D-118 replaced the first with `connectors/<name>/connector.yaml` and D-120 the second with
+`sources/<name>/datasource.yaml`, so the config token is now a *path* to search and a *name* to
+enable, and the thing's own configuration lives with the thing.
+
+The rule that leaves behind, worth stating because it is what keeps this file from growing without
+bound: **config says which and where; a manifest says what.** If a proposed field would describe
+the internals of one attached thing, it belongs in that thing's manifest, not here.
 """
 
 import os
 from pathlib import Path
-from typing import Annotated, Literal, Self
+from typing import Literal, Self
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
-
-
-class JsonElnSourceSpec(BaseModel):
-    """A JSON-export ELN ingest source carrying its own export dir (a `DataSourceSpec` variant).
-
-    The bare `eln-json` registry key reads the single global `eln_export_dir`; this typed spec
-    nests a per-instance `export_dir`, so two JSON-ELN instances (e.g. prod and staging) with
-    different directories can be configured side by side — the capability a single global field
-    cannot provide. `name` is both the source's registry key and its `sync_cursors` cursor key,
-    so
-    it must be unique across every configured source. `extra="forbid"` rejects a foreign field.
-    """
-
-    model_config = ConfigDict(extra="forbid")
-
-    type: Literal["eln-json"] = "eln-json"
-    name: str = Field(min_length=1)
-    export_dir: str = Field(min_length=1)
-
-
-class OrdElnSourceSpec(BaseModel):
-    """A native-ORD ELN ingest source carrying its own export dir (a `DataSourceSpec` variant).
-
-    The structured-recipe counterpart of `JsonElnSourceSpec`: the same per-instance `export_dir`
-    story, reading Open Reaction Database JSON instead of the free-text export. The two variants
-    differ only by which adapter `sources.registry.build_data_source` constructs.
-    """
-
-    model_config = ConfigDict(extra="forbid")
-
-    type: Literal["eln-ord"] = "eln-ord"
-    name: str = Field(min_length=1)
-    export_dir: str = Field(min_length=1)
-
-
-# A config-carrying data source, discriminated on `type` and built by `sources.registry`'s
-# `build_data_source`. This typed list is the *additive* path (alongside the bare-key
-# `data_sources` comma list) for sources that nest their own per-instance config;
-# keyless/default sources (graph, vector, the global-dir eln-json) stay in the comma list, so
-# there is no regression. A new config-carrying type — the deferred Snowflake connector, which
-# would nest its connection / credential-ref / schema-mapping config — joins as one more variant
-# here plus one branch in `build_data_source`, with no edit to any source consumer (D-054's "one
-# entry + one token" story).
-DataSourceSpec = Annotated[JsonElnSourceSpec | OrdElnSourceSpec, Field(discriminator="type")]
 
 
 class ObservabilitySettings(BaseSettings):
@@ -1184,28 +1146,37 @@ class ElnSettings(BaseSettings):
 
 
 class SourcesSettings(BaseSettings):
-    """The generic `DataSource` seam (plan F7): which registered sources are active.
+    """The generic `DataSource` seam (plan F7): where sources are discovered, and which are active.
 
-    Its own section because the seam is deliberately source-agnostic — adding a source (first
-    live one: a custom Snowflake ELN connector) is one registry entry + one key here, zero core
-    edits — so it belongs to neither the ELN section nor the retrieval section alone.
+    Its own section because the seam is deliberately source-agnostic — adding a source (first live
+    one: a custom Snowflake ELN connector) is one `datasource.yaml` folder and one name here, zero
+    core edits — so it belongs to neither the ELN section nor the retrieval section alone.
+
+    Two tokens, exactly mirroring the connector seam: a *discovery* path and an *enablement* list.
+    Discovery is not enablement (D-018) — the repo ships every source, a deployment runs the subset
+    it has validated.
     """
 
-    # A comma list of `sources.registry` keys. `graph` is the knowledge-graph retriever
+    # Where `datasource.yaml` folders are discovered. An OS-pathsep list (like `PATH` and
+    # `connectors_dir`); read through the `data_sources_dirs` property, never raw. Earlier
+    # directories win a name collision, so a deployment can mount a folder that overrides a shipped
+    # source — which is how a second JSON-ELN drop with its own `export_dir` is configured now
+    # that `data_source_specs` is gone (D-120): a manifest with `config: {export_dir: ...}`,
+    # not a new pydantic variant plus a new branch in core.
+    data_sources_dir: str = "sources"
+
+    # A comma list of discovered source names. `graph` is the knowledge-graph retriever
     # (retrieve-only); `eln-json`/`eln-ord` re-host the ELN adapters (ingest-only).
     # `active_retrieve_sources()` feeds `gather_evidence`, so the default keeps today's
     # exactly-one-graph-retriever behavior; `active_ingest_sources()` feeds the ELN sync,
-    # defaulting to the JSON adapter as before.
+    # defaulting to the JSON adapter as before. A name here that no manifest declares is a startup
+    # error, not a corpus that silently stops being searched.
     data_sources: str = "graph,eln-json"
 
-    # Config-carrying data sources (typed, discriminated on `type`), additive to `data_sources`.
-    # A `DataSourceSpec` both names a source and nests its per-instance config (e.g. a JSON/ORD
-    # ELN's own `export_dir`), so two instances of one type with different directories coexist —
-    # impossible with the single global `eln_export_dir`. Keyless/default sources stay in the
-    # `data_sources` comma list; this list is only for sources that carry their own config. Each
-    # name is a registry key and a per-source cursor key, so names are unique across both
-    # tokens.
-    data_source_specs: list[DataSourceSpec] = []
+    @property
+    def data_sources_dirs(self) -> list[str]:
+        """The data-source directories, split on the OS path separator (like `PATH`)."""
+        return [d for d in self.data_sources_dir.split(os.pathsep) if d]
 
     @property
     def data_source_list(self) -> list[str]:
@@ -1214,18 +1185,17 @@ class SourcesSettings(BaseSettings):
 
     @model_validator(mode="after")
     def _distinct_source_names(self) -> Self:
-        """Reject a name shared by two sources — each is a registry key and a per-source cursor key.
+        """Reject a name listed twice — each name is also a per-source `sync_cursors` cursor key.
 
-        A collision (spec vs spec, or a spec reusing a comma-list key) would make two sources
-        share one `sync_cursors` row, so one's advancing cursor could silently skip the other's
-        entries. Caught at startup, before any sync runs.
+        A duplicate would make one source advance the other's high-water cursor, silently skipping
+        entries. Caught at startup, before any sync runs. (Two *different* sources cannot collide
+        any more: a name is a folder name, and `_source_dirs` dedupes by it.)
         """
-        names = [*self.data_source_list, *(spec.name for spec in self.data_source_specs)]
+        names = self.data_source_list
         duplicated = sorted({name for name in names if names.count(name) > 1})
         if duplicated:
             raise ValueError(
-                "data source names must be unique across data_sources and data_source_specs; "
-                f"duplicated: {duplicated}"
+                f"data source names must be unique in data_sources; duplicated: {duplicated}"
             )
         return self
 

@@ -103,13 +103,18 @@ def test_no_module_hardcodes_a_third_party_data_source() -> None:
 def test_the_source_registry_offers_no_external_source() -> None:
     """The data-source registry is the one place a source is attached, so it is checked by name.
 
-    A host-literal scan cannot catch a source whose address arrives entirely from config. The
-    registry is the chokepoint: nothing becomes a retrievable source without an entry here.
-    """
-    from sources.registry import DATA_SOURCES
+    A host-literal scan cannot catch a source whose address arrives entirely from config. Discovery
+    is the chokepoint: nothing becomes a retrievable source without a `datasource.yaml` on disk.
 
-    assert "literature" not in DATA_SOURCES
-    assert set(DATA_SOURCES) == {
+    Checked against what the *repo ships* rather than what a deployment enables. `data_sources_dir`
+    is a search path, so a cluster can mount an extra folder — that is the seam working as designed
+    (D-120), and it is a deployment's own decision to audit. What must not drift unnoticed is a new
+    external corpus arriving in this repository.
+    """
+    from sources.registry import discovered
+
+    assert "literature" not in discovered()
+    assert set(discovered()) == {
         "graph",
         "vector",
         "lexical",

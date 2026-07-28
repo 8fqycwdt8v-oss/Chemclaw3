@@ -89,6 +89,12 @@ jobs:
       - name: Validate connectors
         run: make connector-validate
 
+      # The same class of failure for the *other* seam that names its implementation as a string
+      # (D-120). A data source's half is `module:callable`, resolved in whichever worker asks for
+      # it first — so a typo surfaces at the first sync, in a worker, hours after the deploy.
+      - name: Validate data sources
+        run: make datasource-validate
+
       - name: Validate step templates
         run: make template-validate
 
