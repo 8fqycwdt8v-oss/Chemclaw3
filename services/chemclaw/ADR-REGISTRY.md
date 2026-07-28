@@ -157,3 +157,4 @@ number is one another session will take.
 | D-130 | Turn teardown runs in a cancelled task, so its cleanup has to be shielded to happen at all |
 | D-131 | The connector health probe follows the address override, instead of probing the pod itself |
 | D-132 | The shipped defaults were never executed: three configurations that fail on first contact |
+| D-133 | The plan the model could approve for itself: a pre-execution gate that is not a tool |

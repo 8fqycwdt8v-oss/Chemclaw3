@@ -222,7 +222,10 @@ def test_harness_agent_adds_todo_and_mode_providers(monkeypatch: pytest.MonkeyPa
     provider_types = {type(p).__name__ for p in agent.context_providers}
     assert {
         "TodoProvider",
-        "AgentModeProvider",
+        # The *gated* provider specifically (REV-1, D-132). Asserting the base class here would
+        # pass for stock `AgentModeProvider` too — which advertises `mode_set` to the model and is
+        # exactly the configuration this must never silently revert to.
+        "PlanApprovalModeProvider",
         "InMemoryHistoryProvider",
         "SkillsProvider",
         "CompactionProvider",

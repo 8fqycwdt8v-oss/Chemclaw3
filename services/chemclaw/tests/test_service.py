@@ -1067,6 +1067,11 @@ def test_every_session_scoped_route_is_ownership_gated() -> None:
         ("/sessions/{session_id}/messages", "GET"),
         ("/sessions/{session_id}/events", "GET"),
         ("/sessions/{session_id}/attachments", "POST"),
+        # The pre-execution approval gate (REV-1, D-132). Both must be owner-scoped: reading a
+        # plan leaks what another chemist is doing, and deciding on one would let a stranger
+        # authorize it.
+        ("/sessions/{session_id}/plan", "GET"),
+        ("/sessions/{session_id}/plan/decision", "POST"),
     }, (
         "new session-scoped route detected — it MUST resolve ownership via _resolve_session, "
         "and this inventory + the non-owner sweep below must cover it"
@@ -1086,6 +1091,8 @@ def test_every_session_scoped_route_is_ownership_gated() -> None:
             # a 404 here proves the *ownership* gate rather than a body-parsing rejection.
             if url.endswith("/attachments"):
                 res = client.request(method, url, files={"file": ("a.txt", b"x", "text/plain")})
+            elif url.endswith("/plan/decision"):
+                res = client.request(method, url, json={"approved": True, "plan_hash": "x"})
             else:
                 res = client.request(method, url, json={"message": "x"})
             assert res.status_code == 404, (

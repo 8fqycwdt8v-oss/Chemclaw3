@@ -16,7 +16,6 @@ from typing import Any
 
 from agent_framework import (
     Agent,
-    AgentModeProvider,
     CharacterEstimatorTokenizer,
     ChatOptions,
     CompactionProvider,
@@ -48,6 +47,7 @@ from agents import preferences as _preferences  # noqa: F401
 from agents import research_tools as _research_tools  # noqa: F401
 from agents import subscriptions as _subscriptions  # noqa: F401
 from agents.audit import AuditSink, make_audit_middleware
+from agents.harness_mode import PlanApprovalModeProvider
 from agents.llm_provider import build_chat_client
 from agents.profiles import AgentProfile, get_profile
 from agents.skill_access import EnabledSkillsSource, RoleScopedSkillsSource
@@ -298,7 +298,7 @@ def _build_harness_agent(
         after_compaction_strategy=strategy,
         tokenizer=tokenizer,
         # Plan/execute mode: start in plan for approval-first autonomy, execute for autonomous runs.
-        mode_provider=AgentModeProvider(default_mode=start_mode),
+        mode_provider=PlanApprovalModeProvider(default_mode=start_mode),
         # Loop only in execute mode while todos remain — so plan_only stops for approval — capped.
         loop_should_continue=todos_remaining(looping_modes=["execute"]),
         loop_max_iterations=settings.harness_max_loop_iterations,
