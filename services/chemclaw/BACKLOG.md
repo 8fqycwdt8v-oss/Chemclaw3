@@ -32,29 +32,36 @@ missing prerequisite), in D-092.
 
 The load test's fixes landed (see D-119). What it surfaced and did **not** close:
 
-- [ ] **CHAOS-1 A session whose client walks away mid-turn stays 409 for ~63 s.** Found by the
-      Stage 5e chaos pass. Abandon an SSE turn mid-stream and the same session refuses the next
-      turn — `a turn is already running for this session` — for **63 s measured**, where it should
-      free immediately. A chemist who closes a tab and reopens it cannot resume for a minute.
+- [x] **CHAOS-1 A session whose client walks away mid-turn stayed 409 for ~63 s.** Closed by D-124:
+      **60.9 s → 0.0 s measured**, and 409 → 200 on a second replica.
 
-      The blocker is the in-process `active_turns` set (`service/app.py:757`), whose `discard`
-      lives in the streamed generator's `finally` alongside the durable claim release. Two theories
-      were tested and **both were wrong**, which is why this is open rather than fixed:
+      Three theories were tested across two sessions and **all three were wrong** — the in-process
+      `active_turns` entry leaking, the abandoned turn running on, and the claim release simply
+      needing to be detached. What settled it was sampling both guards once per second while
+      polling: `chemclaw_turns_in_flight` was 0 from the first sample (the `finally` *did* run
+      promptly) while the `session_turns` row counted down from exactly 60 s with no refresh. The
+      recovery time was the lease, so the release had never landed. Tracing the store then showed
+      it *entered* on every abandoned turn and *completed* on none: a bare `await` in a cancelled
+      task raises at its first suspension point. Shielded now, with the error handling inside the
+      shielded task so it cannot end as a stray `Task exception was never retrieved`.
 
-      1. *"The `await` in that `finally` is cancelled before it reaches the database."* Plausible —
-         a `finally` that runs during task cancellation cannot reliably await. Detaching the
-         release onto its own task changed the measured time not at all (63.5 s vs 65.1 s). The
-         change was reverted rather than shipped unverified.
-      2. *"The abandoned turn keeps running to completion and holds the session."* Also no: the
-         session's actor produced **zero** `audit_events` rows, so no tool ever ran.
+- [x] **CHAOS-1b The disconnect rollback was dead code on the only path that reaches it.** Found by
+      the same trace, closed by D-124. `service/runner.py` rolled a half-written turn back under
+      `except GeneratorExit:` — what `aclose()` raises. sse-starlette answers `http.disconnect` by
+      cancelling its task group and never calls `aclose()` on the body iterator, so the real path
+      delivers `CancelledError` and the rollback never ran. It looked covered because
+      `tests/test_turn_cancellation.py` tore every stream down by hand under the comment *"what
+      sse-starlette does when the client disconnects"*. It is not. Both teardowns are now
+      exercised; the clause also brings the turn deadline under the same rollback.
 
-      So the generator's `finally` is not running promptly and neither explanation covers it. Next
-      step is to instrument the teardown directly — log on entry to that `finally` with a timestamp
-      — and find out when it actually fires relative to the disconnect. Reproduction:
-      `scratchpad/disconnect_probe.py`, which prints the recovery time.
-
-      Severity is real but bounded: it costs availability of one conversation for about a minute,
-      never correctness, and the lease/`discard` do eventually fire.
+- [x] **CHAOS-1c The connector health probe ignored the deployment's address override.** Found by
+      re-running the Stage 5e connector-kill scenario, which could not tell a killed connector from
+      a mis-probed one. Closed by D-125. `connector_urls` moved the tool endpoint and left the probe
+      on the manifest's loopback dev default; the shipped chart always sets that override, so in a
+      cluster `/readyz` reported every connector unreachable however healthy it was — and under
+      `connectors_required: true` the front door would have failed to start every time. Measured
+      before/after on the running stack: all six `unreachable` → all six `healthy`, and they now
+      flip back when the fleet is killed.
 
 
 - [x] **STREAM-1 The front door shared one chat client across concurrent turns, corrupting streamed

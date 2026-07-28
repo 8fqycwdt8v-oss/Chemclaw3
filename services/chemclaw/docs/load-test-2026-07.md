@@ -483,6 +483,11 @@ is invisible to a different owner.
 | **Postgres stopped and restarted** | The pool **recovered without a service restart**: both replicas answered `/healthz` and created sessions again once the database came back. |
 | **Client disconnects mid-turn** | **FAILS.** The session refuses the next turn for **63 s**. Recorded as CHAOS-1. |
 
+> **Correction (see the re-run below).** The first row is half wrong and the readings are kept as
+> written so the mistake is legible. The turn did answer, but `/readyz` naming the connector
+> unreachable proved nothing: it said `unreachable` *before* the kill as well, because the probe was
+> pointed at the wrong address entirely (D-125). The signal was not being read — it was constant.
+
 ## CHAOS-1, and two wrong theories
 
 Abandon an SSE turn mid-stream and the same session answers 409 for 63 seconds. The blocker is the
@@ -500,3 +505,91 @@ So the generator's `finally` is not firing promptly and neither story explains w
 to instrument the teardown directly rather than reason about it. It costs availability of one
 conversation for about a minute and never costs correctness — which is why it is recorded rather
 than guessed at.
+
+# Stage 5e, re-run — CHAOS-1 resolved, and two more defects behind it
+
+The instrument was the whole answer, and theory 1 turned out to be *right about the mechanism and
+wrong in its experiment* — a distinction only measurement could draw.
+
+## Attributing the 63 seconds
+
+Two guards can hold that 409 and no earlier run had separated them. Sampling both once per second
+while polling settles it in one pass:
+
+```
+t+ 0.0s  POST=409  in_flight=0.0  claim=81d518@+59.9s
+t+30.9s  POST=409  in_flight=0.0  claim=81d518@+28.9s
+t+59.9s  POST=409  in_flight=0.0  claim=81d518@+0.0s
+t+60.9s  POST=200  in_flight=0.0  claim=81d518@+60.0s
+```
+
+`in_flight` is 0 in the *first* sample, so the third theory dies too: the in-process set was freed
+immediately and the generator's `finally` did run promptly. The durable claim's `expires_at` counts
+down from exactly `service_turn_claim_lease_seconds` and is never refreshed. The recovery time *is*
+the lease. The release never landed.
+
+Tracing the claim store shows why, without inference:
+
+```
+CLAIMTRACE t+ 0.75s claim(71743695) -> True
+STREAMTRACE agent stream got CancelledError
+CLAIMTRACE t+ 0.75s release(71743695) ENTERED
+CLAIMTRACE t+ 0.76s claim(71743695) -> False        <- and no COMPLETED, ever
+```
+
+Entered on every abandoned turn, completed on none. A bare `await` inside a cancelled task raises at
+its first suspension point, so the release reached the database call and died there. The earlier
+"detach it onto a task" experiment had the right idea and was measured on a branch without the fix.
+
+## What the same trace line gave away
+
+`agent stream got CancelledError` answers a question nobody had asked: **which** exception a real
+disconnect delivers. The runner rolled a half-written turn back under `except GeneratorExit:` — the
+exception `aclose()` raises. sse-starlette never calls `aclose()` on the body iterator; it cancels
+its task group. So the rollback that exists to stop one dropped connection from poisoning a
+conversation was unreachable on the only path that reaches it, and the suite reported green because
+all three of its abandonment tests closed the stream by hand.
+
+Writing the regression test walked into the same trap once more: the first version cancelled the
+consumer while it sat in its own frame, so the abandoned generator was finalised later by
+`asyncio.run`'s async-generator shutdown — which raises `GeneratorExit` — and the test passed
+against the unfixed code. It now waits for the agent to signal that it has stalled.
+
+## Re-run results
+
+Live Anthropic, Postgres sessions, the connection dropped as soon as a `tool_call` event reached the
+wire.
+
+| Scenario | Before | After |
+|---|---|---|
+| **C1** disconnect mid-tool-call, one replica | session 409 for **60.9 s** | free in **0.0 s**; next turn answers in 2.6 s; **no unmatched `tool_use`** left in durable history |
+| **C2** disconnect on replica A, next turn on replica B | **HTTP 409** | HTTP 200, answered in 4.8 s |
+| **C3** connector fleet SIGKILLed mid-turn | `/readyz` constant, signal unreadable | all six flip `healthy` → `unreachable`; the turn still **answers** (39 s, three tool retries), and the next turn completes on the reduced surface |
+| **C4** Postgres stopped at the instant of the disconnect | — | release fails *attributably*; session usable again 50 s after the database returns, inside the lease |
+
+C2 is the row that matters for the shipped chart: a process that never served the abandoned turn has
+only the `session_turns` row to go on, so the durable claim is the whole guard there.
+
+C4 was not a confirmation — it **found the third defect**. The first run produced a bare
+`Task exception was never retrieved` and no attributable warning, because the store raises
+`psycopg.errors.AdminShutdown`, which matched none of the `(ConnectionError, OSError, RuntimeError)`
+the release caught. Shielding had turned a failure that used to be discarded with its `finally` into
+one nobody was left to read. Widened, re-run, clean.
+
+C3 could not be read at all until the probe was fixed (D-125): `/readyz` reported `unreachable` for
+every connector before and after the kill, because `connector_urls` moves the tool endpoint and the
+probe was still reading the manifest's loopback dev default. The shipped chart always sets that
+override, so in a cluster the readiness signal was constant — and under `connectors_required: true`
+the front door would have refused to start, blaming connectors that were healthy.
+
+## What is still open here
+
+Nothing from this scenario. Two things are worth stating so they are not mistaken for coverage:
+
+* The durable-history rollback did not delete any rows in C1, and that is expected rather than a
+  gap: with per-service-call history persistence disabled (the LIVE-1 mitigation), an abandoned turn
+  has not committed anything yet, so the session-state rollback is what does the work. The durable
+  half remains the guard for the configuration that does persist mid-turn.
+* C4's 50 s recovery is the lease doing its job, not a regression. Shielding makes the release
+  *run*; when the store is gone there is nothing that can make it *succeed*, which is why the lease
+  exists.

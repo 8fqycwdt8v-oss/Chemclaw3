@@ -4906,3 +4906,171 @@ by two turns at once — rather than the corruption itself, which is upstream co
 **This is a workaround, written to be deleted.** The real fix is for the parser to hold that state
 per stream. `DEFERRED.md` records the trigger: when it does, the pool collapses back to one shared
 agent per profile and `agents/agent_pool.py` goes away.
+
+## D-124 — Turn teardown runs in a cancelled task, so its cleanup has to be shielded to happen at all
+
+**Context.** Stage 5e's chaos pass found CHAOS-1: abandon an SSE turn mid-stream and the same
+session refuses its owner's next turn — `a turn is already running for this session` — for **63
+seconds measured**. A chemist who closed a tab could not reopen the conversation for a minute.
+
+The finding stayed open across two sessions because two explanations were tested and **both were
+wrong**. Detaching the durable claim release onto its own task changed the measured time not at all
+(63.5 s vs 65.1 s). The theory that the abandoned turn simply ran on to completion was refuted by
+its actor producing zero `audit_events` rows. The written next step — instrument the teardown — is
+what finally settled it, and the instrument mattered more than the reasoning did.
+
+**What it actually was.** Two guards can hold that 409, and no previous measurement separated them.
+Sampling both once per second while polling settles it in one run:
+
+```
+t+ 0.0s  POST=409  in_flight=0.0  claim=81d518@+59.9s
+t+30.9s  POST=409  in_flight=0.0  claim=81d518@+28.9s
+t+59.9s  POST=409  in_flight=0.0  claim=81d518@+0.0s
+t+60.9s  POST=200  in_flight=0.0  claim=81d518@+60.0s
+```
+
+`in_flight` is 0 from the first sample: the in-process `active_turns` set was freed *immediately*,
+so the generator's `finally` did run promptly — the third disproved theory. The durable claim's
+`expires_at` counts monotonically down from 60 s and is never refreshed, so the heartbeat was
+cancelled too. The recovery time is exactly `service_turn_claim_lease_seconds`. **The release never
+landed**, and the lease — designed as the backstop — was carrying the whole path.
+
+Tracing the claim store proves the mechanism rather than inferring it:
+
+```
+CLAIMTRACE t+ 0.75s claim(71743695) -> True
+STREAMTRACE agent stream got CancelledError
+CLAIMTRACE t+ 0.75s release(71743695) ENTERED
+CLAIMTRACE t+ 0.76s claim(71743695) -> False        <- and no COMPLETED, ever
+```
+
+The release is *entered* on every abandoned turn and *completes* on none. sse-starlette answers
+`http.disconnect` by cancelling its task group; a bare `await` inside a cancelled task raises at its
+first suspension point, so `_release_turn_claim` reached the database call and died there. The
+earlier "detach it onto a task" experiment was the right idea measured on the wrong branch.
+
+**Decision.** Shield the release, and give the shielded coroutine its own error handling:
+
+```python
+async def _release() -> None:
+    try:
+        await claims.release(session_id, _WORKER_ID)
+    except (ConnectionError, OSError, RuntimeError):
+        logger.warning("could not release the turn claim for session %s; it expires on its own", ...)
+
+await asyncio.shield(_release())
+```
+
+`shield` runs the release as an independent task that outlives the cancelled frame. The error
+handling belongs *inside* that task rather than around the `await`: once the awaiting task is
+cancelled, `shield` drops its bookkeeping callback on the inner task, so a failure raised afterwards
+is never retrieved and asyncio reports it as a bare `Task exception was never retrieved` with
+nothing tying it to a session. A task that cannot fail cannot produce one. The same restructuring is
+applied to the runner's pre-existing `rollback_to` shield, which had the identical hazard.
+
+The lease stays as the backstop for what shielding cannot cover — the process being killed, the loop
+closing under it. It is now what it was always meant to be: the exceptional path, not the only one.
+
+**The second defect, found by the same instrument.** The trace line `agent stream got
+CancelledError` is the answer to a question nobody had asked: which exception does a real disconnect
+deliver? `service/runner.py` rolled a half-written turn back under `except GeneratorExit:` — the
+exception `aclose()` raises. sse-starlette **never calls `aclose()` on the body iterator** on the
+disconnect path; it cancels. So the rollback that exists to stop one dropped connection from
+poisoning a conversation with an orphaned `tool_use` was **dead code on the only path that reaches
+it**, and had been since it was written. The clause now catches `(GeneratorExit,
+asyncio.CancelledError)`, which also brings the front door's whole-turn deadline under the same
+rollback — a timed-out turn is half-written in exactly the same way.
+
+This was a silent weakness rather than an outage only because `agents.session_store` repairs
+unmatched tool calls at read time. That backstop strips the orphan; only the rollback discards the
+rest of the abandoned turn.
+
+**Why no test caught either.** `tests/test_turn_cancellation.py` had three tests about abandoned
+turns, every one of them tearing the stream down with `await stream.aclose()` under the comment
+*"what sse-starlette does when the client disconnects"*. It is not what sse-starlette does. The
+suite simulated the one teardown production never takes, and reported green while the real path was
+unhandled — the same shape as LIVE-1, where `ScriptedChatClient` derived from the base class
+*without* middleware and so tested a pipeline production never ran.
+
+Writing the regression test reproduced the trap once more, and that is worth recording. The first
+version cancelled the consuming task while it sat in its own frame rather than inside the turn; the
+abandoned generator was then finalised by `asyncio.run`'s async-generator shutdown, which raises
+`GeneratorExit` — so the test passed against the unfixed code. It now waits for the agent to signal
+that it has stalled, guaranteeing the cancel lands inside the turn, and asserts *before* the loop
+closes.
+
+**Result, measured on the real stack** (live Anthropic, Postgres sessions, disconnect after a
+`tool_call` event was seen on the wire):
+
+| | before | after |
+|---|---|---|
+| single replica: session freed after | **60.9 s** | **0.0 s** |
+| two replicas, next turn on the other process | **HTTP 409** | HTTP 200, answered in 4.8 s |
+| unmatched `tool_use` ids left in durable history | — | none |
+
+The two-replica row is the one that matters for the shipped chart: a process that never served the
+abandoned turn has only the `session_turns` row to go on, so the durable claim is the entire guard
+there and its release is the entire fix.
+
+**Cost.** Cleanup now outlives the request that scheduled it, by one task and typically ~140 ms.
+That is the price of cleanup that runs at all, and it is bounded: the task does one DELETE and
+cannot fail outward.
+
+## D-125 — The connector health probe follows the address override, instead of probing the pod itself
+
+**Context.** Re-running Stage 5e's connector-kill scenario after D-124 produced a result that could
+not be read: `/readyz` reported every connector `unreachable` **both before and after** the fleet
+was SIGKILLed mid-turn. The scenario exists to prove the unreachable signal is loud (the failure
+D-118 called out, where an agent silently runs with only its in-process tools), and it could not
+distinguish a killed connector from one that was never probed correctly.
+
+It was the latter, and not only in dev. `connectors/registry.py` applied the deployment's
+`connector_urls` override to the connector's *tool* endpoint and nowhere else, while
+`connectors/health.py` read `manifest.endpoint.health_url` straight off the file. A bundle's
+manifest ships a loopback dev default, so the two disagreed the moment the override was set — and
+**the shipped chart always sets it**: `chemclaw.connectorUrls` computes one in-cluster Service URL
+per enabled bundle precisely so the front door does not have to be patched per environment.
+
+The consequence in a cluster is that the front door probed `http://127.0.0.1:881x/healthz` — its own
+pod, where nothing listens. Every connector read `unreachable` however healthy it was, so `/readyz`
+and the `chemclaw_connectors_unhealthy` gauge were decorative; and under `connectors_required: true`
+— the GxP fail-fast posture, the one a regulated deployment would pick — the probe raises at
+startup, so the front door would have failed to start every time, with a message blaming connectors
+that were fine.
+
+**Decision.** One public `connectors.registry.health_url(manifest)`, and the probe goes through it.
+The probe is a second caller of the override, so the override is what it must ask.
+
+The move is a **suffix replacement, not an origin swap**, because the two deployments that exist put
+a connector in different *places* rather than merely on different hosts:
+
+| | endpoint | health |
+|---|---|---|
+| Helm (per-bundle Service) | `http://…-connector-chem:8814/mcp` | `…:8814/healthz` |
+| `scripts.connectors_dev` (one port, mounted by name) | `http://127.0.0.1:8810/chem/mcp` | `…/chem/healthz` |
+
+Keeping the health path verbatim is right for the first and wrong for the second — `…:8810/healthz`
+is a 404 there, which is exactly why the dev topology never revealed the bug. So the manifest's own
+two URLs define the relationship (whatever distinguishes its health URL from its endpoint URL), and
+that difference is re-applied at the effective address. An override that does not end the way the
+manifest's endpoint does falls back to the declared URL: possibly wrong, but not silently invented.
+
+**Result, measured on the running stack** with the dev composite serving all six bundles:
+
+| | before | after |
+|---|---|---|
+| `/readyz` with every connector healthy | `bo=unreachable, calc=unreachable, chem=unreachable, molfp=unreachable, rxnfp=unreachable, safety=unreachable` | `bo=healthy, calc=healthy, chem=healthy, molfp=healthy, rxnfp=healthy, safety=healthy` |
+| `/readyz` after the fleet is killed mid-turn | (unchanged — indistinguishable) | all six flip to `unreachable` |
+
+With the signal working, the scenario finally reports something: the turn whose connector died at
+2.7 s still **answered**, retrying tools three times against a dead server and finishing in 39 s, and
+the next turn completed on the reduced surface. Losing a connector costs capability, not the
+conversation — which is what `connectors_required: false` promises and what had never actually been
+observed end to end.
+
+**Why no test caught it.** Every registry test asserted the override on the tool URL
+(`test_connector_urls_override_the_manifest_address`) and no test asserted anything about the probe
+URL at all, so the two halves of one address were covered asymmetrically. `tests/test_deploy_chart.py`
+checks that the chart *computes* the URLs; nothing checked that everything reading an address goes
+through the same function. Three tests now pin it, including the path-moving case that the naive
+origin swap would fail.
