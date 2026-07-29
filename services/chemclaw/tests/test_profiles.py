@@ -71,15 +71,17 @@ def test_profile_can_narrow_connectors() -> None:
 
 def test_profile_attenuates_but_audit_and_authz_always_attach() -> None:
     """The invariant: narrowing a profile never removes the audit + per-tool authz middleware."""
-    from agents.tool_authz import enforce_tool_authz
+    from agents.tool_authz import announce_tool_failures, enforce_tool_authz
 
     agent = build_agent(
         chat_client=object(),
         profile=AgentProfile(name="tiny", tool_names=frozenset({"predict_pka"})),
     )
     middleware = list(agent.middleware or [])
-    assert len(middleware) == 4  # denial + domain-error surfacing + audit + authz, unchanged
+    # denial + domain-error surfacing + audit + authz + failure announcing, unchanged
+    assert len(middleware) == 5
     assert enforce_tool_authz in middleware
+    assert announce_tool_failures in middleware
 
 
 def test_unknown_tool_name_in_profile_fails_loud() -> None:

@@ -263,3 +263,71 @@ def test_fingerprint_retriever_cites_reaction_notes() -> None:
         assert await retriever.retrieve("what was the yield?", {}) == []
 
     asyncio.run(_run())
+
+
+def test_graph_retriever_finds_a_note_through_ordinary_phrasing(tmp_path: Path) -> None:
+    """`the biaryl route` must find the biaryl note; the phrase-substring test never could.
+
+    The live failure this reproduces (D-138): asking about "the biaryl route" returned nothing
+    while "biaryl" returned three notes, so the agent told a project manager the knowledge graph
+    was empty on a programme it holds the campaign for — and then asked them to supply it.
+    """
+
+    async def _run() -> None:
+        (tmp_path / "a.md").write_text(
+            "---\nid: campaign-biaryl\ntype: campaign\n---\nSuzuki scope for the product.\n",
+            encoding="utf-8",
+        )
+        retriever = GraphRetriever(str(tmp_path))
+        assert [c.source_note_id for c in await retriever.retrieve("biaryl", {})] == [
+            "campaign-biaryl"
+        ]
+        # The words a chemist actually puts around the term must not erase the hit.
+        for phrasing in ("the biaryl", "our biaryl route", "status of the biaryl programme"):
+            assert [c.source_note_id for c in await retriever.retrieve(phrasing, {})] == [
+                "campaign-biaryl"
+            ], phrasing
+
+    asyncio.run(_run())
+
+
+def test_graph_retriever_requires_every_term_before_it_widens(tmp_path: Path) -> None:
+    """All-terms first: a note matching the whole query beats one matching part of it.
+
+    Term matching must not become "any word matches", which would return the whole corpus for
+    every question and make the ranking the only thing standing between the model and noise.
+    """
+
+    async def _run() -> None:
+        (tmp_path / "a.md").write_text(
+            "---\nid: reaction-both\ntype: reaction\n---\nAmide coupling in toluene.\n",
+            encoding="utf-8",
+        )
+        (tmp_path / "b.md").write_text(
+            "---\nid: reaction-one\ntype: reaction\n---\nSuzuki coupling in water.\n",
+            encoding="utf-8",
+        )
+        retriever = GraphRetriever(str(tmp_path))
+        # Both terms present in one note only: the partial match is not returned at all.
+        assert [c.source_note_id for c in await retriever.retrieve("amide coupling", {})] == [
+            "reaction-both"
+        ]
+        # Nothing matches everything, so the search widens — and coverage orders what comes back.
+        widened = await retriever.retrieve("amide suzuki coupling", {})
+        assert [c.source_note_id for c in widened] == ["reaction-both", "reaction-one"]
+
+    asyncio.run(_run())
+
+
+def test_graph_retriever_still_answers_a_query_that_is_only_stopwords(tmp_path: Path) -> None:
+    """Filtering every term away must not turn into "no terms, therefore everything matches"."""
+
+    async def _run() -> None:
+        (tmp_path / "a.md").write_text(
+            "---\nid: reaction-a\ntype: reaction\n---\nEsterification at 80 C.\n", encoding="utf-8"
+        )
+        retriever = GraphRetriever(str(tmp_path))
+        assert await retriever.retrieve("of the", {}) == []
+        assert [c.source_note_id for c in await retriever.retrieve("at", {})] == ["reaction-a"]
+
+    asyncio.run(_run())

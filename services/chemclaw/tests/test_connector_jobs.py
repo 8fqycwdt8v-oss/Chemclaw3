@@ -82,13 +82,19 @@ def client(monkeypatch: pytest.MonkeyPatch) -> _FakeClient:
 
 
 def _params(tool: Any, **values: Any) -> BaseModel:
-    """Build the tool's generated params model from `values` (what MAF does from a tool call)."""
+    """Build the tool's generated params model from `values` — the *convenient* caller's shape.
+
+    Deliberately not described as "what MAF does": it is not, and believing it was is what let
+    every declared job ship broken (D-138). The two tests below drive the framework's real
+    invocation path instead; this helper stays because most tests here are about the gates, not
+    the argument shape, and a constructed model keeps those readable.
+    """
     model: type[BaseModel] = tool.__annotations__["params"]
     return model(**values)
 
 
 def _launch(tool: Any, **values: Any) -> str:
-    """Call the generated tool with `values`, as MAF would.
+    """Call the generated tool with `values`.
 
     A sync wrapper because the suite has no pytest-asyncio: each test drives one event loop
     through `asyncio.run`, which is the convention everywhere else here.
@@ -165,6 +171,58 @@ def test_launching_starts_the_declared_workflow_on_the_declared_queue(
     assert payload.connector == "calc" and payload.job == "run_calculation"
     assert payload.payload == {"smiles": "CCO"}  # the omitted optional param is not sent
     assert job_id == job_workflow_id("calc", "run_calculation", {"smiles": "CCO"})
+
+
+def test_launching_works_when_the_argument_arrives_as_the_raw_json_object(
+    client: _FakeClient,
+) -> None:
+    """The shape the framework actually passes is a `dict`, and it must launch (D-138).
+
+    Every other launch test in this file hands the tool a constructed model, which is why all of
+    them passed while every declared job — `compute_reaction_energy`, `compare_solvents`,
+    `start_optimization_campaign`, `compute_dft_energy` — failed on its first real use with
+    `'dict' object has no attribute 'model_dump'`. The parameter's annotation is a pydantic model
+    and MAF publishes its JSON schema, but MAF hands the body the decoded JSON object; nothing
+    between the wire and the tool builds the model.
+    """
+    tool = build_job_tool("calc", _SPEC)
+    job_id = str(asyncio.run(tool({"smiles": "CCO", "cycles": 3})))
+    (call,) = client.calls
+    payload: ConnectorJobInput = call["input"]
+    assert payload.payload == {"smiles": "CCO", "cycles": 3}
+    assert job_id == job_workflow_id("calc", "run_calculation", {"smiles": "CCO", "cycles": 3})
+
+
+def test_the_raw_object_is_validated_rather_than_passed_through(client: _FakeClient) -> None:
+    """Accepting a dict must not mean accepting *any* dict — the schema still has to hold.
+
+    The failure this guards against is the lazy repair: dropping the model and forwarding whatever
+    arrived. The declared type would then be advertised to the model and enforced nowhere, and a
+    mistyped argument would reach the workflow instead of the tool call.
+    """
+    tool = build_job_tool("calc", _SPEC)
+    with pytest.raises(ValidationError):
+        asyncio.run(tool({"smiles": "CCO", "cycles": "not-an-integer"}))
+    with pytest.raises(ValidationError):
+        asyncio.run(tool({"cycles": 3}))  # the required param is missing
+    assert client.calls == []  # nothing durable was started on an invalid launch
+
+
+def test_launching_survives_the_framework_s_own_invocation_path(client: _FakeClient) -> None:
+    """End-to-end through `agent_framework.tool(...).invoke()`, not our idea of it.
+
+    The test above encodes today's observed behaviour (a `dict` arrives). This one encodes the
+    property that actually matters and would survive the framework changing its mind: whatever
+    MAF hands the body, a launch driven through MAF's own dispatcher starts the declared workflow.
+    """
+    from agent_framework import tool as as_tool
+
+    fn = build_job_tool("calc", _SPEC)
+    invocable = as_tool(fn, name=fn.__name__, description="Start a calculation.")
+    asyncio.run(invocable.invoke(arguments={"params": {"smiles": "CCO"}}))
+    (call,) = client.calls
+    payload: ConnectorJobInput = call["input"]
+    assert payload.payload == {"smiles": "CCO"}
 
 
 def test_identical_arguments_produce_the_same_id_and_different_ones_do_not(

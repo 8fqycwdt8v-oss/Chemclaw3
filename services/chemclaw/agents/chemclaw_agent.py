@@ -52,6 +52,7 @@ from agents.llm_provider import build_chat_client
 from agents.profiles import AgentProfile, get_profile
 from agents.skill_access import EnabledSkillsSource, RoleScopedSkillsSource
 from agents.tool_authz import (
+    announce_tool_failures,
     enforce_tool_authz,
     surface_authorization_denials,
     surface_domain_errors,
@@ -88,6 +89,26 @@ _INSTRUCTIONS = (
     "property the record does not state — e.g. weighing a solvent not yet tried against the "
     "ones in the ELN — compute it yourself (predict_solubility and the others) and fold the "
     "prediction, with its uncertainty, into the answer rather than leaving the gap.\n"
+    "Look before you ask. A chemist writing 'our amide coupling', 'the biaryl route' or "
+    "'4-bromoanisole' is naming something the record already holds, and asking them to restate "
+    "it as SMILES, masses or an experiment id hands the work back to the person who asked. So: "
+    "search first (gather_evidence, then find_notes/expand_note on what it cites), resolve names "
+    "with resolve_compound, and when resolve_compound returns nothing, look the name up in the "
+    "knowledge graph before concluding it is unknown — the graph carries compound notes whose "
+    "structure is authoritative for this programme even when the reagent table has never heard "
+    "of it. Ask a clarifying question only when the search actually came back empty or found "
+    "genuinely competing candidates, and then say what you searched and what you found, so the "
+    "chemist is answering a narrowed question rather than filling in a form. Partial data is "
+    "still an answer: compute what the question allows, and name the one missing input, rather "
+    "than withholding everything until every field is supplied.\n"
+    "Traceability: every tool call is recorded in a tamper-evident audit trail — actor, tool, "
+    "arguments, outcome, latency, correlation id and deployment revision — hash-chained so that "
+    "altering or removing a past entry breaks verification, which an operator runs with "
+    "`make audit-verify`. That chain, not a job id, is what answers 'prove this number was not "
+    "edited': a job id shows a calculation is reproducible, which is a different claim. When "
+    "asked how a computed value in a report is defended, describe what the trail records and how "
+    "it is verified, and be clear that agent-written knowledge additionally passes the PR-gate "
+    "where a human signs off before it counts as established.\n"
     "Safety: before you propose a synthesis, a reagent, or a set of conditions, call "
     "screen_hazards on the species involved and report every flag it returns, with its "
     "explanation, to the chemist. An empty result means no rule matched — never present it as "
@@ -199,22 +220,25 @@ def build_agent(
         actor=actor,
         sink=audit_sink,
     )
-    # Four function middlewares over every tool call, outermost first: `surface_authorization_
+    # Five function middlewares over every tool call, outermost first: `surface_authorization_
     # denials` and `surface_domain_errors` each turn one known-safe exception type (an
     # authorization refusal; chemclaw's own `ChemclawError` bad-input contract) into its own
     # clear, safe result instead of MAF's opaque "Function failed." — audit records the call
     # underneath both, so a denial or bad-input error is still logged as an `error` outcome
-    # exactly as before; per-tool authorization (F10-C) gates it innermost, closest to the tool
-    # body. All four are no-ops on the dev path (log-only sink; authz open until
-    # `entra_required`; no ChemclawError raised on a happy path), so the classic path is
-    # unchanged by default. They are attached unconditionally, *after* the profile narrows the
-    # toolset — so a profile attenuates capability but can never bypass audit or authorization
-    # (the safety rubric, audit §7).
+    # exactly as before; per-tool authorization (F10-C) gates it next. `announce_tool_failures`
+    # sits innermost, closest to the tool body, because it is the only one that must see the raw
+    # exception from *every* failure — including the two the converters above turn into results —
+    # so the chemist's transcript shows the step that did not work (D-138). All five are no-ops on
+    # the dev path (log-only sink; authz open until `entra_required`; no ChemclawError raised, and
+    # no failure at all, on a happy path), so the classic path is unchanged by default. They are
+    # attached unconditionally, *after* the profile narrows the toolset — so a profile attenuates
+    # capability but can never bypass audit or authorization (the safety rubric, audit §7).
     middleware = [
         surface_authorization_denials,
         surface_domain_errors,
         audit,
         enforce_tool_authz,
+        announce_tool_failures,
     ]
     # Default generation params from config (F0.3), applied to every turn unless a run overrides
     # them — so temperature/length are a deployment setting, not a per-call literal.

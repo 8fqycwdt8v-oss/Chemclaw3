@@ -86,3 +86,21 @@ def test_the_registry_has_no_duplicate_reservations() -> None:
     """
     duplicates = sorted(adr for adr, count in Counter(_registry_ids()).items() if count > 1)
     assert not duplicates, f"ADR-REGISTRY.md reserves the same number twice: {duplicates}"
+
+
+def test_neither_ledger_carries_an_unresolved_conflict_marker() -> None:
+    """A `<<<<<<<` left in the ledger is invisible to every other check here, and was.
+
+    The id checks parse `| D-NNN |` rows and `## D-NNN` headings, so three marker lines sat in
+    `ADR-REGISTRY.md` on `main` while every assertion above passed: the rows on both sides of the
+    conflict were kept, the ids were fine, and nothing looked at the lines between them. The
+    registry's whole purpose is that "which numbers are taken?" is one grep a human trusts, so a
+    file that still shows a half-finished merge undermines the mechanism rather than the data.
+    """
+    for path in (_DECISIONS, _REGISTRY):
+        offenders = [
+            f"{path.name}:{number}"
+            for number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), start=1)
+            if line.startswith(("<<<<<<< ", ">>>>>>> ")) or line == "======="
+        ]
+        assert not offenders, f"unresolved merge conflict markers: {offenders}"

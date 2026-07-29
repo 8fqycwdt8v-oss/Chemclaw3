@@ -6,6 +6,7 @@ tool body runs and passes an allowed one through — all offline with fakes, no 
 """
 
 import asyncio
+import contextlib
 from collections.abc import Awaitable, Callable
 from types import SimpleNamespace
 from typing import cast
@@ -16,10 +17,12 @@ from agent_framework import FunctionInvocationContext
 from agents.authz import AuthorizationError, authorize_tool
 from agents.identity_context import reset_current_identity, set_current_identity
 from agents.tool_authz import (
+    announce_tool_failures,
     enforce_tool_authz,
     surface_authorization_denials,
     surface_domain_errors,
 )
+from agents.turn_signals import Signal, ToolFailureSignal, begin_turn, drain, end_turn
 from chemclaw.config import settings
 from chemclaw.errors import ChemclawError
 
@@ -396,3 +399,70 @@ def test_an_unauthenticated_user_is_named_as_such(monkeypatch: pytest.MonkeyPatc
     monkeypatch.setattr(settings, "tool_authz_default", "deny")
     with pytest.raises(AuthorizationError, match="an unauthenticated user is not authorized"):
         authorize_tool("predict_pka")
+
+
+def _drive_announcing(
+    ctx: FunctionInvocationContext, call_next: Callable[[], Awaitable[None]]
+) -> list[Signal]:
+    """Run `announce_tool_failures` inside a turn and return the signals it left behind."""
+
+    async def _run() -> list[Signal]:
+        token = begin_turn()
+        try:
+            with contextlib.suppress(Exception):
+                await announce_tool_failures(ctx, call_next)
+            return list(drain())
+        finally:
+            end_turn(token)
+
+    return asyncio.run(_run())
+
+
+def test_a_failing_tool_is_announced_to_the_turn() -> None:
+    """The chemist's transcript learns the step failed; until this, only the log and audit did.
+
+    The live shape that motivated it: a job launcher raised on every attempt, MAF stopped the
+    tool loop after three consecutive errors, and the turn ended mid-sentence with no answer and
+    no error event — nothing anywhere in the stream said a tool had failed (D-138).
+    """
+
+    async def _boom() -> None:
+        raise AttributeError("'dict' object has no attribute 'model_dump'")
+
+    (signal,) = _drive_announcing(_ctx("compute_reaction_energy"), _boom)
+    assert isinstance(signal, ToolFailureSignal)
+    assert signal.tool == "compute_reaction_energy"
+    assert signal.message.startswith("AttributeError: 'dict' object has no attribute")
+
+
+def test_the_failing_exception_still_propagates_untouched() -> None:
+    """Announcing is observation: audit and the two converters must see exactly what they did."""
+
+    async def _boom() -> None:
+        raise ValueError("unrelated failure")
+
+    async def _run() -> None:
+        with pytest.raises(ValueError, match="unrelated failure"):
+            await announce_tool_failures(_ctx("predict_pka"), _boom)
+
+    asyncio.run(_run())
+
+
+def test_a_successful_call_announces_nothing() -> None:
+    """No signal on the happy path — the trace must not gain an entry per working tool."""
+
+    async def _ok() -> None:
+        return None
+
+    assert _drive_announcing(_ctx("predict_pka"), _ok) == []
+
+
+def test_a_long_failure_message_is_truncated_before_it_reaches_the_stream() -> None:
+    """An unexpected exception's text is not written to be read, and must not flood the trace."""
+
+    async def _boom() -> None:
+        raise RuntimeError("x" * 5000)
+
+    (signal,) = _drive_announcing(_ctx("predict_pka"), _boom)
+    assert isinstance(signal, ToolFailureSignal)
+    assert len(signal.message) <= 300

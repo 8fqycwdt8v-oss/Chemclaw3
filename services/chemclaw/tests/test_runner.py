@@ -252,3 +252,86 @@ def test_verifier_failure_degrades_to_plain_answer(monkeypatch: pytest.MonkeyPat
     answer = _answer(_run_turn())
     assert answer.text == "Yield was 90% [[reaction-a]]."
     assert answer.confidence is None and answer.unsupported_claims == []
+
+
+class _CallContent:
+    """One streamed function-call content, in the shape the provider actually emits.
+
+    The name arrives once, on a content whose `arguments` is still an empty dict; the argument
+    JSON then streams as text fragments on contents that carry only the `call_id`. Reproduced
+    here from a live capture rather than invented, because the bug being guarded against was
+    believing a different shape (D-138).
+    """
+
+    def __init__(self, *, name: str = "", call_id: str = "", arguments: object = None) -> None:
+        self.name = name
+        self.call_id = call_id
+        self.arguments = arguments
+
+
+def _update(*contents: object) -> _Update:
+    update = _Update()
+    update.contents = list(contents)
+    return update
+
+
+def test_a_streamed_tool_call_reports_the_arguments_it_was_called_with() -> None:
+    """`ToolCallEvent.arguments` must carry the reassembled JSON, not the empty opening content."""
+    trace = runner._ToolCallTrace()
+    assert trace.feed(_update(_CallContent(name="add", call_id="c1", arguments={}))) == []
+    # The provider opens the argument stream with an *empty* fragment before the first characters
+    # arrive. Reading that as "nothing more is coming" closed the call early and shipped an empty
+    # preview to the UI — the second way this defect survived a fix (D-138).
+    assert trace.feed(_update(_CallContent(call_id="c1", arguments=""))) == []
+    assert trace.feed(_update(_CallContent(call_id="c1", arguments='{"a": 1'))) == []
+    assert trace.feed(_update(_CallContent(call_id="c1", arguments='7, "b": 25}'))) == []
+    # The call is complete once an update goes by without adding to it — here the result content.
+    (event,) = trace.feed(_update(_CallContent(call_id="c1")))
+    assert event.tool == "add"
+    assert event.arguments == '{"a": 17, "b": 25}'
+    assert trace.flush() == []
+
+
+def test_a_call_whose_arguments_end_the_stream_is_still_reported() -> None:
+    """Nothing follows the last update, so the flush is what keeps the final call from vanishing."""
+    trace = runner._ToolCallTrace()
+    trace.feed(_update(_CallContent(name="screen_hazards", call_id="c9", arguments={})))
+    trace.feed(_update(_CallContent(call_id="c9", arguments='{"smiles": "CCO"}')))
+    (event,) = trace.flush()
+    assert (event.tool, event.arguments) == ("screen_hazards", '{"smiles": "CCO"}')
+
+
+def test_two_interleaved_calls_keep_their_own_arguments() -> None:
+    """Parallel tool calls share the stream; the `call_id` is what keeps them apart."""
+    trace = runner._ToolCallTrace()
+    trace.feed(
+        _update(
+            _CallContent(name="predict_pka", call_id="a", arguments={}),
+            _CallContent(name="predict_logd", call_id="b", arguments={}),
+        )
+    )
+    trace.feed(
+        _update(
+            _CallContent(call_id="a", arguments='{"smiles": "CC(=O)O"}'),
+            _CallContent(call_id="b", arguments='{"smiles": "c1ccccc1"}'),
+        )
+    )
+    events = sorted(trace.flush(), key=lambda e: e.tool)
+    assert [(e.tool, e.arguments) for e in events] == [
+        ("predict_logd", '{"smiles": "c1ccccc1"}'),
+        ("predict_pka", '{"smiles": "CC(=O)O"}'),
+    ]
+
+
+def test_a_call_delivered_whole_is_reported_without_waiting_for_the_next_update() -> None:
+    """Name plus complete arguments in one content means the call is finished, so emit it now.
+
+    Holding it back until an update went by would push the trace entry behind the text the model
+    produces next, which reads as the tool having run after the sentence that describes it.
+    """
+    trace = runner._ToolCallTrace()
+    (event,) = trace.feed(
+        _update(_CallContent(name="find_notes", call_id="z", arguments={"query": "amide"}))
+    )
+    assert (event.tool, event.arguments) == ("find_notes", '{"query": "amide"}')
+    assert trace.flush() == []  # nothing left open, so nothing is emitted twice

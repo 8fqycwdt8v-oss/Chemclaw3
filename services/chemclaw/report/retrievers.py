@@ -8,6 +8,7 @@ emit carries the id of the note it came from, so the harness can cite it (5b.2).
 """
 
 import asyncio
+import re
 from datetime import date
 from pathlib import Path
 from typing import Any
@@ -21,6 +22,32 @@ from mcp_servers.fpstore import FingerprintError, FingerprintStore
 from mcp_servers.rxnfp.search import find_similar_reactions
 from report.evidence import EvidenceChunk
 from report.vector_index import IndexHit, NoteIndex, default_note_index, note_text
+
+# Words that carry no retrieval signal but do carry the difference between "biaryl" (three hits)
+# and "the biaryl" (none) under a whole-phrase match. Deliberately tiny and English-only: this is
+# not stemming or a language model, it is the handful of words a chemist puts around the term they
+# actually mean. A longer list would start discarding real chemistry ("in situ", "on water").
+_STOPWORDS = frozenset(
+    {"a", "an", "and", "for", "from", "in", "is", "of", "on", "or", "our", "the", "to", "with"}
+)
+# Below this a term matches too much to be worth requiring; two characters is already `pd`.
+_MIN_TERM_CHARS = 2
+
+
+def _query_terms(query: str) -> list[str]:
+    """The terms a note must contain to match `query` — lowercased, split on non-word characters.
+
+    Punctuation splits rather than being stripped, because a chemist's query carries structure in
+    it (`Pd(OAc)2`, `4-bromoanisole`, `reactants>>products`) and the parts are what a note's text
+    holds. Falls back to the whole query when nothing survives filtering — a search for `the` is
+    still a search, and returning "no terms, therefore everything" would be worse than literal.
+    """
+    terms = [
+        term
+        for term in re.split(r"[^0-9a-z]+", query.lower())
+        if len(term) >= _MIN_TERM_CHARS and term not in _STOPWORDS
+    ]
+    return terms or [query.lower()]
 
 
 def _excerpt(body: str) -> str:
@@ -98,44 +125,67 @@ class GraphRetriever:
         self._dir = Path(notes_dir) if notes_dir is not None else settings.knowledge_path
 
     async def retrieve(self, query: str, filters: dict[str, Any]) -> list[EvidenceChunk]:
-        """Return chunks from notes matching `query` (substring), ranked best first.
+        """Return chunks from notes matching every term of `query`, ranked best first.
 
-        Deterministic, case-insensitive substring match over a note's id, tags, and body. Each
-        hit is a real, existing note (this reads the graph), so its citation always resolves;
-        but substring matching is a coarse *candidate* filter — a short query can match
-        incidentally (`ester` in `polyester`). The `development-report` skill judges relevance;
-        this retriever only guarantees the note exists, not that it answers the question.
+        Deterministic and case-insensitive over a note's id, tags, and body — the same haystack
+        the dense and lexical indexes build from. Matching is per *term*, not on the query
+        verbatim: a whole-phrase substring test only found a note that literally contained the
+        sentence a chemist typed, so `biaryl` returned the campaign, the compound and the
+        playbook while `the biaryl` returned nothing at all (D-138). That is the failure mode
+        that matters here, and it was the opposite of the one the old docstring warned about:
+        under-matching, silently, on ordinary phrasing. With the graph retriever the only source
+        enabled by default, an empty result sent the agent back to the chemist asking for
+        details the record already held.
+
+        Every term must be present, so precision is unchanged for a query that used to work — a
+        phrase match implies all its terms match. When nothing satisfies all of them the search
+        widens to any term rather than answering "nothing known", and coverage then orders the
+        result: a note matching three of four terms outranks one matching a single term.
+
+        This remains a coarse *candidate* filter — a short term can still match incidentally
+        (`ester` in `polyester`). The `development-report` skill judges relevance; this retriever
+        only guarantees the note exists, not that it answers the question.
         """
-        needle = query.lower()
-        chunks: list[EvidenceChunk] = []
+        terms = _query_terms(query)
         conflicts = await _conflict_index(self._dir)
+        scored: list[tuple[int, EvidenceChunk]] = []
         for note in (await _eligible_notes(self._dir, filters)).values():
-            # Same haystack the dense/lexical index build from (`note_text`), so all three entry
-            # points agree on what "the note's content" is and cannot drift.
             haystack = note_text(note).lower()
-            if needle in haystack:
-                # Score a matched note by its own confidence (KM-5): every returned note already
-                # matched the query, so among candidates the more-trusted note survives truncation
-                # first. A note with no confidence takes the configured neutral default.
-                score = (
-                    note.confidence
-                    if note.confidence is not None
-                    else settings.retrieval_default_confidence
-                )
-                chunks.append(
+            coverage = sum(1 for term in terms if term in haystack)
+            if not coverage:
+                continue
+            # Score a matched note by its own confidence (KM-5): among candidates the
+            # more-trusted note survives truncation first. A note with no confidence takes the
+            # configured neutral default.
+            score = (
+                note.confidence
+                if note.confidence is not None
+                else settings.retrieval_default_confidence
+            )
+            scored.append(
+                (
+                    coverage,
                     EvidenceChunk(
                         content=_excerpt(note.body) or note.id,
                         source_note_id=note.id,
                         retriever=self.name,
                         score=score,
                         conflicts_with=conflicts.get(note.id, []),
-                    )
+                    ),
                 )
+            )
+        complete = [pair for pair in scored if pair[0] == len(terms)]
         # RRF reads each source's list as ranked best-first, so the list must be ordered by this
-        # retriever's own relevance signal — disk order is not a ranking. Note id breaks ties
-        # deterministically.
-        chunks.sort(key=lambda chunk: (-chunk.score, chunk.source_note_id))
-        return chunks
+        # retriever's own relevance signal — disk order is not a ranking. Coverage leads only on
+        # the widened search (on the complete one it is the same for every hit, so this reduces
+        # to confidence exactly as before). Note id breaks ties deterministically.
+        return [
+            chunk
+            for _, chunk in sorted(
+                complete or scored,
+                key=lambda pair: (-pair[0], -pair[1].score, pair[1].source_note_id),
+            )
+        ]
 
 
 class FingerprintReactionRetriever:
