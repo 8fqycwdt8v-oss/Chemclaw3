@@ -200,14 +200,13 @@ section, and STO-5/11/13 stay deliberately open.
 - [ ] **Vendor a real third-party reference corpus** — [M]. The mechanism is in place and
       documented (`data/vendored/README.md`); what remains is choosing a licence-clean source and
       adding the build step that installs it.
-- [ ] **DEP-1: decide how `knowledge_dir` is populated in a cluster** — [M]. Assessed in
-      `docs/audit/13-storage-and-knowledge-audit.md` §7: three viable shapes (init container +
-      pulling sidecar, RWX volume, periodic Temporal pull), none implemented. More pressing now
-      that a seed corpus exists whose absence in a pod would be visible.
-- [ ] **Reconcile the ADR-number convention with its own test** — [S]. `CLAUDE.md` says "reserve it
-      in your first commit, not your last"; `tests/test_decision_log.py` requires the registry and
-      the log to name exactly the same set, which forbids reserving ahead. The test wins because it
-      runs. Raised twice now.
+- [x] **Reconcile the ADR-number convention with its own test.** `CLAUDE.md` said "reserve it in
+      your first commit"; `tests/test_decision_log.py` required the registry and the log to name
+      exactly the same ADRs, which forbade it. The convention was not aspirational — `1f1f233`
+      followed it and `8f6a319` had to undo it. Fixed at the root: a ledger row may read
+      `RESERVED — …`, which is exempt from the registry-matches-log check and **not** exempt from
+      the duplicate check, so the number is claimed the moment it is pushed. A new test fails a
+      marker left on after the ADR merges, because a stale `RESERVED` row reads as a free number.
 
 **Closed as not-gaps:** STO-11 (`embedding_provider="hash"` is the documented offline dev path),
 STO-13 (audit-trail disposal stays refused — deleting from a hash chain is indistinguishable from

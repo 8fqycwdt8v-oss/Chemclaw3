@@ -176,6 +176,12 @@ Your number is that highest one **+ 1**. To list every heading locally, use
 you know you will write an ADR — before the ADR itself exists. A number you have not yet pushed is
 a number another session will take.
 
+Mark such a row `| D-NNN | RESERVED — what it will be about |` and swap the marker for the real
+title in the commit that adds the ADR. `tests/test_decision_log.py` exempts `RESERVED` rows from
+"the registry and the log name the same ADRs" while still counting them as taken. Without that
+marker the two rules contradicted each other and the test won: `1f1f233` reserved six numbers as
+instructed here, and `8f6a319` deleted five of them to get CI green.
+
 **3. When it collides anyway, the branch merging *second* renumbers.** This is a rule, not a
 judgement call, so two sessions never both wait or both move. Whoever is merging (you, if you hit
 the conflict) takes the *new* free number, and fixes every reference:

@@ -18,7 +18,21 @@ from pathlib import Path
 _DECISIONS = Path(__file__).resolve().parents[1] / "DECISIONS.md"
 _REGISTRY = Path(__file__).resolve().parents[1] / "ADR-REGISTRY.md"
 _HEADING = re.compile(r"^## (D-\d+)", re.MULTILINE)
-_REGISTRY_ROW = re.compile(r"^\| (D-\d+) \|", re.MULTILINE)
+_REGISTRY_ROW = re.compile(r"^\| (D-\d+) \| ([^|]*)\|", re.MULTILINE)
+
+# A ledger row for a number claimed but not yet written up. `CLAUDE.md` tells an author to reserve
+# in the *first* commit on a branch — "a number you have not yet pushed is a number another session
+# will take" — which necessarily means the row exists before the ADR does. Without a marker for
+# that state this test rejected the very convention the repo documents: `1f1f233` reserved
+# D-124…D-129 as instructed and `8f6a319` had to delete five of them to get CI green.
+_RESERVED = "RESERVED"
+
+
+def _registry_rows() -> list[tuple[str, str]]:
+    """Every `(id, title)` in the allocation ledger, in file order."""
+    return [
+        (adr, title.strip()) for adr, title in _REGISTRY_ROW.findall(_REGISTRY.read_text("utf-8"))
+    ]
 
 
 def _adr_ids() -> list[str]:
@@ -27,8 +41,18 @@ def _adr_ids() -> list[str]:
 
 
 def _registry_ids() -> list[str]:
-    """Every ADR id in the allocation ledger, in file order."""
-    return _REGISTRY_ROW.findall(_REGISTRY.read_text(encoding="utf-8"))
+    """Every ADR id in the allocation ledger, reserved or written, in file order."""
+    return [adr for adr, _ in _registry_rows()]
+
+
+def _written_ids() -> list[str]:
+    """Ledger ids whose ADR is claimed to exist — every row that is not a reservation."""
+    return [adr for adr, title in _registry_rows() if not title.startswith(_RESERVED)]
+
+
+def _reserved_ids() -> list[str]:
+    """Ledger ids claimed by a branch whose ADR is not written yet."""
+    return [adr for adr, title in _registry_rows() if title.startswith(_RESERVED)]
 
 
 def test_every_adr_id_is_unique() -> None:
@@ -67,15 +91,36 @@ def test_the_registry_lists_exactly_the_decisions_in_the_log() -> None:
 
     So the sync is machine-checked rather than left to whoever remembers. Adding an ADR means
     adding both lines; this test is the reminder.
+
+    **Rows marked `RESERVED` are excluded**, because they are the one legitimate way for the two
+    files to differ: a number claimed on a branch whose ADR is not written yet. Requiring exact
+    equality made the documented convention impossible to follow — see `_RESERVED`.
     """
-    log, registry = _adr_ids(), _registry_ids()
-    missing = [adr for adr in log if adr not in set(registry)]
-    extra = [adr for adr in registry if adr not in set(log)]
-    assert not missing, f"in DECISIONS.md but not reserved in ADR-REGISTRY.md: {missing}"
-    assert not extra, f"reserved in ADR-REGISTRY.md but no such ADR in DECISIONS.md: {extra}"
-    assert log == registry, (
+    log, written = _adr_ids(), _written_ids()
+    missing = [adr for adr in log if adr not in set(written)]
+    extra = [adr for adr in written if adr not in set(log)]
+    assert not missing, f"in DECISIONS.md but not listed in ADR-REGISTRY.md: {missing}"
+    assert not extra, (
+        f"listed in ADR-REGISTRY.md but no such ADR in DECISIONS.md: {extra}. If the ADR is still "
+        f"to be written, mark the row '{_RESERVED} — …' so the number stays claimed."
+    )
+    assert log == written, (
         "ADR-REGISTRY.md lists the same ids as DECISIONS.md but in a different order; "
         "the ledger is ascending and append-only, mirroring the log"
+    )
+
+
+def test_a_reserved_number_has_no_adr_yet() -> None:
+    """Once the ADR is written the marker comes off, or the ledger stops meaning anything.
+
+    A row left marked `RESERVED` after its ADR has merged would read as an unclaimed number to the
+    next author enumerating against `origin/main` — handing out a number already in use, which is
+    the collision the ledger exists to prevent.
+    """
+    written_up = sorted(set(_reserved_ids()) & set(_adr_ids()))
+    assert not written_up, (
+        f"still marked {_RESERVED} in ADR-REGISTRY.md but written in DECISIONS.md: {written_up}; "
+        "replace the marker with the ADR's title"
     )
 
 

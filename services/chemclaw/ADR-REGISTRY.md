@@ -26,7 +26,17 @@ git show origin/main:services/chemclaw/ADR-REGISTRY.md | grep -oE '^\| D-[0-9]+'
 ```
 
 Reserve the number here in your **first** commit on the branch, not at the end — an unreserved
-number is one another session will take.
+number is one another session will take. Because that necessarily happens before the ADR exists,
+write the row as:
+
+```
+| D-NNN | RESERVED — one line on what the decision will be about |
+```
+
+and replace the marker with the real title in the commit that adds the ADR. `RESERVED` rows are
+exempt from the registry-matches-log check and *not* exempt from the duplicate check, which is
+exactly the point: the number is claimed the moment it is pushed. A reservation that is never
+written up leaves a gap, and a gap is harmless (`CLAUDE.md`, rule 4).
 
 | ADR | Title |
 |---|---|
