@@ -55,8 +55,9 @@ claim about the world is to run it.
       route recording `(session_id, plan_hash, actor, decided_at)` — mirroring
       `POST /approvals/{id}/decision`, which already got this right for jobs. Needs an ADR.
       **Done (D-137).** `PlanApprovalModeProvider` retracts the `mode_set` tool MAF injects, and the only path into execute mode is now the owner-scoped `POST /sessions/{id}/plan/decision`, bound to a hash of the plan the human was shown and recorded in `plan_approvals`.
-- [ ] **REV-2 [High] Nothing scrapes `/metrics`.** No ServiceMonitor, PodMonitor or scrape
+- [x] **REV-2 [High] Nothing scrapes `/metrics`.** No ServiceMonitor, PodMonitor or scrape
       annotation anywhere under `deploy/`. Every metric in the system is uncollected in production.
+      **Done (D-143).** A ServiceMonitor on the front-door Service, selecting it by the `http` port *name* so a port change cannot orphan the scrape. Front door only: workers and connectors record through `chemclaw.metrics_bridge`, whose contract is that a metric recorded outside the front door is a no-op, so a scrape pointed at them would collect nothing and report up. `additionalLabels` is left empty for the operator's `serviceMonitorSelector`, which is release-specific. A test asserts the scraped *path* is a route the app actually serves — the D-142 shape, since a ServiceMonitor naming `/metric` renders, validates, deploys and collects nothing forever.
 - [x] **REV-3 [High] The two `expensive: true` CREST jobs heartbeat once** against a 600 s
       heartbeat timeout. `run_cached_ensemble`/`run_cached_interaction` have no `progress`
       parameter at all, so this is plumbing, not a kwarg. Each retry restarts CREST from zero
@@ -67,7 +68,9 @@ claim about the world is to run it.
       production default). MAF reads `session.state[source_id]["messages"]`, whose only writer is
       `InMemoryHistoryProvider`. So `session_messages` is read with no LIMIT every turn and a
       long-lived session re-reads its whole history before every model call. The docstring promises
-      the opposite. *Confirm on a real deployment before acting.*
+      the opposite. **Confirmed by reading MAF, and the obvious fix is unsafe.**
+      **Documented and pinned, not fixed (D-143).** Confirmed exactly as described. Two corrections to the framing: the `before_run` half *does* work under Postgres, so the model's input is still bounded and this is not a context-window bug — what is unbounded is the per-turn read and the forever-growing stored history. And **a `LIMIT` on the load would corrupt data**: `get_messages` repairs unmatched tool-call pairings by *writing back*, and over a windowed read a `tool_result` whose `tool_use` fell outside the window is indistinguishable from a real orphan, so the repair would strip and commit a pairing that was intact on disk. Both docstrings that promised the opposite are corrected, and `tests/test_durable_compaction_gap.py` pins the no-op *and* the write-back hazard.
+      **Still open:** the real fix, which is either (a) make the read-repair in-memory-only when the load is partial, then bound the read, or (b) durable compaction that prunes whole tool-call groups from `session_messages`. Either is a design change to a durable path with a data-loss failure mode and wants its own ADR.
 - [x] **REV-5 [High] `retrieval_recall`/`retrieval_precision` are absent from `evals/baseline.json`**,
       so the only metrics that run a live retriever have zero drift coverage — verified by
       collapsing both to 0.0 and getting no alert. Also give `save_baseline` a Makefile target; it

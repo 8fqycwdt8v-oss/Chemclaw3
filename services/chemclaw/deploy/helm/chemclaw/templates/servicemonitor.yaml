@@ -1,0 +1,39 @@
+{{- if .Values.monitoring.enabled }}
+{{- /* Something has to actually collect `/metrics` (REV-2). The route has existed since DEP-4 and
+       nothing under `deploy/` scraped it — no ServiceMonitor, no PodMonitor, no annotation — so
+       every counter, gauge and histogram in the system was exposed and uncollected in production.
+       That is the quiet way an observability story fails: the code is written, the endpoint
+       answers, and no dashboard or alert has ever had a data point.
+
+       A ServiceMonitor rather than scrape annotations because the target is OpenShift, whose
+       user-workload monitoring stack is the Prometheus Operator; annotations are the older
+       convention its default configuration does not read. `additionalLabels` is what lets an
+       operator match this to their Prometheus's `serviceMonitorSelector`, which is release-specific
+       and cannot be guessed here.
+
+       Only the front door. The workers and connector pods import `chemclaw.metrics_bridge`, whose
+       whole contract is that recording a metric outside the front door is a no-op — there is no
+       registry and no HTTP surface in those processes — so pointing a scrape at them would collect
+       nothing and report it as healthy. */ -}}
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: {{ include "chemclaw.name" . }}
+  labels:
+    {{- include "chemclaw.labels" . | nindent 4 }}
+    {{- with .Values.monitoring.additionalLabels }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+spec:
+  selector:
+    matchLabels:
+      {{- include "chemclaw.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: service
+  endpoints:
+    {{- /* By port *name*, not number: the Service names it `http`, and a name survives a port
+           change that a hardcoded number would silently miss. */}}
+    - port: http
+      path: {{ .Values.monitoring.path | quote }}
+      interval: {{ .Values.monitoring.interval | quote }}
+      scrapeTimeout: {{ .Values.monitoring.scrapeTimeout | quote }}
+{{- end }}
