@@ -36,6 +36,7 @@ from temporalio.exceptions import WorkflowAlreadyStartedError
 from agents.authz import authorize_trigger, require_actor
 from agents.dialogue_tools import dry_run_notice, is_dry_run
 from agents.harness_todo import mark_awaiting_job
+from agents.identity_context import get_current_correlation_id
 from agents.session_context import get_current_session, get_current_session_id
 from agents.tool_registry import CapabilityTool
 from agents.turn_signals import record_job_started
@@ -271,6 +272,7 @@ def build_job_tool(connector: str, job: JobSpec) -> CapabilityTool:
                     payload=payload,
                     requested_by=requested_by,
                     session_id=get_current_session_id() or "",
+                    correlation_id=get_current_correlation_id() or "",
                     publish_to_graph=job.publish_to_graph,
                 ),
                 id=workflow_id,

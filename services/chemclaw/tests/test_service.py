@@ -445,20 +445,24 @@ class _FakeOwnerStore:
 
     def __init__(self) -> None:
         self.owners: dict[str, str | None] = {}
+        # Stored beside the owner, as the real table stores it, so a rehydration test can see the
+        # profile survive an eviction rather than a fake supplying what the column would (REV-14).
+        self.profiles: dict[str, str | None] = {}
         self.created: dict[str, datetime] = {}
 
-    async def record(self, session_id: str, owner: str | None) -> None:
+    async def record(self, session_id: str, owner: str | None, profile: str | None = None) -> None:
         if session_id not in self.owners:
             self.owners[session_id] = owner
+            self.profiles[session_id] = profile
             # Distinct, increasing timestamps so "newest first" is actually observable.
             self.created[session_id] = datetime(2026, 1, 1, tzinfo=UTC) + timedelta(
                 minutes=len(self.created)
             )
 
-    async def lookup(self, session_id: str) -> tuple[bool, str | None]:
+    async def lookup(self, session_id: str) -> tuple[bool, str | None, str | None]:
         if session_id in self.owners:
-            return (True, self.owners[session_id])
-        return (False, None)
+            return (True, self.owners[session_id], self.profiles[session_id])
+        return (False, None, None)
 
     async def list_for_owner(self, owner: str | None) -> list[tuple[str, datetime]]:
         rows = [(sid, self.created[sid]) for sid, own in self.owners.items() if own == owner]
@@ -552,7 +556,7 @@ class _UnreachableOwnerStore(_FakeOwnerStore):
     handed over in time.
     """
 
-    async def record(self, session_id: str, owner: str | None) -> None:
+    async def record(self, session_id: str, owner: str | None, profile: str | None = None) -> None:
         raise ConnectionError("Postgres unreachable at host=db: couldn't get a connection")
 
 

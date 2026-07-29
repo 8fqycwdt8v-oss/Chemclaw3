@@ -217,8 +217,8 @@ def test_session_owner_records_and_reattaches() -> None:
         await writer.record("sess-owner-1", "mallory")  # idempotent: first writer wins
 
         reader = SessionOwnerStore()  # a restarted pod would build a fresh instance
-        assert await reader.lookup("sess-owner-1") == (True, "alice")
-        assert await reader.lookup("sess-never-created") == (False, None)
+        assert await reader.lookup("sess-owner-1") == (True, "alice", None)
+        assert await reader.lookup("sess-never-created") == (False, None, None)
 
     asyncio.run(_run())
 
@@ -273,7 +273,7 @@ def test_session_owner_records_null_owner() -> None:
         await migrated_db_or_skip()
         store = SessionOwnerStore()
         await store.record("sess-owner-null", None)
-        assert await store.lookup("sess-owner-null") == (True, None)
+        assert await store.lookup("sess-owner-null") == (True, None, None)
 
     asyncio.run(_run())
 
