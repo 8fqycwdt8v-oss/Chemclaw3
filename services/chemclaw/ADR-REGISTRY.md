@@ -177,3 +177,4 @@ written up leaves a gap, and a gap is harmless (`CLAUDE.md`, rule 4).
 | D-140 | A template's job step: resolved off the workflow thread, and finally able to fail |
 | D-141 | Two facts that stopped at a process boundary: a session's profile, and the turn's correlation id |
 | D-142 | A production value has to be executed, not type-checked — and two guards that were off in the one deployment that needed them |
+| D-143 | Nobody was collecting the metrics, and the durable history is never compacted — one fixed, one where the obvious fix corrupts data |

@@ -222,6 +222,22 @@ serviceAccount:
 # NetworkPolicy egress allow-list (F6-T2): the app talks only to these, nothing else leaves the pod.
 # Includes the internal LLM (8000) and OTLP collector (4317) — both plain HTTP on non-443 ports, so
 # they must be listed explicitly or the agent cannot reach its model / ship traces.
+# Metrics collection (REV-2). The `/metrics` route has existed since DEP-4 and nothing scraped it,
+# so every counter in the system was exposed and uncollected — an observability story that fails
+# quietly, because the endpoint answers and no dashboard has ever had a data point.
+#
+# A ServiceMonitor targets OpenShift's user-workload monitoring (the Prometheus Operator). Set
+# `additionalLabels` to whatever the cluster's Prometheus uses in its `serviceMonitorSelector` —
+# it is release-specific, commonly `release: <prometheus-release>`, and cannot be guessed here.
+# Disable if the cluster collects by some other mechanism.
+monitoring:
+  enabled: true
+  path: /metrics
+  interval: 30s
+  # Below `interval`, so a slow scrape is dropped rather than overlapping the next one.
+  scrapeTimeout: 10s
+  additionalLabels: {}
+
 networkPolicy:
   enabled: true
   egressPorts:

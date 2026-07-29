@@ -557,8 +557,20 @@ def _build_compaction(history_source_id: str) -> CompactionProvider:
     collapse older tool-result payloads (the big evidence sweeps and full ELN recipes) into a
     short cited trace, then slide the conversation window; the composed strategy's built-in
     fallback drops the oldest groups if still over budget. System instructions and skills are
-    always preserved. The same strategy runs `before_run` (guard the model input) and
-    `after_run` (shrink the persisted history so the next turn starts smaller).
+    always preserved.
+
+    The same strategy is passed for `before_run` (guard the model input) and `after_run` (shrink
+    the persisted history so the next turn starts smaller) — **but the second half only runs under
+    `session_store="memory"`** (REV-4). MAF's `after_run` reads the thread from
+    `session.state[history_source_id]["messages"]`, which is where `InMemoryHistoryProvider` keeps
+    it and where `PostgresHistoryProvider` deliberately keeps nothing. Under the production default
+    it finds no messages and returns, so the persisted history is never trimmed and every turn
+    re-reads all of it. `agents/session_store.py` documents the whole shape, including why the
+    obvious fix — a `LIMIT` on the load — would corrupt stored tool-call pairings.
+
+    It is still wired for both, because the `before_run` half is what actually bounds the model
+    input and it works under either store; passing `after_strategy` costs one no-op lookup where it
+    does not apply and is correct where it does.
 
     Args:
         history_source_id: The history provider whose stored messages `after_run` compacts.

@@ -17,6 +17,29 @@ Three stores live here because they are one session's durable state and must sha
 the message history above, `SessionOwnerStore` (who owns a session id — the fact the in-process
 LRU loses on restart), and `SessionTurnClaims` (which process is running a turn on it right now —
 the fact the in-process 409 guard loses at the pod boundary, D-121).
+
+**After-run compaction does not apply to this provider, and cannot as MAF is built** (REV-4).
+`CompactionProvider.after_run` reads `session.state[history_source_id]["messages"]` — the place
+`InMemoryHistoryProvider` keeps its thread. This provider deliberately keeps nothing there, which is
+the entire point of it, so the lookup finds nothing and the strategy returns without doing anything.
+Under `session_store="postgres"` — the production default — the `after_strategy` half of
+`agents.chemclaw_agent._build_compaction` is a silent no-op, and the claim that it will "shrink the
+persisted history so the next turn starts smaller" is false here.
+
+What still works is the `before_run` half, which compacts what earlier providers loaded *into the
+context*. That is the half that guards the model's input, so a long session does not blow its
+context window. What is unbounded is this provider's own read: `_SELECT` has no `LIMIT`, so every
+turn loads the session's entire history, and the stored history grows for the session's whole life.
+
+**The obvious fix corrupts data, which is why this is documented rather than patched.** Adding a
+`LIMIT` to load only a recent window looks safe because `get_messages` already repairs unmatched
+tool-call pairings on read. It is not: that repair *writes back* — it deletes and rewrites the
+stored rows it judges orphaned. Over a windowed read, a `tool_result` whose `tool_use` merely fell
+outside the window looks exactly like a genuine orphan, so the repair would strip it and commit
+that, permanently destroying a pairing that was intact on disk. A correct bound needs the repair to
+run in memory only when the load is partial, or needs real durable compaction that prunes whole
+groups. Either is a design change to a durable path with a data-loss failure mode, so it wants its
+own ADR rather than a patch. Recorded in `BACKLOG.md` with that shape.
 """
 
 import logging

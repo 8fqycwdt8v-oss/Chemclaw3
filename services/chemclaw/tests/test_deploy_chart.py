@@ -343,7 +343,7 @@ def test_a_comment_never_swallows_the_line_after_it() -> None:
 # Kinds kubeconform has no schema for, so `make helm-validate` runs with
 # `-ignore-missing-schemas` and *skips* them rather than failing. Keeping the set explicit is what
 # stops that flag from being a hole: a skipped kind is a deliberate entry here, not a silent pass.
-_UNVALIDATED_KINDS = frozenset({"Route"})
+_UNVALIDATED_KINDS = frozenset({"Route", "ServiceMonitor"})
 
 
 def test_only_the_known_crd_is_unvalidated_by_kubeconform() -> None:
@@ -379,4 +379,64 @@ def test_only_the_known_crd_is_unvalidated_by_kubeconform() -> None:
     assert _UNVALIDATED_KINDS <= rendered, (
         f"_UNVALIDATED_KINDS names kind(s) the chart no longer renders: "
         f"{sorted(_UNVALIDATED_KINDS - rendered)}"
+    )
+
+
+def test_something_actually_scrapes_the_metrics_endpoint() -> None:
+    """`/metrics` must be collected, not merely served (REV-2).
+
+    The route has existed since DEP-4 and nothing under `deploy/` scraped it — no ServiceMonitor,
+    no PodMonitor, no `prometheus.io/scrape` annotation — so every counter, gauge and histogram in
+    the system was exposed and uncollected in production. That is the quiet way an observability
+    story fails: the code is written, the endpoint answers, and no dashboard or alert has ever had
+    a data point. Three of the metrics this repo added most recently exist specifically so an
+    operator can see a degraded turn or a failing PR-gate; none of them was reaching anyone.
+    """
+    monitor = next(
+        (
+            path
+            for path, text in _template_text().items()
+            if "kind: ServiceMonitor" in text or "PodMonitor" in text
+        ),
+        None,
+    )
+    assert monitor is not None, "no chart template collects /metrics; every metric is uncollected"
+
+
+def test_the_scrape_targets_the_front_door_by_port_name() -> None:
+    """It must select the Service that serves `/metrics`, on the port that Service names.
+
+    By *name* rather than number, so a port change cannot silently orphan the scrape. And only the
+    front door: the workers and connector pods record through `chemclaw.metrics_bridge`, whose
+    contract is that a metric recorded outside the front door is a no-op — there is no registry and
+    no HTTP surface there — so a scrape pointed at them would collect nothing while reporting up.
+    """
+    text = (CHART / "templates" / "servicemonitor.yaml").read_text()
+    assert "app.kubernetes.io/component: service" in text, (
+        "the scrape does not select the front door specifically"
+    )
+    assert re.search(r"^\s*- port: http\s*$", text, flags=re.MULTILINE), (
+        "the scrape names a port number rather than the Service's `http` port name"
+    )
+    service = (CHART / "templates" / "service-route.yaml").read_text()
+    assert re.search(r"^\s*- name: http\s*$", service, flags=re.MULTILINE), (
+        "the Service no longer names its port `http`, so the ServiceMonitor selects nothing"
+    )
+
+
+def test_the_scraped_path_is_a_route_the_app_serves() -> None:
+    """The executed half: the path the chart scrapes has to exist on the real app (D-142).
+
+    A ServiceMonitor naming `/metric` renders, validates, deploys, and collects nothing forever —
+    Prometheus reports the target as down and an operator reads it as a broken pod. Nothing in the
+    chart can catch that, because the chart has no idea what routes the app declares. This is the
+    same lesson as the OTel crash loop: a production value has to be executed, not type-checked.
+    """
+    from service.app import create_app
+
+    path = _values()["monitoring"]["path"]
+    routes = {getattr(route, "path", None) for route in create_app().routes}
+    assert path in routes, (
+        f"the chart scrapes {path!r}, which the app does not serve; "
+        f"the metrics route is one of {sorted(r for r in routes if r and 'metric' in r)}"
     )
