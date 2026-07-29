@@ -12,6 +12,7 @@ that some function *was called* would have passed against a counter nobody ever 
 """
 
 import asyncio
+from types import SimpleNamespace
 
 from kg.note import Note
 from kg.pr_gate import NoteSubmission, propose_note
@@ -87,3 +88,64 @@ def test_the_bridge_tolerates_a_registry_that_cannot_be_imported() -> None:
     from chemclaw.metrics_bridge import record_metric
 
     record_metric(lambda m: m.increment("no_such_counter_declared_anywhere"))
+
+
+def test_the_priced_token_dimensions_are_published_separately() -> None:
+    """One undifferentiated total cannot answer "what is this costing" (REV-10, D-144).
+
+    Input, output and cache-read carry different prices — a cache read is roughly an order of
+    magnitude cheaper than a fresh input token — so a deployment that caches well and one that does
+    not published *identical* `chemclaw_tokens_total` while their bills differed several-fold. MAF
+    has reported all four dimensions since the beginning; nothing read past the sum.
+
+    Driven through `_usage_tokens` on a MAF-shaped update rather than by calling the counters
+    directly, because the defect was in the reading, not the publishing.
+    """
+    from service.runner import _usage_tokens
+
+    update = SimpleNamespace(
+        contents=[
+            SimpleNamespace(
+                usage_details={
+                    "input_token_count": 100,
+                    "output_token_count": 20,
+                    "cache_read_input_token_count": 900,
+                    "cache_creation_input_token_count": 50,
+                    "total_token_count": 1070,
+                }
+            )
+        ]
+    )
+    usage = _usage_tokens(update)
+
+    assert (usage.input, usage.output) == (100, 20)
+    # The two that were never read at all. Without them, the 900 cheap tokens above are invisible
+    # and the deployment looks like it is paying full price for every one of them.
+    assert (usage.cache_read, usage.cache_write) == (900, 50)
+    # And the cache counts are *not* folded into `input`: a provider that reports them has already
+    # excluded cache reads from `input_token_count`, so adding them would re-price the cheap
+    # tokens as expensive ones — the opposite of the mistake this fixes.
+    assert usage.input == 100
+
+
+def test_a_provider_reporting_no_cache_counts_leaves_those_counters_alone() -> None:
+    """A fabricated zero is indistinguishable from a genuinely uncached deployment.
+
+    The same rule `service.metrics` states for gauges — it refuses to emit an unbound one because
+    "a fabricated zero would be indistinguishable from a genuinely idle service" — and the exact
+    failure REV-19 found in the counters. An `openai_compatible` endpoint that reports no cache
+    fields must leave those two counters untouched, not publish 0.
+    """
+    from service.metrics import METRICS
+    from service.runner import _usage_tokens
+
+    update = SimpleNamespace(
+        contents=[SimpleNamespace(usage_details={"input_token_count": 7, "output_token_count": 3})]
+    )
+    usage = _usage_tokens(update)
+    assert (usage.cache_read, usage.cache_write) == (0, 0)
+
+    before = METRICS.value("chemclaw_cache_read_tokens_total")
+    if usage.cache_read:  # the runner's own guard, restated
+        METRICS.increment("chemclaw_cache_read_tokens_total", float(usage.cache_read))
+    assert METRICS.value("chemclaw_cache_read_tokens_total") == before

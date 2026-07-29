@@ -105,10 +105,12 @@ claim about the world is to run it.
       MAF exposes no `cache_control` hook for `tools` (the 11 k that dominates), production is
       `openai_compatible`, and the prefix is not byte-stable because `tools/list` is re-fetched per
       turn — one flapping connector invalidates the whole prefix.
-- [ ] **REV-10 [Med] Token accounting is priced-blind.** `chemclaw_tokens_total` collapses input
+- [x] **REV-10 [Med] Token accounting is priced-blind.** `chemclaw_tokens_total` collapses input
       and output before the counter sees it; cache-read/write are not read at all; the registry
       supports no labels, so no per-model or per-profile attribution. AG-11 (cost) still open. MAF
       already implements the full GenAI token model — reachable now that OTel can start.
+      **Done (D-144), the pricing half.** Four counters for the four priced dimensions, with `chemclaw_tokens_total` kept as the total. The budget guard still meters the total, so the 429 behaviour is unchanged — this splits what is published, not what is enforced. Cache counts are *not* folded into `input` (a provider reporting them has already excluded them, so folding would re-price cheap tokens as expensive), and a counter stays untouched rather than publishing a fabricated `0` when the provider reports nothing — the REV-19 rule.
+      **Still open:** per-model / per-profile attribution. The registry has no label support at all, so `chemclaw_tokens_total{model=...}` is not expressible; that is a change to the exposition format and the registry's storage, not to the reading. Four counters answer "what is it costing"; labels answer "costing *on what*", which is a larger change.
 - [x] **REV-11 [Med] `correlation_id` stops at the process boundary.** Not in the connector
       identity headers, not in `ConnectorJobInput`, not into HPC. ~4 lines to make the audit trail
       joinable across all four runtimes. Note that fixing OTel does not fix this.
