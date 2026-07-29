@@ -1,4 +1,4 @@
-"""The `job` step: resolved outside workflow code, and able to fail (REV-13, D-146).
+"""The `job` step: resolved outside workflow code, and able to fail (REV-13, D-140).
 
 `JobStep` is the one template step kind no test had ever constructed, and it carried two defects
 that only a `job` step could reach.

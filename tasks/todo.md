@@ -3,7 +3,7 @@
 Requested 2026-07-29: "the GitHub now looks quite messy … many many folders with an unclear
 structure and with often similar names. Is there a way to bring more structure into the git?"
 
-Branch: `claude/github-repo-structure-6yyibc`. Three ADRs: D-145, D-146, D-147.
+Branch: `claude/github-repo-structure-6yyibc`. Three ADRs: D-146, D-147, D-148.
 
 ## What was actually wrong
 
@@ -19,7 +19,7 @@ Branch: `claude/github-repo-structure-6yyibc`. Three ADRs: D-145, D-146, D-147.
    second near-empty ADR mechanism in `docs/adr/`.
 4. No repository-root README: a visitor saw `.github/` and `services/`.
 
-## Stage 1 — flatten (D-145) — DONE
+## Stage 1 — flatten (D-146) — DONE
 
 - [x] `git mv` every entry of `services/chemclaw/` to the root; delete the tier
 - [x] Merge the two `.gitignore`s; repoint the Git-LFS rule at `.bin/temporal`
@@ -28,7 +28,7 @@ Branch: `claude/github-repo-structure-6yyibc`. Three ADRs: D-145, D-146, D-147.
       like duplicates and are not
 - [x] Leave past-tense `services/chemclaw/` mentions in the append-only record alone
 
-## Stage 2 — the record (D-146) — DONE
+## Stage 2 — the record (D-147) — DONE
 
 - [x] Split `DECISIONS.md` into `docs/decisions/D-NNN-<slug>.md`, verified byte-identical per ADR
 - [x] Fold `docs/adr/` into D-001 and delete it; `ADR-REGISTRY.md` → `docs/decisions/README.md`
@@ -37,7 +37,7 @@ Branch: `claude/github-repo-structure-6yyibc`. Three ADRs: D-145, D-146, D-147.
 - [x] Rewrite `tests/test_decision_log.py` for the new shape; update CLAUDE.md's allocation procedure
 - [x] Update references across 73 files
 
-## Stage 3 — regroup (D-147) — DONE
+## Stage 3 — regroup (D-148) — DONE
 
 - [x] 18 packages → `src/chemclaw/{core,agent,api,durable,connectors,science,kg,ingest,retrieval,memory,mcp,templates,evals,cli}`
 - [x] ~1200 imports plus the module paths in strings, manifests, entrypoint, Helm, Makefile, CI
@@ -49,7 +49,7 @@ Branch: `claude/github-repo-structure-6yyibc`. Three ADRs: D-145, D-146, D-147.
 ## Stage 4 — what CI caught that the offline gate did not — DONE
 
 - [x] `test_image_ships_every_first_party_package` went **vacuous**: it discovered root packages,
-      and D-147 left none, so it iterated an empty set and passed. Replaced with an assertion that
+      and D-148 left none, so it iterated an empty set and passed. Replaced with an assertion that
       `src/` is COPYd, plus a widened runtime-data check and an exists-on-disk check.
 - [x] `make db-migrate` applied **zero migrations, silently**. `_read_sql_files` located `infra/sql`
       as `__file__`'s grandparent — the repo root only while the module was `calc/migrate.py`.

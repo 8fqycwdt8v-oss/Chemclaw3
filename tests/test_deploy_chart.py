@@ -156,7 +156,7 @@ def test_image_ships_the_first_party_source_tree() -> None:
     'safety'`. It then discovered the eighteen top-level packages instead, so the next one was
     covered on the day it was created.
 
-    Since D-147 there is one package under `src/`, so the discovery has nothing left to discover —
+    Since D-148 there is one package under `src/`, so the discovery has nothing left to discover —
     and a test that iterates an empty set passes vacuously, which is worse than the hardcoded list
     it replaced. What it asserts now is the property that actually keeps the image complete: `src/`
     is COPYd whole, and `tests/test_packaging.py` separately forbids a first-party package from
@@ -175,7 +175,7 @@ def test_image_ships_the_data_directories_read_at_runtime() -> None:
 def test_every_runtime_data_directory_actually_exists() -> None:
     """A COPY of a vanished directory fails the build; one that moved fails silently at start-up.
 
-    The pairing matters: `eln/exports` became `data/eln-exports` in D-147, and had the Containerfile
+    The pairing matters: `eln/exports` became `data/eln-exports` in D-148, and had the Containerfile
     kept COPYing `eln/` the build would have broken loudly — but had the *config default* alone
     moved, the image would have started fine and read an empty export directory forever.
     """

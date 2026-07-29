@@ -9,10 +9,17 @@ encodes, which is where the real risk lives: what it prunes, what it refuses to 
 that a deployment must opt in before anything is deleted.
 """
 
-import pytest
+import asyncio
 
+import pytest
+from agent_framework import Content, Message
+from psycopg.types.json import Jsonb
+
+from chemclaw.agent.message_pairing import unmatched_result_ids
+from chemclaw.core import db
 from chemclaw.core.config import settings
-from chemclaw.durable.retention import _PRUNABLE, _window_days
+from chemclaw.durable.retention import _PRUNABLE, _window_days, prune_expired_rows
+from tests.pg import migrated_db_or_skip
 
 
 def test_only_spent_operational_rows_are_prunable() -> None:
@@ -54,3 +61,112 @@ def test_a_stated_window_is_read_per_table(monkeypatch: pytest.MonkeyPatch) -> N
     monkeypatch.setattr(settings, "retention_session_messages_days", 365)
     assert _window_days("session_events") == 7
     assert _window_days("session_messages") == 365
+
+
+# --- D-145: an age cutoff alone cannot dispose of a conversation row ---------------------------
+
+
+def _call(call_id: str) -> Content:
+    return Content.from_function_call(call_id=call_id, name="predict_pka", arguments={})
+
+
+def _result(call_id: str) -> Content:
+    return Content.from_function_result(call_id=call_id, result="ok")
+
+
+def test_a_pair_straddling_the_cutoff_survives_intact() -> None:
+    """The defect, against a real database: an expiring call whose result is not expiring stays.
+
+    This is what the old single `DELETE ... WHERE created_at < cutoff` got wrong. It deleted the
+    call and left the result — and a stranded `tool_result` is the one failure the read-repair
+    cannot heal (`unmatched_result_ids`), so the session was bricked permanently by a cleanup job.
+
+    Rows are dated explicitly rather than by waiting, because the whole point is a pair whose two
+    halves fall on opposite sides of the window.
+    """
+
+    async def _run() -> tuple[list[int], set[str]]:
+        await migrated_db_or_skip()
+        monkeypatch = pytest.MonkeyPatch()
+        monkeypatch.setattr(settings, "retention_session_messages_days", 365)
+        monkeypatch.setattr(settings, "retention_session_events_days", 0)
+        try:
+            session_id = "d145-straddle"
+            async with db.connection(settings.postgres_dsn) as conn:
+                async with conn.cursor() as cur:
+                    await cur.execute(
+                        "DELETE FROM session_messages WHERE session_id = %s", (session_id,)
+                    )
+                    for age_days, message in (
+                        (400, Message(role="assistant", contents=[_call("c1")])),
+                        # The answer arrived inside the window — the pair straddles the cutoff.
+                        (1, Message(role="tool", contents=[_result("c1")])),
+                    ):
+                        await cur.execute(
+                            "INSERT INTO session_messages (session_id, message, created_at) "
+                            "VALUES (%s, %s, now() - make_interval(days => %s))",
+                            (session_id, Jsonb(message.to_dict()), age_days),
+                        )
+                await conn.commit()
+
+            await prune_expired_rows()
+
+            async with db.connection(settings.postgres_dsn) as conn:
+                async with conn.cursor() as cur:
+                    await cur.execute(
+                        "SELECT id, message FROM session_messages "
+                        "WHERE session_id = %s ORDER BY id",
+                        (session_id,),
+                    )
+                    rows = await cur.fetchall()
+            surviving = [Message.from_dict(row[1]) for row in rows]
+            return [int(row[0]) for row in rows], unmatched_result_ids(surviving)
+        finally:
+            monkeypatch.undo()
+
+    ids, stranded = asyncio.run(_run())
+    assert len(ids) == 2, (
+        "retention split a tool-call pairing across the cutoff; the surviving half is unusable"
+    )
+    assert stranded == set(), f"retention stranded {stranded} — the session is now bricked"
+
+
+def test_an_expired_pair_is_removed_whole() -> None:
+    """The closure must not become a refusal to prune anything: both halves expired, both go."""
+
+    async def _run() -> int:
+        await migrated_db_or_skip()
+        monkeypatch = pytest.MonkeyPatch()
+        monkeypatch.setattr(settings, "retention_session_messages_days", 365)
+        monkeypatch.setattr(settings, "retention_session_events_days", 0)
+        try:
+            session_id = "d145-both-expired"
+            async with db.connection(settings.postgres_dsn) as conn:
+                async with conn.cursor() as cur:
+                    await cur.execute(
+                        "DELETE FROM session_messages WHERE session_id = %s", (session_id,)
+                    )
+                    for message in (
+                        Message(role="assistant", contents=[_call("c9")]),
+                        Message(role="tool", contents=[_result("c9")]),
+                    ):
+                        await cur.execute(
+                            "INSERT INTO session_messages (session_id, message, created_at) "
+                            "VALUES (%s, %s, now() - make_interval(days => 400))",
+                            (session_id, Jsonb(message.to_dict())),
+                        )
+                await conn.commit()
+
+            await prune_expired_rows()
+
+            async with db.connection(settings.postgres_dsn) as conn:
+                async with conn.cursor() as cur:
+                    await cur.execute(
+                        "SELECT count(*) FROM session_messages WHERE session_id = %s", (session_id,)
+                    )
+                    row = await cur.fetchone()
+            return int(row[0]) if row is not None else -1
+        finally:
+            monkeypatch.undo()
+
+    assert asyncio.run(_run()) == 0

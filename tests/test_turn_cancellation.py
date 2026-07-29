@@ -196,7 +196,7 @@ def test_abandoned_turn_still_books_its_tokens() -> None:
                 budget=budget,
                 # Stated, because this test counts *events* to decide when to abandon: defaulting
                 # means every enabled connector, none of which is running in a test process, and
-                # the resulting degradation event (D-145) would shift the cut-off by one update.
+                # the resulting degradation event (D-139) would shift the cut-off by one update.
                 connectors=[],
             )
         )

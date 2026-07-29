@@ -64,7 +64,7 @@ def _events(agent: Any) -> list[Any]:
 
     `connectors=[]` is stated rather than defaulted: omitting it means *every enabled connector*,
     which in a test process is six hosts that are not running — so the turn genuinely degrades and
-    now says so (D-145). These tests are about signal ordering, and a turn that dials six dead hosts
+    now says so (D-139). These tests are about signal ordering, and a turn that dials six dead hosts
     to assert an event list was asserting more than it meant to.
     """
 

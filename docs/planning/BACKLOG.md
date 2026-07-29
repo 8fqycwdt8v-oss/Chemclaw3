@@ -80,7 +80,7 @@ claim about the world is to run it.
       callers**, though its docstring says it is "for the caller to surface". A turn answers with a
       silently degraded capability set; in `template_activities` the output enters the PR-gate with
       no marker.
-      **Done (D-145).** The announcement moved *into* `open_reachable` — a WARNING naming the connectors plus `chemclaw_connectors_unreachable_total`, counted per connector — because a return value that must be read had been forgotten four times out of four. The front door additionally yields a `CapabilityDegradedEvent` before the first token; the CLI prints to stderr, which its docstring had promised and never done. Still degrades rather than raising: one dark connector must not become a dead front door.
+      **Done (D-139).** The announcement moved *into* `open_reachable` — a WARNING naming the connectors plus `chemclaw_connectors_unreachable_total`, counted per connector — because a return value that must be read had been forgotten four times out of four. The front door additionally yields a `CapabilityDegradedEvent` before the first token; the CLI prints to stderr, which its docstring had promised and never done. Still degrades rather than raising: one dark connector must not become a dead front door.
 - [ ] **REV-7 [Med] A push-back event lost between claim and delivery is lost permanently — and
       the fix is *not* the one this item first proposed.** The original recommendation (yield before
       marking rows consumed) is **refuted**: `agents/session_events.py` documents at-most-once as a
@@ -114,21 +114,21 @@ claim about the world is to run it.
 - [x] **REV-11 [Med] `correlation_id` stops at the process boundary.** Not in the connector
       identity headers, not in `ConnectorJobInput`, not into HPC. ~4 lines to make the audit trail
       joinable across all four runtimes. Note that fixing OTel does not fix this.
-      **Done (D-147).** An `X-Chemclaw-Correlation-Id` header beside the actor/roles/session, and a `correlation_id` on `ConnectorJobInput` that becomes a workflow memo beside `requested_by`. Both follow the shape already established for the actor: advisory-never-authorization for the header, in the input rather than ambient for the job (a workflow has no request context), and a memo rather than `payload` so it is not something the model can write. HPC is unchanged — the bridge runs under a shared service identity and wants its own pass.
+      **Done (D-141).** An `X-Chemclaw-Correlation-Id` header beside the actor/roles/session, and a `correlation_id` on `ConnectorJobInput` that becomes a workflow memo beside `requested_by`. Both follow the shape already established for the actor: advisory-never-authorization for the header, in the input rather than ambient for the job (a workflow has no request context), and a memo rather than `payload` so it is not something the model can write. HPC is unchanged — the bridge runs under a shared service identity and wants its own pass.
 - [x] **REV-12 [Med] Prediction calibration pools every calculator version.** `calc_version` is
       never passed when recording, so the unique index degenerates and a v2 prediction destroys
       v1's row; the read path has no version predicate either. `calculator_trust` reports the
       pooled figure. Dormant while `calibration_enabled` is off.
-      **Done (D-145).** Both halves — the tools pass the running version, and `calibration_for` now *requires* one and filters on it. The observation write stays version-blind on purpose: a measurement is a fact about the molecule, which is what makes a version-over-version comparison possible. Verified against live Postgres by simulating the pooled read, where a high version and a low one cancel to a bias of exactly 0.0.
+      **Done (D-139).** Both halves — the tools pass the running version, and `calibration_for` now *requires* one and filters on it. The observation write stays version-blind on purpose: a measurement is a fact about the molecule, which is what makes a version-over-version comparison possible. Verified against live Postgres by simulating the pooled read, where a high version and a low one cancel to a bias of exactly 0.0.
 - [x] **REV-13 [Med] `find_job` does filesystem I/O inside workflow code**, and the comment above
       it says it is I/O-free. `ConnectorError` is a `ValueError`, not a `FailureError`, and no
       `failure_exception_types` is declared — so it fails the *workflow task* and Temporal retries
       indefinitely. The run hangs rather than failing. No test constructs a `JobStep`.
-      **Done (D-146).** The lookup moved to a local activity, `resolve_job_step`, following `orchestrator.resolve_fan_out_limit`'s precedent — the resolution is now recorded in history rather than re-read from the replaying worker's disk. That also turns the `ConnectorError` into an `ActivityError`, which `BAD_DATA_RETRY` fails on the first attempt. `TemplateWorkflow` gains `failure_exception_types=[Exception]` for the sequencer's own raw raises. `tests/test_template_job_step.py` is the first test to construct a `JobStep`.
+      **Done (D-140).** The lookup moved to a local activity, `resolve_job_step`, following `orchestrator.resolve_fan_out_limit`'s precedent — the resolution is now recorded in history rather than re-read from the replaying worker's disk. That also turns the `ConnectorError` into an `ActivityError`, which `BAD_DATA_RETRY` fails on the first attempt. `TemplateWorkflow` gains `failure_exception_types=[Exception]` for the sequencer's own raw raises. `tests/test_template_job_step.py` is the first test to construct a `JobStep`.
 - [x] **REV-14 [Med] Rehydrated and LRU-evicted sessions revert to the default profile**,
       permanently. The profile is never persisted. Eviction matters more than restart: no TTL, so
       session 1001 evicts session 1. All three rehydration tests discard the profile argument.
-      **Done (D-147).** Persisted as a nullable column on `session_owners` (`infra/sql/021`) and rehydrated onto. The old comment called the loss graceful — "the conversation resumes with the full tool surface rather than a narrowed one" — which has the direction backwards: a profile is attenuation only, so restoring the full surface is the control being switched off, and the LRU has no TTL so it happens on a live pod without any restart. `None` surviving as `None` is pinned separately; storing `""` would ask for a profile named empty-string.
+      **Done (D-141).** Persisted as a nullable column on `session_owners` (`infra/sql/021`) and rehydrated onto. The old comment called the loss graceful — "the conversation resumes with the full tool surface rather than a narrowed one" — which has the direction backwards: a profile is attenuation only, so restoring the full surface is the control being switched off, and the LRU has no TTL so it happens on a live pod without any restart. `None` surviving as `None` is pinned separately; storing `""` would ask for a profile named empty-string.
 - [x] **REV-15 [Med] Chart parity test proves nothing about behaviour.** It constructs
       `Settings(**helm_values)`; `otel_enabled=True` constructs perfectly and then kills the pod.
       Two holes: keys from `templates/config.yaml` (`note_repo_dir`, `connector_urls`) are outside
@@ -138,11 +138,11 @@ claim about the world is to run it.
 - [x] **REV-16 [Med] Dark-by-default flags that arguably should not be.** `budget_enabled` off
       (the load test that validated the system ran with budgets *on*); `audit_verify_enabled` off,
       so the tamper-evident chain is never verified; `connectors_required` off.
-      **Done (D-142), two of three.** `budget_enabled` and `audit_verify_enabled` are on in the chart, each pinned by an *executed* test rather than by asserting the flag. `connectors_required` deliberately stays false: unlike the other two its docstring is a real considered trade, and the review's argument for flipping it — that the degradation was silent — stopped being true when D-145 landed `CapabilityDegradedEvent`, the WARNING and the counter. Fail-fast would now trade availability away for visibility that already exists.
+      **Done (D-142), two of three.** `budget_enabled` and `audit_verify_enabled` are on in the chart, each pinned by an *executed* test rather than by asserting the flag. `connectors_required` deliberately stays false: unlike the other two its docstring is a real considered trade, and the review's argument for flipping it — that the degradation was silent — stopped being true when D-139 landed `CapabilityDegradedEvent`, the WARNING and the counter. Fail-fast would now trade availability away for visibility that already exists.
 - [x] **REV-17 [Med] `deployment_revision` can never be set in production** — no chart key,
       Containerfile ARG or build step sets it, though its docstring says the image build injects
       the digest. AG-14 is unmet while reading as done.
-      **Done (D-146).** A `CHEMCLAW_REVISION` build ARG exported as `CHEMCLAW_DEPLOYMENT_REVISION`, with the image workflow passing the commit SHA — a build arg rather than a chart value because the image is the thing that has a revision, and one that disagrees with the running bytes is worse than an honest "unknown". The wiring is pinned offline in `test_deploy_chart.py`; the image job runs the built image and compares, because only that proves the value arrived.
+      **Done (D-140).** A `CHEMCLAW_REVISION` build ARG exported as `CHEMCLAW_DEPLOYMENT_REVISION`, with the image workflow passing the commit SHA — a build arg rather than a chart value because the image is the thing that has a revision, and one that disagrees with the running bytes is worse than an honest "unknown". The wiring is pinned offline in `test_deploy_chart.py`; the image job runs the built image and compares, because only that proves the value arrived.
 - [x] **REV-18 [Low] Missing validators** for combinations the config comments already forbid in
       prose: `session_store="memory"` with `uvicorn_workers > 1`, `mid_turn_resume_timeout >=
       turn_timeout`, `budget_enabled` with all caps zero, `embedding_dim` vs the `vector(N)` column.
@@ -150,7 +150,7 @@ claim about the world is to run it.
 - [x] **REV-19 [Low] `chemclaw_jobs_started_total` and `chemclaw_notes_proposed_total` are never
       incremented** — a permanent `0`. The gauge path refuses to fabricate zeros; counters get no
       such protection. Increment them or delete them.
-      **Done (D-145).** Incremented at the durable-job launch and the PR-gate proposal. The note counter moves *after* the submitter returns: counting the attempt would report a healthy gate during exactly the outage the metric exists to reveal. `agents/audit.py`'s private `_record_metric` was promoted to `chemclaw/metrics_bridge.py` at its fourth caller rather than imported by its underscore name.
+      **Done (D-139).** Incremented at the durable-job launch and the PR-gate proposal. The note counter moves *after* the submitter returns: counting the attempt would report a healthy gate during exactly the outage the metric exists to reveal. `agents/audit.py`'s private `_record_metric` was promoted to `chemclaw/metrics_bridge.py` at its fourth caller rather than imported by its underscore name.
 - [x] **REV-20 [Low] Anthropic client ignores `llm_timeout_seconds`/`llm_max_retries`/CA bundle.**
       Actual timeout is the SDK's 600 s, not the configured 60 s. Default for CLI and dev.
       **Done.** `AsyncAnthropic` now carries `llm_timeout_seconds`, `llm_max_retries` and the CA bundle. Verified against the live API.
@@ -158,6 +158,14 @@ claim about the world is to run it.
       `docs/guides/harness-konzept.md`, and the cap applies in both modes, not only execute.
       `workflows/template_job.py` calls its own lookup "I/O-free". `agents/chemclaw_agent.py`
       calls `plan_only` "the pre-execution GxP gate" (REV-1).
+- [ ] **Heal sessions already bricked by a stranded `tool_result`.** `get_messages`'s repair
+      strips orphaned *calls* and cannot see an orphaned *result* (D-145), so any session the old
+      age-based retention split is unusable forever with no automatic recovery. Adding the mirror
+      strip to the read repair would fix them — deliberately **not** shipped with D-145, because
+      doing so would mask a regression in `droppable_rows` rather than surface it. Needs its own
+      argument: it is a new destructive behaviour on the read path, and it destroys evidence of how
+      the split happened.
+
 ## Storage & knowledge substrate (docs/archive/audit/13-storage-and-knowledge-audit.md)
 
 The layer under retrieval and capability, audited as one system for the first time: what the

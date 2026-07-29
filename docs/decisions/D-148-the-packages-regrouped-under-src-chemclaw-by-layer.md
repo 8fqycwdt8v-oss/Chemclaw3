@@ -1,4 +1,4 @@
-# D-147 — The packages regrouped under `src/chemclaw/` by the four architecture layers
+# D-148 — The packages regrouped under `src/chemclaw/` by the four architecture layers
 
 Eighteen flat top-level Python packages — `agents bo calc chemclaw connectors eln evals kg
 mcp_servers memory report safety scripts service sources templates workers workflows` — with no
@@ -6,7 +6,7 @@ stated grouping, sitting beside the data corpora, the docs, the tests and the de
 in the layout said which of them were the four layers `CLAUDE.md` opens with, which was the shared
 kernel, and which were ops tooling. Several were near-homonyms of each other:
 
-- `chemclaw/` inside repo `Chemclaw3` (and, until D-145, inside `services/chemclaw/`) — the same
+- `chemclaw/` inside repo `Chemclaw3` (and, until D-146, inside `services/chemclaw/`) — the same
   word at three levels, naming something that is neither the repo nor the service but the *shared
   kernel*: config, db, http, ids, logging.
 - `calc/` beside `connectors/calc/`, `bo/` beside `connectors/bo/`, `safety/` beside

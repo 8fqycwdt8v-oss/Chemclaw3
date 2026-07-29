@@ -18,6 +18,7 @@ regression test can assert the same rule rather than restating it.
 
 import copy
 from collections.abc import Sequence
+from collections.abc import Set as AbstractSet
 
 from agent_framework import Message
 
@@ -45,6 +46,97 @@ def unmatched_call_ids(messages: Sequence[Message]) -> set[str]:
         for message in messages
         for content in message.contents
         if content.type == _CALL and content.call_id is not None and content.call_id not in answered
+    }
+
+
+def unmatched_result_ids(messages: Sequence[Message]) -> set[str]:
+    """Return the `call_id`s of function *results* that no function call accounts for.
+
+    The mirror of `unmatched_call_ids`, and the asymmetry between them is the whole reason this
+    exists. `unmatched_call_ids` reports unanswered calls and `strip_call_ids` removes them, so an
+    orphaned call is detected and healed on every read. Nothing detects an orphaned **result**: the
+    repair filters on `type == "function_call"` only, so a `tool_result` whose `tool_use` is gone is
+    invisible to it — and the API rejects that thread exactly as hard as the converse. A stranded
+    result is therefore a bricked session with *no* self-heal path.
+
+    Deliberately **not** wired into the read-time repair (D-146). Stripping a stranded result would
+    silently destroy evidence and, worse, would mask a bug in whatever produced it. Its job is to be
+    the assertion: any code that deletes conversation rows must prove it never leaves one of these,
+    rather than rely on something cleaning up afterwards.
+    """
+    called = {
+        content.call_id
+        for message in messages
+        for content in message.contents
+        if content.type == _CALL and content.call_id is not None
+    }
+    return {
+        content.call_id
+        for message in messages
+        for content in message.contents
+        if content.type == _RESULT and content.call_id is not None and content.call_id not in called
+    }
+
+
+def droppable_rows(rows: Sequence[tuple[int, Message]], candidates: AbstractSet[int]) -> set[int]:
+    """Narrow `candidates` to the rows that can be deleted without stranding a tool-call pairing.
+
+    Storage may not dispose of a conversation row on its own terms: a `function_call` and the
+    `function_result` answering it are one indivisible unit, and deleting either half alone bricks
+    the session (`unmatched_result_ids` explains why the surviving half cannot be healed). Both
+    callers that delete rows — durable compaction and age-based retention — choose their candidates
+    for reasons that know nothing about pairing, so the pairing rule is applied once, here.
+
+    Rows are joined into components by shared `call_id`, in **either** direction: a row is linked to
+    every row mentioning an id it mentions, whether as the call or the result. The relation is
+    transitive, which matters for parallel calls — one assistant message carrying three calls links
+    to all three result rows, and those may link on again. A component survives or dies whole.
+
+    **This contracts, it never expands.** A component with even one row outside `candidates` is
+    dropped from the answer entirely, rather than pulling its remaining rows in. That direction is
+    the safety property: expanding would let an age cutoff reach *forward* and delete a live result
+    from a recent turn, whereas contracting can only ever return a subset of what the caller already
+    chose — so the worst case is a straddling group surviving one more pass, which is harmless and
+    self-correcting.
+
+    Args:
+        rows: Every row of the session, as `(row_id, message)` — not just the candidates. A
+            candidate's partner is frequently *not* a candidate (that is precisely the case worth
+            catching), so a partial view would report a split component as droppable.
+        candidates: The row ids the caller wants to delete.
+
+    Returns:
+        The subset of `candidates` that is safe to delete.
+    """
+    # Union-find over row ids, keyed by call_id. A dict of representatives is enough at this size
+    # (one session's history), and path compression keeps the transitive case honest.
+    parent: dict[int, int] = {row_id: row_id for row_id, _ in rows}
+
+    def find(row_id: int) -> int:
+        while parent[row_id] != row_id:
+            parent[row_id] = parent[parent[row_id]]
+            row_id = parent[row_id]
+        return row_id
+
+    def union(left: int, right: int) -> None:
+        left_root, right_root = find(left), find(right)
+        if left_root != right_root:
+            parent[right_root] = left_root
+
+    first_row_for_call: dict[str, int] = {}
+    for row_id, message in rows:
+        for content in message.contents:
+            call_id = content.call_id if content.type in (_CALL, _RESULT) else None
+            if call_id is None:
+                continue
+            seen = first_row_for_call.setdefault(call_id, row_id)
+            union(seen, row_id)
+
+    members: dict[int, set[int]] = {}
+    for row_id, _ in rows:
+        members.setdefault(find(row_id), set()).add(row_id)
+    return {
+        row_id for component in members.values() if component <= candidates for row_id in component
     }
 
 

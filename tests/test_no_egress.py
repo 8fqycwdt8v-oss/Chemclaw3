@@ -28,7 +28,7 @@ _ROOT = Path(__file__).resolve().parents[1]
 
 # First-party packages. `tests/` is excluded deliberately: a test may legitimately name a host in a
 # docstring or a mocked-transport URL, and the constraint is about what the *shipped* code reaches.
-# One entry since D-147: every first-party module lives under `src/`, so this cannot fall behind
+# One entry since D-148: every first-party module lives under `src/`, so this cannot fall behind
 # the way an eighteen-name list did. `infra/` carries SQL, not Python, and `rglob` finds nothing
 # there anyway.
 _PACKAGES = ("src",)

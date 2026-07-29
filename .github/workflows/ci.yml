@@ -8,7 +8,7 @@
 # two `[x]` entries in `docs/planning/BACKLOG.md`. D-117 moved every gate here and deleted the stranded copies, so
 # what runs and what is claimed to run are the same thing again.
 #
-# D-145 then removed the `services/chemclaw/` wrapper itself — it was the last remnant of a Replit
+# D-146 then removed the `services/chemclaw/` wrapper itself — it was the last remnant of a Replit
 # monorepo whose other half was already deleted, and one service does not need a `services/` tier.
 # The service is the repository root now, so this workflow needs no `working-directory` at all.
 name: ci

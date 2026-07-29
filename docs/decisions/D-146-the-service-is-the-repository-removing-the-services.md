@@ -1,4 +1,4 @@
-# D-145 — The service is the repository: removing the `services/` tier
+# D-146 — The service is the repository: removing the `services/` tier
 
 The Python service lived at `services/chemclaw/`. Nothing needed it there. The tier is the last
 remnant of the Replit-era monorepo whose other half — a TypeScript client, 174 tracked files — D-138's
@@ -30,4 +30,4 @@ exists, and it needs to name that path.
 **The map.** The reason the tree read as unnavigable was never only the wrapper: eighteen flat
 top-level packages with no stated grouping, several of them near-homonyms of each other. A root
 `ARCHITECTURE.md` now names every directory and ties it to one of the four layers, and is the file to
-update when a directory is added. D-146 and D-147 are the other two halves of the same cleanup.
+update when a directory is added. D-147 and D-148 are the other two halves of the same cleanup.

@@ -4,7 +4,7 @@ One file per architecture decision, `D-NNN-<slug>.md`, alongside this index. `do
 holds the *reasoning*; this file is the allocation ledger, so "which numbers are taken?" is one
 listing rather than a scan of a 421 KB document.
 
-**Why one file per ADR.** Until D-146 every decision was appended to the end of a single
+**Why one file per ADR.** Until D-147 every decision was appended to the end of a single
 `DECISIONS.md`. ADR numbers collided three times, and the cause was structural rather than
 careless: concurrent branches all append to the same last line of the same file, and each picks
 "the highest number I can see, plus one" against its own branch, which cannot see the others.
@@ -179,6 +179,7 @@ this reason; the filenames make that ordering irrelevant now, and the numbers st
 | [D-142](D-142-a-production-value-has-to-be-executed-not-type.md) | A production value has to be executed, not type-checked — and two guards that were off in the one deployment that needed them |
 | [D-143](D-143-nobody-was-collecting-the-metrics-and-the-durable.md) | Nobody was collecting the metrics, and the durable history is never compacted — one fixed, one where the obvious fix corrupts data |
 | [D-144](D-144-token-accounting-was-priced-blind-one-total-where.md) | Token accounting was priced-blind: one total where the bill has four line items |
-| [D-145](D-145-the-service-is-the-repository-removing-the-services.md) | The service is the repository: removing the `services/` tier the Replit monorepo left behind |
-| [D-146](D-146-one-file-per-adr-and-a-docs-tree-with-an-archive.md) | One file per ADR, and a `docs/` tree with a living half and an archive |
-| [D-147](D-147-the-packages-regrouped-under-src-chemclaw-by-layer.md) | The packages regrouped under `src/chemclaw/` by the four architecture layers |
+| [D-145](D-145-a-conversation-row-cannot-be-disposed-of-without-the.md) | A conversation row cannot be disposed of without the rows it is paired with |
+| [D-146](D-146-the-service-is-the-repository-removing-the-services.md) | The service is the repository: removing the `services/` tier the Replit monorepo left behind |
+| [D-147](D-147-one-file-per-adr-and-a-docs-tree-with-an-archive.md) | One file per ADR, and a `docs/` tree with a living half and an archive |
+| [D-148](D-148-the-packages-regrouped-under-src-chemclaw-by-layer.md) | The packages regrouped under `src/chemclaw/` by the four architecture layers |

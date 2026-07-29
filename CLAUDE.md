@@ -164,7 +164,7 @@ each picking "highest I can see, plus one" — against its *own* branch, which c
 So they picked the same number **and** conflicted on the same line, inside ninety lines of prose
 where it was easy to miss.
 
-D-146 removed the shared append point: one file per ADR. Two branches adding different ADRs now
+D-147 removed the shared append point: one file per ADR. Two branches adding different ADRs now
 touch disjoint files, and two branches claiming the same number collide on a **filename** — an
 add/add conflict git reports loudly. The procedure below is what remains.
 

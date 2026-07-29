@@ -7,7 +7,12 @@ database. These pin the pure rule; `test_session_store.py` pins the storage laye
 
 from agent_framework import Content, Message
 
-from chemclaw.agent.message_pairing import strip_unmatched_calls, unmatched_call_ids
+from chemclaw.agent.message_pairing import (
+    droppable_rows,
+    strip_unmatched_calls,
+    unmatched_call_ids,
+    unmatched_result_ids,
+)
 
 
 def _call(call_id: str, name: str = "screen_hazards") -> Content:
@@ -103,3 +108,82 @@ def test_empty_history_is_handled() -> None:
     """A brand-new session reads back nothing at all."""
     assert unmatched_call_ids([]) == set()
     assert strip_unmatched_calls([]) == []
+
+
+# --- D-145: disposing of a row means disposing of the rows it is paired with -------------------
+
+
+def test_a_stranded_result_is_invisible_to_the_repair() -> None:
+    """The asymmetry that makes `droppable_rows` necessary, stated as a test.
+
+    `unmatched_call_ids` reports unanswered *calls* and `strip_call_ids` removes them, so an
+    orphaned call heals itself on the next read. A `tool_result` whose `tool_use` is gone is
+    reported by neither and removed by neither — and the API rejects that thread just as hard. So a
+    stranded result is a bricked session with no self-heal path, which is why nothing may create
+    one.
+    """
+    stranded = [Message(role="tool", contents=[_result("c1")])]
+    assert unmatched_call_ids(stranded) == set(), "the repair can see a stranded result after all"
+    assert strip_unmatched_calls(stranded) == stranded, "the repair removed it after all"
+    # Only the mirror sees it, and it exists to be asserted on rather than to heal anything.
+    assert unmatched_result_ids(stranded) == {"c1"}
+
+
+def test_neither_half_of_a_pair_may_be_dropped_alone() -> None:
+    """The core guarantee: a call and its result survive or die together."""
+    rows = [
+        (1, Message(role="user", contents=[Content.from_text("hi")])),
+        (2, Message(role="assistant", contents=[_call("c1")])),
+        (3, Message(role="tool", contents=[_result("c1")])),
+    ]
+    assert droppable_rows(rows, {2}) == set(), "the call was dropped without its result"
+    assert droppable_rows(rows, {3}) == set(), "the result was dropped without its call"
+    assert droppable_rows(rows, {2, 3}) == {2, 3}
+    # A row that mentions no call_id is its own component and needs no partner.
+    assert droppable_rows(rows, {1}) == {1}
+
+
+def test_the_closure_is_transitive_across_parallel_calls() -> None:
+    """One assistant message with two calls binds *both* result rows into one component.
+
+    A single-pass "does this row's partner come along?" filter passes this case wrongly: row 2's
+    partner row 3 is a candidate, so a naive check would drop {2, 3} and strand row 4's result.
+    """
+    rows = [
+        (2, Message(role="assistant", contents=[_call("c1"), _call("c2")])),
+        (3, Message(role="tool", contents=[_result("c1")])),
+        (4, Message(role="tool", contents=[_result("c2")])),
+    ]
+    assert droppable_rows(rows, {2, 3}) == set()
+    assert droppable_rows(rows, {2, 3, 4}) == {2, 3, 4}
+
+
+def test_the_closure_is_order_independent() -> None:
+    """A result stored before its call is still one component.
+
+    MAF's own grouping is positional; storage order is not guaranteed to match it once a prior
+    repair has removed an interleaving row. `unmatched_call_ids` is already order-independent for
+    the same reason, and the closure has to match it or the two would disagree about what a group
+    is.
+    """
+    rows = [
+        (1, Message(role="tool", contents=[_result("c1")])),
+        (2, Message(role="assistant", contents=[_call("c1")])),
+    ]
+    assert droppable_rows(rows, {1}) == set()
+    assert droppable_rows(rows, {1, 2}) == {1, 2}
+
+
+def test_the_closure_contracts_rather_than_expanding() -> None:
+    """The safety direction: never return a row the caller did not ask to delete.
+
+    Expanding would let an age cutoff reach *forward* and delete a live tool result from a recent
+    turn. Contracting can only return a subset, so the worst case is a straddling group surviving
+    one more pass — harmless, and self-correcting once the partner also ages out.
+    """
+    rows = [
+        (1, Message(role="assistant", contents=[_call("c1")])),
+        (2, Message(role="tool", contents=[_result("c1")])),
+    ]
+    assert droppable_rows(rows, {1}) <= {1}
+    assert droppable_rows(rows, set()) == set()

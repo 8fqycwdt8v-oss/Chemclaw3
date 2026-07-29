@@ -14,8 +14,8 @@ For what the *code* directories are, see `ARCHITECTURE.md` at the repository roo
 
 ## A note on paths inside older documents
 
-ADRs written before D-146 cite `DECISIONS.md`, `BACKLOG.md` and `DEFERRED.md` at the repository
-root, and ones written before D-145 cite `services/chemclaw/…`. Those references are left as
+ADRs written before D-147 cite `DECISIONS.md`, `BACKLOG.md` and `DEFERRED.md` at the repository
+root, and ones written before D-146 cite `services/chemclaw/…`. Those references are left as
 written — the ADR record is append-only, and rewriting it would falsify the account of what was
 true when each decision was made. The documents themselves are now `docs/decisions/`,
 `docs/planning/BACKLOG.md` and `docs/planning/DEFERRED.md`.

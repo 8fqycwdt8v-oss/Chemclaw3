@@ -44,7 +44,7 @@ def test_every_chemclaw_error_subclass_is_listed_non_retryable() -> None:
     walks every first-party module so all subclasses are defined, then asserts none is
     missing from the policy (the drift this base class was created to eliminate).
     """
-    # One package since D-147; `walk_packages` reaches every module under it, so a new
+    # One package since D-148; `walk_packages` reaches every module under it, so a new
     # subclass anywhere in the tree is still defined by the time the assertion runs.
     first_party = ["chemclaw"]
     for package_name in first_party:

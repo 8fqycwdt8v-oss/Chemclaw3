@@ -332,7 +332,7 @@ Kept because a lead that looked right and was not is the more useful record.
 
 - **REV-16: `connectors_required` should be on.** Refuted in part, and this one was refuted by the
   review's *own* fixes. The argument for fail-fast was that serving with a silently reduced tool
-  surface is worse than not serving — and the silence was the load-bearing word. D-145 removed it:
+  surface is worse than not serving — and the silence was the load-bearing word. D-139 removed it:
   an unreachable connector now produces a `CapabilityDegradedEvent` before the first token, a
   WARNING naming the connectors, and `chemclaw_connectors_unreachable_total`. Flipping the flag now
   would take one dark connector and turn it into a dead front door, in exchange for visibility that
@@ -375,7 +375,7 @@ its reasoning live; `BACKLOG.md` carries the per-item detail.*
    D-144.** The four priced dimensions are published; **labels are still open**, because the
    registry has no label support at all and adding it changes the exposition format and the
    registry's storage rather than the reading.
-7. ~~**Propagate `correlation_id`** to connectors and `ConnectorJobInput` (§4).~~ **Done — D-147.**
+7. ~~**Propagate `correlation_id`** to connectors and `ConnectorJobInput` (§4).~~ **Done — D-141.**
    HPC deliberately untouched: that bridge runs under a shared service identity and wants its own
    pass.
 8. ~~**Grow the chart parity test** to read `templates/config.yaml` and to assert that production

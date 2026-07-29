@@ -10,7 +10,7 @@ layer.
 One core task queue (its name comes from `chemclaw.core.config`): `background-jobs`
 (D-006). See `docs/reference/architektur.md` §2, §15.
 
-**The workflows and the worker are one package** (D-147). They were `workflows/`
+**The workflows and the worker are one package** (D-148). They were `workflows/`
 and `workers/` — two top-level packages, the second holding a single 60-line
 module whose entire job was to serve what the first declared. Splitting them said
 nothing a reader could use, and `workers/` was easy to confuse with the per-bundle

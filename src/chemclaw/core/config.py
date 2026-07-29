@@ -56,10 +56,10 @@ _PACKAGE = Path(__file__).resolve().parent.parent
 
 
 def _shipped(*parts: str) -> str:
-    """An absolute path to a declaration that ships *inside* the package (D-147).
+    """An absolute path to a declaration that ships *inside* the package (D-148).
 
     Three defaults name a directory of declarations the repository itself provides: the connector
-    bundles, the data sources, and the hazard rule table. Before D-147 all three were CWD-relative
+    bundles, the data sources, and the hazard rule table. Before D-148 all three were CWD-relative
     strings (`"connectors"`, `"sources"`, `"safety/rules.yaml"`), which only resolved when the
     process happened to be started from the repository root — which is precisely why the
     Containerfile had to COPY them into the workdir rather than just installing the package.
@@ -169,7 +169,7 @@ class StoreSettings(BaseSettings):
 
     postgres_dsn: str = "postgresql://chemclaw:chemclaw@localhost:5432/chemclaw"
     # The ordered `.sql` migrations `chemclaw.science.calc.migrate` applies. A setting rather than
-    # a path derived from `__file__`, which is what it was until D-147: `parent.parent` happened to
+    # a path derived from `__file__`, which is what it was until D-148: `parent.parent` happened to
     # be the repository root only while the module sat at `calc/migrate.py`, and moving
     # it two levels deeper silently pointed it inside the package — `make db-migrate` failed in CI
     # with no SQL found. The directory is repository/workdir-relative like `knowledge_dir` and
