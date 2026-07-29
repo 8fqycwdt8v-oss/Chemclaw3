@@ -12,3 +12,6 @@
 
 # D-140 — DECISIONS.md split into one file per ADR under docs/decisions/.
 cddf56dcba675c8b28396ada494967d2786479d7
+
+# D-141 — the eighteen packages regrouped under src/chemclaw/.
+15be829553dba12c598bfa3c7c2ee4452522e6e1
