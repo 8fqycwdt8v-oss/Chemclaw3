@@ -70,9 +70,14 @@ class ObservabilitySettings(BaseSettings):
     # flood the log; raise it when a fuller argument record is needed for an audit.
     agent_audit_max_arg_chars: int = Field(default=200, ge=0)
     # The deployment's code/prompt/skill revision stamped onto every audit record (AG-14): the
-    # Git SHA or image digest the running pod was built from, so a past agent result ties to the
-    # exact version that produced it (GxP reproducibility). The deployment sets it (the F6 image
-    # build injects the digest); "unknown" until then, a value change, not a schema change.
+    # Git SHA the running pod was built from, so a past agent result ties to the exact version that
+    # produced it (GxP reproducibility). The image build sets it — `deploy/Containerfile` takes a
+    # `CHEMCLAW_REVISION` build arg and exports it under this name, and the image workflow passes
+    # the commit SHA. That sentence used to be here as a claim about a build that did not exist:
+    # nothing set it anywhere, so every deployment recorded the literal "unknown" while AG-14 read
+    # as met (REV-17). "unknown" is now what a local `docker build` honestly reports, not what
+    # production does. `tests/test_deploy_chart.py` pins the wiring; the image job runs the built
+    # image and compares the value, because only that can prove it arrived.
     deployment_revision: str = "unknown"
     # OpenTelemetry export (off by default). When enabled,
     # `chemclaw.logging.configure_telemetry` calls MAF's `configure_otel_providers`, which reads

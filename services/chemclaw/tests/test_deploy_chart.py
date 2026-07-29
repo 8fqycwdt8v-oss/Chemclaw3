@@ -178,6 +178,33 @@ def test_image_installs_git() -> None:
     assert "dnf install -y git" in (DEPLOY / "Containerfile").read_text()
 
 
+def test_the_image_carries_the_revision_it_was_built_from() -> None:
+    """`deployment_revision` must be settable by a build, or AG-14 reads as met while being unmet.
+
+    `chemclaw/config.py` has always said the F6 image build injects the revision, and until REV-17
+    no build did: nothing in the Containerfile, the chart or CI set `CHEMCLAW_DEPLOYMENT_REVISION`,
+    so every audit record in every deployment carried the literal `"unknown"`. The whole point of
+    the field is tying a past agent result to the exact prompt/skill/config version that produced
+    it, and a constant answers no such question.
+
+    Pinned in three parts because each is separately droppable: the ARG must exist, it must reach
+    the image's environment under the name the settings prefix reads, and CI must actually pass a
+    value. The image workflow additionally runs the built image and compares — only that can prove
+    the value arrived, and only a built image can do it.
+    """
+    containerfile = (DEPLOY / "Containerfile").read_text()
+    assert "ARG CHEMCLAW_REVISION" in containerfile, "the Containerfile declares no revision ARG"
+    assert "CHEMCLAW_DEPLOYMENT_REVISION=${CHEMCLAW_REVISION}" in containerfile, (
+        "the revision ARG never reaches the environment, so `settings.deployment_revision` "
+        "stays at its 'unknown' default in every built image"
+    )
+    workflow = (DEPLOY.parents[2] / ".github" / "workflows" / "image.yml").read_text()
+    assert "--build-arg" in workflow and "CHEMCLAW_REVISION=" in workflow, (
+        "the image workflow builds without passing CHEMCLAW_REVISION, so the ARG falls back to "
+        "its 'unknown' default and the wiring above is inert"
+    )
+
+
 def test_the_chart_gives_each_bundle_the_halves_its_manifest_declares() -> None:
     """`server`/`worker` in values must match the bundle's own `connector.yaml`, both ways.
 

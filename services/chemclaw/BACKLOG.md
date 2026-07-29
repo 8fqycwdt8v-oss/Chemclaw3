@@ -114,10 +114,11 @@ claim about the world is to run it.
       v1's row; the read path has no version predicate either. `calculator_trust` reports the
       pooled figure. Dormant while `calibration_enabled` is off.
       **Done (D-139).** Both halves — the tools pass the running version, and `calibration_for` now *requires* one and filters on it. The observation write stays version-blind on purpose: a measurement is a fact about the molecule, which is what makes a version-over-version comparison possible. Verified against live Postgres by simulating the pooled read, where a high version and a low one cancel to a bias of exactly 0.0.
-- [ ] **REV-13 [Med] `find_job` does filesystem I/O inside workflow code**, and the comment above
+- [x] **REV-13 [Med] `find_job` does filesystem I/O inside workflow code**, and the comment above
       it says it is I/O-free. `ConnectorError` is a `ValueError`, not a `FailureError`, and no
       `failure_exception_types` is declared — so it fails the *workflow task* and Temporal retries
       indefinitely. The run hangs rather than failing. No test constructs a `JobStep`.
+      **Done (D-140).** The lookup moved to a local activity, `resolve_job_step`, following `orchestrator.resolve_fan_out_limit`'s precedent — the resolution is now recorded in history rather than re-read from the replaying worker's disk. That also turns the `ConnectorError` into an `ActivityError`, which `BAD_DATA_RETRY` fails on the first attempt. `TemplateWorkflow` gains `failure_exception_types=[Exception]` for the sequencer's own raw raises. `tests/test_template_job_step.py` is the first test to construct a `JobStep`.
 - [ ] **REV-14 [Med] Rehydrated and LRU-evicted sessions revert to the default profile**,
       permanently. The profile is never persisted. Eviction matters more than restart: no TTL, so
       session 1001 evicts session 1. All three rehydration tests discard the profile argument.
@@ -129,9 +130,10 @@ claim about the world is to run it.
 - [ ] **REV-16 [Med] Dark-by-default flags that arguably should not be.** `budget_enabled` off
       (the load test that validated the system ran with budgets *on*); `audit_verify_enabled` off,
       so the tamper-evident chain is never verified; `connectors_required` off.
-- [ ] **REV-17 [Med] `deployment_revision` can never be set in production** — no chart key,
+- [x] **REV-17 [Med] `deployment_revision` can never be set in production** — no chart key,
       Containerfile ARG or build step sets it, though its docstring says the image build injects
       the digest. AG-14 is unmet while reading as done.
+      **Done (D-140).** A `CHEMCLAW_REVISION` build ARG exported as `CHEMCLAW_DEPLOYMENT_REVISION`, with the image workflow passing the commit SHA — a build arg rather than a chart value because the image is the thing that has a revision, and one that disagrees with the running bytes is worse than an honest "unknown". The wiring is pinned offline in `test_deploy_chart.py`; the image job runs the built image and compares, because only that proves the value arrived.
 - [x] **REV-18 [Low] Missing validators** for combinations the config comments already forbid in
       prose: `session_store="memory"` with `uvicorn_workers > 1`, `mid_turn_resume_timeout >=
       turn_timeout`, `budget_enabled` with all caps zero, `embedding_dim` vs the `vector(N)` column.

@@ -174,3 +174,4 @@ written up leaves a gap, and a gap is harmless (`CLAUDE.md`, rule 4).
 | D-137 | The plan the model could approve for itself: a pre-execution gate that is not a tool |
 | D-138 | Fifty questions, asked live: the job surface was dead, the trace was blind, and a failed tool was silent |
 | D-139 | Three silent failures: a degraded turn, a pooled calibration, and two counters wired to nothing |
+| D-140 | A template's job step: resolved off the workflow thread, and finally able to fail |
