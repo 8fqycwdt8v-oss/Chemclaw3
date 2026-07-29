@@ -330,10 +330,22 @@ Kept because a lead that looked right and was not is the more useful record.
   without a git conflict. Two tests fail, naming the number. The collision was caught by hand during
   a merge before CI ever ran, so the guard was never observed firing and was assumed absent.
 
-Five refuted against fourteen confirmed. The pattern held in every one: what looked like a missing
-safeguard was a considered trade whose reasoning lived in a docstring, or a guard that already
-existed in a test not read closely enough. Both are arguments for verifying a lead against the code
-*before* planning the fix, which is the practice that caught the last two.
+- **REV-16: `connectors_required` should be on.** Refuted in part, and this one was refuted by the
+  review's *own* fixes. The argument for fail-fast was that serving with a silently reduced tool
+  surface is worse than not serving — and the silence was the load-bearing word. D-139 removed it:
+  an unreachable connector now produces a `CapabilityDegradedEvent` before the first token, a
+  WARNING naming the connectors, and `chemclaw_connectors_unreachable_total`. Flipping the flag now
+  would take one dark connector and turn it into a dead front door, in exchange for visibility that
+  already exists. The other two flags in that item (`budget_enabled`, `audit_verify_enabled`) were
+  real and are on.
+
+Six refuted, in whole or part, against sixteen confirmed. The pattern held in almost every one: what
+looked like a missing safeguard was a considered trade whose reasoning lived in a docstring, or a
+guard that already existed in a test not read closely enough. Both are arguments for verifying a
+lead against the code *before* planning the fix, which is the practice that caught the last three.
+The `connectors_required` case adds a second lesson: a backlog written against one snapshot of the
+system goes stale as the system is fixed, so a lead's premise deserves re-checking even when it was
+correct when written.
 
 ---
 

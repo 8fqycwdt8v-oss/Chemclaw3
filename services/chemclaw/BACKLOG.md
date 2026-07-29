@@ -124,14 +124,16 @@ claim about the world is to run it.
       permanently. The profile is never persisted. Eviction matters more than restart: no TTL, so
       session 1001 evicts session 1. All three rehydration tests discard the profile argument.
       **Done (D-141).** Persisted as a nullable column on `session_owners` (`infra/sql/021`) and rehydrated onto. The old comment called the loss graceful — "the conversation resumes with the full tool surface rather than a narrowed one" — which has the direction backwards: a profile is attenuation only, so restoring the full surface is the control being switched off, and the LRU has no TTL so it happens on a live pod without any restart. `None` surviving as `None` is pinned separately; storing `""` would ask for a profile named empty-string.
-- [ ] **REV-15 [Med] Chart parity test proves nothing about behaviour.** It constructs
+- [x] **REV-15 [Med] Chart parity test proves nothing about behaviour.** It constructs
       `Settings(**helm_values)`; `otel_enabled=True` constructs perfectly and then kills the pod.
       Two holes: keys from `templates/config.yaml` (`note_repo_dir`, `connector_urls`) are outside
       it, and there is no inverse test that a production value is *executed*. This is the test
       class that would have caught two of the three Criticals.
-- [ ] **REV-16 [Med] Dark-by-default flags that arguably should not be.** `budget_enabled` off
+      **Done (D-142).** The derived keys are discovered from `templates/config.yaml` and rendered offline, and `connector_urls` is now *asserted*, not merely constructed — a render of `{}` builds a valid `Settings` while pointing the front door at nothing. Writing it surfaced the sharper point: pydantic-settings JSON-decodes a complex field from an env var and **not** from an init kwarg, so the old model of "the pod environment" was the wrong mechanism for these keys, not just incomplete. The inverse direction now has tests too (below).
+- [x] **REV-16 [Med] Dark-by-default flags that arguably should not be.** `budget_enabled` off
       (the load test that validated the system ran with budgets *on*); `audit_verify_enabled` off,
       so the tamper-evident chain is never verified; `connectors_required` off.
+      **Done (D-142), two of three.** `budget_enabled` and `audit_verify_enabled` are on in the chart, each pinned by an *executed* test rather than by asserting the flag. `connectors_required` deliberately stays false: unlike the other two its docstring is a real considered trade, and the review's argument for flipping it — that the degradation was silent — stopped being true when D-139 landed `CapabilityDegradedEvent`, the WARNING and the counter. Fail-fast would now trade availability away for visibility that already exists.
 - [x] **REV-17 [Med] `deployment_revision` can never be set in production** — no chart key,
       Containerfile ARG or build step sets it, though its docstring says the image build injects
       the digest. AG-14 is unmet while reading as done.
