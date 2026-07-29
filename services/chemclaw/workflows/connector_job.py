@@ -68,6 +68,12 @@ class ConnectorJobInput(BaseModel):
     # The chat to wake on completion; empty off the service path (CLI, tests), where there is no
     # session to push back to.
     session_id: str = ""
+    # The turn that launched this run, so its durable execution joins to the audit trail of the
+    # conversation it came from (REV-11). It travelled no further than this process before: core
+    # stamped every in-core tool call with a correlation id and then started a workflow that knew
+    # nothing about it, so a durable job was an island in the trail. Empty off the request path,
+    # where there is no turn to correlate to.
+    correlation_id: str = ""
     publish_to_graph: bool = False
 
 
@@ -118,7 +124,11 @@ class ConnectorJobWorkflow:
             # model-authored arguments, so putting the actor there would make it a field the LLM
             # could fill in. A memo is beside the argument, readable with `workflow.memo_value`,
             # and set once here for every connector job rather than per bundle (D-118).
-            memo={"requested_by": job.requested_by},
+            # `correlation_id` rides beside the actor for the same reason the actor does: it is
+            # metadata about the run, not a model-authored argument, and `payload` is exactly the
+            # arguments the LLM filled in. A memo keeps both readable (`workflow.memo_value`)
+            # without letting either become something the model can write.
+            memo={"requested_by": job.requested_by, "correlation_id": job.correlation_id},
             # A child is started once per parent run; a retried parent activity never re-launches
             # it, so rejecting duplicates is the honest policy (a duplicate id here is a bug).
             id_reuse_policy=WorkflowIDReusePolicy.REJECT_DUPLICATE,

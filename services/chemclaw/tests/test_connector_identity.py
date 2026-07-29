@@ -114,3 +114,61 @@ def test_a_missing_credential_raises_instead_of_sending_an_empty_one(
     assert auth is not None
     with pytest.raises(MissingConnectorCredential, match="CHEMCLAW_TEST_TOKEN"):
         next(auth.auth_flow(httpx.Request("GET", "http://alpha/mcp")))
+
+
+def test_the_correlation_id_crosses_the_connector_boundary() -> None:
+    """The audit trail joins across processes, on the key core already stamps (REV-11).
+
+    `agents.audit` records a correlation id for every in-core tool call, and the connector serving
+    that call logged under an id of its own with nothing tying the two together. "Show me everything
+    that happened in this turn" was therefore answerable in core and unanswerable across the four
+    runtimes a turn actually spans — which is most of what an audit trail is for.
+
+    Advisory like the rest of these headers: a connector may join its records to ours on it and must
+    never make an access decision on it.
+    """
+    from agents.identity_context import reset_current_correlation_id, set_current_correlation_id
+    from connectors.identity import HEADER_CORRELATION
+
+    token = set_current_correlation_id("turn-7f3a")
+    try:
+        headers = turn_headers()
+    finally:
+        reset_current_correlation_id(token)
+    assert headers[HEADER_CORRELATION] == "turn-7f3a"
+    # Absent, not empty, once the turn is over — an empty id in a connector's log reads as one
+    # that exists, which is the failure this header is meant to remove rather than reproduce.
+    assert HEADER_CORRELATION not in turn_headers()
+
+
+def test_a_durable_job_carries_the_turn_it_was_launched_from() -> None:
+    """The other half of the same gap: a durable run must not be an island in the trail.
+
+    `ConnectorJobInput` reaches a Temporal worker that has no request context, so the id has to
+    travel in the input — the same argument that puts `requested_by` there. It is then set as a
+    workflow *memo* rather than folded into `payload`, because `payload` is exactly the arguments
+    the model filled in, and metadata the LLM can write is not metadata.
+    """
+    from workflows.connector_job import ConnectorJobInput
+
+    job = ConnectorJobInput(
+        connector="calc",
+        job="compute_reaction_energy",
+        workflow="CalcJobWorkflow",
+        task_queue="background-jobs",
+        requested_by="user-1",
+        correlation_id="turn-7f3a",
+    )
+    assert job.correlation_id == "turn-7f3a"
+    # Defaulted, so every existing caller keeps working and an off-request-path launch (the CLI, a
+    # scheduled job) records the honest absence rather than a fabricated id.
+    assert (
+        ConnectorJobInput(
+            connector="calc",
+            job="compute_reaction_energy",
+            workflow="CalcJobWorkflow",
+            task_queue="background-jobs",
+            requested_by="user-1",
+        ).correlation_id
+        == ""
+    )

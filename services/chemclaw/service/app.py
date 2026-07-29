@@ -141,12 +141,12 @@ class SessionOwners(Protocol):
     database) is imported only on the durable path, and a test can inject an in-memory fake.
     """
 
-    async def record(self, session_id: str, owner: str | None) -> None:
-        """Record a session's owner at creation (idempotent)."""
+    async def record(self, session_id: str, owner: str | None, profile: str | None = None) -> None:
+        """Record a session's owner and profile at creation (idempotent)."""
         ...
 
-    async def lookup(self, session_id: str) -> tuple[bool, str | None]:
-        """Return `(found, owner)` for a session id — `(False, None)` when unknown."""
+    async def lookup(self, session_id: str) -> tuple[bool, str | None, str | None]:
+        """Return `(found, owner, profile)` for a session id — all-None when unknown."""
         ...
 
     async def list_for_owner(self, owner: str | None) -> list[tuple[str, datetime]]:
@@ -598,7 +598,7 @@ def create_app(
         owners: SessionOwners | None = app.state.session_owners
         if owners is None:
             raise HTTPException(status_code=404, detail="unknown session")
-        found, owner = await owners.lookup(session_id)
+        found, owner, profile = await owners.lookup(session_id)
         if not found or (owner is not None and owner != principal.oid):
             raise HTTPException(status_code=404, detail="unknown session")
         # Re-check the cache after the awaited lookup: two racing requests would otherwise each
@@ -611,14 +611,15 @@ def create_app(
         # rebuilding the handle is enough to resume the conversation; register it so later turns
         # hit the cache.
         #
-        # A rehydrated session comes back on the *default* profile: the owner row records who
-        # owns a session, not which agent it was talking to, and inventing a column for it would
-        # be a migration in service of a case that degrades gracefully — the conversation
-        # resumes with the full tool surface rather than a narrowed one. Recorded here rather
-        # than left as a surprise; persisting the profile is the fix if a deployment ever needs
-        # the narrowing to survive a restart.
-        session = _agent().create_session(session_id=session_id)
-        return _live_sessions().add(session_id, session, owner)
+        # On its own profile, not the default (REV-14). This used to come back on the default and
+        # was documented as degrading gracefully — "the conversation resumes with the full tool
+        # surface rather than a narrowed one". That has the direction backwards: a profile is
+        # *attenuation only* (`agents.chemclaw_agent`), so restoring the full surface is a silent
+        # widening, and it did not need a restart to happen. The live LRU has a capacity and no
+        # TTL, so on a busy pod one session evicts another while both are in use; a chemist
+        # mid-conversation regained every tool their profile had removed, having done nothing.
+        session = _agent(profile).create_session(session_id=session_id)
+        return _live_sessions().add(session_id, session, owner, profile)
 
     def _plan_approvals() -> PlanApprovalStore:
         """The durable plan-approval store, read through one annotated accessor.
@@ -732,7 +733,7 @@ def create_app(
         # Persist ownership first (durable path only), so the session reattaches after a restart
         # even if the pod dies before the first turn writes any history.
         if app.state.session_owners is not None:
-            await app.state.session_owners.record(session_id, principal.oid)
+            await app.state.session_owners.record(session_id, principal.oid, profile)
         app.state.live_sessions.add(
             session_id, agent.create_session(session_id=session_id), principal.oid, profile
         )

@@ -1,0 +1,19 @@
+-- The agent profile a session was created under, so an evicted session does not silently widen.
+--
+-- REV-14. `session_owners` carried the single security-relevant fact the in-process LRU lost — the
+-- owner — and dropped the other one. A profile is *attenuation only* (`agents.chemclaw_agent`: "it
+-- can only attenuate, never widen"), so a session created under `property-lookup` sees a narrowed
+-- instruction set, a narrowed tool list and a narrowed connector surface. Rehydration rebuilt the
+-- handle on the **default** profile, which does not narrow at all — so the session came back with
+-- every tool, including the durable-job launchers its profile had removed.
+--
+-- This is not the restart case it was documented as. The LRU has a capacity and no TTL, so on a
+-- busy pod session 1001 evicts session 1 while both are live: a chemist mid-conversation, having
+-- done nothing, silently regains a surface someone deliberately took away. Losing an attenuation
+-- control is a widening, and a widening is never the graceful direction to degrade in.
+--
+-- Nullable, because most sessions have no profile and NULL is the honest value for them — the same
+-- reason `owner` is nullable. Adding a column rather than a second table: this row is already "the
+-- facts about a session that must survive the LRU", and the profile is one of them by exactly the
+-- argument that put the owner here.
+ALTER TABLE session_owners ADD COLUMN IF NOT EXISTS profile TEXT;

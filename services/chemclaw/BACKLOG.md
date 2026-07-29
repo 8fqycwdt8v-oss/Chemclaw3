@@ -106,9 +106,10 @@ claim about the world is to run it.
       and output before the counter sees it; cache-read/write are not read at all; the registry
       supports no labels, so no per-model or per-profile attribution. AG-11 (cost) still open. MAF
       already implements the full GenAI token model — reachable now that OTel can start.
-- [ ] **REV-11 [Med] `correlation_id` stops at the process boundary.** Not in the connector
+- [x] **REV-11 [Med] `correlation_id` stops at the process boundary.** Not in the connector
       identity headers, not in `ConnectorJobInput`, not into HPC. ~4 lines to make the audit trail
       joinable across all four runtimes. Note that fixing OTel does not fix this.
+      **Done (D-141).** An `X-Chemclaw-Correlation-Id` header beside the actor/roles/session, and a `correlation_id` on `ConnectorJobInput` that becomes a workflow memo beside `requested_by`. Both follow the shape already established for the actor: advisory-never-authorization for the header, in the input rather than ambient for the job (a workflow has no request context), and a memo rather than `payload` so it is not something the model can write. HPC is unchanged — the bridge runs under a shared service identity and wants its own pass.
 - [x] **REV-12 [Med] Prediction calibration pools every calculator version.** `calc_version` is
       never passed when recording, so the unique index degenerates and a v2 prediction destroys
       v1's row; the read path has no version predicate either. `calculator_trust` reports the
@@ -119,9 +120,10 @@ claim about the world is to run it.
       `failure_exception_types` is declared — so it fails the *workflow task* and Temporal retries
       indefinitely. The run hangs rather than failing. No test constructs a `JobStep`.
       **Done (D-140).** The lookup moved to a local activity, `resolve_job_step`, following `orchestrator.resolve_fan_out_limit`'s precedent — the resolution is now recorded in history rather than re-read from the replaying worker's disk. That also turns the `ConnectorError` into an `ActivityError`, which `BAD_DATA_RETRY` fails on the first attempt. `TemplateWorkflow` gains `failure_exception_types=[Exception]` for the sequencer's own raw raises. `tests/test_template_job_step.py` is the first test to construct a `JobStep`.
-- [ ] **REV-14 [Med] Rehydrated and LRU-evicted sessions revert to the default profile**,
+- [x] **REV-14 [Med] Rehydrated and LRU-evicted sessions revert to the default profile**,
       permanently. The profile is never persisted. Eviction matters more than restart: no TTL, so
       session 1001 evicts session 1. All three rehydration tests discard the profile argument.
+      **Done (D-141).** Persisted as a nullable column on `session_owners` (`infra/sql/021`) and rehydrated onto. The old comment called the loss graceful — "the conversation resumes with the full tool surface rather than a narrowed one" — which has the direction backwards: a profile is attenuation only, so restoring the full surface is the control being switched off, and the LRU has no TTL so it happens on a live pod without any restart. `None` surviving as `None` is pinned separately; storing `""` would ask for a profile named empty-string.
 - [ ] **REV-15 [Med] Chart parity test proves nothing about behaviour.** It constructs
       `Settings(**helm_values)`; `otel_enabled=True` constructs perfectly and then kills the pod.
       Two holes: keys from `templates/config.yaml` (`note_repo_dir`, `connector_urls`) are outside
