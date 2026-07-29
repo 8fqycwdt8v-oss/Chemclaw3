@@ -18,6 +18,7 @@ import time
 import uuid
 from collections.abc import AsyncIterator, Mapping, Sequence
 from contextlib import AsyncExitStack
+from dataclasses import dataclass
 from typing import Any
 
 from agent_framework import AgentSession
@@ -122,7 +123,7 @@ async def run_turn(
     # Metered across the turn's updates and booked once on teardown (even on failure — a failed
     # turn still spent tokens up to the point it broke, so its cost must count toward the next
     # check).
-    turn_tokens = 0
+    turn_usage = _TurnUsage()
     # Stamp the turn's session so a job-launching tool (compute_dft_energy) records push-back to the
     # right session (F3-T3) — ambient, never a model-supplied argument. Reset on turn teardown.
     session_token = set_current_session_id(session.session_id)
@@ -204,7 +205,7 @@ async def run_turn(
             )
             tool_trace = _ToolCallTrace()
             async for update in stream:
-                turn_tokens += _usage_tokens(update)
+                turn_usage.add(_usage_tokens(update))
                 # Drain *before* this update's own content: a tool that ran while the model was
                 # producing this update ran before the text it then produced, so emitting the
                 # signal first is the truthful transcript order (RCH-4/RCH-5).
@@ -342,14 +343,25 @@ async def run_turn(
         )
     finally:
         if budget is not None:
-            budget.record(session.session_id, actor, turn_tokens)
+            budget.record(session.session_id, actor, turn_usage.total)
         # Observed on every path — success, failure and disconnect — because a turn that failed
         # after 40 s is exactly the sample an operator needs, and excluding it would make the
         # histogram look best when the service is worst. The token counter is the same number the
         # budget guard meters, published as a rate rather than only used to refuse.
         METRICS.observe("chemclaw_turn_duration_seconds", time.perf_counter() - turn_started)
-        if turn_tokens:
-            METRICS.increment("chemclaw_tokens_total", float(turn_tokens))
+        if turn_usage.total:
+            METRICS.increment("chemclaw_tokens_total", float(turn_usage.total))
+        # Published separately from the total because they are priced separately (REV-10). Each is
+        # guarded so a provider that reports none of them leaves its counter untouched rather than
+        # publishing a fabricated zero — the same rule `service.metrics` applies to gauges.
+        for name, value in (
+            ("chemclaw_input_tokens_total", turn_usage.input),
+            ("chemclaw_output_tokens_total", turn_usage.output),
+            ("chemclaw_cache_read_tokens_total", turn_usage.cache_read),
+            ("chemclaw_cache_write_tokens_total", turn_usage.cache_write),
+        ):
+            if value:
+                METRICS.increment(name, float(value))
         end_turn(signals_token)
         reset_dry_run(dry_run_token)
         reset_current_session_id(session_token)
@@ -464,15 +476,52 @@ def _signal_event(signal: Signal) -> Event:
     return NoteProposedEvent(note_id=signal.note_id, reference=signal.reference)
 
 
-def _usage_tokens(update: Any) -> int:
-    """Best-effort total tokens reported in a streamed update's usage content (0 if none).
+@dataclass(slots=True)
+class _TurnUsage:
+    """One turn's model usage, split along the dimensions it is *priced* along (REV-10).
 
-    MAF emits usage as a content carrying a `UsageDetails` mapping (`input_token_count`/
-    `output_token_count`/`total_token_count`). Duck-typed on the mapping so a provider or
-    version that reports no usage — or the fake agent in tests — simply meters 0; the turn caps
-    still bind.
+    The runner used to accumulate a single int, and `chemclaw_tokens_total` published it. That
+    number cannot answer "what is this deployment costing", which is the question AG-11 asks:
+    input, output and cache-read carry different prices — a cache read is roughly an order of
+    magnitude cheaper than a fresh input token — so a deployment that caches well and one that does
+    not report identical totals while their bills differ several-fold.
+
+    MAF has reported all four since the beginning (`UsageDetails` carries
+    `cache_read_input_token_count` and `cache_creation_input_token_count` beside the input/output
+    pair). Nothing read past the sum.
+
+    `total` stays the sum the budget guard meters, so the runaway-cost refusal is unchanged: this
+    splits what is *published*, not what is enforced.
     """
-    total = 0
+
+    input: int = 0
+    output: int = 0
+    cache_read: int = 0
+    cache_write: int = 0
+    total: int = 0
+
+    def add(self, other: "_TurnUsage") -> None:
+        """Accumulate another update's usage into this turn's running total."""
+        self.input += other.input
+        self.output += other.output
+        self.cache_read += other.cache_read
+        self.cache_write += other.cache_write
+        self.total += other.total
+
+
+def _usage_tokens(update: Any) -> _TurnUsage:
+    """Best-effort usage reported in a streamed update's usage content (all zero if none).
+
+    MAF emits usage as a content carrying a `UsageDetails` mapping. Duck-typed on the mapping so a
+    provider or version that reports no usage — or the fake agent in tests — simply meters 0; the
+    turn caps still bind.
+
+    `total` falls back to input+output when the provider omits it, exactly as before. The cache
+    counts are read separately rather than folded in, because a provider that reports them has
+    already excluded cache reads from `input_token_count` — adding them would double-count the
+    cheap tokens as expensive ones.
+    """
+    usage = _TurnUsage()
     for content in getattr(update, "contents", None) or []:
         details = getattr(content, "usage_details", None)
         if not isinstance(details, Mapping):
@@ -482,8 +531,16 @@ def _usage_tokens(update: Any) -> int:
             tokens = (details.get("input_token_count") or 0) + (
                 details.get("output_token_count") or 0
             )
-        total += int(tokens or 0)
-    return total
+        usage.add(
+            _TurnUsage(
+                input=int(details.get("input_token_count") or 0),
+                output=int(details.get("output_token_count") or 0),
+                cache_read=int(details.get("cache_read_input_token_count") or 0),
+                cache_write=int(details.get("cache_creation_input_token_count") or 0),
+                total=int(tokens or 0),
+            )
+        )
+    return usage
 
 
 class _ToolCallTrace:

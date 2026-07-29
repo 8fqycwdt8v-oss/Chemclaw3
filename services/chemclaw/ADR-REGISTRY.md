@@ -178,3 +178,4 @@ written up leaves a gap, and a gap is harmless (`CLAUDE.md`, rule 4).
 | D-141 | Two facts that stopped at a process boundary: a session's profile, and the turn's correlation id |
 | D-142 | A production value has to be executed, not type-checked — and two guards that were off in the one deployment that needed them |
 | D-143 | Nobody was collecting the metrics, and the durable history is never compacted — one fixed, one where the obvious fix corrupts data |
+| D-144 | Token accounting was priced-blind: one total where the bill has four line items |
