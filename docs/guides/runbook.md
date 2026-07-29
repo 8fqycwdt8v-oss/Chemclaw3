@@ -190,7 +190,7 @@ ever written into a bundle.
 `unprobed` (no `health_url` declared — honest for a third-party server), and
 `chemclaw_connectors_unhealthy` on `/metrics` counts the unreachable ones. An unreachable connector
 costs its tools for that turn, not the turn itself; set `CHEMCLAW_CONNECTORS_REQUIRED=true` to fail
-startup instead. Verify a bundle standalone with `uvicorn connectors.<name>.server.app:app` and check
+startup instead. Verify a bundle standalone with `uvicorn chemclaw.connectors.<name>.server.app:app` and check
 `/healthz`; tool *discovery* needs no database, but *invoking* a search does.
 
 **What ships today.** Six bundles: `molfp` and `rxnfp` (fingerprint search), `safety` (the hazard

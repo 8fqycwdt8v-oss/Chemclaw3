@@ -25,7 +25,7 @@ spec:
         - name: migrate
           image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
           imagePullPolicy: {{ .Values.image.pullPolicy }}
-          command: ["python", "-m", "calc.migrate"]
+          command: ["python", "-m", "chemclaw.science.calc.migrate"]
           env:
             {{- include "chemclaw.env" . | nindent 12 }}
           envFrom:

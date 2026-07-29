@@ -19,7 +19,6 @@ from pathlib import Path
 from chemclaw.core.config import settings
 from chemclaw.core.db import connect
 
-_SQL_DIR = Path(__file__).resolve().parent.parent / "infra" / "sql"
 # The ledger's own DDL. Applied first and not itself tracked — it is the tracker.
 _LEDGER_FILE = "000_schema_migrations.sql"
 
@@ -33,7 +32,8 @@ def _read_sql_files() -> dict[str, str]:
 
     One function so the whole directory is read in a single thread hop rather than one per file.
     """
-    return {path.name: path.read_text() for path in sorted(_SQL_DIR.glob("*.sql"))}
+    sql_dir = Path(settings.sql_migrations_dir)
+    return {path.name: path.read_text() for path in sorted(sql_dir.glob("*.sql"))}
 
 
 def _checksum(text: str) -> str:

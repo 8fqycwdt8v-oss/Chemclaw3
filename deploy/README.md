@@ -7,9 +7,9 @@ config source (the pydantic `Settings`) fed from a `ConfigMap` + three plain `Se
 
 | Component | Entry (`CHEMCLAW_COMPONENT`) | Runs |
 |---|---|---|
-| Front door | `service` | `uvicorn service.app:create_app` behind an OIDC **Route** |
-| Background worker | `background-worker` | `python -m workers.background_worker` — `background-jobs` (light) |
-| Connector worker | `connector-worker-<name>` | `python -m connectors.<name>.worker` — that bundle's own queue |
+| Front door | `service` | `uvicorn chemclaw.api.app:create_app` behind an OIDC **Route** |
+| Background worker | `background-worker` | `python -m chemclaw.durable.background_worker` — `background-jobs` (light) |
+| Connector worker | `connector-worker-<name>` | `python -m chemclaw.connectors.<name>.worker` — that bundle's own queue |
 | MCP servers | `mcp-molfp` / `mcp-rxnfp` | fingerprint capability servers |
 
 All five are the **same image** (`deploy/Containerfile`), rootless (UID 1001, arbitrary-UID safe for
@@ -47,7 +47,7 @@ OpenShift SCC), no secret baked in. `deploy/entrypoint.sh` dispatches on `CHEMCL
   (`temporal_api_key` instead of the mTLS trio) if that trade changes.
 - **Postgres/pgvector**: an operator- or managed-instance with mTLS and the existing
   `pg_statement_timeout_seconds`. Migrations run as a **pre-deploy Helm hook** Job
-  (`templates/migrate-job.yaml` → `python -m calc.migrate`, i.e. `make db-migrate`, D-034) that
+  (`templates/migrate-job.yaml` → `python -m chemclaw.science.calc.migrate`, i.e. `make db-migrate`, D-034) that
   completes before any app container starts — no container ever races the DDL.
 
 ## Network & probes
