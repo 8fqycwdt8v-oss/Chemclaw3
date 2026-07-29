@@ -1,0 +1,21 @@
+# A reference dataset baked into the container image at build time.
+#
+# The one sanctioned escalation of D-089 ("no external data sources"), and the escalation is
+# narrow on purpose: the corpus is pinned, checksummed and licence-labelled in a pull request a
+# person reviewed, and at runtime it is a file on local disk. There is no address in this source
+# and no network call on any path it can reach — `tests/test_no_egress.py` asserts both, and was
+# extended rather than relaxed to cover it.
+#
+# Retrieve-only, like `graph` and for a related reason: vendored data is reference material, not
+# experiments. An ingest half would give third-party records a write path into the knowledge graph
+# behind the PR-gate's back.
+#
+# Not enabled by default. A deployment that has reviewed the dataset it ships adds `vendored` to
+# CHEMCLAW_DATA_SOURCES; one that ships none leaves it off and nothing changes.
+name: vendored
+description: >-
+  A licence-labelled reference corpus vendored into the image at build time (reagent and solvent
+  names, synonyms and structures). Raises the ceiling on compound-name resolution, which is
+  otherwise bounded by the hand-maintained table in chemclaw/reagents.py.
+
+retrieve: chemclaw.ingest.sources.vendored_dataset:VendoredDatasetRetriever

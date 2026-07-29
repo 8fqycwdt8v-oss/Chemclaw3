@@ -13,17 +13,17 @@ from pathlib import Path
 
 import pytest
 
-import evals  # noqa: F401 — registers the metrics used by the case-set
-from chemclaw.config import settings
-from evals.baseline import (
+import chemclaw.evals  # noqa: F401 — registers the metrics used by the case-set
+from chemclaw.core.config import settings
+from chemclaw.durable.eval_drift import check_eval_drift
+from chemclaw.evals.baseline import (
     Baseline,
     aggregate_metrics,
     detect_drift,
     load_baseline,
     save_baseline,
 )
-from evals.harness import EvalReport, ScoredResult, load_eval_cases, run_eval
-from workflows.eval_drift import check_eval_drift
+from chemclaw.evals.harness import EvalReport, ScoredResult, load_eval_cases, run_eval
 
 
 def _report(*pairs: tuple[str, float]) -> EvalReport:

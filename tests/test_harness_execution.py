@@ -30,10 +30,10 @@ from agent_framework import (
 from agent_framework._middleware import ChatMiddlewareLayer
 from agent_framework._tools import FunctionInvocationLayer
 
-from agents.chemclaw_agent import build_agent
-from agents.message_pairing import calls_without_adjacent_results
-from chemclaw.config import settings
-from connectors.registry import open_reachable
+from chemclaw.agent.chemclaw_agent import build_agent
+from chemclaw.agent.message_pairing import calls_without_adjacent_results
+from chemclaw.connectors.registry import open_reachable
+from chemclaw.core.config import settings
 
 # One scripted turn: given the messages sent to the model, return its next reply.
 _ScriptedTurn = Callable[[list[Message]], ChatResponse]
@@ -131,7 +131,8 @@ def _run_turn(agent: object, message: str, session: object) -> str:
     """Run one streamed turn to completion and return its final text.
 
     Connects/closes the agent's connectors for the turn through the same `open_reachable` helper
-    `service.runner.run_turn` and `agents.cli` use — the lifecycle `build_agent`'s docstring leaves
+    `chemclaw.api.runner.run_turn` and `chemclaw.agent.cli` use — the lifecycle `build_agent`'s
+    docstring leaves
     to
     its caller. Sharing the helper is what keeps this test honest: it exercises the real degrade
     path,

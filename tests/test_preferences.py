@@ -14,8 +14,8 @@ import asyncio
 
 import pytest
 
-from agents.preferences import PreferenceStore, recall_preferences, remember_preference
-from chemclaw.config import settings
+from chemclaw.agent.preferences import PreferenceStore, recall_preferences, remember_preference
+from chemclaw.core.config import settings
 
 
 def test_a_preference_round_trips_per_owner() -> None:
@@ -62,7 +62,7 @@ def test_preferences_never_reach_the_pr_gate(monkeypatch: pytest.MonkeyPatch) ->
     If this ever routed through `propose_note`, reviewers would be asked to sign off on personal
     trivia — which is exactly how a gate stops being taken seriously.
     """
-    import agents.preferences as module
+    import chemclaw.agent.preferences as module
 
     assert not hasattr(module, "propose_note")
     assert "propose_note" not in module.__doc__ or "not" in module.__doc__.lower()
@@ -74,7 +74,7 @@ def test_the_tools_are_scoped_to_the_calling_chemist(monkeypatch: pytest.MonkeyP
     A model-supplied owner would let one chemist read or overwrite another's preferences.
     """
     monkeypatch.setattr(settings, "session_store", "memory")
-    monkeypatch.setattr("agents.preferences.require_actor", lambda: "anna")
+    monkeypatch.setattr("chemclaw.agent.preferences.require_actor", lambda: "anna")
     asyncio.run(remember_preference("project", "PRJ-9"))
-    monkeypatch.setattr("agents.preferences.require_actor", lambda: "ben")
+    monkeypatch.setattr("chemclaw.agent.preferences.require_actor", lambda: "ben")
     assert asyncio.run(recall_preferences()) == []

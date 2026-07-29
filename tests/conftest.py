@@ -15,8 +15,8 @@ from collections.abc import Iterator
 import psycopg
 import pytest
 
-from chemclaw.config import settings
-from kg.pr_gate import NoteSubmission
+from chemclaw.core.config import settings
+from chemclaw.kg.pr_gate import NoteSubmission
 from tests.pg import create_test_schema, drop_test_schema, schema_dsn
 
 

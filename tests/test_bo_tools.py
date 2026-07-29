@@ -8,14 +8,14 @@ in-process (no Temporal), the same as the campaign tests.
 
 import asyncio
 
-from bo.problem import (
+from chemclaw.connectors.bo.server.tools import suggest_next_experiment
+from chemclaw.science.bo.problem import (
     CategoricalParameter,
     ContinuousParameter,
     Objective,
     Observation,
     OptimizationProblem,
 )
-from connectors.bo.server.tools import suggest_next_experiment
 
 
 def _problem() -> OptimizationProblem:

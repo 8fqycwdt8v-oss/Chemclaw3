@@ -15,16 +15,16 @@ from bofire.data_models.features.api import CategoricalDescriptorInput, Categori
 from bofire.data_models.strategies.api import SoboStrategy
 from bofire.strategies import api as strategies
 
-from bo.engine import _to_domain, propose_candidates
-from bo.featurize import DESCRIPTOR_NAMES, featurize_problem
-from bo.problem import (
+from chemclaw.science.bo.engine import _to_domain, propose_candidates
+from chemclaw.science.bo.featurize import DESCRIPTOR_NAMES, featurize_problem
+from chemclaw.science.bo.problem import (
     CategoricalParameter,
     ContinuousParameter,
     Objective,
     Observation,
     OptimizationProblem,
 )
-from calc.store import InMemoryStore
+from chemclaw.science.calc.store import InMemoryStore
 
 # Phosphine ligands whose structures are unambiguous, spanning the donor range a
 # cross-coupling ligand screen actually covers: two trialkyl (strong donors, one bulky)

@@ -10,11 +10,11 @@ from pathlib import Path
 
 import pytest
 
-import agents.research_tools as research_tools
-from agents.research_tools import gather_evidence
-from chemclaw.config import settings
-from mcp_servers.fpstore import InMemoryFingerprintStore
-from mcp_servers.rxnfp.search import record_for_reaction
+import chemclaw.agent.research_tools as research_tools
+from chemclaw.agent.research_tools import gather_evidence
+from chemclaw.core.config import settings
+from chemclaw.mcp.fpstore import InMemoryFingerprintStore
+from chemclaw.mcp.rxnfp.search import record_for_reaction
 
 _ESTER = "CCO.CC(=O)O>>CCOC(C)=O"
 

@@ -7,7 +7,7 @@ database. These pin the pure rule; `test_session_store.py` pins the storage laye
 
 from agent_framework import Content, Message
 
-from agents.message_pairing import strip_unmatched_calls, unmatched_call_ids
+from chemclaw.agent.message_pairing import strip_unmatched_calls, unmatched_call_ids
 
 
 def _call(call_id: str, name: str = "screen_hazards") -> Content:

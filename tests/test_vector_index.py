@@ -9,10 +9,10 @@ the same way over real pgvector + full-text search.
 import asyncio
 from pathlib import Path
 
-from chemclaw.config import settings
-from chemclaw.db import connect
-from chemclaw.embeddings import embed_texts
-from report.vector_index import (
+from chemclaw.core.config import settings
+from chemclaw.core.db import connect
+from chemclaw.core.embeddings import embed_texts
+from chemclaw.retrieval.vector_index import (
     InMemoryNoteIndex,
     NoteRecord,
     PostgresNoteIndex,

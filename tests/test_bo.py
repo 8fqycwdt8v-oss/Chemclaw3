@@ -10,9 +10,9 @@ import warnings
 
 import pytest
 
-from bo.campaign import optimize
-from bo.engine import initial_candidates, propose_candidates
-from bo.problem import (
+from chemclaw.science.bo.campaign import optimize
+from chemclaw.science.bo.engine import initial_candidates, propose_candidates
+from chemclaw.science.bo.problem import (
     CategoricalParameter,
     ContinuousParameter,
     Objective,

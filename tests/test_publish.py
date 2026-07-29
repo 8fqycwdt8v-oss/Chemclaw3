@@ -9,9 +9,9 @@ every bad-data error type non-retryable by its exact class name (Temporal matche
 import importlib
 import pkgutil
 
-from chemclaw.config import settings
-from chemclaw.errors import ChemclawError
-from workflows.publish import BAD_DATA_RETRY, note_publish_retry
+from chemclaw.core.config import settings
+from chemclaw.core.errors import ChemclawError
+from chemclaw.durable.publish import BAD_DATA_RETRY, note_publish_retry
 
 
 def test_bad_data_retry_is_bounded() -> None:
@@ -44,22 +44,9 @@ def test_every_chemclaw_error_subclass_is_listed_non_retryable() -> None:
     walks every first-party module so all subclasses are defined, then asserts none is
     missing from the policy (the drift this base class was created to eliminate).
     """
-    first_party = [
-        "agents",
-        "bo",
-        "calc",
-        "chemclaw",
-        "eln",
-        "evals",
-        "kg",
-        "mcp_servers",
-        "memory",
-        "report",
-        "service",
-        "sources",
-        "workers",
-        "workflows",
-    ]
+    # One package since D-141; `walk_packages` reaches every module under it, so a new
+    # subclass anywhere in the tree is still defined by the time the assertion runs.
+    first_party = ["chemclaw"]
     for package_name in first_party:
         package = importlib.import_module(package_name)
         for module_info in pkgutil.walk_packages(package.__path__, prefix=f"{package_name}."):

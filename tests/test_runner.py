@@ -11,12 +11,12 @@ from typing import Any
 import pytest
 from agent_framework import AgentSession
 
-import service.runner as runner
-from agents.harness_todo import complete_awaiting_job, mark_awaiting_job
-from agents.turn_signals import announce_job_started
-from agents.verifier import ClaimCheck, VerificationResult
-from chemclaw.config import settings
-from service.events import AnswerEvent, JobStartedEvent, PlanEvent
+import chemclaw.api.runner as runner
+from chemclaw.agent.harness_todo import complete_awaiting_job, mark_awaiting_job
+from chemclaw.agent.turn_signals import announce_job_started
+from chemclaw.agent.verifier import ClaimCheck, VerificationResult
+from chemclaw.api.events import AnswerEvent, JobStartedEvent, PlanEvent
+from chemclaw.core.config import settings
 
 
 class _Update:
@@ -60,7 +60,7 @@ def _answer(events: list[Any]) -> AnswerEvent:
 
 def test_answer_is_unscored_when_verification_is_off(monkeypatch: pytest.MonkeyPatch) -> None:
     """Verifier off (default): the final answer carries no confidence — today's behavior exactly."""
-    from chemclaw.config import settings
+    from chemclaw.core.config import settings
 
     monkeypatch.setattr(settings, "verifier_enabled", False)
     answer = _answer(_run_turn())
@@ -71,7 +71,7 @@ def test_answer_is_unscored_when_verification_is_off(monkeypatch: pytest.MonkeyP
 
 def test_low_confidence_answer_is_flagged(monkeypatch: pytest.MonkeyPatch) -> None:
     """Verifier on: a sub-threshold verdict stamps confidence, unsupported claims, review flag."""
-    from chemclaw.config import settings
+    from chemclaw.core.config import settings
 
     monkeypatch.setattr(settings, "verifier_enabled", True)
     monkeypatch.setattr(settings, "verifier_confidence_threshold", 0.7)
@@ -90,7 +90,7 @@ def test_low_confidence_answer_is_flagged(monkeypatch: pytest.MonkeyPatch) -> No
 
 def test_high_confidence_answer_is_not_flagged(monkeypatch: pytest.MonkeyPatch) -> None:
     """Verifier on: a verdict at/above the threshold is scored but not routed to review."""
-    from chemclaw.config import settings
+    from chemclaw.core.config import settings
 
     monkeypatch.setattr(settings, "verifier_enabled", True)
     monkeypatch.setattr(settings, "verifier_confidence_threshold", 0.7)
@@ -106,7 +106,7 @@ def test_high_confidence_answer_is_not_flagged(monkeypatch: pytest.MonkeyPatch) 
 
 def test_confidence_exactly_at_threshold_is_not_flagged(monkeypatch: pytest.MonkeyPatch) -> None:
     """Verifier on: confidence == threshold is acceptable (strictly-less rule), so not flagged."""
-    from chemclaw.config import settings
+    from chemclaw.core.config import settings
 
     monkeypatch.setattr(settings, "verifier_enabled", True)
     monkeypatch.setattr(settings, "verifier_confidence_threshold", 0.7)
@@ -241,7 +241,7 @@ def test_unreadable_plan_does_not_sink_the_turn(monkeypatch: pytest.MonkeyPatch)
 
 def test_verifier_failure_degrades_to_plain_answer(monkeypatch: pytest.MonkeyPatch) -> None:
     """Verifier on but raising: the turn still returns its answer, unscored — never a sunk turn."""
-    from chemclaw.config import settings
+    from chemclaw.core.config import settings
 
     monkeypatch.setattr(settings, "verifier_enabled", True)
 

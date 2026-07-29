@@ -9,14 +9,14 @@ end to end.
 import asyncio
 import warnings
 
-from bo.benchmarks.reizman_suzuki import (
+from chemclaw.science.bo.benchmarks.reizman_suzuki import (
     YieldSurrogate,
     build_problem,
     load_benchmark,
     load_dataset,
 )
-from bo.campaign import optimize
-from bo.problem import CategoricalParameter
+from chemclaw.science.bo.campaign import optimize
+from chemclaw.science.bo.problem import CategoricalParameter
 
 warnings.filterwarnings("ignore")
 

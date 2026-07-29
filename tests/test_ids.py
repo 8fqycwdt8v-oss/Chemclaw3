@@ -1,4 +1,4 @@
-"""Behavioral tests for the shared identity helpers (`chemclaw.chem`, `chemclaw.ids`).
+"""Behavioral tests for the shared identity helpers (`chemclaw.core.chem`, `chemclaw.core.ids`).
 
 Proves the two properties every content-addressed key in the system relies on:
 canonicalization collapses equivalent SMILES to one key, and the hash is stable
@@ -9,17 +9,17 @@ import asyncio
 
 import pytest
 
-from calc.pka import PkaInput, run_cached_pka
-from calc.solubility import SolubilityInput, run_cached_solubility
-from calc.store import CalculationKey, InMemoryStore
-from calc.xtb import XtbInput, run_cached_xtb
-from chemclaw.chem import (
+from chemclaw.connectors.qm.specs import QmJobSpec, qm_job_key
+from chemclaw.core.chem import (
     InvalidSmilesError,
     canonical_smiles,
     require_canonical_smiles,
 )
-from chemclaw.ids import stable_hash
-from connectors.qm.specs import QmJobSpec, qm_job_key
+from chemclaw.core.ids import stable_hash
+from chemclaw.science.calc.pka import PkaInput, run_cached_pka
+from chemclaw.science.calc.solubility import SolubilityInput, run_cached_solubility
+from chemclaw.science.calc.store import CalculationKey, InMemoryStore
+from chemclaw.science.calc.xtb import XtbInput, run_cached_xtb
 
 
 def test_stable_hash_is_order_independent() -> None:

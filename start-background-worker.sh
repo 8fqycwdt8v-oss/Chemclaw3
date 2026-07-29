@@ -11,6 +11,6 @@ export CHEMCLAW_POSTGRES_DSN="${DATABASE_URL:-postgresql://localhost/chemclaw}"
 
 echo "Starting Chemclaw3 background worker (ELN sync, BO campaigns, approvals)..."
 echo "  Temporal: ${CHEMCLAW_TEMPORAL_ADDRESS:-localhost:7233}"
-echo "  ELN dir : ${CHEMCLAW_ELN_EXPORT_DIR:-eln/exports}"
+echo "  ELN dir : ${CHEMCLAW_ELN_EXPORT_DIR:-data/eln-exports}"
 
-exec "$SCRIPT_DIR/.venv/bin/python" -m workers.background_worker
+exec "$SCRIPT_DIR/.venv/bin/python" -m chemclaw.durable.background_worker

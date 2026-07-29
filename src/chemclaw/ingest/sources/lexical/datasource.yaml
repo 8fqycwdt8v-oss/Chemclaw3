@@ -1,0 +1,9 @@
+# Ranked full-text entry point into the note tree (F10-A), off by default like `vector`.
+# Beats the graph retriever's plain substring test, which cannot rank and matches incidental
+# substrings. Reads the same derived note index.
+name: lexical
+description: >-
+  Ranked full-text search over the knowledge graph (Postgres FTS). Term matching with relevance
+  ordering; requires the note index to have been built.
+
+retrieve: chemclaw.retrieval.retrievers:LexicalRetriever

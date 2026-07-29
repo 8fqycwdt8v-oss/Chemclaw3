@@ -8,14 +8,14 @@ git).
 
 import asyncio
 
-from eln.ord import Component, OrdReaction, Role
-from memory.jobs import synthesize_optimization_campaigns
-from memory.optimization import (
+from chemclaw.ingest.eln.ord import Component, OrdReaction, Role
+from chemclaw.memory.jobs import synthesize_optimization_campaigns
+from chemclaw.memory.optimization import (
     OptimizationCampaign,
     find_optimization_campaigns,
     optimization_campaign_note,
 )
-from memory.similarity import cluster_by_similarity, reaction_fingerprints
+from chemclaw.memory.similarity import cluster_by_similarity, reaction_fingerprints
 from tests.conftest import FakeSubmitter
 
 

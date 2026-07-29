@@ -19,8 +19,8 @@ import asyncio
 
 import pytest
 
-from chemclaw import db
-from chemclaw.config import settings
+from chemclaw.core import db
+from chemclaw.core.config import settings
 from tests.pg import migrated_db_or_skip
 
 

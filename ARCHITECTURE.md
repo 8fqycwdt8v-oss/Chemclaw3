@@ -3,71 +3,84 @@
 Start here if you are trying to find something. `README.md` is how to run it; this is what the
 directories are and why they are separate.
 
+**The one rule that makes the tree navigable: `src/` is all the code. Everything beside it is
+data, configuration or documents.**
+
 ## The four layers
 
 Four layers, each with one responsibility. The rule that matters is that their concerns never
-merge — `CLAUDE.md` states it, and `tests/test_layering.py` enforces the part a machine can check.
+merge — `CLAUDE.md` states it, and `tests/test_layering.py` enforces the parts a machine can check.
 
 1. **MAF** (Microsoft Agent Framework) — conversation orchestration and short reasoning steps.
 2. **Temporal** — durable execution of long or expensive jobs. Durability lives here and *only*
-   here, never in MAF. Two task queues: `hpc-jobs` (few, heavy workers) and `background-jobs`
-   (light: sync, re-index, reports). Every result is persisted once and never recomputed.
+   here, never in MAF. Two kinds of task queue: `background-jobs` (light: sync, re-index, reports)
+   and one per connector bundle that owns durable work, each sized for that work. Every result is
+   persisted once and never recomputed.
 3. **Agent Skills** (`SKILL.md`) — "how do I do X" (judgment), loaded on demand.
 4. **Markdown knowledge graph in Git** (NetworkX indexer) — "what do we know" (data and relations).
 
 Skills hold judgment; connectors hold capability (deterministic tools). Anything the agent
 generates enters the graph through a **PR-gate**, so a human signs off before it becomes knowledge.
 
-## Where the code is
+## The code: `src/chemclaw/`
 
-| Directory | Layer | What it is |
+| Subpackage | Layer | What it is |
 | --- | --- | --- |
-| `chemclaw/` | — | The shared kernel every other package imports: config, database, HTTP, ids, logging, errors, embeddings, the Temporal client. It imports nothing first-party. |
-| `agents/` | 1 (MAF) | Conversation orchestration: the agent, its tool surface, sessions, identity, authorization, the plan/execute harness. |
-| `service/` | 1 (MAF) | The FastAPI + SSE front door that serves `agents/` over HTTP, behind OIDC. |
-| `workflows/` | 2 (Temporal) | Workflow and activity definitions — the durable half of every long job. |
-| `workers/` | 2 (Temporal) | The `background-jobs` worker process. |
-| `connectors/` | 2 + 3 | The capability seam. One bundle per capability (`chem`, `calc`, `bo`, `qm`, `safety`, `molfp`, `rxnfp`), each colocating its `connector.yaml` manifest, its MCP tool server, its Temporal worker, and its own `skills/`. Adding a capability is adding a directory here. |
-| `skills/` | 3 (Skills) | The global `SKILL.md` files — judgment that is not tied to one connector. |
+| `core/` | — | The shared kernel: config, database, HTTP, ids, logging, errors, embeddings, the Temporal client. Everything imports it; it imports no sibling, and `test_layering.py` proves that. |
+| `agent/` | 1 (MAF) | Conversation orchestration: the agent, its tool surface, sessions, identity, authorization, the plan/execute harness. |
+| `api/` | 1 (MAF) | The FastAPI + SSE front door that serves `agent/` over HTTP, behind OIDC. |
+| `durable/` | 2 (Temporal) | Workflows, activities, and the `background-jobs` worker that hosts them. |
+| `connectors/` | 2 + 3 | The capability seam. One bundle per capability (`chem`, `calc`, `bo`, `qm`, `safety`, `molfp`, `rxnfp`), each colocating its `connector.yaml` manifest, its MCP tool server, its Temporal worker, and its own `skills/`. Adding a capability is adding a directory here — no core edit. |
+| `science/` | — | The pure-computation engines: `calc` (xTB/GFN2, conformers, pKa, solubility, thermochemistry), `bo` (BoFire), `safety` (hazard screening). No Temporal, no MCP. |
 | `kg/` | 4 (Graph) | The graph indexer, the schema and link validators, the PR-gate that writes notes. |
-| `knowledge/` | 4 (Graph) | The graph itself: Markdown notes with frontmatter, one directory per note type. Data, not code. |
-| `calc/` | — | The physics engine: xTB/GFN2, conformers, pKa, solubility, thermochemistry, and the Postgres calculation cache. Pure computation. |
-| `bo/` | — | The BoFire Bayesian-optimization engine and its benchmarks. Pure computation. |
-| `safety/` | — | Hazard rules and screening. Pure computation. |
-| `eln/` | — | ELN ingestion: the adapters, the sync cursor, export validation. |
-| `sources/` | — | The generic `DataSource` seam. A new source is one `sources/<name>/datasource.yaml` plus its name in `CHEMCLAW_DATA_SOURCES` — no core edits. |
-| `report/` | — | Retrieval and synthesis: the retrievers, hybrid search, the vector index, the report harness. |
+| `ingest/` | — | Getting records in: `sources` is the generic `DataSource` seam, `eln` the ELN adapters hosted behind it. |
+| `retrieval/` | — | Reading back out: the retrievers, hybrid search, the vector index, the report harness. |
 | `memory/` | — | The memory layers over past campaigns, interactions and failures. |
-| `mcp_servers/` | — | The two standalone MCP servers (`molfp`, `rxnfp`) that are not connector bundles. |
-| `templates/` | — | Step templates: the manifest, registry and resolver, plus the shipped `*.yaml`. |
-| `evals/` | — | The eval harness and metrics, plus the versioned case-set and retrieval corpus. |
-| `scripts/` | — | Every validator `make` runs, plus the dev entrypoints. |
-| `examples/` | — | A runnable walkthrough. Deliberately not shipped in the wheel. |
+| `mcp/` | — | The two standalone MCP servers (`molfp`, `rxnfp`) that are not connector bundles. |
+| `templates/` | — | Step templates: the manifest, registry and resolver. |
+| `evals/` | — | The eval harness and metrics. |
+| `cli/` | — | Every terminal entrypoint in one place: `chat` (the admin CLI, and the `chemclaw` console script) and the eight validators `make` runs. |
+
+Layer 3 has no code: it is `SKILL.md` files — the global ones in `skills/`, the bundled ones
+inside each connector.
 
 ## Everything else
 
 | Directory | What it is |
 | --- | --- |
-| `tests/` | The suite. Also the gate for several *declarations*: packaging lists, the Containerfile COPY set, the Helm chart's kinds, the ADR ledger. |
+| `knowledge/` | **Layer 4's data**: the graph itself, Markdown notes with frontmatter, one directory per note type. PR-gated; `CHEMCLAW_NOTE_REPO_DIR` can point it at a dedicated checkout. |
+| `skills/` | **Layer 3**: the global `SKILL.md` files — judgment not tied to one connector. |
+| `profiles/` | Agent profiles (YAML) selecting across skills and tools. |
+| `templates/` | The shipped step-template YAML the code in `src/chemclaw/templates/` resolves. |
+| `evals/` | The versioned case-set, the retrieval corpus and the committed baseline. |
+| `data/` | Vendored datasets and the sample ELN exports. |
+| `tests/` | The suite. Also the gate for several *declarations*: the packaging lists, the Containerfile COPY set, the Helm chart's kinds, the ADR ledger, the layering rules. |
 | `infra/` | The local dev stack (`docker-compose.yml`) and the SQL migrations. |
 | `deploy/` | OpenShift delivery: one rootless multi-target image (`Containerfile`, role chosen by `CHEMCLAW_COMPONENT`) and the Helm chart. |
-| `docs/` | Design documents, the runbook, plans, and point-in-time reviews. |
-| `data/` | Vendored datasets shipped into the image. |
-| `profiles/` | Agent profiles (YAML) selecting across skills and tools. |
+| `docs/` | The record and the reference — see `docs/README.md` for which parts are maintained. |
+| `examples/` | A runnable walkthrough. Deliberately not shipped in the wheel. |
 | `tasks/` | The working files `CLAUDE.md` requires: `todo.md` and `lessons.md`. |
 | `.github/workflows/` | CI. The **only** place GitHub Actions reads workflows from — see D-139. |
 
 ## Two pairs of names that look like duplicates and are not
 
-**`calc/` vs `connectors/calc/`** (and `bo/`, `safety/` likewise). The first is the engine: pure
-computation, no Temporal and no MCP imports. The second is the wrapper: the durable job definition
-and the tool surface that expose that engine to the agent. They are separate so the engine stays
-importable and testable without an orchestration stack, which is the layering rule above. Merging
-them would put Temporal imports inside the physics.
+**`science/calc/` vs `connectors/calc/`** (and `bo`, `safety` likewise). The first is the engine:
+pure computation, importable and testable with no orchestration stack. The second is the wrapper:
+the durable job definition and the MCP tool surface that expose that engine to the agent. Keeping
+them apart is the layering rule; merging them would put Temporal imports inside the physics. Before
+D-141 they were `calc/` and `connectors/calc/` — same distinction, no way to see it from the names.
 
 **`skills/` vs `connectors/*/skills/`.** A bundled skill ships and deploys with its connector; a
-global skill does not belong to one capability. Both are discovered by one mechanism —
-`CHEMCLAW_SKILLS_DIR` is a `PATH`-style list — so the split is about ownership, not lookup.
+global skill belongs to no single capability. Both are discovered by one mechanism —
+`CHEMCLAW_SKILLS_DIR` is a `PATH`-style list, and the connector registry appends each enabled
+bundle's directory — so the split is about ownership, not lookup.
+
+## Where declarations live
+
+Three defaults resolve against the installed package rather than the working directory, because
+what they name ships inside it: `connectors_dir`, `data_sources_dir` and `safety_rules_path`
+(D-141). Each remains overridable, and the two directory ones remain `PATH`-style lists, so
+pointing a deployment at an *additional* private bundle directory works as before.
 
 ## Related repositories
 
@@ -79,7 +92,11 @@ This repository is the backend and orchestration core.
 
 ## Keeping this file true
 
-Adding a top-level directory means adding a row here. The design record lives in `docs/decisions/`
-(`D-NNN`, append-only) with `docs/decisions/README.md` as its index; `docs/reference/architektur.md` is the original
-pre-implementation design and is **historical** — right about the four layers, silent on connectors,
-which now carry every tool, job and skill.
+Adding a top-level directory, or a subpackage under `src/chemclaw/`, means adding a row here.
+`tests/test_packaging.py` enforces the structural half: `src/` holds exactly one package, and no
+import package may reappear beside it.
+
+The design record is `docs/decisions/` (one file per ADR, `D-NNN`), indexed by
+`docs/decisions/README.md`. `docs/reference/architektur.md` is the original pre-implementation
+design and is **historical** — right about the four layers, silent on connectors, which now carry
+every tool, job and skill.

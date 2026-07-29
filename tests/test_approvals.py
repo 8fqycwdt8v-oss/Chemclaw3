@@ -14,8 +14,8 @@ from typing import Any
 import pytest
 from fastapi.testclient import TestClient
 
-from agents.interaction_tools import PendingApproval
-from service.app import create_app
+from chemclaw.agent.interaction_tools import PendingApproval
+from chemclaw.api.app import create_app
 
 
 class _FakeAgent:
@@ -54,10 +54,10 @@ def seam(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
         holds: list[PendingApproval] = state["pending"]
         return [h for h in holds if owner is None or h.requested_by in ("", owner)]
 
-    monkeypatch.setattr("service.app.approval_owner", fake_owner)
-    monkeypatch.setattr("service.app.approval_status", fake_status)
-    monkeypatch.setattr("service.app.decide_approval", fake_decide)
-    monkeypatch.setattr("service.app.list_pending_approvals", fake_list)
+    monkeypatch.setattr("chemclaw.api.app.approval_owner", fake_owner)
+    monkeypatch.setattr("chemclaw.api.app.approval_status", fake_status)
+    monkeypatch.setattr("chemclaw.api.app.decide_approval", fake_decide)
+    monkeypatch.setattr("chemclaw.api.app.list_pending_approvals", fake_list)
     return state
 
 
@@ -133,7 +133,7 @@ def test_decision_is_not_an_agent_tool() -> None:
     would have been the shortest path to "the hold can be answered" and would have collapsed the
     GxP line the PR-gate exists to draw.
     """
-    from agents.chemclaw_agent import _capability_tools
+    from chemclaw.agent.chemclaw_agent import _capability_tools
 
     names = {getattr(tool, "__name__", "") for tool in _capability_tools()}
     assert "decide_approval" not in names

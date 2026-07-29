@@ -1,18 +1,19 @@
 """The durable memory-synthesis corpus reader honors the data-source config (DUP-1).
 
-`workflows.memory_jobs._all_reactions` is the corpus every memory job reasons over. After the F7
+`chemclaw.durable.memory_jobs._all_reactions` is the corpus every memory job reasons over. After
+the F7
 seam it must read the *configured* active ingest sources (`settings.data_sources`), not a hardcoded
 union of every ELN adapter — so toggling `CHEMCLAW_DATA_SOURCES` actually changes what memory sees,
 the same guarantee the durable ELN sync already honors. Uses the committed sample exports that the
-default config points at (`eln/exports` + `eln/exports/ord`); no server needed.
+default config points at (`data/eln-exports` + `data/eln-exports/ord`); no server needed.
 """
 
 import asyncio
 
 import pytest
 
-from chemclaw.config import settings
-from workflows.memory_jobs import _all_reactions
+from chemclaw.core.config import settings
+from chemclaw.durable.memory_jobs import _all_reactions
 
 
 def test_all_reactions_honors_data_sources_config(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -38,8 +39,8 @@ def test_background_worker_registers_memory_fan_out() -> None:
     Registration is easy to forget when a synthesis job's topology changes, and a missing child or
     activity only fails at runtime on the server (which CI's server tests skip offline), so pin it.
     """
-    from workers.background_worker import BACKGROUND_ACTIVITIES, BACKGROUND_WORKFLOWS
-    from workflows.memory_jobs import (
+    from chemclaw.durable.background_worker import BACKGROUND_ACTIVITIES, BACKGROUND_WORKFLOWS
+    from chemclaw.durable.memory_jobs import (
         PublishNoteWorkflow,
         build_campaign_notes_activity,
         build_optimization_notes_activity,

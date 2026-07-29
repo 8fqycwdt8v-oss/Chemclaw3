@@ -19,10 +19,10 @@ from typing import Any
 import pytest
 from rdkit.Chem.Draw import rdMolDraw2D
 
-from calc.store import InMemoryStore
-from calc.xtb_spec import XtbSpec
-from chemclaw.reagents import resolve_compound_name
-from connectors.chem.server import tools as chem_tools
+from chemclaw.connectors.chem.server import tools as chem_tools
+from chemclaw.core.reagents import resolve_compound_name
+from chemclaw.science.calc.store import InMemoryStore
+from chemclaw.science.calc.xtb_spec import XtbSpec
 
 
 def _thread_recording(target: Any, seen: list[int]) -> Any:
@@ -90,7 +90,7 @@ def test_electronic_properties_embed_and_key_off_the_event_loop(
     first call in a process, so a cold worker paid a `subprocess.run` on the loop that serves
     every Temporal task poll and heartbeat.
     """
-    from calc import xtb_props
+    from chemclaw.science.calc import xtb_props
 
     embeds: list[int] = []
     keys: list[int] = []
@@ -115,7 +115,7 @@ def test_gather_evidence_runs_its_sources_concurrently() -> None:
     Postgres": awaited in sequence the tool takes both delays, gathered it takes one. Asserted as
     overlap in time rather than a wall-clock threshold, so it is not timing-sensitive.
     """
-    from agents import research_tools
+    from chemclaw.agent import research_tools
 
     running = 0
     peak = 0

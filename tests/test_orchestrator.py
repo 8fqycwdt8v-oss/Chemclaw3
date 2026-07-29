@@ -26,9 +26,9 @@ with workflow.unsafe.imports_passed_through():
     from temporalio.client import Client
     from temporalio.worker import Worker
 
-    from chemclaw.config import settings
+    from chemclaw.core.config import settings
+    from chemclaw.durable.orchestrator import _batches, fan_out
     from tests.temporal_env import pydantic_client, start_env_or_skip
-    from workflows.orchestrator import _batches, fan_out
 
 
 def test_batches_splits_in_order() -> None:
@@ -99,8 +99,8 @@ def test_fan_out_limit_is_resolved_via_an_activity(monkeypatch) -> None:  # type
     """
     from temporalio.testing import ActivityEnvironment
 
-    from chemclaw.config import settings
-    from workflows.orchestrator import resolve_fan_out_limit
+    from chemclaw.core.config import settings
+    from chemclaw.durable.orchestrator import resolve_fan_out_limit
 
     monkeypatch.setattr(settings, "orchestrator_max_parallel_children", 3)
     assert asyncio.run(ActivityEnvironment().run(resolve_fan_out_limit)) == 3
@@ -108,7 +108,7 @@ def test_fan_out_limit_is_resolved_via_an_activity(monkeypatch) -> None:  # type
 
 def test_background_worker_registers_fan_out_limit_activity() -> None:
     """Every worker hosting a fan-out parent must serve the limit-resolving activity."""
-    from workers.background_worker import BACKGROUND_ACTIVITIES
-    from workflows.orchestrator import resolve_fan_out_limit
+    from chemclaw.durable.background_worker import BACKGROUND_ACTIVITIES
+    from chemclaw.durable.orchestrator import resolve_fan_out_limit
 
     assert resolve_fan_out_limit in BACKGROUND_ACTIVITIES

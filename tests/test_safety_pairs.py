@@ -17,7 +17,7 @@ the rule table's own header tells a contributor to do.
 
 import pytest
 
-from safety.screen import screen_reaction
+from chemclaw.science.safety.screen import screen_reaction
 
 
 @pytest.mark.parametrize(

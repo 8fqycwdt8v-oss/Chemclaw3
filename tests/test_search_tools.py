@@ -9,15 +9,15 @@ import asyncio
 
 import pytest
 
-import agents.search_tools as search_tools
-from agents.search_tools import (
+import chemclaw.agent.search_tools as search_tools
+from chemclaw.agent.search_tools import (
     find_similar_molecules,
     find_similar_reactions,
     find_substructure_matches,
 )
-from mcp_servers.fpstore import InMemoryFingerprintStore
-from mcp_servers.molfp.search import record_for
-from mcp_servers.rxnfp.search import record_for_reaction
+from chemclaw.mcp.fpstore import InMemoryFingerprintStore
+from chemclaw.mcp.molfp.search import record_for
+from chemclaw.mcp.rxnfp.search import record_for_reaction
 
 
 def _reaction_store() -> InMemoryFingerprintStore:

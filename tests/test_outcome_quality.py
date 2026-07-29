@@ -4,7 +4,7 @@ Two absences in `OrdReaction` that the agent's own instructions contradicted:
 
 - **No date.** The largest note class in the system had no time axis, so reaction evidence could
   not be recency-ranked, F10-G2's bi-temporal `valid_from`/`valid_to` had nothing to be populated
-  from for reactions, and `memory.chains` had no fallback ordering for a cyclic chain.
+  from for reactions, and `chemclaw.memory.chains` had no fallback ordering for a cyclic chain.
 - **No purity or impurities.** `_INSTRUCTIONS` tells the agent its job includes answering about
   "yield, purity, impurities" while the schema carried `yield_percent` alone — so every purity
   question could only ever be answered "the data is silent", with the chemist unable to tell a data
@@ -23,11 +23,11 @@ from pathlib import Path
 import pytest
 from pydantic import ValidationError
 
-from eln.adapter import RawEntry
-from eln.json_adapter import JsonExportAdapter
-from eln.note import note_from_ord_reaction
-from eln.ord import Component, Impurity, OrdReaction, Role
-from eln.ord_adapter import OrdJsonAdapter
+from chemclaw.ingest.eln.adapter import RawEntry
+from chemclaw.ingest.eln.json_adapter import JsonExportAdapter
+from chemclaw.ingest.eln.note import note_from_ord_reaction
+from chemclaw.ingest.eln.ord import Component, Impurity, OrdReaction, Role
+from chemclaw.ingest.eln.ord_adapter import OrdJsonAdapter
 
 
 def _reaction(**overrides: object) -> OrdReaction:

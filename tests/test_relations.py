@@ -14,11 +14,11 @@ from pathlib import Path
 
 import pytest
 
-from kg.graph import build_graph, invalidate_cache, related
-from kg.note import Note, Relation, cited_ids, cited_links, split_link
-from kg.relations import DEFAULT_RELATION, KNOWN_RELATIONS
-from kg.render import render_note
-from kg.validate import validate
+from chemclaw.kg.graph import build_graph, invalidate_cache, related
+from chemclaw.kg.note import Note, Relation, cited_ids, cited_links, split_link
+from chemclaw.kg.relations import DEFAULT_RELATION, KNOWN_RELATIONS
+from chemclaw.kg.render import render_note
+from chemclaw.kg.validate import validate
 
 
 def _write(directory: Path, *notes: Note) -> Path:
@@ -94,7 +94,8 @@ def test_a_frontmatter_relation_to_a_missing_note_dangles_like_a_body_link(tmp_p
 def test_an_unknown_relation_fails_validation(tmp_path: Path) -> None:
     """A typo makes an edge no relation-aware query can find, so it stops at the gate.
 
-    Checked in `kg.validate` rather than in the schema, exactly as `KNOWN_NOTE_TYPES` is: the agent
+    Checked in `chemclaw.kg.validate` rather than in the schema, exactly as `KNOWN_NOTE_TYPES` is:
+    the agent
     must still be able to *propose* a genuinely new relation, and a human sees it on the PR.
     """
     source = Note(id="a", type="report", body="[[percursor-of:b]]")  # typo, deliberately

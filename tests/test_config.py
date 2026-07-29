@@ -11,7 +11,7 @@ from pathlib import Path
 
 import pytest
 
-from chemclaw.config import Settings
+from chemclaw.core.config import Settings
 
 # `CHEMCLAW_FOO=...`, optionally commented out (a documented-but-unset key, e.g. the JSON
 # spec tokens). Both forms count as "documented" for the parity test below.

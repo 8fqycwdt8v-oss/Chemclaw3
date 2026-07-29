@@ -13,15 +13,15 @@ from typing import Any
 
 import pytest
 
-from agents.verifier import (
+from chemclaw.agent.verifier import (
     ClaimCheck,
     VerificationResult,
     gather_cited_evidence,
     verify_answer,
     verify_turn_answer,
 )
-from chemclaw.config import settings
-from report.evidence import EvidenceChunk
+from chemclaw.core.config import settings
+from chemclaw.retrieval.evidence import EvidenceChunk
 
 
 class _FakeResponse:

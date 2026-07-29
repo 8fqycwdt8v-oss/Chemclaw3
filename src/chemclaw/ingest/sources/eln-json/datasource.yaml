@@ -1,0 +1,16 @@
+# A JSON-export ELN drop directory.
+#
+# Ingest-only, and deliberately so: reactions flow in and become graph notes, which the `graph`
+# source then retrieves. Carrying a retriever here as well would double-count every ingested
+# reaction — once as an ELN record, once as the note it became.
+#
+# `config:` is empty, so the adapter falls back to the configured `eln_export_dir`. A deployment
+# with a second drop directory adds a folder like this one to a dir in CHEMCLAW_DATA_SOURCES_DIRS
+# with its own `export_dir:` — no core edit, which is what replaced the typed `data_source_specs`
+# union (D-076, superseded by D-120).
+name: eln-json
+description: >-
+  An electronic lab notebook exporting free-text JSON entries. Ingested and mapped to ORD
+  reactions, which become knowledge-graph note proposals.
+
+ingest: chemclaw.ingest.eln.json_adapter:JsonExportAdapter

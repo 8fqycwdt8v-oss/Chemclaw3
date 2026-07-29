@@ -24,8 +24,8 @@ lint:  ## Ruff lint + format check (no writes; use `uv run ruff format` to fix).
 	uv run ruff check .
 	uv run ruff format --check .
 
-type:  ## Static type check, strict (every first-party package; see tests/test_packaging.py).
-	uv run mypy agents bo calc chemclaw connectors eln evals examples kg mcp_servers memory report safety scripts service sources templates tests workers workflows
+type:  ## Static type check, strict (the whole package, plus examples and tests).
+	uv run mypy src examples tests
 
 test:  ## Run the test suite.
 	uv run pytest
@@ -39,40 +39,40 @@ chat:  ## Chat with the agent from the terminal (admin/testing mode; needs ANTHR
 	uv run chemclaw --admin
 
 db-migrate:  ## Apply infra/sql migrations to the configured database.
-	uv run python -m calc.migrate
+	uv run python -m chemclaw.science.calc.migrate
 
 schedules-apply:  ## Create/update the Temporal Schedules for the periodic background jobs.
-	uv run python -m scripts.schedules
+	uv run python -m chemclaw.cli.schedules
 
 kg-validate:  ## Validate the knowledge graph (schema, duplicate ids, broken links).
-	uv run python -m kg.validate
+	uv run python -m chemclaw.kg.validate
 
 eval:  ## Score the versioned eval case-set and print the citable report (Phase 2b).
-	uv run python -m evals.harness
+	uv run python -m chemclaw.evals.harness
 
 eval-baseline:  ## Regenerate evals/baseline.json from a scoring run (after a reviewed change).
-	uv run python -m scripts.refresh_baseline
+	uv run python -m chemclaw.cli.refresh_baseline
 
 eln-validate:  ## Validate the ELN export's reactions (RDKit structure + mass balance).
-	uv run python -m eln.validate
+	uv run python -m chemclaw.ingest.eln.validate
 
 skill-validate:  ## Validate SKILL.md frontmatter (name/description present, name matches dir).
-	uv run python -m scripts.validate_skills
+	uv run python -m chemclaw.cli.validate_skills
 
 connector-validate:  ## Validate the connector bundles (manifests, declarations, tool surface, jobs).
-	uv run python -m scripts.validate_connectors
+	uv run python -m chemclaw.cli.validate_connectors
 
 datasource-validate:  ## Validate the data-source manifests (halves resolve, config binds, names exist).
-	uv run python -m scripts.validate_datasources
+	uv run python -m chemclaw.cli.validate_datasources
 
 template-validate:  ## Validate the step templates (steps, references, tools/jobs/profiles named).
-	uv run python -m scripts.validate_templates
+	uv run python -m chemclaw.cli.validate_templates
 
 connectors:  ## Run every enabled local connector's FastAPI app in one dev process.
-	uv run python -m scripts.connectors_dev
+	uv run python -m chemclaw.cli.connectors_dev
 
 prose-validate:  ## Check the agent's prose only names tools that exist (gap IDEA-7).
-	uv run python -m scripts.validate_prose_contract
+	uv run python -m chemclaw.cli.validate_prose_contract
 
 helm-validate:  ## Render the Helm chart and validate it against the Kubernetes schemas.
 	@# `-ignore-missing-schemas` is required, not a relaxation of convenience: the chart renders an
@@ -92,10 +92,10 @@ helm-validate:  ## Render the Helm chart and validate it against the Kubernetes 
 	      'https://raw.githubusercontent.com/datreeio/CRDs-catalog/main/{{.Group}}/{{.ResourceKind}}_{{.ResourceAPIVersion}}.json'
 
 audit-verify:  ## Verify the tamper-evident hash chain over the GxP audit trail (F10-G1).
-	uv run python -m scripts.verify_audit_chain
+	uv run python -m chemclaw.cli.verify_audit_chain
 
 reindex:  ## Rebuild the derived note index (dense + lexical) for hybrid retrieval (F10-A).
-	uv run python -m report.vector_index
+	uv run python -m chemclaw.retrieval.vector_index
 
 up:  ## Start the local dev stack (Temporal dev server + Postgres/pgvector).
 	docker compose -f infra/docker-compose.yml up -d

@@ -26,18 +26,18 @@ import pytest
 import uvicorn
 from fastapi import FastAPI
 
-from agents.identity_context import reset_current_identity, set_current_identity
-from agents.session_context import reset_current_session_id, set_current_session_id
-from connectors.identity import (
+from chemclaw.agent.identity_context import reset_current_identity, set_current_identity
+from chemclaw.agent.session_context import reset_current_session_id, set_current_session_id
+from chemclaw.connectors.identity import (
     HEADER_ACTOR,
     HEADER_ROLES,
     HEADER_SESSION,
     stamp_turn_identity,
 )
-from connectors.manifest import HttpEndpoint
-from connectors.registry import discovered
-from connectors.server import connector_app
-from connectors.transport import DegradingHttpConnector
+from chemclaw.connectors.manifest import HttpEndpoint
+from chemclaw.connectors.registry import discovered
+from chemclaw.connectors.server import connector_app
+from chemclaw.connectors.transport import DegradingHttpConnector
 
 # Every discovered bundle that ships a local HTTP server, as `(name, manifest)`. Parametrizing
 # over discovery rather than a hardcoded list means a new bundle is covered on the day it is
@@ -87,10 +87,10 @@ def composite() -> Iterator[int]:
     the MCP session manager, and `FastMCP.session_manager.run()` is single-use — a module-level
     `app` (what every bundle exports) can therefore be served exactly once per process. Serving
     each bundle in its own server per test would fail on the second one. Mounting them together
-    is also what `scripts.connectors_dev` does for the dev loop, so this exercises that shape
+    is also what `chemclaw.cli.connectors_dev` does for the dev loop, so this exercises that shape
     too.
     """
-    from scripts.connectors_dev import build_composite
+    from chemclaw.cli.connectors_dev import build_composite
 
     app, _urls = build_composite()
     port = _free_port()
@@ -201,7 +201,7 @@ def test_the_turn_identity_actually_arrives_at_the_connector() -> None:
 
 
 def test_an_unreachable_connector_costs_its_tools_not_the_turn() -> None:
-    """The degrade posture, at the layer it has to live in (`connectors.transport`).
+    """The degrade posture, at the layer it has to live in (`chemclaw.connectors.transport`).
 
     Nothing is listening on this port. The connector must come back *not connected* and
     contribute no tools, rather than raising — because `Agent.run` re-enters an unconnected MCP
@@ -225,7 +225,7 @@ def test_concurrent_turns_get_their_own_connections_and_their_own_identity() -> 
     """Why connectors are built per turn: sharing one tool object across turns is doubly wrong.
 
     Two turns run at once with different actors, each with its own connector instance — the
-    shape `agents.chemclaw_agent.connector_tools` produces. Both must complete, and every
+    shape `chemclaw.agent.chemclaw_agent.connector_tools` produces. Both must complete, and every
     request must carry the identity of the turn that made it.
 
     Measured, not assumed: with a *shared* tool object instead, the same two turns deadlock

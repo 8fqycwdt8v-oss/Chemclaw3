@@ -14,16 +14,16 @@ import pytest
 from temporalio.client import Client
 from temporalio.worker import Worker
 
-from chemclaw.config import settings
-from connectors.qm.knowledge import note_from_qm_result
-from connectors.qm.specs import QMJobResult, QmJobSpec
-from connectors.qm.workflows import QMJobWorkflow
-from eln.compound import compound_dependencies, compound_id
-from kg.git_submitter import GitNoteSubmitter, GitSubmitError
-from kg.note import Note
-from kg.pr_gate import NoteFile, NoteSubmission
+from chemclaw.connectors.qm.knowledge import note_from_qm_result
+from chemclaw.connectors.qm.specs import QMJobResult, QmJobSpec
+from chemclaw.connectors.qm.workflows import QMJobWorkflow
+from chemclaw.core.config import settings
+from chemclaw.durable.connector_job import ConnectorJobResult
+from chemclaw.ingest.eln.compound import compound_dependencies, compound_id
+from chemclaw.kg.git_submitter import GitNoteSubmitter, GitSubmitError
+from chemclaw.kg.note import Note
+from chemclaw.kg.pr_gate import NoteFile, NoteSubmission
 from tests.temporal_env import QM_ACTIVITIES, pydantic_client, start_env_or_skip
-from workflows.connector_job import ConnectorJobResult
 
 _RESULT = QMJobResult(
     molecule_smiles="CCO",
@@ -74,7 +74,7 @@ def test_the_bundle_has_no_way_to_write_the_note_itself() -> None:
     boundary it could not cross. Core publishes whatever note the job envelope carries now, so a
     connector reaching the graph would first have to import the PR-gate — and no bundle does.
     """
-    import connectors.qm.knowledge as qm_knowledge
+    import chemclaw.connectors.qm.knowledge as qm_knowledge
 
     assert not hasattr(qm_knowledge, "write_knowledge_node")
     source = Path(qm_knowledge.__file__).read_text(encoding="utf-8")
@@ -148,7 +148,7 @@ def test_git_submitter_pushes_branch(tmp_path: Path) -> None:
 def test_submit_leaves_the_shared_checkout_on_base(tmp_path: Path) -> None:
     """After a submission, `note_repo_dir` is back on `base` — not stuck on the note branch.
 
-    `note_repo_dir` is also where readers (`kg.graph.load_notes` et al.) resolve
+    `note_repo_dir` is also where readers (`chemclaw.kg.graph.load_notes` et al.) resolve
     `settings.knowledge_path`, so a checkout left on `note/<id>` would make every reader
     see one proposed note's isolated content instead of the merged knowledge base until
     the next submission happened to switch branches again first (the bug this proves fixed).
@@ -176,7 +176,7 @@ def test_submit_busts_the_graph_cache(tmp_path: Path, monkeypatch: pytest.Monkey
     wrote as absent — and the submitter's `checkout -B`/`reset --hard` rewrite the tree wholesale,
     so a stale cached graph could describe a tree that no longer exists.
     """
-    from kg import graph as kg_graph
+    from chemclaw.kg import graph as kg_graph
 
     _, work = _make_remote_and_clone(tmp_path)
     notes_dir = work / "knowledge"
@@ -431,7 +431,7 @@ def test_git_command_timeout_kills_the_child_and_raises(
     async def _fake_exec(*_args: object, **_kwargs: object) -> _HangingProcess:
         return _HangingProcess()
 
-    monkeypatch.setattr("kg.git_submitter.asyncio.create_subprocess_exec", _fake_exec)
+    monkeypatch.setattr("chemclaw.kg.git_submitter.asyncio.create_subprocess_exec", _fake_exec)
     (tmp_path / ".git").mkdir()  # submit() flocks a file under .git/ before running git
     submitter = GitNoteSubmitter(repo_dir=str(tmp_path), base_branch="main", remote="origin")
 

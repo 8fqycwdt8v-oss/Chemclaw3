@@ -13,7 +13,7 @@ import textwrap
 
 import pytest
 
-from workflows.registry import (
+from chemclaw.durable.registry import (
     describe,
     durable_workflow,
     registered_activities,
@@ -28,7 +28,7 @@ def test_every_declared_capability_reaches_its_worker() -> None:
     proves the imports are still there — the one thing adding a workflow to a *new*
     module still requires.
     """
-    from workers.background_worker import BACKGROUND_ACTIVITIES, BACKGROUND_WORKFLOWS
+    from chemclaw.durable.background_worker import BACKGROUND_ACTIVITIES, BACKGROUND_WORKFLOWS
 
     assert BACKGROUND_WORKFLOWS == registered_workflows("background")
     assert BACKGROUND_ACTIVITIES == registered_activities("background")
@@ -41,12 +41,12 @@ def test_the_queues_do_not_overlap() -> None:
     where the overlap could actually appear, because a bundle module that forgot `bundle_queue`
     and wrote `"background"` would silently ask core's worker to serve its heavy closure.
     """
-    import connectors.bo.worker  # noqa: F401 — registration
-    import connectors.calc.worker  # noqa: F401 — registration
-    import connectors.qm.worker  # noqa: F401 — registration
-    from connectors.queues import bundle_queue
-    from connectors.registry import discovered
-    from workers import background_worker  # noqa: F401 — registration
+    import chemclaw.connectors.bo.worker  # noqa: F401 — registration
+    import chemclaw.connectors.calc.worker  # noqa: F401 — registration
+    import chemclaw.connectors.qm.worker  # noqa: F401 — registration
+    from chemclaw.connectors.queues import bundle_queue
+    from chemclaw.connectors.registry import discovered
+    from chemclaw.durable import background_worker  # noqa: F401 — registration
 
     for kind in (registered_workflows, registered_activities):
         background = {item.__name__ for item in kind("background")}
@@ -57,11 +57,11 @@ def test_the_queues_do_not_overlap() -> None:
 
 def test_a_connectors_durable_work_is_on_its_own_queue_only() -> None:
     """A bundle's workflows run on the bundle's own worker — the point of the seam."""
-    from connectors.calc.activities import run_xtb_calculation
-    from connectors.calc.workflows import CalcJobWorkflow
-    from connectors.qm.activities import submit_to_hpc
-    from connectors.qm.workflows import QMJobWorkflow
-    from connectors.queues import bundle_queue
+    from chemclaw.connectors.calc.activities import run_xtb_calculation
+    from chemclaw.connectors.calc.workflows import CalcJobWorkflow
+    from chemclaw.connectors.qm.activities import submit_to_hpc
+    from chemclaw.connectors.qm.workflows import QMJobWorkflow
+    from chemclaw.connectors.queues import bundle_queue
 
     for workflow_cls, activity, bundle in (
         (CalcJobWorkflow, run_xtb_calculation, "calc"),
@@ -91,7 +91,7 @@ def test_cores_workers_import_no_bundle() -> None:
     probe = textwrap.dedent(
         """
         import json, sys
-        import workers.background_worker  # noqa: F401
+        import chemclaw.durable.background_worker  # noqa: F401
         print(json.dumps(sorted(sys.modules)))
         """
     )
@@ -104,10 +104,10 @@ def test_cores_workers_import_no_bundle() -> None:
     # (`registry`, `queues`, `identity`, `transport`, …) are core's own seam and are fine to
     # import. Derived from the filesystem rather than listed, so adding a bundle extends the
     # check on the day it is created instead of the day someone remembers to widen a set.
-    from connectors.registry import discovered
+    from chemclaw.connectors.registry import discovered
 
-    bundle_prefixes = tuple(f"connectors.{name}." for name in discovered())
-    bundle_modules = tuple(f"connectors.{name}" for name in discovered())
+    bundle_prefixes = tuple(f"chemclaw.connectors.{name}." for name in discovered())
+    bundle_modules = tuple(f"chemclaw.connectors.{name}" for name in discovered())
     offenders = sorted(n for n in loaded if n.startswith(bundle_prefixes) or n in bundle_modules)
     assert not offenders, f"core's workers import bundle module(s): {offenders}"
 
@@ -122,10 +122,12 @@ def _probe(name: str, module: str) -> type:
 
 def test_a_name_claimed_by_two_modules_is_rejected() -> None:
     """Two definitions sharing a Temporal name means the worker silently drops one."""
-    first = _probe("RegistryCollisionProbe", "workflows.probe_one")
+    first = _probe("RegistryCollisionProbe", "chemclaw.durable.probe_one")
     durable_workflow("background")(first)
     with pytest.raises(ValueError, match="claimed by both"):
-        durable_workflow("background")(_probe("RegistryCollisionProbe", "workflows.probe_two"))
+        durable_workflow("background")(
+            _probe("RegistryCollisionProbe", "chemclaw.durable.probe_two")
+        )
     assert first in registered_workflows("background")
 
 
@@ -136,7 +138,7 @@ def test_re_registering_the_same_definition_is_allowed() -> None:
     every workflow task would raise on a duplicate that is not one, and the worker would
     die on its first piece of work.
     """
-    module = "workflows.reimport_probe"
+    module = "chemclaw.durable.reimport_probe"
     durable_workflow("background")(_probe("RegistryReimportProbe", module))
     durable_workflow("background")(_probe("RegistryReimportProbe", module))  # must not raise
     names = [item.__name__ for item in registered_workflows("background")]
@@ -145,8 +147,8 @@ def test_re_registering_the_same_definition_is_allowed() -> None:
 
 def test_describe_names_what_a_worker_serves() -> None:
     """The startup log line is derived, not restated — so it cannot go stale."""
-    import connectors.qm.worker  # noqa: F401 — registration
-    from connectors.queues import bundle_queue
+    import chemclaw.connectors.qm.worker  # noqa: F401 — registration
+    from chemclaw.connectors.queues import bundle_queue
 
     line = describe(bundle_queue("qm"))
     assert "workflows=[QMJobWorkflow]" in line

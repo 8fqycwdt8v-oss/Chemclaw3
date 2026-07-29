@@ -15,16 +15,16 @@ credential must raise rather than send an empty `Authorization`.
 That the headers actually *arrive* is a transport property, proven against a live server in
 `test_connector_transport.py` — it cannot be shown here, and assuming it is exactly the mistake
 that
-made MAF's own `header_provider` look usable (see `connectors.identity`).
+made MAF's own `header_provider` look usable (see `chemclaw.connectors.identity`).
 """
 
 import httpx
 import pytest
 
-from agents.dialogue_tools import reset_dry_run, set_dry_run
-from agents.identity_context import reset_current_identity, set_current_identity
-from agents.session_context import reset_current_session_id, set_current_session_id
-from connectors.identity import (
+from chemclaw.agent.dialogue_tools import reset_dry_run, set_dry_run
+from chemclaw.agent.identity_context import reset_current_identity, set_current_identity
+from chemclaw.agent.session_context import reset_current_session_id, set_current_session_id
+from chemclaw.connectors.identity import (
     HEADER_ACTOR,
     HEADER_DRY_RUN,
     HEADER_ROLES,
@@ -33,7 +33,7 @@ from connectors.identity import (
     auth_for,
     turn_headers,
 )
-from connectors.manifest import BearerAuth, NoAuth
+from chemclaw.connectors.manifest import BearerAuth, NoAuth
 
 
 def test_no_ambient_identity_sends_no_identity_headers() -> None:

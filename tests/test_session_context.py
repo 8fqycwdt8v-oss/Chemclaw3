@@ -4,7 +4,8 @@ Proves the contextvar carrier, that a durable launcher stamps the current sessio
 the completing workflow knows whom to notify), and that the runner sets/clears the ambient id
 around a turn — all offline with fakes (no Temporal, no database).
 
-The launcher under test is the *generated* one (`connectors.jobs`), which is now the only kind: the
+The launcher under test is the *generated* one (`chemclaw.connectors.jobs`), which is now the only
+kind: the
 hand-written QM launcher that used to carry this plumbing became a declared job in D-118.
 """
 
@@ -13,15 +14,15 @@ from typing import Any
 
 from agent_framework import AgentSession
 
-import connectors.jobs as connector_jobs
-from agents.session_context import (
+import chemclaw.connectors.jobs as connector_jobs
+from chemclaw.agent.session_context import (
     get_current_session_id,
     reset_current_session_id,
     set_current_session_id,
 )
-from connectors.jobs import build_job_tool, job_workflow_id
-from connectors.manifest import JobSpec
-from service.runner import run_turn
+from chemclaw.api.runner import run_turn
+from chemclaw.connectors.jobs import build_job_tool, job_workflow_id
+from chemclaw.connectors.manifest import JobSpec
 
 _SPEC = JobSpec.model_validate(
     {
@@ -29,7 +30,7 @@ _SPEC = JobSpec.model_validate(
         "workflow": "QMJobWorkflow",
         "task_queue": "connector-qm",
         "summary": "Run a durable DFT calculation.",
-        "params_model": "connectors.qm.specs:QmJobSpec",
+        "params_model": "chemclaw.connectors.qm.specs:QmJobSpec",
     }
 )
 

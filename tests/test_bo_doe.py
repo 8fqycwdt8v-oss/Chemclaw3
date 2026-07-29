@@ -7,9 +7,14 @@ import asyncio
 
 import pytest
 
-from bo.engine import factorial_design
-from bo.problem import CategoricalParameter, ContinuousParameter, Objective, OptimizationProblem
-from connectors.bo.server.tools import generate_screening_design
+from chemclaw.connectors.bo.server.tools import generate_screening_design
+from chemclaw.science.bo.engine import factorial_design
+from chemclaw.science.bo.problem import (
+    CategoricalParameter,
+    ContinuousParameter,
+    Objective,
+    OptimizationProblem,
+)
 
 
 def _screening_problem() -> OptimizationProblem:

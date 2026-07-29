@@ -18,16 +18,9 @@ from temporalio.client import Client
 from temporalio.testing import ActivityEnvironment
 from temporalio.worker import Worker
 
-import workflows.eln_sync as eln_sync
-from chemclaw.config import settings
-from eln.adapter import RawEntry
-from eln.ord import OrdReaction
-from eln.sync import IngestSummary, RejectedEntry, sync_entries
-from mcp_servers.fpstore import InMemoryFingerprintStore
-from sources.registry import active_ingest_source_names
-from tests.conftest import FakeSubmitter
-from tests.temporal_env import pydantic_client, start_env_or_skip
-from workflows.eln_sync import (
+import chemclaw.durable.eln_sync as eln_sync
+from chemclaw.core.config import settings
+from chemclaw.durable.eln_sync import (
     ElnSyncWorkflow,
     _BoundedIngest,
     _merge,
@@ -36,6 +29,13 @@ from workflows.eln_sync import (
     store_sync_cursor,
     sync_eln_entries,
 )
+from chemclaw.ingest.eln.adapter import RawEntry
+from chemclaw.ingest.eln.ord import OrdReaction
+from chemclaw.ingest.eln.sync import IngestSummary, RejectedEntry, sync_entries
+from chemclaw.ingest.sources.registry import active_ingest_source_names
+from chemclaw.mcp.fpstore import InMemoryFingerprintStore
+from tests.conftest import FakeSubmitter
+from tests.temporal_env import pydantic_client, start_env_or_skip
 
 _EPOCH = datetime.min.replace(tzinfo=UTC)
 
@@ -66,7 +66,7 @@ def test_sync_eln_entries_ingests_one_named_source(monkeypatch: pytest.MonkeyPat
     env = ActivityEnvironment()
     env.on_heartbeat = lambda *details: beats.append(details)
     chunk = asyncio.run(env.run(sync_eln_entries, "eln-json", _EPOCH))
-    # The JSON seed corpus (eln/exports) has two valid reactions.
+    # The JSON seed corpus (data/eln-exports) has two valid reactions.
     assert set(chunk.summary.ingested) == {"eln-2026-001", "eln-2026-002"}
     assert chunk.summary.rejected == []
     assert chunk.has_more is False  # nothing beyond the batch bound remains
@@ -183,7 +183,7 @@ def test_eln_sync_workflow_ingests_seed_corpus(monkeypatch: pytest.MonkeyPatch) 
                     id="eln-sync-test",
                     task_queue="test-eln",
                 )
-        # The seed corpus (eln/exports) has two valid reactions.
+        # The seed corpus (data/eln-exports) has two valid reactions.
         assert set(summary.ingested) == {"eln-2026-001", "eln-2026-002"}
         assert summary.rejected == []
         assert len(fake.submissions) == 2  # both proposed a reaction note
@@ -303,7 +303,7 @@ def test_eln_sync_workflow_drains_a_backlog_in_chunks(
 
 def test_background_worker_registers_eln_sync() -> None:
     """The ELN sync activity/workflow are wired onto the background worker (regression)."""
-    from workers.background_worker import BACKGROUND_ACTIVITIES, BACKGROUND_WORKFLOWS
+    from chemclaw.durable.background_worker import BACKGROUND_ACTIVITIES, BACKGROUND_WORKFLOWS
 
     assert ElnSyncWorkflow in BACKGROUND_WORKFLOWS
     assert sync_eln_entries in BACKGROUND_ACTIVITIES

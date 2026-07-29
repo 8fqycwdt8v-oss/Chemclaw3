@@ -9,9 +9,9 @@ from types import SimpleNamespace
 
 import pytest
 
-from chemclaw.config import settings
-from service.budget import BudgetExceeded, BudgetTracker
-from service.runner import _usage_tokens
+from chemclaw.api.budget import BudgetExceeded, BudgetTracker
+from chemclaw.api.runner import _usage_tokens
+from chemclaw.core.config import settings
 
 
 @pytest.fixture

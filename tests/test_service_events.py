@@ -11,8 +11,8 @@ from typing import Any
 
 from agent_framework import AgentSession
 
-from service.events import AnswerEvent, ErrorEvent, Event, TokenEvent, ToolCallEvent
-from service.runner import run_turn
+from chemclaw.api.events import AnswerEvent, ErrorEvent, Event, TokenEvent, ToolCallEvent
+from chemclaw.api.runner import run_turn
 
 
 class _ToolContent:

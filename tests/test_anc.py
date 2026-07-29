@@ -7,9 +7,9 @@ version of this preconditioner made optimization *slower* and only a measurement
 import numpy as np
 import pytest
 
-from calc import anc
-from calc.structure import structure_from_smiles
-from calc.xtb_opt import OptSpec, optimize_structure
+from chemclaw.science.calc import anc
+from chemclaw.science.calc.structure import structure_from_smiles
+from chemclaw.science.calc.xtb_opt import OptSpec, optimize_structure
 
 
 def test_the_model_hessian_is_symmetric_and_has_no_net_force() -> None:

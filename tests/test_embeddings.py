@@ -12,8 +12,8 @@ from typing import Any
 
 import pytest
 
-import chemclaw.embeddings as provider
-from chemclaw.config import Settings
+import chemclaw.core.embeddings as provider
+from chemclaw.core.config import Settings
 
 
 def _use_settings(monkeypatch: pytest.MonkeyPatch, **overrides: Any) -> None:

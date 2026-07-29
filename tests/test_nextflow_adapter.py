@@ -11,9 +11,9 @@ import asyncio
 import httpx
 import pytest
 
-from chemclaw.config import settings
-from connectors.qm.hpc import nextflow
-from connectors.qm.specs import HpcJobHandle, QMJobInput, qm_job_key
+from chemclaw.connectors.qm.hpc import nextflow
+from chemclaw.connectors.qm.specs import HpcJobHandle, QMJobInput, qm_job_key
+from chemclaw.core.config import settings
 
 
 @pytest.fixture

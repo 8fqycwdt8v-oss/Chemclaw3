@@ -9,10 +9,14 @@ import asyncio
 
 from agent_framework import Content, InMemoryHistoryProvider, Message
 
-from agents.chemclaw_agent import history_provider
-from agents.message_pairing import unmatched_call_ids
-from agents.session_store import PostgresHistoryProvider, SessionOwnerStore, SessionTurnClaims
-from chemclaw.config import settings
+from chemclaw.agent.chemclaw_agent import history_provider
+from chemclaw.agent.message_pairing import unmatched_call_ids
+from chemclaw.agent.session_store import (
+    PostgresHistoryProvider,
+    SessionOwnerStore,
+    SessionTurnClaims,
+)
+from chemclaw.core.config import settings
 from tests.pg import migrated_db_or_skip
 
 

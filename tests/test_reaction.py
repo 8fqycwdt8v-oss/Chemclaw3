@@ -10,13 +10,13 @@ import asyncio
 
 import pytest
 
-from calc.reaction import (
+from chemclaw.core.config import settings
+from chemclaw.science.calc.reaction import (
     check_balance,
     compare_solvent_effects,
     compute_reaction_energy,
 )
-from calc.store import InMemoryStore
-from chemclaw.config import settings
+from chemclaw.science.calc.store import InMemoryStore
 
 
 def test_esterification_returns_all_three_deltas() -> None:
@@ -229,7 +229,8 @@ def test_a_reaction_reports_which_conformational_treatment_produced_it() -> None
 def test_the_exotherm_flag_survived_the_consolidation() -> None:
     """The one capability the removed exotherm screen had, now on the composite (D-108).
 
-    `calc.reaction_energy` was deleted rather than kept alongside this module, so its
+    `chemclaw.science.calc.reaction_energy` was deleted rather than kept alongside this module, so
+    its
     thermal-hazard flag had to move rather than be dropped — that is the difference between
     consolidating and losing a feature. It reads ΔE against the same configured threshold.
 

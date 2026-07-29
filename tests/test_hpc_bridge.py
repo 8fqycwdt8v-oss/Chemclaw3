@@ -9,9 +9,9 @@ import logging
 
 import pytest
 
-from agents.identity.hpc_bridge import map_to_hpc_identity
-from chemclaw.config import settings
-from chemclaw.temporal_client import connect_options
+from chemclaw.agent.identity.hpc_bridge import map_to_hpc_identity
+from chemclaw.core.config import settings
+from chemclaw.core.temporal_client import connect_options
 
 
 def test_hpc_bridge_maps_and_logs(
@@ -19,7 +19,7 @@ def test_hpc_bridge_maps_and_logs(
 ) -> None:
     """An Entra oid maps to the configured HPC identity and the mapping is logged."""
     monkeypatch.setattr(settings, "hpc_bridge_identity", "hpc-svc")
-    with caplog.at_level(logging.INFO, logger="agents.identity.hpc_bridge"):
+    with caplog.at_level(logging.INFO, logger="chemclaw.agent.identity.hpc_bridge"):
         identity = map_to_hpc_identity("entra-oid-1")
     assert identity == "hpc-svc"
     assert "entra-oid-1" in caplog.text  # the real user is in the audit line

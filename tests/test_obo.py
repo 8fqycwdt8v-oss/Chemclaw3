@@ -11,8 +11,8 @@ from pathlib import Path
 import httpx
 import pytest
 
-from agents.identity.obo import OboExchangeError, exchange_obo
-from chemclaw.config import settings
+from chemclaw.agent.identity.obo import OboExchangeError, exchange_obo
+from chemclaw.core.config import settings
 
 
 @pytest.fixture

@@ -16,8 +16,8 @@ from typing import Any
 import pytest
 from temporalio.client import WorkflowExecutionStatus
 
-import agents.durable_tools as durable_tools
-from agents.durable_tools import get_durable_job_status
+import chemclaw.agent.durable_tools as durable_tools
+from chemclaw.agent.durable_tools import get_durable_job_status
 
 
 class _Description:

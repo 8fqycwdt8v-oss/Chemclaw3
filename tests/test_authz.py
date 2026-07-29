@@ -11,9 +11,9 @@ instead of once per hand-written tool.
 
 import pytest
 
-from agents.authz import AuthorizationError, authorize_trigger, require_actor
-from agents.identity_context import reset_current_identity, set_current_identity
-from chemclaw.config import settings
+from chemclaw.agent.authz import AuthorizationError, authorize_trigger, require_actor
+from chemclaw.agent.identity_context import reset_current_identity, set_current_identity
+from chemclaw.core.config import settings
 
 
 def _privileged_env(monkeypatch: pytest.MonkeyPatch) -> None:

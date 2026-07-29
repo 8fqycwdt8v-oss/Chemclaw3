@@ -19,18 +19,18 @@ from pathlib import Path
 
 import pytest
 
-from eln.adapter import RawEntry
-from eln.json_adapter import JsonExportAdapter
-from eln.note import note_from_ord_reaction
-from eln.ord import Component, OrdReaction, ReactionStep, Role, StepKind
-from eln.ord_adapter import OrdFormatError, OrdJsonAdapter
-from eln.sync import sync_entries
-from eln.validate import validate_ord
-from mcp_servers.fpstore import InMemoryFingerprintStore
+from chemclaw.ingest.eln.adapter import RawEntry
+from chemclaw.ingest.eln.json_adapter import JsonExportAdapter
+from chemclaw.ingest.eln.note import note_from_ord_reaction
+from chemclaw.ingest.eln.ord import Component, OrdReaction, ReactionStep, Role, StepKind
+from chemclaw.ingest.eln.ord_adapter import OrdFormatError, OrdJsonAdapter
+from chemclaw.ingest.eln.sync import sync_entries
+from chemclaw.ingest.eln.validate import validate_ord
+from chemclaw.mcp.fpstore import InMemoryFingerprintStore
 from tests.conftest import FakeSubmitter
 
 _EPOCH = datetime.min.replace(tzinfo=UTC)
-_ORD_EXAMPLE = Path("eln/exports/ord/ord-2026-001.json")
+_ORD_EXAMPLE = Path("data/eln-exports/ord/ord-2026-001.json")
 
 _DETAILED_PROCEDURE = (
     "1. Charge substrate and THF to the reactor. "
@@ -240,7 +240,7 @@ def test_ord_auxiliary_role_collapses_to_reagent_not_reactant() -> None:
     """A stated role outside the subset (INTERNAL_STANDARD) maps to REAGENT, unstated to REACTANT.
 
     An internal standard read as a REACTANT would fabricate causal chain edges in
-    `memory.chains` (which keys handoffs on REACTANT only).
+    `chemclaw.memory.chains` (which keys handoffs on REACTANT only).
     """
     payload = {
         "reaction_id": "ord-aux",

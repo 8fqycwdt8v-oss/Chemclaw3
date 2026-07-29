@@ -12,10 +12,10 @@ from datetime import date
 
 import pytest
 
-from chemclaw.config import settings
-from kg.conflicts import Conflict, conflicts_by_note, find_conflicts
-from kg.note import Note, Relation
-from memory.failure import failure_note
+from chemclaw.core.config import settings
+from chemclaw.kg.conflicts import Conflict, conflicts_by_note, find_conflicts
+from chemclaw.kg.note import Note, Relation
+from chemclaw.memory.failure import failure_note
 
 
 def _note(note_id: str, **kwargs: object) -> Note:

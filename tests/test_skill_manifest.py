@@ -16,10 +16,10 @@ import pytest
 from agent_framework import FileSkillsSource, SkillsSource, SkillsSourceContext
 from agent_framework._agents import SupportsAgentRun
 
-import scripts.validate_skills as validate_skills
-from agents.skill_access import EnabledSkillsSource, RoleScopedSkillsSource
-from agents.skill_manifest import SkillManifest
-from chemclaw.config import Settings, settings
+import chemclaw.cli.validate_skills as validate_skills
+from chemclaw.agent.skill_access import EnabledSkillsSource, RoleScopedSkillsSource
+from chemclaw.agent.skill_manifest import SkillManifest
+from chemclaw.core.config import Settings, settings
 
 
 def _write_skill(root: Path, name: str) -> None:

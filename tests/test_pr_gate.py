@@ -6,9 +6,9 @@ from pathlib import Path
 
 import pytest
 
-from kg.note import Note, parse_note
-from kg.pr_gate import propose_note
-from kg.render import render_note
+from chemclaw.kg.note import Note, parse_note
+from chemclaw.kg.pr_gate import propose_note
+from chemclaw.kg.render import render_note
 from tests.conftest import FakeSubmitter
 
 

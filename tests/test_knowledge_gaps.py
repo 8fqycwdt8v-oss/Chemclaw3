@@ -18,15 +18,15 @@ from pathlib import Path
 import pytest
 from pydantic import ValidationError
 
-from eln.ord import Component, OrdReaction, OutcomeClass, Role
-from kg.analytics import analyze
-from kg.graph import build_graph, load_notes
-from kg.note import KNOWN_NOTE_TYPES, Note
-from kg.render import render_note
-from kg.validate import validate
-from memory.playbook import find_playbook_candidates
-from report.evidence import EvidenceChunk
-from report.hybrid import reciprocal_rank_fusion
+from chemclaw.ingest.eln.ord import Component, OrdReaction, OutcomeClass, Role
+from chemclaw.kg.analytics import analyze
+from chemclaw.kg.graph import build_graph, load_notes
+from chemclaw.kg.note import KNOWN_NOTE_TYPES, Note
+from chemclaw.kg.render import render_note
+from chemclaw.kg.validate import validate
+from chemclaw.memory.playbook import find_playbook_candidates
+from chemclaw.retrieval.evidence import EvidenceChunk
+from chemclaw.retrieval.hybrid import reciprocal_rank_fusion
 
 
 def _write(directory: Path, note: Note) -> None:

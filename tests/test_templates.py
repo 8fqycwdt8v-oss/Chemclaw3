@@ -20,15 +20,15 @@ from typing import Any
 import pytest
 from pydantic import ValidationError
 
-from templates.manifest import AgentStep, Template
-from templates.registry import (
+from chemclaw.templates.manifest import AgentStep, Template
+from chemclaw.templates.registry import (
     TemplateError,
     build_template_tool,
     discovered,
     run_workflow_id,
     tool_name,
 )
-from templates.resolve import UnresolvedReference, resolve
+from chemclaw.templates.resolve import UnresolvedReference, resolve
 
 _MINIMAL = {
     "summary": "Do the thing.",
@@ -207,7 +207,7 @@ def test_a_broken_template_file_fails_discovery(
         "summary: x\nsteps:\n  - {id: one, kind: agent, prompt: 'use ${steps.later.result}'}\n",
         encoding="utf-8",
     )
-    monkeypatch.setattr("chemclaw.config.settings.templates_dir", str(tmp_path))
+    monkeypatch.setattr("chemclaw.core.config.settings.templates_dir", str(tmp_path))
     discovered.cache_clear()
     try:
         with pytest.raises(TemplateError, match="invalid template"):
@@ -224,7 +224,7 @@ def test_the_name_lives_in_the_filename_only(
         "name: something-else\nsummary: x\nsteps:\n  - {id: one, kind: agent, prompt: hi}\n",
         encoding="utf-8",
     )
-    monkeypatch.setattr("chemclaw.config.settings.templates_dir", str(tmp_path))
+    monkeypatch.setattr("chemclaw.core.config.settings.templates_dir", str(tmp_path))
     discovered.cache_clear()
     try:
         with pytest.raises(TemplateError, match="name is its filename"):
@@ -237,12 +237,12 @@ def test_the_validator_catches_a_step_naming_a_tool_that_does_not_exist(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """The gate's reason to exist: a pinned procedure must not fail on step four in production."""
-    from scripts.validate_templates import validate_templates
+    from chemclaw.cli.validate_templates import validate_templates
 
     (tmp_path / "ghost.yaml").write_text(
         "summary: x\nsteps:\n  - {id: one, kind: tool, tool: no_such_tool}\n", encoding="utf-8"
     )
-    monkeypatch.setattr("chemclaw.config.settings.templates_dir", str(tmp_path))
+    monkeypatch.setattr("chemclaw.core.config.settings.templates_dir", str(tmp_path))
     discovered.cache_clear()
     try:
         problems = validate_templates()
@@ -264,9 +264,9 @@ def test_a_template_run_executes_its_steps_in_order(monkeypatch: pytest.MonkeyPa
     from temporalio import activity
     from temporalio.worker import Worker
 
+    from chemclaw.durable.template_activities import AgentStepInput, ToolStepInput
+    from chemclaw.durable.template_job import TemplateRunInput, TemplateWorkflow
     from tests.temporal_env import pydantic_client, start_env_or_skip
-    from workflows.template_activities import AgentStepInput, ToolStepInput
-    from workflows.template_job import TemplateRunInput, TemplateWorkflow
 
     seen: list[tuple[str, Any]] = []
 

@@ -20,8 +20,8 @@ offline**, each phase ADR'd (D-039…D-050) and green under `make lint type test
   core rule, workload identity federation, OBO (dormant), Temporal-mTLS + HPC identity bridges.
 - **F5** real Nextflow (Seqera/Tower) launcher behind the QM activities (mock kept for CI).
 - **F6** OpenShift delivery: one rootless image, Helm chart, CI, three-secret model, Temporal self-hosted.
-- **F7** the generic `DataSource` seam (`sources/`) — ELN re-hosted unchanged; a new source is one
-  `sources/<name>/datasource.yaml` folder plus its name in `CHEMCLAW_DATA_SOURCES`, with **zero**
+- **F7** the generic `DataSource` seam (`chemclaw.ingest.sources`) — ELN re-hosted unchanged; a new source is one
+  `ingest/sources/<name>/datasource.yaml` folder plus its name in `CHEMCLAW_DATA_SOURCES`, with **zero**
   core edits (D-120). First live connector (deferred): a custom Snowflake ELN source.
 
 **Live edges remain open** (need a real Entra tenant / Temporal broker / OpenShift cluster): real token

@@ -12,9 +12,9 @@ functions over a spec and an ensemble.
 
 import asyncio
 
-from calc.conformers import Conformer, ConformerEnsemble, ConformerSpec, truncated
-from calc.store import InMemoryStore, run_cached
-from calc.structure import Structure
+from chemclaw.science.calc.conformers import Conformer, ConformerEnsemble, ConformerSpec, truncated
+from chemclaw.science.calc.store import InMemoryStore, run_cached
+from chemclaw.science.calc.structure import Structure
 
 
 def _butane() -> Structure:

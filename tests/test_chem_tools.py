@@ -16,13 +16,13 @@ from typing import Any
 
 import pytest
 
-from chemclaw.chem import InvalidSmilesError
-from chemclaw.reagents import display_name, known_names, resolve_compound_name
-from connectors.chem.server.tools import (
+from chemclaw.connectors.chem.server.tools import (
     render_structure,
     resolve_compound,
     stoichiometry_table,
 )
+from chemclaw.core.chem import InvalidSmilesError
+from chemclaw.core.reagents import display_name, known_names, resolve_compound_name
 
 
 def _run(coro: Any) -> Any:

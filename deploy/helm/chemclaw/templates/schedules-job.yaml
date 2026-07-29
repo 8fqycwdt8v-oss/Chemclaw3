@@ -2,7 +2,7 @@
 
        Every periodic job in the system — ELN sync, the three memory-synthesis jobs, the note
        reindex, eval drift, retention, audit-chain verification — is worker-registered but only
-       runs when a Temporal Schedule fires it. `scripts/schedules.py` creates those Schedules and
+       runs when a Temporal Schedule fires it. `chemclaw/cli/schedules.py` creates those Schedules and
        nothing in the chart ran it, so a correctly-installed deployment ingested nothing and
        synthesised nothing, silently.
 
@@ -35,7 +35,7 @@ spec:
         - name: schedules
           image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
           imagePullPolicy: {{ .Values.image.pullPolicy }}
-          command: ["python", "-m", "scripts.schedules"]
+          command: ["python", "-m", "chemclaw.cli.schedules"]
           env:
             {{- include "chemclaw.env" . | nindent 12 }}
           envFrom:

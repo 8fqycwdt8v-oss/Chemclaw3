@@ -1,4 +1,4 @@
-"""The testing CLI resolves identity, parses args, and runs a turn (agents/cli.py).
+"""The testing CLI resolves identity, parses args, and runs a turn (chemclaw/cli/chat.py).
 
 Credential-free: identity/arg logic is pure, and the run path is exercised with a stub agent so
 no LLM or MCP subprocess is needed — this proves the CLI plumbing (admin-only auth gate, actor
@@ -9,8 +9,8 @@ import asyncio
 
 import pytest
 
-from agents import cli
-from chemclaw.config import settings
+from chemclaw.cli import chat as cli
+from chemclaw.core.config import settings
 
 
 def test_admin_identity_advertises_all_skills_as_the_configured_actor(

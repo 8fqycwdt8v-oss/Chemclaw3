@@ -8,7 +8,7 @@ and overwrites on upsert — so consecutive scheduled runs resume without re-doi
 import asyncio
 from datetime import UTC, datetime
 
-from eln.cursor import _EPOCH, load_cursor, store_cursor
+from chemclaw.ingest.eln.cursor import _EPOCH, load_cursor, store_cursor
 from tests.pg import migrated_db_or_skip
 
 

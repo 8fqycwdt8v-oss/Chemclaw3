@@ -18,9 +18,9 @@ from typing import Any
 import pytest
 from agent_framework import AgentSession
 
-from service.events import AnswerEvent
-from service.metrics import METRICS
-from service.runner import run_turn
+from chemclaw.api.events import AnswerEvent
+from chemclaw.api.metrics import METRICS
+from chemclaw.api.runner import run_turn
 
 
 class _SilentAgent:
@@ -41,7 +41,7 @@ class _UnreachableHistory:
     """A durable history provider whose watermark read fails the way a busy database does."""
 
     async def latest_message_id(self, session_id: str) -> int | None:
-        """Fail exactly as `chemclaw.db` does when a connection cannot be obtained in time."""
+        """Fail exactly as `chemclaw.core.db` does when a connection cannot be obtained in time."""
         raise ConnectionError("Postgres unreachable at postgresql://h/db: connection timeout")
 
 

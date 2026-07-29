@@ -16,8 +16,8 @@ from pathlib import Path
 
 import pytest
 
-from connectors.manifest import HttpEndpoint, StdioEndpoint
-from connectors.registry import (
+from chemclaw.connectors.manifest import HttpEndpoint, StdioEndpoint
+from chemclaw.connectors.registry import (
     ConnectorError,
     connector_tool_names,
     discovered,
@@ -27,7 +27,7 @@ from connectors.registry import (
     mcp_tools,
     skills_dirs,
 )
-from connectors.transport import DegradingHttpConnector, DegradingStdioConnector
+from chemclaw.connectors.transport import DegradingHttpConnector, DegradingStdioConnector
 
 _JOB_BLOCK = """
 jobs:
@@ -76,8 +76,8 @@ def _http_manifest(name: str, port: int = 9001, tools: str = "search") -> str:
 
 def _use(monkeypatch: pytest.MonkeyPatch, root: Path, *, enabled_list: str = "") -> None:
     """Point the registry at `root` as its only connectors dir, with the given enable-list."""
-    monkeypatch.setattr("chemclaw.config.settings.connectors_dir", str(root))
-    monkeypatch.setattr("chemclaw.config.settings.connectors_enabled", enabled_list)
+    monkeypatch.setattr("chemclaw.core.config.settings.connectors_dir", str(root))
+    monkeypatch.setattr("chemclaw.core.config.settings.connectors_enabled", enabled_list)
     discovered.cache_clear()
 
 
@@ -179,7 +179,7 @@ def test_connector_urls_override_the_manifest_address(
     _bundle(tmp_path, "alpha", _http_manifest("alpha"))
     _use(monkeypatch, tmp_path)
     monkeypatch.setattr(
-        "chemclaw.config.settings.connector_urls", {"alpha": "http://alpha.svc:8080/mcp"}
+        "chemclaw.core.config.settings.connector_urls", {"alpha": "http://alpha.svc:8080/mcp"}
     )
     (tool,) = mcp_tools()
     assert tool.url == "http://alpha.svc:8080/mcp"
@@ -197,7 +197,7 @@ def test_the_health_probe_follows_the_address_override(
     _bundle(tmp_path, "alpha", _http_manifest("alpha"))
     _use(monkeypatch, tmp_path)
     monkeypatch.setattr(
-        "chemclaw.config.settings.connector_urls",
+        "chemclaw.core.config.settings.connector_urls",
         {"alpha": "http://alpha-connector.svc:8814/mcp"},
     )
     (manifest,) = enabled()
@@ -207,7 +207,7 @@ def test_the_health_probe_follows_the_address_override(
 def test_the_health_probe_follows_an_override_that_moves_the_path_too(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """`scripts.connectors_dev` mounts every bundle under one port by name, so the path moves.
+    """`chemclaw.cli.connectors_dev` mounts every bundle under one port by name, so the path moves.
 
     Swapping only the origin would give `/healthz`, which that composite serves as a 404 — the
     reason the dev topology could not tell a killed connector from a mis-probed one.
@@ -215,7 +215,7 @@ def test_the_health_probe_follows_an_override_that_moves_the_path_too(
     _bundle(tmp_path, "alpha", _http_manifest("alpha"))
     _use(monkeypatch, tmp_path)
     monkeypatch.setattr(
-        "chemclaw.config.settings.connector_urls", {"alpha": "http://127.0.0.1:8810/alpha/mcp"}
+        "chemclaw.core.config.settings.connector_urls", {"alpha": "http://127.0.0.1:8810/alpha/mcp"}
     )
     (manifest,) = enabled()
     assert health_url(manifest) == "http://127.0.0.1:8810/alpha/healthz"
@@ -296,8 +296,8 @@ def test_the_first_connectors_dir_wins_a_name_collision(
     shipped = tmp_path / "shipped"
     _bundle(private, "alpha", _http_manifest("alpha", port=7777))
     _bundle(shipped, "alpha", _http_manifest("alpha", port=8888))
-    monkeypatch.setattr("chemclaw.config.settings.connectors_dir", f"{private}:{shipped}")
-    monkeypatch.setattr("chemclaw.config.settings.connectors_enabled", "")
+    monkeypatch.setattr("chemclaw.core.config.settings.connectors_dir", f"{private}:{shipped}")
+    monkeypatch.setattr("chemclaw.core.config.settings.connectors_enabled", "")
     discovered.cache_clear()
     (manifest,) = enabled()
     assert isinstance(manifest.endpoint, HttpEndpoint | StdioEndpoint)

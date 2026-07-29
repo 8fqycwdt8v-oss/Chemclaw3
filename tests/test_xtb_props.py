@@ -12,15 +12,15 @@ import asyncio
 import pytest
 from rdkit import Chem
 
-from calc.store import InMemoryStore
-from calc.structure import structure_from_smiles
-from calc.xtb_props import (
+from chemclaw.science.calc.store import InMemoryStore
+from chemclaw.science.calc.structure import structure_from_smiles
+from chemclaw.science.calc.xtb_props import (
     compute_fukui,
     compute_properties,
     run_cached_fukui,
     run_cached_properties,
 )
-from calc.xtb_spec import XtbSpec
+from chemclaw.science.calc.xtb_spec import XtbSpec
 
 
 def _ring_positions(smiles: str) -> dict[str, list[int]]:

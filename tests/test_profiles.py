@@ -9,14 +9,14 @@ regardless of profile. See `docs/archive/audit/10-config-extensibility.md` ยง6/ย
 
 import pytest
 
-from agents.chemclaw_agent import _INSTRUCTIONS, build_agent, connector_tools
-from agents.profiles import (
+from chemclaw.agent.chemclaw_agent import _INSTRUCTIONS, build_agent, connector_tools
+from chemclaw.agent.profiles import (
     AgentProfile,
     get_profile,
     register_profile,
     registered_profile_names,
 )
-from chemclaw.config import settings
+from chemclaw.core.config import settings
 
 
 def test_default_profile_reproduces_todays_agent() -> None:
@@ -71,7 +71,7 @@ def test_profile_can_narrow_connectors() -> None:
 
 def test_profile_attenuates_but_audit_and_authz_always_attach() -> None:
     """The invariant: narrowing a profile never removes the audit + per-tool authz middleware."""
-    from agents.tool_authz import announce_tool_failures, enforce_tool_authz
+    from chemclaw.agent.tool_authz import announce_tool_failures, enforce_tool_authz
 
     agent = build_agent(
         chat_client=object(),
@@ -116,6 +116,6 @@ def test_get_profile_resolution_and_registration() -> None:
         with pytest.raises(ValueError, match="already registered"):
             register_profile(AgentProfile(name="probe-profile"))
     finally:
-        from agents.profiles import _REGISTRY
+        from chemclaw.agent.profiles import _REGISTRY
 
         _REGISTRY.pop("probe-profile", None)

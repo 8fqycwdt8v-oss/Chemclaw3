@@ -23,10 +23,10 @@ from agent_framework._compaction import (
     included_token_count,
 )
 
-from agents.chemclaw_agent import _build_compaction, build_agent, connector_tools
-from chemclaw.config import settings
-from connectors.registry import connector_tool_names, discovered
-from templates.registry import template_tool_names
+from chemclaw.agent.chemclaw_agent import _build_compaction, build_agent, connector_tools
+from chemclaw.connectors.registry import connector_tool_names, discovered
+from chemclaw.core.config import settings
+from chemclaw.templates.registry import template_tool_names
 
 # The domain capability an agent must be able to reach, spanning both halves of the surface: the
 # durable launchers and the knowledge/PR-gate tools are in-process, the property calculators are the
@@ -143,7 +143,7 @@ def test_skills_load_and_read_without_an_unanswerable_approval() -> None:
 
 def test_agent_audits_and_authorizes_every_tool_call() -> None:
     """Five middlewares attach: both surfacing layers, audit, per-tool authz, failure announcing."""
-    from agents.tool_authz import (
+    from chemclaw.agent.tool_authz import (
         announce_tool_failures,
         enforce_tool_authz,
         surface_authorization_denials,
@@ -195,7 +195,7 @@ def test_instructions_only_name_available_tools() -> None:
     followed by `(`) matched zero times in a file that names every tool bare (D-117). Sharing the
     validator's extractor means the two cannot disagree about what the prose promises.
     """
-    from scripts.validate_prose_contract import referenced_tool_names
+    from chemclaw.cli.validate_prose_contract import referenced_tool_names
 
     agent = build_agent(chat_client=object())
     available = {f.name for f in agent.default_options["tools"]}
@@ -204,7 +204,7 @@ def test_instructions_only_name_available_tools() -> None:
     available |= set(connector_tool_names())
     available |= set(template_tool_names())
 
-    from agents.chemclaw_agent import _INSTRUCTIONS
+    from chemclaw.agent.chemclaw_agent import _INSTRUCTIONS
 
     referenced = referenced_tool_names(_INSTRUCTIONS)
     # A floor, so a refactor that empties the prose cannot make this test vacuously green.

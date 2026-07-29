@@ -10,10 +10,10 @@ import asyncio
 from pathlib import Path
 from typing import Any
 
-from mcp_servers.fpstore import InMemoryFingerprintStore
-from mcp_servers.rxnfp.search import record_for_reaction
-from report.evidence import EvidenceChunk, SourceRetriever
-from report.harness import (
+from chemclaw.mcp.fpstore import InMemoryFingerprintStore
+from chemclaw.mcp.rxnfp.search import record_for_reaction
+from chemclaw.retrieval.evidence import EvidenceChunk, SourceRetriever
+from chemclaw.retrieval.harness import (
     Claim,
     Report,
     ReportRequest,
@@ -23,7 +23,7 @@ from report.harness import (
     report_note,
     verify_claims,
 )
-from report.retrievers import FingerprintReactionRetriever, GraphRetriever
+from chemclaw.retrieval.retrievers import FingerprintReactionRetriever, GraphRetriever
 
 _ESTER = "CCO.CC(=O)O>>CCOC(C)=O"
 
@@ -175,7 +175,7 @@ def test_graph_retriever_matches_and_cites_notes(tmp_path: Path) -> None:
 
 def test_graph_retriever_scores_by_confidence(tmp_path: Path) -> None:
     """Each chunk carries a score from its note's confidence, defaulting when absent (KM-5)."""
-    from chemclaw.config import settings
+    from chemclaw.core.config import settings
 
     async def _run() -> None:
         (tmp_path / "a.md").write_text(

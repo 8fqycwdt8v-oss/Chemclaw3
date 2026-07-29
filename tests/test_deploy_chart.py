@@ -97,7 +97,7 @@ def test_the_entrypoint_has_no_case_the_chart_never_declares() -> None:
     The check above catches a chart component with no entrypoint case — a crash loop. It cannot
     catch the reverse: an entrypoint case for a component nothing deploys. That is what happened
     to `mcp-calc`. Its module was described as deleted in three separate documents, yet
-    `entrypoint.sh` still carried `mcp-calc) exec python -m mcp_servers.calc.server`, so the image
+    `entrypoint.sh` still carried `mcp-calc) exec python -m chemclaw.mcp.calc.server`, so the image
     went on shipping and dispatching a second live copy of seven `calc`-bundle tools. Nothing
     failed, because nothing looked this way.
 
@@ -183,7 +183,8 @@ def test_the_chart_gives_each_bundle_the_halves_its_manifest_declares() -> None:
 
     These two flags are the chart's only hand-maintained mirror of a manifest, and each direction
     fails silently in a different way. A bundle with `jobs:` and no `worker: true` gets no pod
-    polling its queue, so every job it starts waits forever — the exact failure `workflows.registry`
+    polling its queue, so every job it starts waits forever — the exact failure
+    `chemclaw.durable.registry`
     exists to prevent, one layer out. A bundle with `server: true` and no `endpoint:` gets an app
     Deployment running `uvicorn connectors.<name>.server.app:app` against a module that does not
     exist, which is a crash loop plus a bogus entry in the front door's address map.
@@ -191,7 +192,7 @@ def test_the_chart_gives_each_bundle_the_halves_its_manifest_declares() -> None:
     Derived from the manifests rather than listed, so a new bundle is covered on the day it is
     created.
     """
-    from connectors.registry import discovered
+    from chemclaw.connectors.registry import discovered
 
     entries = _values()["connectors"]
     for name, (_bundle, manifest) in discovered().items():
@@ -208,7 +209,7 @@ def test_every_shipped_connector_has_a_chart_entry() -> None:
     the
     risk is no longer deploying them, it is shipping a bundle the chart cannot deploy at all.
     """
-    from connectors.registry import discovered
+    from chemclaw.connectors.registry import discovered
 
     entries = _values()["connectors"]
     for name in discovered():
@@ -240,7 +241,7 @@ def test_schedules_are_applied_by_a_post_install_hook() -> None:
     """Without this Job no Temporal Schedule exists, so no periodic job ever fires (DEP-5)."""
     job = (CHART / "templates" / "schedules-job.yaml").read_text()
     assert '"helm.sh/hook": post-install,post-upgrade' in job
-    assert '"python", "-m", "scripts.schedules"' in job
+    assert '"python", "-m", "chemclaw.cli.schedules"' in job
 
 
 def test_the_route_pins_a_browser_to_one_front_door_pod() -> None:

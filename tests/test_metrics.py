@@ -1,7 +1,8 @@
 """The operational metrics surface (gaps DEP-4, SCH-4, SCH-5).
 
 Three things were working correctly and completely invisibly: admission control shedding turns
-with a 503, the budget guard refusing with a 429, and `agents.audit` swallowing a sink failure to
+with a 503, the budget guard refusing with a 429, and `chemclaw.agent.audit` swallowing a sink
+failure to
 keep tool calls alive. "At capacity" looked identical to "fine" from outside, and a GxP trail could
 be quietly incomplete indefinitely.
 
@@ -17,8 +18,8 @@ from typing import Any
 import pytest
 from fastapi.testclient import TestClient
 
-from service.app import create_app
-from service.metrics import CONTENT_TYPE, Metrics
+from chemclaw.api.app import create_app
+from chemclaw.api.metrics import CONTENT_TYPE, Metrics
 
 
 class _FakeAgent:
@@ -111,11 +112,12 @@ def test_metrics_carry_no_identifiers_or_turn_content() -> None:
 def test_a_swallowed_audit_sink_failure_is_counted() -> None:
     """The GxP trail can be incomplete while tool calls keep working (SEC-3) — that must be visible.
 
-    `agents.audit` imports the registry lazily and tolerates its absence, because the workers
+    `chemclaw.agent.audit` imports the registry lazily and tolerates its absence, because the
+    workers
     import that module without ever building the front door.
     """
-    from agents.audit import _record_metric
-    from service.metrics import METRICS
+    from chemclaw.agent.audit import _record_metric
+    from chemclaw.api.metrics import METRICS
 
     before = METRICS.value("chemclaw_audit_sink_failures_total")
     _record_metric(lambda metrics: metrics.increment("chemclaw_audit_sink_failures_total"))
@@ -134,7 +136,7 @@ def test_a_merge_notification_triggers_a_rebuild_now(monkeypatch: pytest.MonkeyP
         started.append("called")
         return "note-reindex-202607250900"
 
-    monkeypatch.setattr("service.app.request_note_reindex", _fake_reindex)
+    monkeypatch.setattr("chemclaw.api.app.request_note_reindex", _fake_reindex)
     with TestClient(create_app(agent_factory=lambda _profile: _FakeAgent())) as client:
         response = client.post("/events/knowledge-merged")
     assert response.status_code == 202

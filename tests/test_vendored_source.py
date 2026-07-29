@@ -15,8 +15,8 @@ from pathlib import Path
 
 import pytest
 
-from chemclaw.config import settings
-from sources.vendored_dataset import (
+from chemclaw.core.config import settings
+from chemclaw.ingest.sources.vendored_dataset import (
     VendoredDatasetError,
     VendoredDatasetRetriever,
     _read_manifest,
@@ -64,7 +64,7 @@ def test_the_shipped_dataset_covers_names_the_hand_maintained_table_does_not() -
     Asserted against the real resolver rather than by counting rows — "more entries" is not the
     claim, "names that previously resolved to nothing" is.
     """
-    from chemclaw.reagents import resolve_compound_name
+    from chemclaw.core.reagents import resolve_compound_name
 
     manifest = _read_manifest(_SHIPPED)
     records = _read_records(_SHIPPED, manifest)
@@ -119,7 +119,7 @@ def test_a_missing_dataset_yields_no_evidence_rather_than_breaking_retrieval(
     import logging
 
     retriever = VendoredDatasetRetriever(dataset_dir=str(tmp_path / "absent"))
-    with caplog.at_level(logging.WARNING, logger="sources.vendored_dataset"):
+    with caplog.at_level(logging.WARNING, logger="chemclaw.ingest.sources.vendored_dataset"):
         assert asyncio.run(retriever.retrieve("acetonitrile", {})) == []
     assert "vendored dataset unavailable" in caplog.text
 
@@ -172,10 +172,18 @@ def test_the_source_is_retrieve_only() -> None:
     """
     import yaml
 
-    path = Path(__file__).resolve().parents[1] / "sources" / "vendored" / "datasource.yaml"
+    path = (
+        Path(__file__).resolve().parents[1]
+        / "src"
+        / "chemclaw"
+        / "ingest"
+        / "sources"
+        / "vendored"
+        / "datasource.yaml"
+    )
     manifest = yaml.safe_load(path.read_text(encoding="utf-8"))
     assert manifest.get("ingest") is None
-    assert manifest["retrieve"].startswith("sources.vendored_dataset:")
+    assert manifest["retrieve"].startswith("chemclaw.ingest.sources.vendored_dataset:")
 
 
 def test_it_is_not_enabled_by_default() -> None:

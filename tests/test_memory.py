@@ -12,21 +12,21 @@ from pathlib import Path
 
 import pytest
 
-from chemclaw.config import settings
-from eln.ord import Component, OrdReaction, Role
-from kg.note import Note
-from kg.render import render_note
-from memory.campaign import campaign_note_from_chain
-from memory.chains import detect_chains
-from memory.ids import stable_id
-from memory.interaction import note_from_confirmed_answer
-from memory.jobs import build_campaign_notes, distill_playbooks, synthesize_campaigns
-from memory.playbook import (
+from chemclaw.core.config import settings
+from chemclaw.ingest.eln.ord import Component, OrdReaction, Role
+from chemclaw.kg.note import Note
+from chemclaw.kg.render import render_note
+from chemclaw.memory.campaign import campaign_note_from_chain
+from chemclaw.memory.chains import detect_chains
+from chemclaw.memory.ids import stable_id
+from chemclaw.memory.interaction import note_from_confirmed_answer
+from chemclaw.memory.jobs import build_campaign_notes, distill_playbooks, synthesize_campaigns
+from chemclaw.memory.playbook import (
     PlaybookError,
     find_playbook_candidates,
     playbook_note,
 )
-from memory.supersede import supersede_updates
+from chemclaw.memory.supersede import supersede_updates
 from tests.conftest import FakeSubmitter
 
 
@@ -332,7 +332,7 @@ def test_build_campaign_notes_is_the_pure_half_of_synthesis() -> None:
     that the extracted builder yields the same content the in-process publish path does, so the
     refactor is behavior-preserving.
     """
-    from memory.jobs import build_campaign_notes
+    from chemclaw.memory.jobs import build_campaign_notes
 
     a = _reaction("a", ["CCO"], ["CC=O"], project="proj-x")
     b = _reaction("b", ["CC=O"], ["CC(O)O"], project="proj-x")
@@ -364,7 +364,7 @@ def test_interaction_note_captures_confirmed_answer() -> None:
 
 def test_record_confirmed_answer_tool_uses_gate(monkeypatch: pytest.MonkeyPatch) -> None:
     """The agent tool routes a confirmed answer through the (fake) PR-gate (5.5 wiring)."""
-    from agents import memory_tools
+    from chemclaw.agent import memory_tools
 
     fake = FakeSubmitter()
     monkeypatch.setattr(memory_tools, "default_submitter", lambda: fake)

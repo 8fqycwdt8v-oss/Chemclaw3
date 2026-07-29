@@ -13,7 +13,7 @@ Pure validation — no subprocess, no network, no filesystem.
 import pytest
 from pydantic import ValidationError
 
-from connectors.manifest import (
+from chemclaw.connectors.manifest import (
     BearerAuth,
     ConnectorManifest,
     HttpEndpoint,
@@ -102,14 +102,16 @@ def test_a_job_declares_its_arguments_exactly_one_way() -> None:
         {**_JOB, "params": [{"name": "smiles", "type": "string", "description": "the molecule"}]}
     )
     assert inline.params[0].name == "smiles"
-    referenced = JobSpec.model_validate({**_JOB, "params_model": "bo.problem:CampaignSpec"})
-    assert referenced.params_model == "bo.problem:CampaignSpec"
+    referenced = JobSpec.model_validate(
+        {**_JOB, "params_model": "chemclaw.science.bo.problem:CampaignSpec"}
+    )
+    assert referenced.params_model == "chemclaw.science.bo.problem:CampaignSpec"
     with pytest.raises(ValidationError, match="declares both"):
         JobSpec.model_validate(
             {
                 **_JOB,
                 "params": [{"name": "a", "type": "string", "description": "a"}],
-                "params_model": "bo.problem:CampaignSpec",
+                "params_model": "chemclaw.science.bo.problem:CampaignSpec",
             }
         )
 

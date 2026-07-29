@@ -25,9 +25,9 @@ from urllib.parse import quote
 import psycopg
 import pytest
 
-from calc.migrate import migrate
-from chemclaw.config import settings
-from chemclaw.db import connect
+from chemclaw.core.config import settings
+from chemclaw.core.db import connect
+from chemclaw.science.calc.migrate import migrate
 
 # Not a `Settings` field on purpose: `chemclaw/config.py` is the operator-facing deployment
 # surface, and its parity tests (DA-1) require every field to be documented in `.env.example`.

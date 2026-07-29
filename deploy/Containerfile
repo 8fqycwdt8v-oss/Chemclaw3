@@ -49,40 +49,25 @@ RUN set -eux; \
     xtb --version >/dev/null && crest --version >/dev/null
 
 COPY pyproject.toml uv.lock README.md ./
-# Copy the source needed to build the wheel + run every component.
-COPY chemclaw ./chemclaw
-COPY agents ./agents
-COPY service ./service
-COPY workflows ./workflows
-COPY workers ./workers
-COPY mcp_servers ./mcp_servers
-COPY report ./report
-COPY bo ./bo
-COPY eln ./eln
-COPY calc ./calc
-COPY infra ./infra
-COPY kg ./kg
-COPY memory ./memory
-COPY sources ./sources
-# The connector bundles: their manifests, their FastAPI apps, and any skills/profiles they ship.
-# One image serves every component including each connector (the entrypoint dispatches on
-# CHEMCLAW_COMPONENT=connector-<name>), so adding a bundle needs no change here.
-COPY connectors ./connectors
-COPY safety ./safety
-# The two file-defined extension seams beside connectors: `templates/` holds the step templates
-# (code plus the shipped YAML) and `profiles/` the cross-capability agent profiles. Both are
-# discovered from disk at start-up, so an image missing them silently advertises fewer
-# capabilities rather than failing — which is why they are COPYd explicitly.
-COPY templates ./templates
-COPY profiles ./profiles
-# Not optional extras: `skills/` IS the agent's judgment layer (an image without it advertises no
-# skills at all), `scripts/` owns the Temporal Schedules that fire every periodic job, and `evals/`
-# carries the committed case-set + baseline the drift job scores against. `knowledge/` seeds the
-# note tree so the mount point exists even before the first sync.
+# All first-party code, in one COPY. Before D-141 this was eighteen lines, one per top-level
+# package, and a new package that nobody added here was simply missing from the image — which is
+# how `connectors/` and `templates/` came to be absent from the wheel and coverage lists too.
+# One package means there is nothing left to forget.
+COPY src ./src
+# The data the application reads from disk at start-up, none of which is code. `skills/` IS the
+# agent's judgment layer (an image without it advertises no skills at all); `profiles/` holds the
+# cross-capability agent profiles and `templates/` the shipped step templates — both discovered
+# from disk, so an image missing them silently advertises fewer capabilities rather than failing.
+# `evals/` carries the committed case-set and baseline the drift job scores against, `data/` the
+# vendored dataset and the sample ELN exports, and `knowledge/` seeds the note tree so the mount
+# point exists even before the first sync. `infra/` holds the SQL migrations the migrate Job runs.
 COPY skills ./skills
-COPY scripts ./scripts
+COPY profiles ./profiles
+COPY templates ./templates
 COPY evals ./evals
+COPY data ./data
 COPY knowledge ./knowledge
+COPY infra ./infra
 COPY deploy/entrypoint.sh /usr/local/bin/chemclaw-entrypoint
 COPY deploy/knowledge-sync.sh /usr/local/bin/chemclaw-knowledge-sync
 

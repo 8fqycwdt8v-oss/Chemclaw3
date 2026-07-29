@@ -13,15 +13,15 @@ import pytest
 from temporalio.client import Client
 from temporalio.worker import Worker
 
-import workflows.interaction_approval as approval
-from tests.conftest import FakeSubmitter
-from tests.temporal_env import pydantic_client, start_env_or_skip
-from workflows.interaction_approval import (
+import chemclaw.durable.interaction_approval as approval
+from chemclaw.durable.interaction_approval import (
     ApprovalOutcome,
     InteractionApprovalWorkflow,
     InteractionCandidate,
     propose_confirmed_answer_activity,
 )
+from tests.conftest import FakeSubmitter
+from tests.temporal_env import pydantic_client, start_env_or_skip
 
 _CANDIDATE = InteractionCandidate(
     interaction_id="q-42",
@@ -100,7 +100,7 @@ def test_decision_state_machine_first_click_wins() -> None:
 
 def test_background_worker_registers_interaction_approval() -> None:
     """The approval workflow/activity are wired onto the background worker (regression)."""
-    from workers.background_worker import BACKGROUND_ACTIVITIES, BACKGROUND_WORKFLOWS
+    from chemclaw.durable.background_worker import BACKGROUND_ACTIVITIES, BACKGROUND_WORKFLOWS
 
     assert InteractionApprovalWorkflow in BACKGROUND_WORKFLOWS
     assert propose_confirmed_answer_activity in BACKGROUND_ACTIVITIES

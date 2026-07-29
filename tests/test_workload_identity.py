@@ -12,8 +12,8 @@ from pathlib import Path
 import httpx
 import pytest
 
-from agents.identity.workload import WorkloadIdentityError, WorkloadTokenProvider
-from chemclaw.config import settings
+from chemclaw.agent.identity.workload import WorkloadIdentityError, WorkloadTokenProvider
+from chemclaw.core.config import settings
 
 
 @pytest.fixture

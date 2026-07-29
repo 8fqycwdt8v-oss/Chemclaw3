@@ -7,7 +7,8 @@ demanded before any durable work, and re-launching the identical job returns the
 instead of paying twice. Those are the five properties the four hand-written adapters had, now
 asserted once against the factory that replaced them.
 
-Temporal is faked at the client seam (`connectors.jobs.connect`) because none of this is about
+Temporal is faked at the client seam (`chemclaw.connectors.jobs.connect`) because none of this is
+about
 Temporal's behavior — `test_connector_job_workflow.py` covers that against a real server. What
 is under test here is what happens *before* the workflow starts, which is where the gates live.
 """
@@ -19,13 +20,18 @@ import pytest
 from pydantic import BaseModel, ValidationError
 from temporalio.exceptions import WorkflowAlreadyStartedError
 
-from agents.authz import AuthorizationError
-from agents.dialogue_tools import reset_dry_run, set_dry_run
-from agents.identity_context import reset_current_identity, set_current_identity
-from agents.turn_signals import JobSignal, begin_turn, drain, end_turn
-from connectors.jobs import ConnectorJobError, build_job_tool, job_workflow_id, resolve_params_model
-from connectors.manifest import JobSpec
-from workflows.connector_job import ConnectorJobInput
+from chemclaw.agent.authz import AuthorizationError
+from chemclaw.agent.dialogue_tools import reset_dry_run, set_dry_run
+from chemclaw.agent.identity_context import reset_current_identity, set_current_identity
+from chemclaw.agent.turn_signals import JobSignal, begin_turn, drain, end_turn
+from chemclaw.connectors.jobs import (
+    ConnectorJobError,
+    build_job_tool,
+    job_workflow_id,
+    resolve_params_model,
+)
+from chemclaw.connectors.manifest import JobSpec
+from chemclaw.durable.connector_job import ConnectorJobInput
 
 _SPEC = JobSpec.model_validate(
     {
@@ -77,7 +83,7 @@ def client(monkeypatch: pytest.MonkeyPatch) -> _FakeClient:
     async def _connect() -> _FakeClient:
         return fake
 
-    monkeypatch.setattr("connectors.jobs.connect", _connect)
+    monkeypatch.setattr("chemclaw.connectors.jobs.connect", _connect)
     return fake
 
 
@@ -140,10 +146,10 @@ def test_a_referenced_model_gives_full_fidelity_for_a_structured_input() -> None
             "workflow": "BoCampaignWorkflow",
             "task_queue": "connector-bo",
             "summary": "Start a campaign.",
-            "params_model": "bo.problem:CampaignSpec",
+            "params_model": "chemclaw.science.bo.problem:CampaignSpec",
         }
     )
-    from bo.problem import CampaignSpec
+    from chemclaw.science.bo.problem import CampaignSpec
 
     assert build_job_tool("bo", referenced).__annotations__["params"] is CampaignSpec
 
@@ -153,9 +159,9 @@ def test_an_unresolvable_model_reference_fails_with_a_named_error() -> None:
     with pytest.raises(ConnectorJobError, match="cannot import"):
         resolve_params_model("no.such.module:Thing")
     with pytest.raises(ConnectorJobError, match="has no"):
-        resolve_params_model("bo.problem:NotAThing")
+        resolve_params_model("chemclaw.science.bo.problem:NotAThing")
     with pytest.raises(ConnectorJobError, match="not a pydantic model"):
-        resolve_params_model("bo.problem:require_rounds_within_ceiling")
+        resolve_params_model("chemclaw.science.bo.problem:require_rounds_within_ceiling")
 
 
 def test_launching_starts_the_declared_workflow_on_the_declared_queue(
@@ -253,7 +259,7 @@ def test_a_duplicate_submit_returns_the_existing_id_rather_than_erroring(
     async def _connect() -> _FakeClient:
         return fake
 
-    monkeypatch.setattr("connectors.jobs.connect", _connect)
+    monkeypatch.setattr("chemclaw.connectors.jobs.connect", _connect)
     tool = build_job_tool("calc", _SPEC)
     token = begin_turn()
     try:
@@ -292,10 +298,10 @@ def test_a_fresh_start_blocks_the_harness_plan_on_the_job(
     """
     from agent_framework import AgentSession
 
-    from agents.harness_todo import complete_awaiting_job
-    from agents.session_context import reset_current_session, set_current_session
+    from chemclaw.agent.harness_todo import complete_awaiting_job
+    from chemclaw.agent.session_context import reset_current_session, set_current_session
 
-    monkeypatch.setattr("chemclaw.config.settings.harness_enabled", True)
+    monkeypatch.setattr("chemclaw.core.config.settings.harness_enabled", True)
     tool = build_job_tool("calc", _SPEC)
     session = AgentSession(session_id="s1")
     token = set_current_session(session)
@@ -311,16 +317,16 @@ def test_a_duplicate_launch_leaves_the_harness_plan_alone(monkeypatch: pytest.Mo
     """A re-joined run may already be finished, so an awaiting todo for it would never flip."""
     from agent_framework import AgentSession
 
-    from agents.harness_todo import complete_awaiting_job
-    from agents.session_context import reset_current_session, set_current_session
+    from chemclaw.agent.harness_todo import complete_awaiting_job
+    from chemclaw.agent.session_context import reset_current_session, set_current_session
 
     fake = _FakeClient(error=WorkflowAlreadyStartedError("dup", "wf", run_id=None))
 
     async def _connect() -> _FakeClient:
         return fake
 
-    monkeypatch.setattr("connectors.jobs.connect", _connect)
-    monkeypatch.setattr("chemclaw.config.settings.harness_enabled", True)
+    monkeypatch.setattr("chemclaw.connectors.jobs.connect", _connect)
+    monkeypatch.setattr("chemclaw.core.config.settings.harness_enabled", True)
     tool = build_job_tool("calc", _SPEC)
     session = AgentSession(session_id="s1")
     token = set_current_session(session)
@@ -337,10 +343,10 @@ def test_the_classic_agent_never_writes_to_a_todo_list_nobody_reads(
     """With the harness off (the default), a launch touches no todo state."""
     from agent_framework import AgentSession
 
-    from agents.harness_todo import complete_awaiting_job
-    from agents.session_context import reset_current_session, set_current_session
+    from chemclaw.agent.harness_todo import complete_awaiting_job
+    from chemclaw.agent.session_context import reset_current_session, set_current_session
 
-    monkeypatch.setattr("chemclaw.config.settings.harness_enabled", False)
+    monkeypatch.setattr("chemclaw.core.config.settings.harness_enabled", False)
     tool = build_job_tool("calc", _SPEC)
     session = AgentSession(session_id="s1")
     token = set_current_session(session)
@@ -355,7 +361,7 @@ def test_a_launch_with_no_ambient_session_does_not_crash(
     client: _FakeClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """The CLI path: harness on, but no live `AgentSession` to hold a plan."""
-    monkeypatch.setattr("chemclaw.config.settings.harness_enabled", True)
+    monkeypatch.setattr("chemclaw.core.config.settings.harness_enabled", True)
     tool = build_job_tool("calc", _SPEC)
     assert _launch(tool, smiles="CCO") == job_workflow_id(
         "calc", "run_calculation", {"smiles": "CCO"}
@@ -381,13 +387,14 @@ def test_an_expensive_job_is_authorized_before_any_durable_work(
     """`authorize_trigger` fires for `expensive: true`, so a plan cannot outrun entitlements.
 
     Enforcement is only active under Entra, so the gate is switched on here with the same two
-    config tokens a real deployment sets — asserting the wiring, not re-testing `agents.authz`.
+    config tokens a real deployment sets — asserting the wiring, not re-testing
+    `chemclaw.agent.authz`.
     """
     expensive = JobSpec.model_validate({**_SPEC.model_dump(exclude_none=True), "expensive": True})
     tool = build_job_tool("calc", expensive)
-    monkeypatch.setattr("chemclaw.config.settings.entra_required", True)
-    monkeypatch.setattr("chemclaw.config.settings.entra_expensive_actions", "run_calculation")
-    monkeypatch.setattr("chemclaw.config.settings.entra_privileged_roles", "hpc-operator")
+    monkeypatch.setattr("chemclaw.core.config.settings.entra_required", True)
+    monkeypatch.setattr("chemclaw.core.config.settings.entra_expensive_actions", "run_calculation")
+    monkeypatch.setattr("chemclaw.core.config.settings.entra_privileged_roles", "hpc-operator")
     identity = set_current_identity("user-1", frozenset({"process-chemist"}))
     try:
         with pytest.raises(AuthorizationError):
@@ -402,7 +409,7 @@ def test_durable_work_is_refused_without_an_authenticated_actor(
 ) -> None:
     """`require_actor` is the F4-T3 core rule: under Entra, no user means no durable job."""
     tool = build_job_tool("calc", _SPEC)
-    monkeypatch.setattr("chemclaw.config.settings.entra_required", True)
+    monkeypatch.setattr("chemclaw.core.config.settings.entra_required", True)
     with pytest.raises(AuthorizationError, match="requires an authenticated user"):
         _launch(tool, smiles="CCO")
     assert client.calls == []
@@ -475,7 +482,7 @@ def _install(monkeypatch: pytest.MonkeyPatch, client: _ResultClient) -> _ResultC
     async def _connect() -> _ResultClient:
         return client
 
-    monkeypatch.setattr("connectors.jobs.connect", _connect)
+    monkeypatch.setattr("chemclaw.connectors.jobs.connect", _connect)
     return client
 
 

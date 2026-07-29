@@ -10,10 +10,15 @@ import asyncio
 import numpy as np
 import pytest
 
-from calc import xtb_cli
-from calc.store import InMemoryStore
-from calc.structure import Structure, structure_from_smiles
-from calc.xtb_opt import OptimizationSummary, OptSpec, optimize_structure, run_cached_optimization
+from chemclaw.science.calc import xtb_cli
+from chemclaw.science.calc.store import InMemoryStore
+from chemclaw.science.calc.structure import Structure, structure_from_smiles
+from chemclaw.science.calc.xtb_opt import (
+    OptimizationSummary,
+    OptSpec,
+    optimize_structure,
+    run_cached_optimization,
+)
 
 
 def test_optimization_lowers_the_energy_and_flattens_the_gradient() -> None:

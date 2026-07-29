@@ -7,8 +7,8 @@ SKILL.md fails CI rather than silently disappearing from the agent's skill surfa
 
 from pathlib import Path
 
-from chemclaw.config import settings
-from scripts.validate_skills import validate_skills
+from chemclaw.cli.validate_skills import validate_skills
+from chemclaw.core.config import settings
 
 
 def test_shipped_skills_are_valid() -> None:
@@ -72,9 +72,9 @@ def test_a_declared_tool_resolves_wherever_the_capability_lives() -> None:
     did not, moving a tool across the boundary would break every skill that teaches it,
     which would make the deployment shape a property of the judgment layer.
     """
-    from agents.skill_manifest import SkillManifest
-    from connectors.registry import connector_tool_names
-    from scripts.validate_skills import _dependency_problems
+    from chemclaw.agent.skill_manifest import SkillManifest
+    from chemclaw.cli.validate_skills import _dependency_problems
+    from chemclaw.connectors.registry import connector_tool_names
 
     out_of_process = set(connector_tool_names())
     assert "predict_pka" in out_of_process  # a connector MCP tool
@@ -91,8 +91,8 @@ def test_a_declared_tool_resolves_wherever_the_capability_lives() -> None:
 
 def test_an_invented_tool_is_still_rejected() -> None:
     """Widening the lookup must not weaken it: an unknown name is still a failure."""
-    from agents.skill_manifest import SkillManifest
-    from scripts.validate_skills import _dependency_problems
+    from chemclaw.agent.skill_manifest import SkillManifest
+    from chemclaw.cli.validate_skills import _dependency_problems
 
     problems = _dependency_problems(
         Path("probe/SKILL.md"),

@@ -9,9 +9,9 @@ import asyncio
 
 import psycopg
 
-from agents.audit import AuditEvent
-from agents.audit_store import PostgresAuditSink
-from chemclaw.config import settings
+from chemclaw.agent.audit import AuditEvent
+from chemclaw.agent.audit_store import PostgresAuditSink
+from chemclaw.core.config import settings
 from tests.pg import migrated_db_or_skip
 
 

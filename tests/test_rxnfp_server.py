@@ -6,7 +6,7 @@ hit the production store. The capability logic is proven in `test_rxnfp.py`.
 
 import asyncio
 
-from mcp_servers.rxnfp.server import server
+from chemclaw.mcp.rxnfp.server import server
 
 
 def test_server_advertises_the_reaction_tools() -> None:

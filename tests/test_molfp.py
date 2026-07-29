@@ -13,9 +13,9 @@ from contextlib import asynccontextmanager
 
 import pytest
 
-from chemclaw import db
-from chemclaw.config import settings
-from mcp_servers.fpstore import (
+from chemclaw.core import db
+from chemclaw.core.config import settings
+from chemclaw.mcp.fpstore import (
     FingerprintError,
     FingerprintRecord,
     InMemoryFingerprintStore,
@@ -24,9 +24,9 @@ from mcp_servers.fpstore import (
     find_matches,
     tanimoto,
 )
-from mcp_servers.molfp import search
-from mcp_servers.molfp.fingerprint import ecfp_bitstring, molecule_definition
-from mcp_servers.molfp.search import (
+from chemclaw.mcp.molfp import search
+from chemclaw.mcp.molfp.fingerprint import ecfp_bitstring, molecule_definition
+from chemclaw.mcp.molfp.search import (
     SubstructureHit,
     find_similar_molecules,
     find_substructure_matches,

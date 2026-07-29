@@ -11,8 +11,8 @@ that a deployment must opt in before anything is deleted.
 
 import pytest
 
-from chemclaw.config import settings
-from workflows.retention import _PRUNABLE, _window_days
+from chemclaw.core.config import settings
+from chemclaw.durable.retention import _PRUNABLE, _window_days
 
 
 def test_only_spent_operational_rows_are_prunable() -> None:

@@ -16,8 +16,8 @@ import pytest
 from agent_framework import AgentSession
 from fastapi.testclient import TestClient
 
-from service.app import LiveSession, _LiveSessions, create_app
-from service.metrics import METRICS
+from chemclaw.api.app import LiveSession, _LiveSessions, create_app
+from chemclaw.api.metrics import METRICS
 
 # A minimal ASGI HTTP scope, for the one test that drives the app below `TestClient` (which
 # cannot express "the handler was cancelled and nothing was ever sent").
@@ -218,7 +218,7 @@ def test_a_launched_job_reaches_the_browser_as_an_sse_event() -> None:
     The end-to-end half of D-042: without it the chemist saw nothing between their message and
     the answer, with the first sign of the job arriving only as the completion push-back.
     """
-    from agents.turn_signals import announce_job_started
+    from chemclaw.agent.turn_signals import announce_job_started
 
     class _JobAgent(_FakeAgent):
         def run(  # noqa: D102 - a fake agent's run, documented by its class
@@ -256,7 +256,7 @@ def test_turn_is_shed_with_503_at_capacity(monkeypatch) -> None:  # type: ignore
     """A turn that cannot get an admission permit within the timeout is shed with 503 (AG-15)."""
     import asyncio
 
-    from chemclaw.config import settings
+    from chemclaw.core.config import settings
 
     monkeypatch.setattr(settings, "service_turn_admission_timeout_seconds", 0.05)
     app = create_app(agent_factory=lambda _profile: _FakeAgent())
@@ -277,7 +277,7 @@ def test_permit_is_released_after_each_turn(monkeypatch) -> None:  # type: ignor
     """
     import asyncio
 
-    from chemclaw.config import settings
+    from chemclaw.core.config import settings
 
     monkeypatch.setattr(settings, "service_turn_admission_timeout_seconds", 1.0)
     app = create_app(agent_factory=lambda _profile: _FakeAgent())
@@ -303,7 +303,7 @@ def test_message_to_unknown_session_is_404() -> None:
 
 def test_oversized_message_is_rejected(monkeypatch) -> None:  # type: ignore[no-untyped-def]
     """A message past the configured cap is a clean 422, not an unbounded read (SEC-4)."""
-    from chemclaw.config import settings
+    from chemclaw.core.config import settings
 
     monkeypatch.setattr(settings, "service_max_message_chars", 10)
     with _client(_FakeAgent()) as client:
@@ -314,7 +314,7 @@ def test_oversized_message_is_rejected(monkeypatch) -> None:  # type: ignore[no-
 
 def test_a_session_is_owner_scoped() -> None:
     """A user cannot post into or stream a session another user created (review finding)."""
-    from service.auth import Principal, require_principal
+    from chemclaw.api.auth import Principal, require_principal
 
     app = create_app(agent_factory=lambda _profile: _FakeAgent())
     alice = Principal(oid="alice", upn="alice@corp", roles=frozenset())
@@ -335,8 +335,8 @@ def test_a_session_is_owner_scoped() -> None:
 
 def test_job_pushback_streams_completed_events(monkeypatch) -> None:  # type: ignore[no-untyped-def]
     """The events endpoint streams a finished job's push-back to the session (F3-T3)."""
-    import service.app as app_module
-    from agents.session_events import SessionEvent
+    import chemclaw.api.app as app_module
+    from chemclaw.agent.session_events import SessionEvent
 
     async def _fake_stream(session_id: str, **_: object) -> object:
         yield SessionEvent(
@@ -371,10 +371,10 @@ def test_job_pushback_flips_the_harness_awaiting_todo(monkeypatch) -> None:  # t
 
     from agent_framework import DEFAULT_TODO_SOURCE_ID, TodoSessionStore
 
-    import service.app as app_module
-    from agents.harness_todo import mark_awaiting_job
-    from agents.session_events import SessionEvent
-    from chemclaw.config import settings
+    import chemclaw.api.app as app_module
+    from chemclaw.agent.harness_todo import mark_awaiting_job
+    from chemclaw.agent.session_events import SessionEvent
+    from chemclaw.core.config import settings
 
     monkeypatch.setattr(settings, "harness_enabled", True)
 
@@ -406,10 +406,10 @@ def test_job_pushback_does_not_touch_todos_when_harness_disabled(monkeypatch) ->
 
     from agent_framework import DEFAULT_TODO_SOURCE_ID, TodoSessionStore
 
-    import service.app as app_module
-    from agents.harness_todo import mark_awaiting_job
-    from agents.session_events import SessionEvent
-    from chemclaw.config import settings
+    import chemclaw.api.app as app_module
+    from chemclaw.agent.harness_todo import mark_awaiting_job
+    from chemclaw.agent.session_events import SessionEvent
+    from chemclaw.core.config import settings
 
     monkeypatch.setattr(settings, "harness_enabled", False)
 
@@ -547,7 +547,7 @@ def test_a_finished_turn_hands_its_cross_process_claim_back() -> None:
 class _UnreachableOwnerStore(_FakeOwnerStore):
     """An ownership registry whose every call fails the way a starved pool checkout does.
 
-    `chemclaw.db.connection` maps both `PoolTimeout` and an unreachable server to
+    `chemclaw.core.db.connection` maps both `PoolTimeout` and an unreachable server to
     `ConnectionError`, so this is exactly what a route sees when no pooled connection can be
     handed over in time.
     """
@@ -589,7 +589,7 @@ def test_session_list_is_owner_scoped_and_newest_first() -> None:
     store. Scoping is the security half: a session id is a capability, and listing someone else's
     would hand it out.
     """
-    from service.auth import Principal, require_principal
+    from chemclaw.api.auth import Principal, require_principal
 
     alice = Principal(oid="alice", upn="a@corp", roles=frozenset())
     bob = Principal(oid="bob", upn="b@corp", roles=frozenset())
@@ -617,7 +617,7 @@ def test_session_list_is_empty_without_a_durable_registry() -> None:
     Reporting the process's live LRU instead would answer a question about the deployment with an
     eviction-dependent guess that a pod restart silently changes.
     """
-    from service.auth import Principal, require_principal
+    from chemclaw.api.auth import Principal, require_principal
 
     app = create_app(
         agent_factory=lambda _profile: _FakeAgent()
@@ -641,7 +641,7 @@ def test_transcript_reads_back_the_stored_thread() -> None:
     """
     from agent_framework import Message
 
-    from service.auth import Principal, require_principal
+    from chemclaw.api.auth import Principal, require_principal
 
     app = create_app(agent_factory=lambda _profile: _FakeAgent())
     app.dependency_overrides[require_principal] = lambda: Principal(
@@ -678,8 +678,8 @@ def test_session_rehydrates_after_a_restart() -> None:
     Simulates the pod restart the front door previously could not survive: ownership persists, so a
     cache miss looks the owner up and rebuilds the live handle instead of forcing a new session.
     """
-    from chemclaw.config import settings
-    from service.auth import Principal, require_principal
+    from chemclaw.api.auth import Principal, require_principal
+    from chemclaw.core.config import settings
 
     owners = _FakeOwnerStore()
     app = create_app(agent_factory=lambda _profile: _FakeAgent(), owner_store=owners)
@@ -702,8 +702,8 @@ def test_session_rehydrates_after_a_restart() -> None:
 
 def test_rehydration_is_owner_scoped() -> None:
     """After a restart, a different user still cannot reattach to someone else's session (F3)."""
-    from chemclaw.config import settings
-    from service.auth import Principal, require_principal
+    from chemclaw.api.auth import Principal, require_principal
+    from chemclaw.core.config import settings
 
     owners = _FakeOwnerStore()
     app = create_app(agent_factory=lambda _profile: _FakeAgent(), owner_store=owners)
@@ -727,7 +727,7 @@ def test_no_rehydration_without_durable_store() -> None:
 
     The default path is unchanged: rehydration is gated on `session_store="postgres"`.
     """
-    from chemclaw.config import settings
+    from chemclaw.core.config import settings
 
     app = create_app(
         agent_factory=lambda _profile: _FakeAgent()
@@ -742,7 +742,7 @@ def test_no_rehydration_without_durable_store() -> None:
 
 def test_turn_is_refused_over_budget(monkeypatch) -> None:  # type: ignore[no-untyped-def]
     """Once a session's turn budget is spent, the next turn is refused with 429 (budget #3)."""
-    from chemclaw.config import settings
+    from chemclaw.core.config import settings
 
     monkeypatch.setattr(settings, "budget_enabled", True)
     monkeypatch.setattr(settings, "budget_max_turns_per_session", 1)
@@ -762,7 +762,7 @@ def test_turn_is_refused_over_budget(monkeypatch) -> None:  # type: ignore[no-un
 
 def test_budget_disabled_allows_many_turns(monkeypatch) -> None:  # type: ignore[no-untyped-def]
     """With budgets off (the default), turn count is never capped (unchanged behavior)."""
-    from chemclaw.config import settings
+    from chemclaw.core.config import settings
 
     monkeypatch.setattr(settings, "budget_enabled", False)
     monkeypatch.setattr(settings, "budget_max_turns_per_session", 1)
@@ -893,7 +893,7 @@ def test_stalled_turn_times_out_and_frees_the_permit(monkeypatch) -> None:  # ty
     Without this, a hung model stream would hold one of the few admission permits forever; a
     handful of stalls would collapse the front door (every turn shed 503) until restart.
     """
-    from chemclaw.config import settings
+    from chemclaw.core.config import settings
 
     class _HungAgent(_FakeAgent):
         def run(  # noqa: D102 - a fake agent's run, documented by its class
@@ -944,7 +944,7 @@ def test_cancelled_admission_wait_does_not_brick_the_session(monkeypatch) -> Non
 
     import httpx
 
-    from chemclaw.config import settings
+    from chemclaw.core.config import settings
 
     monkeypatch.setattr(settings, "service_turn_admission_timeout_seconds", 30.0)
 
@@ -983,9 +983,9 @@ def test_event_streams_are_capped_per_user(monkeypatch) -> None:  # type: ignore
 
     import httpx
 
-    import service.app as app_module
-    from agents.session_events import SessionEvent
-    from chemclaw.config import settings
+    import chemclaw.api.app as app_module
+    from chemclaw.agent.session_events import SessionEvent
+    from chemclaw.core.config import settings
 
     async def _idle_stream(session_id: str, **_: object) -> object:
         while True:  # holds the stream open without ever delivering
@@ -1022,8 +1022,8 @@ def test_events_route_claims_only_job_completed(monkeypatch) -> None:  # type: i
     The claim marks rows consumed atomically; claiming every kind and filtering afterwards would
     silently destroy events of other kinds meant for other consumers.
     """
-    import service.app as app_module
-    from agents.session_events import SessionEvent
+    import chemclaw.api.app as app_module
+    from chemclaw.agent.session_events import SessionEvent
 
     captured: dict[str, object] = {}
 
@@ -1049,7 +1049,7 @@ def test_every_session_scoped_route_is_ownership_gated() -> None:
     """
     from fastapi.routing import APIRoute
 
-    from service.auth import Principal, require_principal
+    from chemclaw.api.auth import Principal, require_principal
 
     app = create_app(agent_factory=lambda _profile: _FakeAgent())
     session_routes = [

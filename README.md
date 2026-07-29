@@ -22,7 +22,7 @@ Useful targets: `make eval` (score the versioned metric case-set),
 `make eln-validate` (validate ELN exports), `make kg-validate` (knowledge-graph
 schema + link check). See the `Makefile` for the full list.
 
-Every environment value comes from `chemclaw/config.py` (see `.env.example`);
+Every environment value comes from `src/chemclaw/core/config.py` (see `.env.example`);
 there is no second config source.
 
 ## Running the assistant
@@ -30,13 +30,13 @@ there is no second config source.
 ```sh
 # The front-door chat service (FastAPI + SSE). Browse to the served page, start a
 # session, watch a plan + tool use, get a cited answer.
-uvicorn service.app:create_app --factory --port 8080
+uvicorn chemclaw.api.app:create_app --factory --port 8080
 
 # Durable workers (separate processes; need Temporal + Postgres from `make up`).
-python -m workers.background_worker   # background-jobs (ELN sync, reports, memory)
-python -m connectors.qm.worker        # connector-qm (the durable QM/DFT job via Nextflow)
-python -m connectors.calc.worker      # connector-calc (the expensive xTB calculations)
-python -m connectors.bo.worker        # connector-bo (optimization campaigns)
+python -m chemclaw.durable.background_worker    # background-jobs (ELN sync, reports, memory)
+python -m chemclaw.connectors.qm.worker         # connector-qm (the durable QM/DFT job via Nextflow)
+python -m chemclaw.connectors.calc.worker       # connector-calc (the expensive xTB calculations)
+python -m chemclaw.connectors.bo.worker         # connector-bo (optimization campaigns)
 ```
 
 The LLM provider is config-selected (`CHEMCLAW_LLM_PROVIDER`): an internal

@@ -19,7 +19,7 @@ PORT="${CHEMCLAW_SERVICE_PORT:-8080}"
 
 echo "Starting Chemclaw service on ${HOST}:${PORT}"
 VENV="$SCRIPT_DIR/.venv"
-exec "$VENV/bin/python" -m uvicorn service.app:create_app \
+exec "$VENV/bin/python" -m uvicorn chemclaw.api.app:create_app \
   --factory \
   --host "$HOST" \
   --port "$PORT" \

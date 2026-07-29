@@ -10,14 +10,14 @@ from uuid import uuid4
 
 import pytest
 
-from agents.session_events import (
+from chemclaw.agent.session_events import (
     SessionEvent,
     claim_unconsumed,
     record_session_event,
     stream_new_events,
 )
-from chemclaw import db
-from chemclaw.config import settings
+from chemclaw.core import db
+from chemclaw.core.config import settings
 from tests.pg import migrated_db_or_skip
 
 
@@ -56,8 +56,8 @@ def test_session_event_requires_session_and_kind() -> None:
 
 def test_notify_activity_forwards_to_the_channel(monkeypatch) -> None:  # type: ignore[no-untyped-def]
     """The Temporal notify activity forwards its typed input to the channel writer (no DB)."""
-    import workflows.notify as notify
-    from workflows.notify import SessionEventInput, record_session_event_activity
+    import chemclaw.durable.notify as notify
+    from chemclaw.durable.notify import SessionEventInput, record_session_event_activity
 
     captured: dict[str, object] = {}
 
@@ -226,7 +226,7 @@ def test_dedupe_key_derivation_is_stable_and_event_specific() -> None:
     the same workflow id, a different kind, or a different payload (one drift alert per metric in
     one run) → different keys, so genuinely distinct events never dedupe each other.
     """
-    from workflows.notify import _dedupe_key
+    from chemclaw.durable.notify import _dedupe_key
 
     base = _dedupe_key("wf-1", "run-1", "job_completed", {"job_id": "j", "energy": -1.5})
     assert base == _dedupe_key("wf-1", "run-1", "job_completed", {"energy": -1.5, "job_id": "j"})

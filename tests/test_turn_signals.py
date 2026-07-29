@@ -7,7 +7,8 @@ opened a knowledge PR was never told: the reference went into the model's contex
 "human signs off" line existed only in a git host's UI.
 
 The runner only sees the model's streamed updates, so tools hand these facts over out of band
-through `agents.turn_signals` (a contextvar, task-local like the ambient session/identity). These
+through `chemclaw.agent.turn_signals` (a contextvar, task-local like the ambient session/identity).
+These
 tests drive the real runner with a fake agent whose "tool" records a signal, and assert the events
 come out interleaved in order.
 """
@@ -19,9 +20,15 @@ from typing import Any
 import pytest
 from agent_framework import AgentSession
 
-from agents.turn_signals import begin_turn, drain, end_turn, record_job_started, record_proposal
-from chemclaw.config import settings
-from service.runner import run_turn
+from chemclaw.agent.turn_signals import (
+    begin_turn,
+    drain,
+    end_turn,
+    record_job_started,
+    record_proposal,
+)
+from chemclaw.api.runner import run_turn
+from chemclaw.core.config import settings
 
 
 class _SignallingAgent:
@@ -148,7 +155,7 @@ def test_plan_is_emitted_from_the_harness_todo_state(monkeypatch: pytest.MonkeyP
         calls["n"] += 1
         return plans[min(calls["n"] - 1, len(plans) - 1)]
 
-    monkeypatch.setattr("service.runner.todo_titles", _fake_titles)
+    monkeypatch.setattr("chemclaw.api.runner.todo_titles", _fake_titles)
     events = _events(_SignallingAgent(jobs=[], proposals=[]))
     emitted = [e.todos for e in events if e.type == "plan"]
     # Emitted when it first appears and again when it changes — never once per update.
@@ -162,7 +169,7 @@ def test_an_unchanged_plan_is_not_re_emitted(monkeypatch: pytest.MonkeyPatch) ->
     async def _fake_titles(session: Any) -> list[str]:
         return ["[ ] one step"]
 
-    monkeypatch.setattr("service.runner.todo_titles", _fake_titles)
+    monkeypatch.setattr("chemclaw.api.runner.todo_titles", _fake_titles)
     events = _events(_SignallingAgent(jobs=[], proposals=[]))
     assert len([e for e in events if e.type == "plan"]) == 1
 
@@ -174,7 +181,7 @@ def test_a_failing_plan_read_never_sinks_the_turn(monkeypatch: pytest.MonkeyPatc
     async def _boom(session: Any) -> list[str]:
         raise RuntimeError("todo store unavailable")
 
-    monkeypatch.setattr("service.runner.todo_titles", _boom)
+    monkeypatch.setattr("chemclaw.api.runner.todo_titles", _boom)
     events = _events(_SignallingAgent(jobs=[], proposals=[]))
     assert events[-1].type == "answer"
     assert not [e for e in events if e.type == "error"]
@@ -189,8 +196,8 @@ def test_an_approval_signal_carries_the_holds_handle_to_the_stream() -> None:
     approval arrived renderable but unanswerable — and `service/static/app.js` returns early on an
     empty handle, so the Yes/No control never rendered at all.
     """
-    from agents.turn_signals import record_approval_request
-    from service.runner import _signal_event
+    from chemclaw.agent.turn_signals import record_approval_request
+    from chemclaw.api.runner import _signal_event
 
     token = begin_turn()
     try:
@@ -212,6 +219,6 @@ def test_a_plan_approval_still_has_no_handle() -> None:
     It is answered by the next turn, not by a decision endpoint, so an id there would point a
     surface at a hold that does not exist. The emptiness is load-bearing, not incidental.
     """
-    from service.events import ApprovalRequestEvent
+    from chemclaw.api.events import ApprovalRequestEvent
 
     assert ApprovalRequestEvent(prompt="Approve the plan?").approval_id == ""

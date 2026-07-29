@@ -18,8 +18,8 @@ import asyncio
 import pytest
 from temporalio import activity
 
-from chemclaw.config import settings
-from connectors.calc import activities
+from chemclaw.connectors.calc import activities
+from chemclaw.core.config import settings
 
 
 def test_a_long_crest_run_heartbeats_while_it_runs(monkeypatch: pytest.MonkeyPatch) -> None:

@@ -11,7 +11,7 @@ import asyncio
 import psycopg
 import pytest
 
-from chemclaw import db
+from chemclaw.core import db
 
 
 def test_redact_strips_the_password_only() -> None:

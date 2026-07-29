@@ -11,11 +11,16 @@ from pathlib import Path
 
 import pytest
 
-from chemclaw.config import settings
-from connectors.safety.server.tools import screen_hazards
-from kg.note import Note
-from safety.notes import hazard_problems, structures_in
-from safety.screen import SafetyRulesError, at_least, screen_reaction, screen_structure
+from chemclaw.connectors.safety.server.tools import screen_hazards
+from chemclaw.core.config import settings
+from chemclaw.kg.note import Note
+from chemclaw.science.safety.notes import hazard_problems, structures_in
+from chemclaw.science.safety.screen import (
+    SafetyRulesError,
+    at_least,
+    screen_reaction,
+    screen_structure,
+)
 
 # One textbook example per structural rule — the same molecules the eval case pins.
 _HAZARDOUS = {
@@ -202,7 +207,7 @@ def test_tool_is_advertised_to_the_agent() -> None:
     of the model; that the *server* serves exactly that name is `test_connector_transport.py`'s
     job.
     """
-    from connectors.registry import connector_tool_names
+    from chemclaw.connectors.registry import connector_tool_names
 
     assert "screen_hazards" in connector_tool_names()
 

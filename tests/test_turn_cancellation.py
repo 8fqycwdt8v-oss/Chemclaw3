@@ -34,9 +34,9 @@ from typing import Any, cast
 import pytest
 from agent_framework import AgentSession
 
-from service.budget import BudgetTracker
-from service.events import Event
-from service.runner import run_turn
+from chemclaw.api.budget import BudgetTracker
+from chemclaw.api.events import Event
+from chemclaw.api.runner import run_turn
 
 
 def _closable(stream: AsyncIterator[Event]) -> AsyncGenerator[Event, None]:

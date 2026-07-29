@@ -1,4 +1,4 @@
-"""Per-tool authorization: the decision (agents.authz) and the middleware (agents.tool_authz).
+"""Per-tool authorization: the decision and the middleware that enforces it.
 
 Proves `authorize_tool` allows/denies by the turn's ambient roles against `tool_role_gates` under
 both defaults, that dev mode is open, and that `enforce_tool_authz` blocks a denied call before the
@@ -14,17 +14,17 @@ from typing import cast
 import pytest
 from agent_framework import FunctionInvocationContext
 
-from agents.authz import AuthorizationError, authorize_tool
-from agents.identity_context import reset_current_identity, set_current_identity
-from agents.tool_authz import (
+from chemclaw.agent.authz import AuthorizationError, authorize_tool
+from chemclaw.agent.identity_context import reset_current_identity, set_current_identity
+from chemclaw.agent.tool_authz import (
     announce_tool_failures,
     enforce_tool_authz,
     surface_authorization_denials,
     surface_domain_errors,
 )
-from agents.turn_signals import Signal, ToolFailureSignal, begin_turn, drain, end_turn
-from chemclaw.config import settings
-from chemclaw.errors import ChemclawError
+from chemclaw.agent.turn_signals import Signal, ToolFailureSignal, begin_turn, drain, end_turn
+from chemclaw.core.config import settings
+from chemclaw.core.errors import ChemclawError
 
 
 def _enforced(monkeypatch: pytest.MonkeyPatch, **overrides: object) -> None:
@@ -306,7 +306,7 @@ def test_domain_errors_convert_a_chemclaw_error_into_the_tool_s_own_result() -> 
     Regression guard for a live e2e finding: `expand_note` citing a reaction note still pending
     PR-gate review failed with MAF's opaque "Error: Function failed.", so the model could not
     tell "pending review" apart from "typo'd id" and could only guess. `ChemclawError` is
-    chemclaw's own always-safe "bad input" contract (`chemclaw.errors`), so its message is safe
+    chemclaw's own always-safe "bad input" contract (`chemclaw.core.errors`), so its message is safe
     to surface verbatim, exactly like `AuthorizationError`.
     """
 

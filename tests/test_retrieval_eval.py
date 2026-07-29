@@ -13,12 +13,12 @@ from typing import Any
 
 import pytest
 
-import evals  # noqa: F401 — registers the retrieval metrics on import
-from chemclaw.config import settings
-from evals.harness import load_eval_cases, run_eval
-from evals.metric import get_metric, registered_names
-from report.evidence import EvidenceChunk
-from report.retrievers import GraphRetriever
+import chemclaw.evals  # noqa: F401 — registers the retrieval metrics on import
+from chemclaw.core.config import settings
+from chemclaw.evals.harness import load_eval_cases, run_eval
+from chemclaw.evals.metric import get_metric, registered_names
+from chemclaw.retrieval.evidence import EvidenceChunk
+from chemclaw.retrieval.retrievers import GraphRetriever
 
 _REPO = Path(__file__).resolve().parent.parent
 _CORPUS = _REPO / "evals" / "retrieval_corpus"

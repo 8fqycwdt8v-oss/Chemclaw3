@@ -11,13 +11,13 @@ from typing import Any
 
 import pytest
 
-import agents.research_tools as research_tools
-from chemclaw.config import settings
-from chemclaw.embeddings import embed_texts
-from report.evidence import EvidenceChunk
-from report.hybrid import reciprocal_rank_fusion
-from report.retrievers import LexicalRetriever, VectorRetriever
-from report.vector_index import InMemoryNoteIndex, reindex_notes
+import chemclaw.agent.research_tools as research_tools
+from chemclaw.core.config import settings
+from chemclaw.core.embeddings import embed_texts
+from chemclaw.retrieval.evidence import EvidenceChunk
+from chemclaw.retrieval.hybrid import reciprocal_rank_fusion
+from chemclaw.retrieval.retrievers import LexicalRetriever, VectorRetriever
+from chemclaw.retrieval.vector_index import InMemoryNoteIndex, reindex_notes
 
 
 def _write_note(directory: Path, note_id: str, body: str, note_type: str = "reaction") -> None:

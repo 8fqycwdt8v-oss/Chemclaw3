@@ -12,8 +12,8 @@ import sys
 
 import pytest
 
-from chemclaw.config import settings
-from chemclaw.logging import configure_logging, configure_telemetry
+from chemclaw.core.config import settings
+from chemclaw.core.logging import configure_logging, configure_telemetry
 
 
 def test_configure_logging_applies_configured_level(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -58,7 +58,7 @@ def test_configure_telemetry_works_with_the_shipped_helm_value() -> None:
         [
             sys.executable,
             "-c",
-            "from chemclaw.logging import configure_telemetry; configure_telemetry()",
+            "from chemclaw.core.logging import configure_telemetry; configure_telemetry()",
         ],
         env={
             **os.environ,

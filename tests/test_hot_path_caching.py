@@ -18,9 +18,9 @@ import httpx
 import pytest
 from temporalio.client import Client
 
-from chemclaw import temporal_client
-from chemclaw.config import settings
-from connectors.manifest import HttpEndpoint
+from chemclaw.connectors.manifest import HttpEndpoint
+from chemclaw.core import temporal_client
+from chemclaw.core.config import settings
 
 
 def test_the_temporal_client_is_built_once_per_process(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -45,7 +45,7 @@ def test_the_temporal_client_is_built_once_per_process(monkeypatch: pytest.Monke
 
 def test_connector_probes_share_one_http_client(monkeypatch: pytest.MonkeyPatch) -> None:
     """One `AsyncClient` per sweep, not per connector — a fleet of N cost N TCP setups a probe."""
-    from connectors import health
+    from chemclaw.connectors import health
 
     built = 0
     real_client = httpx.AsyncClient
@@ -80,7 +80,7 @@ def test_readyz_reuses_its_connector_sweep_inside_the_window(
     """A burst of readiness probes costs one connector sweep, not one per request."""
     from fastapi.testclient import TestClient
 
-    from service import app as service_app
+    from chemclaw.api import app as service_app
     from tests.test_service import _FakeAgent, _no_connectors
 
     monkeypatch.setattr(settings, "service_readiness_cache_seconds", 60.0)
@@ -110,7 +110,7 @@ def test_readyz_probes_every_request_when_the_window_is_zero(
     """Zero restores the pre-cache behavior, so a deployment can opt out of the staleness."""
     from fastapi.testclient import TestClient
 
-    from service import app as service_app
+    from chemclaw.api import app as service_app
     from tests.test_service import _FakeAgent, _no_connectors
 
     monkeypatch.setattr(settings, "service_readiness_cache_seconds", 0.0)

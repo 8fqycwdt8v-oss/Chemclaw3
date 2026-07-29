@@ -14,13 +14,13 @@ from pathlib import Path
 
 import pytest
 
-from eln.compound import compound_dependencies, compound_id, compound_note
-from kg.crosslink import calc_ref_index, cited_calculations, notes_for_calculation
-from kg.graph import invalidate_cache
-from kg.note import Note
-from kg.pr_gate import NoteSubmission, propose_note
-from kg.render import render_note
-from kg.validate import validate
+from chemclaw.ingest.eln.compound import compound_dependencies, compound_id, compound_note
+from chemclaw.kg.crosslink import calc_ref_index, cited_calculations, notes_for_calculation
+from chemclaw.kg.graph import invalidate_cache
+from chemclaw.kg.note import Note
+from chemclaw.kg.pr_gate import NoteSubmission, propose_note
+from chemclaw.kg.render import render_note
+from chemclaw.kg.validate import validate
 
 _KEY = "xtb.hess@GFN2-xTB+tblite+0.4.0:ab12cd:34ef56"
 _OTHER_KEY = "xtb.opt@GFN2-xTB+tblite+0.4.0:9988aa:112233"

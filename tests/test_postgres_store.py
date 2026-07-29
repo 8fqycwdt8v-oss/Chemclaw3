@@ -8,9 +8,9 @@ version.
 
 import asyncio
 
-from calc.migrate import migrate
-from calc.postgres_store import PostgresStore
-from calc.store import CalculationKey, StoredResult
+from chemclaw.science.calc.migrate import migrate
+from chemclaw.science.calc.postgres_store import PostgresStore
+from chemclaw.science.calc.store import CalculationKey, StoredResult
 from tests.pg import migrated_db_or_skip
 
 

@@ -175,4 +175,4 @@ this reason; the filenames make that ordering irrelevant now, and the numbers st
 | [D-138](D-138-fifty-questions-asked-live-the-job-surface-was-dead.md) | Fifty questions, asked live: the job surface was dead, the trace was blind, and a failed tool was silent |
 | [D-139](D-139-the-service-is-the-repository-removing-the-services.md) | The service is the repository: removing the `services/` tier the Replit monorepo left behind |
 | [D-140](D-140-one-file-per-adr-and-a-docs-tree-with-an-archive.md) | One file per ADR, and a `docs/` tree with a living half and an archive |
-| D-141 | RESERVED — the packages regrouped under `src/chemclaw/` by the four architecture layers |
+| [D-141](D-141-the-packages-regrouped-under-src-chemclaw-by-layer.md) | The packages regrouped under `src/chemclaw/` by the four architecture layers |

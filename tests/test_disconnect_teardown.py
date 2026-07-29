@@ -23,11 +23,11 @@ from typing import Any
 
 from agent_framework import AgentSession
 
-from service.app import create_app
+from chemclaw.api.app import create_app
 
 
 class _Update:
-    """A minimal streamed update, shaped as `service.runner` duck-types it."""
+    """A minimal streamed update, shaped as `chemclaw.api.runner` duck-types it."""
 
     def __init__(self, text: str = "") -> None:
         self.text = text

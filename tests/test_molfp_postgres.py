@@ -10,10 +10,10 @@ import asyncio
 
 import pytest
 
-from chemclaw.config import settings
-from mcp_servers.fpstore import InMemoryFingerprintStore, PostgresFingerprintStore
-from mcp_servers.molfp.fingerprint import molecule_definition
-from mcp_servers.molfp.search import (
+from chemclaw.core.config import settings
+from chemclaw.mcp.fpstore import InMemoryFingerprintStore, PostgresFingerprintStore
+from chemclaw.mcp.molfp.fingerprint import molecule_definition
+from chemclaw.mcp.molfp.search import (
     find_similar_molecules,
     find_substructure_matches,
     record_for,

@@ -12,18 +12,18 @@ import pytest
 from temporalio.client import Client
 from temporalio.worker import Worker
 
-import agents.interaction_tools as interaction_tools
-import workflows.interaction_approval as approval
-from agents.interaction_tools import approval_status, decide_approval, start_approval
-from agents.turn_signals import ApprovalSignal, begin_turn, drain, end_turn
-from chemclaw.config import settings
-from tests.conftest import FakeSubmitter
-from tests.temporal_env import pydantic_client, start_env_or_skip
-from workflows.interaction_approval import (
+import chemclaw.agent.interaction_tools as interaction_tools
+import chemclaw.durable.interaction_approval as approval
+from chemclaw.agent.interaction_tools import approval_status, decide_approval, start_approval
+from chemclaw.agent.turn_signals import ApprovalSignal, begin_turn, drain, end_turn
+from chemclaw.core.config import settings
+from chemclaw.durable.interaction_approval import (
     InteractionApprovalWorkflow,
     InteractionCandidate,
     propose_confirmed_answer_activity,
 )
+from tests.conftest import FakeSubmitter
+from tests.temporal_env import pydantic_client, start_env_or_skip
 
 _CANDIDATE = InteractionCandidate(
     interaction_id="q-77",

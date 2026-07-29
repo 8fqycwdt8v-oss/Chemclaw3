@@ -22,23 +22,23 @@ case "${component}" in
     if [[ "${CHEMCLAW_SERVICE_UVICORN_WORKERS:-1}" -gt 1 ]]; then
       args+=(--workers "${CHEMCLAW_SERVICE_UVICORN_WORKERS}")
     fi
-    exec uvicorn service.app:create_app --factory "${args[@]}"
+    exec uvicorn chemclaw.api.app:create_app --factory "${args[@]}"
     ;;
   background-worker)
-    exec python -m workers.background_worker
+    exec python -m chemclaw.durable.background_worker
     ;;
   connector-worker-*)
     # A connector bundle's own Temporal worker, for a bundle that owns durable work
-    # (`connectors/<name>/worker.py`). Matched before `connector-*` so the more specific prefix wins.
+    # (`src/chemclaw/connectors/<name>/worker.py`). Matched before `connector-*` so the more specific prefix wins.
     name="${component#connector-worker-}"
-    exec python -m "connectors.${name}.worker"
+    exec python -m "chemclaw.connectors.${name}.worker"
     ;;
   connector-*)
-    # A connector bundle's own FastAPI app (`connectors/<name>/server/app.py`). One case for every
+    # A connector bundle's own FastAPI app (`src/chemclaw/connectors/<name>/server/app.py`). One case for every
     # connector rather than one per name: the component name carries the bundle, so adding a
     # connector needs no change to this image — which is the whole point of the connector seam.
     name="${component#connector-}"
-    exec uvicorn "connectors.${name}.server.app:app" \
+    exec uvicorn "chemclaw.connectors.${name}.server.app:app" \
       --host "${CHEMCLAW_SERVICE_HOST:-0.0.0.0}" --port "${CHEMCLAW_SERVICE_PORT:-8080}"
     ;;
   *)

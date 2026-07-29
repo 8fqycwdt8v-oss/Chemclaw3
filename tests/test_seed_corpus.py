@@ -14,12 +14,12 @@ say so.
 from datetime import date
 from pathlib import Path
 
-from kg.conflicts import find_conflicts
-from kg.crosslink import cited_calculations
-from kg.graph import build_graph, invalidate_cache, load_notes, related
-from kg.note import KNOWN_NOTE_TYPES, Note
-from kg.relations import KNOWN_RELATIONS
-from kg.validate import validate
+from chemclaw.kg.conflicts import find_conflicts
+from chemclaw.kg.crosslink import cited_calculations
+from chemclaw.kg.graph import build_graph, invalidate_cache, load_notes, related
+from chemclaw.kg.note import KNOWN_NOTE_TYPES, Note
+from chemclaw.kg.relations import KNOWN_RELATIONS
+from chemclaw.kg.validate import validate
 
 _KNOWLEDGE = Path(__file__).resolve().parents[1] / "knowledge"
 

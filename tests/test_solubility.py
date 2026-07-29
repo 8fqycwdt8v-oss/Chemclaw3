@@ -8,12 +8,12 @@ import asyncio
 
 import pytest
 
-from calc.solubility import (
+from chemclaw.science.calc.solubility import (
     SolubilityInput,
     predict_solubility,
     run_cached_solubility,
 )
-from calc.store import InMemoryStore
+from chemclaw.science.calc.store import InMemoryStore
 
 
 def test_ordering_matches_chemistry() -> None:

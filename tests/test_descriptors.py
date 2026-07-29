@@ -9,13 +9,13 @@ from importlib.metadata import version
 
 import pytest
 
-from calc.descriptors import (
+from chemclaw.science.calc.descriptors import (
     DescriptorInput,
     _calc_version,
     compute_descriptor_profile,
     run_cached_descriptor_profile,
 )
-from calc.store import InMemoryStore
+from chemclaw.science.calc.store import InMemoryStore
 
 _ASPIRIN = "CC(=O)Oc1ccccc1C(=O)O"
 

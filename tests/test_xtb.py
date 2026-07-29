@@ -12,10 +12,10 @@ import pytest
 from rdkit import Chem
 from rdkit.Chem import AllChem
 
-from calc.store import InMemoryStore
-from calc.structure import structure_from_smiles
-from calc.xtb import XtbInput, run_cached_xtb, run_xtb
-from calc.xtb_spec import XtbSpec
+from chemclaw.science.calc.store import InMemoryStore
+from chemclaw.science.calc.structure import structure_from_smiles
+from chemclaw.science.calc.xtb import XtbInput, run_cached_xtb, run_xtb
+from chemclaw.science.calc.xtb_spec import XtbSpec
 
 
 def test_water_energy_is_physical() -> None:
@@ -163,7 +163,7 @@ def test_relative_isomer_energies_have_the_right_ordering(
 
 
 def test_the_engine_is_the_only_place_units_change() -> None:
-    """Everything `calc.xtb_engine` hands upward is in Angstrom (X1's unit boundary).
+    """Everything `science.calc.xtb_engine` hands upward is in Angstrom (X1's unit boundary).
 
     Merged from `main`, `conformer_positions` was `positions_bohr` and returned atomic
     units, because there `geometry` did too. On this branch `geometry` returns Angstrom and
@@ -173,7 +173,7 @@ def test_the_engine_is_the_only_place_units_change() -> None:
     Asserted on a bond length rather than on a constant: water's O-H is ~0.96 Angstrom and
     ~1.81 Bohr, so the two are unmistakable and the test says which one the module promises.
     """
-    from calc.xtb_engine import conformer_positions, geometry, parse_molecule
+    from chemclaw.science.calc.xtb_engine import conformer_positions, geometry, parse_molecule
 
     mol = parse_molecule("O")
     for numbers, positions in (

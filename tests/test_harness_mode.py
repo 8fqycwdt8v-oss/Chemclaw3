@@ -15,7 +15,7 @@ import pytest
 from agent_framework import AgentSession
 from agent_framework._harness._mode import AgentModeProvider
 
-from agents.harness_mode import (
+from chemclaw.agent.harness_mode import (
     EXECUTE_MODE,
     MODEL_MODE_TOOL,
     PLAN_MODE,
@@ -24,8 +24,8 @@ from agents.harness_mode import (
     grant_execute,
     session_mode,
 )
-from agents.harness_todo import mark_awaiting_job
-from agents.plan_approval_store import PlanApprovalStore
+from chemclaw.agent.harness_todo import mark_awaiting_job
+from chemclaw.agent.plan_approval_store import PlanApprovalStore
 from tests.pg import migrated_db_or_skip
 
 

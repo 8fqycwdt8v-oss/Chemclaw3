@@ -12,17 +12,17 @@ import asyncio
 import numpy as np
 import pytest
 
-from calc.store import InMemoryStore
-from calc.structure import Structure, structure_from_smiles
-from calc.xtb_opt import OptSpec, optimize_structure
-from calc.xtb_thermo import (
+from chemclaw.core.config import settings
+from chemclaw.science.calc.store import InMemoryStore
+from chemclaw.science.calc.structure import Structure, structure_from_smiles
+from chemclaw.science.calc.xtb_opt import OptSpec, optimize_structure
+from chemclaw.science.calc.xtb_thermo import (
     ThermochemistryResult,
     ThermoSpec,
     VibrationalMode,
     compute_thermochemistry,
     relax_to_minimum,
 )
-from chemclaw.config import settings
 
 
 def _minimum(smiles: str) -> Structure:

@@ -16,10 +16,10 @@ from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
 from fastapi.testclient import TestClient
 
-import service.auth as auth
-from chemclaw.config import settings
-from service.app import create_app
-from service.auth import AuthError, validate_token
+import chemclaw.api.auth as auth
+from chemclaw.api.app import create_app
+from chemclaw.api.auth import AuthError, validate_token
+from chemclaw.core.config import settings
 
 _AUDIENCE = "api://chemclaw"
 _ISSUER = "https://issuer.test/v2.0"
@@ -130,7 +130,7 @@ def test_token_validation_runs_off_the_event_loop(monkeypatch: pytest.MonkeyPatc
     """
     import asyncio
 
-    from service.auth import Principal
+    from chemclaw.api.auth import Principal
 
     monkeypatch.setattr(settings, "entra_required", True)
     on_loop: list[bool] = []
@@ -202,7 +202,7 @@ def test_unauthenticated_exposed_boots_only_with_explicit_opt_in(
     monkeypatch.setattr(settings, "entra_required", False)
     monkeypatch.setattr(settings, "service_host", "0.0.0.0")
     monkeypatch.setattr(settings, "service_allow_insecure", True)
-    with caplog.at_level(logging.WARNING, logger="service.app"):
+    with caplog.at_level(logging.WARNING, logger="chemclaw.api.app"):
         app = create_app(agent_factory=lambda _profile: _FakeAgent())
     assert any("authorization gates OPEN" in r.message for r in caplog.records)
     with TestClient(app) as client:
@@ -215,6 +215,6 @@ def test_entra_required_exposed_boots_without_warning(
     """The production posture (enforcement on, exposed bind) boots cleanly — nothing to warn."""
     monkeypatch.setattr(settings, "entra_required", True)
     monkeypatch.setattr(settings, "service_host", "0.0.0.0")
-    with caplog.at_level(logging.WARNING, logger="service.app"):
+    with caplog.at_level(logging.WARNING, logger="chemclaw.api.app"):
         create_app(agent_factory=lambda _profile: _FakeAgent())
     assert not any("authorization gates OPEN" in r.message for r in caplog.records)

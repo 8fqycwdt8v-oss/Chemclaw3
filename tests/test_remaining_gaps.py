@@ -22,10 +22,10 @@ from pathlib import Path
 
 import pytest
 
-from agents.attachments import AttachmentError, AttachmentStore, parse_attachment
-from calc.calibration import Calibration, summarize
-from chemclaw.config import settings
-from scripts.backfill_corpus import note_for_document
+from chemclaw.agent.attachments import AttachmentError, AttachmentStore, parse_attachment
+from chemclaw.cli.backfill_corpus import note_for_document
+from chemclaw.core.config import settings
+from chemclaw.science.calc.calibration import Calibration, summarize
 
 # --- IDEA-2: predicted-vs-actual calibration -------------------------------------------------
 

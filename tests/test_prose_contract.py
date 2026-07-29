@@ -8,8 +8,8 @@ fail at call time. `mypy` cannot see prose, `pytest` did not read it, and `make 
 checks frontmatter.
 """
 
-from agents.chemclaw_agent import available_tool_names
-from scripts.validate_prose_contract import _ALLOWED_NON_TOOLS, check_prose_contract
+from chemclaw.agent.chemclaw_agent import available_tool_names
+from chemclaw.cli.validate_prose_contract import _ALLOWED_NON_TOOLS, check_prose_contract
 
 
 def test_shipped_prose_names_only_real_tools() -> None:
@@ -30,7 +30,7 @@ def test_in_process_tools_count_as_real() -> None:
 
 def test_a_made_up_tool_is_caught(tmp_path: object, monkeypatch: object) -> None:
     """A skill naming a nonexistent tool fails the check — the `find_similar_reactions` case."""
-    import scripts.validate_prose_contract as module
+    import chemclaw.cli.validate_prose_contract as module
 
     monkeypatch.setattr(  # type: ignore[attr-defined]
         module,
@@ -44,7 +44,7 @@ def test_a_made_up_tool_is_caught(tmp_path: object, monkeypatch: object) -> None
 
 def test_pointing_the_agent_at_a_workflow_is_caught(monkeypatch: object) -> None:
     """The `BoCampaignWorkflow` case: the agent cannot invoke a workflow class, only a tool."""
-    import scripts.validate_prose_contract as module
+    import chemclaw.cli.validate_prose_contract as module
 
     monkeypatch.setattr(  # type: ignore[attr-defined]
         module,

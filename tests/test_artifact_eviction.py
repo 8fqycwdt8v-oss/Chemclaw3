@@ -13,8 +13,8 @@ in what the statements target and when they are allowed to run, not in psycopg.
 
 import asyncio
 
-from chemclaw.config import settings
-from workflows.artifact_eviction import _EVICT_IDLE, _EVICT_TO_FIT, evict_cold_artifacts
+from chemclaw.core.config import settings
+from chemclaw.durable.artifact_eviction import _EVICT_IDLE, _EVICT_TO_FIT, evict_cold_artifacts
 
 _STATEMENTS = (_EVICT_IDLE, _EVICT_TO_FIT)
 

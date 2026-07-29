@@ -39,14 +39,14 @@ _PROBE = textwrap.dedent(
     """
     import json, sys
 
-    from sources.registry import active_ingest_source_names
+    from chemclaw.ingest.sources.registry import active_ingest_source_names
 
     names = active_ingest_source_names()
     loaded = set(sys.modules)
     print(json.dumps({
         "names": names,
         "third_party": sorted(t for t in {m.split(".")[0] for m in loaded} if t in %r),
-        "report_modules": sorted(m for m in loaded if m.startswith("report.")),
+        "report_modules": sorted(m for m in loaded if m.startswith("chemclaw.retrieval.")),
         "total": len(loaded),
     }))
     """
@@ -88,5 +88,5 @@ def test_asking_which_sources_to_ingest_imports_no_adapter_at_all() -> None:
     # `report.retrievers` is the retrieve-side closure (it pulls rdkit, drfp and the note index).
     # An ingest-only worker must never reach it. `report.evidence` is the shared DTO module that
     # `sources/base.py` imports for the contract itself, so it is expected and harmless.
-    assert "report.retrievers" not in result["report_modules"], result
-    assert "report.vector_index" not in result["report_modules"], result
+    assert "chemclaw.retrieval.retrievers" not in result["report_modules"], result
+    assert "chemclaw.retrieval.vector_index" not in result["report_modules"], result

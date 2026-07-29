@@ -5,10 +5,10 @@ import asyncio
 import pytest
 from pydantic import ValidationError
 
-from calc.store import InMemoryStore
-from calc.structure import structure_from_smiles
-from calc.xtb_scan import ScanSpec, run_cached_scan, run_scan
-from chemclaw.config import settings
+from chemclaw.core.config import settings
+from chemclaw.science.calc.store import InMemoryStore
+from chemclaw.science.calc.structure import structure_from_smiles
+from chemclaw.science.calc.xtb_scan import ScanSpec, run_cached_scan, run_scan
 
 
 def test_butane_torsion_profile_has_anti_and_gauche_in_the_right_places() -> None:
@@ -42,7 +42,7 @@ def test_the_scanned_coordinate_is_actually_held() -> None:
     """
     from rdkit.Chem import rdMolTransforms
 
-    from calc.xtb_scan import _mol_with_conformer
+    from chemclaw.science.calc.xtb_scan import _mol_with_conformer
 
     structure = structure_from_smiles("CCCC", optimize=True)
     result = run_scan(ScanSpec(atoms=(0, 1, 2, 3), values=(60.0, 180.0)), structure)

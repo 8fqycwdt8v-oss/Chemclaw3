@@ -12,7 +12,8 @@ import random
 import pytest
 from pydantic import BaseModel
 
-from calc.artifacts import (
+from chemclaw.core.config import settings
+from chemclaw.science.calc.artifacts import (
     ArtifactRef,
     InMemoryArtifactStore,
     content_address,
@@ -21,13 +22,12 @@ from calc.artifacts import (
     media_type_for,
     put_all,
 )
-from calc.store import (
+from chemclaw.science.calc.store import (
     CalculationKey,
     InMemoryStore,
     cached_compute,
     run_cached_with_artifacts,
 )
-from chemclaw.config import settings
 
 # A Turbomole-shaped Hessian: highly repetitive numeric text, which is what the real artifacts are
 # and therefore what the compression claim has to hold for.
@@ -99,7 +99,7 @@ def test_artifact_over_the_cap_is_skipped_not_raised(
     async def _run() -> None:
         monkeypatch.setattr(settings, "artifact_max_bytes", 16)
         store = InMemoryArtifactStore()
-        with caplog.at_level(logging.DEBUG, logger="calc.artifacts"):
+        with caplog.at_level(logging.DEBUG, logger="chemclaw.science.calc.artifacts"):
             stored = await put_all(store, "k", {"hessian": _HESSIAN})
         assert stored == []
         assert await store.list_for("k") == []
@@ -228,7 +228,7 @@ def test_artifact_failure_does_not_lose_a_completed_calculation(
     async def _run() -> None:
         results = InMemoryStore()
         key = CalculationKey.build("xtb.hess", "gfn2", inputs={"structure": "s"})
-        with caplog.at_level(logging.WARNING, logger="calc.store"):
+        with caplog.at_level(logging.WARNING, logger="chemclaw.science.calc.store"):
             result, was_cached = await run_cached_with_artifacts(
                 results,
                 _Broken(),

@@ -16,9 +16,9 @@ from importlib.metadata import version
 
 import pytest
 
-from calc.pka import PkaInput, _calc_version, predict_pka, run_cached_pka
-from calc.store import InMemoryStore
-from chemclaw.config import settings
+from chemclaw.core.config import settings
+from chemclaw.science.calc.pka import PkaInput, _calc_version, predict_pka, run_cached_pka
+from chemclaw.science.calc.store import InMemoryStore
 
 
 def test_calc_version_embeds_engine_build() -> None:

@@ -8,7 +8,7 @@ import asyncio
 
 from agent_framework import DEFAULT_TODO_SOURCE_ID, AgentSession, TodoSessionStore
 
-from agents.harness_todo import complete_awaiting_job, mark_awaiting_job
+from chemclaw.agent.harness_todo import complete_awaiting_job, mark_awaiting_job
 
 
 def test_mark_then_complete_flips_only_the_matching_todo() -> None:

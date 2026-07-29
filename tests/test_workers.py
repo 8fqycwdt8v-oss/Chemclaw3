@@ -12,8 +12,8 @@ are not extras, they are where the heavy work moved to.
 
 from collections.abc import Iterable
 
-from workers.background_worker import BACKGROUND_ACTIVITIES, BACKGROUND_WORKFLOWS
-from workflows.eln_sync import ElnSyncWorkflow, load_sync_cursor, store_sync_cursor
+from chemclaw.durable.background_worker import BACKGROUND_ACTIVITIES, BACKGROUND_WORKFLOWS
+from chemclaw.durable.eln_sync import ElnSyncWorkflow, load_sync_cursor, store_sync_cursor
 
 
 def _names(items: Iterable[object]) -> list[str]:
@@ -37,11 +37,11 @@ def test_the_calc_connectors_worker_serves_every_expensive_xtb_task() -> None:
     closed union discriminated on `kind` — so the queue choice is made once, not per
     capability.
     """
-    import connectors.calc.worker  # noqa: F401 — importing it is what registers the bundle
-    from connectors.calc.workflows import CalcJobWorkflow
-    from connectors.queues import bundle_queue
-    from connectors.registry import discovered
-    from workflows.registry import registered_activities, registered_workflows
+    import chemclaw.connectors.calc.worker  # noqa: F401 — importing it is what registers the bundle
+    from chemclaw.connectors.calc.workflows import CalcJobWorkflow
+    from chemclaw.connectors.queues import bundle_queue
+    from chemclaw.connectors.registry import discovered
+    from chemclaw.durable.registry import registered_activities, registered_workflows
 
     # Read from the registry, not from module constants. `CALC_WORKFLOWS`/`CALC_ACTIVITIES`/
     # `TASK_QUEUE` were hand-maintained lists that could silently disagree with what the bundle's
@@ -61,15 +61,15 @@ def test_the_calc_connectors_worker_serves_every_expensive_xtb_task() -> None:
 def test_the_qm_connectors_worker_serves_the_hpc_job_and_all_four_activities() -> None:
     """The HPC/DFT job reaches a worker — the assertion core's `hpc-jobs` worker used to carry.
 
-    Importing `connectors.qm.worker` is the whole registration, exactly as for `calc`: no
+    Importing `chemclaw.connectors.qm.worker` is the whole registration, exactly as for `calc`: no
     `_WORKFLOWS`/`_ACTIVITIES` list to fall out of step with what the modules define. A workflow
     registered without its four activities would poll forever on the first `prepare_input`.
     """
-    import connectors.qm.worker  # noqa: F401 — importing it is what registers the bundle
-    from connectors.qm.workflows import QMJobWorkflow
-    from connectors.queues import bundle_queue
-    from connectors.registry import discovered
-    from workflows.registry import registered_activities, registered_workflows
+    import chemclaw.connectors.qm.worker  # noqa: F401 — importing it is what registers the bundle
+    from chemclaw.connectors.qm.workflows import QMJobWorkflow
+    from chemclaw.connectors.queues import bundle_queue
+    from chemclaw.connectors.registry import discovered
+    from chemclaw.durable.registry import registered_activities, registered_workflows
 
     queue = bundle_queue("qm")
     assert QMJobWorkflow in registered_workflows(queue)

@@ -15,17 +15,17 @@ import asyncio
 import numpy as np
 import pytest
 
-from calc.artifacts import InMemoryArtifactStore
-from calc.store import InMemoryStore
-from calc.structure import Structure
-from calc.xtb_hessian import (
+from chemclaw.science.calc.artifacts import InMemoryArtifactStore
+from chemclaw.science.calc.store import InMemoryStore
+from chemclaw.science.calc.structure import Structure
+from chemclaw.science.calc.xtb_hessian import (
     DIPOLE_ARTIFACT,
     HESSIAN_ARTIFACT,
     Hessian,
     HessianSpec,
     run_cached_hessian,
 )
-from calc.xtb_thermo import (
+from chemclaw.science.calc.xtb_thermo import (
     ThermoSpec,
     run_cached_thermochemistry,
     thermochemistry_from_hessian,
@@ -67,7 +67,7 @@ class _Counted:
 
     def __call__(self, spec: HessianSpec, structure: Structure) -> tuple[Hessian, dict[str, bytes]]:
         """Produce the Hessian and its packed artifacts, counting the call."""
-        from calc.xtb_hessian import _pack
+        from chemclaw.science.calc.xtb_hessian import _pack
 
         self.calls += 1
         hessian = _fake_hessian(self._structure)
@@ -92,7 +92,7 @@ def test_a_second_temperature_reuses_the_hessian_instead_of_recomputing_it(
     async def _run() -> None:
         structure = _water()
         counted = _Counted(structure)
-        monkeypatch.setattr("calc.xtb_hessian.compute_hessian", counted)
+        monkeypatch.setattr("chemclaw.science.calc.xtb_hessian.compute_hessian", counted)
         results = InMemoryStore()
         artifacts = InMemoryArtifactStore()
 
@@ -120,7 +120,7 @@ def test_the_same_hessian_asked_for_twice_is_computed_once() -> None:
         structure = _water()
         counted = _Counted(structure)
         with pytest.MonkeyPatch.context() as patch:
-            patch.setattr("calc.xtb_hessian.compute_hessian", counted)
+            patch.setattr("chemclaw.science.calc.xtb_hessian.compute_hessian", counted)
             results = InMemoryStore()
             artifacts = InMemoryArtifactStore()
             first, first_cached = await run_cached_hessian(
@@ -182,7 +182,7 @@ def test_a_cached_hessian_whose_blob_is_gone_recomputes_rather_than_failing(
     async def _run() -> None:
         structure = _water()
         counted = _Counted(structure)
-        monkeypatch.setattr("calc.xtb_hessian.compute_hessian", counted)
+        monkeypatch.setattr("chemclaw.science.calc.xtb_hessian.compute_hessian", counted)
         results = InMemoryStore()
         artifacts = InMemoryArtifactStore()
 
@@ -213,12 +213,12 @@ def test_a_disabled_artifact_store_caches_no_hessian_and_says_so(
     """
 
     async def _run() -> None:
-        from chemclaw.config import settings
+        from chemclaw.core.config import settings
 
         monkeypatch.setattr(settings, "artifact_store_enabled", False)
         structure = _water()
         counted = _Counted(structure)
-        monkeypatch.setattr("calc.xtb_hessian.compute_hessian", counted)
+        monkeypatch.setattr("chemclaw.science.calc.xtb_hessian.compute_hessian", counted)
         results = InMemoryStore()
         artifacts = InMemoryArtifactStore()
 
@@ -240,7 +240,7 @@ def test_a_stored_matrix_of_the_wrong_shape_is_rejected_not_used(
     """
 
     async def _run() -> None:
-        from calc.xtb_hessian import HessianResult, _load, _pack
+        from chemclaw.science.calc.xtb_hessian import HessianResult, _load, _pack
 
         artifacts = InMemoryArtifactStore()
         ref = await artifacts.put("k", HESSIAN_ARTIFACT, _pack(np.eye(6)))

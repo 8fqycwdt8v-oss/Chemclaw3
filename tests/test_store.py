@@ -11,7 +11,7 @@ import logging
 import pytest
 from pydantic import BaseModel
 
-from calc.store import (
+from chemclaw.science.calc.store import (
     CalculationKey,
     InMemoryStore,
     StoredResult,
@@ -143,7 +143,7 @@ def test_cache_logs_hit_and_miss(caplog: pytest.LogCaptureFixture) -> None:
         await cached_compute(store, key, compute)  # miss
         await cached_compute(store, key, compute)  # hit
 
-    with caplog.at_level(logging.DEBUG, logger="calc.store"):
+    with caplog.at_level(logging.DEBUG, logger="chemclaw.science.calc.store"):
         asyncio.run(_run())
 
     assert "calc cache miss, computing" in caplog.text

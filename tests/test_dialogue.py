@@ -20,14 +20,14 @@ from typing import Any
 import pytest
 from agent_framework import AgentSession
 
-from agents.dialogue_tools import (
+from chemclaw.agent.dialogue_tools import (
     ask_clarifying_question,
     dry_run_notice,
     is_dry_run,
     reset_dry_run,
     set_dry_run,
 )
-from service.runner import run_turn
+from chemclaw.api.runner import run_turn
 
 
 class _AskingAgent:
@@ -120,7 +120,7 @@ def test_the_notice_can_never_be_mistaken_for_a_real_result() -> None:
 
 def test_a_dry_run_does_not_launch_a_durable_job(monkeypatch: pytest.MonkeyPatch) -> None:
     """The whole point: the expensive path is described, not taken."""
-    from agents import durable_tools
+    from chemclaw.agent import durable_tools
 
     async def _explode(*args: Any, **kwargs: Any) -> Any:
         raise AssertionError("a dry run reached the Temporal client")
@@ -142,9 +142,9 @@ def test_a_dry_run_does_not_submit_a_qm_job(monkeypatch: pytest.MonkeyPatch) -> 
     is the one whose side effect is a cluster reservation, and a dry run that reached the Temporal
     client would start one.
     """
-    from connectors import jobs as connector_jobs
-    from connectors.jobs import build_job_tool
-    from connectors.registry import enabled
+    from chemclaw.connectors import jobs as connector_jobs
+    from chemclaw.connectors.jobs import build_job_tool
+    from chemclaw.connectors.registry import enabled
 
     (spec,) = next(m for m in enabled() if m.name == "qm").jobs
 

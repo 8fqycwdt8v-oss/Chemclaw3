@@ -1,22 +1,23 @@
 """Behavioral tests for the pH-dependent logD calculator (D-092).
 
 Runs real GFN2-xTB (via the reused pKa predictor); asserts the Henderson-Hasselbalch direction
-(more acid protonated at low pH → higher logD) and that it inherits `calc.pka`'s domain limits.
+(more acid protonated at low pH → higher logD) and that it inherits `chemclaw.science.calc.pka`'s
+domain limits.
 """
 
 import asyncio
 
 import pytest
 
-from calc.logd import LogdInput, predict_logd
-from calc.store import InMemoryStore
+from chemclaw.science.calc.logd import LogdInput, predict_logd
+from chemclaw.science.calc.store import InMemoryStore
 
 _BENZOIC_ACID = "OC(=O)c1ccccc1"
 
 
 def test_logd_defaults_to_configured_ph() -> None:
     """Omitting `ph` uses `settings.logd_default_ph` (7.4), not an arbitrary constant."""
-    from chemclaw.config import settings
+    from chemclaw.core.config import settings
 
     async def _run() -> None:
         store = InMemoryStore()
@@ -66,7 +67,7 @@ def test_logd_reuses_the_cached_pka() -> None:
     """A second logD call at a different pH does not recompute the xTB pKa."""
 
     async def _run() -> None:
-        from calc.pka import PkaInput, run_cached_pka
+        from chemclaw.science.calc.pka import PkaInput, run_cached_pka
 
         store = InMemoryStore()
         await predict_logd(store, LogdInput(smiles=_BENZOIC_ACID, ph=7.0))
@@ -84,8 +85,9 @@ def test_logd_reuses_the_cached_pka() -> None:
 def test_a_base_is_corrected_in_the_other_direction() -> None:
     """Henderson-Hasselbalch runs the opposite way for a base, and the sign is everything.
 
-    A cross-branch regression, invisible to either side alone. `calc.logd` was written when
-    `calc.pka` covered acids only, so it hard-coded the acid form
+    A cross-branch regression, invisible to either side alone. `chemclaw.science.calc.logd` was
+    written when
+    `chemclaw.science.calc.pka` covered acids only, so it hard-coded the acid form
     `logD = clogP - log10(1 + 10**(pH - pKa))`. X11 widened the predictor to aromatic and
     aryl nitrogen, and pyridine — which previously *raised* — began flowing into that
     formula as though it were an acid.
@@ -111,7 +113,8 @@ def test_a_base_is_corrected_in_the_other_direction() -> None:
 def test_an_aliphatic_amine_is_refused_rather_than_given_a_logd() -> None:
     """The refusal propagates: no pKa means no pH correction, so no logD (gate G4).
 
-    `calc.pka` declines aliphatic amines because it cannot rank them at all, and a logD
+    `chemclaw.science.calc.pka` declines aliphatic amines because it cannot rank them at all, and a
+    logD
     built on a number that does not exist would be a plausible-looking product of two
     guesses rather than one.
     """

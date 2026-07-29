@@ -43,11 +43,11 @@ from agent_framework._tools import FunctionInvocationLayer
 from fastapi import FastAPI
 from mcp.server.fastmcp import FastMCP
 
-from agents.audit import AuditEvent
-from agents.chemclaw_agent import build_agent, connector_tools
-from agents.identity_context import reset_current_identity, set_current_identity
-from connectors.identity import HEADER_ACTOR
-from connectors.registry import discovered, open_reachable
+from chemclaw.agent.audit import AuditEvent
+from chemclaw.agent.chemclaw_agent import build_agent, connector_tools
+from chemclaw.agent.identity_context import reset_current_identity, set_current_identity
+from chemclaw.connectors.identity import HEADER_ACTOR
+from chemclaw.connectors.registry import discovered, open_reachable
 
 _BUNDLE = """\
 name: governed
@@ -177,7 +177,7 @@ class _Observed:
 @pytest.fixture
 def governed(tmp_path: Any, monkeypatch: pytest.MonkeyPatch) -> Iterator[_Observed]:
     """Serve a one-tool connector and point the registry at its bundle; yields what it observed."""
-    from connectors.server import connector_app
+    from chemclaw.connectors.server import connector_app
 
     observed = _Observed()
     server = FastMCP("governed")
@@ -204,8 +204,8 @@ def governed(tmp_path: Any, monkeypatch: pytest.MonkeyPatch) -> Iterator[_Observ
     (bundle / "connector.yaml").write_text(
         _BUNDLE.format(url=f"http://127.0.0.1:{port}/mcp"), encoding="utf-8"
     )
-    monkeypatch.setattr("chemclaw.config.settings.connectors_dir", str(tmp_path))
-    monkeypatch.setattr("chemclaw.config.settings.connectors_enabled", "")
+    monkeypatch.setattr("chemclaw.core.config.settings.connectors_dir", str(tmp_path))
+    monkeypatch.setattr("chemclaw.core.config.settings.connectors_enabled", "")
     discovered.cache_clear()
     try:
         with _Server(app, port):
@@ -272,9 +272,9 @@ def test_a_denied_connector_tool_never_runs_and_is_still_audited(
     audit asks. The audit middleware is attached outermost for this reason, and this proves it
     holds across the process boundary too.
     """
-    monkeypatch.setattr("chemclaw.config.settings.entra_required", True)
+    monkeypatch.setattr("chemclaw.core.config.settings.entra_required", True)
     monkeypatch.setattr(
-        "chemclaw.config.settings.tool_role_gates", {"echo_subject": ["structure-analyst"]}
+        "chemclaw.core.config.settings.tool_role_gates", {"echo_subject": ["structure-analyst"]}
     )
     sink = _RecordingSink()
     identity = set_current_identity("user-42", frozenset({"process-chemist"}))  # lacks the role

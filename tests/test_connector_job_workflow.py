@@ -8,7 +8,7 @@ queue read from a manifest. So this runs the two workers a deployment runs:
 - a **core** worker on the background queue hosting `ConnectorJobWorkflow` and the real PR-gate and
   push-back activities;
 - a **connector** worker on the bundle's own queue hosting only the bundle's own workflow
-  (`tests/fixtures/connectors/fixture/workflows.py`), which imports nothing from the wrapper.
+  (`tests/fixtures/connectors/fixture/chemclaw.durable.py`), which imports nothing from the wrapper.
 
 The generated tool from the fixture manifest launches it, and the assertions are about what core
 did on the connector's behalf: the envelope came back intact, the note went through the PR-gate
@@ -31,16 +31,16 @@ import pytest
 from temporalio.client import Client
 from temporalio.worker import Worker
 
-from agents.session_events import record_session_event
-from connectors.jobs import build_job_tool, job_workflow_id
-from connectors.registry import discovered, enabled
-from kg.note import Note
-from kg.pr_gate import propose_note
+from chemclaw.agent.session_events import record_session_event
+from chemclaw.connectors.jobs import build_job_tool, job_workflow_id
+from chemclaw.connectors.registry import discovered, enabled
+from chemclaw.durable.connector_job import ConnectorJobResult, ConnectorJobWorkflow
+from chemclaw.durable.memory_jobs import publish_memory_note_activity
+from chemclaw.durable.notify import record_session_event_activity
+from chemclaw.kg.note import Note
+from chemclaw.kg.pr_gate import propose_note
 from tests.fixtures.connectors.fixture.workflows import FixtureJobWorkflow
 from tests.temporal_env import pydantic_client, start_env_or_skip
-from workflows.connector_job import ConnectorJobResult, ConnectorJobWorkflow
-from workflows.memory_jobs import publish_memory_note_activity
-from workflows.notify import record_session_event_activity
 
 _FIXTURE_DIR = Path(__file__).parent / "fixtures" / "connectors"
 _CONNECTOR_QUEUE = "connector-fixture"
@@ -57,7 +57,7 @@ def test_the_wrapper_is_served_by_the_background_worker() -> None:
     offline, so the one property that would silently break *every* connector job — nobody
     polling the queue the generated tool starts work on — is pinned by a test that always runs.
     """
-    from workers.background_worker import BACKGROUND_WORKFLOWS
+    from chemclaw.durable.background_worker import BACKGROUND_WORKFLOWS
 
     assert ConnectorJobWorkflow in BACKGROUND_WORKFLOWS
 
@@ -85,8 +85,8 @@ def test_the_publish_activity_calls_the_pr_gate_the_way_the_pr_gate_expects(
         seen.update(bound.arguments)
         return "pr://note/n"
 
-    monkeypatch.setattr("workflows.memory_jobs.propose_note", _capture)
-    monkeypatch.setattr("workflows.memory_jobs.default_submitter", lambda: object())
+    monkeypatch.setattr("chemclaw.durable.memory_jobs.propose_note", _capture)
+    monkeypatch.setattr("chemclaw.durable.memory_jobs.default_submitter", lambda: object())
 
     note = Note(id="n", type="job-result", created_by="agent", body="no links")
     assert asyncio.run(publish_memory_note_activity(note)) == "pr://note/n"
@@ -130,8 +130,8 @@ def _fixture_job_tool(monkeypatch: pytest.MonkeyPatch) -> Any:
     Built through the registry rather than hand-constructed, so this exercises the real manifest
     → tool path: a mistake in the fixture's YAML fails here as it would in production.
     """
-    monkeypatch.setattr("chemclaw.config.settings.connectors_dir", str(_FIXTURE_DIR))
-    monkeypatch.setattr("chemclaw.config.settings.connectors_enabled", "")
+    monkeypatch.setattr("chemclaw.core.config.settings.connectors_dir", str(_FIXTURE_DIR))
+    monkeypatch.setattr("chemclaw.core.config.settings.connectors_enabled", "")
     discovered.cache_clear()
     (manifest,) = enabled()
     (job,) = manifest.jobs
@@ -178,10 +178,10 @@ def test_a_connector_job_runs_its_own_workflow_and_core_does_the_rest(
         )
 
     # Stub what the activities *do*, not the activities themselves — see the module docstring.
-    monkeypatch.setattr("workflows.memory_jobs.propose_note", _fake_propose)
-    monkeypatch.setattr("workflows.memory_jobs.default_submitter", lambda: object())
-    monkeypatch.setattr("workflows.notify.record_session_event", _fake_record)
-    monkeypatch.setattr("chemclaw.config.settings.background_task_queue", _CORE_QUEUE)
+    monkeypatch.setattr("chemclaw.durable.memory_jobs.propose_note", _fake_propose)
+    monkeypatch.setattr("chemclaw.durable.memory_jobs.default_submitter", lambda: object())
+    monkeypatch.setattr("chemclaw.durable.notify.record_session_event", _fake_record)
+    monkeypatch.setattr("chemclaw.core.config.settings.background_task_queue", _CORE_QUEUE)
     tool = _fixture_job_tool(monkeypatch)
 
     async def _run() -> ConnectorJobResult:
@@ -191,7 +191,7 @@ def test_a_connector_job_runs_its_own_workflow_and_core_does_the_rest(
             async def _connect() -> Client:
                 return client
 
-            monkeypatch.setattr("connectors.jobs.connect", _connect)
+            monkeypatch.setattr("chemclaw.connectors.jobs.connect", _connect)
             core = Worker(
                 client,
                 task_queue=_CORE_QUEUE,
@@ -204,11 +204,14 @@ def test_a_connector_job_runs_its_own_workflow_and_core_does_the_rest(
             async with core, connector:
                 # The session is ambient, never a model-supplied argument (F3-T3), so the tool
                 # picks up which chat to wake exactly as it does mid-turn.
-                from agents.identity_context import (
+                from chemclaw.agent.identity_context import (
                     reset_current_identity,
                     set_current_identity,
                 )
-                from agents.session_context import reset_current_session_id, set_current_session_id
+                from chemclaw.agent.session_context import (
+                    reset_current_session_id,
+                    set_current_session_id,
+                )
 
                 token = set_current_session_id(_SESSION)
                 identity = set_current_identity(_ACTOR, frozenset())

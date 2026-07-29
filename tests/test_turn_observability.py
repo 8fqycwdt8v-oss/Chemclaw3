@@ -15,9 +15,9 @@ from typing import Any
 import pytest
 from agent_framework import AgentSession
 
-from agents.identity_context import get_current_correlation_id
-from service.metrics import METRICS, Metrics
-from service.runner import run_turn
+from chemclaw.agent.identity_context import get_current_correlation_id
+from chemclaw.api.metrics import METRICS, Metrics
+from chemclaw.api.runner import run_turn
 
 
 class _SilentAgent:
@@ -172,7 +172,7 @@ def test_the_front_door_configures_logging_and_telemetry_at_startup(
     """
     from fastapi.testclient import TestClient
 
-    from service import app as service_app
+    from chemclaw.api import app as service_app
     from tests.test_service import _FakeAgent, _no_connectors
 
     calls: list[str] = []

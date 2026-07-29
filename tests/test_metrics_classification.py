@@ -9,8 +9,8 @@ import math
 
 import pytest
 
-from evals.metric import EvalCase, MetricError, get_metric
-from evals.metrics import precision_recall_f1
+from chemclaw.evals.metric import EvalCase, MetricError, get_metric
+from chemclaw.evals.metrics import precision_recall_f1
 
 
 def test_prf_typical_case() -> None:

@@ -14,15 +14,19 @@ import pytest
 from temporalio.client import Client
 from temporalio.worker import Worker
 
-from bo.benchmarks.reizman_suzuki import build_problem, load_dataset
-from bo.campaign import optimize
-from bo.objectives import (
+from chemclaw.connectors.bo.activities import evaluate_candidates, propose_initial, propose_next
+from chemclaw.connectors.bo.workflows import BoCampaignWorkflow
+from chemclaw.core.chem import InvalidSmilesError
+from chemclaw.core.config import settings
+from chemclaw.science.bo.benchmarks.reizman_suzuki import build_problem, load_dataset
+from chemclaw.science.bo.campaign import optimize
+from chemclaw.science.bo.objectives import (
     MOLECULE_KEY,
     get_objective,
     molecule_library_problem,
     solubility_objective,
 )
-from bo.problem import (
+from chemclaw.science.bo.problem import (
     CampaignResult,
     CampaignSpec,
     CategoricalParameter,
@@ -37,12 +41,8 @@ from bo.problem import (
     distinct_candidate_count,
     require_rounds_within_ceiling,
 )
-from calc.solubility import SolubilityInput, predict_solubility
-from calc.store import InMemoryStore
-from chemclaw.chem import InvalidSmilesError
-from chemclaw.config import settings
-from connectors.bo.activities import evaluate_candidates, propose_initial, propose_next
-from connectors.bo.workflows import BoCampaignWorkflow
+from chemclaw.science.calc.solubility import SolubilityInput, predict_solubility
+from chemclaw.science.calc.store import InMemoryStore
 from tests.temporal_env import pydantic_client, start_env_or_skip
 
 warnings.filterwarnings("ignore")

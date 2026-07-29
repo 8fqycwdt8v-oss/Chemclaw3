@@ -28,25 +28,10 @@ _ROOT = Path(__file__).resolve().parents[1]
 
 # First-party packages. `tests/` is excluded deliberately: a test may legitimately name a host in a
 # docstring or a mocked-transport URL, and the constraint is about what the *shipped* code reaches.
-_PACKAGES = (
-    "agents",
-    "bo",
-    "calc",
-    "chemclaw",
-    "connectors",
-    "eln",
-    "evals",
-    "infra",
-    "kg",
-    "mcp_servers",
-    "memory",
-    "report",
-    "scripts",
-    "service",
-    "sources",
-    "workers",
-    "workflows",
-)
+# One entry since D-141: every first-party module lives under `src/`, so this cannot fall behind
+# the way an eighteen-name list did. `infra/` carries SQL, not Python, and `rglob` finds nothing
+# there anyway.
+_PACKAGES = ("src",)
 
 # Hosts the system is *deployed with* rather than reaching out to: infrastructure an operator runs
 # or contracts for, appearing only as a per-deployment configurable default.
@@ -111,7 +96,7 @@ def test_the_source_registry_offers_no_external_source() -> None:
     (D-120), and it is a deployment's own decision to audit. What must not drift unnoticed is a new
     external corpus arriving in this repository.
     """
-    from sources.registry import discovered
+    from chemclaw.ingest.sources.registry import discovered
 
     assert "literature" not in discovered()
     assert set(discovered()) == {
@@ -136,11 +121,14 @@ def test_the_vendored_source_cannot_make_a_request() -> None:
     duly got built). So the constraint is enforced: the module may not import an HTTP client, which
     means it cannot acquire one by accident during a later edit either.
     """
-    source = (_ROOT / "sources" / "vendored_dataset.py").read_text(encoding="utf-8")
+    source = (_ROOT / "src" / "chemclaw" / "ingest" / "sources" / "vendored_dataset.py").read_text(
+        encoding="utf-8"
+    )
     for client in ("httpx", "requests", "urllib", "aiohttp", "socket"):
         assert f"import {client}" not in source, (
-            f"sources/vendored_dataset.py imports {client}: a vendored dataset is installed at "
-            "build time and read from local disk, and the moment it can make a request it is an "
+            f"ingest/sources/vendored_dataset.py imports {client}: a vendored dataset is "
+            "installed at build time and read from local disk, and the moment it can make a "
+            "request it is an "
             "external data source (D-089)"
         )
 

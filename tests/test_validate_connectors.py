@@ -16,9 +16,9 @@ exists on top of pydantic's own validation:
 
 import pytest
 
-from chemclaw.config import settings
-from connectors.manifest import ConnectorManifest
-from scripts.validate_connectors import _job_problems
+from chemclaw.cli.validate_connectors import _job_problems
+from chemclaw.connectors.manifest import ConnectorManifest
+from chemclaw.core.config import settings
 
 _MANIFEST = {
     "name": "probe",
@@ -77,7 +77,7 @@ def test_the_shipped_bundles_pass_their_own_gate() -> None:
     Discovery rather than the enabled set: a bundle that is broken while disabled is one nobody can
     turn on, and finding that out at enable time is exactly what this gate prevents.
     """
-    from scripts.validate_connectors import validate_connectors
+    from chemclaw.cli.validate_connectors import validate_connectors
 
     assert validate_connectors() == []
 

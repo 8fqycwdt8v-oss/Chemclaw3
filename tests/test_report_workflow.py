@@ -11,19 +11,19 @@ import pytest
 from temporalio.client import Client
 from temporalio.worker import Worker
 
-import workflows.report_workflow as report_workflow
-from chemclaw.config import settings
-from report.evidence import EvidenceChunk
-from report.harness import ReportRequest, ReportSection
-from tests.conftest import FakeSubmitter
-from tests.temporal_env import pydantic_client, start_env_or_skip
-from workflows.orchestrator import resolve_fan_out_limit
-from workflows.report_workflow import (
+import chemclaw.durable.report_workflow as report_workflow
+from chemclaw.core.config import settings
+from chemclaw.durable.orchestrator import resolve_fan_out_limit
+from chemclaw.durable.report_workflow import (
     DevelopmentReportWorkflow,
     ReportSectionWorkflow,
     propose_report,
     retrieve_section,
 )
+from chemclaw.retrieval.evidence import EvidenceChunk
+from chemclaw.retrieval.harness import ReportRequest, ReportSection
+from tests.conftest import FakeSubmitter
+from tests.temporal_env import pydantic_client, start_env_or_skip
 
 
 class _FakeRetriever:
@@ -41,7 +41,7 @@ class _FailingRetriever:
     name = "boom"
 
     async def retrieve(self, query: str, filters: dict) -> list[EvidenceChunk]:  # type: ignore[type-arg]
-        from chemclaw.errors import ChemclawError
+        from chemclaw.core.errors import ChemclawError
 
         raise ChemclawError("retriever exploded")  # non-retryable → activity fails fast
 
@@ -52,7 +52,8 @@ def test_default_retrievers_uses_the_configured_source_registry(
     """`default_retrievers` must honor `settings.data_sources`, not a hardcoded `GraphRetriever`.
 
     A report section's query is prose exactly like a conversational turn's, so it needs the
-    same source registry `agents.research_tools.gather_evidence` fans out over — a deployment
+    same source registry `chemclaw.agent.research_tools.gather_evidence` fans out over — a
+    deployment
     that turns on hybrid (vector/lexical) retrieval must not have to remember to also flip it
     here (D-018). No Temporal/Postgres needed: this is a direct call, not a workflow run.
     """
@@ -138,7 +139,7 @@ def test_failed_section_is_marked_not_dropped(monkeypatch: pytest.MonkeyPatch) -
 
 def test_background_worker_registers_report_workflow() -> None:
     """The report workflow + activities are wired onto the background worker (regression)."""
-    from workers.background_worker import BACKGROUND_ACTIVITIES, BACKGROUND_WORKFLOWS
+    from chemclaw.durable.background_worker import BACKGROUND_ACTIVITIES, BACKGROUND_WORKFLOWS
 
     assert DevelopmentReportWorkflow in BACKGROUND_WORKFLOWS
     assert ReportSectionWorkflow in BACKGROUND_WORKFLOWS  # the fan-out child must be registered too

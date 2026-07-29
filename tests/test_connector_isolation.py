@@ -2,13 +2,16 @@
 
 This is the seam's central promise and the reason a capability "earns a bundle by taking a
 dependency closure with it". It held for imports the eye can see — core's modules simply do not
-`import connectors.calc` — and it was broken by the one field that resolves an import invisibly.
+`import chemclaw.connectors.calc` — and it was broken by the one field that resolves an import
+invisibly.
 
 `connector.yaml`'s `params_model` names a pydantic model as `module:Class`, and
 `connectors/jobs.py` resolves it by importing that module. It does so inside `build_job_tool`,
 which `agents/chemclaw_agent.py` calls on **every** `build_agent`. The `calc` bundle pointed its
-five jobs at `workflows/models.py`, which imported `calc.complexes`, `calc.conformers`,
-`calc.reaction` and `calc.xtb_scan` for the *result* types that lived alongside the request types.
+five jobs at `workflows/models.py`, which imported `chemclaw.science.calc.complexes`,
+`chemclaw.science.calc.conformers`,
+`chemclaw.science.calc.reaction` and `chemclaw.science.calc.xtb_scan` for the *result* types that
+lived alongside the request types.
 Measured on `main`, building the enabled job tools loaded **`tblite`** — a compiled
 quantum-chemistry library — **and fifteen `calc.*` modules** into the agent's process.
 
@@ -36,8 +39,8 @@ _BUNDLE_ONLY_PACKAGES = ("calc",)
 _PROBE = textwrap.dedent(
     """
     import json, sys
-    from connectors.jobs import build_job_tool
-    from connectors.registry import enabled
+    from chemclaw.connectors.jobs import build_job_tool
+    from chemclaw.connectors.registry import enabled
 
     for manifest in enabled():
         for job in manifest.jobs:
@@ -79,7 +82,8 @@ def test_building_job_tools_loads_no_bundle_only_first_party_package() -> None:
     offenders = sorted(
         name
         for name in loaded
-        if name.split(".")[0] in _BUNDLE_ONLY_PACKAGES and not name.startswith("connectors.")
+        if name.split(".")[0] in _BUNDLE_ONLY_PACKAGES
+        and not name.startswith("chemclaw.connectors.")
     )
     assert not offenders, (
         f"building the connector job tools loaded {offenders} into the agent's process; the "

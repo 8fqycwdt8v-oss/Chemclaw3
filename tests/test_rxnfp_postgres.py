@@ -8,10 +8,10 @@ import asyncio
 
 import pytest
 
-from chemclaw.config import settings
-from mcp_servers.fpstore import PostgresFingerprintStore
-from mcp_servers.rxnfp.fingerprint import reaction_definition
-from mcp_servers.rxnfp.search import find_similar_reactions, record_for_reaction
+from chemclaw.core.config import settings
+from chemclaw.mcp.fpstore import PostgresFingerprintStore
+from chemclaw.mcp.rxnfp.fingerprint import reaction_definition
+from chemclaw.mcp.rxnfp.search import find_similar_reactions, record_for_reaction
 from tests.pg import migrated_db_or_skip
 
 _ESTER_ETHYL = "CCO.CC(=O)O>>CCOC(C)=O"

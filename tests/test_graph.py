@@ -6,10 +6,10 @@ from pathlib import Path
 import networkx as nx
 import pytest
 
-import kg.graph as graph
-from chemclaw.config import settings
-from kg.graph import build_graph, neighborhood
-from kg.validate import validate
+import chemclaw.kg.graph as graph
+from chemclaw.core.config import settings
+from chemclaw.kg.graph import build_graph, neighborhood
+from chemclaw.kg.validate import validate
 
 
 def _note(id_: str, links: list[str], type_: str = "compound") -> str:

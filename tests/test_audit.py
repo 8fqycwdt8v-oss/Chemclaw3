@@ -17,13 +17,13 @@ from typing import cast
 import pytest
 from agent_framework import FunctionInvocationContext
 
-from agents.audit import (
+from chemclaw.agent.audit import (
     AuditEvent,
     NullAuditSink,
     default_audit_sink,
     make_audit_middleware,
 )
-from chemclaw.config import settings
+from chemclaw.core.config import settings
 
 
 def _ctx(name: str, arguments: object, result: object = None) -> FunctionInvocationContext:
@@ -117,7 +117,7 @@ def _drive_mw(
 
 def test_ambient_identity_overrides_the_static_actor() -> None:
     """The turn's authenticated Entra user is the recorded actor, over the build default (F4)."""
-    from agents.identity_context import reset_current_identity, set_current_identity
+    from chemclaw.agent.identity_context import reset_current_identity, set_current_identity
 
     sink = _RecordingSink()
     mw = make_audit_middleware(correlation_id="conv-9", actor="unknown", sink=sink)
@@ -204,7 +204,7 @@ def test_a_postgres_deployment_gets_the_durable_trail_without_asking(
     factory alone would have left the identical trap set for the Temporal template activities
     (which had it independently) and for every entry point added later.
     """
-    from agents.audit_store import PostgresAuditSink
+    from chemclaw.agent.audit_store import PostgresAuditSink
 
     monkeypatch.setattr(settings, "session_store", "postgres")
     assert isinstance(default_audit_sink(), PostgresAuditSink)
@@ -232,7 +232,7 @@ def test_an_omitted_sink_no_longer_silently_means_log_only(
         async def record(self, event: AuditEvent) -> None:
             recorded.append(event.tool)
 
-    monkeypatch.setattr("agents.audit.default_audit_sink", lambda: _Marker())
+    monkeypatch.setattr("chemclaw.agent.audit.default_audit_sink", lambda: _Marker())
     middleware = make_audit_middleware(correlation_id="c", actor="a")
     context = _ctx("compute_xtb_energy", {"smiles": "CCO"})
 

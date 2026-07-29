@@ -17,10 +17,10 @@ from typing import Any
 import pytest
 from fastapi.testclient import TestClient
 
-from agents.chemclaw_agent import build_agent, connector_tools
-from agents.profile_discovery import ProfileError, load_profiles, profile_files
-from agents.profiles import _REGISTRY, get_profile, registered_profile_names
-from service.app import create_app
+from chemclaw.agent.chemclaw_agent import build_agent, connector_tools
+from chemclaw.agent.profile_discovery import ProfileError, load_profiles, profile_files
+from chemclaw.agent.profiles import _REGISTRY, get_profile, registered_profile_names
+from chemclaw.api.app import create_app
 
 _PROFILE = """\
 instructions: Answer tersely.
@@ -38,7 +38,7 @@ def profiles_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[Pa
     `load_profiles` is deliberately idempotent, which would hide the leak rather than surface
     it.
     """
-    monkeypatch.setattr("chemclaw.config.settings.profiles_dir", str(tmp_path))
+    monkeypatch.setattr("chemclaw.core.config.settings.profiles_dir", str(tmp_path))
     before = set(registered_profile_names())
     try:
         yield tmp_path
@@ -92,7 +92,7 @@ def test_two_files_claiming_one_name_is_an_error(
     second.mkdir()
     _write(profiles_dir, "clash")
     _write(second, "clash")
-    monkeypatch.setattr("chemclaw.config.settings.profiles_dir", f"{profiles_dir}:{second}")
+    monkeypatch.setattr("chemclaw.core.config.settings.profiles_dir", f"{profiles_dir}:{second}")
     with pytest.raises(ProfileError, match="already defined by"):
         load_profiles()
 
@@ -111,9 +111,9 @@ def test_a_bundle_can_ship_its_own_profile(monkeypatch: pytest.MonkeyPatch) -> N
     The same split as skills: shared content in the configured tree, capability-specific content
     in the bundle so it ships and is reviewed with the capability it is about.
     """
-    from connectors.registry import profiles_dirs
+    from chemclaw.connectors.registry import profiles_dirs
 
-    monkeypatch.setattr("chemclaw.config.settings.profiles_dir", "does-not-exist")
+    monkeypatch.setattr("chemclaw.core.config.settings.profiles_dir", "does-not-exist")
     # No bundle declares profiles today, so the discovery list is exactly the shared tree's —
     # the assertion worth making is that the bundle half is wired, not that a bundle happens to
     # use it.
@@ -144,7 +144,7 @@ def test_a_profile_cannot_widen_what_its_caller_may_do() -> None:
     are attached afterwards and unconditionally, so a profile that named a tool the caller may
     not use would still be refused at call time.
     """
-    from agents.tool_authz import enforce_tool_authz
+    from chemclaw.agent.tool_authz import enforce_tool_authz
 
     load_profiles()
     narrowed = build_agent(chat_client=object(), profile="property-lookup")

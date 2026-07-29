@@ -10,10 +10,10 @@ from pathlib import Path
 
 import pytest
 
-import agents.research_tools as research_tools
-from agents.framing import frame_untrusted
-from agents.graph_tools import expand_note
-from chemclaw.config import settings
+import chemclaw.agent.research_tools as research_tools
+from chemclaw.agent.framing import frame_untrusted
+from chemclaw.agent.graph_tools import expand_note
+from chemclaw.core.config import settings
 
 
 def test_frame_untrusted_wraps_and_names_source() -> None:

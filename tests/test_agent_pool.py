@@ -16,7 +16,7 @@ import asyncio
 
 import pytest
 
-from agents.agent_pool import AgentPool
+from chemclaw.agent.agent_pool import AgentPool
 
 
 class _Agent:

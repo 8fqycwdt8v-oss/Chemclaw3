@@ -8,11 +8,11 @@ prefix. Server-backed (skips offline): the real `PostgresAuditSink` writes a lin
 
 import asyncio
 
-from agents.audit import AuditEvent
-from agents.audit_store import PostgresAuditSink, chain_hash
-from chemclaw.config import settings
-from chemclaw.db import connect
-from scripts.verify_audit_chain import ChainRow, check_chain, verify_chain
+from chemclaw.agent.audit import AuditEvent
+from chemclaw.agent.audit_store import PostgresAuditSink, chain_hash
+from chemclaw.cli.verify_audit_chain import ChainRow, check_chain, verify_chain
+from chemclaw.core.config import settings
+from chemclaw.core.db import connect
 from tests.pg import migrated_db_or_skip
 
 _DEFAULT_ACTOR = "u-1"

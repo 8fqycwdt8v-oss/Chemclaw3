@@ -8,7 +8,8 @@ provenance intact — all offline, no DB or Temporal.
 The fan-out test is the seam's **acceptance test**: it attaches a new source the way an operator
 would — writing a `datasource.yaml` into a directory and naming it in `data_sources` — and touches
 no core Python at all. Before D-120 the same test had to `monkeypatch.setitem` a dict inside
-`sources.registry`, which is precisely the core edit the seam is supposed to remove; a test that
+`chemclaw.ingest.sources.registry`, which is precisely the core edit the seam is supposed to
+remove; a test that
 has to reach into core to add a source is evidence the seam does not work.
 """
 
@@ -21,12 +22,12 @@ from typing import Any
 
 import pytest
 
-import agents.research_tools as research_tools
-import sources.registry as registry
-from chemclaw.config import settings
-from eln.adapter import RawEntry
-from report.evidence import EvidenceChunk
-from sources.base import DataSource, SourceSpec
+import chemclaw.agent.research_tools as research_tools
+import chemclaw.ingest.sources.registry as registry
+from chemclaw.core.config import settings
+from chemclaw.ingest.eln.adapter import RawEntry
+from chemclaw.ingest.sources.base import DataSource, SourceSpec
+from chemclaw.retrieval.evidence import EvidenceChunk
 
 
 @pytest.fixture(autouse=True)
@@ -147,7 +148,7 @@ def test_manifest_config_reaches_the_adapter(
     This is what replaced the typed `data_source_specs` union: two ELN drops with different
     directories are two manifests, not two pydantic variants plus a branch in core.
     """
-    from eln.json_adapter import JsonExportAdapter
+    from chemclaw.ingest.eln.json_adapter import JsonExportAdapter
 
     manifests, drop = tmp_path / "manifests", tmp_path / "drop"
     drop.mkdir()
@@ -157,7 +158,7 @@ def test_manifest_config_reaches_the_adapter(
         f"""\
         name: eln-json-staging
         description: The staging ELN drop, with its own export directory.
-        ingest: eln.json_adapter:JsonExportAdapter
+        ingest: chemclaw.ingest.eln.json_adapter:JsonExportAdapter
         config:
           export_dir: {drop}
         """,
@@ -183,7 +184,7 @@ def test_a_config_key_the_adapter_rejects_names_both_sides(
         """\
         name: eln-typo
         description: A source whose config names a kwarg the adapter does not take.
-        ingest: eln.json_adapter:JsonExportAdapter
+        ingest: chemclaw.ingest.eln.json_adapter:JsonExportAdapter
         config:
           exprot_dir: /mnt/eln
         """,
@@ -251,7 +252,11 @@ def test_an_earlier_dir_overrides_a_shipped_source(
         retrieve: tests.test_datasource_seam:_FakeRetriever
         """,
     )
-    monkeypatch.setattr(settings, "data_sources_dir", f"{tmp_path}{os.pathsep}sources")
+    # Prepend to whatever the shipped directory currently is, rather than restating it: since
+    # D-141 the default is resolved against the installed package, not the process's CWD, so a
+    # literal here would be asserting the layout instead of the override rule.
+    shipped = settings.data_sources_dir
+    monkeypatch.setattr(settings, "data_sources_dir", f"{tmp_path}{os.pathsep}{shipped}")
 
     assert "eln-json" in registry.discovered()  # the shipped dir is still searched
     assert registry.discovered()["graph"].retrieve == "tests.test_datasource_seam:_FakeRetriever"
@@ -259,7 +264,7 @@ def test_an_earlier_dir_overrides_a_shipped_source(
 
 def test_rehosted_eln_source_carries_provenance() -> None:
     """The re-hosted ELN source rides the seam; its adapter is the existing one (F7-T4)."""
-    from eln.json_adapter import JsonExportAdapter
+    from chemclaw.ingest.eln.json_adapter import JsonExportAdapter
 
     source = registry.make_data_source("eln-json")
     assert source.name == "eln-json"

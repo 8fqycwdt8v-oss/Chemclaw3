@@ -12,9 +12,9 @@ configuration is part of the key and why that is the first thing asserted here.
 
 import pytest
 
-from chemclaw import embeddings
-from chemclaw.config import settings
-from chemclaw.embeddings import clear_embedding_cache, embed_texts
+from chemclaw.core import embeddings
+from chemclaw.core.config import settings
+from chemclaw.core.embeddings import clear_embedding_cache, embed_texts
 
 
 @pytest.fixture(autouse=True)

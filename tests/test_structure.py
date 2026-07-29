@@ -8,7 +8,7 @@ converged by tblite into a meaningless number (gate G4).
 
 import pytest
 
-from calc.structure import Structure, structure_from_smiles
+from chemclaw.science.calc.structure import Structure, structure_from_smiles
 
 
 def _water() -> Structure:

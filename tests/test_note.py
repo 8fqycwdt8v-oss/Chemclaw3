@@ -6,8 +6,8 @@ from pathlib import Path
 import pytest
 from pydantic import ValidationError
 
-from chemclaw.errors import ChemclawError
-from kg.note import Note, NoteError, parse_note, read_note
+from chemclaw.core.errors import ChemclawError
+from chemclaw.kg.note import Note, NoteError, parse_note, read_note
 
 
 def test_is_current_honors_validity_window() -> None:

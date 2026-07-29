@@ -15,16 +15,16 @@ from pathlib import Path
 
 import pytest
 
-from chemclaw.config import settings
-from eln.adapter import RawEntry, parse_iso_utc
-from eln.ingest import IngestError, ingest_reaction
-from eln.json_adapter import ElnFormatError, JsonExportAdapter
-from eln.note import note_from_ord_reaction
-from eln.ord import Component, OrdReaction, Role
-from eln.ord_adapter import OrdJsonAdapter
-from eln.sync import sync_entries
-from eln.validate import validate_ord
-from mcp_servers.fpstore import InMemoryFingerprintStore
+from chemclaw.core.config import settings
+from chemclaw.ingest.eln.adapter import RawEntry, parse_iso_utc
+from chemclaw.ingest.eln.ingest import IngestError, ingest_reaction
+from chemclaw.ingest.eln.json_adapter import ElnFormatError, JsonExportAdapter
+from chemclaw.ingest.eln.note import note_from_ord_reaction
+from chemclaw.ingest.eln.ord import Component, OrdReaction, Role
+from chemclaw.ingest.eln.ord_adapter import OrdJsonAdapter
+from chemclaw.ingest.eln.sync import sync_entries
+from chemclaw.ingest.eln.validate import validate_ord
+from chemclaw.mcp.fpstore import InMemoryFingerprintStore
 from tests.conftest import FakeSubmitter
 
 _EPOCH = datetime.min.replace(tzinfo=UTC)
@@ -820,7 +820,7 @@ def test_overlap_rerejection_logs_debug_not_warning(
         summary = await sync_entries(_ListAdapter([replayed, fresh]), rxn, mol, sub, since)
         assert {r.entry_id for r in summary.rejected} == {"replayed-bad", "fresh-bad"}
 
-    with caplog.at_level(logging.DEBUG, logger="eln.sync"):
+    with caplog.at_level(logging.DEBUG, logger="chemclaw.ingest.eln.sync"):
         asyncio.run(_run())
     warnings = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
     debugs = [r.getMessage() for r in caplog.records if r.levelno == logging.DEBUG]

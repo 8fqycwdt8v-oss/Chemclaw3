@@ -13,9 +13,9 @@ import asyncio
 
 import pytest
 
-import connectors.calc.server.tools as calc_tools
-from calc.store import InMemoryStore
-from chemclaw.config import settings
+import chemclaw.connectors.calc.server.tools as calc_tools
+from chemclaw.core.config import settings
+from chemclaw.science.calc.store import InMemoryStore
 
 
 def test_compute_xtb_energy_tool_runs_and_caches(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -114,7 +114,7 @@ def test_predict_logd_tool_defaults_ph_and_reuses_pka(monkeypatch: pytest.Monkey
     monkeypatch.setattr(calc_tools, "default_store", lambda: store)
 
     async def _run() -> None:
-        from chemclaw.config import settings
+        from chemclaw.core.config import settings
 
         result = await calc_tools.predict_logd("OC(=O)c1ccccc1")
         assert result.ph == settings.logd_default_ph

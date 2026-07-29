@@ -8,16 +8,16 @@ import pytest
 from temporalio.client import Client
 from temporalio.worker import Worker
 
-import workflows.memory_jobs as memory_jobs
-from bo.problem import CampaignResult, CampaignSpec, Observation
-from chemclaw.config import settings
-from connectors.bo.activities import evaluate_candidates, propose_initial, propose_next
-from connectors.bo.knowledge import note_from_campaign_result
-from connectors.bo.workflows import BoCampaignWorkflow
+import chemclaw.durable.memory_jobs as memory_jobs
+from chemclaw.connectors.bo.activities import evaluate_candidates, propose_initial, propose_next
+from chemclaw.connectors.bo.knowledge import note_from_campaign_result
+from chemclaw.connectors.bo.workflows import BoCampaignWorkflow
+from chemclaw.core.config import settings
+from chemclaw.durable.connector_job import ConnectorJobInput, ConnectorJobWorkflow
+from chemclaw.durable.memory_jobs import publish_memory_note_activity
+from chemclaw.science.bo.problem import CampaignResult, CampaignSpec, Observation
 from tests.conftest import FakeSubmitter
 from tests.temporal_env import pydantic_client, start_env_or_skip
-from workflows.connector_job import ConnectorJobInput, ConnectorJobWorkflow
-from workflows.memory_jobs import publish_memory_note_activity
 
 _BO_ACTIVITIES: Sequence[Callable[..., Any]] = [propose_initial, propose_next, evaluate_candidates]
 
@@ -75,7 +75,7 @@ def test_campaign_publishes_recommendation_to_graph(monkeypatch: pytest.MonkeyPa
     monkeypatch.setattr(memory_jobs, "default_submitter", lambda: fake)
 
     async def _run() -> None:
-        from bo.benchmarks.reizman_suzuki import build_problem, load_dataset
+        from chemclaw.science.bo.benchmarks.reizman_suzuki import build_problem, load_dataset
 
         spec = CampaignSpec(
             problem=build_problem(load_dataset()),

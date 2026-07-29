@@ -19,13 +19,13 @@ from temporalio.exceptions import ActivityError, ApplicationError
 from temporalio.testing import ActivityEnvironment
 from temporalio.worker import Replayer, Worker
 
-from chemclaw.config import settings
-from connectors.qm.activities import parse_qm_output, poll_hpc_status, prepare_input
-from connectors.qm.hpc import nextflow
-from connectors.qm.specs import HpcJobHandle, QMJobInput, QmJobSpec
-from connectors.qm.workflows import QMJobWorkflow
+from chemclaw.connectors.qm.activities import parse_qm_output, poll_hpc_status, prepare_input
+from chemclaw.connectors.qm.hpc import nextflow
+from chemclaw.connectors.qm.specs import HpcJobHandle, QMJobInput, QmJobSpec
+from chemclaw.connectors.qm.workflows import QMJobWorkflow
+from chemclaw.core.config import settings
+from chemclaw.durable.connector_job import ConnectorJobResult
 from tests.temporal_env import QM_ACTIVITIES, pydantic_client, start_env_or_skip
-from workflows.connector_job import ConnectorJobResult
 
 _TASK_QUEUE = "test-connector-qm"
 

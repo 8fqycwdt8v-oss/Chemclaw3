@@ -18,8 +18,8 @@ from typing import Any
 from temporalio import workflow
 
 with workflow.unsafe.imports_passed_through():
-    from kg.note import Note
-    from workflows.connector_job import ConnectorJobResult
+    from chemclaw.durable.connector_job import ConnectorJobResult
+    from chemclaw.kg.note import Note
 
 
 @workflow.defn(name="FixtureJobWorkflow")
@@ -34,7 +34,7 @@ class FixtureJobWorkflow:
         the model-authored arguments, so the actor cannot live there without becoming something an
         LLM could fill in. Core stamps the memo on the child call, and a bundle whose backend runs
         under a shared service identity — the HPC cluster — reads it here to keep the run
-        attributable (`connectors/qm/workflows.py` is the real case).
+        attributable (`connectors/qm/chemclaw.durable.py` is the real case).
         """
         subject = str(payload["subject"])
         return ConnectorJobResult(

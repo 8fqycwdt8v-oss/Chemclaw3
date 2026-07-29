@@ -12,7 +12,7 @@ names the geometry that was really the input.
 
 import asyncio
 
-from calc.geometry import (
+from chemclaw.science.calc.geometry import (
     BestGeometry,
     GeometrySubject,
     best_known_geometry,
@@ -22,8 +22,8 @@ from calc.geometry import (
     starting_geometry,
     subject_of,
 )
-from calc.store import CalculationKey, InMemoryStore
-from calc.structure import Structure
+from chemclaw.science.calc.store import CalculationKey, InMemoryStore
+from chemclaw.science.calc.structure import Structure
 
 _ORIGIN = CalculationKey.build("xtb.opt", "GFN2-xTB+tblite+x", inputs={"structure": "s"})
 
@@ -170,13 +170,14 @@ def test_a_recorded_pointer_never_changes_an_optimizations_cache_key() -> None:
     """The safety property, asserted directly (see the module docstring).
 
     If consulting the pointer could change a key, the same request would return different answers
-    depending on what the store happened to hold — the exact cache dishonesty `calc.xtb_spec` was
+    depending on what the store happened to hold — the exact cache dishonesty
+    `chemclaw.science.calc.xtb_spec` was
     written to prevent. It cannot, because the key is derived from the structure handed to the
     optimizer, and the seeding happens before that.
     """
 
     async def _run() -> None:
-        from calc.xtb_opt import OptSpec
+        from chemclaw.science.calc.xtb_opt import OptSpec
 
         store = InMemoryStore()
         fresh = _ethanol(offset=1e-3)

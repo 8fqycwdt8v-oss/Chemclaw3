@@ -13,10 +13,10 @@ Both wanted the same thing: a structure-derived identity, which is what these pi
 
 import pytest
 
-from chemclaw.chem import InvalidSmilesError
-from eln.compound import compound_id, compound_note, synonyms_for
-from kg.note import KNOWN_NOTE_TYPES
-from memory.optimization import canonical_condition
+from chemclaw.core.chem import InvalidSmilesError
+from chemclaw.ingest.eln.compound import compound_id, compound_note, synonyms_for
+from chemclaw.kg.note import KNOWN_NOTE_TYPES
+from chemclaw.memory.optimization import canonical_condition
 
 
 def test_the_same_molecule_gets_one_id_however_it_is_written() -> None:
@@ -76,7 +76,7 @@ def test_an_unknown_species_folds_to_itself_rather_than_vanishing() -> None:
 
 def test_the_vocabulary_reuses_the_one_identity_table() -> None:
     """So the grouping vocabulary cannot drift from the hazard screen's or the calculators'."""
-    from chemclaw.reagents import resolve_compound_name
+    from chemclaw.core.reagents import resolve_compound_name
 
     resolved = resolve_compound_name("DIPEA")
     assert resolved is not None

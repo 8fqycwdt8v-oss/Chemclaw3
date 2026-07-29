@@ -14,10 +14,10 @@ from pathlib import Path
 import pytest
 from pydantic import ValidationError
 
-from chemclaw.config import settings
-from chemclaw.errors import ChemclawError
-from evals.ab import TaskScores, compare_tool_utility
-from evals.harness import (
+from chemclaw.core.config import settings
+from chemclaw.core.errors import ChemclawError
+from chemclaw.evals.ab import TaskScores, compare_tool_utility
+from chemclaw.evals.harness import (
     EvalCaseError,
     EvalReport,
     ScoredResult,
@@ -26,7 +26,7 @@ from evals.harness import (
     render_report,
     run_eval,
 )
-from evals.metric import (
+from chemclaw.evals.metric import (
     EvalCase,
     MetricError,
     get_metric,
@@ -177,7 +177,7 @@ def test_cli_exits_nonzero_on_unloadable_case_set(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     """The CLI is red when the case-set cannot be loaded (mistyped directory)."""
-    monkeypatch.setattr(sys, "argv", ["evals.harness", str(tmp_path / "missing")])
+    monkeypatch.setattr(sys, "argv", ["chemclaw.evals.harness", str(tmp_path / "missing")])
     assert main() == 1
 
 
@@ -191,7 +191,7 @@ def test_cli_reports_failing_gate_but_exits_zero(
     which cases must pass/fail is pinned by this suite, and only an unloadable or
     unscorable case-set exits non-zero.
     """
-    monkeypatch.setattr(sys, "argv", ["evals.harness", settings.eval_case_dir, "v1"])
+    monkeypatch.setattr(sys, "argv", ["chemclaw.evals.harness", settings.eval_case_dir, "v1"])
     assert main() == 0
     assert "**FAIL**" in capsys.readouterr().out  # the report still shows the red gate
 

@@ -22,7 +22,7 @@ from pptx import Presentation
 from pptx.util import Inches
 from pypdf import PdfWriter
 
-from agents.attachments import AttachmentError, content_type_for, parse_attachment
+from chemclaw.agent.attachments import AttachmentError, content_type_for, parse_attachment
 
 
 def _docx_bytes(paragraphs: list[str], table: list[list[str]] | None = None) -> bytes:

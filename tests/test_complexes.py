@@ -10,16 +10,16 @@ import asyncio
 
 import pytest
 
-from calc import crest_cli
-from calc.complexes import (
+from chemclaw.science.calc import crest_cli
+from chemclaw.science.calc.complexes import (
     ComplexSpec,
     _combine,
     _ordered,
     compute_interaction,
     run_cached_interaction,
 )
-from calc.store import InMemoryStore
-from calc.structure import Structure, structure_from_smiles
+from chemclaw.science.calc.store import InMemoryStore
+from chemclaw.science.calc.structure import Structure, structure_from_smiles
 
 needs_crest = pytest.mark.skipif(
     not crest_cli.is_available(), reason="the crest binary is not installed"

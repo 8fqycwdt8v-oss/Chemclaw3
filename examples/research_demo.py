@@ -21,24 +21,24 @@ import asyncio
 import tempfile
 from pathlib import Path
 
-import agents.research_tools as research_tools
-import agents.search_tools as search_tools
-import connectors.calc.server.tools as calc_tools
-from agents.research_tools import gather_evidence
-from agents.search_tools import find_similar_reactions
-from bo.problem import (
+import chemclaw.agent.research_tools as research_tools
+import chemclaw.agent.search_tools as search_tools
+import chemclaw.connectors.calc.server.tools as calc_tools
+from chemclaw.agent.research_tools import gather_evidence
+from chemclaw.agent.search_tools import find_similar_reactions
+from chemclaw.connectors.bo.server.tools import suggest_next_experiment
+from chemclaw.connectors.calc.server.tools import predict_solubility
+from chemclaw.core.config import settings
+from chemclaw.mcp.fpstore import InMemoryFingerprintStore
+from chemclaw.mcp.rxnfp.search import record_for_reaction
+from chemclaw.science.bo.problem import (
     CategoricalParameter,
     ContinuousParameter,
     Objective,
     Observation,
     OptimizationProblem,
 )
-from calc.store import InMemoryStore
-from chemclaw.config import settings
-from connectors.bo.server.tools import suggest_next_experiment
-from connectors.calc.server.tools import predict_solubility
-from mcp_servers.fpstore import InMemoryFingerprintStore
-from mcp_servers.rxnfp.search import record_for_reaction
+from chemclaw.science.calc.store import InMemoryStore
 
 # The transformation under study and two of its recorded runs.
 _ESTER = "CCO.CC(=O)O>>CCOC(C)=O"

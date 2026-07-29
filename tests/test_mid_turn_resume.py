@@ -17,9 +17,9 @@ from typing import Any
 import pytest
 from agent_framework import AgentSession
 
-from agents.turn_signals import record_job_started
-from chemclaw.config import settings
-from service.runner import run_turn
+from chemclaw.agent.turn_signals import record_job_started
+from chemclaw.api.runner import run_turn
+from chemclaw.core.config import settings
 
 
 class _JobLaunchingAgent:
@@ -75,7 +75,7 @@ def test_the_result_reaches_the_same_turn(monkeypatch: pytest.MonkeyPatch, enabl
     async def _fake_wait(session_id: str, job_ids: list[str], *, timeout_seconds: float) -> Any:
         return {job_ids[0]: {"energy_hartree": -154.1}}
 
-    monkeypatch.setattr("service.runner.await_job_results", _fake_wait)
+    monkeypatch.setattr("chemclaw.api.runner.await_job_results", _fake_wait)
     agent = _JobLaunchingAgent("qm-1")
     events = _events(agent)
 
@@ -92,7 +92,7 @@ def test_the_result_is_handed_to_the_model_as_framed_data(
     async def _fake_wait(session_id: str, job_ids: list[str], *, timeout_seconds: float) -> Any:
         return {"qm-1": {"energy_hartree": -154.1}}
 
-    monkeypatch.setattr("service.runner.await_job_results", _fake_wait)
+    monkeypatch.setattr("chemclaw.api.runner.await_job_results", _fake_wait)
     agent = _JobLaunchingAgent("qm-1")
     _events(agent)
     continuation = agent.messages[1]
@@ -107,7 +107,7 @@ def test_a_timeout_degrades_to_the_previous_behavior(
     async def _no_results(session_id: str, job_ids: list[str], *, timeout_seconds: float) -> Any:
         return {}
 
-    monkeypatch.setattr("service.runner.await_job_results", _no_results)
+    monkeypatch.setattr("chemclaw.api.runner.await_job_results", _no_results)
     agent = _JobLaunchingAgent("qm-1")
     events = _events(agent)
     assert len(agent.messages) == 1  # no continuation
@@ -124,7 +124,7 @@ def test_the_wait_is_off_by_default(monkeypatch: pytest.MonkeyPatch) -> None:
         called.append(job_ids)
         return {}
 
-    monkeypatch.setattr("service.runner.await_job_results", _spy)
+    monkeypatch.setattr("chemclaw.api.runner.await_job_results", _spy)
     agent = _JobLaunchingAgent("qm-1")
     _events(agent)
     assert called == [], "the resume ran without being enabled"
@@ -141,7 +141,7 @@ def test_a_turn_that_starts_no_job_never_waits(
         called.append(job_ids)
         return {}
 
-    monkeypatch.setattr("service.runner.await_job_results", _spy)
+    monkeypatch.setattr("chemclaw.api.runner.await_job_results", _spy)
 
     class _PlainAgent:
         mcp_tools: list[Any] = []
@@ -176,7 +176,7 @@ def test_the_resume_is_not_recursive(monkeypatch: pytest.MonkeyPatch, enabled: N
         waits.append(job_ids)
         return {job_ids[0]: {"ok": True}}
 
-    monkeypatch.setattr("service.runner.await_job_results", _fake_wait)
+    monkeypatch.setattr("chemclaw.api.runner.await_job_results", _fake_wait)
 
     class _AlwaysLaunching:
         mcp_tools: list[Any] = []

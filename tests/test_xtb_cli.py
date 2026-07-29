@@ -11,13 +11,13 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from calc import crest_cli, xtb_cli
-from calc.conformers import ConformerSpec, _conformational_entropy, _populations
-from calc.structure import structure_from_smiles
-from calc.xtb_opt import OptSpec, optimize_structure
-from calc.xtb_spec import XtbSpec, backend_version, resolve_backend
-from calc.xtb_thermo import ThermoSpec, compute_thermochemistry
-from chemclaw.config import settings
+from chemclaw.core.config import settings
+from chemclaw.science.calc import crest_cli, xtb_cli
+from chemclaw.science.calc.conformers import ConformerSpec, _conformational_entropy, _populations
+from chemclaw.science.calc.structure import structure_from_smiles
+from chemclaw.science.calc.xtb_opt import OptSpec, optimize_structure
+from chemclaw.science.calc.xtb_spec import XtbSpec, backend_version, resolve_backend
+from chemclaw.science.calc.xtb_thermo import ThermoSpec, compute_thermochemistry
 
 needs_xtb = pytest.mark.skipif(not xtb_cli.is_available(), reason="the xtb binary is not installed")
 needs_crest = pytest.mark.skipif(
@@ -173,7 +173,7 @@ def test_both_backends_reach_the_same_minimum() -> None:
 
     Wall clock is what the binary is for and is too machine-dependent to assert, so what
     is pinned here is what must hold on any machine: the dispatch, and that a change of
-    optimizer is not a change of answer. The speed claim lives in `calc.xtb_cli`'s
+    optimizer is not a change of answer. The speed claim lives in `chemclaw.science.calc.xtb_cli`'s
     docstring with the numbers it was measured from.
     """
     structure = structure_from_smiles("CCCCO", optimize=True)
@@ -215,7 +215,7 @@ def test_a_conformer_search_finds_butanes_rotamers() -> None:
     gauche-like sits within a kcal/mol of it, the anti is the most populated single
     conformer, and the ensemble contributes a positive entropy — never a count.
     """
-    from calc.conformers import compute_ensemble
+    from chemclaw.science.calc.conformers import compute_ensemble
 
     ensemble = compute_ensemble(ConformerSpec(), structure_from_smiles("CCCC", optimize=True))
     assert ensemble.total_found >= 2
@@ -243,8 +243,8 @@ def test_crest_backed_specs_are_keyed_on_crests_own_build() -> None:
     too: naming the wrong program is what the defect was, so keeping both names would not
     fix it.
     """
-    from calc.complexes import ComplexSpec
-    from calc.xtb_spec import backend_version
+    from chemclaw.science.calc.complexes import ComplexSpec
+    from chemclaw.science.calc.xtb_spec import backend_version
 
     for spec in (ConformerSpec(), ComplexSpec()):
         version = spec.calc_version()

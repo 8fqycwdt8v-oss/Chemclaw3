@@ -2,7 +2,7 @@
 
 import httpx
 
-from chemclaw.http import _ERROR_BODY_MAX_CHARS, error_detail
+from chemclaw.core.http import _ERROR_BODY_MAX_CHARS, error_detail
 
 
 def _response(status: int, text: str) -> httpx.Response:

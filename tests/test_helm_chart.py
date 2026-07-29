@@ -20,7 +20,7 @@ from typing import Any
 
 import yaml
 
-from chemclaw.config import Settings
+from chemclaw.core.config import Settings
 
 _CHART = Path(__file__).resolve().parents[1] / "deploy" / "helm" / "chemclaw"
 _VALUES: dict[str, Any] = yaml.safe_load((_CHART / "values.yaml").read_text(encoding="utf-8"))
