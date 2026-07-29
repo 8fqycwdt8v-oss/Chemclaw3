@@ -94,18 +94,22 @@ def test_anonymous_user_only_hits_session_caps(
 
 
 def test_usage_tokens_reads_maf_usage_content() -> None:
-    """`_usage_tokens` sums the usage content's tokens, preferring total, else input+output."""
+    """`_usage_tokens` sums the usage content's tokens, preferring total, else input+output.
+
+    The budget guard meters `total`, so this is the number that refuses a turn — unchanged by the
+    priced split (REV-10), which only changed what is *published*.
+    """
     total = SimpleNamespace(usage_details={"total_token_count": 42})
     split = SimpleNamespace(usage_details={"input_token_count": 10, "output_token_count": 5})
     plain = SimpleNamespace(name="tool", arguments="{}")  # a non-usage content
     update = SimpleNamespace(contents=[total, split, plain])
-    assert _usage_tokens(update) == 42 + 15
+    assert _usage_tokens(update).total == 42 + 15
 
 
 def test_usage_tokens_zero_without_usage() -> None:
     """An update with no usage content meters 0 (the fake-agent / no-usage-provider path)."""
-    assert _usage_tokens(SimpleNamespace(contents=[SimpleNamespace(text="hi")])) == 0
-    assert _usage_tokens(SimpleNamespace()) == 0
+    assert _usage_tokens(SimpleNamespace(contents=[SimpleNamespace(text="hi")])).total == 0
+    assert _usage_tokens(SimpleNamespace()).total == 0
 
 
 def test_session_counters_are_bounded_by_live_session_cap(

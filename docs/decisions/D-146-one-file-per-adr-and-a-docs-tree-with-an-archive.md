@@ -1,4 +1,4 @@
-# D-140 — One file per ADR, and a `docs/` tree with a living half and an archive
+# D-146 — One file per ADR, and a `docs/` tree with a living half and an archive
 
 `DECISIONS.md` was 421 KB and 134 ADRs in one append-only file, sitting at the repository root
 beside `BACKLOG.md` (124 KB), `DEFERRED.md` and `ADR-REGISTRY.md`. `docs/` held a second,

@@ -70,7 +70,7 @@ def test_run_turn_emits_toolcall_tokens_then_answer() -> None:
     session = agent.create_session(session_id="s1")
 
     async def _collect() -> list[Event]:
-        return [event async for event in run_turn(agent, session, "hello")]
+        return [event async for event in run_turn(agent, session, "hello", connectors=[])]
 
     events = asyncio.run(_collect())
     kinds = [e.type for e in events]
@@ -104,7 +104,7 @@ def test_run_turn_reports_failure_as_error_event() -> None:
     session = agent.create_session(session_id="s2")
 
     async def _collect() -> list[Event]:
-        return [event async for event in run_turn(agent, session, "hello")]
+        return [event async for event in run_turn(agent, session, "hello", connectors=[])]
 
     events = asyncio.run(_collect())
     assert [e.type for e in events] == ["error"]

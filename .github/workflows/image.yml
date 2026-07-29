@@ -30,7 +30,26 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Build the multi-target image (rootless)
-        run: docker build -f deploy/Containerfile -t chemclaw:ci .
+        # `CHEMCLAW_REVISION` is what makes `deployment_revision` — the audit trail's "which
+        # version produced this result" column (AG-14) — a real value rather than the constant
+        # "unknown" it had been in every build (REV-17). The commit SHA, not the tag: a tag moves,
+        # and an audit record has to name bytes.
+        run: |
+          docker build -f deploy/Containerfile \
+            --build-arg "CHEMCLAW_REVISION=${GITHUB_SHA}" \
+            -t chemclaw:ci .
+
+      - name: The image knows which revision it was built from
+        # The half that cannot be checked offline: that the ARG actually reaches the running
+        # process's environment. `tests/test_deploy_chart.py` pins the wiring in the files; only a
+        # built image can show the value arrived.
+        run: |
+          set -euo pipefail
+          revision=$(docker run --rm --entrypoint sh chemclaw:ci -c 'printf %s "$CHEMCLAW_DEPLOYMENT_REVISION"')
+          test "${revision}" = "${GITHUB_SHA}" || {
+            echo "image reports revision '${revision}', expected '${GITHUB_SHA}'" >&2
+            exit 1
+          }
 
       - name: Smoke every dispatchable component as a non-root UID
         # Derived from the entrypoint's own cases so this cannot drift from what ships: the two

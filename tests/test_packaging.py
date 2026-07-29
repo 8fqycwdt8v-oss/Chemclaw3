@@ -1,4 +1,4 @@
-"""What is type-checked, what ships, and what coverage measures are one rule (D-117, D-141).
+"""What is type-checked, what ships, and what coverage measures are one rule (D-117, D-147).
 
 Three places used to name the first-party packages by hand — `make type`, the wheel's `packages`,
 and coverage's `source` — and all three had silently drifted:
@@ -11,7 +11,7 @@ and coverage's `source` — and all three had silently drifted:
   invariant it was violating ("a non-editable `pip install` of the wheel must ship all of them or
   the `chemclaw` command and its imports break"), and nothing checked it.
 
-D-141 removed the class of bug rather than detecting it: there is one package, `src/chemclaw`, so
+D-147 removed the class of bug rather than detecting it: there is one package, `src/chemclaw`, so
 there is no list to keep in sync and nothing that can be omitted from it. What is left to check is
 that the three declarations still say that one thing, and that the `src/` layout stays honest — no
 top-level import package may reappear beside `src/`, because that is exactly how the eighteen
@@ -69,7 +69,7 @@ def test_no_import_package_has_reappeared_beside_src() -> None:
     )
     assert not stray, (
         f"top-level import packages outside src/: {stray}. First-party code lives in "
-        "src/chemclaw/ (D-141); see ARCHITECTURE.md for which subpackage it belongs to."
+        "src/chemclaw/ (D-147); see ARCHITECTURE.md for which subpackage it belongs to."
     )
 
 

@@ -1,4 +1,4 @@
-"""ADR ids must actually identify a decision, and the ledger must match the files (D-088, D-140).
+"""ADR ids must actually identify a decision, and the ledger must match the files (D-088, D-146).
 
 Two branches building in parallel each appended ADRs to the end of one `DECISIONS.md` and each
 allocated the *next* free number as seen from its own base — so both wrote D-074, D-075, D-076,
@@ -8,7 +8,7 @@ design docs and several modules cite ADRs by number, and a citation that resolve
 decisions is worse than a dangling one — it reads as authoritative while pointing at the wrong
 rationale.
 
-D-140 split the log into one file per ADR, which turns that particular collision into an add/add
+D-146 split the log into one file per ADR, which turns that particular collision into an add/add
 conflict on a filename rather than something to be noticed in prose. These checks are what is left
 that a machine can still catch: an id that names two files, a file whose name and heading disagree,
 and a ledger that has drifted from the files beside it.
@@ -68,7 +68,7 @@ def _reserved_ids() -> list[str]:
 def test_every_adr_id_is_unique() -> None:
     """No ADR number names two decisions — the invariant a parallel merge silently breaks.
 
-    Since D-140 the filesystem enforces the common case (two files cannot share a name), but two
+    Since D-146 the filesystem enforces the common case (two files cannot share a name), but two
     *differently slugged* files can still carry the same number, which is exactly what two branches
     both writing D-074 would produce.
     """

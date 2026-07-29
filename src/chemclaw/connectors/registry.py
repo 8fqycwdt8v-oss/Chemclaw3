@@ -47,6 +47,7 @@ from chemclaw.connectors.manifest import (
 )
 from chemclaw.connectors.transport import DegradingHttpConnector, DegradingStdioConnector
 from chemclaw.core.config import settings
+from chemclaw.core.metrics_bridge import record_metric
 
 logger = logging.getLogger(__name__)
 
@@ -327,6 +328,15 @@ async def open_reachable(stack: AsyncExitStack, tools: Iterable[Any]) -> list[st
     raise there even if this function swallowed the failure. So an unreachable connector simply
     comes back not-connected, contributes no tools to the turn, and is retried on the next one.
 
+    **The degradation is announced here, not left to the caller** (REV-6). The return value said
+    "for the caller to surface" and all four callers dropped it on the floor, so a turn that lost
+    half its capability answered exactly like one that had all of it — the model simply never saw
+    the tools and reasoned from what remained. Announcing it in the one place every caller passes
+    through means a new caller cannot reintroduce the silence by forgetting to read a return value.
+    A caller that can reach a *human* still reads the list and says so on its own surface (the front
+    door yields `CapabilityDegradedEvent`, the CLI prints to stderr); what is guaranteed here is the
+    operator-visible half.
+
     Args:
         stack: The caller's exit stack, which owns tearing the connections down.
         tools: This turn's connector tools (`chemclaw.agent.chemclaw_agent.connector_tools`).
@@ -347,9 +357,22 @@ async def open_reachable(stack: AsyncExitStack, tools: Iterable[Any]) -> list[st
     # shared between them. Cancellation still propagates — `gather` cancels children with
     # `task.cancel()`, which is precisely what `_is_really_cancelled` reads.
     await asyncio.gather(*(stack.enter_async_context(tool) for tool in tools))
-    return [
+    unreachable = [
         getattr(tool, "name", "?") for tool in tools if not getattr(tool, "is_connected", False)
     ]
+    if unreachable:
+        # WARNING rather than ERROR: the turn still runs, and a connector that is down for a
+        # deployment is a normal transient. The counter is what makes it alertable — a rate that
+        # stays above zero across turns is a dark connector, not a restart.
+        logger.warning(
+            "%d connector(s) did not come up for this scope and contribute no tools: %s",
+            len(unreachable),
+            ", ".join(unreachable),
+        )
+        record_metric(
+            lambda m: m.increment("chemclaw_connectors_unreachable_total", len(unreachable))
+        )
+    return unreachable
 
 
 def job_tools() -> list[CapabilityTool]:

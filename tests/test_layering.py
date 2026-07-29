@@ -2,10 +2,11 @@
 
 `chemclaw.retrieval` is the layer `chemclaw.agent` (and `chemclaw.durable`, `chemclaw.ingest`)
 build on, so the dependency must point one way: retrieval → core, never retrieval → agent. That
-was once violated via `agents.embedding_provider`, closing an agent ↔ retrieval import cycle; the
+was once violated via `chemclaw.agent.embedding_provider`, closing an agent ↔ retrieval import
+cycle; the
 embedding seam now lives in `chemclaw.core.embeddings`.
 
-D-141 grouped the packages by layer, which makes a second rule stateable that the flat layout could
+D-147 grouped the packages by layer, which makes a second rule stateable that the flat layout could
 only imply: **`chemclaw.core` is the shared kernel, so it imports no sibling.** A kernel that
 reaches back up into a layer above it is how the first cycle formed, and it is much easier to do by
 accident when the thing you need is one `from chemclaw.…` away.

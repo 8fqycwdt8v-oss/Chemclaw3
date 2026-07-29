@@ -15,9 +15,10 @@ Those decisions are what these tests pin: the decision, not the plumbing, carrie
 
 **TOOL-6 (external literature) is gone, not merely off**: the decision was reversed to *no external
 sources at all*, so there is nothing left here to pin. `tests/test_no_egress.py` enforces the
-reversal, which prose in `docs/planning/DEFERRED.md` could not.
+reversal, which prose in `DEFERRED.md` could not.
 """
 
+import asyncio
 from pathlib import Path
 
 import pytest
@@ -25,7 +26,15 @@ import pytest
 from chemclaw.agent.attachments import AttachmentError, AttachmentStore, parse_attachment
 from chemclaw.cli.backfill_corpus import note_for_document
 from chemclaw.core.config import settings
-from chemclaw.science.calc.calibration import Calibration, summarize
+from chemclaw.science.calc.calibration import (
+    Calibration,
+    PredictionRecord,
+    calibration_for,
+    record_observation,
+    record_prediction,
+    summarize,
+)
+from tests.pg import migrated_db_or_skip
 
 # --- IDEA-2: predicted-vs-actual calibration -------------------------------------------------
 
@@ -152,3 +161,73 @@ def test_an_unparseable_document_raises_so_the_driver_can_skip_it(tmp_path: Path
     """One PDF must not abort a backfill of ten thousand files."""
     with pytest.raises(AttachmentError):
         note_for_document(tmp_path / "scan.pdf", b"%PDF-1.7", tags=[])
+
+
+# --- REV-12: calibration is scoped to a calculator version (D-136) -----------------------------
+
+
+def test_predictions_from_two_versions_coexist(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A v2 prediction must not overwrite v1's row for the same molecule.
+
+    The unique index is `(calc_type, calc_version, input_hash)`. Every row written by the calculator
+    tools carried the default `calc_version=""`, so the index degenerated to
+    `(calc_type, input_hash)` and upgrading a calculator destroyed the record it was supposed to be
+    compared against.
+    """
+    monkeypatch.setattr(settings, "calibration_enabled", True)
+
+    async def _run() -> tuple[int, int]:
+        await migrated_db_or_skip()
+        for calc_version, predicted in (("v1", 1.0), ("v2", 2.0)):
+            await record_prediction(
+                PredictionRecord(
+                    calc_type="rev12-coexist",
+                    calc_version=calc_version,
+                    input_hash="same-molecule",
+                    subject="CCO",
+                    predicted_value=predicted,
+                    unit="log S",
+                )
+            )
+        await record_observation("rev12-coexist", "same-molecule", 1.0, source="bench")
+        v1 = await calibration_for("rev12-coexist", "v1", unit="log S")
+        v2 = await calibration_for("rev12-coexist", "v2", unit="log S")
+        return v1.n, v2.n
+
+    # Both rows survived, and each version is scored on its own prediction rather than one having
+    # overwritten the other.
+    assert asyncio.run(_run()) == (1, 1)
+
+
+def test_one_measurement_scores_every_version(monkeypatch: pytest.MonkeyPatch) -> None:
+    """An observation is a fact about the molecule, so it reconciles against all versions.
+
+    The observation write is deliberately version-blind — that is what makes a version-over-version
+    comparison possible at all. Only the *read* is scoped, and that is the half that matters:
+    pooled, a version running high and one running low cancel to a bias near zero and the pair
+    reads as well calibrated.
+    """
+    monkeypatch.setattr(settings, "calibration_enabled", True)
+
+    async def _run() -> tuple[float, float]:
+        await migrated_db_or_skip()
+        for calc_version, predicted in (("hi", 3.0), ("lo", 1.0)):
+            await record_prediction(
+                PredictionRecord(
+                    calc_type="rev12-bias",
+                    calc_version=calc_version,
+                    input_hash="same-molecule",
+                    subject="CCO",
+                    predicted_value=predicted,
+                    unit="log S",
+                )
+            )
+        reconciled = await record_observation("rev12-bias", "same-molecule", 2.0, source="bench")
+        # One measurement, both versions' rows: the version-blind write is load-bearing here.
+        assert reconciled == 2
+        hi = await calibration_for("rev12-bias", "hi", unit="log S")
+        lo = await calibration_for("rev12-bias", "lo", unit="log S")
+        return hi.bias, lo.bias
+
+    hi_bias, lo_bias = asyncio.run(_run())
+    assert hi_bias > 0 > lo_bias

@@ -42,7 +42,11 @@ from collections.abc import Generator
 import httpx
 
 from chemclaw.agent.dialogue_tools import is_dry_run
-from chemclaw.agent.identity_context import get_current_actor, get_current_roles
+from chemclaw.agent.identity_context import (
+    get_current_actor,
+    get_current_correlation_id,
+    get_current_roles,
+)
 from chemclaw.agent.session_context import get_current_session_id
 from chemclaw.connectors.manifest import BearerAuth, ConnectorAuth, NoAuth
 
@@ -50,6 +54,12 @@ from chemclaw.connectors.manifest import BearerAuth, ConnectorAuth, NoAuth
 HEADER_ACTOR = "X-Chemclaw-Actor"
 HEADER_ROLES = "X-Chemclaw-Roles"
 HEADER_SESSION = "X-Chemclaw-Session"
+# The turn's correlation id, so a connector's own records join to core's audit trail on the same
+# key core uses (REV-11). Without it the trail stopped at this process boundary: `agents.audit`
+# stamps every in-core tool call with a correlation id, and the connector serving that call logged
+# under an id of its own with nothing tying the two together — so "show me everything that happened
+# in this turn" was answerable in core and unanswerable across the four runtimes the turn spans.
+HEADER_CORRELATION = "X-Chemclaw-Correlation-Id"
 HEADER_DRY_RUN = "X-Chemclaw-Dry-Run"
 
 
@@ -86,6 +96,11 @@ def turn_headers() -> dict[str, str]:
     session_id = get_current_session_id()
     if session_id:
         headers[HEADER_SESSION] = session_id
+    correlation_id = get_current_correlation_id()
+    if correlation_id:
+        # Absent rather than empty for the same reason the actor is: off the request path there is
+        # genuinely no turn, and an empty id in a connector's log would read as one that exists.
+        headers[HEADER_CORRELATION] = correlation_id
     return headers
 
 

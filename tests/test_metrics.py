@@ -112,15 +112,14 @@ def test_metrics_carry_no_identifiers_or_turn_content() -> None:
 def test_a_swallowed_audit_sink_failure_is_counted() -> None:
     """The GxP trail can be incomplete while tool calls keep working (SEC-3) — that must be visible.
 
-    `chemclaw.agent.audit` imports the registry lazily and tolerates its absence, because the
-    workers
-    import that module without ever building the front door.
+    The bridge imports the registry lazily and tolerates its absence, because the workers import
+    `chemclaw.agent.audit` without ever building the front door.
     """
-    from chemclaw.agent.audit import _record_metric
     from chemclaw.api.metrics import METRICS
+    from chemclaw.core.metrics_bridge import record_metric
 
     before = METRICS.value("chemclaw_audit_sink_failures_total")
-    _record_metric(lambda metrics: metrics.increment("chemclaw_audit_sink_failures_total"))
+    record_metric(lambda metrics: metrics.increment("chemclaw_audit_sink_failures_total"))
     assert METRICS.value("chemclaw_audit_sink_failures_total") == before + 1
 
 

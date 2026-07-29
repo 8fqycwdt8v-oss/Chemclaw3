@@ -1,7 +1,7 @@
 """Chemclaw: an AI agent for pharmaceutical and chemical process R&D.
 
 Every first-party module lives under this package, grouped by the four architecture layers
-`ARCHITECTURE.md` describes (D-141):
+`ARCHITECTURE.md` describes (D-147):
 
 - `core` — the shared kernel every other subpackage imports, and which imports none of them.
 - `agent`, `api` — layer 1: conversation orchestration (MAF) and the HTTP front door.

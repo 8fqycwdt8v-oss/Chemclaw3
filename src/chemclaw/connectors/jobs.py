@@ -36,12 +36,14 @@ from temporalio.exceptions import WorkflowAlreadyStartedError
 from chemclaw.agent.authz import authorize_trigger, require_actor
 from chemclaw.agent.dialogue_tools import dry_run_notice, is_dry_run
 from chemclaw.agent.harness_todo import mark_awaiting_job
+from chemclaw.agent.identity_context import get_current_correlation_id
 from chemclaw.agent.session_context import get_current_session, get_current_session_id
 from chemclaw.agent.tool_registry import CapabilityTool
 from chemclaw.agent.turn_signals import record_job_started
 from chemclaw.connectors.manifest import JobParamType, JobSpec
 from chemclaw.core.config import settings
 from chemclaw.core.ids import stable_hash
+from chemclaw.core.metrics_bridge import record_metric
 from chemclaw.core.temporal_client import connect
 from chemclaw.durable.connector_job import (
     ConnectorJobInput,
@@ -274,6 +276,7 @@ def build_job_tool(connector: str, job: JobSpec) -> CapabilityTool:
                     payload=payload,
                     requested_by=requested_by,
                     session_id=get_current_session_id() or "",
+                    correlation_id=get_current_correlation_id() or "",
                     publish_to_graph=job.publish_to_graph,
                 ),
                 id=workflow_id,
@@ -313,6 +316,10 @@ def build_job_tool(connector: str, job: JobSpec) -> CapabilityTool:
         # `job_completed` event to clear the row it drew.
         await _mark_awaiting_if_harness(handle.id, job.name)
         record_job_started(handle.id, job.name)
+        # Counted here rather than at the tool boundary: this is the branch that actually
+        # started a workflow. The re-joined path above returns an existing id without
+        # starting anything, and counting it would report launches that never happened.
+        record_metric(lambda m: m.increment("chemclaw_jobs_started_total"))
         return handle.id
 
     launch.__name__ = job.name

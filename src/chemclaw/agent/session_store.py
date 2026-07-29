@@ -17,6 +17,30 @@ Three stores live here because they are one session's durable state and must sha
 the message history above, `SessionOwnerStore` (who owns a session id — the fact the in-process
 LRU loses on restart), and `SessionTurnClaims` (which process is running a turn on it right now —
 the fact the in-process 409 guard loses at the pod boundary, D-121).
+
+**After-run compaction does not apply to this provider, and cannot as MAF is built** (REV-4).
+`CompactionProvider.after_run` reads `session.state[history_source_id]["messages"]` — the place
+`InMemoryHistoryProvider` keeps its thread. This provider deliberately keeps nothing there, which is
+the entire point of it, so the lookup finds nothing and the strategy returns without doing anything.
+Under `session_store="postgres"` — the production default — the `after_strategy` half of
+`chemclaw.agent.chemclaw_agent._build_compaction` is a silent no-op, and the claim that it will
+"shrink the
+persisted history so the next turn starts smaller" is false here.
+
+What still works is the `before_run` half, which compacts what earlier providers loaded *into the
+context*. That is the half that guards the model's input, so a long session does not blow its
+context window. What is unbounded is this provider's own read: `_SELECT` has no `LIMIT`, so every
+turn loads the session's entire history, and the stored history grows for the session's whole life.
+
+**The obvious fix corrupts data, which is why this is documented rather than patched.** Adding a
+`LIMIT` to load only a recent window looks safe because `get_messages` already repairs unmatched
+tool-call pairings on read. It is not: that repair *writes back* — it deletes and rewrites the
+stored rows it judges orphaned. Over a windowed read, a `tool_result` whose `tool_use` merely fell
+outside the window looks exactly like a genuine orphan, so the repair would strip it and commit
+that, permanently destroying a pairing that was intact on disk. A correct bound needs the repair to
+run in memory only when the load is partial, or needs real durable compaction that prunes whole
+groups. Either is a design change to a durable path with a data-loss failure mode, so it wants its
+own ADR rather than a patch. Recorded in `BACKLOG.md` with that shape.
 """
 
 import logging
@@ -66,10 +90,13 @@ _TURN_REFRESH = (
 _TURN_RELEASE = "DELETE FROM session_turns WHERE session_id = %s AND holder = %s"
 
 _OWNER_INSERT = (
-    "INSERT INTO session_owners (session_id, owner) VALUES (%s, %s) "
+    "INSERT INTO session_owners (session_id, owner, profile) VALUES (%s, %s, %s) "
     "ON CONFLICT (session_id) DO NOTHING"
 )
-_OWNER_SELECT = "SELECT owner FROM session_owners WHERE session_id = %s"
+# The profile comes back with the owner because both are facts the in-process LRU loses, and a
+# rehydration that restored one without the other silently widened the session's tool surface
+# (REV-14 — a profile can only attenuate, so losing it is never the safe direction).
+_OWNER_SELECT = "SELECT owner, profile FROM session_owners WHERE session_id = %s"
 # Newest first: a session list is read as "what was I just working on", and the caller pages from
 # the top. `owner IS NOT DISTINCT FROM %s` rather than `=` so the shared dev principal (a real NULL
 # owner) matches itself instead of dropping every row to SQL's three-valued logic.
@@ -264,15 +291,15 @@ class SessionOwnerStore:
         """Borrow a connection on this store's database (see `_session_connection`)."""
         return _session_connection(self._dsn)
 
-    async def record(self, session_id: str, owner: str | None) -> None:
-        """Record a session's owner at creation (idempotent — the first writer wins)."""
+    async def record(self, session_id: str, owner: str | None, profile: str | None = None) -> None:
+        """Record a session's owner and profile at creation (idempotent — first writer wins)."""
         async with self._connection() as conn:
             async with conn.cursor() as cur:
-                await cur.execute(_OWNER_INSERT, (session_id, owner))
+                await cur.execute(_OWNER_INSERT, (session_id, owner, profile))
             await conn.commit()
 
-    async def lookup(self, session_id: str) -> tuple[bool, str | None]:
-        """Return `(found, owner)` for a session id — `(False, None)` when there is no such session.
+    async def lookup(self, session_id: str) -> tuple[bool, str | None, str | None]:
+        """Return `(found, owner, profile)` — `(False, None, None)` when there is no such session.
 
         The `found` flag distinguishes an unknown session from a known one owned by the shared
         principal (a real `NULL` owner), which a bare `str | None` return could not.
@@ -281,7 +308,9 @@ class SessionOwnerStore:
             async with conn.cursor() as cur:
                 await cur.execute(_OWNER_SELECT, (session_id,))
                 row = await cur.fetchone()
-        return (row is not None, row[0] if row is not None else None)
+        if row is None:
+            return (False, None, None)
+        return (True, row[0], row[1])
 
     async def list_for_owner(self, owner: str | None) -> list[tuple[str, datetime]]:
         """The owner's sessions as `(session_id, created_at)`, newest first, capped by config.

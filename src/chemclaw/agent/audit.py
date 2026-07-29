@@ -20,35 +20,16 @@ contain PII. `agent_audit_max_arg_chars` bounds what is stored; treat the trail 
 import logging
 import time
 from collections.abc import Awaitable, Callable
-from typing import TYPE_CHECKING, Protocol, runtime_checkable
+from typing import Protocol, runtime_checkable
 
 from agent_framework import FunctionInvocationContext, function_middleware
 from pydantic import BaseModel
 
 from chemclaw.agent.identity_context import get_current_actor, get_current_correlation_id
 from chemclaw.core.config import settings
-
-if TYPE_CHECKING:  # the front door's registry; `agents` must not import `service` at runtime
-    from chemclaw.api.metrics import Metrics
+from chemclaw.core.metrics_bridge import record_metric
 
 logger = logging.getLogger(__name__)
-
-
-def _record_metric(update: "Callable[[Metrics], None]") -> None:
-    """Apply `update` to the process metrics registry, tolerating one that cannot be imported.
-
-    `agents` must not hard-depend on `service`: the workers import this module and never build the
-    front door. A missing registry means "no scrape target in this process", which is fine — the
-    log remains the record either way. Written once because there are two of these now (the
-    audit-sink failure counter and the tool-latency histogram) and a second copy of a swallow-all
-    try block is exactly where a real error goes to hide.
-    """
-    try:
-        from chemclaw.api.metrics import METRICS
-
-        update(METRICS)
-    except Exception:  # pragma: no cover - defensive; metrics must never break the audit path
-        pass
 
 
 def _observe_tool_latency(elapsed_ms: float) -> None:
@@ -59,7 +40,7 @@ def _observe_tool_latency(elapsed_ms: float) -> None:
     calls are observed too: a tool that fails after 30 s is exactly the sample that explains a slow
     turn, and dropping it would make the histogram flatter the worse things get.
     """
-    _record_metric(
+    record_metric(
         lambda metrics: metrics.observe("chemclaw_tool_duration_seconds", elapsed_ms / 1000.0)
     )
 
@@ -241,7 +222,7 @@ async def _emit(sink: AuditSink, event: AuditEvent) -> None:
         # Counted as well as logged (gap DEP-4): the ERROR marker is alertable only if something
         # is watching the logs, whereas an incomplete GxP trail should be visible on the same
         # dashboard as everything else.
-        _record_metric(lambda metrics: metrics.increment("chemclaw_audit_sink_failures_total"))
+        record_metric(lambda metrics: metrics.increment("chemclaw_audit_sink_failures_total"))
         # Swallow-and-continue keeps availability, but a lost GxP audit record must be ALERTABLE,
         # not a generic warning (SEC-3): log at ERROR with a stable `audit_sink_failure` marker and
         # the trail identifiers, so monitoring can fire on the marker and name the affected trail.

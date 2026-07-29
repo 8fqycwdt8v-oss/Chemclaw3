@@ -1,7 +1,7 @@
-"""The migration reader finds the SQL files, offline and with no database (D-141).
+"""The migration reader finds the SQL files, offline and with no database (D-147).
 
 `_read_sql_files` located `infra/sql/` as `Path(__file__).parent.parent` — correct only while the
-module sat at `calc/migrate.py`, where that expression happened to be the repository root. D-141
+module sat at `calc/migrate.py`, where that expression happened to be the repository root. D-147
 moved it to `chemclaw/science/calc/migrate.py`, two levels deeper, and the path silently became a
 directory *inside* the package. `glob` on a non-existent directory raises nothing and yields
 nothing, so `make db-migrate` did not fail on a bad path — it applied zero migrations, and CI only

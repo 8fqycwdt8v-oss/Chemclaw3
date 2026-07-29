@@ -60,7 +60,7 @@ inside each connector.
 | `docs/` | The record and the reference — see `docs/README.md` for which parts are maintained. |
 | `examples/` | A runnable walkthrough. Deliberately not shipped in the wheel. |
 | `tasks/` | The working files `CLAUDE.md` requires: `todo.md` and `lessons.md`. |
-| `.github/workflows/` | CI. The **only** place GitHub Actions reads workflows from — see D-139. |
+| `.github/workflows/` | CI. The **only** place GitHub Actions reads workflows from — see D-145. |
 
 ## Two pairs of names that look like duplicates and are not
 
@@ -68,7 +68,7 @@ inside each connector.
 pure computation, importable and testable with no orchestration stack. The second is the wrapper:
 the durable job definition and the MCP tool surface that expose that engine to the agent. Keeping
 them apart is the layering rule; merging them would put Temporal imports inside the physics. Before
-D-141 they were `calc/` and `connectors/calc/` — same distinction, no way to see it from the names.
+D-147 they were `calc/` and `connectors/calc/` — same distinction, no way to see it from the names.
 
 **`skills/` vs `connectors/*/skills/`.** A bundled skill ships and deploys with its connector; a
 global skill belongs to no single capability. Both are discovered by one mechanism —
@@ -79,7 +79,7 @@ bundle's directory — so the split is about ownership, not lookup.
 
 Three defaults resolve against the installed package rather than the working directory, because
 what they name ships inside it: `connectors_dir`, `data_sources_dir` and `safety_rules_path`
-(D-141). Each remains overridable, and the two directory ones remain `PATH`-style lists, so
+(D-147). Each remains overridable, and the two directory ones remain `PATH`-style lists, so
 pointing a deployment at an *additional* private bundle directory works as before.
 
 ## Related repositories

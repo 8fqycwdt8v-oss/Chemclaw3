@@ -77,10 +77,24 @@ RUN uv sync --frozen --no-dev \
     && chown -R 1001:0 /app \
     && chmod -R g=u /app
 
+# The revision this image was built from, stamped onto every audit record (AG-14 / REV-17). The
+# config docstring has always said "the F6 image build injects the digest" and no build ever did —
+# nothing in the Containerfile, the chart or CI set it, so `deployment_revision` was "unknown" in
+# every deployment while AG-14 read as met. A GxP trail whose "which version produced this result"
+# column is a constant is not answering the question it exists to answer.
+#
+# A build ARG rather than a chart value because the image is the thing that has a revision: a chart
+# can be re-rendered against any tag, and a value that disagrees with the bytes is worse than the
+# honest "unknown". Defaulted so a local `docker build` still works and says plainly that it does
+# not know. `envFrom` a ConfigMap does not clobber an image ENV, so a deployment that wants to
+# override it can still put the key in `.Values.config`.
+ARG CHEMCLAW_REVISION=unknown
+
 # Non-root by default; OpenShift may override with an arbitrary UID (still in group 0).
 USER 1001
 ENV PATH="/app/.venv/bin:${PATH}" \
     PYTHONUNBUFFERED=1 \
-    CHEMCLAW_COMPONENT=service
+    CHEMCLAW_COMPONENT=service \
+    CHEMCLAW_DEPLOYMENT_REVISION=${CHEMCLAW_REVISION}
 
 ENTRYPOINT ["/usr/local/bin/chemclaw-entrypoint"]

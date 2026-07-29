@@ -33,6 +33,7 @@ with workflow.unsafe.imports_passed_through():
         AgentStepInput,
         StepIdentity,
         ToolStepInput,
+        resolve_job_step,
         run_agent_step,
         run_tool_step,
     )
@@ -75,8 +76,18 @@ class TemplateRunResult(BaseModel):
 
 # On the light queue: the sequencer only substitutes references and dispatches. Whatever
 # weight a step carries is the tool's, the job's child workflow's, or the model turn's.
+#
+# `failure_exception_types` because the sequencer raises plain exceptions of its own — an unknown
+# step kind, a reference that resolves to nothing. Without it the Temporal SDK treats any raw
+# exception from workflow code as a suspected bug and suspends the run in an internal task-failure
+# retry loop that ignores the retry policy and never gives up, so a template that can *never*
+# succeed hangs instead of failing (the trap D-093 documents for fan-out children; REV-13 found the
+# same hole here). Scoped to `Exception` rather than a name list because the classification that
+# matters at an *activity* boundary — which errors are worth retrying — is already made by
+# `BAD_DATA_RETRY`; what this decides is only whether the workflow is allowed to fail at all, and
+# the answer is always yes.
 @durable_workflow("background")
-@workflow.defn
+@workflow.defn(failure_exception_types=[Exception])
 class TemplateWorkflow:
     """Run a template's steps in order, durably, and return every step's result."""
 
@@ -140,11 +151,15 @@ class TemplateWorkflow:
                 retry_policy=BAD_DATA_RETRY,
             )
         if isinstance(step, JobStep):
-            return await self._run_job_step(step, scope, identity)
+            return await self._run_job_step(step, scope, identity, timeout)
         raise ValueError(f"unknown template step kind {type(step).__name__}")
 
     async def _run_job_step(
-        self, step: JobStep, scope: dict[str, Any], identity: StepIdentity
+        self,
+        step: JobStep,
+        scope: dict[str, Any],
+        identity: StepIdentity,
+        timeout: timedelta,
     ) -> ConnectorJobResult:
         """Run a connector job as a child workflow and await it — the whole point of a `job` step.
 
@@ -154,14 +169,18 @@ class TemplateWorkflow:
         keeps the job's cross-cutting concerns — the PR-gate publish, the actor attribution — in the
         one place that owns them.
         """
-        # Imported inside the workflow's sandbox-passthrough at call time rather than at module
-        # scope: the job lookup reads the connector registry, which does filesystem + YAML I/O on a
-        # cold process (`discovered()` is `@cache`d, so once per worker) and is not something a
-        # workflow module should pull in for a step kind most templates never use.
-        with workflow.unsafe.imports_passed_through():
-            from chemclaw.connectors.registry import find_job
-
-        connector, job = find_job(step.job)
+        # Through an activity, not by calling `find_job` here: the lookup reads the connector
+        # bundles off disk, so doing it in workflow code made the child-workflow start depend on the
+        # replaying worker's filesystem rather than on history — and an unknown job name raised a
+        # plain `ValueError` into workflow code, which Temporal retries as a suspected bug forever
+        # instead of failing the run (REV-13). Local, because it is a cached in-process lookup, not
+        # a network call; the point is recording the answer, not offloading the work.
+        resolved = await workflow.execute_local_activity(
+            resolve_job_step,
+            step.job,
+            start_to_close_timeout=timeout,
+            retry_policy=BAD_DATA_RETRY,
+        )
         # Addressed by type name, so the child's return is untyped at the call site; `result_type`
         # is what actually decodes it into a `ConnectorJobResult`.
         return cast(
@@ -169,13 +188,13 @@ class TemplateWorkflow:
             await workflow.execute_child_workflow(
                 "ConnectorJobWorkflow",
                 ConnectorJobInput(
-                    connector=connector,
-                    job=job.name,
-                    workflow=job.workflow,
-                    task_queue=job.task_queue,
+                    connector=resolved.connector,
+                    job=resolved.job,
+                    workflow=resolved.workflow,
+                    task_queue=resolved.task_queue,
                     payload=resolve(step.arguments, scope),
                     requested_by=identity.actor,
-                    publish_to_graph=job.publish_to_graph,
+                    publish_to_graph=resolved.publish_to_graph,
                 ),
                 id=f"{workflow.info().workflow_id}-{step.id}",
                 task_queue=settings.background_task_queue,

@@ -4,5 +4,5 @@
 `science.bo` is the BoFire optimizer; `science.safety` is hazard screening. None of them import
 Temporal, MCP or `chemclaw.agent` — that is the point of the split, and it is what keeps them
 testable without an orchestration stack. `chemclaw.connectors.calc` is the durable-job and
-tool-surface wrapper around `chemclaw.science.calc`, never a second copy of it (D-141).
+tool-surface wrapper around `chemclaw.science.calc`, never a second copy of it (D-147).
 """

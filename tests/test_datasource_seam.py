@@ -253,7 +253,7 @@ def test_an_earlier_dir_overrides_a_shipped_source(
         """,
     )
     # Prepend to whatever the shipped directory currently is, rather than restating it: since
-    # D-141 the default is resolved against the installed package, not the process's CWD, so a
+    # D-147 the default is resolved against the installed package, not the process's CWD, so a
     # literal here would be asserting the layout instead of the override rule.
     shipped = settings.data_sources_dir
     monkeypatch.setattr(settings, "data_sources_dir", f"{tmp_path}{os.pathsep}{shipped}")

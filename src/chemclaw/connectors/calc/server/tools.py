@@ -33,12 +33,14 @@ from chemclaw.science.calc.descriptors import (
 from chemclaw.science.calc.logd import LogdInput, LogdResult
 from chemclaw.science.calc.logd import predict_logd as _predict_logd
 from chemclaw.science.calc.pka import PkaInput, PkaResult, run_cached_pka
+from chemclaw.science.calc.pka import calc_version as pka_calc_version
 from chemclaw.science.calc.postgres_store import PostgresStore
 from chemclaw.science.calc.solubility import (
     SolubilityInput,
     SolubilityResult,
     run_cached_solubility,
 )
+from chemclaw.science.calc.solubility import calc_version as solubility_calc_version
 from chemclaw.science.calc.store import ResultStore
 from chemclaw.science.calc.structure import structure_from_smiles
 from chemclaw.science.calc.xtb import XtbInput, XtbResult, run_cached_xtb
@@ -61,7 +63,12 @@ def default_store() -> ResultStore:
 
 
 async def _log_prediction(
-    calc_type: str, smiles: str, value: float, uncertainty: float | None, unit: str
+    calc_type: str,
+    calc_version: str,
+    smiles: str,
+    value: float,
+    uncertainty: float | None,
+    unit: str,
 ) -> None:
     """Record a prediction for later reconciliation against a measurement (gap IDEA-2).
 
@@ -76,6 +83,11 @@ async def _log_prediction(
     await record_prediction(
         PredictionRecord(
             calc_type=calc_type,
+            # Without this the unique index `(calc_type, calc_version, input_hash)` degenerated to
+            # `(calc_type, input_hash)`, because every row carried the default `""` — so upgrading a
+            # calculator silently overwrote the previous version's prediction and `calculator_trust`
+            # reported a bias averaged across versions that were never comparable (REV-12).
+            calc_version=calc_version,
             input_hash=stable_hash(canonical),
             subject=canonical,
             predicted_value=value,
@@ -134,8 +146,14 @@ async def calculator_trust(property_name: str) -> Calibration:
     Returns:
         Bias, mean absolute error, RMSE, and uncertainty coverage, with the observation count.
     """
+    # The *current* version's calibration, not a pooled figure: the chemist is asking how far to
+    # trust the calculator that is about to answer them, and a v1 that ran high averaged with a v2
+    # that ran low reads as well-calibrated while neither is (REV-12).
+    solubility = property_name == "solubility"
     return await calibration_for(
-        property_name, unit="log S" if property_name == "solubility" else "pKa"
+        property_name,
+        solubility_calc_version() if solubility else pka_calc_version(),
+        unit="log S" if solubility else "pKa",
     )
 
 
@@ -173,7 +191,12 @@ async def predict_solubility(smiles: str) -> SolubilityResult:
     """
     result, _ = await run_cached_solubility(default_store(), SolubilityInput(smiles=smiles))
     await _log_prediction(
-        "solubility", smiles, result.log_s_mol_per_l, result.uncertainty_log, "log S"
+        "solubility",
+        solubility_calc_version(),
+        smiles,
+        result.log_s_mol_per_l,
+        result.uncertainty_log,
+        "log S",
     )
     return result
 
@@ -203,7 +226,7 @@ async def predict_pka(smiles: str) -> PkaResult:
         and the uncertainty.
     """
     result, _ = await run_cached_pka(default_store(), PkaInput(smiles=smiles))
-    await _log_prediction("pka", smiles, result.pka, result.uncertainty, "pKa")
+    await _log_prediction("pka", pka_calc_version(), smiles, result.pka, result.uncertainty, "pKa")
     return result
 
 

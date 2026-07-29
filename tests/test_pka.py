@@ -17,7 +17,7 @@ from importlib.metadata import version
 import pytest
 
 from chemclaw.core.config import settings
-from chemclaw.science.calc.pka import PkaInput, _calc_version, predict_pka, run_cached_pka
+from chemclaw.science.calc.pka import PkaInput, calc_version, predict_pka, run_cached_pka
 from chemclaw.science.calc.store import InMemoryStore
 
 
@@ -26,8 +26,8 @@ def test_calc_version_embeds_engine_build() -> None:
 
     An engine or geometry-stack upgrade recomputes rather than serving a stale pKa.
     """
-    assert version("tblite") in _calc_version()
-    assert version("rdkit") in _calc_version()
+    assert version("tblite") in calc_version()
+    assert version("rdkit") in calc_version()
 
 
 def test_charged_input_raises() -> None:
@@ -275,7 +275,7 @@ def test_calc_version_covers_both_calibrations() -> None:
     stored value carries its uncertainty. Keying only the acid half would serve a base
     result computed under a superseded fit.
     """
-    version = _calc_version()
+    version = calc_version()
     for value in (
         settings.pka_calibration_slope,
         settings.pka_base_calibration_slope,

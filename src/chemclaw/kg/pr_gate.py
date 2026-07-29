@@ -13,6 +13,7 @@ from typing import Protocol
 from pydantic import BaseModel, Field
 
 from chemclaw.core.config import settings
+from chemclaw.core.metrics_bridge import record_metric
 from chemclaw.kg.note import Note
 from chemclaw.kg.render import render_note
 
@@ -131,4 +132,10 @@ async def propose_note(
             + ".\n\nRequires human review before merge — GxP: AI proposes, human signs off."
         ),
     )
-    return await submitter.submit(submission)
+    reference = await submitter.submit(submission)
+    # Counted after the submitter returns, so the number means "a note reached the branch", not "we
+    # tried". A failing submitter raises, and a metric incremented before it would have reported a
+    # healthy PR-gate while every write was failing — which is the exact condition this counter was
+    # declared to make visible and, until now, never did.
+    record_metric(lambda m: m.increment("chemclaw_notes_proposed_total"))
+    return reference

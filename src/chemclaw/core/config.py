@@ -56,10 +56,10 @@ _PACKAGE = Path(__file__).resolve().parent.parent
 
 
 def _shipped(*parts: str) -> str:
-    """An absolute path to a declaration that ships *inside* the package (D-141).
+    """An absolute path to a declaration that ships *inside* the package (D-147).
 
     Three defaults name a directory of declarations the repository itself provides: the connector
-    bundles, the data sources, and the hazard rule table. Before D-141 all three were CWD-relative
+    bundles, the data sources, and the hazard rule table. Before D-147 all three were CWD-relative
     strings (`"connectors"`, `"sources"`, `"safety/rules.yaml"`), which only resolved when the
     process happened to be started from the repository root — which is precisely why the
     Containerfile had to COPY them into the workdir rather than just installing the package.
@@ -90,9 +90,14 @@ class ObservabilitySettings(BaseSettings):
     # flood the log; raise it when a fuller argument record is needed for an audit.
     agent_audit_max_arg_chars: int = Field(default=200, ge=0)
     # The deployment's code/prompt/skill revision stamped onto every audit record (AG-14): the
-    # Git SHA or image digest the running pod was built from, so a past agent result ties to the
-    # exact version that produced it (GxP reproducibility). The deployment sets it (the F6 image
-    # build injects the digest); "unknown" until then, a value change, not a schema change.
+    # Git SHA the running pod was built from, so a past agent result ties to the exact version that
+    # produced it (GxP reproducibility). The image build sets it — `deploy/Containerfile` takes a
+    # `CHEMCLAW_REVISION` build arg and exports it under this name, and the image workflow passes
+    # the commit SHA. That sentence used to be here as a claim about a build that did not exist:
+    # nothing set it anywhere, so every deployment recorded the literal "unknown" while AG-14 read
+    # as met (REV-17). "unknown" is now what a local `docker build` honestly reports, not what
+    # production does. `tests/test_deploy_chart.py` pins the wiring; the image job runs the built
+    # image and compares the value, because only that can prove it arrived.
     deployment_revision: str = "unknown"
     # OpenTelemetry export (off by default). When enabled,
     # `chemclaw.logging.configure_telemetry` calls MAF's `configure_otel_providers`, which reads
@@ -164,7 +169,7 @@ class StoreSettings(BaseSettings):
 
     postgres_dsn: str = "postgresql://chemclaw:chemclaw@localhost:5432/chemclaw"
     # The ordered `.sql` migrations `chemclaw.science.calc.migrate` applies. A setting rather than
-    # a path derived from `__file__`, which is what it was until D-141: `parent.parent` happened to
+    # a path derived from `__file__`, which is what it was until D-147: `parent.parent` happened to
     # be the repository root only while the module sat at `calc/migrate.py`, and moving
     # it two levels deeper silently pointed it inside the package — `make db-migrate` failed in CI
     # with no SQL found. The directory is repository/workdir-relative like `knowledge_dir` and

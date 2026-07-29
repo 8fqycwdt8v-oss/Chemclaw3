@@ -156,7 +156,7 @@ def test_image_ships_the_first_party_source_tree() -> None:
     'safety'`. It then discovered the eighteen top-level packages instead, so the next one was
     covered on the day it was created.
 
-    Since D-141 there is one package under `src/`, so the discovery has nothing left to discover —
+    Since D-147 there is one package under `src/`, so the discovery has nothing left to discover —
     and a test that iterates an empty set passes vacuously, which is worse than the hardcoded list
     it replaced. What it asserts now is the property that actually keeps the image complete: `src/`
     is COPYd whole, and `tests/test_packaging.py` separately forbids a first-party package from
@@ -175,7 +175,7 @@ def test_image_ships_the_data_directories_read_at_runtime() -> None:
 def test_every_runtime_data_directory_actually_exists() -> None:
     """A COPY of a vanished directory fails the build; one that moved fails silently at start-up.
 
-    The pairing matters: `eln/exports` became `data/eln-exports` in D-141, and had the Containerfile
+    The pairing matters: `eln/exports` became `data/eln-exports` in D-147, and had the Containerfile
     kept COPYing `eln/` the build would have broken loudly — but had the *config default* alone
     moved, the image would have started fine and read an empty export directory forever.
     """
@@ -189,6 +189,33 @@ def test_every_runtime_data_directory_actually_exists() -> None:
 def test_image_installs_git() -> None:
     """The PR-gate shells out to git; an image without it fails every knowledge write at push."""
     assert "dnf install -y git" in (DEPLOY / "Containerfile").read_text()
+
+
+def test_the_image_carries_the_revision_it_was_built_from() -> None:
+    """`deployment_revision` must be settable by a build, or AG-14 reads as met while being unmet.
+
+    `chemclaw/config.py` has always said the F6 image build injects the revision, and until REV-17
+    no build did: nothing in the Containerfile, the chart or CI set `CHEMCLAW_DEPLOYMENT_REVISION`,
+    so every audit record in every deployment carried the literal `"unknown"`. The whole point of
+    the field is tying a past agent result to the exact prompt/skill/config version that produced
+    it, and a constant answers no such question.
+
+    Pinned in three parts because each is separately droppable: the ARG must exist, it must reach
+    the image's environment under the name the settings prefix reads, and CI must actually pass a
+    value. The image workflow additionally runs the built image and compares — only that can prove
+    the value arrived, and only a built image can do it.
+    """
+    containerfile = (DEPLOY / "Containerfile").read_text()
+    assert "ARG CHEMCLAW_REVISION" in containerfile, "the Containerfile declares no revision ARG"
+    assert "CHEMCLAW_DEPLOYMENT_REVISION=${CHEMCLAW_REVISION}" in containerfile, (
+        "the revision ARG never reaches the environment, so `settings.deployment_revision` "
+        "stays at its 'unknown' default in every built image"
+    )
+    workflow = (DEPLOY.parent / ".github" / "workflows" / "image.yml").read_text()
+    assert "--build-arg" in workflow and "CHEMCLAW_REVISION=" in workflow, (
+        "the image workflow builds without passing CHEMCLAW_REVISION, so the ARG falls back to "
+        "its 'unknown' default and the wiring above is inert"
+    )
 
 
 def test_the_chart_gives_each_bundle_the_halves_its_manifest_declares() -> None:
@@ -330,7 +357,7 @@ def test_a_comment_never_swallows_the_line_after_it() -> None:
 # Kinds kubeconform has no schema for, so `make helm-validate` runs with
 # `-ignore-missing-schemas` and *skips* them rather than failing. Keeping the set explicit is what
 # stops that flag from being a hole: a skipped kind is a deliberate entry here, not a silent pass.
-_UNVALIDATED_KINDS = frozenset({"Route"})
+_UNVALIDATED_KINDS = frozenset({"Route", "ServiceMonitor"})
 
 
 def test_only_the_known_crd_is_unvalidated_by_kubeconform() -> None:
@@ -366,4 +393,64 @@ def test_only_the_known_crd_is_unvalidated_by_kubeconform() -> None:
     assert _UNVALIDATED_KINDS <= rendered, (
         f"_UNVALIDATED_KINDS names kind(s) the chart no longer renders: "
         f"{sorted(_UNVALIDATED_KINDS - rendered)}"
+    )
+
+
+def test_something_actually_scrapes_the_metrics_endpoint() -> None:
+    """`/metrics` must be collected, not merely served (REV-2).
+
+    The route has existed since DEP-4 and nothing under `deploy/` scraped it — no ServiceMonitor,
+    no PodMonitor, no `prometheus.io/scrape` annotation — so every counter, gauge and histogram in
+    the system was exposed and uncollected in production. That is the quiet way an observability
+    story fails: the code is written, the endpoint answers, and no dashboard or alert has ever had
+    a data point. Three of the metrics this repo added most recently exist specifically so an
+    operator can see a degraded turn or a failing PR-gate; none of them was reaching anyone.
+    """
+    monitor = next(
+        (
+            path
+            for path, text in _template_text().items()
+            if "kind: ServiceMonitor" in text or "PodMonitor" in text
+        ),
+        None,
+    )
+    assert monitor is not None, "no chart template collects /metrics; every metric is uncollected"
+
+
+def test_the_scrape_targets_the_front_door_by_port_name() -> None:
+    """It must select the Service that serves `/metrics`, on the port that Service names.
+
+    By *name* rather than number, so a port change cannot silently orphan the scrape. And only the
+    front door: the workers and connector pods record through `chemclaw.core.metrics_bridge`, whose
+    contract is that a metric recorded outside the front door is a no-op — there is no registry and
+    no HTTP surface there — so a scrape pointed at them would collect nothing while reporting up.
+    """
+    text = (CHART / "templates" / "servicemonitor.yaml").read_text()
+    assert "app.kubernetes.io/component: service" in text, (
+        "the scrape does not select the front door specifically"
+    )
+    assert re.search(r"^\s*- port: http\s*$", text, flags=re.MULTILINE), (
+        "the scrape names a port number rather than the Service's `http` port name"
+    )
+    service = (CHART / "templates" / "service-route.yaml").read_text()
+    assert re.search(r"^\s*- name: http\s*$", service, flags=re.MULTILINE), (
+        "the Service no longer names its port `http`, so the ServiceMonitor selects nothing"
+    )
+
+
+def test_the_scraped_path_is_a_route_the_app_serves() -> None:
+    """The executed half: the path the chart scrapes has to exist on the real app (D-142).
+
+    A ServiceMonitor naming `/metric` renders, validates, deploys, and collects nothing forever —
+    Prometheus reports the target as down and an operator reads it as a broken pod. Nothing in the
+    chart can catch that, because the chart has no idea what routes the app declares. This is the
+    same lesson as the OTel crash loop: a production value has to be executed, not type-checked.
+    """
+    from chemclaw.api.app import create_app
+
+    path = _values()["monitoring"]["path"]
+    routes = {getattr(route, "path", None) for route in create_app().routes}
+    assert path in routes, (
+        f"the chart scrapes {path!r}, which the app does not serve; "
+        f"the metrics route is one of {sorted(r for r in routes if r and 'metric' in r)}"
     )

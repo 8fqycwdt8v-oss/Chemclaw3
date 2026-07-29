@@ -4,7 +4,7 @@ One file per architecture decision, `D-NNN-<slug>.md`, alongside this index. `do
 holds the *reasoning*; this file is the allocation ledger, so "which numbers are taken?" is one
 listing rather than a scan of a 421 KB document.
 
-**Why one file per ADR.** Until D-140 every decision was appended to the end of a single
+**Why one file per ADR.** Until D-146 every decision was appended to the end of a single
 `DECISIONS.md`. ADR numbers collided three times, and the cause was structural rather than
 careless: concurrent branches all append to the same last line of the same file, and each picks
 "the highest number I can see, plus one" against its own branch, which cannot see the others.
@@ -173,6 +173,12 @@ this reason; the filenames make that ordering irrelevant now, and the numbers st
 | [D-136](D-136-the-shipped-defaults-were-never-executed-three.md) | The shipped defaults were never executed: three configurations that fail on first contact |
 | [D-137](D-137-the-plan-the-model-could-approve-for-itself-a-pre.md) | The plan the model could approve for itself: a pre-execution gate that is not a tool |
 | [D-138](D-138-fifty-questions-asked-live-the-job-surface-was-dead.md) | Fifty questions, asked live: the job surface was dead, the trace was blind, and a failed tool was silent |
-| [D-139](D-139-the-service-is-the-repository-removing-the-services.md) | The service is the repository: removing the `services/` tier the Replit monorepo left behind |
-| [D-140](D-140-one-file-per-adr-and-a-docs-tree-with-an-archive.md) | One file per ADR, and a `docs/` tree with a living half and an archive |
-| [D-141](D-141-the-packages-regrouped-under-src-chemclaw-by-layer.md) | The packages regrouped under `src/chemclaw/` by the four architecture layers |
+| [D-139](D-139-three-silent-failures-a-degraded-turn-a-pooled.md) | Three silent failures: a degraded turn, a pooled calibration, and two counters wired to nothing |
+| [D-140](D-140-a-template-s-job-step-resolved-off-the-workflow.md) | A template's job step: resolved off the workflow thread, and finally able to fail |
+| [D-141](D-141-two-facts-that-stopped-at-a-process-boundary-a.md) | Two facts that stopped at a process boundary: a session's profile, and the turn's correlation id |
+| [D-142](D-142-a-production-value-has-to-be-executed-not-type.md) | A production value has to be executed, not type-checked — and two guards that were off in the one deployment that needed them |
+| [D-143](D-143-nobody-was-collecting-the-metrics-and-the-durable.md) | Nobody was collecting the metrics, and the durable history is never compacted — one fixed, one where the obvious fix corrupts data |
+| [D-144](D-144-token-accounting-was-priced-blind-one-total-where.md) | Token accounting was priced-blind: one total where the bill has four line items |
+| [D-145](D-145-the-service-is-the-repository-removing-the-services.md) | The service is the repository: removing the `services/` tier the Replit monorepo left behind |
+| [D-146](D-146-one-file-per-adr-and-a-docs-tree-with-an-archive.md) | One file per ADR, and a `docs/` tree with a living half and an archive |
+| [D-147](D-147-the-packages-regrouped-under-src-chemclaw-by-layer.md) | The packages regrouped under `src/chemclaw/` by the four architecture layers |

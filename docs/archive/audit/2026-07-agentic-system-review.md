@@ -312,27 +312,93 @@ Kept because a lead that looked right and was not is the more useful record.
   path writes a non-default provenance, and there is no actor column to lose.
 - **The `deepcopy(session.state)` per turn is expensive.** Only under `session_store=memory`;
   production is Postgres, where the state is small. Dev/CLI cost only.
+- **REV-7: job→session push-back should yield before marking rows consumed.** Refuted, and this is
+  the one refutation where implementing the recommendation would have *caused* a defect.
+  `agents/session_events.py` documents at-most-once as a deliberate trade made by COR-4, which
+  replaced an at-least-once claim that double-delivered: the claiming
+  `UPDATE … FOR UPDATE SKIP LOCKED … RETURNING` is one atomic step precisely so two tailers racing
+  on a session can never both deliver a row. Reordering restores the double delivery. The residual
+  risk — a consumer lost between claim-commit and delivery drops the event with nothing to retry —
+  is real, and the fix is a visibility-timeout redelivery (claim with a lease, confirm on delivery,
+  re-offer on expiry), which preserves the single-claim property. Rewritten in `BACKLOG.md` with
+  that shape rather than the wrong one; a wrong recommendation left standing in a backlog is worse
+  than no recommendation.
+- **An ADR duplicate-number guard is missing.** Refuted, and the belief was mine rather than the
+  code's: `tests/test_decision_log.py::test_the_registry_has_no_duplicate_reservations` has existed
+  since D-109 and goes red on exactly the bad merge that prompted the plan item — verified by
+  injecting a duplicate `D-133` row at a different file position, the precise shape that auto-merges
+  without a git conflict. Two tests fail, naming the number. The collision was caught by hand during
+  a merge before CI ever ran, so the guard was never observed firing and was assumed absent.
+
+- **REV-16: `connectors_required` should be on.** Refuted in part, and this one was refuted by the
+  review's *own* fixes. The argument for fail-fast was that serving with a silently reduced tool
+  surface is worse than not serving — and the silence was the load-bearing word. D-145 removed it:
+  an unreachable connector now produces a `CapabilityDegradedEvent` before the first token, a
+  WARNING naming the connectors, and `chemclaw_connectors_unreachable_total`. Flipping the flag now
+  would take one dark connector and turn it into a dead front door, in exchange for visibility that
+  already exists. The other two flags in that item (`budget_enabled`, `audit_verify_enabled`) were
+  real and are on.
+
+Six refuted, in whole or part, against sixteen confirmed. The pattern held in almost every one: what
+looked like a missing safeguard was a considered trade whose reasoning lived in a docstring, or a
+guard that already existed in a test not read closely enough. Both are arguments for verifying a
+lead against the code *before* planning the fix, which is the practice that caught the last three.
+The `connectors_required` case adds a second lesson: a backlog written against one snapshot of the
+system goes stale as the system is fixed, so a lead's premise deserves re-checking even when it was
+correct when written.
 
 ---
 
 ## 8. What to do next, in order
 
-1. **Close the approval gate** (§1). The only finding where the system's central GxP claim is false
-   in the shipped configuration. Needs an ADR.
-2. **Add a scrape target** (§4). Every metric is currently uncollected; this is a few lines of
-   chart.
-3. **Plumb `progress=` into the two CREST jobs** (§6.1). Strictly less compute *and* strictly fewer
-   spurious failures.
-4. **Add the retrieval metrics to `evals/baseline.json`** (§6.6), and make `save_baseline`
-   reachable from a Makefile target so it cannot drift again.
+*Struck through as of the review's implementation pass. The ADRs named are where each decision and
+its reasoning live; `BACKLOG.md` carries the per-item detail.*
+
+1. ~~**Close the approval gate** (§1). The only finding where the system's central GxP claim is
+   false in the shipped configuration. Needs an ADR.~~ **Done — D-137**, a pre-execution gate that
+   is not a tool (the model could otherwise approve its own plan by calling `mode_set`).
+2. ~~**Add a scrape target** (§4). Every metric is currently uncollected.~~ **Done — D-143.** A
+   ServiceMonitor on the front door, by port name, with the scraped path checked against the app's
+   real routes.
+3. ~~**Plumb `progress=` into the two CREST jobs** (§6.1).~~ **Done — D-130's batch.**
+4. ~~**Add the retrieval metrics to `evals/baseline.json`** (§6.6), and make `save_baseline`
+   reachable from a Makefile target.~~ **Done** — `scripts/refresh_baseline.py`, `make
+   eval-baseline`.
 5. **Decide the caching strategy** (§3) — including whether to carry a patch or an upstream change
-   for tool-schema breakpoints, and how to make the prefix byte-stable first.
-6. **Split the token counter** into input/output/cache and add labels (§3, §4), or lean on MAF's
-   GenAI semconv now that the OTel pipeline can start.
-7. **Propagate `correlation_id`** to connectors and `ConnectorJobInput` (§4).
-8. **Grow the chart parity test** to read `templates/config.yaml` and to assert that production
-   values are executed, not just constructed (§5). That is the test class that would have caught
-   two of this review's three Criticals.
+   for tool-schema breakpoints, and how to make the prefix byte-stable first. **Still open, and
+   deliberately so:** it is blocked on three things that must be decided together (MAF exposes no
+   `cache_control` hook for `tools`, which is the 11 k that dominates; production is
+   `openai_compatible`; and the prefix is not byte-stable because `tools/list` is re-fetched per
+   turn, so one flapping connector invalidates it). This is the largest remaining performance item
+   and it wants a decision, not an implementation.
+6. ~~**Split the token counter** into input/output/cache and add labels (§3, §4).~~ **Half done —
+   D-144.** The four priced dimensions are published; **labels are still open**, because the
+   registry has no label support at all and adding it changes the exposition format and the
+   registry's storage rather than the reading.
+7. ~~**Propagate `correlation_id`** to connectors and `ConnectorJobInput` (§4).~~ **Done — D-147.**
+   HPC deliberately untouched: that bridge runs under a shared service identity and wants its own
+   pass.
+8. ~~**Grow the chart parity test** to read `templates/config.yaml` and to assert that production
+   values are executed, not just constructed (§5).~~ **Done — D-142**, and it found more than
+   expected: pydantic-settings JSON-decodes a complex field from an env var and *not* from an init
+   kwarg, so the old model of the pod environment was the wrong mechanism for the derived keys, not
+   merely incomplete.
+
+### What is left, and why each is a decision rather than a task
+
+- **REV-9, prompt caching** — as above. The measurement is done (~14.6 k fixed prefix per model
+  call, ~20.5 k with connector tools, re-paid up to 25× per turn in harness mode); the blocker is
+  three coupled choices.
+- **REV-7, push-back redelivery** — the original recommendation was refuted (it would reinstate the
+  double delivery COR-4 closed). The real fix is a visibility-timeout redelivery, which is a design
+  change to a durable path.
+- **REV-4, bounding the durable history read** — confirmed, and the obvious fix corrupts data
+  (D-143). Needs either an in-memory-only read-repair for partial loads, or durable compaction that
+  prunes whole tool-call groups.
+- **Per-model token labels** — see 6.
+
+All four are recorded in `BACKLOG.md` with the shape the fix needs to take, rather than as
+restatements of the problem.
 
 ---
 
