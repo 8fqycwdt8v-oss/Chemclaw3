@@ -178,6 +178,20 @@ config:
   CHEMCLAW_ENTRA_TOKEN_ENDPOINT: "https://login.microsoftonline.com/TENANT/oauth2/v2.0/token"
   CHEMCLAW_OTEL_ENABLED: "true"
   CHEMCLAW_OTEL_ENDPOINT: "http://otel-collector.observability.svc:4317"
+  # The runaway-cost guard, on in production (REV-16). Off is the *code* default because a CLI or
+  # a test must not 429, but a deployment serving real users has no reason to be unguarded: a turn
+  # is iteration-capped and the number of turns is not, so a client or an automated push-back loop
+  # can accumulate unbounded LLM spend. The caps below are the shipped defaults — generous for a
+  # real chemist, finite against a loop — and the load run that validated this system ran with
+  # budgets on, so "on" is the configuration that was actually measured.
+  CHEMCLAW_BUDGET_ENABLED: "true"
+  # Verify the tamper-evident audit chain on a Schedule rather than when someone remembers to run
+  # `make audit-verify` (REV-16). Its own docstring says it "only earns a Schedule where a durable
+  # audit sink is actually configured" — this chart sets `SESSION_STORE: postgres`, which is
+  # exactly what makes `default_audit_sink()` durable, so the precondition holds here and nowhere
+  # else. A chain nobody checks detects tampering only after someone thinks to look, which in a
+  # GxP setting is the one failure mode the chain exists to remove.
+  CHEMCLAW_AUDIT_VERIFY_ENABLED: "true"
 
 # Secret refs (F6-T6): the THREE documented plain secrets only — the generic LLM key, Temporal mTLS,
 # and the HPC-bridge credential. Everything else is federation (no client secret at rest). Populate
