@@ -1,0 +1,100 @@
+# Single multi-target image for every Chemclaw component (plan F6-T1).
+#
+# One image, one dependency closure; the *component* is chosen at runtime by CHEMCLAW_COMPONENT
+# (see deploy/entrypoint.sh), so the service, the two Temporal workers, and the MCP servers all ship
+# the same bits and differ only by entrypoint. UBI9 + a non-root UID keeps it OpenShift-SCC-friendly
+# (arbitrary high UID at runtime); no secret is ever baked in — all config arrives via env/mounts.
+FROM registry.access.redhat.com/ubi9/python-311:latest
+
+# uv drives the install to match local/CI exactly (same lockfile). Copy metadata first for layer reuse.
+# `git` is a hard runtime dependency, not a convenience: the PR-gate submitter shells out to it
+# (`kg/git_submitter.py`) and the knowledge-sync sidecar clones/pulls the note repo with it, so an
+# image without git silently breaks both directions of the knowledge layer.
+USER 0
+RUN dnf install -y git && dnf clean all && pip install --no-cache-dir uv
+WORKDIR /app
+
+# The two calculation binaries (xTB plan X5/X6). Pinned release tarballs rather than a
+# package manager, because UBI9 has neither in its repositories and a pinned artifact is
+# what makes the image reproducible. Both are optional at *runtime* — `calc.xtb_cli` and
+# `calc.crest_cli` fall back or report unavailable — but a worker image without them
+# loses the 9-11x ANCopt speedup and conformer sampling entirely.
+#
+# Licensing: xtb is LGPL-3.0, crest is GPL-3.0. Both are invoked as separate processes
+# over files and never linked, so the usual analysis is that neither affects this
+# codebase's licence — but *distributing* them inside an image is a decision for whoever
+# owns the product. Drop the crest layer to ship without it.
+#
+# The xtb link is resolved by *finding* the extracted binary rather than guessing its directory.
+# The previous form tried `/opt/xtb-dist/bin/xtb` and fell back to `/opt/xtb-${XTB_VERSION}/bin/xtb`
+# — but `ln -s` succeeds when its target does not exist, creating a dangling link, so the `||`
+# fallback could never run and the version check below failed with 127. The 6.6.1 tarball extracts
+# to `xtb-6.6.1/`, i.e. exactly the path the unreachable fallback named, so **this image had never
+# built**. Nothing noticed because the workflow that builds it was stranded under
+# `services/chemclaw/.github/`, where GitHub Actions never reads (both fixed in D-117).
+ARG XTB_VERSION=6.6.1
+ARG CREST_VERSION=3.0.2
+RUN set -eux; \
+    curl -fsSL -o /tmp/xtb.tar.xz \
+      "https://github.com/grimme-lab/xtb/releases/download/v${XTB_VERSION}/xtb-${XTB_VERSION}-linux-x86_64.tar.xz"; \
+    tar -xJf /tmp/xtb.tar.xz -C /opt; \
+    xtb_bin="$(find /opt -maxdepth 4 -type f -name xtb -perm -u+x -print -quit)"; \
+    test -n "${xtb_bin}" || { echo "no xtb binary under /opt after extraction" >&2; exit 1; }; \
+    ln -sfn "${xtb_bin}" /usr/local/bin/xtb; \
+    curl -fsSL -o /tmp/crest.tar.xz \
+      "https://github.com/crest-lab/crest/releases/download/v${CREST_VERSION}/crest-gnu-12-ubuntu-latest.tar.xz"; \
+    mkdir -p /opt/crest && tar -xJf /tmp/crest.tar.xz -C /opt/crest --strip-components=1; \
+    install -m 0755 /opt/crest/crest /usr/local/bin/crest; \
+    rm -f /tmp/xtb.tar.xz /tmp/crest.tar.xz; \
+    xtb --version >/dev/null && crest --version >/dev/null
+
+COPY pyproject.toml uv.lock README.md ./
+# All first-party code, in one COPY. Before D-141 this was eighteen lines, one per top-level
+# package, and a new package that nobody added here was simply missing from the image — which is
+# how `connectors/` and `templates/` came to be absent from the wheel and coverage lists too.
+# One package means there is nothing left to forget.
+COPY src ./src
+# The data the application reads from disk at start-up, none of which is code. `skills/` IS the
+# agent's judgment layer (an image without it advertises no skills at all); `profiles/` holds the
+# cross-capability agent profiles and `templates/` the shipped step templates — both discovered
+# from disk, so an image missing them silently advertises fewer capabilities rather than failing.
+# `evals/` carries the committed case-set and baseline the drift job scores against, `data/` the
+# vendored dataset and the sample ELN exports, and `knowledge/` seeds the note tree so the mount
+# point exists even before the first sync. `infra/` holds the SQL migrations the migrate Job runs.
+COPY skills ./skills
+COPY profiles ./profiles
+COPY templates ./templates
+COPY evals ./evals
+COPY data ./data
+COPY knowledge ./knowledge
+COPY infra ./infra
+COPY deploy/entrypoint.sh /usr/local/bin/chemclaw-entrypoint
+COPY deploy/knowledge-sync.sh /usr/local/bin/chemclaw-knowledge-sync
+
+# Install into a project venv; --frozen fails if the lockfile drifted (reproducible builds).
+RUN uv sync --frozen --no-dev \
+    && chmod +x /usr/local/bin/chemclaw-entrypoint /usr/local/bin/chemclaw-knowledge-sync \
+    && chown -R 1001:0 /app \
+    && chmod -R g=u /app
+
+# The revision this image was built from, stamped onto every audit record (AG-14 / REV-17). The
+# config docstring has always said "the F6 image build injects the digest" and no build ever did —
+# nothing in the Containerfile, the chart or CI set it, so `deployment_revision` was "unknown" in
+# every deployment while AG-14 read as met. A GxP trail whose "which version produced this result"
+# column is a constant is not answering the question it exists to answer.
+#
+# A build ARG rather than a chart value because the image is the thing that has a revision: a chart
+# can be re-rendered against any tag, and a value that disagrees with the bytes is worse than the
+# honest "unknown". Defaulted so a local `docker build` still works and says plainly that it does
+# not know. `envFrom` a ConfigMap does not clobber an image ENV, so a deployment that wants to
+# override it can still put the key in `.Values.config`.
+ARG CHEMCLAW_REVISION=unknown
+
+# Non-root by default; OpenShift may override with an arbitrary UID (still in group 0).
+USER 1001
+ENV PATH="/app/.venv/bin:${PATH}" \
+    PYTHONUNBUFFERED=1 \
+    CHEMCLAW_COMPONENT=service \
+    CHEMCLAW_DEPLOYMENT_REVISION=${CHEMCLAW_REVISION}
+
+ENTRYPOINT ["/usr/local/bin/chemclaw-entrypoint"]

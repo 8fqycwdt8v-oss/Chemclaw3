@@ -1,0 +1,185 @@
+# ADR index
+
+One file per architecture decision, `D-NNN-<slug>.md`, alongside this index. `docs/decisions/`
+holds the *reasoning*; this file is the allocation ledger, so "which numbers are taken?" is one
+listing rather than a scan of a 421 KB document.
+
+**Why one file per ADR.** Until D-147 every decision was appended to the end of a single
+`DECISIONS.md`. ADR numbers collided three times, and the cause was structural rather than
+careless: concurrent branches all append to the same last line of the same file, and each picks
+"the highest number I can see, plus one" against its own branch, which cannot see the others.
+`CLAUDE.md` named the escape hatch itself and asked for it to be taken deliberately. This is it.
+The `D-NNN` sequence is unchanged — every existing citation still resolves — but the shared append
+point is gone: two branches adding different ADRs no longer touch the same lines, and two branches
+claiming the *same* number now collide on a **filename**, which git reports loudly instead of
+burying inside ninety lines of prose.
+
+**Allocating a number.** Enumerate against `origin/main`, never against your own branch:
+
+```sh
+git fetch origin main
+git ls-tree --name-only origin/main docs/decisions/ | grep -oE 'D-[0-9]+' | sort -V | tail -1
+```
+
+Your number is that one **+ 1**. Reserve it here in your **first** commit on the branch, not at the
+end — an unreserved number is one another session will take. Because that necessarily happens
+before the ADR file exists, write the row as:
+
+```
+| D-NNN | RESERVED — one line on what the decision will be about |
+```
+
+and replace the marker with the real title in the commit that adds the file. `RESERVED` rows are
+exempt from the index-matches-files check and *not* exempt from the duplicate check, which is
+exactly the point: the number is claimed the moment it is pushed. A reservation that is never
+written up leaves a gap, and a gap is harmless — never renumber a merged ADR to close one, because
+a moved number breaks every citation to it. (`D-008` sits after `D-009` in the original log for
+this reason; the filenames make that ordering irrelevant now, and the numbers stay put.)
+
+`tests/test_decision_log.py` enforces all of the above.
+
+| ADR | Title |
+|---|---|
+| [D-001](D-001-runtime-is-python.md) | Runtime is Python |
+| [D-002](D-002-maf-for-orchestration-temporal-for-durability-kept.md) | MAF for orchestration, Temporal for durability (kept separate) |
+| [D-003](D-003-agent-skills-skill-md-for-capability-integration.md) | Agent Skills (SKILL.md) for capability integration |
+| [D-004](D-004-knowledge-as-a-markdown-git-graph-networkx-not-a.md) | Knowledge as a Markdown + Git graph (NetworkX), not a graph DB |
+| [D-005](D-005-human-in-the-loop-via-pr-gate.md) | Human-in-the-loop via PR-gate |
+| [D-006](D-006-one-execution-system-temporal-task-queues-no-pg-boss.md) | One execution system: Temporal task queues, no pg-boss |
+| [D-007](D-007-first-milestone-maf-temporal-spine-hpc-mocked.md) | First milestone: MAF + Temporal spine (HPC mocked) |
+| [D-008](D-008-deep-research-report-harness-one-core-pluggable.md) | Deep-research/report harness: one core, pluggable retrievers |
+| [D-009](D-009-evaluation-metrics-layer-is-first-class-phase-2b.md) | Evaluation/metrics layer is first-class (Phase 2b) |
+| [D-010](D-010-hpc-dft-deferred-lead-with-fast-local-calculators.md) | HPC/DFT deferred; lead with fast local calculators (user decision) |
+| [D-011](D-011-results-are-persisted-once-never-recomputed.md) | Results are persisted once, never recomputed (calculation store, first-class) |
+| [D-012](D-012-bofire-is-the-bayesian-optimization-engine-no-in.md) | BoFire is the Bayesian-optimization engine (no in-house BO), pulled forward |
+| [D-013](D-013-maf-stays-the-orchestrator-reaffirmed-vs-langgraph.md) | MAF stays the orchestrator (reaffirmed vs. LangGraph) |
+| [D-014](D-014-eval-cases-live-outside-the-knowledge-graph-own.md) | Eval cases live outside the knowledge graph (own versioned dir, not notes) |
+| [D-015](D-015-calculator-contract-now-run-cached-name-registry.md) | Calculator contract now (`run_cached`), name-registry deferred |
+| [D-016](D-016-mcp-capability-servers-live-in-mcp-servers-not-mcp.md) | MCP capability servers live in `mcp_servers/`, not `mcp/` |
+| [D-017](D-017-one-generic-fingerprint-store-for-molecules-and.md) | One generic fingerprint store for molecules and reactions |
+| [D-018](D-018-eln-ingestion-ord-subset-schema-one-json-adapter-llm.md) | ELN ingestion: ORD-subset schema, one JSON adapter, LLM-per-field deferred |
+| [D-019](D-019-memory-layers-add-no-new-infrastructure-note-types.md) | Memory layers add no new infrastructure (note types + jobs only) |
+| [D-020](D-020-report-harness-reuses-retrievers-over-existing-data.md) | Report harness reuses retrievers over existing data (no new store) |
+| [D-021](D-021-production-readiness-review-one-bad-data-contract.md) | Production-readiness review: one bad-data contract, hardened PR-gate |
+| [D-022](D-022-eln-carries-step-by-step-recipes-a-second-adapter.md) | ELN carries step-by-step recipes; a second adapter reads native ORD |
+| [D-023](D-023-the-agent-is-the-research-surface-integrations-stay.md) | The agent is the research surface; integrations stay dumb |
+| [D-024](D-024-the-agent-computes-and-designs-experiments.md) | The agent computes and designs experiments proactively, not just retrieves |
+| [D-025](D-025-the-agent-keeps-its-chat-thread-within-a-token.md) | The agent keeps its chat thread within a token budget (MAF compaction) |
+| [D-026](D-026-observability-floor-config-driven-logging-one-clear.md) | Observability floor: config-driven logging + one clear DB-connect failure |
+| [D-027](D-027-gxp-tool-audit-middleware-opt-in-opentelemetry-maf.md) | GxP tool-audit middleware + opt-in OpenTelemetry (MAF out-of-the-box) |
+| [D-028](D-028-admin-pluggability-eln-adapter-registry-multi-dir.md) | Admin pluggability: ELN adapter registry, multi-dir skills, cache-trace log |
+| [D-029](D-029-the-agent-consumes-fingerprint-search-over-mcp.md) | The agent consumes fingerprint search over MCP (config-driven servers) |
+| [D-030](D-030-deep-review-hardening-bounded-retries-git-ref-safe.md) | Deep-review hardening: bounded retries, git-ref-safe slugs, git timeouts, cache keys |
+| [D-031](D-031-deep-review-deferred-items-worked-off-fp-definition.md) | Deep-review deferred items worked off: fp-definition guard, ELN re-drive, KISS cleanups |
+| [D-032](D-032-durable-async-approval-hold-for-captured-user.md) | Durable async approval hold for captured user answers (Yes/No button seam) |
+| [D-033](D-033-one-canonical-identity-scheme-sha-256-hashing.md) | One canonical identity scheme: SHA-256 hashing + canonical SMILES in every key |
+| [D-034](D-034-review-hardening-migration-ledger-durable-audit.md) | Review hardening: migration ledger, durable audit trail, injection framing, stmt timeout |
+| [D-035](D-035-missing-runnable-seams-schedules-eln-cursor.md) | Missing runnable seams: schedules, ELN cursor persistence, approval + skill-role seams |
+| [D-036](D-036-review-cleanup-dedupe-name-drift-guard-neutral.md) | Review cleanup: dedupe, name-drift guard, neutral config names, doc refresh |
+| [D-037](D-037-tooling-gaps-coverage-unified-mypy-scope-worker.md) | Tooling gaps: coverage, unified mypy scope, worker tests, preflight, skill-validate |
+| [D-038](D-038-maf-agent-harness-as-an-optional-third-reasoning.md) | MAF Agent Harness as an optional third reasoning backbone |
+| [D-039](D-039-f0-config-selected-llm-provider-seam-foundation-plan.md) | F0: config-selected LLM provider seam (foundation-plan D-A1) |
+| [D-040](D-040-f1-maf-agent-harness-is-the-autonomous-plan-execute.md) | F1: MAF Agent Harness is the autonomous plan/execute backbone (foundation D-020) |
+| [D-041](D-041-f2-front-door-run-service-foundation-plan-d-a2.md) | F2: front-door run service (foundation-plan D-A2) |
+| [D-042](D-042-f3-durable-session-job-session-push-back-foundation.md) | F3: durable session + job→session push-back (foundation-plan D-A3) |
+| [D-043](D-043-f4-entra-id-identity-rbac-front-door-oidc-one.md) | F4: Entra ID identity & RBAC — front-door OIDC + one authorization gate (D-A4) |
+| [D-044](D-044-f4-t3-the-core-rule-user-triggered-workflows-are.md) | F4-T3: the core rule — user-triggered workflows are user-specific via `require_actor` |
+| [D-045](D-045-f4-t2-workload-identity-federation-a-pod-mints-its.md) | F4-T2: workload identity federation (a pod mints its own token, no secret at rest) |
+| [D-046](D-046-f4-t4-on-behalf-of-exchange-for-user-scoped.md) | F4-T4: On-Behalf-Of exchange for user-scoped downstream (wired, dormant) |
+| [D-047](D-047-f4-t6-the-two-non-entra-transport-bridges-carry.md) | F4-T6: the two non-Entra transport bridges carry identity as a claim |
+| [D-048](D-048-f5-real-hpc-execution-via-a-nextflow-launcher-behind.md) | F5: real HPC execution via a Nextflow launcher behind the QM activities (D-A5, D-A5a) |
+| [D-049](D-049-f6-openshift-delivery-one-image-one-config-source.md) | F6: OpenShift delivery — one image, one config source, three plain secrets (D-A6, D-A6a) |
+| [D-050](D-050-f7-the-generic-data-source-seam-compose-two-half.md) | F7: the generic data-source seam (compose two half-contracts, don't merge them) |
+| [D-051](D-051-foundation-review-f4-f7-adversarial-review-fixes.md) | Foundation review (F4–F7): adversarial review + fixes |
+| [D-052](D-052-role-scoped-skill-visibility-salvaged-from-the.md) | Role-scoped skill visibility (salvaged from the phase6-authz branch) |
+| [D-053](D-053-consolidate-eln-source-selection-onto-the-f7-seam.md) | Consolidate ELN source selection onto the F7 seam; memory honors `data_sources` (audit DUP-1) |
+| [D-054](D-054-per-source-eln-cursors-a-per-scope-token-lock-close.md) | Per-source ELN cursors + a per-scope token lock (close the two F-review deferrals) |
+| [D-055](D-055-gxp-freshness-read-time-provenance-in-graph.md) | GxP freshness + read-time provenance in graph retrieval (audit KM-6, KM-7) |
+| [D-056](D-056-retrieval-quality-gate-a-starter-gold-set-registered.md) | Retrieval-quality gate: a starter gold set + registered metrics (audit KM-13) |
+| [D-057](D-057-four-more-engine-gaps-closed-km-5-km-14-retrieval.md) | Four more engine gaps closed (KM-5, KM-14 retrieval half, AG-14, AG-15) |
+| [D-058](D-058-prove-the-harness-loop-live-close-the-f3-t3-awaiting.md) | Prove the harness loop live; close the F3-T3 awaiting-todo deferral |
+| [D-059](D-059-f10-e-b-per-task-model-routing-answer-verification.md) | F10-E/B: per-task model routing + answer verification & confidence routing (D-A11) |
+| [D-060](D-060-f10-c-per-tool-authorization-middleware-supersedes-d.md) | F10-C: per-tool authorization middleware (supersedes D-044 scope, D-A12) |
+| [D-061](D-061-f10-g-audit-hash-chain-bi-temporal-note-fields-d-a15.md) | F10-G: audit hash-chain + bi-temporal note fields (D-A15) |
+| [D-062](D-062-f10-a-hybrid-retrieval-dense-lexical-entry-points.md) | F10-A: hybrid retrieval — dense + lexical entry points, RRF fusion (D-A10) |
+| [D-063](D-063-f10-f-classification-metrics-p-r-f1-eval-drift.md) | F10-F: classification metrics (P/R/F1) + eval drift detection (D-A14) |
+| [D-064](D-064-f10-d-sub-agent-orchestration-via-temporal-child.md) | F10-D: sub-agent orchestration via Temporal child workflows (D-A13) |
+| [D-065](D-065-f10-post-implementation-review-cycle-verified-fixes.md) | F10 post-implementation review cycle: verified fixes |
+| [D-066](D-066-resilience-hardening-db-query-clamps-session.md) | Resilience hardening: DB-query clamps, session reattach, turn/token budgets |
+| [D-067](D-067-fail-closed-startup-unauthenticated-network-exposed.md) | Fail-closed startup: unauthenticated + network-exposed refuses to boot |
+| [D-068](D-068-write-tools-are-role-gated-by-default-default-write.md) | Write tools are role-gated by default (DEFAULT_WRITE_TOOL_GATES) |
+| [D-069](D-069-submitter-checkout-ownership-enforced-with-an-os.md) | Submitter checkout ownership enforced with an OS-level advisory lock |
+| [D-070](D-070-eln-sync-cursor-semantics-future-tolerance-clamp.md) | ELN sync cursor semantics: future-tolerance clamp, overlap window, chunked activities |
+| [D-071](D-071-deterministic-config-capture-in-workflows-idempotent.md) | Deterministic config capture in workflows; idempotent session events |
+| [D-072](D-072-checkmate-campaign-2026-07-adversarially-verified.md) | CHECKMATE campaign 2026-07: adversarially-verified review, hardening, and refactor pass |
+| [D-073](D-073-final-adversarial-diff-pass-campaign-introduced.md) | Final adversarial diff pass: campaign-introduced defects caught and fixed |
+| [D-074](D-074-compared-against-google-s-open-knowledge-format-okf.md) | Compared against Google's Open Knowledge Format (OKF v0.1): design reaffirmed, two follow-ups queued |
+| [D-075](D-075-config-extensibility-tool-registry-agentprofile-seam.md) | Config-extensibility: `@tool` registry + `AgentProfile` seam (audit doc 10, items 2–3) |
+| [D-076](D-076-config-extensibility-datasourcespec-discriminated.md) | Config-extensibility: `DataSourceSpec` discriminated union (audit doc 10, item 4) |
+| [D-077](D-077-the-turn-stream-emits-its-plan-and-its-job-launches.md) | The turn stream emits its plan and its job launches (F2/F3 deferred item closed) |
+| [D-078](D-078-memory-notes-are-retired-when-their-cluster-merges.md) | Memory notes are retired when their cluster merges or shrinks |
+| [D-079](D-079-workflow-versioning-is-a-deploy-checklist-not-a-ci.md) | Workflow versioning is a deploy checklist, not a CI guard |
+| [D-080](D-080-chemical-safety-a-deterministic-advisory-structural.md) | Chemical safety: a deterministic, advisory structural screen (never a clearance) |
+| [D-081](D-081-config-extensibility-mcp-transport-union-skill.md) | Config-extensibility: MCP transport union, skill manifest + enable-list, config idiom rule (audit doc 10, items 5–7) |
+| [D-082](D-082-graph-cache-ttl-da-5-decision-d-1-and-the-helm.md) | Graph-cache TTL (DA-5 / decision D-1) and the Helm render gate (DA-10 / decision D-2) |
+| [D-083](D-083-f11-waves-0-3-closing-the-capability-gaps-deployment.md) | F11 waves 0–3: closing the capability gaps (deployment, reachability, chemistry) |
+| [D-084](D-084-f11-waves-3-4-operating-the-system-the-knowledge.md) | F11 waves 3–4: operating the system; the knowledge model reasoning about itself |
+| [D-085](D-085-f11-completion-the-five-items-blocked-on-a-decision.md) | F11 completion: the five items blocked on a decision or a prerequisite |
+| [D-086](D-086-first-reconciliation-with-main-prs-17-20-hazard.md) | First reconciliation with `main` (PRs #17–#20): hazard screen, event sink, tool registry |
+| [D-087](D-087-second-reconciliation-with-main-pr-21-the-mcp.md) | Second reconciliation with `main` (PR #21): the MCP transport union |
+| [D-088](D-088-third-reconciliation-with-main-pr-23-adr-renumbering.md) | Third reconciliation with `main` (PR #23): ADR renumbering, and the chart's env parity guard |
+| [D-089](D-089-no-external-sources-pdf-pptx-docx-xlsx-are-in-scope.md) | No external sources; PDF/PPTX/DOCX/XLSX are in scope |
+| [D-090](D-090-reported-issue-sweep-the-azide-the-screener-could.md) | Reported-issue sweep: the azide the screener could not see, two missing session routes, and the note-repo footgun |
+| [D-091](D-091-restoring-the-tree-the-replit-restructure-rewound.md) | Restoring the tree the Replit restructure rewound |
+| [D-092](D-092-process-analytical-development-capability-research.md) | Process/analytical-development capability research: quick wins, one durable big win, and what was rejected |
+| [D-093](D-093-a-raw-exception-in-a-fan-out-child-suspends-as-a.md) | A raw exception in a fan-out child suspends as a task failure, not a workflow failure |
+| [D-094](D-094-ci-s-kg-validate-step-needs-a-real-even-empty.md) | CI's `kg-validate` step needs a real (even empty) `knowledge` directory |
+| [D-095](D-095-xtb-capability-seams-x1-and-the-properties-the-scf.md) | xTB capability seams (X1) and the properties the SCF already produced (X2) |
+| [D-096](D-096-xtb-descriptors-as-bo-featurization-u1.md) | xTB descriptors as BO featurization (U1) |
+| [D-097](D-097-the-single-point-runs-on-a-relaxed-geometry-and-the.md) | The single point runs on a relaxed geometry, and the skill catalogue that found it |
+| [D-098](D-098-x3-x4-geometries-free-energies-the-reaction.md) | X3/X4: geometries, free energies, the reaction composite, and durable routing |
+| [D-099](D-099-durable-capabilities-declare-their-own-queue.md) | Durable capabilities declare their own queue |
+| [D-100](D-100-sizing-for-real-substrates-the-workload-is-200-800.md) | Sizing for real substrates: the workload is 200-800 Da |
+| [D-101](D-101-x5-x6-x7-the-binaries-and-what-they-change.md) | X5/X6/X7: the binaries, and what they change |
+| [D-102](D-102-x9-revisited-preconditioning-the-path-the-binary.md) | X9 revisited: preconditioning the path the binary cannot take |
+| [D-103](D-103-x8-the-calculators-as-an-mcp-server-and-the-line.md) | X8: the calculators as an MCP server, and the line identity draws |
+| [D-104](D-104-x11-two-molecules-together-and-the-half-of-the-amine.md) | X11: two molecules together, and the half of the amine problem that is refused |
+| [D-105](D-105-fourth-reconciliation-with-main-pr-28-the-restored.md) | Fourth reconciliation with `main` (PR #28): the restored tree meets the xTB layer |
+| [D-106](D-106-heavy-review-of-the-xtb-layer-five-defects-the-tests.md) | Heavy review of the xTB layer: five defects the tests did not catch |
+| [D-107](D-107-fifth-reconciliation-with-main-pr-31-a-unit-boundary.md) | Fifth reconciliation with `main` (PR #31): a unit boundary and a sign, both silent |
+| [D-108](D-108-one-conformer-ensemble-one-reaction-composite-the.md) | One conformer ensemble, one reaction composite: the duplicates are removed |
+| [D-109](D-109-four-fixes-from-the-live-e2e-pass-and-two-root.md) | Four fixes from the live e2e pass, and two root causes that were not what they looked like |
+| [D-110](D-110-the-connector-seam-one-way-to-add-a-tool-a-skill-or.md) | The connector seam: one way to add a tool, a skill, or an agentic workflow |
+| [D-111](D-111-stage-c-the-domain-connectors-and-two-defects-the.md) | Stage C: the domain connectors, and two defects the migration surfaced |
+| [D-112](D-112-bo-as-the-reference-connector-owned-durable.md) | `bo` as the reference connector-owned durable capability |
+| [D-113](D-113-stages-d-and-e-profiles-select-an-agent-templates.md) | Stages D and E: profiles select an agent, templates fix a procedure |
+| [D-114](D-114-sixth-reconciliation-with-main-the-xtb-layer-meets.md) | Sixth reconciliation with `main`: the xTB layer meets the connector seam |
+| [D-115](D-115-the-two-remaining-stage-c-items-answered-neither.md) | The two remaining Stage C items, answered: neither becomes a bundle |
+| [D-116](D-116-seventh-reconciliation-with-main-pr-30-two.md) | Seventh reconciliation with `main` (PR #30): two capabilities the merge silently restored |
+| [D-117](D-117-consolidating-the-outstanding-branches-and-deleting.md) | Consolidating the outstanding branches, and deleting what four generations of the design left behind |
+| [D-118](D-118-one-connector-seam-for-mcp-temporal-and-long-running.md) | One connector seam for MCP, Temporal and long-running HPC tools |
+| [D-119](D-119-production-scale-the-event-loop-the-connection-pool.md) | Production scale: the event loop, the connection pool, and a guard that switched itself off |
+| [D-120](D-120-a-data-source-becomes-a-manifest-the-second-config.md) | A data source becomes a manifest: the second config-side union replaced by a folder |
+| [D-121](D-121-the-front-door-as-a-multi-process-service-pure-asgi.md) | The front door as a multi-process service: pure-ASGI headers, a durable turn claim, a pool timeout that sheds |
+| [D-122](D-122-the-gxp-audit-trail-defaults-to-durable-because.md) | The GxP audit trail defaults to durable, because opting in per call site did not work |
+| [D-123](D-123-one-agent-per-concurrent-turn-a-shared-chat-client.md) | One agent per concurrent turn: a shared chat client corrupts streamed tool calls |
+| [D-124](D-124-a-calculation-s-by-products-outlive-the-directory-it.md) | The artifact store: a calculation's by-products outlive its tempdir, and the cost policy the cache lacked |
+| [D-130](D-130-turn-teardown-runs-in-a-cancelled-task-so-its.md) | Turn teardown runs in a cancelled task, so its cleanup has to be shielded to happen at all |
+| [D-131](D-131-the-connector-health-probe-follows-the-address.md) | The connector health probe follows the address override, instead of probing the pod itself |
+| [D-132](D-132-the-hessian-is-its-own-calculation-splitting-the.md) | The Hessian is its own calculation: splitting the matrix from the thermochemistry computed over it |
+| [D-133](D-133-a-submission-is-a-note-and-what-it-needs-so-a.md) | A submission is a note and what it needs, so a computed result can cite the compound it is about |
+| [D-134](D-134-edges-carry-relations-and-their-own-validity-so-the.md) | Edges carry relations and their own validity, so the graph stops being a citation network |
+| [D-135](D-135-a-dataset-may-be-vendored-into-the-image-at-build.md) | A dataset may be vendored into the image at build time — the one amendment to D-089's scope |
+| [D-136](D-136-the-shipped-defaults-were-never-executed-three.md) | The shipped defaults were never executed: three configurations that fail on first contact |
+| [D-137](D-137-the-plan-the-model-could-approve-for-itself-a-pre.md) | The plan the model could approve for itself: a pre-execution gate that is not a tool |
+| [D-138](D-138-fifty-questions-asked-live-the-job-surface-was-dead.md) | Fifty questions, asked live: the job surface was dead, the trace was blind, and a failed tool was silent |
+| [D-139](D-139-three-silent-failures-a-degraded-turn-a-pooled.md) | Three silent failures: a degraded turn, a pooled calibration, and two counters wired to nothing |
+| [D-140](D-140-a-template-s-job-step-resolved-off-the-workflow.md) | A template's job step: resolved off the workflow thread, and finally able to fail |
+| [D-141](D-141-two-facts-that-stopped-at-a-process-boundary-a.md) | Two facts that stopped at a process boundary: a session's profile, and the turn's correlation id |
+| [D-142](D-142-a-production-value-has-to-be-executed-not-type.md) | A production value has to be executed, not type-checked — and two guards that were off in the one deployment that needed them |
+| [D-143](D-143-nobody-was-collecting-the-metrics-and-the-durable.md) | Nobody was collecting the metrics, and the durable history is never compacted — one fixed, one where the obvious fix corrupts data |
+| [D-144](D-144-token-accounting-was-priced-blind-one-total-where.md) | Token accounting was priced-blind: one total where the bill has four line items |
+| [D-145](D-145-a-conversation-row-cannot-be-disposed-of-without-the.md) | A conversation row cannot be disposed of without the rows it is paired with |
+| [D-146](D-146-the-service-is-the-repository-removing-the-services.md) | The service is the repository: removing the `services/` tier the Replit monorepo left behind |
+| [D-147](D-147-one-file-per-adr-and-a-docs-tree-with-an-archive.md) | One file per ADR, and a `docs/` tree with a living half and an archive |
+| [D-148](D-148-the-packages-regrouped-under-src-chemclaw-by-layer.md) | The packages regrouped under `src/chemclaw/` by the four architecture layers |

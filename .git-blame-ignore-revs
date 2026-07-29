@@ -1,0 +1,17 @@
+# Commits that only moved or renamed things. `git blame` should skip them and report the commit
+# that last changed a line's *content*, not the one that relocated the file.
+#
+# Enable locally (once per clone; CI does not need it):
+#     git config blame.ignoreRevsFile .git-blame-ignore-revs
+#
+# Add a commit here only if it changed no behaviour — a pure move, rename or reformat. A commit
+# that moved files *and* edited them belongs in neither category; split it instead.
+
+# D-139 — services/chemclaw/* moved to the repository root.
+61d31191badcaceddf1e3bda81b8fa77c19bb91c
+
+# D-140 — DECISIONS.md split into one file per ADR under docs/decisions/.
+cddf56dcba675c8b28396ada494967d2786479d7
+
+# D-141 — the eighteen packages regrouped under src/chemclaw/.
+15be829553dba12c598bfa3c7c2ee4452522e6e1

@@ -14,17 +14,13 @@
 #
 # The registry push and cluster rollout are not here. The stranded workflow carried them as a job
 # whose entire body was `echo "docker push + helm upgrade ..."` — a stub, deleted rather than
-# carried forward. Its trigger is recorded in DEFERRED.md: a real cluster and its credentials.
+# carried forward. Its trigger is recorded in docs/planning/DEFERRED.md: a real cluster and its credentials.
 name: image
 
 on:
   push:
     branches: ["main"]
   pull_request:
-
-defaults:
-  run:
-    working-directory: services/chemclaw
 
 jobs:
   image:
@@ -78,10 +74,10 @@ jobs:
             echo "found ${#modules[@]} fixed component(s) in entrypoint.sh; the greps have drifted" >&2
             exit 1
           }
-          for bundle in connectors/*/; do
+          for bundle in src/chemclaw/connectors/*/; do
             name="$(basename "${bundle}")"
-            [ -f "${bundle}/server/app.py" ] && modules+=("connectors.${name}.server.app")
-            [ -f "${bundle}/worker.py" ] && modules+=("connectors.${name}.worker")
+            [ -f "${bundle}/server/app.py" ] && modules+=("chemclaw.connectors.${name}.server.app")
+            [ -f "${bundle}/worker.py" ] && modules+=("chemclaw.connectors.${name}.worker")
           done
           for module in "${modules[@]}"; do
             echo "::group::import ${module}"

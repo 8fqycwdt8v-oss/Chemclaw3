@@ -1,0 +1,32 @@
+# The heavy quantum chemistry. Its own bundle because its dependency closure is the HPC bridge —
+# the Nextflow launcher credential, the artifact store, and a poll that runs for hours — none of
+# which the chat service or core's background worker has any business holding.
+#
+# No `endpoint:`. This capability contributes exactly one thing, and it is durable: there is no
+# sub-second QM tool to serve over MCP. That is why it was the last capability outside the seam —
+# it is the *jobs-only* shape, and until D-118 a jobs-only bundle had no queue of its own to run on.
+name: qm
+description: >-
+  Quantum-mechanical (DFT) calculations on the HPC cluster: a durable single-point energy at a
+  named level of theory. Minutes to days, launched through Nextflow under the shared HPC service
+  identity with the requesting user carried in the audit trail.
+
+jobs:
+  - name: compute_dft_energy
+    workflow: QMJobWorkflow
+    task_queue: connector-qm
+    expensive: true
+    publish_to_graph: true
+    summary: Run a durable DFT calculation on one molecule; returns a job id immediately.
+    description: >-
+      The heavy path. Use it when semiempirical xTB (compute_xtb_energy, compute_reaction_energy)
+      is not accurate enough for the decision at hand — see the qm-job-submission skill for how to
+      choose the method and basis set. Long-running: poll the returned id with
+      get_durable_job_status. Identical requests share one job id, so re-asking is free.
+    params_model: chemclaw.connectors.qm.specs:QmJobSpec
+
+# No `inline_wait_seconds`: a DFT run is hours to days, so waiting for it inside a turn could only
+# ever burn the turn's budget and then hand back the job id anyway.
+
+skills:
+  - qm-job-submission
