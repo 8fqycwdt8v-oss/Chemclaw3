@@ -4,7 +4,7 @@ Only the *contract* is fixed, never an ELN's shape: an adapter fetches raw entri
 than a cursor and maps each into the canonical `OrdReaction`. Every ELN-specific quirk
 lives behind this seam (G6), so the sync (`workflows.eln_sync`) and everything above it are
 identical no matter which ELN is wired. There is no universal ELN abstraction — one adapter
-per source (DEFERRED.md: generalize only from a third source).
+per source (docs/planning/DEFERRED.md: generalize only from a third source).
 """
 
 from datetime import UTC, datetime

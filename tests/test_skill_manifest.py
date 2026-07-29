@@ -5,7 +5,7 @@ contract whose declared capabilities are checked against the live registries (so
 renamed tool fails CI instead of surviving as stale prose), and a deployment can narrow which
 discovered skills are advertised without deleting folders. Both only ever *attenuate* — neither can
 advertise a skill no directory provides, and the role gate still runs on top. Offline; the shipped
-`skills/` tree is the fixture. See `docs/audit/10-config-extensibility.md` §9 item 5.
+`skills/` tree is the fixture. See `docs/archive/audit/10-config-extensibility.md` §9 item 5.
 """
 
 import asyncio

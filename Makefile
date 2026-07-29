@@ -84,8 +84,8 @@ helm-validate:  ## Render the Helm chart and validate it against the Kubernetes 
 	@# The flag skips a kind rather than failing it, so `tests/test_deploy_chart.py` pins exactly
 	@# which kinds the chart renders. A new unvalidated CRD is then a deliberate edit to that test,
 	@# not something that slips through as "skipped".
-	@command -v helm >/dev/null || { echo "helm not installed - see docs/runbook.md"; exit 1; }
-	@command -v kubeconform >/dev/null || { echo "kubeconform not installed - see docs/runbook.md"; exit 1; }
+	@command -v helm >/dev/null || { echo "helm not installed - see docs/guides/runbook.md"; exit 1; }
+	@command -v kubeconform >/dev/null || { echo "kubeconform not installed - see docs/guides/runbook.md"; exit 1; }
 	helm template chemclaw deploy/helm/chemclaw \
 	  | kubeconform -strict -summary -ignore-missing-schemas -kubernetes-version $(KUBE_VERSION) \
 	      -schema-location default -schema-location \

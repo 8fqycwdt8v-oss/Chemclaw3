@@ -5,7 +5,7 @@ Temporal durable jobs, Agent Skills, and a PR-gated Markdown knowledge graph.
 
 **`ARCHITECTURE.md` is the map** — the four layers and what every directory in this
 repository is for. Read it before going looking for something. The original design and
-build order live in `docs/architektur.md` and `docs/implementation-plan.md`; both are
+build order live in `docs/reference/architektur.md` and `docs/planning/implementation-plan.md`; both are
 historical (see `CLAUDE.md`).
 
 ## Quickstart
@@ -52,7 +52,7 @@ plan→approve→execute harness. Entra identity is enforced when
 (`deploy/helm/chemclaw/`). See `deploy/README.md` for the topology (front-door
 Route behind OIDC, the two Temporal workers, MCP servers, workload identity
 federation, and the three plain secrets). The build order and per-phase status
-live in `docs/implementation-tickets.md`.
+live in `docs/planning/implementation-tickets.md`.
 
 ## Security
 

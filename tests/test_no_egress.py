@@ -1,11 +1,11 @@
 """No first-party module reaches an external host (the "no external sources" decision, D-089).
 
 The PubChem literature retriever was built, reviewed, and then rejected on scope: **this system
-takes no external sources**. Deleting the module records that as of today; it does not stop the
-next connector. The reason a guard is warranted rather than a `DEFERRED.md` line is that the
-original decision *was* already written down — TOOL-6 sat in `DEFERRED.md` as "blocked on choosing a
-source", which reads as an invitation, and duly got built. Prose stated the constraint; nothing
-enforced it.
+takes no external sources**. Deleting the module records that as of today; it does not stop the next
+connector. The reason a guard is warranted rather than a `docs/planning/DEFERRED.md` line is that
+the original decision *was* already written down — TOOL-6 sat in `docs/planning/DEFERRED.md` as
+"blocked on choosing a source", which reads as an invitation, and duly got built. Prose stated the
+constraint; nothing enforced it.
 
 **What "external" means here, precisely.** Not "no URLs" — the codebase legitimately holds the
 addresses of things it is deployed alongside: the LLM endpoint, Temporal, Postgres, the Entra
@@ -130,11 +130,11 @@ def test_the_source_registry_offers_no_external_source() -> None:
 def test_the_vendored_source_cannot_make_a_request() -> None:
     """The vendored dataset is a file on disk, and this is what makes that structural.
 
-    D-089's real subject is a *runtime* dependency on somebody else's service. A build-time
-    dataset has none — but "we intend to only read from disk" is prose, and prose is exactly what
-    D-089 already learned does not hold (TOOL-6 sat in `DEFERRED.md` as an invitation and duly got
-    built). So the constraint is enforced: the module may not import an HTTP client, which means
-    it cannot acquire one by accident during a later edit either.
+    D-089's real subject is a *runtime* dependency on somebody else's service. A build-time dataset
+    has none — but "we intend to only read from disk" is prose, and prose is exactly what D-089
+    already learned does not hold (TOOL-6 sat in `docs/planning/DEFERRED.md` as an invitation and
+    duly got built). So the constraint is enforced: the module may not import an HTTP client, which
+    means it cannot acquire one by accident during a later edit either.
     """
     source = (_ROOT / "sources" / "vendored_dataset.py").read_text(encoding="utf-8")
     for client in ("httpx", "requests", "urllib", "aiohttp", "socket"):

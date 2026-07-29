@@ -1,8 +1,9 @@
 """The pre-execution approval gate: only a human moves the harness from plan to execute.
 
-`SECURITY.md`, `docs/harness-konzept.md` §6 and `build_agent`'s own docstring all describe a GxP
-gate — in `plan_only` the agent proposes a plan and waits for a human before executing. The shipped
-production configuration runs exactly that (`harness_enabled=true`, `harness_autonomy=plan_only`).
+`SECURITY.md`, `docs/guides/harness-konzept.md` §6 and `build_agent`'s own docstring all describe a
+GxP gate — in `plan_only` the agent proposes a plan and waits for a human before executing. The
+shipped production configuration runs exactly that (`harness_enabled=true`,
+`harness_autonomy=plan_only`).
 
 **It did not exist.** MAF's `AgentModeProvider.before_run` injects a `mode_set` tool into the
 model's own tool surface on every run, declared `approval_mode="never_require"`, and its

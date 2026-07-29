@@ -26,17 +26,17 @@ offline**, each phase ADR'd (D-039…D-050) and green under `make lint type test
 
 **Live edges remain open** (need a real Entra tenant / Temporal broker / OpenShift cluster): real token
 validation, federation/OBO exchanges, live cluster durability + `helm`/`kubeconform` render. See
-`BACKLOG.md` for the exact list.
+`docs/planning/BACKLOG.md` for the exact list.
 
-**On the design documents below: they are historical, not current.** `docs/architektur.md` is
+**On the design documents below: they are historical, not current.** `docs/reference/architektur.md` is
 pre-implementation design and contains **zero** references to connectors — the seam that now carries
 every tool, job and skill (D-118) — so it describes a system that no longer exists in its details
-while remaining right about the four layers. Read it for intent; read `DECISIONS.md`, the package
-READMEs and `docs/runbook.md` for what is true today.
+while remaining right about the four layers. Read it for intent; read `docs/decisions/`, the package
+READMEs and `docs/guides/runbook.md` for what is true today.
 
-- `docs/architektur.md` — the four-layer architecture (§6 = the real OpenShift/Nextflow/internal-LLM
+- `docs/reference/architektur.md` — the four-layer architecture (§6 = the real OpenShift/Nextflow/internal-LLM
   deployment; §7/§8 = Entra durchgängig).
-- `docs/implementation-plan.md` — the original build order; `docs/implementation-tickets.md` — the
+- `docs/planning/implementation-plan.md` — the original build order; `docs/planning/implementation-tickets.md` — the
   F0–F9 ticket backlog with per-phase status.
 
 ## Related repositories
@@ -75,7 +75,7 @@ Four layers, each with a single responsibility. **Never merge their concerns.**
 Durability lives **only** in Temporal, never in MAF. Skills hold judgment; MCP servers hold
 capability (deterministic tools). Anything agent-generated enters the graph via a **PR-gate**
 (human validates before merge) — this is the GxP "AI proposes, human signs off" line, reused
-everywhere (job results, reports, distilled playbooks). See `docs/architektur.md` §4, §9, §12.
+everywhere (job results, reports, distilled playbooks). See `docs/reference/architektur.md` §4, §9, §12.
 
 ## Commands
 
@@ -138,15 +138,16 @@ destructive/ambiguous, or the user asked to review before merge for this task.
 - **Config, never magic numbers**: every URL, path, threshold, timeout, model name comes from
   the one `pydantic-settings` config, ENV-overridable.
 
-Run the plan's **Quality-Gate ("Checkmate")** checklist (G1–G7, see `docs/implementation-plan.md`)
+Run the plan's **Quality-Gate ("Checkmate")** checklist (G1–G7, see `docs/planning/implementation-plan.md`)
 after each cluster of steps before moving on.
 
 ## Persistent knowledge (read at session start, update at session end)
 
-- `BACKLOG.md` — prioritized open action items.
-- `DEFERRED.md` — consciously postponed items **with the reason they are not now**.
-- `DECISIONS.md` — architecture decisions with rationale (append-only ADR log).
-- `ADR-REGISTRY.md` — the `D-NNN` allocation ledger, one line per number. **Every session that
+- `docs/planning/BACKLOG.md` — prioritized open action items.
+- `docs/planning/DEFERRED.md` — consciously postponed items **with the reason they are not now**.
+- `docs/decisions/` — architecture decisions with rationale, one file per ADR (`D-NNN-<slug>.md`).
+  Never edit a merged ADR; a decision that has changed gets a new ADR that supersedes it.
+- `docs/decisions/README.md` — the `D-NNN` allocation ledger, one row per number. **Every session that
   writes an ADR must reserve its number here** (see below).
 - `tasks/lessons.md` — self-improvement log. Review it at session start; after **any**
   correction from the user, add the pattern here and write a rule for yourself that prevents
@@ -157,57 +158,60 @@ Keep these current; they are the memory across sessions. For recurring patterns,
 
 ### Allocating an ADR number
 
-ADR numbers have collided three times, each costing a renumber during a merge. The cause is
-structural, not carelessness: several branches run concurrently, all append to the end of
-`DECISIONS.md`, and each picks "highest I can see, plus one" — against its *own* branch, which
-cannot see the others. Follow this exactly.
+ADR numbers collided three times, each costing a renumber during a merge. The cause was structural,
+not carelessness: several branches ran concurrently, all appending to the end of one `DECISIONS.md`,
+each picking "highest I can see, plus one" — against its *own* branch, which cannot see the others.
+So they picked the same number **and** conflicted on the same line, inside ninety lines of prose
+where it was easy to miss.
 
-**1. Enumerate against `origin/main`, never against your branch.** Your branch's highest number
-is stale the moment another branch merges.
+D-140 removed the shared append point: one file per ADR. Two branches adding different ADRs now
+touch disjoint files, and two branches claiming the same number collide on a **filename** — an
+add/add conflict git reports loudly. The procedure below is what remains.
+
+**1. Enumerate against `origin/main`, never against your branch.** Your branch's highest number is
+stale the moment another branch merges.
 
 ```sh
 git fetch origin main
-# the highest number currently allocated:
-git show origin/main:ADR-REGISTRY.md | grep -oE '^\| D-[0-9]+' | sort -V | tail -1
-# cross-check against the log itself (the two must agree):
-git show origin/main:DECISIONS.md | grep -cE '^## D-[0-9]+'
+# the highest number currently allocated (the ledger and the files must agree):
+git show origin/main:docs/decisions/README.md | grep -oE '^\| \[?D-[0-9]+' | grep -oE 'D-[0-9]+' | sort -V | tail -1
+git ls-tree --name-only origin/main docs/decisions/ | grep -oE 'D-[0-9]+' | sort -V | tail -1
 ```
 
-Your number is that highest one **+ 1**. To list every heading locally, use
-`grep -nE '^## D-[0-9]+' DECISIONS.md`.
+Your number is that highest one **+ 1**. Locally, `ls docs/decisions/` is the whole record.
 
-**2. Reserve it in your first commit, not your last.** Add the row to `ADR-REGISTRY.md` as soon as
-you know you will write an ADR — before the ADR itself exists. A number you have not yet pushed is
-a number another session will take.
+**2. Reserve it in your first commit, not your last.** Add the row to `docs/decisions/README.md` as
+soon as you know you will write an ADR — before the ADR file exists. A number you have not yet
+pushed is a number another session will take.
 
 Mark such a row `| D-NNN | RESERVED — what it will be about |` and swap the marker for the real
-title in the commit that adds the ADR. `tests/test_decision_log.py` exempts `RESERVED` rows from
-"the registry and the log name the same ADRs" while still counting them as taken. Without that
-marker the two rules contradicted each other and the test won: `1f1f233` reserved six numbers as
-instructed here, and `8f6a319` deleted five of them to get CI green.
+title *and a link to the file* in the commit that adds the ADR. `tests/test_decision_log.py` exempts
+`RESERVED` rows from "the ledger and the files name the same ADRs" while still counting them as
+taken. Without that marker the two rules contradicted each other and the test won: `1f1f233`
+reserved six numbers as instructed here, and `8f6a319` deleted five of them to get CI green.
 
 **3. When it collides anyway, the branch merging *second* renumbers.** This is a rule, not a
 judgement call, so two sessions never both wait or both move. Whoever is merging (you, if you hit
-the conflict) takes the *new* free number, and fixes every reference:
+the conflict) takes the *new* free number — `git mv` the file to its new name, fix the `#` heading
+inside it, move the ledger row, and fix every reference:
 
 ```sh
-git grep -n 'D-0*<old>'          # DECISIONS.md, ADR-REGISTRY.md, BACKLOG.md, DEFERRED.md, code comments
+git grep -n 'D-0*<old>'   # docs/decisions/, its README, docs/planning/, code comments
 ```
 
-`DECISIONS.md` is append-only, so the resolution is always "keep both blocks, main's first, renumber
-mine" — never drop or reorder an already-merged ADR.
+Never drop, reorder or edit an already-merged ADR to resolve this; only your own file moves.
 
 **4. Do not renumber a merged ADR to close a gap.** A gap is harmless; a moved number breaks every
-citation to it. `D-008` already sits after `D-009` in file order for this reason — leave it.
+citation to it. `D-008` was written after `D-009` for this reason — the numbers stay put.
 
-If collisions continue despite this, the fix is to abandon the global sequence for date-plus-slug
-ids (`D-2026-07-27-harness-streaming`), which cannot collide. That is a deliberate convention
-change — raise it, don't drift into it.
+If collisions somehow continue, the remaining fix is to abandon the global sequence for
+date-plus-slug ids (`D-2026-07-27-harness-streaming`), which cannot collide at all. That costs every
+existing citation, so it is a deliberate convention change — raise it, don't drift into it.
 
 ## Token / context management
 
 - **Compact policy** — when context is compacted (`/compact`), the summary MUST preserve:
-  open TODOs (from `BACKLOG.md`), API/interface changes **with their rationale**, the list of
+  open TODOs (from `docs/planning/BACKLOG.md`), API/interface changes **with their rationale**, the list of
   changed files, and a one-line summary of any failed approach (so it is not retried).
 - After finishing a self-contained step, actively suggest/use `/compact` (or `/clear`).
 - Keep replies as short as possible; no explanations without added value.

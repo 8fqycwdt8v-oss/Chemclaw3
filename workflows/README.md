@@ -7,7 +7,7 @@ replayable; all I/O and non-determinism lives in **activities**. Durability live
 here and **only** here, never in the MAF layer.
 
 One core task queue (its name comes from `chemclaw.config`): `background-jobs`
-(D-006). See `docs/architektur.md` §2, §15.
+(D-006). See `docs/reference/architektur.md` §2, §15.
 
 **Which queue is a property of the capability, not of the deployment**, so it is
 declared where the capability is defined rather than in a worker: put
@@ -20,7 +20,7 @@ workflow modules to run them.
 **Heavy work is not here at all any more.** `hpc-jobs` held one workflow,
 `QMJobWorkflow`, and it is a declared connector job now: the class kept its Temporal
 type name (a rename would be a different command in a recorded history — see
-`docs/workflow-versioning.md`) and moved to `connectors/qm/workflows.py`, on the
+`docs/guides/workflow-versioning.md`) and moved to `connectors/qm/workflows.py`, on the
 bundle's own `connector-qm` queue. The xTB tasks went the same way earlier, as
 `CalcJobWorkflow` on `connector-calc` (D-114). So a capability that carries a
 dependency closure — the HPC bridge, `tblite`, `bofire` — carries it into its own

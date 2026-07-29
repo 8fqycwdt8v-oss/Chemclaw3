@@ -7,7 +7,7 @@ config, but there is no way to bind those into a named, selectable bundle. This 
 bundle without a new execution engine: a profile is an *override set* over `build_agent`'s
 existing dimensions, and the sole `"default"` profile reproduces today's agent byte-for-byte.
 
-Design (see `docs/audit/10-config-extensibility.md` §6):
+Design (see `docs/archive/audit/10-config-extensibility.md` §6):
 
 - **`None` means "use the global default."** Every override field defaults to `None`, and
   `build_agent` resolves `None` against the module instructions / `settings` — so this module

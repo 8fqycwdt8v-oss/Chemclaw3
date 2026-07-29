@@ -6,7 +6,7 @@ kick off durable work — but they hold **no durability themselves** (that is
 Temporal's job) and **no domain judgment** (that lives in `skills/`).
 
 An agent tool that starts a long job returns immediately with a `job_id`; the
-work runs as a Temporal workflow (see `workflows/`). See `docs/architektur.md` §1
+work runs as a Temporal workflow (see `workflows/`). See `docs/reference/architektur.md` §1
 and CLAUDE.md's four-layer rule.
 
 **Current tools:** knowledge-graph read + PR-gated write (`graph_tools`), cross-source

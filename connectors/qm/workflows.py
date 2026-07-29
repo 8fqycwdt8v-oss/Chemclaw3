@@ -15,8 +15,8 @@ chemistry.
 
 The class keeps its name. `@workflow.defn` derives the Temporal type name from `__name__`, so moving
 the module is invisible to a recorded history while renaming the class is not — which is exactly why
-`docs/workflow-versioning.md` records the `QMJobWorkflow` → `CalculationWorkflow` rename as dropped
-rather than deferred.
+`docs/guides/workflow-versioning.md` records the `QMJobWorkflow` → `CalculationWorkflow` rename as
+dropped rather than deferred.
 """
 
 from datetime import timedelta

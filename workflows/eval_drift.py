@@ -6,11 +6,11 @@ channel so an operator sees a regression instead of it going unnoticed.
 
 Scope note (honesty about what this catches): the committed case-set is deterministic, so over it
 this is a *deployment-consistency tripwire* — it fires only if the deployed baseline, code, and
-cases were committed inconsistently (the same condition the CI guard catches at merge). Real
-runtime *quality* drift needs a non-deterministic eval (retrieval P/R/F1 over the deployment's own
-live graph), which is deployment-local and deferred — see DEFERRED.md. The scoring work — run +
-aggregate + compare — is pure and lives in `evals.baseline` (fully unit-tested); this file is only
-the Temporal shell: one activity does the file I/O, the workflow delivers each alert via the
+cases were committed inconsistently (the same condition the CI guard catches at merge). Real runtime
+*quality* drift needs a non-deterministic eval (retrieval P/R/F1 over the deployment's own live
+graph), which is deployment-local and deferred — see docs/planning/DEFERRED.md. The scoring work —
+run + aggregate + compare — is pure and lives in `evals.baseline` (fully unit-tested); this file is
+only the Temporal shell: one activity does the file I/O, the workflow delivers each alert via the
 `notify` seam. Durability of the *schedule* lives in Temporal (D-035), not host cron.
 """
 

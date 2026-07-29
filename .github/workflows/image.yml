@@ -14,7 +14,7 @@
 #
 # The registry push and cluster rollout are not here. The stranded workflow carried them as a job
 # whose entire body was `echo "docker push + helm upgrade ..."` — a stub, deleted rather than
-# carried forward. Its trigger is recorded in DEFERRED.md: a real cluster and its credentials.
+# carried forward. Its trigger is recorded in docs/planning/DEFERRED.md: a real cluster and its credentials.
 name: image
 
 on:

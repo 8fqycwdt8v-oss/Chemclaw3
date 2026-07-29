@@ -14,9 +14,9 @@ non-zero if the chain is broken, so it can gate a compliance check in CI or an a
 
 Known limit: deleting a *trailing* run of rows (tip truncation) cannot be detected from the chain
 alone — the remaining rows still link cleanly and nothing records how many rows there should be.
-Catching that needs an external append-count/max-id anchor recorded out-of-band; it is deferred
-(see DEFERRED.md). The chain detects modification, reordering, interior deletion, and prefix
-truncation.
+Catching that needs an external append-count/max-id anchor recorded out-of-band; it is deferred (see
+docs/planning/DEFERRED.md). The chain detects modification, reordering, interior deletion, and
+prefix truncation.
 
 The pure `check_chain` is separated from the database fetch so the invariants are unit-testable
 offline over synthetic rows. Rows written before the chain migration (empty `row_hash`) are treated

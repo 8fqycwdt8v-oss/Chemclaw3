@@ -8,7 +8,7 @@ the two, and the consequences compounded rather than added:
 - `find_notes` is literal substring matching, so a query by trivial name missed a SMILES-keyed
   corpus *entirely* rather than partially;
 - the deferred "per-step species linking from free-text prose" is blocked on precisely this — its
-  `DEFERRED.md` entry says linking needs "a name→SMILES tool", which did not exist;
+  `docs/planning/DEFERRED.md` entry says linking needs "a name→SMILES tool", which did not exist;
 - the conditions-vocabulary gap (KNW-4) and compound notes (KNW-7) both need one canonical identity
   to hang on.
 

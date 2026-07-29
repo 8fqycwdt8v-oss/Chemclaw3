@@ -1,4 +1,4 @@
-"""Bridge a submitted async job to the harness's todo list (BACKLOG.md F3-T3 follow-up: D-040).
+"""Bridge a submitted async job to the harness's todo list (BACKLOG F3-T3 follow-up: D-040).
 
 When the harness's execute-mode loop calls a fire-and-forget tool like `compute_dft_energy`, the
 todo the model was working cannot simply stay open — `todos_remaining` would keep re-invoking the
@@ -8,12 +8,12 @@ own `TodoProvider` state, that a todo is blocked on a specific job id; `complete
 flips it once the job's push-back event arrives (`agents.session_events`), so the *next* turn's
 `todos_remaining` check sees it as done instead of stuck open forever.
 
-This closes exactly the gap `BACKLOG.md` names ("flipping the harness `awaiting` todo on
-completion — needs MAF TodoProvider store mutation"). It does not attempt to resume the *same*
+This closes exactly the gap `docs/planning/BACKLOG.md` names ("flipping the harness `awaiting` todo
+on completion — needs MAF TodoProvider store mutation"). It does not attempt to resume the *same*
 streamed turn while the job is still running — deciding how a new turn gets triggered server-side
 with no client request in flight is a separate, open design question
-(`docs/harness-konzept.md` §4) left for when the harness loop is exercised live, not guessed at
-here; the flipped todo is picked up the next time the session's loop runs.
+(`docs/guides/harness-konzept.md` §4) left for when the harness loop is exercised live, not guessed
+at here; the flipped todo is picked up the next time the session's loop runs.
 
 `TodoItem` (MAF) carries only `id`/`title`/`description`/`is_complete` — no field for an arbitrary
 job id — so the link is a description-string convention. It is never model-authored: this module

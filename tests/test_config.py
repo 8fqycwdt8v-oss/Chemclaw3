@@ -334,9 +334,10 @@ def test_env_example_documents_only_real_fields() -> None:
 def test_env_example_documents_every_field() -> None:
     """Every `Settings` field appears in `.env.example`.
 
-    `docs/runbook.md` and `docs/implementation-plan.md` both promise "every field mirrored in
-    `.env.example`" — an operator reads that file to learn what is tunable. An undocumented
-    field is an invisible knob, so this makes the promise machine-checked rather than aspirational.
+    `docs/guides/runbook.md` and `docs/planning/implementation-plan.md` both promise "every field
+    mirrored in `.env.example`" — an operator reads that file to learn what is tunable. An
+    undocumented field is an invisible knob, so this makes the promise machine-checked rather than
+    aspirational.
     """
     undocumented = set(Settings.model_fields) - _documented_keys()
     assert not undocumented, f"settings missing from .env.example: {sorted(undocumented)}"

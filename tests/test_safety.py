@@ -273,11 +273,11 @@ def test_structures_are_read_from_smiles_and_code_spans() -> None:
         id="reaction-w",
         type="reaction",
         compound_smiles="CCO",
-        body="Ran `CCO.CC(=O)O>>CCOC(C)=O` at `80 °C` for `2 h`, see `docs/runbook.md`.\n",
+        body="Ran `CCO.CC(=O)O>>CCOC(C)=O` at `80 °C` for `2 h`, see `docs/guides/runbook.md`.\n",
     )
     found = structures_in(note)
     assert "CCO" in found and "CCOC(C)=O" in found  # reaction SMILES split into components
-    assert "docs/runbook.md" not in found  # RDKit is the arbiter of what is a structure
+    assert "docs/guides/runbook.md" not in found  # RDKit is the arbiter of what is a structure
 
 
 def test_broken_rule_table_blocks_the_gate_instead_of_crashing_it(

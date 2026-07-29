@@ -1,6 +1,6 @@
 # Task: the generic connector seam — one way to add a tool, skill or agentic workflow
 
-Requested 2026-07-26. Design + staging in `docs/connector-plan.md` (deep status-quo analysis,
+Requested 2026-07-26. Design + staging in `docs/planning/connector-plan.md` (deep status-quo analysis,
 eight interview decisions, two verified MAF API findings). This file is the working queue.
 
 Branch: `claude/generic-connector-tools-workflows-uz8afs`.
@@ -37,7 +37,7 @@ Branch: `claude/generic-connector-tools-workflows-uz8afs`.
       `validate_prose_contract` off `settings.mcp_servers`
 - [x] tests: manifest validation, registry enable/unknown, header provider, auth, generated job tool
       (audit+authz wrap it), `ConnectorJobWorkflow` against a real `WorkflowEnvironment`
-- [x] `.env.example`, Helm values/templates, `docs/runbook.md`, `DECISIONS.md` ADRs
+- [x] `.env.example`, Helm values/templates, `docs/guides/runbook.md`, `docs/decisions/` ADRs
 
 Gate A: `make lint type test` green; audit+authz demonstrably wrap a connector-sourced tool and a
 generated job tool; unknown enabled connector fails loud; non-loopback `auth: none` refused.
@@ -286,7 +286,7 @@ suite grew `**_run_options` so a fake cannot silently drift from the real call s
 
 # xTB capability layer — X3 (geometries + thermochemistry) and X4 (the composite)
 
-Proposal: `docs/xtb-tools-proposal.md` §12. Branch: `claude/xtb-chemclaw-tools-proposal-nujp14`.
+Proposal: `docs/guides/xtb-tools-proposal.md` §12. Branch: `claude/xtb-chemclaw-tools-proposal-nujp14`.
 
 Scope of *this* change: **X3** — `optimize_geometry`, `compute_thermochemistry`, `scan_coordinate`
 — and **X4** — `compute_reaction_energy`, `compare_solvent_effects`. Together these are the phases
@@ -348,7 +348,7 @@ the skill catalogue says gate 19 of its 28 skills.
 - [x] X4.2 `calc/reaction.py`: `compare_solvent_effects` over the same reaction machinery.
 - [x] X4.3 Agent tools + config + `.env.example`.
 - [x] X3/X4 skills: the catalogue entries these unblock.
-- [x] Docs: ADR, `BACKLOG.md`, catalogue status.
+- [x] Docs: ADR, `docs/planning/BACKLOG.md`, catalogue status.
 
 ## Raised by the user mid-build, and done
 
@@ -364,7 +364,7 @@ the skill catalogue says gate 19 of its 28 skills.
       point now reproduces to 1%). Atom ceiling 120 -> 150, optimizer step cap 400 -> 1500, job
       budget 1 h -> 4 h, and the activity heartbeats between species/solvents/scan points so a
       dead worker is caught in minutes rather than at the timeout.
-- [ ] **xTB as an MCP server** — answered, not built. Recorded as X8 in `BACKLOG.md` with the
+- [ ] **xTB as an MCP server** — answered, not built. Recorded as X8 in `docs/planning/BACKLOG.md` with the
       reason it is an either/or switch rather than an addition.
 
 ## Verification (planned before building)
@@ -419,11 +419,11 @@ while being badly wrong in absolute terms. The first two are X5/X6; the third is
 - [x] **X7 the expert seam** — `run_xtb_task` over a typed spec, role-gated.
 - [x] Both binaries pinned into the container image; every new setting in `.env.example`.
 - [x] Skills: `tautomer-analysis`; `conformational-analysis` extended for ensembles;
-      `docs/xtb-skill-catalogue.md` §9 ideates the seven further skills CREST's searches unlock.
+      `docs/guides/xtb-skill-catalogue.md` §9 ideates the seven further skills CREST's searches unlock.
 - [x] ~~X9~~ retired: ANCopt *is* the internal-coordinate optimizer.
 - [ ] **X8 (MCP)** — answered, not built. It is an either/or migration of the agent's advertised
       surface, not an addition, and it touches skill frontmatter, the registry test and the
-      in-process `bo/` callers. Scoped in `BACKLOG.md`.
+      in-process `bo/` callers. Scoped in `docs/planning/BACKLOG.md`.
 - [ ] **X10 transition states** — the largest remaining gap at the model level; unchanged by X5-X7.
 
 ### What the binaries changed about the earlier phases
@@ -595,7 +595,7 @@ so neither branch's tests could have caught them:
 
 **Owed, not done:** two implementations of conformer ensembles and two of reaction energetics
 now coexist. Kept both — deleting either is a product decision. Tracked at the top of
-`BACKLOG.md`.
+`docs/planning/BACKLOG.md`.
 
 ## Consolidation: one conformer ensemble, one reaction composite (D-108)
 
@@ -609,7 +609,7 @@ framework. D-107 had kept both and recorded that a decision was owed; this is it
       (`is_strongly_exothermic` / `exotherm_threshold_kcal`) so consolidating lost no
       capability — pinned by `test_the_exotherm_flag_survived_the_consolidation`.
 - [x] Repointed `skills/calculation-selection` at `sample_conformers` /
-      `compute_reaction_energy` + `get_job_status`, and `DEFERRED.md`'s ANI-2x row at
+      `compute_reaction_energy` + `get_job_status`, and `docs/planning/DEFERRED.md`'s ANI-2x row at
       `calc.conformers`.
 - [x] `tests/test_workers.py` now asserts the xTB job is on the **`hpc`** queue — the
       removed workflow was on `background`, which was the wrong queue for a minutes-long

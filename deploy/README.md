@@ -64,7 +64,7 @@ OpenShift SCC), no secret baked in. `deploy/entrypoint.sh` dispatches on `CHEMCL
 Temporal replays workflow **code** against recorded **history**, so a control-flow change deployed
 while a run is in flight fails that run with a nondeterminism error. Every release that touches a
 `@workflow.defn` body (or a helper called from one) goes through the checklist in
-[`docs/workflow-versioning.md`](../docs/workflow-versioning.md): gate the change with
+[`docs/guides/workflow-versioning.md`](../docs/workflow-versioning.md): gate the change with
 `workflow.patched()`, or pause the Schedules and drain in-flight runs as an explicit deploy step.
 Renaming a workflow or activity type is never safe in place — it is a different command in history.
 
@@ -92,7 +92,7 @@ Until D-117 these lived under `services/chemclaw/.github/`, where nothing execut
 
 The push-to-registry + `helm upgrade` rollout is **not** wired: the stranded workflow carried it as
 a job whose whole body was an `echo`, and a stub is not a pipeline. Its trigger — a real cluster and
-its credentials — is recorded in `DEFERRED.md`. Migrations run as the pre-deploy Job
+its credentials — is recorded in `docs/planning/DEFERRED.md`. Migrations run as the pre-deploy Job
 (`templates/migrate-job.yaml`), never inside an app container.
 
 > **Verified offline:** pure-YAML parse + template brace-balance + `Settings` key mapping. `helm

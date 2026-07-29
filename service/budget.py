@@ -10,7 +10,8 @@ session and per user, and refuses (HTTP 429) a turn that would exceed a configur
 Scope is deliberately in-process and best-effort — the counters reset on restart. That bounds a
 running process's runaway (the "$400 in twenty minutes" failure), which is what the per-turn loop
 cap leaves open; a durable, rolling-window per-user quota that survives restarts is a larger piece,
-consciously deferred (see DEFERRED.md). Off by default (`budget_enabled`), so a deployment opts in.
+consciously deferred (see docs/planning/DEFERRED.md). Off by default (`budget_enabled`), so a
+deployment opts in.
 """
 
 import threading

@@ -1,5 +1,5 @@
 
-## 2026-07-25 — Deep analysis pass (docs/audit/12)
+## 2026-07-25 — Deep analysis pass (docs/archive/audit/12)
 
 - **Verify a "survived mutation" before calling it a coverage gap.** Two of five survivors were
   mis-targeted patches — one replaced a *docstring* occurrence of `created_by == "agent"` while the

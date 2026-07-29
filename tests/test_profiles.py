@@ -4,7 +4,7 @@ Proves the seam adds per-use-case agent configuration without weakening anything
 profile reproduces today's agent byte-for-byte, a profile *narrows* the advertised tools/MCP and
 swaps instructions/harness, an unknown tool name fails loud (fail-fast), and — the load-bearing
 invariant — a profile *attenuates but never authorizes*: the audit + authz middleware is attached
-regardless of profile. See `docs/audit/10-config-extensibility.md` §6/§8 (Spike 2).
+regardless of profile. See `docs/archive/audit/10-config-extensibility.md` §6/§8 (Spike 2).
 """
 
 import pytest

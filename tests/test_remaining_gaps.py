@@ -15,7 +15,7 @@ Those decisions are what these tests pin: the decision, not the plumbing, carrie
 
 **TOOL-6 (external literature) is gone, not merely off**: the decision was reversed to *no external
 sources at all*, so there is nothing left here to pin. `tests/test_no_egress.py` enforces the
-reversal, which prose in `DEFERRED.md` could not.
+reversal, which prose in `docs/planning/DEFERRED.md` could not.
 """
 
 from pathlib import Path

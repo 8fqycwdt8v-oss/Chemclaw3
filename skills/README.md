@@ -6,7 +6,7 @@ decides *when and how* to use capabilities; it never re-implements them and neve
 touches storage directly (it goes through an MCP tool — gate G6).
 
 Each skill is a subdirectory with a `SKILL.md` (front-matter + instructions).
-This directory holds **Markdown, not Python**. See `docs/architektur.md` §3,
+This directory holds **Markdown, not Python**. See `docs/reference/architektur.md` §3,
 §12.3.
 
 ## Adding a skill (admin)

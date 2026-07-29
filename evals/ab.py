@@ -1,7 +1,7 @@
 """Per-task tool-utility A/B comparison (plan step 2b.4).
 
 Why this exists: tool/skill augmentation does **not** help uniformly — it is
-task-dependent and can introduce its own error class (docs/research-review.md F8/F9).
+task-dependent and can introduce its own error class (docs/archive/research-review.md F8/F9).
 This module compares a metric value with tools against the same metric without them,
 per task, so the system can steer tool use **selectively** — crediting tools only where
 they measurably help and flagging tasks where they hurt. It is a pure comparison over

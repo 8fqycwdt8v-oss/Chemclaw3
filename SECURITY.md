@@ -2,8 +2,8 @@
 
 This documents what Chemclaw enforces today, what is gated on live infrastructure, and how to
 deploy it safely. It reflects the **F4 identity/RBAC** foundation (Entra everywhere); it is not the
-pre-Phase-6 "no auth" world. For the design rationale see `docs/architektur.md` §7/§8 and
-`DECISIONS.md` D-042…D-047, D-052.
+pre-Phase-6 "no auth" world. For the design rationale see `docs/reference/architektur.md` §7/§8 and
+`docs/decisions/` D-042…D-047, D-052.
 
 ## What is enforced
 
@@ -61,7 +61,7 @@ The browser-facing run service sets `Content-Security-Policy`, `X-Content-Type-O
 `X-Frame-Options: DENY`, and HSTS (config-gated by `service_security_headers`, default on); bounds
 each chat message (`service_max_message_chars`) and the live-session cache
 (`service_max_live_sessions`); and warns loudly at startup if it runs unauthenticated
-(`entra_required=false`) on a non-loopback bind. See `docs/audit/` for the audit that added these.
+(`entra_required=false`) on a non-loopback bind. See `docs/archive/audit/` for the audit that added these.
 
 ## The enforcement switch
 
@@ -81,7 +81,7 @@ key (the model call is not a user-scoped resource), not a per-user token.
 
 The code paths exist and are unit-tested against local keys/fakes, but the following need real
 infrastructure to exercise end to end and must be validated in a staging tenant/cluster before
-production (tracked in `BACKLOG.md`):
+production (tracked in `docs/planning/BACKLOG.md`):
 
 - Real Entra token validation against a live tenant JWKS; the federation and On-Behalf-Of
   (`agents/identity/obo.py`, currently dormant) token exchanges.

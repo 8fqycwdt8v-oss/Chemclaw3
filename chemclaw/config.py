@@ -512,7 +512,7 @@ class LlmSettings(BaseSettings):
     # the internal OpenAI-compatible ("OpenLLM-like") endpoint without any code change, keeping
     # Anthropic as a local-dev path. `openai_compatible` reaches the endpoint with **one generic
     # API credential** (`llm_api_key`) — deliberately *not* per-user Entra: the raw inference
-    # call is not a user-scoped resource (see docs/foundation-plan.md §0).
+    # call is not a user-scoped resource (see docs/planning/foundation-plan.md §0).
     # `llm_base_url`/`llm_model` are required for `openai_compatible` (validated below); the TLS
     # CA bundle, timeout, and retry budget shape the transport so an internal endpoint with a
     # private CA works from config alone. `llm_temperature`/`llm_max_tokens` are the default
@@ -1328,7 +1328,7 @@ class ConnectorSettings(BaseSettings):
 
     Its own section because a connector is the one mechanism for adding *any* capability — the
     MCP tools a FastAPI server serves, the durable jobs a Temporal worker runs, and the skills
-    and agent profiles that come with them (`connectors/`, `docs/connector-plan.md`). It
+    and agent profiles that come with them (`connectors/`, `docs/planning/connector-plan.md`). It
     replaces the old `mcp_servers` list, which could only describe the first of those four.
     """
 

@@ -79,9 +79,9 @@ def test_the_qm_connectors_worker_serves_the_hpc_job_and_all_four_activities() -
     _, manifest = discovered()["qm"]
     jobs = manifest.jobs
     assert jobs and {job.task_queue for job in jobs} == {queue}
-    # The Temporal *type name* is what binds the manifest to the class, and renaming that class
-    # would be a different command in any recorded history (`docs/workflow-versioning.md`), so the
-    # string is pinned here rather than derived.
+    # # The Temporal *type name* is what binds the manifest to the class, and renaming that class #
+    # would be a different command in any recorded history (`docs/guides/workflow-versioning.md`),
+    # so the # string is pinned here rather than derived.
     assert {job.workflow for job in jobs} == {"QMJobWorkflow"}
 
 

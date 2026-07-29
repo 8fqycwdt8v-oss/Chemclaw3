@@ -5,7 +5,7 @@
 # its workflow at `services/chemclaw/.github/workflows/ci.yml` where nothing executed it. For a
 # while this file then ran a *subset* of that stranded workflow, and three live documents went on
 # claiming the missing gates were enforced — `pyproject.toml` ("CI runs `make cov` as a gate") and
-# two `[x]` entries in `BACKLOG.md`. D-117 moved every gate here and deleted the stranded copies, so
+# two `[x]` entries in `docs/planning/BACKLOG.md`. D-117 moved every gate here and deleted the stranded copies, so
 # what runs and what is claimed to run are the same thing again.
 #
 # D-139 then removed the `services/chemclaw/` wrapper itself — it was the last remnant of a Replit

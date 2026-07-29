@@ -1,9 +1,9 @@
 """The capability-tool registry seam (config-extensibility item 2).
 
-Proves the `@tool` registry replaced the hardcoded `_capability_tools()` list without changing
-the advertised toolset or the safety wiring: registration is by function name, duplicates are a
-loud programming error, and the agent still advertises exactly the same in-process tools wrapped
-by the same audit+authz middleware. See `docs/audit/10-config-extensibility.md` §5/§8 (Spike 1).
+Proves the `@tool` registry replaced the hardcoded `_capability_tools()` list without changing the
+advertised toolset or the safety wiring: registration is by function name, duplicates are a loud
+programming error, and the agent still advertises exactly the same in-process tools wrapped by the
+same audit+authz middleware. See `docs/archive/audit/10-config-extensibility.md` §5/§8 (Spike 1).
 """
 
 import pytest

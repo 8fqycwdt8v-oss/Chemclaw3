@@ -15,7 +15,7 @@ scores a conversational answer's *faithfulness* to its evidence and returns an a
 
 Confidence *routing* (stamping a low-confidence answer so a surface can flag it for review) lives in
 `service/runner.py`; this module only scores. The durable human hold (D-032) is deferred — see
-DEFERRED.md — so today a low-confidence answer is marked, not blocked.
+docs/planning/DEFERRED.md — so today a low-confidence answer is marked, not blocked.
 """
 
 import asyncio

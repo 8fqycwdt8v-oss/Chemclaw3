@@ -79,7 +79,7 @@ This repository is the backend and orchestration core.
 
 ## Keeping this file true
 
-Adding a top-level directory means adding a row here. The design record lives in `DECISIONS.md`
-(`D-NNN`, append-only) with `ADR-REGISTRY.md` as its index; `docs/architektur.md` is the original
+Adding a top-level directory means adding a row here. The design record lives in `docs/decisions/`
+(`D-NNN`, append-only) with `docs/decisions/README.md` as its index; `docs/reference/architektur.md` is the original
 pre-implementation design and is **historical** — right about the four layers, silent on connectors,
 which now carry every tool, job and skill.

@@ -25,7 +25,7 @@ core owns the obligations that must never vary per capability:
 
 The child is addressed by **workflow type name + task queue**, both strings from the manifest, so
 this module imports nothing from any connector — and moving a workflow between workers is a one-line
-manifest change rather than a code change (`docs/connector-plan.md` §5.3).
+manifest change rather than a code change (`docs/planning/connector-plan.md` §5.3).
 """
 
 from datetime import timedelta

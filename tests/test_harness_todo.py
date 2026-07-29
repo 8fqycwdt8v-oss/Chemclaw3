@@ -1,4 +1,4 @@
-"""The awaiting-job todo bridge flips the right item, and only once (BACKLOG.md F3-T3 follow-up).
+"""The awaiting-job todo bridge flips the right item, and only once (BACKLOG F3-T3 follow-up).
 
 No agent, no LLM, no Temporal — a real `AgentSession` is all `mark_awaiting_job`/
 `complete_awaiting_job` need, since they operate directly on the harness's `TodoSessionStore`.

@@ -87,7 +87,7 @@ class BearerAuth(BaseModel):
 # in-cluster. The Entra service-identity and on-behalf-of modes are a documented extension
 # point, not a stub — OBO needs the user's raw access token, which `service.auth.Principal`
 # deliberately does not carry, and neither exchange can be verified without a real tenant (see
-# `docs/connector-plan.md` §11).
+# `docs/planning/connector-plan.md` §11).
 ConnectorAuth = NoAuth | BearerAuth
 
 
@@ -160,7 +160,7 @@ class JobSpec(BaseModel):
     reaches it without importing it. `workflow` is a Temporal workflow **type name** (a string)
     and `task_queue` is where its worker polls, so core has no build-time dependency on the
     connector at all — and moving a workflow from core's worker to the connector's own is a
-    one-line change here (`docs/connector-plan.md` §5.3).
+    one-line change here (`docs/planning/connector-plan.md` §5.3).
 
     `expensive` marks the job for the coarse `authorize_trigger` gate (a costly HPC/BO run must
     be entitled, not merely authenticated). `publish_to_graph` lets core PR-gate a `Note` the

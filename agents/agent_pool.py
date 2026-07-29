@@ -35,7 +35,7 @@ counted.
 
 This is a workaround for an upstream defect and is written to be deleted: when the parser keeps that
 state per stream, the pool can collapse back to one shared agent per profile and this module goes
-away. `DEFERRED.md` records the trigger.
+away. `docs/planning/DEFERRED.md` records the trigger.
 """
 
 import asyncio

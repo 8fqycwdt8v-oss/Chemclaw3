@@ -4,7 +4,7 @@
 in the sibling `evals.metrics` — plural. Import the registry from here, the functions there.)
 
 Why this layer exists: the Checkmates gate *code* quality, but scientific *output*
-quality needs its own measurable gate (docs/research-review.md F7-F9). A metric is a
+quality needs its own measurable gate (docs/archive/research-review.md F7-F9). A metric is a
 **pure function** from an evaluation case to a `MetricResult` — value plus provenance
 and an optional pass/fail against a config threshold (never a hardcoded one, G3).
 

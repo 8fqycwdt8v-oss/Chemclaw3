@@ -1,6 +1,6 @@
 -- The pre-execution approval a human gives a harness plan (D-137 / REV-1).
 --
--- `SECURITY.md` and `docs/harness-konzept.md` §6 describe a GxP gate: in `plan_only` the agent
+-- `SECURITY.md` and `docs/guides/harness-konzept.md` §6 describe a GxP gate: in `plan_only` the agent
 -- proposes and waits for a human before executing. In practice MAF injected a `mode_set` tool into
 -- the model's own tool surface, so the agent flipped itself — and the audit middleware recorded
 -- that flip under the *chemist's* Entra oid, because it attributes every tool call to the ambient
