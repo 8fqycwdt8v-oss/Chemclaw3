@@ -2,8 +2,11 @@
 
 AI agent for pharmaceutical/chemical process R&D: MAF conversation orchestration,
 Temporal durable jobs, Agent Skills, and a PR-gated Markdown knowledge graph.
-Architecture and build order live in `docs/architektur.md` and
-`docs/implementation-plan.md`.
+
+**`ARCHITECTURE.md` is the map** — the four layers and what every directory in this
+repository is for. Read it before going looking for something. The original design and
+build order live in `docs/architektur.md` and `docs/implementation-plan.md`; both are
+historical (see `CLAUDE.md`).
 
 ## Quickstart
 

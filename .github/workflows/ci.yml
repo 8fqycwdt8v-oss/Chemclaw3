@@ -1,22 +1,22 @@
 # CI gate: every check CLAUDE.md's "green before done" rule names. A red run blocks merge.
 #
 # Lives at the repository root because that is the only place GitHub Actions reads workflows from.
-# The Python service moved under `services/chemclaw/` in the Replit restructure, which stranded its
-# workflow at `services/chemclaw/.github/workflows/ci.yml` where nothing executed it. For a while
-# this file then ran a *subset* of that stranded workflow, and three live documents went on claiming
-# the missing gates were enforced — `pyproject.toml` ("CI runs `make cov` as a gate") and two `[x]`
-# entries in `BACKLOG.md`. D-117 moved every gate here and deleted the stranded copies, so what runs
-# and what is claimed to run are the same thing again.
+# The Python service had moved under `services/chemclaw/` in the Replit restructure, which stranded
+# its workflow at `services/chemclaw/.github/workflows/ci.yml` where nothing executed it. For a
+# while this file then ran a *subset* of that stranded workflow, and three live documents went on
+# claiming the missing gates were enforced — `pyproject.toml` ("CI runs `make cov` as a gate") and
+# two `[x]` entries in `BACKLOG.md`. D-117 moved every gate here and deleted the stranded copies, so
+# what runs and what is claimed to run are the same thing again.
+#
+# D-139 then removed the `services/chemclaw/` wrapper itself — it was the last remnant of a Replit
+# monorepo whose other half was already deleted, and one service does not need a `services/` tier.
+# The service is the repository root now, so this workflow needs no `working-directory` at all.
 name: ci
 
 on:
   push:
     branches: ["**"]
   pull_request:
-
-defaults:
-  run:
-    working-directory: services/chemclaw
 
 jobs:
   check:

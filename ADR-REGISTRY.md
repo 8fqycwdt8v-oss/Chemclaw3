@@ -22,7 +22,7 @@ The short form, and the only correct source to allocate against is `origin/main`
 
 ```sh
 git fetch origin main
-git show origin/main:services/chemclaw/ADR-REGISTRY.md | grep -oE '^\| D-[0-9]+' | sort -V | tail -1
+git show origin/main:ADR-REGISTRY.md | grep -oE '^\| D-[0-9]+' | sort -V | tail -1
 ```
 
 Reserve the number here in your **first** commit on the branch, not at the end — an unreserved
@@ -173,3 +173,6 @@ written up leaves a gap, and a gap is harmless (`CLAUDE.md`, rule 4).
 | D-136 | The shipped defaults were never executed: three configurations that fail on first contact |
 | D-137 | The plan the model could approve for itself: a pre-execution gate that is not a tool |
 | D-138 | Fifty questions, asked live: the job surface was dead, the trace was blind, and a failed tool was silent |
+| D-139 | The service is the repository: removing the `services/` tier the Replit monorepo left behind |
+| D-140 | RESERVED — one file per ADR, and a `docs/` tree with a living half and an archive |
+| D-141 | RESERVED — the packages regrouped under `src/chemclaw/` by the four architecture layers |

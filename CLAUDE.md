@@ -58,6 +58,10 @@ ask first if the required change is destructive, ambiguous, or outside what was 
 
 ## Architecture (the one thing to internalize)
 
+`ARCHITECTURE.md` maps every directory to its layer and explains the two name pairs that look
+like duplicates and are not (`calc/` vs `connectors/calc/`; `skills/` vs `connectors/*/skills/`).
+Adding a top-level directory means adding a row there.
+
 Four layers, each with a single responsibility. **Never merge their concerns.**
 
 1. **MAF** (Microsoft Agent Framework) — conversation orchestration + short reasoning steps.
@@ -164,9 +168,9 @@ is stale the moment another branch merges.
 ```sh
 git fetch origin main
 # the highest number currently allocated:
-git show origin/main:services/chemclaw/ADR-REGISTRY.md | grep -oE '^\| D-[0-9]+' | sort -V | tail -1
+git show origin/main:ADR-REGISTRY.md | grep -oE '^\| D-[0-9]+' | sort -V | tail -1
 # cross-check against the log itself (the two must agree):
-git show origin/main:services/chemclaw/DECISIONS.md | grep -cE '^## D-[0-9]+'
+git show origin/main:DECISIONS.md | grep -cE '^## D-[0-9]+'
 ```
 
 Your number is that highest one **+ 1**. To list every heading locally, use
