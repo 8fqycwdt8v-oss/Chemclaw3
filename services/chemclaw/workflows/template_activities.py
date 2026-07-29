@@ -20,7 +20,8 @@ from temporalio import activity
 from agents.audit import make_audit_middleware
 from agents.identity_context import reset_current_identity, set_current_identity
 from agents.tool_authz import enforce_tool_authz
-from connectors.registry import open_reachable
+from connectors.registry import find_job, open_reachable
+from workflows.registry import durable_activity
 
 logger = logging.getLogger(__name__)
 
@@ -69,6 +70,55 @@ class AgentStepInput(BaseModel):
     prompt: str = Field(min_length=1)
     profile: str | None = None
     identity: StepIdentity
+
+
+class ResolvedJob(BaseModel):
+    """Where a declared job name actually runs — the four facts a child workflow start needs."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    connector: str
+    job: str
+    workflow: str
+    task_queue: str
+    publish_to_graph: bool
+
+
+@durable_activity("background")
+@activity.defn
+async def resolve_job_step(name: str) -> ResolvedJob:
+    """Resolve a declared job name to its connector, workflow type and queue — outside the workflow.
+
+    `TemplateWorkflow._run_job_step` used to call `connectors.registry.find_job` directly, inside
+    `workflow.unsafe.imports_passed_through()`. Two things were wrong with that (REV-13), and they
+    compound:
+
+    **It read the filesystem from workflow code.** `find_job` walks `enabled()`, which reaches
+    `discovered()` — directory scans and YAML parsing, `@cache`d per worker process but re-run on
+    any process that has not done it. That makes the child-workflow start a function of the *disk
+    the replaying worker happens to have* rather than of history. A worker that came up with a
+    different bundle set resolves the same step differently, and Temporal refuses the resulting
+    history mismatch. Resolving through a local activity records the answer once, exactly as
+    `workflows.orchestrator.resolve_fan_out_limit` does for the fan-out bound and for the same
+    reason.
+
+    **A bad job name hung the run instead of failing it.** `find_job` raises `ConnectorError`, which
+    is a `ValueError` — a plain exception, not an SDK `FailureError`. Raised in workflow code, the
+    Temporal SDK treats it as a possible bug and suspends the workflow in an internal task-failure
+    retry loop that ignores the retry policy and never gives up (the same trap D-093 documents for
+    fan-out children). A template naming a job that no enabled connector declares therefore produced
+    a run that sat there forever rather than one that failed and said why. Across an activity
+    boundary the same error arrives as an `ActivityError`, and `BAD_DATA_RETRY` lists `ValueError`
+    non-retryable, so it fails on the first attempt with the message naming the declared jobs.
+    """
+    connector, job = find_job(name)
+    return ResolvedJob(
+        connector=connector,
+        job=job.name,
+        workflow=job.workflow,
+        task_queue=job.task_queue,
+        publish_to_graph=job.publish_to_graph,
+    )
 
 
 @activity.defn
