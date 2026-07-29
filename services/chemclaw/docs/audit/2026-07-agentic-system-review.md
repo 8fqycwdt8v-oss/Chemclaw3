@@ -312,6 +312,28 @@ Kept because a lead that looked right and was not is the more useful record.
   path writes a non-default provenance, and there is no actor column to lose.
 - **The `deepcopy(session.state)` per turn is expensive.** Only under `session_store=memory`;
   production is Postgres, where the state is small. Dev/CLI cost only.
+- **REV-7: job→session push-back should yield before marking rows consumed.** Refuted, and this is
+  the one refutation where implementing the recommendation would have *caused* a defect.
+  `agents/session_events.py` documents at-most-once as a deliberate trade made by COR-4, which
+  replaced an at-least-once claim that double-delivered: the claiming
+  `UPDATE … FOR UPDATE SKIP LOCKED … RETURNING` is one atomic step precisely so two tailers racing
+  on a session can never both deliver a row. Reordering restores the double delivery. The residual
+  risk — a consumer lost between claim-commit and delivery drops the event with nothing to retry —
+  is real, and the fix is a visibility-timeout redelivery (claim with a lease, confirm on delivery,
+  re-offer on expiry), which preserves the single-claim property. Rewritten in `BACKLOG.md` with
+  that shape rather than the wrong one; a wrong recommendation left standing in a backlog is worse
+  than no recommendation.
+- **An ADR duplicate-number guard is missing.** Refuted, and the belief was mine rather than the
+  code's: `tests/test_decision_log.py::test_the_registry_has_no_duplicate_reservations` has existed
+  since D-109 and goes red on exactly the bad merge that prompted the plan item — verified by
+  injecting a duplicate `D-133` row at a different file position, the precise shape that auto-merges
+  without a git conflict. Two tests fail, naming the number. The collision was caught by hand during
+  a merge before CI ever ran, so the guard was never observed firing and was assumed absent.
+
+Five refuted against fourteen confirmed. The pattern held in every one: what looked like a missing
+safeguard was a considered trade whose reasoning lived in a docstring, or a guard that already
+existed in a test not read closely enough. Both are arguments for verifying a lead against the code
+*before* planning the fix, which is the practice that caught the last two.
 
 ---
 

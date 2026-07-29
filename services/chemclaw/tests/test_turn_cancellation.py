@@ -189,7 +189,15 @@ def test_abandoned_turn_still_books_its_tokens() -> None:
     async def _abandon() -> None:
         stream = _closable(
             run_turn(
-                _EndlessAgent(), AgentSession(session_id="s1"), "hi", actor="u1", budget=budget
+                _EndlessAgent(),
+                AgentSession(session_id="s1"),
+                "hi",
+                actor="u1",
+                budget=budget,
+                # Stated, because this test counts *events* to decide when to abandon: defaulting
+                # means every enabled connector, none of which is running in a test process, and
+                # the resulting degradation event (D-139) would shift the cut-off by one update.
+                connectors=[],
             )
         )
         consumed = 0
@@ -302,7 +310,8 @@ def test_a_cancelled_turn_still_books_its_tokens() -> None:
     async def _drive() -> None:
         agent = _StallingAgent(updates=3)
         await _cancel_mid_turn(
-            run_turn(agent, session, "hi", actor="u1", budget=budget), agent.stalled
+            run_turn(agent, session, "hi", actor="u1", budget=budget, connectors=[]),
+            agent.stalled,
         )
         assert budget.booked, "a cancelled turn booked nothing at all"
         booked_session, user_id, tokens = budget.booked[0]

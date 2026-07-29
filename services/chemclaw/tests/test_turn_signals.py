@@ -53,10 +53,19 @@ class _SignallingAgent:
 
 
 def _events(agent: Any) -> list[Any]:
-    """Collect one turn's events."""
+    """Collect one turn's events, with no connectors.
+
+    `connectors=[]` is stated rather than defaulted: omitting it means *every enabled connector*,
+    which in a test process is six hosts that are not running — so the turn genuinely degrades and
+    now says so (D-139). These tests are about signal ordering, and a turn that dials six dead hosts
+    to assert an event list was asserting more than it meant to.
+    """
 
     async def _collect() -> list[Any]:
-        return [event async for event in run_turn(agent, AgentSession(session_id="s1"), "hi")]
+        return [
+            event
+            async for event in run_turn(agent, AgentSession(session_id="s1"), "hi", connectors=[])
+        ]
 
     return asyncio.run(_collect())
 
@@ -99,7 +108,10 @@ def test_signals_are_isolated_per_turn() -> None:
     async def _two_turns() -> tuple[list[Any], list[Any]]:
         async def _one(job_id: str) -> list[Any]:
             agent = _SignallingAgent(jobs=[(job_id, "qm")], proposals=[])
-            return [e async for e in run_turn(agent, AgentSession(session_id=job_id), "hi")]
+            return [
+                e
+                async for e in run_turn(agent, AgentSession(session_id=job_id), "hi", connectors=[])
+            ]
 
         return await asyncio.gather(_one("job-a"), _one("job-b"))
 

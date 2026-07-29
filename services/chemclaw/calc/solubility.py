@@ -86,6 +86,18 @@ def predict_solubility(job: SolubilityInput) -> SolubilityResult:
     )
 
 
+def calc_version() -> str:
+    """The version this calculator's results are keyed and calibrated under.
+
+    Extracted from the cache-key builder rather than duplicated beside it: the calibration ledger
+    keys predictions by `(calc_type, calc_version, input_hash)`, and a ledger whose version string
+    drifted from the cache's would score two different things under one name (REV-12).
+    """
+    return (
+        f"{_MODEL.name}@{_MODEL.version}/rdkit-{version('rdkit')}/u-{settings.solubility_rmse_log}"
+    )
+
+
 async def run_cached_solubility(
     store: ResultStore, job: SolubilityInput
 ) -> tuple[SolubilityResult, bool]:
@@ -98,10 +110,7 @@ async def run_cached_solubility(
     """
     key = CalculationKey.build(
         calc_type=CALC_TYPE,
-        calc_version=(
-            f"{_MODEL.name}@{_MODEL.version}/rdkit-{version('rdkit')}/"
-            f"u-{settings.solubility_rmse_log}"
-        ),
+        calc_version=calc_version(),
         inputs={"smiles": require_canonical_smiles(job.smiles)},
     )
     return await run_cached(store, key, lambda: predict_solubility(job), SolubilityResult)
