@@ -283,7 +283,7 @@ def predict_pka(job: PkaInput) -> PkaResult:
     )
 
 
-def _calc_version() -> str:
+def calc_version() -> str:
     """Cache-key version tying pKa results to method, engine, solvent, calibration, uncertainty.
 
     The engine build is included (see `calc.xtb_engine.engine_version`) so a tblite
@@ -312,7 +312,7 @@ async def run_cached_pka(store: ResultStore, job: PkaInput) -> tuple[PkaResult, 
     canonical = job.model_copy(update={"smiles": require_canonical_smiles(job.smiles)})
     key = CalculationKey.build(
         calc_type=CALC_TYPE,
-        calc_version=_calc_version(),
+        calc_version=calc_version(),
         inputs={"smiles": canonical.smiles},
         params={"embed_seed": settings.xtb_embed_seed},
     )

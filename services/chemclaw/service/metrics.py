@@ -46,6 +46,15 @@ _COUNTERS: dict[str, str] = {
     ),
     "chemclaw_jobs_started_total": "Durable jobs launched by an agent tool.",
     "chemclaw_notes_proposed_total": "Notes opened on a branch through the PR-gate.",
+    # A turn whose connectors did not come up still answers — from whatever tools remained. That is
+    # the right behaviour and the reason it needs a number: a degraded answer is indistinguishable
+    # from a good one in the transcript, and `open_reachable` returned the list to four callers that
+    # all discarded it (REV-6). Counted per unreachable connector rather than per degraded turn, so
+    # "one connector is dark" and "the fleet is dark" are different rates.
+    "chemclaw_connectors_unreachable_total": (
+        "Connectors that failed to come up when a turn or template step opened them; their tools "
+        "were absent from that turn."
+    ),
     "chemclaw_event_streams_rejected_total": (
         "Push-back event streams rejected with 429 at the per-user or per-process cap."
     ),

@@ -85,11 +85,11 @@ async def run_tool_step(step: ToolStepInput) -> Any:
     try:
         async with AsyncExitStack() as stack:
             connectors = connector_tools()
-            await open_reachable(stack, connectors)
+            unreachable = await open_reachable(stack, connectors)
             agent = build_agent(
                 chat_client=_NoChatClient(), correlation_id=step.identity.correlation_id
             )
-            return await _invoke(agent, connectors, step)
+            return await _invoke(agent, connectors, step, unreachable)
     finally:
         reset_current_identity(tokens)
 
@@ -103,8 +103,17 @@ class _NoChatClient:
     """
 
 
-async def _invoke(agent: Any, connectors: list[Any], step: ToolStepInput) -> Any:
-    """Find `step.tool` on the assembled surface and call it, or raise naming what exists."""
+async def _invoke(
+    agent: Any, connectors: list[Any], step: ToolStepInput, unreachable: list[str]
+) -> Any:
+    """Find `step.tool` on the assembled surface and call it, or raise naming what exists.
+
+    `unreachable` is carried in only to make the failure legible (REV-6). A connector that did not
+    come up contributes no functions, so its tools are simply *absent* from `available` — and the
+    error then blamed the template for naming a tool that the template names correctly. On a
+    retried activity that reads as a broken template rather than a broken host, which sends the
+    operator to the wrong file.
+    """
     for tool in agent.default_options["tools"]:
         if getattr(tool, "name", None) == step.tool:
             return await _call_function_tool(tool, step)
@@ -116,7 +125,10 @@ async def _invoke(agent: Any, connectors: list[Any], step: ToolStepInput) -> Any
         [t.name for t in agent.default_options["tools"]]
         + [f.name for c in connectors for f in c.functions]
     )
-    raise ValueError(f"template step names unknown tool {step.tool!r}; available: {available}")
+    degraded = f" ({len(unreachable)} unreachable: {', '.join(unreachable)})" if unreachable else ""
+    raise ValueError(
+        f"template step names unknown tool {step.tool!r}{degraded}; available: {available}"
+    )
 
 
 async def _call_function_tool(tool: Any, step: ToolStepInput) -> Any:

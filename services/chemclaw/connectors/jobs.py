@@ -41,6 +41,7 @@ from agents.tool_registry import CapabilityTool
 from agents.turn_signals import record_job_started
 from chemclaw.config import settings
 from chemclaw.ids import stable_hash
+from chemclaw.metrics_bridge import record_metric
 from chemclaw.temporal_client import connect
 from connectors.manifest import JobParamType, JobSpec
 from workflows.connector_job import ConnectorJobInput, ConnectorJobResult, ConnectorJobWorkflow
@@ -309,6 +310,10 @@ def build_job_tool(connector: str, job: JobSpec) -> CapabilityTool:
         # `job_completed` event to clear the row it drew.
         await _mark_awaiting_if_harness(handle.id, job.name)
         record_job_started(handle.id, job.name)
+        # Counted here rather than at the tool boundary: this is the branch that actually
+        # started a workflow. The re-joined path above returns an existing id without
+        # starting anything, and counting it would report launches that never happened.
+        record_metric(lambda m: m.increment("chemclaw_jobs_started_total"))
         return handle.id
 
     launch.__name__ = job.name

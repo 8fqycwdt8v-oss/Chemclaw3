@@ -110,7 +110,14 @@ async def _run(args: argparse.Namespace) -> None:
         # agent. Per-profile CLI selection waits for the front door to grow it (plan Stage D).
         connectors = connector_tools()
         async with contextlib.AsyncExitStack() as stack:
-            await open_reachable(stack, connectors)
+            # To stderr, with the answers on stdout: a piped `--message` run stays parseable while
+            # a person at a terminal still learns the answer was assembled without those tools.
+            # The docstring above has always claimed this warning; until REV-6 it was not emitted.
+            for name in await open_reachable(stack, connectors):
+                print(
+                    f"warning: connector {name!r} is unreachable; its tools are unavailable",
+                    file=sys.stderr,
+                )
             if args.message is not None:
                 print((await converse(agent, args.message, connectors)).strip())
             else:

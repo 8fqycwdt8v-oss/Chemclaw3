@@ -81,6 +81,23 @@ class NoteProposedEvent(BaseModel):
     reference: str
 
 
+class CapabilityDegradedEvent(BaseModel):
+    """One or more connectors did not come up, so this turn answers with fewer tools (REV-6).
+
+    The turn is not failed by this and must not be: an unreachable connector costs its tools, not
+    the conversation. But the chemist has no other way to tell. The model does not know a tool is
+    missing — it reasons from the surface it was given — so an answer assembled without the ELN
+    reads exactly like one assembled with it, and "the ELN says nothing about that batch" and "the
+    ELN was unreachable" arrive as the same sentence. This event is the difference between them.
+
+    Emitted before the first token, so a surface can mark the answer as partial while it streams
+    rather than retroactively.
+    """
+
+    type: Literal["capability_degraded"] = "capability_degraded"
+    connectors: list[str]
+
+
 class ApprovalRequestEvent(BaseModel):
     """The turn is waiting on a human decision (plan approval or an interaction approval)."""
 
@@ -139,6 +156,7 @@ Event = (
     | TokenEvent
     | JobStartedEvent
     | JobCompletedEvent
+    | CapabilityDegradedEvent
     | ApprovalRequestEvent
     | NoteProposedEvent
     | QuestionEvent

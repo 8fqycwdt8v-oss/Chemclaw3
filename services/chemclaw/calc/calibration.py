@@ -48,16 +48,23 @@ ON CONFLICT (calc_type, calc_version, input_hash) DO UPDATE SET
     predicted_at = now()
 """
 
+# Deliberately *not* scoped by version: a measurement is a fact about the molecule, not about the
+# calculator that guessed at it. One reported value scores every version's prediction of that
+# molecule, which is what makes a version-over-version comparison possible at all.
 _RECORD_OBSERVATION = """
 UPDATE predictions
    SET observed_value = %s, observed_at = now(), observed_source = %s
  WHERE calc_type = %s AND input_hash = %s
 """
 
+# Scoped to one calculator *version*. Pooling versions was the other half of REV-12: even with the
+# write path fixed, a read that ignored the version would average a v1 that ran high against a v2
+# that ran low and report the cancellation as good calibration. A chemist asking "how far off is
+# this calculator" means the one that just answered them.
 _SELECT_RECONCILED = """
 SELECT predicted_value, predicted_uncertainty, observed_value
   FROM predictions
- WHERE calc_type = %s AND observed_value IS NOT NULL
+ WHERE calc_type = %s AND calc_version = %s AND observed_value IS NOT NULL
 """
 
 
@@ -195,8 +202,12 @@ def summarize(
     )
 
 
-async def calibration_for(calc_type: str, *, unit: str = "") -> Calibration:
-    """Read the reconciled rows for one calculator and summarize them."""
+async def calibration_for(calc_type: str, calc_version: str, *, unit: str = "") -> Calibration:
+    """Read the reconciled rows for one calculator *version* and summarize them.
+
+    `calc_version` is required rather than defaulted: a default would silently reproduce the pooled
+    reading this exists to remove, and every caller already knows which version answered.
+    """
     if not settings.calibration_enabled:
         return Calibration(calc_type=calc_type, n=0, unit=unit)
     try:
@@ -204,7 +215,7 @@ async def calibration_for(calc_type: str, *, unit: str = "") -> Calibration:
             settings.postgres_dsn, statement_timeout_seconds=settings.pg_statement_timeout_seconds
         ) as conn:
             async with conn.cursor() as cur:
-                await cur.execute(_SELECT_RECONCILED, (calc_type,))
+                await cur.execute(_SELECT_RECONCILED, (calc_type, calc_version))
                 rows = await cur.fetchall()
     except Exception:
         logger.warning("could not read calibration for %s", calc_type, exc_info=True)

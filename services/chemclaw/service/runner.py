@@ -56,6 +56,7 @@ from service.budget import BudgetTracker
 from service.events import (
     AnswerEvent,
     ApprovalRequestEvent,
+    CapabilityDegradedEvent,
     ErrorEvent,
     Event,
     JobStartedEvent,
@@ -192,7 +193,12 @@ async def run_turn(
             # ones, so the model sees one combined surface. An unreachable connector costs its
             # tools, not the turn.
             turn_connectors = connectors if connectors is not None else connector_tools()
-            await open_reachable(stack, turn_connectors)
+            # Surfaced before the first token rather than discarded (REV-6): the model cannot tell
+            # the chemist that a tool was missing, because it never saw one missing — it answers
+            # from the surface it was handed. Only this layer knows the surface was short.
+            unreachable = await open_reachable(stack, turn_connectors)
+            if unreachable:
+                yield CapabilityDegradedEvent(connectors=unreachable)
             stream = agent.run(
                 user_message, stream=True, session=session, tools=turn_connectors or None
             )
