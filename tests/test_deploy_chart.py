@@ -135,42 +135,55 @@ def _all_templates() -> str:
     return "\n".join(_template_text().values())
 
 
-# Top-level directories that are never shipped: test code, and the docs/infra trees the image
-# either does not need or COPYs under a different name. Everything else first-party must ship.
-_NOT_SHIPPED = frozenset({"tests", "examples"})
+# Directories the image reads at runtime that are *data*, not code, so no package discovery can
+# find them. Each absence is invisible offline and silent in production: the agent simply advertises
+# no skills or fewer capabilities, the graph is empty, migrations have no SQL. `tests/` and
+# `examples/` are the two first-party trees deliberately not shipped.
+_RUNTIME_DATA = ("skills", "profiles", "templates", "evals", "data", "knowledge", "infra")
 
 
-def test_image_ships_every_first_party_package() -> None:
-    """Every first-party Python package must be in the image, discovered — not listed by hand.
+def _copied() -> set[str]:
+    """Every path the Containerfile COPYs."""
+    containerfile = (DEPLOY / "Containerfile").read_text()
+    return set(re.findall(r"^COPY\s+(\S+)\s", containerfile, flags=re.MULTILINE))
+
+
+def test_image_ships_the_first_party_source_tree() -> None:
+    """All first-party code must be in the image.
 
     This started as a hardcoded list and **missed `safety/`**: `main` added the package, the image
     never COPYd it, and the container died at import with `ModuleNotFoundError: No module named
-    'safety'`. A hardcoded list only ever catches the omissions someone already thought of, which
-    is precisely the failure it was written to prevent. Discovering the packages instead means the
-    next one is covered on the day it is created.
+    'safety'`. It then discovered the eighteen top-level packages instead, so the next one was
+    covered on the day it was created.
+
+    Since D-141 there is one package under `src/`, so the discovery has nothing left to discover —
+    and a test that iterates an empty set passes vacuously, which is worse than the hardcoded list
+    it replaced. What it asserts now is the property that actually keeps the image complete: `src/`
+    is COPYd whole, and `tests/test_packaging.py` separately forbids a first-party package from
+    reappearing anywhere else.
     """
-    root = DEPLOY.parent
-    packages = {
-        path.name
-        for path in root.iterdir()
-        if path.is_dir() and (path / "__init__.py").exists() and path.name not in _NOT_SHIPPED
-    }
-    containerfile = (DEPLOY / "Containerfile").read_text()
-    copied = set(re.findall(r"^COPY\s+(\S+)\s", containerfile, flags=re.MULTILINE))
-    missing = sorted(packages - copied)
-    assert not missing, f"Containerfile never COPYs first-party package(s): {missing}"
+    assert "src" in _copied(), "Containerfile never COPYs src/ — the image would ship no code"
 
 
 def test_image_ships_the_data_directories_read_at_runtime() -> None:
-    """`skills/`, `knowledge/` and `infra/` are data, not packages, so discovery cannot find them.
-
-    Their absence is invisible offline: the agent simply advertises no skills, the graph is empty,
-    and migrations have no SQL — each a silent capability loss rather than a crash.
-    """
-    containerfile = (DEPLOY / "Containerfile").read_text()
-    copied = set(re.findall(r"^COPY\s+(\S+)\s", containerfile, flags=re.MULTILINE))
-    for required in ("skills", "knowledge", "infra"):
+    """The data trees are not code, so nothing about them is caught by an import failure."""
+    copied = _copied()
+    for required in _RUNTIME_DATA:
         assert required in copied, f"Containerfile never COPYs {required}/"
+
+
+def test_every_runtime_data_directory_actually_exists() -> None:
+    """A COPY of a vanished directory fails the build; one that moved fails silently at start-up.
+
+    The pairing matters: `eln/exports` became `data/eln-exports` in D-141, and had the Containerfile
+    kept COPYing `eln/` the build would have broken loudly — but had the *config default* alone
+    moved, the image would have started fine and read an empty export directory forever.
+    """
+    root = DEPLOY.parent
+    for required in _RUNTIME_DATA:
+        assert (root / required).is_dir(), (
+            f"Containerfile COPYs {required}/ but no such directory exists at the repository root"
+        )
 
 
 def test_image_installs_git() -> None:
