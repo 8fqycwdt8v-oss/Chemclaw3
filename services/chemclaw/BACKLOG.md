@@ -158,6 +158,14 @@ claim about the world is to run it.
       `docs/harness-konzept.md`, and the cap applies in both modes, not only execute.
       `workflows/template_job.py` calls its own lookup "I/O-free". `agents/chemclaw_agent.py`
       calls `plan_only` "the pre-execution GxP gate" (REV-1).
+- [ ] **Heal sessions already bricked by a stranded `tool_result`.** `get_messages`'s repair
+      strips orphaned *calls* and cannot see an orphaned *result* (D-145), so any session the old
+      age-based retention split is unusable forever with no automatic recovery. Adding the mirror
+      strip to the read repair would fix them — deliberately **not** shipped with D-145, because
+      doing so would mask a regression in `droppable_rows` rather than surface it. Needs its own
+      argument: it is a new destructive behaviour on the read path, and it destroys evidence of how
+      the split happened.
+
 ## Storage & knowledge substrate (docs/audit/13-storage-and-knowledge-audit.md)
 
 The layer under retrieval and capability, audited as one system for the first time: what the

@@ -9,7 +9,16 @@ a records story with no disposal story is incomplete.
 **What this prunes, and what it deliberately refuses to.**
 
 - `session_events` — a consumed push-back mailbox row is spent; it exists to wake one stream once.
-- `session_messages` — conversation history. Bounded by age, per the deployment's policy.
+- `session_messages` — conversation history. Bounded by age, per the deployment's policy, **but an
+  age cutoff alone cannot dispose of a conversation row** (D-145). A `tool_use` and the
+  `tool_result` answering it are one indivisible unit: delete either half and the API rejects the
+  whole thread on every subsequent turn. Rows of one turn are written together and so share a
+  `created_at`, but a cutoff is an instant with no knowledge of turns, and a pair *can* straddle it
+  — a call retried across a window boundary, a mid-turn-resume interleaving, a clock that moved.
+  Worse, the asymmetry in `agents.message_pairing` means only one of the two failures self-heals:
+  an orphaned *call* is stripped on the next read, while an orphaned *result* is invisible to the
+  repair and bricks the session permanently. So this table is pruned per session through
+  `droppable_rows`, which refuses any row whose partner is not also expiring.
 
 - `audit_events` is **refused**, by design, not by omission. The table is hash-chained
   (`infra/sql/011`), so deleting its oldest rows leaves the surviving head pointing at a `prev_hash`
@@ -35,6 +44,11 @@ from pydantic import BaseModel
 from temporalio import activity, workflow
 
 with workflow.unsafe.imports_passed_through():
+    from agent_framework import Message
+    from psycopg import AsyncConnection
+    from psycopg.rows import TupleRow
+
+    from agents.message_pairing import droppable_rows
     from chemclaw.config import settings
     from chemclaw.db import connection
     from workflows.registry import durable_activity, durable_workflow
@@ -47,6 +61,21 @@ _PRUNABLE: dict[str, str] = {
     "session_events": "created_at",
     "session_messages": "created_at",
 }
+
+# The three statements the per-session conversation prune needs. Only sessions that actually have an
+# expired row are visited, so a deployment whose sessions are all recent pays one indexed scan.
+_EXPIRED_SESSIONS = (
+    "SELECT DISTINCT session_id FROM session_messages "
+    "WHERE created_at < now() - make_interval(days => %s)"
+)
+# The whole session, in id order: the pairing closure needs the partners, which are frequently the
+# rows that are *not* expiring.
+_SESSION_ROWS = "SELECT id, message FROM session_messages WHERE session_id = %s ORDER BY id"
+_EXPIRED_IDS = (
+    "SELECT id FROM session_messages "
+    "WHERE session_id = %s AND created_at < now() - make_interval(days => %s)"
+)
+_DELETE_IDS = "DELETE FROM session_messages WHERE session_id = %s AND id = ANY(%s)"
 
 
 class RetentionOutcome(BaseModel):
@@ -83,6 +112,12 @@ async def prune_expired_rows() -> RetentionOutcome:
             if days <= 0:
                 outcome.skipped.append(f"{table} (retention disabled)")
                 continue
+            if table == "session_messages":
+                # Not a single sweeping DELETE: a conversation row's disposability depends on rows
+                # that may not be expiring (see the module docstring). Per session, through the
+                # pairing closure.
+                outcome.deleted[table] = await _prune_session_messages(conn, days)
+                continue
             async with conn.cursor() as cur:
                 # Table and column come from the closed `_PRUNABLE` map above, never from a caller,
                 # so the interpolation cannot carry untrusted input; the *value* is bound.
@@ -93,6 +128,36 @@ async def prune_expired_rows() -> RetentionOutcome:
                 outcome.deleted[table] = cur.rowcount
         await conn.commit()
     return outcome
+
+
+async def _prune_session_messages(conn: AsyncConnection[TupleRow], days: int) -> int:
+    """Delete expired conversation rows, never splitting a tool-call pairing; return the count.
+
+    Three statements per session rather than one across the table, because the decision is not
+    expressible in SQL: whether an expired row may go depends on whether the rows *paired with it*
+    are also going, and those may be newer than the cutoff.
+
+    Reads the session's **whole** history, not just its expired rows. That is the point — a
+    candidate's partner being non-expired is exactly the case worth catching, and a partial view
+    would report the split component as safe. Sessions are handled one at a time so the memory cost
+    is one conversation, not the whole expired backlog.
+    """
+    deleted = 0
+    async with conn.cursor() as cur:
+        await cur.execute(_EXPIRED_SESSIONS, (days,))
+        session_ids = [row[0] for row in await cur.fetchall()]
+    for session_id in session_ids:
+        async with conn.cursor() as cur:
+            await cur.execute(_SESSION_ROWS, (session_id,))
+            rows = [(int(row[0]), Message.from_dict(row[1])) for row in await cur.fetchall()]
+            await cur.execute(_EXPIRED_IDS, (session_id, days))
+            expired = {int(row[0]) for row in await cur.fetchall()}
+            disposable = droppable_rows(rows, expired)
+            if not disposable:
+                continue
+            await cur.execute(_DELETE_IDS, (session_id, sorted(disposable)))
+            deleted += max(cur.rowcount, 0)
+    return deleted
 
 
 @durable_workflow("background")
