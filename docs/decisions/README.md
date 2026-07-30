@@ -183,3 +183,4 @@ this reason; the filenames make that ordering irrelevant now, and the numbers st
 | [D-146](D-146-the-service-is-the-repository-removing-the-services.md) | The service is the repository: removing the `services/` tier the Replit monorepo left behind |
 | [D-147](D-147-one-file-per-adr-and-a-docs-tree-with-an-archive.md) | One file per ADR, and a `docs/` tree with a living half and an archive |
 | [D-148](D-148-the-packages-regrouped-under-src-chemclaw-by-layer.md) | The packages regrouped under `src/chemclaw/` by the four architecture layers |
+| D-149 | RESERVED — removing the last of the Replit deployment surface, two merge residues, and a guard for docstring path pointers |
