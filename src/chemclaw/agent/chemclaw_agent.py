@@ -310,7 +310,7 @@ def _build_harness_agent(
     pre-resolved by `build_agent` from the profile, so this path advertises exactly the
     profile's (possibly narrowed) surface.
     """
-    strategy, tokenizer = _compaction_strategy()
+    strategy, tokenizer = compaction_strategy()
     instructions = profile.instructions if profile.instructions is not None else _INSTRUCTIONS
     autonomy = (
         profile.harness_autonomy
@@ -571,7 +571,8 @@ def _build_compaction(history_source_id: str) -> CompactionProvider:
     `session.state[history_source_id]["messages"]`, which is where `InMemoryHistoryProvider` keeps
     it and where `PostgresHistoryProvider` deliberately keeps nothing. Under the production default
     it finds no messages and returns, so the persisted history is never trimmed and every turn
-    re-reads all of it. `agents/session_store.py` documents the whole shape, including why the
+    re-reads all of it. `chemclaw/agent/session_store.py` documents the whole shape, including
+    why the
     obvious fix — a `LIMIT` on the load — would corrupt stored tool-call pairings.
 
     It is still wired for both, because the `before_run` half is what actually bounds the model
@@ -584,7 +585,7 @@ def _build_compaction(history_source_id: str) -> CompactionProvider:
     Returns:
         A configured `CompactionProvider`.
     """
-    strategy, tokenizer = _compaction_strategy()
+    strategy, tokenizer = compaction_strategy()
     return CompactionProvider(
         before_strategy=strategy,
         after_strategy=strategy,
@@ -593,12 +594,18 @@ def _build_compaction(history_source_id: str) -> CompactionProvider:
     )
 
 
-def _compaction_strategy() -> tuple[TokenBudgetComposedStrategy, CharacterEstimatorTokenizer]:
-    """The token-budget compaction strategy + tokenizer, shared by the classic and harness paths.
+def compaction_strategy() -> tuple[TokenBudgetComposedStrategy, CharacterEstimatorTokenizer]:
+    """The token-budget compaction strategy + tokenizer, shared by every path that compacts.
 
     One definition of "reclaim tokens cheapest-first" (collapse stale tool-result dumps, then
-    slide the conversation window, within `agent_context_token_budget`) so the two agent flavors
+    slide the conversation window, within `agent_context_token_budget`) so the agent flavors
     cannot drift in how they keep context bounded (DRY).
+
+    Public because the durable path is the third consumer (`agents.session_store`, D-149). That one
+    matters more than the other two for sharing: it *deletes* what the strategy excludes, so a
+    second, tighter policy there would silently destroy context the model was still entitled to.
+    One budget, one answer, and the durable pass converges on exactly what `before_run` would have
+    produced anyway.
     """
     tokenizer = CharacterEstimatorTokenizer()
     strategy = TokenBudgetComposedStrategy(

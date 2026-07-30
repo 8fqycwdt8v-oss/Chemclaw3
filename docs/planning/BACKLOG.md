@@ -64,13 +64,15 @@ claim about the world is to run it.
       (the store is written only on completion): ~50 min of saturated CPU to fail a job that would
       have succeeded. Third instance: `calc/reaction.py` at `level="thorough"`.
       **Done.** `_beating` in `connectors/calc/activities.py` awaits the CREST work on a timer derived from the heartbeat timeout. A timer, not a progress callback: a single subprocess has no unit boundary to report at, and "still running" is the honest signal.
-- [ ] **REV-4 [High] After-run compaction is a silent no-op under `session_store=postgres`** (the
+- [x] **REV-4 [High] After-run compaction is a silent no-op under `session_store=postgres`** (the
       production default). MAF reads `session.state[source_id]["messages"]`, whose only writer is
       `InMemoryHistoryProvider`. So `session_messages` is read with no LIMIT every turn and a
       long-lived session re-reads its whole history before every model call. The docstring promises
       the opposite. **Confirmed by reading MAF, and the obvious fix is unsafe.**
       **Documented and pinned, not fixed (D-143).** Confirmed exactly as described. Two corrections to the framing: the `before_run` half *does* work under Postgres, so the model's input is still bounded and this is not a context-window bug — what is unbounded is the per-turn read and the forever-growing stored history. And **a `LIMIT` on the load would corrupt data**: `get_messages` repairs unmatched tool-call pairings by *writing back*, and over a windowed read a `tool_result` whose `tool_use` fell outside the window is indistinguishable from a real orphan, so the repair would strip and commit a pairing that was intact on disk. Both docstrings that promised the opposite are corrected, and `tests/test_durable_compaction_gap.py` pins the no-op *and* the write-back hazard.
       **Still open:** the real fix, which is either (a) make the read-repair in-memory-only when the load is partial, then bound the read, or (b) durable compaction that prunes whole tool-call groups from `session_messages`. Either is a design change to a durable path with a data-loss failure mode and wants its own ADR.
+      **Done (D-149).** `save_messages` now runs the *same* strategy against the table after storing a turn — inline rather than on a schedule, because that is where MAF intends after-run compaction and the turn claim already guarantees one writer per session. Measured over 60 turns: uncompacted the table grows by exactly 4 rows/turn to 240; compacted it sits in a band (14 → 23 → 22 → 18) bounded by the window, not the turn count. Off by default, matching `retention_enabled`. `get_messages` is untouched — no `LIMIT` — because compaction never reads a partial history and so sidesteps the corruption class rather than accepting it.
+
 - [x] **REV-5 [High] `retrieval_recall`/`retrieval_precision` are absent from `evals/baseline.json`**,
       so the only metrics that run a live retriever have zero drift coverage — verified by
       collapsing both to 0.0 and getting no alert. Also give `save_baseline` a Makefile target; it

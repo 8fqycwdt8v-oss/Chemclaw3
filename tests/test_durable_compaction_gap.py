@@ -1,23 +1,23 @@
-"""After-run compaction does not apply to the durable history provider (REV-4).
+"""What the durable-compaction fix deliberately did *not* do (REV-4, D-149).
 
-`chemclaw.agent.chemclaw_agent._build_compaction` passes an `after_strategy`, and its docstring
-said it
-would "shrink the persisted history so the next turn starts smaller". Under
-`session_store="postgres"` — the production default — it does nothing at all.
+This file used to pin an open gap. The gap is closed — `save_messages` now runs the context
+compaction strategy against the table (`chemclaw.agent.session_store._compact`) — but the two
+facts that
+shaped the fix are still true, and both are load-bearing:
 
-MAF's `CompactionProvider.after_run` reads `session.state[history_source_id]["messages"]`: the place
-`InMemoryHistoryProvider` keeps its thread. `PostgresHistoryProvider` deliberately keeps nothing
-there, which is the entire point of it, so the lookup finds nothing and the strategy returns having
-touched nothing. The `before_run` half still works — it compacts what was loaded into the *context*,
-which is what bounds the model's input — so this is not a context-window bug. What is unbounded is
-the read: every turn loads the session's whole history, forever.
+**MAF's `after_run` still cannot reach the durable provider, and never will.**
+`CompactionProvider.after_run` reads `session.state[history_source_id]["messages"]`, the slot
+`InMemoryHistoryProvider` writes and `PostgresHistoryProvider` deliberately does not. Nothing short
+of reintroducing the in-process thread the provider exists to abolish would change that, which is
+why the fix lives in the provider rather than in the `CompactionProvider` wiring. If these tests
+ever go red, someone has started populating that slot and the durable path needs re-deciding, not
+patching.
 
-These tests pin the gap rather than closing it, and the reason is the second test. The obvious fix —
-a `LIMIT` on the load — would silently corrupt stored history, because `get_messages` repairs
-unmatched tool-call pairings by *writing back*. A `tool_result` whose `tool_use` merely fell outside
-a window is indistinguishable from a real orphan, so the repair would strip and commit it. Pinning
-that hazard is worth more than a patch that hides it: it is the trap the next person to read the
-docstring will walk into.
+**`get_messages` still has no `LIMIT`, and must not grow one.** Windowing the read looks like the
+cheaper fix and silently corrupts data: the repair on that path *writes back*, and over a partial
+read a `tool_result` whose `tool_use` merely fell outside the window is indistinguishable from a
+real orphan. Compaction sidesteps the whole class by deleting only whole pairing components
+(`droppable_rows`, D-145) — it never reads a partial history.
 """
 
 import asyncio

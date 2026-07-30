@@ -101,6 +101,12 @@ _COUNTERS: dict[str, str] = {
         "Prompt tokens written to the provider's cache — priced above a fresh input token, so a "
         "cache that is written and never read is a net loss this makes visible."
     ),
+    # Durable history compaction (D-149). A count that stays flat while sessions are long means
+    # the pass is not running — the knob is off, or the row floor is never reached — which is
+    # the difference between "history is bounded" and "nothing is bounding it".
+    "chemclaw_history_rows_compacted_total": (
+        "Stored conversation rows removed by durable compaction after a turn."
+    ),
 }
 
 # Latency histograms. Two, not more: a turn is the unit a chemist waits on, and a tool call is the
