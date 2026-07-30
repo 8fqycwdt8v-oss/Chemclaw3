@@ -104,6 +104,12 @@ three shell scripts belonging to a deployment target that no longer exists; four
 merge left behind; a two-symbol routing seam that was documented but never built; and 78 docstring
 pointers repaired and pinned by a new test. `docs/decisions/D-149-*.md` has the reasoning.
 
+**Verification.** `make lint type test` green: **2006 passed, 76 skipped**, which is exactly the
+1591-test baseline taken before the first commit plus the new guard's 415 parametrized cases — so no
+test was dropped or made vacuous by the edits. All seven declaration validators still pass, `mypy
+--strict` reports no issues over 414 source files, and `tests/test_decision_log.py` accepts the
+D-149 ledger row.
+
 **The bar was "is this residue, or is it merely old?"** Every deletion here is something whose
 *reason to exist* is gone — a Replit runner with no Replit, a compatibility alias with nothing to be
 compatible with, a `runtime:` switch no manifest ever set. Nothing was removed for being
