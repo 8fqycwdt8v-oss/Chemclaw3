@@ -1,139 +1,95 @@
-# Task: make the codebase as clean and simple as possible
+# Task: an intense review of the agentic system — performance, reliability, configurability, monitorability
 
-Requested 2026-07-30: "Check the current code base for opportunities for simplification,
-removing of doublings or things not needed anymore."
+Requested 2026-07-29/30. Branch: `claude/agentic-system-review-iu3gjz`.
+ADRs: **D-145**, **D-150**, **D-151**, **D-152**.
 
-Branch: `claude/codebase-cleanup-y7osy3`. One ADR: D-149.
+The review itself is in `docs/archive/audit/2026-07-agentic-system-review.md`; its findings became
+`REV-*` entries in `docs/planning/BACKLOG.md`. This file records the *closing* pass — the four items
+left open because each needed a judgment call rather than an implementation, plus what verifying
+them turned up.
 
-## What the survey found
+(The previous occupant of this file, the codebase-cleanup pass, is merged and its record lives in
+D-149, its backlog entries, and git history.)
 
-The survey was mechanical, not impressionistic — four scans over `src/` and `tests/`:
+## What shipped
 
-| Scan | Result |
-| --- | --- |
-| Unreferenced top-level defs/classes (AST, whole-repo grep) | **3 real hits**, all merge residue |
-| Unreferenced public methods (AST, decorator-aware) | **0** |
-| Unread `Settings` fields (AST vs. every text file, incl. `CHEMCLAW_*` env spellings) | **0** |
-| Identical / name-normalised duplicate function bodies | **1**, a legitimate `Protocol` pair |
-
-So there is no dead-code layer and no duplication layer to remove: the ordinary cleanup targets are
-already clean, and inventing work there would be churn. What the scans *did* surface is narrower and
-real — residue from two migrations that were each completed except for their last mile.
-
-**1. The Replit deployment surface outlived the Replit deployment.** D-091 restored the tree the
-Replit restructure rewound, and listed six Replit-only additions it deliberately did not revert
-(the overlay could not touch what it did not contain). D-146 then deleted `services/chemclaw/` —
-"the last remnant of a Replit restructure". Three of those six are still at the repository root,
-referenced by nothing: `start.sh`, `start-temporal.sh`, `start-background-worker.sh`, plus the
-138 MB Git-LFS `.bin/temporal` binary the second one runs. They bridge `AI_INTEGRATIONS_ANTHROPIC_*`
-into an SDK convention this system no longer uses (the provider is config-selected, D-039) and
-hard-code `$SCRIPT_DIR/.venv/bin/python`. `README.md` and `docs/guides/runbook.md` document
-`make up` + `python -m chemclaw…` instead; CI touches none of them.
-
-**2. A merge left four aliases where one name belongs.** `agents/job_events.py` — a fourth
-Replit-only addition — was consolidated into `agent/turn_signals.py`, correctly, but its four
-caller-facing names were kept beside the canonical ones "as the name main's callers already use".
-Three have had zero callers ever since; the fourth has only test callers and is lossy — it
-hard-codes `kind="job"`, discarding the field the signal exists to carry.
-
-**3. `connectors/queues.py` documents a seam it does not have.** `task_queue_for` and the
-`JobRuntime` literal have no callers; only `bundle_queue` does. The module docstring nonetheless
-explains a `bundle`/`background` routing choice and asserts "Two members, both with a real caller",
-which is false.
-
-**4. 78 docstring pointers name directories D-148 deleted.** The restructure renamed five packages
-(`agents/`→`agent/`, `service/`→`api/`, `workflows/`+`workers/`→`durable/`, `calc/`→`science/calc/`)
-and moved modules across them. The prose that navigates a reader between modules was not carried
-along: `durable/artifact_eviction.py` opens by citing `workflows/retention.py`,
-`agent/turn_signals.py` cites `service/events.py`, and so on — dangling pointers in the one place a
-reader looks first. This repository guards seven other declarations against the live surface
-(`kg-validate`, `skill-validate`, `connector-validate`, `template-validate`, `prose-validate`,
-`eln-validate`, `audit-verify`); this class had no guard, which is why it drifted through a rename
-in silence.
-
-## Plan
-
-### Stage 0 — reserve the ADR number
-
-- [x] Add the `D-149` row to `docs/decisions/README.md`, marked `RESERVED`, in the first commit
-
-### Stage 1 — delete the Replit deployment surface (D-149)
-
-- [x] Delete `start.sh`, `start-temporal.sh`, `start-background-worker.sh`
-- [x] Delete `.bin/temporal` (138 MB LFS) and the `.gitattributes` rule that exists only for it
-- [x] Confirm no reference survives outside the append-only ADR record
-- Acceptance: `git grep` finds the scripts only in `docs/decisions/D-091-*`; `make up` and the
-  README's worker commands are the only documented way to start anything.
-
-### Stage 2 — one name per signal (`agent/turn_signals.py`)
-
-- [x] Delete `set_job_sink`, `reset_job_sink`, `drain_started_jobs` (zero callers)
-- [x] Delete `announce_job_started`; point its three test call sites at `record_job_started` with
-      the `kind` the wrapper was discarding
-- Acceptance: `tests/test_runner.py` and `tests/test_service.py` pin the same behaviour, and the
-  module exposes exactly one name per operation.
-
-### Stage 3 — drop the unbuilt queue-routing seam (`connectors/queues.py`)
-
-- [x] Delete `task_queue_for` and `JobRuntime`
-- [x] Rewrite the module docstring to describe the seam that exists (one queue per bundle, derived
-      from the bundle name) rather than the routing choice that does not
-- Acceptance: `bundle_queue` is the module's whole surface, and the docstring's claims are
-  checkable against it.
-
-### Stage 4 — repair the 78 dangling docstring pointers, and guard them (D-149)
-
-- [x] Rewrite every backticked module pointer in `src/` and `tests/` to its post-D-148 location.
-      Past-tense provenance sentences name the current file rather than being deleted — the old
-      name stays in the ADR record, which is where history belongs.
-- [x] Add `tests/test_docstring_paths.py`: every backticked `<pkg>/<…>.py` in `src/` or `tests/`
-      must resolve to a file that exists, under `src/chemclaw/`, `tests/`, or the repository root
-- Acceptance: the new test fails on the tree as it stands today and passes after the rewrite —
-  demonstrated, not asserted.
-
-### Stage 5 — record and verify
-
-- [x] Write `docs/decisions/D-149-*.md`; swap the `RESERVED` marker for the real title and link
-- [x] `make lint type test` green
-- [x] CHECKMATE G1–G7
+- [x] **§1 Retention safety (D-145)** — `droppable_rows`, a union-find closure over `call_id` that
+      contracts and never expands; `retention.py` routes `session_messages` through it; migration
+      022 for the candidate scan.
+- [x] **§2 Durable compaction (D-151)** — `plan_compaction`, a pure translation between MAF's
+      annotate-and-insert and storage's delete-and-rewrite; run from `save_messages` in a second
+      best-effort transaction, behind a default-off flag, with a `MAX(id)` watermark protecting the
+      turn's own rows.
+- [x] **§3 Push-back (D-150)** — `await_job_results` waits on Temporal workflow handles instead of
+      destructively claiming the shared mailbox.
+- [x] **§4 Metrics labels (D-152)** — declared labels, a per-counter series cap, `profile` on the
+      five spend counters; per-model closed as already-solved by MAF's OTel emission.
+- [x] **§5 REV-9 (D-152)** — no mechanism, a measurement: runbook §(viii), corrected HELP text,
+      rewritten backlog entry.
+- [x] **§6 Live harness smoke test (D-152)** — the first turn of the production construction path
+      against a live model. It found a High.
+- [x] Both corrections owed from earlier batches (D-143's `_SELECT` citation; the review report's
+      §4).
 
 ## Review
 
-**What shipped**, in five commits on `claude/codebase-cleanup-y7osy3`: 138 MB of Git-LFS binary and
-three shell scripts belonging to a deployment target that no longer exists; four alias functions a
-merge left behind; a two-symbol routing seam that was documented but never built; and 78 docstring
-pointers repaired and pinned by a new test. `docs/decisions/D-149-*.md` has the reasoning.
+**Verification changed three of the four open items, and every change was in the same direction:**
+the backlog entry was written from a reading, and the code said something slightly different —
+usually worse.
 
-**Verification.** `make lint type test` green: **2006 passed, 76 skipped**, which is exactly the
-1591-test baseline taken before the first commit plus the new guard's 415 parametrized cases — so no
-test was dropped or made vacuous by the edits. All seven declaration validators still pass, `mypy
---strict` reports no issues over 414 source files, and `tests/test_decision_log.py` accepts the
-D-149 ledger row.
+- REV-4's hazard was worse than documented *and already live*: retention could strand a
+  `function_result`, which nothing can see and nothing repairs — a permanently bricked session.
+- REV-7 had a second consumer that *destroys* events rather than losing them to a crash.
+- REV-9 had been measured on the wrong provider, and its "cacheable half" is not cacheable through
+  `Agent` at all.
+- Half of REV-10 was already done, upstream, by a system nobody had looked at.
 
-**The bar was "is this residue, or is it merely old?"** Every deletion here is something whose
-*reason to exist* is gone — a Replit runner with no Replit, a compatibility alias with nothing to be
-compatible with, a `runtime:` switch no manifest ever set. Nothing was removed for being
-unfashionable and nothing working was restructured, which is why the survey table above is in the
-plan at all: when the scans come back at zero, the honest output is a short change, not a long one.
+**Two dormant live defects, both fixed while dormant.** Retention (D-145) and the mid-turn wait
+(D-150) are each behind a default-off flag. That is the cheapest possible moment to fix a
+data-destroying bug, and it is the same argument REV-12 made.
 
-**The one piece worth more than the deletions.** Stage 4's real output is not the 78 repaired
-pointers — it is `tests/test_docstring_paths.py`. Those pointers were correct when written and
-rotted in a rename that touched none of them; repairing them without a guard buys one clean tree and
-the identical rot at the next restructure. The test was confirmed to fail on the pre-repair tree (51
-failing files) before it was made to pass, and it asserts its own corpus is non-empty — the failure
-mode D-148's post-mortem named, where a rename leaves a test iterating nothing and reporting green.
+**My own §3 design was refuted by exploration and withdrawn, not pushed through.** "Select, yield,
+then confirm" re-selects an unconfirmed event on every poll, because the tailer has no
+`try`/`finally`. Preventing that *is* a visibility timeout — which is what the backlog entry I was
+trying to shortcut had already concluded. The withdrawal is in D-150 rather than edited out.
 
-**One finding deliberately left open, not silently closed.** Deleting the dead half of
-`connectors/queues.py` exposed a live gap it was hiding: every `connector.yaml` declares a
-`task_queue` that must equal `bundle_queue(connector)`, all eight agree, and nothing checks it.
-Closing it means choosing whether a connector job may ever run on core's worker — a capability
-decision, not a cleanup — so it went to `docs/planning/BACKLOG.md` with both options and a trigger
-rather than being settled here by side effect.
+**Six refuted leads are kept in the record**, including one refuted by this review's own earlier
+fix and one where the guard I proposed already existed.
 
-**Also considered, and not done.** `docs/planning/` holds five completed build plans
-(`backlog-plan`, `connector-plan`, `foundation-plan`, `gap-closure-plan`, `parity-plan`) that read
-as archive material, but `docs/README.md` declares that directory maintained *including* the build
-plans — moving them is a documentation-policy change and belongs in its own request. The bare
-`calc/…` pointers inside `science/calc/` were rewritten like every other rather than tolerated as
-sibling-relative shorthand: two spellings of one path is exactly the ambiguity the guard exists to
-remove.
+**The smoke test earned its place.** `CHEMCLAW_HARNESS_ENABLED=true` ships in the chart; the code
+default and all 2068 tests run `false`. The first live turn under the shipped configuration crashed
+before reaching the model, and `make chat` had been unusable under it for as long as the flag has
+been in the chart. Ten minutes of running the real entrypoint under the real configuration. The
+general lesson — *a configuration only production sets is a configuration nothing tests* — is in
+`tasks/lessons.md` with a rule that makes it mechanical, and the offline regression test now
+reproduces that exact `RuntimeError` without a credential.
+
+**One thing I would do differently.** I wrote the metrics label support with a rendering branch that
+papered over an ambiguity (a bare sample beside labelled ones) instead of removing the ambiguity.
+The elegance pass caught it and the fix was smaller than the workaround: make the declaration bind
+in both directions, and the branch disappears. The prompt for that pass is in `CLAUDE.md`; it paid
+for itself here.
+
+## Verification
+
+Every fix has a test **verified to fail on the unfixed code** by reverting the source — including
+the two that carry the real burden: a straddling call/result pair surviving retention, and a
+session's row count plateauing across 40 turns where it previously grew by 4/turn. When the
+plateau assertion caught a local peak, I measured the real curve over 80 turns rather than widening
+the threshold, found it oscillates in a band, and rewrote the assertion against the linear count.
+
+`make lint`, `make type`, `make test` green against live Postgres: **2068 passed, 32 skipped** (19
+Temporal test server, 13 xtb/crest binaries — none Postgres). Migration 022 applied.
+
+## Still open, recorded rather than done
+
+- **REV-7's original** — a notification lost between claim-commit and delivery. Needs a
+  visibility-timeout lease, a migration, a per-*stream* holder id, a cancellation-shielded confirm
+  (D-130's trap), and `event_id` in the SSE payload. It is an operator-facing contract change, so it
+  gets its own ADR.
+- **Healing stranded `function_result`s on read** — the only repair path for a session already
+  bricked by the retention bug, deliberately not shipped alongside D-145 because it would *mask* a
+  regression in the closure primitive rather than surface it.
+- **A recurring live check of the harness path.** The smoke test closes "never executed", not
+  "tested". CI has no credential, and inventing one is a decision about secrets.
+- **REV-9's mechanism** — upstream in `agent_framework`, both halves.
