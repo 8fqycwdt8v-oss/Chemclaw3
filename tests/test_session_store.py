@@ -344,7 +344,7 @@ def test_a_crashed_workers_claim_ages_out_and_a_refresh_holds_it() -> None:
     asyncio.run(_run())
 
 
-# --- D-149: the stored history stops growing without bound -------------------------------------
+# --- D-151: the stored history stops growing without bound -------------------------------------
 
 
 # Long enough for the window to bind several times over, so the band is visible rather than a

@@ -1,10 +1,10 @@
 """The one durable wrapper every connector job runs inside — core keeps the cross-cutting concerns.
 
 Why this exists: before connectors, four bespoke adapters (`agents/qm_tools.py`,
-`agents/durable_tools.py`) each re-implemented the same shape — derive a deterministic id, stamp the
+`agent/durable_tools.py`) each re-implemented the same shape — derive a deterministic id, stamp the
 actor, start a named workflow, map its status, publish a note through the PR-gate, push back to the
 launching session — and each imported its workflow class directly, which forced every durable
-capability into core's own worker lists (`workers/background_worker.py`).
+capability into core's own worker lists (`durable/background_worker.py`).
 
 This workflow inverts that. The connector owns its workflow *code* and the worker that serves it;
 core owns the obligations that must never vary per capability:

@@ -1,6 +1,6 @@
 """One generated agent tool per declared job — the four bespoke adapters, written once.
 
-`agents/qm_tools.py::submit_qm_job` and the three launchers in `agents/durable_tools.py` were the
+`agents/qm_tools.py::submit_qm_job` and the three launchers in `agent/durable_tools.py` were the
 same handful of lines four times: authorize the trigger, refuse under dry-run, demand an actor,
 derive a deterministic workflow id, start the workflow, announce the launch, return the id. Only
 the workflow class and the id derivation differed — and both are now manifest data

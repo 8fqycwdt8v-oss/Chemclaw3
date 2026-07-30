@@ -2,8 +2,9 @@
 
 Every connector we own is the same shape — a FastAPI application exposing `/healthz` for the startup
 probe and `/mcp` for the MCP streamable-HTTP transport, over a `FastMCP` instance holding the
-capability's tools. That shape is written once here so a new connector's `server/app.py` is three
-lines, and so the two cross-cutting behaviors it needs cannot be forgotten per connector:
+capability's tools. That shape is written once here so a new connector's
+`connectors/<name>/server/app.py` is three lines, and so the two cross-cutting behaviors it needs
+cannot be forgotten per connector:
 
 - **Running the MCP session manager.** `FastMCP.streamable_http_app()` returns a Starlette app whose
   *own* lifespan starts the session manager; mounting that app inside FastAPI does not run a

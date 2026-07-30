@@ -71,7 +71,7 @@ claim about the world is to run it.
       the opposite. **Confirmed by reading MAF, and the obvious fix is unsafe.**
       **Documented and pinned, not fixed (D-143).** Confirmed exactly as described. Two corrections to the framing: the `before_run` half *does* work under Postgres, so the model's input is still bounded and this is not a context-window bug — what is unbounded is the per-turn read and the forever-growing stored history. And **a `LIMIT` on the load would corrupt data**: `get_messages` repairs unmatched tool-call pairings by *writing back*, and over a windowed read a `tool_result` whose `tool_use` fell outside the window is indistinguishable from a real orphan, so the repair would strip and commit a pairing that was intact on disk. Both docstrings that promised the opposite are corrected, and `tests/test_durable_compaction_gap.py` pins the no-op *and* the write-back hazard.
       **Still open:** the real fix, which is either (a) make the read-repair in-memory-only when the load is partial, then bound the read, or (b) durable compaction that prunes whole tool-call groups from `session_messages`. Either is a design change to a durable path with a data-loss failure mode and wants its own ADR.
-      **Done (D-149).** `save_messages` now runs the *same* strategy against the table after storing a turn — inline rather than on a schedule, because that is where MAF intends after-run compaction and the turn claim already guarantees one writer per session. Measured over 60 turns: uncompacted the table grows by exactly 4 rows/turn to 240; compacted it sits in a band (14 → 23 → 22 → 18) bounded by the window, not the turn count. Off by default, matching `retention_enabled`. `get_messages` is untouched — no `LIMIT` — because compaction never reads a partial history and so sidesteps the corruption class rather than accepting it.
+      **Done (D-151).** `save_messages` now runs the *same* strategy against the table after storing a turn — inline rather than on a schedule, because that is where MAF intends after-run compaction and the turn claim already guarantees one writer per session. Measured over 60 turns: uncompacted the table grows by exactly 4 rows/turn to 240; compacted it sits in a band (14 → 23 → 22 → 18) bounded by the window, not the turn count. Off by default, matching `retention_enabled`. `get_messages` is untouched — no `LIMIT` — because compaction never reads a partial history and so sidesteps the corruption class rather than accepting it.
 
 - [x] **REV-5 [High] `retrieval_recall`/`retrieval_precision` are absent from `evals/baseline.json`**,
       so the only metrics that run a live retriever have zero drift coverage — verified by
@@ -617,6 +617,21 @@ for each recorded here rather than left implicit.
       OBO additionally needs the user's *raw* access token, which `service.auth.Principal` deliberately
       does not carry — a security-relevant change with no caller today. *Trigger: a real tenant (the
       same one blocking every other live Entra edge).*
+- [ ] **A manifest's `task_queue` is unchecked against `bundle_queue`** — [S]. Found while removing
+      the dead half of `connectors/queues.py` (D-149). A bundle's queue name is derived in code
+      (`bundle_queue`, used by every `@durable_workflow`/`@durable_activity` decorator and by each
+      worker) *and* spelled out per job in `connector.yaml`. All eight declarations agree with the
+      derivation today, and nothing checks that they do — a typo is a job that starts successfully
+      and then sits forever in a queue nobody polls, which is exactly the failure the module's
+      docstring claims to have designed out. Two ways to close it, and the choice is a real
+      decision rather than a cleanup: **(a)** `make connector-validate` asserts
+      `job.task_queue == bundle_queue(connector)`, or **(b)** drop the field and derive it, which
+      is strictly simpler but forecloses ever routing a connector-declared job onto core's
+      `background-jobs` worker — the escape hatch `JobSpec`'s docstring advertises ("moving a
+      workflow from core's worker to the connector's own is a one-line change here") and that
+      `task_queue_for`/`JobRuntime` were built for and never wired up. Deciding (b) means deciding
+      that a connector job always runs on its bundle's worker. *Trigger: the next connector bundle
+      added, or the next job moved between workers — whichever comes first.*
 - [ ] **Concurrent-turn MCP lifecycle, the general case** — [S]. Per-turn connector instances fixed
       this for connectors (D-109), and the *shape* that caused it — a process-lived tool whose context
       is entered per turn — should not reappear. A guard test asserting no MCP tool is attached to the

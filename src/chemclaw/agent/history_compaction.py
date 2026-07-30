@@ -1,4 +1,4 @@
-"""Translating a MAF compaction result into row deletions (REV-4, D-149).
+"""Translating a MAF compaction result into row deletions (REV-4, D-151).
 
 MAF's compaction strategies and a SQL table disagree about what compaction *is*, and this module is
 the whole of the disagreement.

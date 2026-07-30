@@ -29,7 +29,7 @@ from chemclaw.core.config import settings
 from chemclaw.core.db import connect
 from chemclaw.science.calc.migrate import migrate
 
-# Not a `Settings` field on purpose: `chemclaw/config.py` is the operator-facing deployment
+# Not a `Settings` field on purpose: `core/config.py` is the operator-facing deployment
 # surface, and its parity tests (DA-1) require every field to be documented in `.env.example`.
 # A test-only knob does not belong there.
 #

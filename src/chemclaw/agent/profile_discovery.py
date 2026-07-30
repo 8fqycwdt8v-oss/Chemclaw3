@@ -6,7 +6,7 @@ and until now the only way to add one was a Python call, which meant a use case 
 configured without a code change. That was the right amount of machinery while exactly one
 profile existed. It stopped being the right amount when the capabilities a profile selects from
 moved to connectors: a "property-lookup agent" is now a name, three tool names and a sentence of
-instructions, and nothing about it should require touching `agents/`.
+instructions, and nothing about it should require touching `agent/`.
 
 So a profile is a YAML file, discovered exactly the way a skill is:
 

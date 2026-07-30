@@ -1,6 +1,6 @@
 """Record a process metric from code that may not be running in the front door (REV-19).
 
-`service/metrics.py` holds a process-wide registry, and a scrape targets a process. But most of
+`api/metrics.py` holds a process-wide registry, and a scrape targets a process. But most of
 the code that has something worth counting does not know which process it is in: a durable job is
 launched from the front door *and* from a Temporal worker, and a note reaches the PR-gate from
 both. `agents` and `connectors` must not hard-depend on `service` — the workers import them and
@@ -9,7 +9,7 @@ never build the front door.
 So the bridge is: import the registry lazily, apply the update, and tolerate its absence. A missing
 registry means "no scrape target in this process", which is the truth rather than an error.
 
-This began as a private helper in `agents/audit.py` with two callers (the audit-sink failure
+This began as a private helper in `agent/audit.py` with two callers (the audit-sink failure
 counter, the tool-latency histogram). It moved here at the fourth, rather than being imported
 across modules by its underscore name. The swallow-all is written once on purpose: a second copy of
 a bare `except Exception: pass` is exactly where a real error goes to hide.

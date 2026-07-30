@@ -8,7 +8,7 @@ core differs.
 
 Note what is *absent*, since that is the point of the seam: no import of the wrapper, no
 knowledge of the PR-gate, no session id, no idempotency logic, no audit. Core owns all of it
-(`workflows/connector_job.py`); a connector author writes a workflow that takes a dict and
+(`durable/connector_job.py`); a connector author writes a workflow that takes a dict and
 returns an envelope. The one thing it *reads* back from core is the run's memo, which is where
 the requesting actor travels — deliberately beside the payload rather than inside it.
 """
@@ -34,7 +34,7 @@ class FixtureJobWorkflow:
         the model-authored arguments, so the actor cannot live there without becoming something an
         LLM could fill in. Core stamps the memo on the child call, and a bundle whose backend runs
         under a shared service identity — the HPC cluster — reads it here to keep the run
-        attributable (`connectors/qm/chemclaw.durable.py` is the real case).
+        attributable (`connectors/qm/workflows.py` is the real case).
         """
         subject = str(payload["subject"])
         return ConnectorJobResult(

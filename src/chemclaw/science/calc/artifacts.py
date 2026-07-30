@@ -1,11 +1,11 @@
 """Content-addressed store for a calculation's by-products (D-124).
 
-The calculation cache (`calc/store.py`) persists the *answer* — a small JSON payload. Everything
-else a run produced was deleted with its temporary directory: `calc/xtb_cli.py` executes xtb
-inside a `tempfile.TemporaryDirectory`, parses the Hessian and `vibspectrum` into numbers, and
-loses the files. On a drug-sized substrate that Hessian costs minutes, and it is exactly the input
-that makes the *next* question cheap — thermochemistry at a second temperature, IR at a different
-broadening, a transition-state search seeded from a known curvature.
+The calculation cache (`science/calc/store.py`) persists the *answer* — a small JSON payload.
+Everything else a run produced was deleted with its temporary directory: `science/calc/xtb_cli.py`
+executes xtb inside a `tempfile.TemporaryDirectory`, parses the Hessian and `vibspectrum` into
+numbers, and loses the files. On a drug-sized substrate that Hessian costs minutes, and it is
+exactly the input that makes the *next* question cheap — thermochemistry at a second temperature, IR
+at a different broadening, a transition-state search seeded from a known curvature.
 
 This module keeps those bytes. Two ideas, each doing one job:
 
@@ -20,9 +20,9 @@ This module keeps those bytes. Two ideas, each doing one job:
 payload exceeds `artifact_max_bytes` or the store is disabled, and every caller ignores the
 return. Capturing a by-product must never be able to fail the calculation it is a by-product of.
 
-The shape deliberately mirrors `calc/store.py`: a `Protocol` with an in-memory backend for tests
-and a Postgres backend for real (`calc/postgres_artifacts.py`), plus a `default_artifact_store()`
-seam that tests monkeypatch at the importing module.
+The shape deliberately mirrors `science/calc/store.py`: a `Protocol` with an in-memory backend
+for tests and a Postgres backend for real (`science/calc/postgres_artifacts.py`), plus a
+`default_artifact_store()` seam that tests monkeypatch at the importing module.
 """
 
 import hashlib

@@ -183,5 +183,6 @@ this reason; the filenames make that ordering irrelevant now, and the numbers st
 | [D-146](D-146-the-service-is-the-repository-removing-the-services.md) | The service is the repository: removing the `services/` tier the Replit monorepo left behind |
 | [D-147](D-147-one-file-per-adr-and-a-docs-tree-with-an-archive.md) | One file per ADR, and a `docs/` tree with a living half and an archive |
 | [D-148](D-148-the-packages-regrouped-under-src-chemclaw-by-layer.md) | The packages regrouped under `src/chemclaw/` by the four architecture layers |
-| [D-149](D-149-the-durable-history-compacts-itself-because-maf-s.md) | The durable history compacts itself, because MAF's after-run compaction cannot reach it |
+| [D-149](D-149-what-two-finished-migrations-left-behind-and-a-guard.md) | What two finished migrations left behind, and the guard for the kind that rots silently |
 | [D-150](D-150-the-mid-turn-wait-asks-the-jobs-not-the-mailbox.md) | The mid-turn wait asks the jobs, not the mailbox |
+| [D-151](D-151-the-durable-history-compacts-itself-because-maf-s.md) | The durable history compacts itself, because MAF's after-run compaction cannot reach it |

@@ -170,7 +170,7 @@ class StoreSettings(BaseSettings):
     postgres_dsn: str = "postgresql://chemclaw:chemclaw@localhost:5432/chemclaw"
     # The ordered `.sql` migrations `chemclaw.science.calc.migrate` applies. A setting rather than
     # a path derived from `__file__`, which is what it was until D-148: `parent.parent` happened to
-    # be the repository root only while the module sat at `calc/migrate.py`, and moving
+    # be the repository root only while the module sat at `science/calc/migrate.py`, and moving
     # it two levels deeper silently pointed it inside the package — `make db-migrate` failed in CI
     # with no SQL found. The directory is repository/workdir-relative like `knowledge_dir` and
     # `skills_dir` (the image COPYs it to `/app/infra` beside `/app/src`), so it follows the same
@@ -552,7 +552,7 @@ class LlmSettings(BaseSettings):
     # generation params threaded into the agent (F0.3). The default provider is `anthropic` so a
     # fresh checkout config singleton is valid with no endpoint set; production sets
     # `CHEMCLAW_LLM_PROVIDER=openai_compatible` + the base_url/model. No provider client class
-    # is imported outside `agents/llm_provider.py`.
+    # is imported outside `agent/llm_provider.py`.
     llm_provider: Literal["openai_compatible", "anthropic"] = "anthropic"
     llm_base_url: str = ""
     llm_model: str = ""
@@ -686,7 +686,7 @@ class AgentSettings(BaseSettings):
     agent_context_token_budget: int = Field(default=100_000, ge=1)
     agent_keep_last_tool_groups: int = Field(default=2, ge=0)
     agent_keep_last_conversation_groups: int = Field(default=12, ge=1)
-    # Apply that same policy to the *stored* history, not only to the model's context (D-149).
+    # Apply that same policy to the *stored* history, not only to the model's context (D-151).
     # MAF's after-run compaction cannot reach `PostgresHistoryProvider` — it reads a session-state
     # slot the durable provider deliberately never writes — so under `session_store="postgres"` the
     # rows accumulated forever and every turn re-read all of them. This runs the identical strategy
@@ -1288,7 +1288,7 @@ class ElnSettings(BaseSettings):
     # JSON) from this directory — the "structured recipe" path, alongside the free-text JSON
     # export above. Same `ElnAdapter` contract, so both flow through the one sync loop.
     ord_export_dir: str = "data/eln-exports/ord"
-    # Temporal Schedule cadence for the ELN sync (`scripts/schedules.py`, applied by `make
+    # Temporal Schedule cadence for the ELN sync (`cli/schedules.py`, applied by `make
     # schedules-apply`). The sync is self-cursoring (loads/stores its high-water mark in
     # `sync_cursors`), so its Schedule passes no argument. Schedules live in Temporal
     # (durability there, not host cron); overridable so a deployment tunes cadence without code
@@ -1447,7 +1447,7 @@ class MemorySettings(BaseSettings):
     # chemistry, so the grouping must be tight to avoid merging distinct transformations.
     optimization_similarity_threshold: float = Field(default=0.7, ge=0.0, le=1.0)
     memory_job_timeout_seconds: float = Field(default=300.0, gt=0)
-    # Temporal Schedule cadence for the memory-synthesis jobs (`scripts/schedules.py`): they
+    # Temporal Schedule cadence for the memory-synthesis jobs (`cli/schedules.py`): they
     # re-scan the whole corpus, so they run less often than the cursor-driven ELN sync.
     memory_synthesis_schedule_minutes: float = Field(default=1440.0, gt=0)
     # Fraction of a Schedule's interval used as a deterministic per-job phase offset (gap
@@ -1620,8 +1620,9 @@ class SafetySettings(BaseSettings):
     and how serious a flag must be before a proposed procedure note is required to document it.
     """
 
-    # The committed, cited SMARTS rule table (`safety/screen.py`). A path, not inline rules: a
-    # process-safety chemist maintains it as data, and a deployment can point at its own table.
+    # The committed, cited SMARTS rule table (`science/safety/screen.py`). A path, not inline
+    # rules: a process-safety chemist maintains it as data, and a deployment can point at its own
+    # table.
     safety_rules_path: str = Field(
         default_factory=lambda: _shipped("science", "safety", "rules.yaml")
     )

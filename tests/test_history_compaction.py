@@ -1,4 +1,4 @@
-"""Translating a compaction result into row deletions, without splitting a pairing (D-149).
+"""Translating a compaction result into row deletions, without splitting a pairing (D-151).
 
 `plan_compaction` sits between two things that disagree: a MAF strategy that *annotates and
 inserts*, and a table that *deletes and rewrites*. These pin the three places the translation can go

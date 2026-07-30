@@ -19,7 +19,7 @@ LRU loses on restart), and `SessionTurnClaims` (which process is running a turn 
 the fact the in-process 409 guard loses at the pod boundary, D-121).
 
 **MAF's after-run compaction cannot reach this provider, so the provider does it itself** (REV-4,
-D-149). `CompactionProvider.after_run` reads `session.state[history_source_id]["messages"]` — the
+D-151). `CompactionProvider.after_run` reads `session.state[history_source_id]["messages"]` — the
 place `InMemoryHistoryProvider` keeps its thread. This provider deliberately keeps nothing there,
 which is the entire point of it, so that lookup finds nothing and the strategy returns having done
 nothing. Under `session_store="postgres"` — the production default — the `after_strategy` half of
@@ -286,7 +286,7 @@ class PostgresHistoryProvider(HistoryProvider):
             await self._compact(session_id, watermark)
 
     async def _compact(self, session_id: str, watermark: int) -> None:
-        """Apply the context compaction policy to the *stored* history (D-149).
+        """Apply the context compaction policy to the *stored* history (D-151).
 
         MAF's `CompactionProvider.after_run` cannot do this: it reads
         `session.state[source_id]["messages"]`, the slot `InMemoryHistoryProvider` writes and this

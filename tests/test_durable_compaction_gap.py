@@ -1,4 +1,4 @@
-"""What the durable-compaction fix deliberately did *not* do (REV-4, D-149).
+"""What the durable-compaction fix deliberately did *not* do (REV-4, D-151).
 
 This file used to pin an open gap. The gap is closed — `save_messages` now runs the context
 compaction strategy against the table (`chemclaw.agent.session_store._compact`) — but the two

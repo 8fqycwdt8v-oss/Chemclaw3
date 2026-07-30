@@ -15,7 +15,7 @@ what a correlation id is for: the audit trail could not separate two chemists' t
 "show me everything that happened in this conversation" returned the pod's entire history. It is
 per-turn state, so it belongs in a task-local like the actor, not on a cached object.
 
-Kept in `agents/` (not `service/`) as plain `str`/`frozenset` values so `chemclaw.agent.audit` and
+Kept in `agent/` (not `api/`) as plain `str`/`frozenset` values so `chemclaw.agent.audit` and
 `chemclaw.agent.authz` can read it without importing the front door (which would invert the
 layering).
 """

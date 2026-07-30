@@ -1,4 +1,4 @@
-# D-149 — The durable history compacts itself, because MAF's after-run compaction cannot reach it
+# D-151 — The durable history compacts itself, because MAF's after-run compaction cannot reach it
 
 **Status:** accepted · **Context:** REV-4. `chemclaw/agent/chemclaw_agent._build_compaction` passes an
 `after_strategy` whose docstring promises to "shrink the persisted history so the next turn starts

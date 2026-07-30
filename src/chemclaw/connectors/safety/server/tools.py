@@ -1,7 +1,7 @@
 """The `safety` connector's MCP tool surface: the hazard screen, one tool.
 
-The capability itself is unchanged and stays in `safety/screen.py` — the rule table, the SMARTS
-matching, the incompatibility check. This module is only what the agent sees, and it is where
+The capability itself is unchanged and stays in `science/safety/screen.py` — the rule table, the
+SMARTS matching, the incompatibility check. This module is only what the agent sees, and it is where
 the tool's *description* lives, because that description is the safety-critical part: it is the
 sentence that decides whether the model treats an empty result as "no rule matched" or as
 "safe". That wording moved here verbatim from `agents/safety_tools.py`, deliberately unedited.

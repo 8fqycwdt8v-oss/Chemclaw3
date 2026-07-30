@@ -1,6 +1,6 @@
 """The two counters that were declared and never incremented (REV-19, D-136).
 
-`chemclaw_jobs_started_total` and `chemclaw_notes_proposed_total` were in `service/metrics.py`'s
+`chemclaw_jobs_started_total` and `chemclaw_notes_proposed_total` were in `api/metrics.py`'s
 declaration table and written by nothing, so every scrape reported a flat `0`. That is worse than
 omitting them: the module's gauge path explicitly refuses to emit an unbound gauge because "a
 fabricated zero would be indistinguishable from a genuinely idle service", and these counters had

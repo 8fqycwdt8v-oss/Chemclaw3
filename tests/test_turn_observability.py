@@ -1,7 +1,7 @@
 """What the front door could not tell you about itself.
 
 The load test had to measure turn latency from the client, because the server exposed none: there
-were no histograms, `service/app.py` never called `configure_telemetry` (so `CHEMCLAW_OTEL_ENABLED`
+were no histograms, `api/app.py` never called `configure_telemetry` (so `CHEMCLAW_OTEL_ENABLED`
 was inert at the one process a chemist talks to), and every turn on a pod shared a single
 correlation id — bound once inside `build_agent`, which caches one agent per profile for the
 process's whole life. The last one is not an observability gap but an audit-trail defect: two
@@ -53,7 +53,7 @@ def test_each_turn_gets_its_own_correlation_id() -> None:
     """Two turns on one cached agent must not share a correlation id.
 
     The agent is deliberately reused across both turns, because that is exactly the production
-    shape: `service/app.py` caches one agent per profile for the pod's lifetime.
+    shape: `api/app.py` caches one agent per profile for the pod's lifetime.
     """
     agent = _SilentAgent()
     _drive(agent, "s-a")
