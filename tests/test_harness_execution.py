@@ -32,6 +32,7 @@ from agent_framework._tools import FunctionInvocationLayer
 
 from chemclaw.agent.chemclaw_agent import build_agent
 from chemclaw.agent.message_pairing import calls_without_adjacent_results
+from chemclaw.cli import chat as cli
 from chemclaw.connectors.registry import open_reachable
 from chemclaw.core.config import settings
 
@@ -283,3 +284,29 @@ def test_history_is_not_duplicated_across_model_calls(monkeypatch: pytest.Monkey
     for index, sent in enumerate(client.calls):
         occurrences = sum(1 for m in sent if "do the two-step task" in (m.text or ""))
         assert occurrences <= 1, f"model call {index} repeated the user's message {occurrences}x"
+
+
+def test_the_cli_takes_a_turn_under_the_shipped_harness_configuration(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`cli.converse` completes a turn with `harness_enabled` on — the chart's configuration.
+
+    The gap this closes is a composition, not a component (D-152, LIVE-8). Every other test in this
+    file builds its own session and passes it to `agent.run`; the CLI did not, relying on the
+    agent's implicit thread, and MAF's `ToolApprovalMiddleware` refuses a session-less run under the
+    harness. So the harness was covered, the CLI was covered, and the only untested thing was the
+    pair — which is precisely what the Helm chart deploys. It surfaced on the first live run as
+    `RuntimeError: ToolApprovalMiddleware requires an AgentSession`, before the model was reached.
+
+    Offline on purpose: the scripted client makes the *on* state of a flag testable without a
+    credential, which is the rule this whole class of defect keeps re-teaching.
+    """
+    monkeypatch.setattr(settings, "harness_enabled", True)
+    monkeypatch.setattr(settings, "harness_autonomy", "plan_only")
+    client = ScriptedChatClient([_text("aspirin's pKa is about 3.5")])
+    agent = build_agent(chat_client=client)
+
+    answer = asyncio.run(cli.converse(agent, "what is aspirin's pKa?", (), agent.create_session()))
+
+    assert "3.5" in answer
+    assert len(client.calls) == 1

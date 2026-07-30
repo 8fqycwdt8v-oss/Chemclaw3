@@ -90,6 +90,7 @@ async def run_turn(
     dry_run: bool = False,
     connectors: Sequence[Any] | None = None,
     history: Any | None = None,
+    profile: str | None = None,
 ) -> AsyncIterator[Event]:
     """Run one turn and yield its events (tokens, tool calls, approvals, then the answer).
 
@@ -115,6 +116,10 @@ async def run_turn(
         history: The session's history provider, when it stores durably. Only used to roll the
             turn's committed rows back on a client disconnect — under the in-memory provider the
             state snapshot below is the whole story, but a durable one has already written them.
+        profile: The session's agent profile, used only to label this turn's token spend
+            (REV-10) — the surface it selects is chosen by the caller, which passes the matching
+            agent and connectors. `None` labels the spend `default`, so every series carries the
+            same label set and the family sums to the deployment's whole spend.
 
     Yields:
         `chemclaw.api.events.Event` values in the order the model produced them, ending with an
@@ -351,11 +356,16 @@ async def run_turn(
         # histogram look best when the service is worst. The token counter is the same number the
         # budget guard meters, published as a rate rather than only used to refuse.
         METRICS.observe("chemclaw_turn_duration_seconds", time.perf_counter() - turn_started)
+        # Labelled by profile (REV-10): "what is this costing" is only actionable once it can be
+        # attributed, and a narrowed profile is exactly the thing a deployment adopts to spend less.
+        # `default` rather than an absent label for a session on no profile, so every series carries
+        # the same label set and the sum over the family is the deployment's whole spend.
+        spend_labels = {"profile": profile or "default"}
         if turn_usage.total:
-            METRICS.increment("chemclaw_tokens_total", float(turn_usage.total))
+            METRICS.increment("chemclaw_tokens_total", float(turn_usage.total), spend_labels)
         # Published separately from the total because they are priced separately (REV-10). Each is
         # guarded so a provider that reports none of them leaves its counter untouched rather than
-        # publishing a fabricated zero — the same rule `service.metrics` applies to gauges.
+        # publishing a fabricated zero — the same rule `api.metrics` applies to gauges.
         for name, value in (
             ("chemclaw_input_tokens_total", turn_usage.input),
             ("chemclaw_output_tokens_total", turn_usage.output),
@@ -363,7 +373,7 @@ async def run_turn(
             ("chemclaw_cache_write_tokens_total", turn_usage.cache_write),
         ):
             if value:
-                METRICS.increment(name, float(value))
+                METRICS.increment(name, float(value), spend_labels)
         end_turn(signals_token)
         reset_dry_run(dry_run_token)
         reset_current_session_id(session_token)

@@ -147,6 +147,8 @@ def test_a_provider_reporting_no_cache_counts_leaves_those_counters_alone() -> N
     assert (usage.cache_read, usage.cache_write) == (0, 0)
 
     before = METRICS.value("chemclaw_cache_read_tokens_total")
-    if usage.cache_read:  # the runner's own guard, restated
-        METRICS.increment("chemclaw_cache_read_tokens_total", float(usage.cache_read))
+    if usage.cache_read:  # the runner's own guard, restated — labels included, as it passes them
+        METRICS.increment(
+            "chemclaw_cache_read_tokens_total", float(usage.cache_read), {"profile": "default"}
+        )
     assert METRICS.value("chemclaw_cache_read_tokens_total") == before
