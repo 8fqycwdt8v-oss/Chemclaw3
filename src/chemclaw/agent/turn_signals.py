@@ -1,6 +1,6 @@
 """Side-channel for things a tool learns that the turn's event stream must surface (gaps RCH-4/5).
 
-`service/events.py` has carried `JobStartedEvent` since F2 and the chat UI has rendered it since
+`api/events.py` has carried `JobStartedEvent` since F2 and the chat UI has rendered it since
 F2-T2, but nothing ever emitted one: a tool that launches a durable job returns a job id *into the
 model's context*, and the runner — which only sees the model's streamed updates — has no way to know
 a job started. The same is true of a PR-gate proposal: `propose_note` opens a branch and returns a
@@ -16,8 +16,9 @@ able to fabricate "a job started" or "a note was proposed".
 The runner drains this after each streamed update, so signals surface in the order they happened,
 interleaved with the tokens and tool calls around them.
 
-**One sink, not one per kind.** A second mechanism (`agents/job_events.py`, carrying job ids only)
-was built independently and folded in here rather than kept beside this one: two contextvar sinks
+**One sink, not one per kind.** A second mechanism carrying job ids only (`job_events`, a
+Replit-only addition, D-091) was built independently and folded in here rather than kept beside
+this one: two contextvar sinks
 drained separately leave the *relative order* of a launched job and a proposed note undefined,
 which is precisely what a transcript must get right. Its four caller-facing names survived the
 fold as aliases and were removed in D-149 — three had never had a caller, and the fourth discarded

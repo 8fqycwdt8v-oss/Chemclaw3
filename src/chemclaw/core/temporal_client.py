@@ -1,6 +1,7 @@
 """One place to open a Temporal client, configured consistently.
 
-Both the worker (`workers/`) and the agent's job tools (`agents/`, Phase 1.5+) need a client that
+Both the workers (`durable/`, `connectors/*/worker.py`) and the agent's job tools (`agent/`) need
+a client that
 points at the configured address/namespace and uses the pydantic data converter so our models
 serialize losslessly. Extracted here so that wiring is written once, not copied per caller (DRY).
 

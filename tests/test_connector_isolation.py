@@ -7,8 +7,8 @@ invisibly.
 
 `connector.yaml`'s `params_model` names a pydantic model as `module:Class`, and
 `connectors/jobs.py` resolves it by importing that module. It does so inside `build_job_tool`,
-which `agents/chemclaw_agent.py` calls on **every** `build_agent`. The `calc` bundle pointed its
-five jobs at `workflows/models.py`, which imported `chemclaw.science.calc.complexes`,
+which `agent/chemclaw_agent.py` calls on **every** `build_agent`. The `calc` bundle pointed its
+five jobs at `connectors/calc/specs.py`, which imported `chemclaw.science.calc.complexes`,
 `chemclaw.science.calc.conformers`,
 `chemclaw.science.calc.reaction` and `chemclaw.science.calc.xtb_scan` for the *result* types that
 lived alongside the request types.
@@ -29,7 +29,7 @@ import sys
 import textwrap
 
 # Third-party closures that must arrive only through a bundle's own worker. Deliberately *not*
-# `rdkit` or `numpy`: `chemclaw/chem.py` imports rdkit for canonical SMILES, so it is core's own
+# `rdkit` or `numpy`: `core/chem.py` imports rdkit for canonical SMILES, so it is core's own
 # dependency regardless and naming it here would make the assertion a lie.
 _HEAVY = ("tblite", "bofire", "botorch", "torch")
 

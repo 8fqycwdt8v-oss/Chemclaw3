@@ -881,5 +881,5 @@ def test_nested_yield_object_is_a_mapping_error() -> None:
 
 
 # The ELN-specific adapter registry (`eln/registry.py`) was removed in DUP-1: source selection is
-# unified in `sources/registry.py` (config-driven via `data_sources`), covered by
+# unified in `ingest/sources/registry.py` (config-driven via `data_sources`), covered by
 # `tests/test_datasource_seam.py`. Both adapters are still exercised directly throughout this file.

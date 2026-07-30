@@ -31,7 +31,7 @@ gate
 the
 actor to correlate its own records, and it must never make an access decision on a header's word
 — anything reachable from outside the trust boundary would be trivially spoofable. This mirrors
-the ADR'd HPC identity bridge (`agents/identity/hpc_bridge.py`, architektur.md §7.2): the
+the ADR'd HPC identity bridge (`agent/identity/hpc_bridge.py`, architektur.md §7.2): the
 downstream runs under our service identity while the requesting user's oid travels with the
 request and is logged, so the audit trail can always answer "which real user drove this".
 """

@@ -5,7 +5,7 @@ production
 adapter, fingerprint stores, and note submitter and does all the I/O (ELN read, DB writes,
 git push); the workflow invokes it with the high-water cursor. It runs on the
 `background-jobs` queue (light, periodic work), and a Temporal Schedule drives it
-(`scripts/schedules.py`). The sync is **self-cursoring and per-source**: each active ingest
+(`cli/schedules.py`). The sync is **self-cursoring and per-source**: each active ingest
 source carries its own cursor in `sync_cursors` (keyed by the registry source name). A
 scheduled run (no `since`) loads each source's cursor, syncs from it, and stores the advanced
 value — so two ingest sources whose newest entries differ never let one skip the other's

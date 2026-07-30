@@ -6,7 +6,7 @@ metric that moved further than a *relative* noise band (`eval_drift_epsilon`, a 
 baseline value) from that baseline. Relative, not absolute, because the metrics live on
 heterogeneous scales (an `f1` in [0, 1] next to an `e_factor` near 35): one absolute band would be
 loose for the bounded metrics and hair-trigger for the large ones. All logic here is pure and
-file-based (no Temporal, no network), so it is fully unit-tested; `workflows/eval_drift.py` is the
+file-based (no Temporal, no network), so it is fully unit-tested; `durable/eval_drift.py` is the
 thin durable wrapper that schedules it.
 """
 

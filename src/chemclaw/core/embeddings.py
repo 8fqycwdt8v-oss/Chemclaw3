@@ -6,7 +6,7 @@ config
 versus the offline dev embedder is a single config change, never a code edit at a call site. Only
 this module knows how an embedding is produced; retrieval (`chemclaw.retrieval.vector_index`)
 consumes the
-vectors provider-agnostically. It lives in the shared kernel (not `agents/`) because retrieval
+vectors provider-agnostically. It lives in the shared kernel (not `agent/`) because retrieval
 infrastructure depends on it — the dependency must point report → chemclaw, never report → agents.
 
 Two providers:

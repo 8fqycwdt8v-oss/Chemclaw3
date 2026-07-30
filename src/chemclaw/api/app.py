@@ -643,7 +643,7 @@ def create_app(
         `app.state` is untyped by design in Starlette, so every direct read of it returns `Any` and
         silently disables type checking on whatever it touches. Reading it once here keeps that
         `Any` in a single place instead of leaking into each caller's return type — which is what
-        `service/` had been doing unchecked, because it was missing from `make type` (D-117).
+        this package had been doing unchecked, because it was missing from `make type` (D-117).
         """
         sessions: _LiveSessions = app.state.live_sessions
         return sessions

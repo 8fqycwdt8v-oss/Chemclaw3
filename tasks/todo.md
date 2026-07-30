@@ -41,7 +41,7 @@ hard-codes `kind="job"`, discarding the field the signal exists to carry.
 explains a `bundle`/`background` routing choice and asserts "Two members, both with a real caller",
 which is false.
 
-**4. 66 docstring pointers name directories D-148 deleted.** The restructure renamed five packages
+**4. 78 docstring pointers name directories D-148 deleted.** The restructure renamed five packages
 (`agents/`→`agent/`, `service/`→`api/`, `workflows/`+`workers/`→`durable/`, `calc/`→`science/calc/`)
 and moved modules across them. The prose that navigates a reader between modules was not carried
 along: `durable/artifact_eviction.py` opens by citing `workflows/retention.py`,
@@ -55,48 +55,79 @@ in silence.
 
 ### Stage 0 — reserve the ADR number
 
-- [ ] Add the `D-149` row to `docs/decisions/README.md`, marked `RESERVED`, in the first commit
+- [x] Add the `D-149` row to `docs/decisions/README.md`, marked `RESERVED`, in the first commit
 
 ### Stage 1 — delete the Replit deployment surface (D-149)
 
-- [ ] Delete `start.sh`, `start-temporal.sh`, `start-background-worker.sh`
-- [ ] Delete `.bin/temporal` (138 MB LFS) and the `.gitattributes` rule that exists only for it
-- [ ] Confirm no reference survives outside the append-only ADR record
+- [x] Delete `start.sh`, `start-temporal.sh`, `start-background-worker.sh`
+- [x] Delete `.bin/temporal` (138 MB LFS) and the `.gitattributes` rule that exists only for it
+- [x] Confirm no reference survives outside the append-only ADR record
 - Acceptance: `git grep` finds the scripts only in `docs/decisions/D-091-*`; `make up` and the
   README's worker commands are the only documented way to start anything.
 
 ### Stage 2 — one name per signal (`agent/turn_signals.py`)
 
-- [ ] Delete `set_job_sink`, `reset_job_sink`, `drain_started_jobs` (zero callers)
-- [ ] Delete `announce_job_started`; point its three test call sites at `record_job_started` with
+- [x] Delete `set_job_sink`, `reset_job_sink`, `drain_started_jobs` (zero callers)
+- [x] Delete `announce_job_started`; point its three test call sites at `record_job_started` with
       the `kind` the wrapper was discarding
 - Acceptance: `tests/test_runner.py` and `tests/test_service.py` pin the same behaviour, and the
   module exposes exactly one name per operation.
 
 ### Stage 3 — drop the unbuilt queue-routing seam (`connectors/queues.py`)
 
-- [ ] Delete `task_queue_for` and `JobRuntime`
-- [ ] Rewrite the module docstring to describe the seam that exists (one queue per bundle, derived
+- [x] Delete `task_queue_for` and `JobRuntime`
+- [x] Rewrite the module docstring to describe the seam that exists (one queue per bundle, derived
       from the bundle name) rather than the routing choice that does not
 - Acceptance: `bundle_queue` is the module's whole surface, and the docstring's claims are
   checkable against it.
 
-### Stage 4 — repair the 66 dangling docstring pointers, and guard them (D-149)
+### Stage 4 — repair the 78 dangling docstring pointers, and guard them (D-149)
 
-- [ ] Rewrite every backticked module pointer in `src/` and `tests/` to its post-D-148 location.
+- [x] Rewrite every backticked module pointer in `src/` and `tests/` to its post-D-148 location.
       Past-tense provenance sentences name the current file rather than being deleted — the old
       name stays in the ADR record, which is where history belongs.
-- [ ] Add `tests/test_docstring_paths.py`: every backticked `<pkg>/<…>.py` in `src/` or `tests/`
+- [x] Add `tests/test_docstring_paths.py`: every backticked `<pkg>/<…>.py` in `src/` or `tests/`
       must resolve to a file that exists, under `src/chemclaw/`, `tests/`, or the repository root
 - Acceptance: the new test fails on the tree as it stands today and passes after the rewrite —
   demonstrated, not asserted.
 
 ### Stage 5 — record and verify
 
-- [ ] Write `docs/decisions/D-149-*.md`; swap the `RESERVED` marker for the real title and link
-- [ ] `make lint type test` green
-- [ ] CHECKMATE G1–G7
+- [x] Write `docs/decisions/D-149-*.md`; swap the `RESERVED` marker for the real title and link
+- [x] `make lint type test` green
+- [x] CHECKMATE G1–G7
 
 ## Review
 
-_(filled in at the end)_
+**What shipped**, in five commits on `claude/codebase-cleanup-y7osy3`: 138 MB of Git-LFS binary and
+three shell scripts belonging to a deployment target that no longer exists; four alias functions a
+merge left behind; a two-symbol routing seam that was documented but never built; and 78 docstring
+pointers repaired and pinned by a new test. `docs/decisions/D-149-*.md` has the reasoning.
+
+**The bar was "is this residue, or is it merely old?"** Every deletion here is something whose
+*reason to exist* is gone — a Replit runner with no Replit, a compatibility alias with nothing to be
+compatible with, a `runtime:` switch no manifest ever set. Nothing was removed for being
+unfashionable and nothing working was restructured, which is why the survey table above is in the
+plan at all: when the scans come back at zero, the honest output is a short change, not a long one.
+
+**The one piece worth more than the deletions.** Stage 4's real output is not the 78 repaired
+pointers — it is `tests/test_docstring_paths.py`. Those pointers were correct when written and
+rotted in a rename that touched none of them; repairing them without a guard buys one clean tree and
+the identical rot at the next restructure. The test was confirmed to fail on the pre-repair tree (51
+failing files) before it was made to pass, and it asserts its own corpus is non-empty — the failure
+mode D-148's post-mortem named, where a rename leaves a test iterating nothing and reporting green.
+
+**One finding deliberately left open, not silently closed.** Deleting the dead half of
+`connectors/queues.py` exposed a live gap it was hiding: every `connector.yaml` declares a
+`task_queue` that must equal `bundle_queue(connector)`, all eight agree, and nothing checks it.
+Closing it means choosing whether a connector job may ever run on core's worker — a capability
+decision, not a cleanup — so it went to `docs/planning/BACKLOG.md` with both options and a trigger
+rather than being settled here by side effect.
+
+**Also considered, and not done.** `docs/planning/` holds five completed build plans
+(`backlog-plan`, `connector-plan`, `foundation-plan`, `gap-closure-plan`, `parity-plan`) that read
+as archive material, but `docs/README.md` declares that directory maintained *including* the build
+plans — moving them is a documentation-policy change and belongs in its own request. The bare
+`calc/…` pointers inside `science/calc/` were rewritten like every other rather than tolerated as
+sibling-relative shorthand: two spellings of one path is exactly the ambiguity the guard exists to
+remove.

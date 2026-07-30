@@ -571,7 +571,7 @@ def _build_compaction(history_source_id: str) -> CompactionProvider:
     `session.state[history_source_id]["messages"]`, which is where `InMemoryHistoryProvider` keeps
     it and where `PostgresHistoryProvider` deliberately keeps nothing. Under the production default
     it finds no messages and returns, so the persisted history is never trimmed and every turn
-    re-reads all of it. `agents/session_store.py` documents the whole shape, including why the
+    re-reads all of it. `agent/session_store.py` documents the whole shape, including why the
     obvious fix — a `LIMIT` on the load — would corrupt stored tool-call pairings.
 
     It is still wired for both, because the `before_run` half is what actually bounds the model

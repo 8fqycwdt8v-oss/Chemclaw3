@@ -11,7 +11,7 @@ seam, exactly as the eval-drift job does (D-069): the alert is this workflow's o
 output, so a dropped delivery would defeat the feature. A silently un-delivered "your audit trail
 has been tampered with" is worse than no check at all, because it reads as an all-clear.
 
-No new verification logic: the workflow is the missing *driver*, and `scripts/verify_audit_chain.py`
+No new verification logic: the workflow is the missing *driver*, and `cli/verify_audit_chain.py`
 remains the single implementation shared by the CLI and this job (DRY).
 """
 

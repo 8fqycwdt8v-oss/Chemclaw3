@@ -5,7 +5,7 @@
 `build_agent`, in the chat service's own process, and again in `make connector-validate`. So
 whatever this module imports, the chat service imports too.
 
-They used to live in `workflows/models.py`, which imports `chemclaw.science.calc.complexes`,
+They used to live in `connectors/calc/specs.py`, which imports `chemclaw.science.calc.complexes`,
 `chemclaw.science.calc.conformers`,
 `chemclaw.science.calc.reaction` and `chemclaw.science.calc.xtb_scan` for the *result* types
 alongside them. Measured on `main`,
@@ -16,7 +16,7 @@ carried a compiled QM library it never called.
 
 So the split here is not stylistic. Requests live in this module and import pydantic and config
 only; results live in `connectors/calc/results.py`, which is free to import the heavy `calc.*`
-types because only this bundle's own worker ever imports it. `scripts/validate_connectors.py`
+types because only this bundle's own worker ever imports it. `cli/validate_connectors.py`
 enforces the boundary rather than trusting it, and `tests/test_connector_isolation.py` asserts it
 in a fresh interpreter (D-118).
 """

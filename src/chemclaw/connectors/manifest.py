@@ -1,7 +1,7 @@
 """The connector manifest: one validated contract for everything a capability contributes.
 
 Why this exists: before connectors, a capability was added in one of four unrelated places — a
-`@tool` function in `agents/`, a `settings.mcp_servers` entry, a bespoke Temporal adapter plus a
+`@tool` function in `agent/`, a `settings.mcp_servers` entry, a bespoke Temporal adapter plus a
 hand-maintained worker list, and a `SKILL.md` folder — three of which are Python edits to
 orchestration code. A capability was a concept the codebase could not name. A `connector.yaml`
 names it: one folder declares the tools it serves, the durable jobs it can run, the skills that
@@ -31,7 +31,7 @@ tool stay in core by rule, and each is a rule rather than a backlog item:
 
 Two shapes vary by kind and are therefore discriminated unions: the transport a connector is
 reached over, and how we authenticate to it. They are unions *here*, in the manifest, rather than
-in `chemclaw/config.py` — which is the whole point, and is now the rule rather than this
+in `core/config.py` — which is the whole point, and is now the rule rather than this
 file's preference: config says which attached things exist and where, a manifest says what
 each one is
 (D-118, D-120). The two config-side unions this docstring used to cite as precedent,

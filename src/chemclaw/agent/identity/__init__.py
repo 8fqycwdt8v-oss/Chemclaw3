@@ -8,6 +8,6 @@ identity without a stored client secret:
 - `hpc_bridge` — maps an Entra `oid` to the HPC/Nextflow service identity, logging every mapping
   (F4-T6), since HPC is one of the two non-Entra transports (§7.2).
 
-The generic LLM credential (`agents/llm_provider.py`) is the one documented exception and uses
+The generic LLM credential (`agent/llm_provider.py`) is the one documented exception and uses
 none of these.
 """

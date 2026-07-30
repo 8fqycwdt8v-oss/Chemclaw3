@@ -196,7 +196,7 @@ def test_a_postgres_deployment_gets_the_durable_trail_without_asking(
 
     The regression test for the pass's highest-ranked finding. `PostgresAuditSink`, the
     tamper-evident chain, `infra/sql/011` and `make audit-verify` were all built and tested, and
-    the sink was constructed in exactly one place — `agents/cli.py`, behind a flag. The deployed
+    the sink was constructed in exactly one place — `cli/chat.py`, behind a flag. The deployed
     service passed no sink, so the middleware installed `NullAuditSink()` and `audit_events` was
     empty in production while every document called it the compliance record.
 

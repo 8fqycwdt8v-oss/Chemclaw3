@@ -19,7 +19,7 @@ from temporalio import workflow
 # offline, where no Temporal test server is available).
 #
 # Passing them through is the established pattern here, not a workaround: every production workflow
-# module already wraps its `chemclaw.config` import exactly this way (`workflows/orchestrator.py`,
+# module already wraps its `chemclaw.config` import exactly this way (`durable/orchestrator.py`,
 # `audit_verify.py`, `digest.py`, …). None of this is workflow code — it is settings plus the test
 # harness — so none of it needs the sandbox's determinism checks.
 with workflow.unsafe.imports_passed_through():

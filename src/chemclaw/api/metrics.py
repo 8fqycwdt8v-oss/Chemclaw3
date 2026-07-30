@@ -22,7 +22,7 @@ protocol, and this module is the only place that knows it.
 Metrics are process-wide (one registry per pod), because that is the scope a scrape targets.
 
 This module used to say histograms belonged in the OTel trace pipeline rather than here. That was
-wrong twice over: `service/app.py` never called `configure_telemetry`, so `CHEMCLAW_OTEL_ENABLED`
+wrong twice over: `api/app.py` never called `configure_telemetry`, so `CHEMCLAW_OTEL_ENABLED`
 did nothing at the front door and there was no latency signal at all; and traces are sampled and
 per-request, so they cannot answer "what is p95 right now" for an alert or an autoscaler. A load
 test had to derive turn latency from the client side because the server exposed none. So there are

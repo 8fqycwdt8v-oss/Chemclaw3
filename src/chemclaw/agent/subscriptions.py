@@ -5,7 +5,7 @@ identity and fingerprint search — every ingredient for *push* — and used non
 chemist learned about a relevant new experiment only by asking again at the right moment, which
 means the useful ones were found by luck.
 
-A subscription is a saved query plus a watermark. The digest job (`workflows/digest.py`) re-runs
+A subscription is a saved query plus a watermark. The digest job (`durable/digest.py`) re-runs
 each one on a cadence and reports only what has appeared since that subscriber was last told, so a
 digest stays a digest rather than becoming a daily re-send of the whole corpus.
 
