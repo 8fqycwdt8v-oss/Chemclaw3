@@ -1,6 +1,6 @@
 """Artifact eviction reclaims by cost, and never touches an answer (STO-6).
 
-`workflows/retention.py` prunes by age and explicitly refuses `calculation_results`, because
+`durable/retention.py` prunes by age and explicitly refuses `calculation_results`, because
 evicting a cached result silently turns a cache hit into a recomputation (D-011) — a cost question,
 not a retention clock. That refusal is only *survivable* because something else bounds the growth
 D-124 introduced, and this job is that something else: it reclaims **blobs**, whose loss costs at
@@ -22,7 +22,7 @@ _STATEMENTS = (_EVICT_IDLE, _EVICT_TO_FIT)
 def test_nothing_this_job_deletes_is_a_calculation_result() -> None:
     """The load-bearing property, asserted against the SQL itself.
 
-    D-011 ("never compute twice") and `workflows/retention.py`'s standing refusal to prune the
+    D-011 ("never compute twice") and `durable/retention.py`'s standing refusal to prune the
     calculation cache both remain literally true *only* because eviction targets blobs alone. A
     statement that reached `calculation_results` would quietly convert a cache hit into an HPC run
     and make two written decisions false at once.

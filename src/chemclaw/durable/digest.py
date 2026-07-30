@@ -1,6 +1,6 @@
 """Deliver standing-query digests (gap IDEA-1).
 
-`agents/subscriptions.py` stores what each chemist asked to be told about; this is the job that
+`agent/subscriptions.py` stores what each chemist asked to be told about; this is the job that
 tells them. It re-runs each saved query on a cadence and pushes only what has appeared since that
 subscriber was last told, through the *existing* session push-back channel (F3-T3) — no new
 delivery mechanism, no email integration, no second notification system.

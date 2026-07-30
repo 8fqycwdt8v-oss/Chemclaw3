@@ -83,10 +83,10 @@ class DegradingHttpConnector(_DegradeOnConnectFailure, MCPStreamableHTTPTool):
 
     It also closes the `httpx.AsyncClient` it was handed, which nothing else does. Ownership of a
     caller-supplied client is explicitly *not* taken by either layer below: the MCP library enters
-    its client into an exit stack only when it created the client itself
-    (`mcp/client/streamable_http.py` — `client_provided = http_client is not None`), and MAF's
-    `close()` tears down the exit stack without touching `self._httpx_client`. Since a connector
-    tool is built fresh per turn (`chemclaw.connectors.registry.connector_tools`), that left one
+    its client into an exit stack only when it created the client itself (the SDK's
+    `mcp.client.streamable_http` — `client_provided = http_client is not None`), and MAF's `close()`
+    tears down the exit stack without touching `self._httpx_client`. Since a connector tool is built
+    fresh per turn (`chemclaw.connectors.registry.connector_tools`), that left one
     abandoned
     client with a live connection pool per connector per turn — six per turn, reclaimed only
     whenever the garbage collector got to them. This is the same leak class D-119 fixed for

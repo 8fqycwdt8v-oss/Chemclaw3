@@ -8,7 +8,7 @@ queue read from a manifest. So this runs the two workers a deployment runs:
 - a **core** worker on the background queue hosting `ConnectorJobWorkflow` and the real PR-gate and
   push-back activities;
 - a **connector** worker on the bundle's own queue hosting only the bundle's own workflow
-  (`tests/fixtures/connectors/fixture/chemclaw.durable.py`), which imports nothing from the wrapper.
+  (`tests/fixtures/connectors/fixture/workflows.py`), which imports nothing from the wrapper.
 
 The generated tool from the fixture manifest launches it, and the assertions are about what core
 did on the connector's behalf: the envelope came back intact, the note went through the PR-gate

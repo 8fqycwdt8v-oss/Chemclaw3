@@ -6,7 +6,7 @@ on somebody else's service — an address in first-party code, a network call on
 an availability and licensing question the deployment cannot answer. What it was never meant to
 rule out is knowing things.
 
-The gap that leaves is concrete. `chemclaw/reagents.py` is a hand-maintained name→SMILES table, and
+The gap that leaves is concrete. `core/reagents.py` is a hand-maintained name→SMILES table, and
 it is the ceiling on `resolve_compound`: a molecule nobody typed into that file does not resolve, so
 a chemist naming an ordinary reagent gets nothing back. Every fix for that is a dataset.
 

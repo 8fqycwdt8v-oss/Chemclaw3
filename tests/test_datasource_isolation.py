@@ -5,10 +5,10 @@ why both exist rather than one generic check: a connector's heavy closure is *co
 `bofire`), a data source's is a **driver** — a database client or vendor SDK. The connector seam
 leaks through one YAML field; this one leaked through the registry's shape.
 
-`sources/registry.py` used to hold `DATA_SOURCES: dict[str, Callable[[], DataSource]]`, mapping a
-name to a lambda that constructed its adapter. Every one of those lambdas named a class, so the
-module imported every adapter at module scope — and the two consumers want *disjoint* halves. The
-durable ELN sync worker, asking only which sources it must ingest (`['eln-json']`, two strings),
+`ingest/sources/registry.py` used to hold `DATA_SOURCES: dict[str, Callable[[], DataSource]]`,
+mapping a name to a lambda that constructed its adapter. Every one of those lambdas named a class,
+so the module imported every adapter at module scope — and the two consumers want *disjoint* halves.
+The durable ELN sync worker, asking only which sources it must ingest (`['eln-json']`, two strings),
 loaded 836 modules including `rdkit`, `drfp`, `numpy` and `psycopg`, none of which it uses. The
 retrieve half of a source it was not touching came along because the dict could not express that
 the half existed without also naming what built it.
@@ -30,7 +30,7 @@ import textwrap
 from typing import TypedDict
 
 # Closures a *retrieve* half brings that an ingest-only worker has no use for. `rdkit` and `numpy`
-# are deliberately absent: `chemclaw/chem.py` imports rdkit for canonical SMILES, so a worker may
+# are deliberately absent: `core/chem.py` imports rdkit for canonical SMILES, so a worker may
 # hold it for reasons that have nothing to do with this seam, and asserting on it would make the
 # test a lie the day some unrelated core import changes.
 _RETRIEVE_ONLY_CLOSURE = ("drfp", "psycopg")
@@ -87,6 +87,6 @@ def test_asking_which_sources_to_ingest_imports_no_adapter_at_all() -> None:
     assert result["third_party"] == [], result
     # `report.retrievers` is the retrieve-side closure (it pulls rdkit, drfp and the note index).
     # An ingest-only worker must never reach it. `report.evidence` is the shared DTO module that
-    # `sources/base.py` imports for the contract itself, so it is expected and harmless.
+    # `ingest/sources/base.py` imports for the contract itself, so it is expected and harmless.
     assert "chemclaw.retrieval.retrievers" not in result["report_modules"], result
     assert "chemclaw.retrieval.vector_index" not in result["report_modules"], result

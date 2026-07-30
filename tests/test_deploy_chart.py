@@ -8,7 +8,8 @@ this suite is the offline half that runs everywhere and catches the failure mode
 - an unbalanced `{{ if }}` / `{{ end }}`,
 - a `CHEMCLAW_COMPONENT` the entrypoint has no case for (guaranteed crash loop),
 - an image missing a directory the running components read at import/run time — which is how
-  `skills/`, `scripts/` and `evals/` came to be absent from the image while every test passed.
+  the skills, the terminal entrypoints and the eval case-set all came to be absent from the
+  image while every test passed.
 
 None of these are visible to `mypy`/`pytest` on the Python tree, and all of them break a deployment
 silently rather than loudly, which is why they earn a test of their own.
@@ -194,7 +195,7 @@ def test_image_installs_git() -> None:
 def test_the_image_carries_the_revision_it_was_built_from() -> None:
     """`deployment_revision` must be settable by a build, or AG-14 reads as met while being unmet.
 
-    `chemclaw/config.py` has always said the F6 image build injects the revision, and until REV-17
+    `core/config.py` has always said the F6 image build injects the revision, and until REV-17
     no build did: nothing in the Containerfile, the chart or CI set `CHEMCLAW_DEPLOYMENT_REVISION`,
     so every audit record in every deployment carried the literal `"unknown"`. The whole point of
     the field is tying a past agent result to the exact prompt/skill/config version that produced

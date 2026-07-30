@@ -1,6 +1,6 @@
 """Bounded growth for the artifact store, ordered by what a blob is worth (STO-6).
 
-`workflows/retention.py` prunes by age and explicitly refuses to touch `calculation_results`,
+`durable/retention.py` prunes by age and explicitly refuses to touch `calculation_results`,
 because D-011 ("never compute twice") is a correctness and cost guarantee and an age cutoff is the
 wrong instrument for a cache. That refusal stands and this job does not weaken it: **nothing here
 deletes a result.** It reclaims *blobs* — the by-products in `artifact_blobs` — and a reclaimed

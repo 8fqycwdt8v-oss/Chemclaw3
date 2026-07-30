@@ -15,7 +15,7 @@ scores a conversational answer's *faithfulness* to its evidence and returns an a
   off-path behavior is exactly the report gate the repo already trusts (DRY, one citation check).
 
 Confidence *routing* (stamping a low-confidence answer so a surface can flag it for review) lives in
-`service/runner.py`; this module only scores. The durable human hold (D-032) is deferred — see
+`api/runner.py`; this module only scores. The durable human hold (D-032) is deferred — see
 docs/planning/DEFERRED.md — so today a low-confidence answer is marked, not blocked.
 """
 

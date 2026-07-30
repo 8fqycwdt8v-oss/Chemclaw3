@@ -13,7 +13,7 @@ from agent_framework import AgentSession
 
 import chemclaw.api.runner as runner
 from chemclaw.agent.harness_todo import complete_awaiting_job, mark_awaiting_job
-from chemclaw.agent.turn_signals import announce_job_started
+from chemclaw.agent.turn_signals import record_job_started
 from chemclaw.agent.verifier import ClaimCheck, VerificationResult
 from chemclaw.api.events import AnswerEvent, JobStartedEvent, PlanEvent
 from chemclaw.core.config import settings
@@ -140,11 +140,11 @@ class _JobLaunchingAgent:
         async def _gen() -> Any:
             if not self._on_last:
                 for job_id in self._job_ids:
-                    announce_job_started(job_id)
+                    record_job_started(job_id, "report")
             yield _Update(text="submitting. ")
             if self._on_last:
                 for job_id in self._job_ids:
-                    announce_job_started(job_id)
+                    record_job_started(job_id, "report")
             yield _Update(text="done.")
 
         return _gen()

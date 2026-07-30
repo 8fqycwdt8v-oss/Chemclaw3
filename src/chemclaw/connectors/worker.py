@@ -2,8 +2,8 @@
 
 Written once now that there is a second caller, which is the condition `connectors/bo/worker.py`
 named as the trigger for looking again: *"there is one connector worker today … the second
-connector worker is when to look at it again."* `calc` is that second one, and `bo/worker.py` and
-`calc/worker.py` had already become near-copies.
+connector worker is when to look at it again."* `calc` is that second one, and
+`connectors/bo/worker.py` and `connectors/calc/worker.py` had already become near-copies.
 
 What made a shared version pointless before was that the *body* of each worker was its two
 hand-maintained lists — `_WORKFLOWS` and `_ACTIVITIES` — so there was nothing to share but the

@@ -18,7 +18,7 @@ Layout:
 - `health.py` — the startup reachability probe behind `/readyz` and the unhealthy gauge.
 - `server.py` — the connector *side*: a FastMCP capability as the FastAPI app a bundle serves.
 
-The durable half lives in `workflows/connector_job.py`: core's `ConnectorJobWorkflow` keeps
+The durable half lives in `durable/connector_job.py`: core's `ConnectorJobWorkflow` keeps
 idempotency, actor attribution, the PR-gate and session push-back, while the connector owns the
 workflow it wraps. Design and staging: `docs/planning/connector-plan.md`.
 """

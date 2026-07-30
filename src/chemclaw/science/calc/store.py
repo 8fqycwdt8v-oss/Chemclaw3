@@ -76,7 +76,7 @@ class StoredResult(BaseModel):
     provenance: str = "computed"
     # Wall time the calculation took on the miss that produced it, or None for a result that
     # arrived some other way (a measured value, a backfill). This is the cost policy
-    # `workflows/retention.py` says a cache needs and refuses to fake with an age cutoff: it is
+    # `durable/retention.py` says a cache needs and refuses to fake with an age cutoff: it is
     # what an artifact eviction orders by, and what tells an operator what the cache is worth.
     compute_seconds: float | None = None
 

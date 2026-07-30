@@ -3,7 +3,7 @@
 `build_chat_client` selects the agent's MAF chat client from config (`settings.llm_provider`), so
 pointing Chemclaw at the internal OpenAI-compatible ("OpenLLM-like") endpoint versus the Anthropic
 dev path is a single config change, never a code edit at a call site (KISS/DRY, mirroring the ELN
-adapter registry). Provider client classes are imported **only here** — `agents/chemclaw_agent.py`
+adapter registry). Provider client classes are imported **only here** — `agent/chemclaw_agent.py`
 calls this factory and stays provider-agnostic.
 
 The internal endpoint is reached with **one generic API credential** (`settings.llm_api_key`),

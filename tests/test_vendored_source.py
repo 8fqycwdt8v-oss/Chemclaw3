@@ -59,7 +59,7 @@ def test_the_shipped_dataset_loads_and_matches_its_own_checksum() -> None:
 
 
 def test_the_shipped_dataset_covers_names_the_hand_maintained_table_does_not() -> None:
-    """The point of vendoring at all: `chemclaw/reagents.py` is the ceiling this raises.
+    """The point of vendoring at all: `core/reagents.py` is the ceiling this raises.
 
     Asserted against the real resolver rather than by counting rows — "more entries" is not the
     claim, "names that previously resolved to nothing" is.

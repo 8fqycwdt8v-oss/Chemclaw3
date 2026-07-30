@@ -218,7 +218,7 @@ def test_a_launched_job_reaches_the_browser_as_an_sse_event() -> None:
     The end-to-end half of D-042: without it the chemist saw nothing between their message and
     the answer, with the first sign of the job arriving only as the completion push-back.
     """
-    from chemclaw.agent.turn_signals import announce_job_started
+    from chemclaw.agent.turn_signals import record_job_started
 
     class _JobAgent(_FakeAgent):
         def run(  # noqa: D102 - a fake agent's run, documented by its class
@@ -230,7 +230,7 @@ def test_a_launched_job_reaches_the_browser_as_an_sse_event() -> None:
             **_run_options: Any,
         ) -> object:
             async def _gen() -> object:
-                announce_job_started("qm-sse")
+                record_job_started("qm-sse", "report")
                 yield _Update(text="submitted")
 
             return _gen()

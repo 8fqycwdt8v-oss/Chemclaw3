@@ -7,7 +7,7 @@ score-agnostic, a stale entry ranks confidently *alongside* live graph hits with
 signal. That is worse than the legs being absent.
 
 This is the missing driver: one activity wrapping the existing `reindex_notes` (no new logic, no new
-store), one workflow on `background-jobs`, and one Temporal Schedule (`scripts/schedules.py`).
+store), one workflow on `background-jobs`, and one Temporal Schedule (`cli/schedules.py`).
 Reindexing is idempotent by upsert, so re-running is always safe and the Schedule needs no cursor.
 
 The index is *derived* — Git-Markdown stays the source of truth (D-004) — so a failed run degrades

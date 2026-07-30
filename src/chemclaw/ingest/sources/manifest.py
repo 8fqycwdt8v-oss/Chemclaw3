@@ -7,7 +7,7 @@ deserve different manifests and similar enough that a second idiom would be inde
 file mirrors that one deliberately: a folder plus a YAML file, `extra="forbid"`, discovered from
 disk, enabled by a config token.
 
-**Why a manifest replaced a dict of factories.** `sources/registry.py` used to hold
+**Why a manifest replaced a dict of factories.** `ingest/sources/registry.py` used to hold
 `DATA_SOURCES: dict[str, Callable[[], DataSource]]`, so every source's adapter was constructed by
 a lambda in that module — which meant the module imported every adapter at module scope. Asking
 for the *retrieve* sources, which under the default config yields exactly one source (`graph`),

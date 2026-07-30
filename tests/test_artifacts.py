@@ -152,7 +152,7 @@ def test_ref_as_str_addresses_one_artifact_of_one_calculation() -> None:
 
 
 def test_cached_compute_records_what_a_miss_cost() -> None:
-    """The cost policy `workflows/retention.py` asked for: a miss is timed, a hit keeps the time."""
+    """The cost policy `durable/retention.py` asked for: a miss is timed, a hit keeps the time."""
 
     async def _run() -> None:
         store = InMemoryStore()

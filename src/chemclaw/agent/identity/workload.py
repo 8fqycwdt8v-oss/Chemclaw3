@@ -7,7 +7,7 @@ access token via the OAuth2 *client-credentials* grant with a `client_assertion`
 so no secret is ever at rest (§7, ADR D-A4). This module is that exchange, with a per-scope cache
 so a token is reused until shortly before it expires.
 
-The generic LLM credential (`agents/llm_provider.py`) is the one documented exception and does not
+The generic LLM credential (`agent/llm_provider.py`) is the one documented exception and does not
 go through here.
 """
 
