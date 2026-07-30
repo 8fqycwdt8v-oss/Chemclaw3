@@ -157,10 +157,14 @@ class JobSpec(BaseModel):
     """A durable capability: one generated agent tool that starts one connector-owned workflow.
 
     The connector owns the workflow *code* and the worker that serves it; this spec is how core
-    reaches it without importing it. `workflow` is a Temporal workflow **type name** (a string)
-    and `task_queue` is where its worker polls, so core has no build-time dependency on the
-    connector at all — and moving a workflow from core's worker to the connector's own is a
-    one-line change here (`docs/planning/connector-plan.md` §5.3).
+    reaches it without importing it. `workflow` is a Temporal workflow **type name** — a string,
+    so core has no build-time dependency on the connector at all.
+
+    **The queue is not declared here.** It is `bundle_queue(connector)`, derived at dispatch, for
+    the reason D-150 gives: a bundle's worker serves what the bundle's own modules registered at
+    import time, so `connector-<name>` is the only queue on which this workflow type exists. A
+    declared queue could therefore hold exactly one correct value and any number of wrong ones,
+    each of which starts a job successfully and then leaves it in a queue nobody polls.
 
     `expensive` marks the job for the coarse `authorize_trigger` gate (a costly HPC/BO run must
     be entitled, not merely authenticated). `publish_to_graph` lets core PR-gate a `Note` the
@@ -175,7 +179,6 @@ class JobSpec(BaseModel):
     # string).
     name: str = Field(min_length=1, pattern=r"^[a-z][a-z0-9_]*$")
     workflow: str = Field(min_length=1)
-    task_queue: str = Field(min_length=1)
     # The first line of the generated tool's docstring — what the model reads when deciding to
     # call it. `description` carries the rest (when to use it, what the id is for, idempotency).
     summary: str = Field(min_length=1)
