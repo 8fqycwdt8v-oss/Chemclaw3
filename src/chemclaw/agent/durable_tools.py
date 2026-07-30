@@ -175,7 +175,25 @@ async def get_durable_job_status(job_id: str) -> DurableJobStatus:
     status = _TERMINAL.get(description.status, "running") if description.status else "running"
     if status != "completed":
         return DurableJobStatus(job_id=job_id, status=status)
-    raw = await handle.result()
+    return completed_job_status(job_id, await handle.result())
+
+
+def completed_job_status(job_id: str, raw: Any) -> DurableJobStatus:
+    """Decode a finished durable job's raw result into the status this system reports.
+
+    Extracted so that "a finished job's result is collected in exactly one place" — which this
+    module's docstring claims and which D-118 made true — survives having a second waiter. The
+    other caller is `chemclaw.agent.job_results`, the mid-turn resume: it waits on the workflow
+    handle rather than polling a status, but what it must do with the answer is identical, and a
+    second copy of this decode is how the two would come to disagree about what "completed" means.
+
+    Args:
+        job_id: The job the result belongs to, for the status and for the error message.
+        raw: Whatever the workflow returned, undecoded.
+
+    Raises:
+        ValueError: When the result is not the connector envelope.
+    """
     try:
         envelope = ConnectorJobResult.model_validate(raw)
     except ValidationError as exc:
@@ -189,7 +207,7 @@ async def get_durable_job_status(job_id: str) -> DurableJobStatus:
             "the id does not belong to a job any launcher in this system started"
         ) from exc
     return DurableJobStatus(
-        job_id=job_id, status=status, summary=envelope.summary, result=envelope.data
+        job_id=job_id, status="completed", summary=envelope.summary, result=envelope.data
     )
 
 
