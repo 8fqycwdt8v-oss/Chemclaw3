@@ -217,21 +217,25 @@ class Metrics:
     ) -> None:
         """Add to a declared counter. An undeclared name or label is a programming error, so raises.
 
-        `labels` is accepted only for a counter that declares them in `_COUNTER_LABELS`, and only
-        with names it declares — a typo is otherwise a second silent time series that no dashboard
-        queries.
+        The declaration is binding **in both directions**: a counter in `_COUNTER_LABELS` must be
+        incremented *with* its labels, and one absent from it must be incremented *without* any.
+        One rule rather than two, and it removes the case that has no good answer — a bare sample
+        beside labelled ones, which a scraper reads as a further series rather than as their total,
+        so the counter would silently double-count under any `sum()`.
         """
         if name not in _COUNTERS:
             raise KeyError(f"undeclared counter {name!r}")
-        if not labels:
+        given = dict(labels or {})
+        declared = _COUNTER_LABELS.get(name, ())
+        if set(given) != set(declared):
+            raise KeyError(
+                f"counter {name!r} takes label(s) {sorted(declared)}, got {sorted(given)}"
+            )
+        if not declared:
             with self._lock:
                 self._counts[name] += amount
             return
-        declared = _COUNTER_LABELS.get(name, ())
-        undeclared = sorted(set(labels) - set(declared))
-        if undeclared:
-            raise KeyError(f"counter {name!r} does not declare label(s) {undeclared}")
-        key = tuple(sorted((label, str(value)) for label, value in labels.items()))
+        key = tuple(sorted((label, str(value)) for label, value in given.items()))
         with self._lock:
             series = self._series.setdefault(name, {})
             if key not in series and len(series) >= _MAX_SERIES_PER_COUNTER:
@@ -292,16 +296,14 @@ class Metrics:
         lines: list[str] = []
         for name, help_text in _COUNTERS.items():
             lines += [f"# HELP {name} {help_text}", f"# TYPE {name} counter"]
-            labelled = series.get(name, {})
             if name not in _COUNTER_LABELS:
                 lines.append(f"{name} {counts[name]:g}")
                 continue
-            # A labelled counter emits one line per observed series and *no* bare line: a bare
-            # line beside labelled ones reads as a separate series rather than as their total,
-            # and a counter nothing has observed yet is genuinely absent, not zero.
-            if counts[name]:
-                lines.append(f"{name} {counts[name]:g}")
-            for key, total in sorted(labelled.items()):
+            # A labelled counter emits one line per observed series and never a bare one — the
+            # bare sample cannot exist, because `increment` requires the declared labels. A
+            # counter nothing has observed yet is therefore genuinely absent rather than zero,
+            # which is the Prometheus convention and this module's own rule for gauges.
+            for key, total in sorted(series.get(name, {}).items()):
                 rendered = ",".join(f'{label}="{_escape(value)}"' for label, value in key)
                 lines.append(f"{name}{{{rendered}}} {total:g}")
         for name, help_text in _GAUGES.items():

@@ -28,11 +28,18 @@ Two gaps recorded rather than closed, because both are upstream:
 
 ### Labels are declared, not free-form
 
-`_COUNTER_LABELS` names each labelled counter's permitted label names; an undeclared label raises a
-`KeyError` exactly as an undeclared *metric* already does. The reason is not tidiness: a label
-typo's failure mode is not a crash but a **second, silent time series** that no dashboard queries
-and nobody notices, which is worse than the metric being absent. A counter missing from the map is
-unlabelled and behaves exactly as before — pre-seeded to zero, rendered as one bare line.
+`_COUNTER_LABELS` names each labelled counter's label names; an undeclared label raises a `KeyError`
+exactly as an undeclared *metric* already does. The reason is not tidiness: a label typo's failure
+mode is not a crash but a **second, silent time series** that no dashboard queries and nobody
+notices, which is worse than the metric being absent. A counter missing from the map is unlabelled
+and behaves exactly as before — pre-seeded to zero, rendered as one bare line.
+
+**The declaration binds in both directions**: a counter that declares labels must be incremented
+*with* them, and one that declares none must be incremented *without* any. The first draft allowed
+a bare increment on a labelled counter and rendered around it, and that has no good answer — a bare
+sample beside labelled ones is read by a scraper as a *further* series rather than as their total,
+so any `sum()` over the counter double-counts. Refusing the call removes both the ambiguity and the
+rendering branch that tried to paper over it, and leaves one rule instead of two.
 
 Labelled series are **not** pre-seeded; a series appears on first observation. That is both
 Prometheus convention and this repo's own REV-19 rule against publishing a fabricated zero.

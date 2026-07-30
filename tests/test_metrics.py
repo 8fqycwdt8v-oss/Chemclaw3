@@ -150,6 +150,19 @@ def test_an_undeclared_label_is_refused() -> None:
         metrics.increment("chemclaw_turns_started_total", 1.0, {"profile": "undeclared-here"})
 
 
+def test_a_labelled_counter_cannot_be_incremented_bare() -> None:
+    """The declaration binds both ways: declared labels are required, not merely permitted.
+
+    Without this, a bare sample could land beside the labelled ones — and a scraper reads that as
+    a *further* series, not as their total, so any `sum()` over the counter double-counts. Making
+    it impossible is cheaper than rendering around it.
+    """
+    metrics = Metrics()
+    with pytest.raises(KeyError, match="chemclaw_tokens_total"):
+        metrics.increment("chemclaw_tokens_total", 1.0)
+    assert "\nchemclaw_tokens_total " not in metrics.render()
+
+
 def test_a_counter_value_sums_across_its_label_sets() -> None:
     """`value()` answers "how many in total", which is what every caller of it means."""
     metrics = Metrics()
