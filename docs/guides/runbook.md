@@ -345,3 +345,47 @@ intentional:
 Over the committed (deterministic) case-set this is a *deployment-consistency tripwire*: it fires
 when the deployed code, cases, and `evals/baseline.json` are inconsistent. After a deliberate
 metric change, refresh the committed baseline — otherwise every scheduled run re-alerts.
+
+## (viii) Answer "is prompt caching paying off?"
+
+The system prompt is large and largely identical turn to turn, so "cache the static prefix" is a
+standing cost-saving proposal (REV-9). **Measure before building it** — the metric that answers the
+question already exists, and the answer decides whether there is anything to build.
+
+Scrape `/metrics` and read the four spend counters together:
+
+```
+chemclaw_input_tokens_total       # fresh prompt tokens, full price
+chemclaw_cache_read_tokens_total  # prompt tokens served from the provider's cache, ~10x cheaper
+chemclaw_cache_write_tokens_total # tokens written to the cache, priced above a fresh input token
+chemclaw_output_tokens_total      # completion tokens, unaffected by any of this
+```
+
+The ratio `cache_read / (cache_read + input)` is the cache hit rate on the prompt side. Each outcome
+implies a different action:
+
+| Reading | What it means | What to do |
+| --- | --- | --- |
+| `cache_read` is a large fraction of prompt spend | The provider is already caching the prefix without being asked | Nothing. The saving is banked; a `cache_control` mechanism would add code for a benefit you already have. |
+| `cache_read` ≈ 0 and `input` is large | The prefix is being re-billed every turn | There is a real saving to chase — see the caveats below before estimating it. |
+| `cache_write` grows while `cache_read` stays flat | The cache is being paid for and never used | Sessions are too short or too spread out to hit it; shortening the prefix beats caching it. |
+
+`cache_write` is **structurally 0 on the `openai_compatible` provider** — it reports cache reads but
+has no cache-write concept — so a zero there on the production provider is not a fault and not a
+signal. On the Anthropic dev path it is real.
+
+Two caveats that make the saving smaller than a naive prefix measurement suggests, both of which
+cost this review a wrong estimate:
+
+- **Measure the provider you actually run.** The ~14.6 k-token prefix figure that started REV-9 was
+  measured on the Anthropic dev path. Production is `openai_compatible`, where
+  `agent_framework_openai` contains **zero** occurrences of `cache_control` — the mechanism is not
+  reachable from there at all, so the fix is upstream work, not a config change here.
+- **The system half is not cacheable through `Agent` as it stands.** `SkillsProvider` merges the
+  skills manifest into the instructions with an f-string, which would `repr()` a structured block
+  list into a string. Marking that half cacheable needs a change in `agent_framework`, not in
+  Chemclaw.
+
+Per-model attribution for the same spend is on the OTel side, not here: MAF emits
+`gen_ai.client.token.usage` labelled by request model, response model, provider and token type, and
+the shipped chart turns OTel on. These counters carry `profile`, which OTel has never heard of.

@@ -64,8 +64,9 @@ from chemclaw.core.metrics_bridge import record_metric
 log = logging.getLogger(__name__)
 
 _INSERT = "INSERT INTO session_messages (session_id, message) VALUES (%s, %s)"
-_SELECT = "SELECT message FROM session_messages WHERE session_id = %s ORDER BY id"
-# Row ids come back too, so a repaired message can be written to the row it came from.
+# Row ids come back too, so a repaired message can be written to the row it came from. There is no
+# id-less variant: every reader needs the id, and the one that existed was dead code that D-143's
+# prose then cited as the statement the read path runs.
 _SELECT_WITH_ID = "SELECT id, message FROM session_messages WHERE session_id = %s ORDER BY id"
 _UPDATE_MESSAGE = "UPDATE session_messages SET message = %s WHERE id = %s"
 _DELETE_IDS = "DELETE FROM session_messages WHERE session_id = %s AND id = ANY(%s)"

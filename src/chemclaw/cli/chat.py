@@ -38,6 +38,11 @@ from chemclaw.core.logging import configure_logging
 
 _EXIT_WORDS = {"exit", "quit", ":q"}
 
+# The session id every CLI run uses. A fixed name, not a fresh uuid: under `session_store=postgres`
+# it makes a terminal session resumable across invocations, which is the CLI's actual use — and the
+# CLI is single-user admin by construction (`resolve_identity`), so there is no one to collide with.
+_CLI_SESSION_ID = "cli"
+
 
 def resolve_identity(*, admin: bool, actor: str | None) -> tuple[str, frozenset[str]]:
     """Resolve the caller's audit actor and ambient roles — the CLI's identity seam.
@@ -80,15 +85,24 @@ def _build_cli_agent(args: argparse.Namespace, actor: str) -> Any:
     return build_agent(actor=actor, audit_sink=sink)
 
 
-async def converse(agent: Any, prompt: str, connectors: Sequence[Any] = ()) -> str:
-    """Run one turn against the agent and return its text answer.
+async def converse(
+    agent: Any, prompt: str, connectors: Sequence[Any] = (), session: Any = None
+) -> str:
+    """Run one turn against the agent on `session` and return its text answer.
 
-    The agent's session history provider accumulates the thread across calls, so reusing the same
-    `agent` object over successive `converse` calls is a multi-turn conversation (no session
-    plumbing needed here). The connectors must already be connected (see `_run`); they are passed
-    per call because `Agent.run` is where run-scoped tools attach.
+    Reusing one `session` across successive `converse` calls is what makes the CLI a multi-turn
+    conversation; the session's history provider accumulates the thread. The connectors must
+    already be connected (see `_run`); they are passed per call because `Agent.run` is where
+    run-scoped tools attach.
+
+    **The session is not optional under `harness_enabled`** (D-152). The harness middleware stack
+    that flag installs raises `ToolApprovalMiddleware requires an AgentSession` on a session-less
+    `agent.run`, so the CLI — which used to rely on the agent's implicit thread — could not take a
+    single turn under the configuration the shipped Helm chart sets. The front door always passed a
+    session and never met this. It defaults to None only so the parameter stays additive for
+    callers that build their own; `_run` always supplies one.
     """
-    response = await agent.run(prompt, tools=list(connectors) or None)
+    response = await agent.run(prompt, tools=list(connectors) or None, session=session)
     return str(response.text)
 
 
@@ -108,6 +122,9 @@ async def _run(args: argparse.Namespace) -> None:
     identity_token = set_current_identity(actor, roles)
     try:
         agent = _build_cli_agent(args, actor)
+        # One session for the whole CLI run — a CLI run *is* one conversation. It is also required,
+        # not merely tidy: the harness middleware refuses a session-less `agent.run` (D-152).
+        session = agent.create_session(session_id=_CLI_SESSION_ID)
         # The default profile's connectors, matching `_build_cli_agent`, which builds the default
         # agent. Per-profile CLI selection waits for the front door to grow it (plan Stage D).
         connectors = connector_tools()
@@ -121,14 +138,14 @@ async def _run(args: argparse.Namespace) -> None:
                     file=sys.stderr,
                 )
             if args.message is not None:
-                print((await converse(agent, args.message, connectors)).strip())
+                print((await converse(agent, args.message, connectors, session)).strip())
             else:
-                await _repl(agent, connectors)
+                await _repl(agent, connectors, session)
     finally:
         reset_current_identity(identity_token)
 
 
-async def _repl(agent: Any, connectors: Sequence[Any] = ()) -> None:
+async def _repl(agent: Any, connectors: Sequence[Any] = (), session: Any = None) -> None:
     """Read a question, print the answer, repeat — until EOF, Ctrl-C, or an exit word.
 
     Prompts/errors go to stderr so a redirected stdout carries only the answers.
@@ -145,7 +162,7 @@ async def _repl(agent: Any, connectors: Sequence[Any] = ()) -> None:
         if prompt.lower() in _EXIT_WORDS:
             return
         try:
-            print((await converse(agent, prompt, connectors)).strip())
+            print((await converse(agent, prompt, connectors, session)).strip())
         except Exception as exc:  # keep the session alive across a single failed turn
             print(f"error: {exc}", file=sys.stderr)
 

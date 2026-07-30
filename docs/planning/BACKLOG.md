@@ -111,18 +111,30 @@ claim about the world is to run it.
       matches `service_turn_claim_lease_seconds`. Both previously discarded theories were about the
       wrong object; the detached-task experiment failed because the task had no strong reference.
       **Done by main (D-130)** — turn teardown is shielded so its cleanup runs in a cancelled task. That is the root cause this review identified: the release was an await in a closing generator and the `RuntimeError` was swallowed.
-- [ ] **REV-9 [Med] Prompt caching: ~14.6 k fixed prefix per model call** (measured; ~20.5 k with
-      connector tools), re-paid every call and up to 25× per turn in harness mode, with zero
-      `cache_control` in first-party code. Blocked on three things that must be decided together:
-      MAF exposes no `cache_control` hook for `tools` (the 11 k that dominates), production is
-      `openai_compatible`, and the prefix is not byte-stable because `tools/list` is re-fetched per
-      turn — one flapping connector invalidates the whole prefix.
+- [ ] **REV-9 [Med] Prompt caching: a large fixed prefix is re-paid every model call** — but
+      **measure before building** (D-152), and this entry as first written overstated how reachable
+      the saving is. Two corrections from verifying it:
+      **(a) the ~14.6 k prefix was measured on the wrong provider.** That figure came from the
+      Anthropic dev path. Production is `openai_compatible`, where `agent_framework_openai` contains
+      **zero** occurrences of `cache_control` — the mechanism is not reachable from production at
+      all, so this is upstream work in MAF, not a knob here.
+      **(b) "the ~3.5 k system half is cacheable" is false through `Agent`.** `SkillsProvider` merges
+      the skills manifest into the instructions with an f-string, which would `repr()` a structured
+      block list into a string. Marking that half cacheable is also an upstream change.
+      Still true: MAF exposes no `cache_control` hook for `tools` (the 11 k that dominates), and the
+      prefix is not byte-stable because `tools/list` is re-fetched per turn, so one flapping
+      connector invalidates it.
+      **What to do now instead of building:** read `chemclaw_cache_read_tokens_total` against
+      `chemclaw_input_tokens_total` on `/metrics` — the provider may already be caching the prefix
+      unasked, in which case there is nothing to build. `docs/guides/runbook.md` §(viii) has the
+      procedure and what each outcome implies. `chemclaw_cache_write_tokens_total` is structurally 0
+      on `openai_compatible` and must not be read as a fault.
 - [x] **REV-10 [Med] Token accounting is priced-blind.** `chemclaw_tokens_total` collapses input
       and output before the counter sees it; cache-read/write are not read at all; the registry
       supports no labels, so no per-model or per-profile attribution. AG-11 (cost) still open. MAF
       already implements the full GenAI token model — reachable now that OTel can start.
       **Done (D-144), the pricing half.** Four counters for the four priced dimensions, with `chemclaw_tokens_total` kept as the total. The budget guard still meters the total, so the 429 behaviour is unchanged — this splits what is published, not what is enforced. Cache counts are *not* folded into `input` (a provider reporting them has already excluded them, so folding would re-price cheap tokens as expensive), and a counter stays untouched rather than publishing a fabricated `0` when the provider reports nothing — the REV-19 rule.
-      **Still open:** per-model / per-profile attribution. The registry has no label support at all, so `chemclaw_tokens_total{model=...}` is not expressible; that is a change to the exposition format and the registry's storage, not to the reading. Four counters answer "what is it costing"; labels answer "costing *on what*", which is a larger change.
+      **Done (D-152), the attribution half — and half of it turned out to be already solved.** Per-*model* attribution needs nothing built: MAF emits `gen_ai.client.token.usage` labelled by request model, response model, provider and token type, and the shipped chart turns OTel on. Duplicating that axis in this registry would mean two systems to reconcile, so it is deliberately not done — with two gaps recorded: MAF records only the `input`/`output` token types, so D-144's cache-read/cache-write dimensions are *not* in that histogram, and OTel has no notion of a Chemclaw `profile`. Per-*profile* attribution is the real gap and is what shipped: the registry gained declared labels (an undeclared label name raises exactly as an undeclared metric does, because a label typo's failure mode is a second silent time series rather than a crash), a per-counter series cap against the unbounded-map leak this codebase has already fixed three times, and the five spend counters carry `profile`. `/metrics` is unauthenticated, so `test_metrics_carry_no_identifiers_or_turn_content` became an allowlist of *declared* label names rather than "`le` is the only label": a profile is configuration, low-cardinality, and not user-derived.
 - [x] **REV-11 [Med] `correlation_id` stops at the process boundary.** Not in the connector
       identity headers, not in `ConnectorJobInput`, not into HPC. ~4 lines to make the audit trail
       joinable across all four runtimes. Note that fixing OTel does not fix this.
@@ -477,6 +489,19 @@ kept because the wrong root cause is the more instructive record.
       renumbers. Does **not** prevent collisions, only makes them a one-line conflict a grep finds;
       the collision-proof escalation (date-plus-slug ids) is recorded in D-109 rather than done
       unilaterally.
+- [x] **LIVE-8 [High] The CLI could not take a turn under the configuration the Helm chart ships.**
+      Found by the review's live harness smoke test (D-152), which is the first time the production
+      agent-construction path met a live model with `harness_enabled=true` — the flag the chart
+      sets while the code default and every test run `false`. The first turn crashed before the
+      model with `RuntimeError: ToolApprovalMiddleware requires an AgentSession`: `cli/chat.py`
+      called `agent.run` with no session, relying on the agent's implicit thread, and the harness
+      middleware refuses that. The front door always passed a session and never met it. Fixed —
+      `_run` creates one `AgentSession` per CLI run and threads it through `converse` and `_repl`,
+      with a regression test that fails on the unfixed code. The smoke test then passed end to end:
+      27 skills, `resolve_compound` → `predict_pka` over the calc connector, the Postgres
+      calculation cache, and the whole turn in the audit trail under one correlation id.
+      **Same shape as LIVE-1's lesson:** a configuration that only production sets is a
+      configuration nothing tests.
 - [ ] **LIVE-6 [Low] Test-to-table locality.** LIVE-2 isolates the schema but the tests still share
       one within a run, so ordering can still couple them (`test_postgres_store` asserts on a global
       migration result). A per-test schema or transactional rollback would close it — [S].

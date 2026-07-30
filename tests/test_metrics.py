@@ -19,7 +19,12 @@ import pytest
 from fastapi.testclient import TestClient
 
 from chemclaw.api.app import create_app
-from chemclaw.api.metrics import CONTENT_TYPE, Metrics
+from chemclaw.api.metrics import (
+    _COUNTER_LABELS,
+    _MAX_SERIES_PER_COUNTER,
+    CONTENT_TYPE,
+    Metrics,
+)
 
 
 class _FakeAgent:
@@ -92,21 +97,80 @@ def test_the_endpoint_exposes_saturation_not_cpu() -> None:
 
 
 def test_metrics_carry_no_identifiers_or_turn_content() -> None:
-    """The route is unauthenticated (like /healthz), so it must expose counts and capacity only."""
+    """The route is unauthenticated (like `/healthz`), so it must expose counts and capacity only.
+
+    This used to assert that a histogram's `le` bucket boundary was the *only* label anywhere, and
+    that was the right guard while the registry had no label support. It is now an allowlist of the
+    label names actually declared, because the reason behind it was never "no labels" — it was "no
+    label may carry turn-derived data on an unauthenticated route".
+
+    A declared label name passes that test on its own terms: `profile` is a value from
+    `profiles/*.yaml`, chosen by whoever deploys the system, bounded by the number of files on disk
+    and identical for every chemist using it. It says nothing about *who* asked or *what* they
+    asked. A session id, an actor oid, a tool argument or a model-supplied string would all fail
+    here, and the allowlist is what keeps the next label from being one of those by accident — the
+    registry refuses an undeclared label name, and this refuses an undeclared one reaching the wire.
+    """
     with TestClient(create_app(agent_factory=lambda _profile: _FakeAgent())) as client:
         client.post("/sessions")
         body = client.get("/metrics").text
+    permitted = {"le"} | {label for labels in _COUNTER_LABELS.values() for label in labels}
     for line in body.splitlines():
         if line.startswith("#"):
             continue
-        # The only label in the whole exposition is a histogram's `le` bucket boundary, which is
-        # a number from `_BUCKETS`. Anything else would be a label carrying turn-derived data,
-        # and this route is unauthenticated.
         label = re.search(r"\{(.*)\}", line)
-        if label is not None:
-            assert re.fullmatch(r'le="(\+Inf|[0-9.]+)"', label.group(1)), (
-                f"unexpected label set: {line}"
-            )
+        if label is None:
+            continue
+        names = {pair.split("=", 1)[0] for pair in label.group(1).split(",")}
+        assert names <= permitted, f"undeclared label on an unauthenticated route: {line}"
+        # `le` is still constrained to a bucket boundary — a number from `_BUCKETS`, never text.
+        for pair in label.group(1).split(","):
+            if pair.startswith("le="):
+                assert re.fullmatch(r'le="(\+Inf|[0-9.]+)"', pair), f"malformed bucket: {line}"
+
+
+def test_a_declared_label_reaches_the_exposition() -> None:
+    """The allowlist above is only meaningful if a label can actually get there.
+
+    Without this, `test_metrics_carry_no_identifiers_or_turn_content` would keep passing on a
+    registry that had silently stopped emitting labels at all — which is how a guard becomes
+    decoration.
+    """
+    metrics = Metrics()
+    metrics.increment("chemclaw_tokens_total", 7.0, {"profile": "property-lookup"})
+    assert 'chemclaw_tokens_total{profile="property-lookup"} 7' in metrics.render()
+
+
+def test_an_undeclared_label_is_refused() -> None:
+    """A label typo is not a crash but a second silent series nobody queries — so it raises."""
+    metrics = Metrics()
+    with pytest.raises(KeyError):
+        metrics.increment("chemclaw_tokens_total", 1.0, {"proflie": "typo"})
+    with pytest.raises(KeyError):
+        metrics.increment("chemclaw_turns_started_total", 1.0, {"profile": "undeclared-here"})
+
+
+def test_a_counter_value_sums_across_its_label_sets() -> None:
+    """`value()` answers "how many in total", which is what every caller of it means."""
+    metrics = Metrics()
+    metrics.increment("chemclaw_tokens_total", 3.0, {"profile": "a"})
+    metrics.increment("chemclaw_tokens_total", 4.0, {"profile": "b"})
+    assert metrics.value("chemclaw_tokens_total") == 7.0
+
+
+def test_the_series_count_is_capped() -> None:
+    """A label value is not bounded by this module, so the map it keys must be.
+
+    The same slow leak this codebase has fixed three times (budget tracker, live sessions, note
+    index). Past the cap the new series is refused; the ones already there keep counting.
+    """
+    metrics = Metrics()
+    for index in range(_MAX_SERIES_PER_COUNTER + 10):
+        metrics.increment("chemclaw_tokens_total", 1.0, {"profile": f"p{index}"})
+    assert metrics.value("chemclaw_tokens_total") == float(_MAX_SERIES_PER_COUNTER)
+    # And the ones that were admitted keep working rather than being frozen out too.
+    metrics.increment("chemclaw_tokens_total", 5.0, {"profile": "p0"})
+    assert metrics.value("chemclaw_tokens_total") == float(_MAX_SERIES_PER_COUNTER) + 5.0
 
 
 def test_a_swallowed_audit_sink_failure_is_counted() -> None:

@@ -59,3 +59,32 @@ def test_converse_returns_the_agent_text() -> None:
             return _Response()
 
     assert asyncio.run(cli.converse(_Agent(), "hi")).strip() == "55% yield"
+
+
+def test_a_turn_runs_on_a_session_because_the_harness_requires_one() -> None:
+    """`converse` passes its session to `agent.run` (D-152).
+
+    Not cosmetic: under `harness_enabled` — which the shipped Helm chart sets — MAF's
+    `ToolApprovalMiddleware` raises `requires an AgentSession` on a session-less `agent.run`, so
+    the CLI could not take a single turn under the production configuration. The front door always
+    passed a session and never met it. Fails on the unfixed code, where `session` never reached
+    `run`.
+    """
+
+    class _Response:
+        text = "ok"
+
+    class _Agent:
+        mcp_tools: list[object] = []
+
+        def __init__(self) -> None:
+            self.seen: object = "never called"
+
+        async def run(self, prompt: str, **run_options: object) -> _Response:
+            self.seen = run_options.get("session")
+            return _Response()
+
+    agent = _Agent()
+    sentinel = object()
+    asyncio.run(cli.converse(agent, "hi", (), sentinel))
+    assert agent.seen is sentinel
