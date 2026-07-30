@@ -1,7 +1,7 @@
 # Task: an intense review of the agentic system — performance, reliability, configurability, monitorability
 
 Requested 2026-07-29/30. Branch: `claude/agentic-system-review-iu3gjz`.
-ADRs: **D-145**, **D-150**, **D-151**, **D-152**.
+ADRs: **D-145**, **D-151**, **D-152**, **D-153**.
 
 The review itself is in `docs/archive/audit/2026-07-agentic-system-review.md`; its findings became
 `REV-*` entries in `docs/planning/BACKLOG.md`. This file records the *closing* pass — the four items
@@ -20,7 +20,7 @@ D-149, its backlog entries, and git history.)
       annotate-and-insert and storage's delete-and-rewrite; run from `save_messages` in a second
       best-effort transaction, behind a default-off flag, with a `MAX(id)` watermark protecting the
       turn's own rows.
-- [x] **§3 Push-back (D-150)** — `await_job_results` waits on Temporal workflow handles instead of
+- [x] **§3 Push-back (D-153)** — `await_job_results` waits on Temporal workflow handles instead of
       destructively claiming the shared mailbox.
 - [x] **§4 Metrics labels (D-152)** — declared labels, a per-counter series cap, `profile` on the
       five spend counters; per-model closed as already-solved by MAF's OTel emission.
@@ -45,13 +45,13 @@ usually worse.
 - Half of REV-10 was already done, upstream, by a system nobody had looked at.
 
 **Two dormant live defects, both fixed while dormant.** Retention (D-145) and the mid-turn wait
-(D-150) are each behind a default-off flag. That is the cheapest possible moment to fix a
+(D-153) are each behind a default-off flag. That is the cheapest possible moment to fix a
 data-destroying bug, and it is the same argument REV-12 made.
 
 **My own §3 design was refuted by exploration and withdrawn, not pushed through.** "Select, yield,
 then confirm" re-selects an unconfirmed event on every poll, because the tailer has no
 `try`/`finally`. Preventing that *is* a visibility timeout — which is what the backlog entry I was
-trying to shortcut had already concluded. The withdrawal is in D-150 rather than edited out.
+trying to shortcut had already concluded. The withdrawal is in D-153 rather than edited out.
 
 **Six refuted leads are kept in the record**, including one refuted by this review's own earlier
 fix and one where the guard I proposed already existed.

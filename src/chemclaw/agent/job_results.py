@@ -12,7 +12,7 @@ A job that does not finish in time is not an error — the existing push-back pa
 on the next turn, which is exactly the pre-existing behavior. The feature therefore degrades to
 "what it did before" rather than to a failure.
 
-**This waits on the jobs, not on the mailbox** (REV-7, D-150). It used to tail
+**This waits on the jobs, not on the mailbox** (REV-7, D-153). It used to tail
 `chemclaw.agent.session_events`, and that was the wrong source in a way that destroyed data. The
 mailbox claim is *destructive*: claiming consumes every unconsumed `job_completed` row for the
 session, so a resume waiting on job A also consumed the row for job B — a job this turn did not

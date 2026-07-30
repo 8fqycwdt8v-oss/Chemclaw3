@@ -37,7 +37,6 @@ _SPEC = JobSpec.model_validate(
     {
         "name": "run_calculation",
         "workflow": "CalculationWorkflow",
-        "task_queue": "connector-calc",
         "summary": "Start a calculation and return its job id.",
         "description": "Long-running, so poll it rather than waiting.",
         "params": [
@@ -144,7 +143,6 @@ def test_a_referenced_model_gives_full_fidelity_for_a_structured_input() -> None
         {
             "name": "start_campaign",
             "workflow": "BoCampaignWorkflow",
-            "task_queue": "connector-bo",
             "summary": "Start a campaign.",
             "params_model": "chemclaw.science.bo.problem:CampaignSpec",
         }
@@ -164,10 +162,15 @@ def test_an_unresolvable_model_reference_fails_with_a_named_error() -> None:
         resolve_params_model("chemclaw.science.bo.problem:require_rounds_within_ceiling")
 
 
-def test_launching_starts_the_declared_workflow_on_the_declared_queue(
+def test_launching_starts_the_declared_workflow_on_the_bundles_own_queue(
     client: _FakeClient,
 ) -> None:
-    """The manifest's `workflow`/`task_queue` are the only thing binding the run to a connector."""
+    """The workflow type name binds the run to a connector; the queue is derived from the bundle.
+
+    `connector-calc` appears in no manifest (D-150) — it is `bundle_queue("calc")`, computed at
+    dispatch. Asserting it on the launch payload is what keeps that derivation honest, since a
+    wrong queue is not an error anywhere: the job would start and then wait forever.
+    """
     tool = build_job_tool("calc", _SPEC)
     job_id = _launch(tool, smiles="CCO")
     (call,) = client.calls

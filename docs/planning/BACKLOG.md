@@ -94,7 +94,7 @@ claim about the world is to run it.
       deadline, confirm on delivery, re-offer on expiry. That keeps COR-4's single-claim property
       (two tailers still cannot both hold a row) while making loss recoverable. A design change to a
       durable path, wanting its own ADR, not a reordering.
-      **Partly done (D-150).** The *second* defect in this area is fixed: `await_job_results` tailed the mailbox, whose claim is destructive, so a mid-turn resume waiting on job A consumed job B's push-back and discarded it — the front door's stream never saw it. It now asks Temporal about its own job ids and never touches the mailbox, so there is no shared queue to race over. Also strictly more informative: the model resumes with the `ConnectorJobResult` envelope rather than the one-line summary the event payload carried.
+      **Partly done (D-153).** The *second* defect in this area is fixed: `await_job_results` tailed the mailbox, whose claim is destructive, so a mid-turn resume waiting on job A consumed job B's push-back and discarded it — the front door's stream never saw it. It now asks Temporal about its own job ids and never touches the mailbox, so there is no shared queue to race over. Also strictly more informative: the model resumes with the `ConnectorJobResult` envelope rather than the one-line summary the event payload carried.
       **Still open — and the cheap fix is refuted.** "Select, yield, then confirm" does not work: `stream_new_events` polls on a timer with no `try/finally`, so an event yielded but unconfirmed is re-selected every poll (`test_tailer_releases_its_connection_between_polls` would see ~37 deliveries instead of 1). Preventing re-selection *is* a visibility timeout. The fix stays as recorded above, and additionally needs a **per-stream** holder id (`_WORKER_ID` is per-process, so two streams in one pod would steal each other's leases) and a confirm shielded against cancellation (D-130's trap — the confirm is reached from a cancelled generator). It is an operator-facing contract change too.
 
 - [ ] **The `eval_drift` push-back channel has no consumer.** `chemclaw.durable.eval_drift` writes
@@ -642,21 +642,18 @@ for each recorded here rather than left implicit.
       OBO additionally needs the user's *raw* access token, which `service.auth.Principal` deliberately
       does not carry — a security-relevant change with no caller today. *Trigger: a real tenant (the
       same one blocking every other live Entra edge).*
-- [ ] **A manifest's `task_queue` is unchecked against `bundle_queue`** — [S]. Found while removing
-      the dead half of `connectors/queues.py` (D-149). A bundle's queue name is derived in code
-      (`bundle_queue`, used by every `@durable_workflow`/`@durable_activity` decorator and by each
-      worker) *and* spelled out per job in `connector.yaml`. All eight declarations agree with the
-      derivation today, and nothing checks that they do — a typo is a job that starts successfully
-      and then sits forever in a queue nobody polls, which is exactly the failure the module's
-      docstring claims to have designed out. Two ways to close it, and the choice is a real
-      decision rather than a cleanup: **(a)** `make connector-validate` asserts
-      `job.task_queue == bundle_queue(connector)`, or **(b)** drop the field and derive it, which
-      is strictly simpler but forecloses ever routing a connector-declared job onto core's
-      `background-jobs` worker — the escape hatch `JobSpec`'s docstring advertises ("moving a
-      workflow from core's worker to the connector's own is a one-line change here") and that
-      `task_queue_for`/`JobRuntime` were built for and never wired up. Deciding (b) means deciding
-      that a connector job always runs on its bundle's worker. *Trigger: the next connector bundle
-      added, or the next job moved between workers — whichever comes first.*
+- [x] ~~**A manifest's `task_queue` is unchecked against `bundle_queue`**~~ — **DONE (D-150)**, and
+      the option that looked like a trade-off turned out not to be one. Raised in D-149: a bundle's
+      queue name was derived in code *and* spelled out per job in `connector.yaml`, all eight
+      agreeing, with nothing checking that they did. The choice looked like validate-it versus
+      derive-it, where deriving forecloses routing a connector job onto core's `background-jobs`
+      worker — the escape hatch `JobSpec`'s docstring advertised and `task_queue_for`/`JobRuntime`
+      were built for. Checking the dispatch path showed that hatch cannot open: core's background
+      worker serves `registered_workflows("background")`, populated at import time by modules it
+      imports, and it never imports a bundle (the boundary `tests/test_workflow_registry.py`
+      asserts). A job declaring `background-jobs` would start and then wait forever. The field
+      could therefore hold exactly one correct value, so it is gone and the queue is derived at
+      dispatch.
 - [ ] **Concurrent-turn MCP lifecycle, the general case** — [S]. Per-turn connector instances fixed
       this for connectors (D-109), and the *shape* that caused it — a process-lived tool whose context
       is entered per turn — should not reappear. A guard test asserting no MCP tool is attached to the
