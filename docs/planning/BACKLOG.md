@@ -605,21 +605,18 @@ for each recorded here rather than left implicit.
       OBO additionally needs the user's *raw* access token, which `service.auth.Principal` deliberately
       does not carry — a security-relevant change with no caller today. *Trigger: a real tenant (the
       same one blocking every other live Entra edge).*
-- [ ] **A manifest's `task_queue` is unchecked against `bundle_queue`** — [S]. Found while removing
-      the dead half of `connectors/queues.py` (D-149). A bundle's queue name is derived in code
-      (`bundle_queue`, used by every `@durable_workflow`/`@durable_activity` decorator and by each
-      worker) *and* spelled out per job in `connector.yaml`. All eight declarations agree with the
-      derivation today, and nothing checks that they do — a typo is a job that starts successfully
-      and then sits forever in a queue nobody polls, which is exactly the failure the module's
-      docstring claims to have designed out. Two ways to close it, and the choice is a real
-      decision rather than a cleanup: **(a)** `make connector-validate` asserts
-      `job.task_queue == bundle_queue(connector)`, or **(b)** drop the field and derive it, which
-      is strictly simpler but forecloses ever routing a connector-declared job onto core's
-      `background-jobs` worker — the escape hatch `JobSpec`'s docstring advertises ("moving a
-      workflow from core's worker to the connector's own is a one-line change here") and that
-      `task_queue_for`/`JobRuntime` were built for and never wired up. Deciding (b) means deciding
-      that a connector job always runs on its bundle's worker. *Trigger: the next connector bundle
-      added, or the next job moved between workers — whichever comes first.*
+- [x] ~~**A manifest's `task_queue` is unchecked against `bundle_queue`**~~ — **DONE (D-150)**, and
+      the option that looked like a trade-off turned out not to be one. Raised in D-149: a bundle's
+      queue name was derived in code *and* spelled out per job in `connector.yaml`, all eight
+      agreeing, with nothing checking that they did. The choice looked like validate-it versus
+      derive-it, where deriving forecloses routing a connector job onto core's `background-jobs`
+      worker — the escape hatch `JobSpec`'s docstring advertised and `task_queue_for`/`JobRuntime`
+      were built for. Checking the dispatch path showed that hatch cannot open: core's background
+      worker serves `registered_workflows("background")`, populated at import time by modules it
+      imports, and it never imports a bundle (the boundary `tests/test_workflow_registry.py`
+      asserts). A job declaring `background-jobs` would start and then wait forever. The field
+      could therefore hold exactly one correct value, so it is gone and the queue is derived at
+      dispatch.
 - [ ] **Concurrent-turn MCP lifecycle, the general case** — [S]. Per-turn connector instances fixed
       this for connectors (D-109), and the *shape* that caused it — a process-lived tool whose context
       is entered per turn — should not reappear. A guard test asserting no MCP tool is attached to the

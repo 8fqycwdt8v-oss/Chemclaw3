@@ -41,6 +41,7 @@ from chemclaw.agent.session_context import get_current_session, get_current_sess
 from chemclaw.agent.tool_registry import CapabilityTool
 from chemclaw.agent.turn_signals import record_job_started
 from chemclaw.connectors.manifest import JobParamType, JobSpec
+from chemclaw.connectors.queues import bundle_queue
 from chemclaw.core.config import settings
 from chemclaw.core.ids import stable_hash
 from chemclaw.core.metrics_bridge import record_metric
@@ -272,7 +273,7 @@ def build_job_tool(connector: str, job: JobSpec) -> CapabilityTool:
                     connector=connector,
                     job=job.name,
                     workflow=job.workflow,
-                    task_queue=job.task_queue,
+                    task_queue=bundle_queue(connector),
                     payload=payload,
                     requested_by=requested_by,
                     session_id=get_current_session_id() or "",

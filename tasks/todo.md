@@ -123,7 +123,32 @@ the identical rot at the next restructure. The test was confirmed to fail on the
 failing files) before it was made to pass, and it asserts its own corpus is non-empty — the failure
 mode D-148's post-mortem named, where a rename leaves a test iterating nothing and reporting green.
 
-**One finding deliberately left open, not silently closed.** Deleting the dead half of
+## Follow-up: the open finding, closed (D-150)
+
+Asked to fix it. The choice looked like validate-the-field versus derive-it, where deriving
+forecloses routing a connector job onto core's `background-jobs` worker. Following the dispatch path
+showed that hatch cannot open: core's background worker serves `registered_workflows("background")`,
+populated at import time by modules it imports, and it never imports a bundle — so a job declaring
+`background-jobs` would start cleanly and then wait forever. The field could hold exactly one
+correct value and any number of unrunnable ones, which also retires the validator option: a check
+asserting a field equals its own derivation proves the field carries no information.
+
+- [x] Remove `JobSpec.task_queue`; derive at both dispatch sites (`connectors/jobs.py`,
+      `durable/template_activities.py`)
+- [x] Strip the eight declarations from four manifests and the fixtures in five test modules
+- [x] Drop the two now-vacuous assertions in `test_workers.py`; pin the derivation where it matters
+      — `test_connector_jobs.py` asserts `payload.task_queue == "connector-calc"` against a manifest
+      that no longer contains that string
+- [x] `ConnectorJobInput`/`ResolvedJob` left alone: they carry the resolved value across a workflow
+      boundary, and narrowing a durable input model buys nothing here
+- [x] ADR D-150; BACKLOG entry closed; gate green at the same 2006 passed / 76 skipped
+
+**The refinement to D-149's closing line.** It said the move on finding an unguarded statement is to
+ask what would have caught it and add that. Incomplete: ask *first* whether the statement needs to
+exist. Here the guard was the wrong instinct and would have locked in the redundancy while looking
+like a fix.
+
+**The original finding, as it was left before that.** Deleting the dead half of
 `connectors/queues.py` exposed a live gap it was hiding: every `connector.yaml` declares a
 `task_queue` that must equal `bundle_queue(connector)`, all eight agree, and nothing checks it.
 Closing it means choosing whether a connector job may ever run on core's worker — a capability

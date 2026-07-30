@@ -21,6 +21,7 @@ from temporalio import activity
 from chemclaw.agent.audit import make_audit_middleware
 from chemclaw.agent.identity_context import reset_current_identity, set_current_identity
 from chemclaw.agent.tool_authz import enforce_tool_authz
+from chemclaw.connectors.queues import bundle_queue
 from chemclaw.connectors.registry import find_job, open_reachable
 from chemclaw.durable.registry import durable_activity
 
@@ -120,7 +121,7 @@ async def resolve_job_step(name: str) -> ResolvedJob:
         connector=connector,
         job=job.name,
         workflow=job.workflow,
-        task_queue=job.task_queue,
+        task_queue=bundle_queue(connector),
         publish_to_graph=job.publish_to_graph,
     )
 

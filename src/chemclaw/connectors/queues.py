@@ -1,14 +1,15 @@
 """The Temporal queue a connector bundle's own worker polls — one function, one spelling.
 
-A bundle's queue name is needed in four places that must all agree: the `@durable_workflow` and
+A bundle's queue name is needed wherever its durable work is named: the `@durable_workflow` and
 `@durable_activity` decorators in the bundle's own modules, the worker that assembles them, the
-`task_queue:` its `connector.yaml` declares for each job, and the Helm component
-`connector-worker-<name>`. Two that disagree is a job sitting forever in a queue nobody polls —
-the same class of failure `durable/registry.py` exists to catch one level up. Deriving the name
-from the bundle name means the code side of that agreement cannot drift (D-118).
+dispatch that starts one of its jobs, and the Helm component `connector-worker-<name>`. Two that
+disagree is a job sitting forever in a queue nobody polls — the same class of failure
+`durable/registry.py` exists to catch one level up.
 
-The manifest side still spells the name out, and nothing yet checks the two against each other;
-see the entry in `docs/planning/BACKLOG.md`.
+Every one of them calls this function, so there is nothing left to disagree. `connector.yaml` used
+to declare the queue per job as well; D-150 removed that field, because a bundle's worker serves
+only what the bundle's own modules registered at import time, so a declared queue could hold
+exactly one correct value and any number of unrunnable ones (D-118).
 """
 
 
