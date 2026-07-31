@@ -191,5 +191,5 @@ this reason; the filenames make that ordering irrelevant now, and the numbers st
 | [D-154](D-154-a-register-that-had-become-a-log-and-the-one.md) | A register that had become a log, and the one trigger it was hiding |
 | [D-155](D-155-what-the-dark-half-of-the-system-does-the-first-time.md) | What the dark half of the system does the first time it runs |
 | [D-156](D-156-the-last-false-duplicate-and-a-map-that-is-enforced.md) | The last false duplicate, the corpora in one place, and a map that is enforced |
-| D-157 | RESERVED — the harness plan approval gates the action rather than latching the session |
-| D-158 | RESERVED — a template step runs as its requester, through the same authz and audit a chat turn uses |
+| [D-157](D-157-an-approval-authorizes-a-request-not-a-session.md) | An approval authorizes a request, not a session |
+| [D-158](D-158-a-template-step-runs-as-its-requester.md) | A template step runs as its requester, and four steps that had never run |
