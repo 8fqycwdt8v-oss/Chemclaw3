@@ -10,6 +10,7 @@ was *not* re-observed ages out; promoting last, so a row cannot be retired in th
 would have promoted it.
 """
 
+import asyncio
 import logging
 from datetime import timedelta
 
@@ -42,7 +43,10 @@ async def mine_observations_activity() -> int:
     accumulates the evidence behind it instead of minting a near-duplicate row every night.
     """
     reactions = await all_reactions()
-    notes = load_notes(settings.knowledge_path)
+    # Off the loop: `load_notes` is a synchronous full parse of the corpus, and an async activity
+    # shares its worker's event loop with every other activity on the queue. Same reason
+    # `retrieval.retrievers` threads it.
+    notes = await asyncio.to_thread(load_notes, settings.knowledge_path)
     found = [*mine_corpus(reactions), *mine_interactions(notes, reactions)]
     recorded = await record_observations(found)
     logger.info("observation mining recorded %d finding(s)", recorded)
@@ -82,7 +86,7 @@ async def promote_observations_activity() -> list[str]:
         note = playbook_note(
             f"playbook-{observation.id.removeprefix('observation-')}",
             _promotion_summary(observation),
-            [ref.removeprefix("reaction-") for ref in observation.evidence_note_ids],
+            observation.evidence_note_ids,
         )
         references.append(
             await propose_note(note, default_submitter(), dependencies=compound_dependencies(note))

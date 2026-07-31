@@ -63,14 +63,20 @@ class TestTheAntiFeedbackRule:
         assert observation.support == 2
         assert not hasattr(observation, "support_count")
 
-    def test_the_id_is_derived_from_content_so_re_mining_accumulates(self) -> None:
-        """A fresh id every night would make support meaningless and the table unbounded."""
-        first = Observation(statement="s", scope="t", evidence_note_ids=["reaction-1"]).with_id()
-        again = Observation(statement="s", scope="t", evidence_note_ids=["reaction-9"]).with_id()
-        assert first.id == again.id
+    def test_the_id_is_the_scope_so_a_growing_finding_stays_one_row(self) -> None:
+        """The statement changes whenever the evidence does, so it must not be part of the id.
+
+        A cluster gaining a member is routine under periodic ELN sync, and it rewrites the
+        statement ("2 runs" -> "3 runs"). Hashing that would mint a new row per growth step:
+        support would never accumulate, `first_seen` would reset, and the superseded row would sit
+        open contradicting its successor for the whole retirement window.
+        """
+        first = Observation(statement="seen in 2 projects", scope="t").with_id()
+        grown = Observation(statement="seen in 3 projects", scope="t").with_id()
+        assert first.id == grown.id
         assert first.id.startswith("observation-")
-        other = Observation(statement="s", scope="u").with_id()
-        assert other.id != first.id
+        # Different findings still get different rows.
+        assert Observation(statement="seen in 2 projects", scope="u").with_id().id != first.id
 
 
 class TestTheCorpusMiner:
@@ -119,6 +125,30 @@ class TestTheCorpusMiner:
             )
             == []
         )
+
+    def test_a_cluster_that_grows_keeps_its_observation(self) -> None:
+        """The end-to-end version of the identity rule, through the miner that produces it.
+
+        This is what a second ELN sync actually looks like: the same transformation, one more
+        failed run. It must land on the row that already exists.
+        """
+        two = mine_corpus(
+            [
+                _reaction("r1", "alpha", OutcomeClass.FAILURE),
+                _reaction("r2", "beta", OutcomeClass.FAILURE),
+            ]
+        )[0].with_id()
+        three = mine_corpus(
+            [
+                _reaction("r1", "alpha", OutcomeClass.FAILURE),
+                _reaction("r2", "beta", OutcomeClass.FAILURE),
+                _reaction("r3", "gamma", OutcomeClass.FAILURE),
+            ]
+        )[0].with_id()
+
+        assert two.id == three.id  # one row, updated — not two rows disagreeing
+        assert "3 projects" in three.statement  # ...and the statement follows the evidence
+        assert three.evidence_note_ids == ["reaction-r1", "reaction-r2", "reaction-r3"]
 
     def test_mining_is_deterministic(self) -> None:
         """A workflow re-runs, and an unstable miner would mint a new row every night."""
@@ -211,3 +241,25 @@ def test_the_migration_forbids_self_citation_in_sql_too() -> None:
     sql = Path("infra/sql/025_observations.sql").read_text(encoding="utf-8")
     assert "observations_evidence_is_merged_notes" in sql
     assert "NOT LIKE '%observation-%'" in sql
+
+
+def test_a_promoted_observation_cites_its_evidence_by_the_ids_it_counted() -> None:
+    """A promotion may not manufacture a note id, and an interaction observation is where it did.
+
+    `playbook_note` used to take bare reaction ids and prefix them, which silently assumed every
+    caller's evidence was a reaction. An interaction observation's support includes the
+    `interaction` note itself, so the prefixing turned `interaction-42` into a link to
+    `reaction-interaction-42` — dangling, and `kg-validate` fails the PR the promotion just
+    opened, after the observation has already been marked promoted and will never be retried.
+    """
+    from chemclaw.memory.playbook import playbook_note
+
+    observation = Observation(
+        statement="crossed two projects",
+        scope="interaction:interaction-42",
+        evidence_note_ids=["interaction-42", "reaction-r1", "reaction-r2"],
+        projects_seen=["alpha", "beta"],
+        origin="interaction",
+    )
+    note = playbook_note("playbook-x", "summary", observation.evidence_note_ids)
+    assert note.outgoing_links() == ["interaction-42", "reaction-r1", "reaction-r2"]
