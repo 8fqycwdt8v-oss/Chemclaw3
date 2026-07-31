@@ -23,10 +23,14 @@ spec:
         azure.workload.identity/use: "true"
     spec:
       serviceAccountName: {{ .Values.serviceAccount.name }}
+      securityContext:
+        {{- include "chemclaw.podSecurityContext" . | nindent 8 }}
       containers:
         - name: background-worker
           image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
           imagePullPolicy: {{ .Values.image.pullPolicy }}
+          securityContext:
+            {{- include "chemclaw.containerSecurityContext" . | nindent 12 }}
           env:
             - name: CHEMCLAW_COMPONENT
               value: "background-worker"

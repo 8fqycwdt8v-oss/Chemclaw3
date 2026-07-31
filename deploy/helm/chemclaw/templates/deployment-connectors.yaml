@@ -35,10 +35,14 @@ spec:
         app.kubernetes.io/component: connector-{{ $name }}
     spec:
       serviceAccountName: {{ $.Values.serviceAccount.name }}
+      securityContext:
+        {{- include "chemclaw.podSecurityContext" $ | nindent 8 }}
       containers:
         - name: connector-{{ $name }}
           image: "{{ $.Values.image.repository }}:{{ $.Values.image.tag }}"
           imagePullPolicy: {{ $.Values.image.pullPolicy }}
+          securityContext:
+            {{- include "chemclaw.containerSecurityContext" $ | nindent 12 }}
           ports:
             - name: http
               containerPort: {{ $.Values.connectorPort }}
@@ -89,10 +93,14 @@ spec:
         app.kubernetes.io/component: connector-worker-{{ $name }}
     spec:
       serviceAccountName: {{ $.Values.serviceAccount.name }}
+      securityContext:
+        {{- include "chemclaw.podSecurityContext" $ | nindent 8 }}
       containers:
         - name: connector-worker-{{ $name }}
           image: "{{ $.Values.image.repository }}:{{ $.Values.image.tag }}"
           imagePullPolicy: {{ $.Values.image.pullPolicy }}
+          securityContext:
+            {{- include "chemclaw.containerSecurityContext" $ | nindent 12 }}
           env:
             - name: CHEMCLAW_COMPONENT
               value: "connector-worker-{{ $name }}"

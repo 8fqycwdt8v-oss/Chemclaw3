@@ -20,11 +20,15 @@ spec:
         azure.workload.identity/use: "true"
     spec:
       serviceAccountName: {{ .Values.serviceAccount.name }}
+      securityContext:
+        {{- include "chemclaw.podSecurityContext" . | nindent 8 }}
       restartPolicy: Never
       containers:
         - name: migrate
           image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
           imagePullPolicy: {{ .Values.image.pullPolicy }}
+          securityContext:
+            {{- include "chemclaw.containerSecurityContext" . | nindent 12 }}
           command: ["python", "-m", "chemclaw.science.calc.migrate"]
           env:
             {{- include "chemclaw.env" . | nindent 12 }}

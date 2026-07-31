@@ -48,6 +48,38 @@ app.kubernetes.io/instance: {{ .Release.Name }}
   value: {{ .Values.knowledge.sync.intervalSeconds | quote }}
 {{- end -}}
 
+{{- /* The two halves of a `restricted` Pod Security Admission profile, written once.
+
+       Nothing in the chart asserted any of this. The image runs as a non-root UID
+       (`Containerfile`), which is a different statement from the pod *declaring* that it must —
+       and PSA reads the declaration, not the image. A namespace labelled
+       `pod-security.kubernetes.io/enforce=restricted`, the default posture for a regulated
+       OpenShift cluster, rejects every pod spec in this chart today. The image being fine is
+       exactly what makes the omission easy to miss: it fails at admission, on deployment day, in
+       someone else's cluster.
+
+       `runAsNonRoot` is asserted without `runAsUser`: OpenShift assigns an arbitrary high UID from
+       the namespace's range, and pinning one fights the SCC rather than satisfying it.
+
+       `readOnlyRootFilesystem` is deliberately NOT here. It is not part of the restricted profile,
+       and the calculation workers shell out to xtb/crest, which need writable scratch — asserting
+       it would trade a real admission failure for a real runtime failure. It is a value
+       (`securityContext.readOnlyRootFilesystem`) so a deployment that has provisioned the scratch
+       mounts can turn it on deliberately. */ -}}
+{{- define "chemclaw.podSecurityContext" -}}
+runAsNonRoot: true
+seccompProfile:
+  type: RuntimeDefault
+{{- end -}}
+
+{{- define "chemclaw.containerSecurityContext" -}}
+allowPrivilegeEscalation: false
+capabilities:
+  drop:
+    - ALL
+readOnlyRootFilesystem: {{ .Values.securityContext.readOnlyRootFilesystem }}
+{{- end -}}
+
 {{- /* Init container: fill the knowledge tree BEFORE the app starts, so no pod ever serves a
        turn against an empty graph. Same image, so no second artifact to build or scan. */ -}}
 {{- define "chemclaw.knowledgeInit" -}}
@@ -55,6 +87,8 @@ app.kubernetes.io/instance: {{ .Release.Name }}
 - name: knowledge-sync-init
   image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
   imagePullPolicy: {{ .Values.image.pullPolicy }}
+  securityContext:
+    {{- include "chemclaw.containerSecurityContext" . | nindent 4 }}
   command: ["/usr/local/bin/chemclaw-knowledge-sync", "once"]
   env:
     {{- include "chemclaw.knowledgeSyncEnv" . | nindent 4 }}
@@ -74,6 +108,8 @@ app.kubernetes.io/instance: {{ .Release.Name }}
 - name: knowledge-sync
   image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
   imagePullPolicy: {{ .Values.image.pullPolicy }}
+  securityContext:
+    {{- include "chemclaw.containerSecurityContext" . | nindent 4 }}
   command: ["/usr/local/bin/chemclaw-knowledge-sync", "loop"]
   env:
     {{- include "chemclaw.knowledgeSyncEnv" . | nindent 4 }}
@@ -118,6 +154,8 @@ app.kubernetes.io/instance: {{ .Release.Name }}
 - name: note-repo-init
   image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
   imagePullPolicy: {{ .Values.image.pullPolicy }}
+  securityContext:
+    {{- include "chemclaw.containerSecurityContext" . | nindent 4 }}
   command: ["/usr/local/bin/chemclaw-knowledge-sync", "checkout"]
   env:
     {{- include "chemclaw.knowledgeSyncEnv" . | nindent 4 }}

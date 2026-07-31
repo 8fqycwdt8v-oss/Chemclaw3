@@ -237,6 +237,31 @@ monitoring:
   # Below `interval`, so a slow scrape is dropped rather than overlapping the next one.
   scrapeTimeout: 10s
   additionalLabels: {}
+  # Collected-and-un-alerted is the same failure REV-2 fixed one level down: the ServiceMonitor
+  # made the metrics visible, and until now not one of them fired anything. `agent/audit.py`
+  # explicitly logs a stable `audit_sink_failure` marker so it can be alerted on; nothing was.
+  alerts:
+    enabled: true
+    # Fleet-wide hourly token ceiling before warning. The per-process budget guard bounds one
+    # runaway process (the "$400 in twenty minutes" failure) and says nothing about the fleet, so
+    # this is the only signal that covers a slow burn across pods. Deliberately generous —
+    # tune it to the deployment's real baseline rather than treating the default as meaningful.
+    tokensPerHourWarning: 2000000
+
+# Pod/container security context. The chart asserted none of this, so a namespace labelled
+# `pod-security.kubernetes.io/enforce=restricted` — the default posture for a regulated OpenShift
+# cluster — rejected every pod spec here. The image has always run as a non-root UID, which is a
+# different statement from the pod *declaring* it must; PSA reads the declaration.
+#
+# The restricted profile itself is not configurable (it is asserted unconditionally in
+# `_helpers.tpl`, because a chart that lets you turn off `allowPrivilegeEscalation: false` is
+# offering a footgun, not a knob). Only the one setting that is *not* part of that profile, and
+# that genuinely cannot be defaulted on, lives here.
+securityContext:
+  # Off because the calculation workers shell out to xtb/crest, which need writable scratch; with
+  # no scratch volume provisioned this trades an admission failure for a runtime failure. Turn it
+  # on once the deployment mounts an emptyDir over the process's temp directory.
+  readOnlyRootFilesystem: false
 
 networkPolicy:
   enabled: true
@@ -246,3 +271,31 @@ networkPolicy:
     https: 443
     llm: 8000
     otel: 4317
+  # WHERE those ports may be dialled. Empty renders `to: []`, which in a NetworkPolicy means
+  # **any destination** — so with this unset, TCP/443 from every pod to the whole internet is
+  # permitted. That is the shipped default only because the addresses are deployment-specific and
+  # a chart cannot invent your Postgres CIDR; it is not a safe end state.
+  #
+  # `tests/test_no_egress.py` enforces "this system takes no external sources" (D-089) by scanning
+  # source code for third-party host literals. That catches a developer adding a data source and
+  # catches nothing at runtime — set this to make the network agree with the decision.
+  #
+  # Entries are NetworkPolicyPeer objects, passed through verbatim:
+  #   - ipBlock: {cidr: 10.0.1.0/24}                     # the database subnet
+  #   - namespaceSelector: {matchLabels: {name: temporal}}
+  #   - namespaceSelector: {matchLabels: {name: llm-serving}}
+  egressDestinations: []
+  # Namespaces allowed to reach the front door, beyond Chemclaw's own pods. The router needs it for
+  # the Route to work and the monitoring stack needs it to scrape `/metrics` — which is
+  # unauthenticated *on the assumption that this rule exists*, and until now it did not. Labels
+  # differ by distribution: OpenShift labels its router namespace
+  # `network.openshift.io/policy-group: ingress` and its user-workload monitoring namespace
+  # `kubernetes.io/metadata.name: openshift-user-workload-monitoring`.
+  serviceIngress:
+    # Its own toggle, not `networkPolicy.enabled`: if these labels are wrong the front door is
+    # unreachable, and the fix must not be "turn off network policy" — that would drop the egress
+    # rule too, which is the one you least want to lose.
+    enabled: true
+  ingressNamespaces:
+    - network.openshift.io/policy-group: ingress
+    - kubernetes.io/metadata.name: openshift-user-workload-monitoring
