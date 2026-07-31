@@ -163,22 +163,31 @@ def test_chart_config_values_load_as_settings(monkeypatch: pytest.MonkeyPatch) -
 
 
 def test_chart_declares_only_the_documented_secrets() -> None:
-    """The chart names exactly the plain secrets the architecture signed off — no fifth crept in.
+    """The chart names exactly the plain secrets the architecture signed off — no sixth crept in.
 
     Everything else is workload-identity federation, i.e. no client secret at rest; a new plain
-    secret is an architecture change (D-047), so it should not pass unnoticed.
+    secret is an architecture change (D-047), so it should not pass unnoticed. Each addition is
+    argued here rather than waved through, which is why this list is written out instead of derived.
 
-    The knowledge-repo push credential is the fourth, added deliberately (gap DEP-2, D-088): the
-    PR-gate submitter shells out to `git push`, and a git host authenticates that push with a token
-    — there is no federated exchange for it the way there is for Entra-fronted APIs. Without the
-    credential every agent-authored note fails at push in-cluster, so the choice is a declared
-    secret or a knowledge layer that cannot write. It is recorded here rather than waved through.
+    The knowledge-repo push credential is the fourth (gap DEP-2, D-088): the PR-gate submitter
+    shells out to `git push`, and a git host authenticates that push with a token — there is no
+    federated exchange for it the way there is for Entra-fronted APIs. Without it every
+    agent-authored note fails at push in-cluster.
+
+    The webhook-signing secret is the fifth (D-2026-07-31-a-proposal-is-a-record-not-a-branch), and
+    it is the same argument one step further along the same path: the git host now tells the
+    deployment which notes were merged, and that claim closes a proposal — so it must be
+    authenticated, and the host authenticates itself by signing, not by holding an Entra identity.
+    Without it every reviewed note stays in the queue forever, which is a review surface nobody
+    works. Note the polarity: an *absent* secret is safe here (the route refuses to decide
+    anything), unlike the four above, where absent means the capability fails.
     """
     assert set(_VALUES["secrets"]["keys"].values()) == {
         "CHEMCLAW_LLM_API_KEY",
         "CHEMCLAW_HPC_API_TOKEN",
         "CHEMCLAW_POSTGRES_DSN",
         "CHEMCLAW_KNOWLEDGE_REPO_TOKEN",
+        "CHEMCLAW_NOTE_WEBHOOK_SECRET",
     }
 
 

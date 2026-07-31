@@ -204,6 +204,7 @@ and is kept only for reservations that were in flight when this changed.
 | [D-168](D-168-a-template-step-runs-as-its-requester.md) | A template step runs as its requester, and four steps that had never run |
 | [D-169](D-169-trust-is-a-distribution-not-a-number-the-residual.md) | Trust is a distribution, not a number: the residual listing, and the property table behind it |
 | [D-170](D-170-a-similarity-hit-you-cannot-qualify-is-a.md) | A similarity hit you cannot qualify is a similarity hit you cannot use |
+| [D-2026-07-31-a-proposal-is-a-record-not-a-branch](D-2026-07-31-a-proposal-is-a-record-not-a-branch.md) | A proposal is a record, not a branch |
 | [D-2026-07-31-adr-ids-that-cannot-collide](D-2026-07-31-adr-ids-that-cannot-collide.md) | ADR ids that cannot collide |
 | [D-2026-07-31-the-audit-chain-is-versioned](D-2026-07-31-the-audit-chain-is-versioned.md) | The audit chain is versioned, so widening the record does not invalidate it |
 | [D-2026-07-31-the-deployment-envelope](D-2026-07-31-the-deployment-envelope.md) | The deployment envelope: a sidecar that emptied the tree, and three assertions the chart never made |

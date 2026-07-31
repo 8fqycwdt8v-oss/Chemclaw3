@@ -15,6 +15,8 @@ on in F4.
 """
 
 import asyncio
+import hashlib
+import hmac
 import logging
 import time
 import uuid
@@ -74,10 +76,38 @@ from chemclaw.connectors.health import (
 from chemclaw.core import db
 from chemclaw.core.config import settings
 from chemclaw.core.logging import configure_logging, configure_telemetry
+from chemclaw.kg.proposal import (
+    NoteProposal,
+    ProposalState,
+    close_merged_notes,
+    decide_proposal,
+    list_proposals,
+    read_proposal,
+)
 
 logger = logging.getLogger(__name__)
 
 _STATIC_DIR = Path(__file__).parent / "static"
+
+# Where a git host puts the body signature. `sha256=<hex>` is the shape GitHub, GitLab and Azure
+# DevOps webhooks all produce, so an operator wires this without a translation step.
+_WEBHOOK_SIGNATURE_HEADER = "X-Chemclaw-Signature"
+
+
+def _webhook_signature_ok(body: bytes, header: str) -> bool:
+    """Whether `header` is a valid HMAC-SHA256 of `body` under the configured webhook secret.
+
+    False when no secret is configured — "unsigned" rather than "trusted", so the caller decides
+    what an unsigned call may do rather than this function deciding for it. `compare_digest` for
+    the comparison: a byte-at-a-time `==` on a MAC leaks its prefix through timing, which is the
+    one implementation detail of a signature check that matters.
+    """
+    secret = settings.note_webhook_secret
+    if not secret or not header.startswith("sha256="):
+        return False
+    expected = hmac.new(secret.encode(), body, hashlib.sha256).hexdigest()
+    return hmac.compare_digest(expected, header.removeprefix("sha256="))
+
 
 # Loopback interfaces: binding here keeps the unauthenticated dev mode reachable only from the
 # local host, so it is not a network-exposed footgun. Anything else (notably the "0.0.0.0"
@@ -386,6 +416,63 @@ class ApprovalStatusOut(BaseModel):
 
     approval_id: str
     status: str
+
+
+class ProposalSummary(BaseModel):
+    """One note proposal as the review queue shows it — everything but the note body.
+
+    A second shape rather than the whole `NoteProposal`, for the reason `JobRecordSummary` is one:
+    a queue may hold dozens of rows and a rendered note is a document, so handing them all back
+    would spend a page of transfer to answer "what is waiting for me". The body is one lookup away
+    by id once a proposal is worth opening.
+    """
+
+    id: int
+    note_id: str
+    note_type: str
+    state: str
+    branch: str
+    reference: str
+    actor: str
+    submitted_at: datetime | None
+    decided_at: datetime | None
+    decided_by: str
+    reason: str
+
+
+class ProposalDetail(ProposalSummary):
+    """A proposal with the rendered note, exactly as it would land in the tree.
+
+    The note itself rather than a summary of it: a reviewer signing off on machine-written
+    knowledge is signing off on the bytes, and a paraphrase is the one thing a GxP review must not
+    be given.
+    """
+
+    content: str
+    session_id: str
+    correlation_id: str
+
+
+class ProposalDecisionIn(BaseModel):
+    """The human decision on one open proposal, with the reason it went that way.
+
+    `reason` is required on a rejection and optional on a merge, because "why was this refused" is
+    the question a rejected proposal exists to answer — before this table there was no record of a
+    rejection at all, and a record that says only "no" would reproduce that gap one level up.
+    """
+
+    approved: bool
+    reason: str = ""
+
+
+class KnowledgeMergedIn(BaseModel):
+    """The notes a git host reports as merged, so their proposals can be closed.
+
+    Optional: an operator calling this by hand to force a reindex still may, and an empty list
+    keeps exactly the pre-existing behaviour (rebuild the index, decide nothing).
+    """
+
+    note_ids: list[str] = []
 
 
 class PlanDecisionIn(BaseModel):
@@ -1097,6 +1184,7 @@ def create_app(
 
     @app.post("/events/knowledge-merged", status_code=202)
     async def knowledge_merged(
+        request: Request,
         principal: Principal = Depends(require_principal),
     ) -> dict[str, str]:
         """Tell the deployment a note merged, so freshness stops being bounded by a timer (SCH-6).
@@ -1107,11 +1195,35 @@ def create_app(
         rebuilt now rather than at the next scheduled sweep — collapsing gap SCH-2's staleness
         window from an interval to seconds.
 
-        Idempotent and cheap to over-call: the reindex is an upsert, and a duplicate delivery
-        just rebuilds an already-current index. Authenticated like every other non-health route.
+        It now also **closes the proposals** the named notes belong to, which is what turns the
+        gate into a loop rather than an outbox: without it a merged note's row would sit `open`
+        forever and the review queue would only ever grow. Only open rows move, so a duplicate
+        delivery — which webhooks routinely are — decides nothing twice.
+
+        **Signed**, because the body now carries an authorization-shaped claim ("a human merged
+        these"). While this route only kicked an idempotent reindex, any authenticated principal
+        calling it was harmless; a principal who can assert a merge could close their own proposal
+        without a reviewer ever seeing it. The signature is HMAC-SHA256 over the raw body under
+        `note_webhook_secret`, compared in constant time. With no secret configured the route keeps
+        its old behaviour and refuses to decide anything — an unsigned caller may still force a
+        reindex, which is what an operator running it by hand needs.
         """
+        raw = await request.body()
+        signed = _webhook_signature_ok(raw, request.headers.get(_WEBHOOK_SIGNATURE_HEADER, ""))
+        if settings.note_webhook_secret and not signed:
+            raise HTTPException(status_code=401, detail="invalid or missing webhook signature")
+        merged = KnowledgeMergedIn.model_validate_json(raw) if raw else KnowledgeMergedIn()
+        closed = 0
+        if merged.note_ids:
+            if not signed:
+                raise HTTPException(
+                    status_code=401,
+                    detail="closing a proposal needs a signed webhook; configure "
+                    "CHEMCLAW_NOTE_WEBHOOK_SECRET and sign the body",
+                )
+            closed = await close_merged_notes(merged.note_ids, principal.oid or "webhook")
         started = await request_note_reindex()
-        return {"status": "accepted", "workflow_id": started}
+        return {"status": "accepted", "workflow_id": started, "proposals_closed": str(closed)}
 
     @app.get("/metrics")
     async def metrics() -> Response:
@@ -1187,6 +1299,122 @@ def create_app(
             await decide_approval(approval_id, body.approved)
         except ValueError as exc:
             raise HTTPException(status_code=404, detail="no such approval hold") from exc
+        return Response(status_code=204)
+
+    def _is_reviewer(principal: Principal) -> bool:
+        """Whether the caller may see and decide *other people's* proposals.
+
+        The same role set that guards every write tool (`entra_privileged_roles`), rather than a
+        new one: signing off on machine-written knowledge is the most consequential write in the
+        system, so inventing a second, weaker role for it would be strange. Dev (`entra_required`
+        off) has no real roles and is open, exactly as `authorize_tool` is; a deployment that
+        enables identity and names no privileged role fails closed, also as `authorize_tool` does —
+        a queue nobody can review is a misconfiguration to notice, not one to paper over.
+        """
+        if not settings.entra_required:
+            return True
+        return bool(principal.roles & settings.entra_privileged_role_set)
+
+    def _proposal_summary(proposal: NoteProposal) -> ProposalSummary:
+        """Project a stored proposal onto the listing shape."""
+        return ProposalSummary(
+            id=proposal.id,
+            note_id=proposal.note_id,
+            note_type=proposal.note_type,
+            state=proposal.state.value,
+            branch=proposal.branch,
+            reference=proposal.reference,
+            actor=proposal.actor,
+            submitted_at=proposal.submitted_at,
+            decided_at=proposal.decided_at,
+            decided_by=proposal.decided_by,
+            reason=proposal.reason,
+        )
+
+    @app.get("/proposals")
+    async def list_note_proposals(
+        state: str = "",
+        before_id: int = 0,
+        principal: Principal = Depends(require_principal),
+    ) -> list[ProposalSummary]:
+        """The PR-gate's queue: what has been proposed, and what became of it.
+
+        The gate is named across `CLAUDE.md`, `ARCHITECTURE.md`, `SECURITY.md` and D-005 as the
+        line that makes machine-written knowledge safe — and it had no surface at all. A note was
+        pushed to `note/<id>` and that was the end of it: nothing listed what was awaiting review,
+        the chemist who proposed a note could not find out what happened to it, and a rejection
+        left no trace, because a rejection is a deleted branch. Browsing refs in a git host was the
+        only discovery mechanism.
+
+        A reviewer sees every proposal; anyone else sees their own. `before_id` pages backwards
+        through the monotonic row ids rather than offsetting, so a proposal arriving mid-page
+        cannot make the next page skip or repeat a row.
+        """
+        try:
+            wanted = ProposalState(state) if state else None
+        except ValueError as exc:
+            raise HTTPException(
+                status_code=422,
+                detail=f"unknown state {state!r}; expected one of "
+                f"{sorted(s.value for s in ProposalState)}",
+            ) from exc
+        scope = "" if _is_reviewer(principal) else principal.oid
+        proposals = await list_proposals(
+            wanted, scope, settings.proposal_list_limit, before_id or None
+        )
+        return [_proposal_summary(proposal) for proposal in proposals]
+
+    async def _visible_proposal(proposal_id: int, principal: Principal) -> NoteProposal:
+        """One proposal the caller may see, or 404 — no existence leak, as with sessions/holds."""
+        proposal = await read_proposal(proposal_id)
+        if proposal is None:
+            raise HTTPException(status_code=404, detail="no such proposal")
+        if not _is_reviewer(principal) and proposal.actor != principal.oid:
+            raise HTTPException(status_code=404, detail="no such proposal")
+        return proposal
+
+    @app.get("/proposals/{proposal_id}")
+    async def get_note_proposal(
+        proposal_id: int,
+        principal: Principal = Depends(require_principal),
+    ) -> ProposalDetail:
+        """One proposal with the note exactly as it would land in the tree."""
+        proposal = await _visible_proposal(proposal_id, principal)
+        return ProposalDetail(
+            **_proposal_summary(proposal).model_dump(),
+            content=proposal.content,
+            session_id=proposal.session_id,
+            correlation_id=proposal.correlation_id,
+        )
+
+    @app.post("/proposals/{proposal_id}/decision", status_code=204)
+    async def decide_note_proposal(
+        proposal_id: int,
+        body: ProposalDecisionIn,
+        principal: Principal = Depends(require_principal),
+    ) -> Response:
+        """Record the human sign-off — or, for the first time, the refusal.
+
+        Deliberately an HTTP route and not an agent tool, for the reason
+        `POST /approvals/{id}/decision` is not (D-005): a tool would let the agent sign off on its
+        own proposal and collapse the line the whole gate draws.
+
+        This records the *decision*, which for a rejection is the entire outcome — there is no git
+        action to take, and the record is what makes "we considered this and said no" answerable
+        later. A merge additionally happens in the git host; the webhook below closes the row when
+        the host reports it, so a proposal merged without anyone calling this is not left open.
+        """
+        if not _is_reviewer(principal):
+            raise HTTPException(status_code=403, detail="deciding a proposal needs a review role")
+        if not body.approved and not body.reason.strip():
+            raise HTTPException(
+                status_code=422, detail="a rejection must state why; that is what the record is for"
+            )
+        await _visible_proposal(proposal_id, principal)
+        state = ProposalState.MERGED if body.approved else ProposalState.REJECTED
+        decided = await decide_proposal(proposal_id, state, principal.oid or "", body.reason)
+        if decided is None:
+            raise HTTPException(status_code=409, detail="this proposal has already been decided")
         return Response(status_code=204)
 
     @app.get("/sessions/{session_id}/plan")

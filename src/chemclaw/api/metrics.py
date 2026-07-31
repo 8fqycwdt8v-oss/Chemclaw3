@@ -81,6 +81,14 @@ _COUNTERS: dict[str, str] = {
     "chemclaw_notes_publish_failures_total": (
         "Knowledge notes that could not be opened on a branch; the knowledge was lost."
     ),
+    # The gate's outcomes, which the two counters above cannot express: they count submissions,
+    # and the question an operator actually has is whether anything is being *reviewed*. A rising
+    # `open` against a flat `merged` is a review queue nobody is working; `rejected` is the series
+    # that had no record at all before, because a rejection is a deleted branch.
+    "chemclaw_note_proposals_total": (
+        "Note proposals by state — open on submission, merged/rejected on a human decision, "
+        "failed when the submission never reached git."
+    ),
     # A turn whose connectors did not come up still answers — from whatever tools remained. That is
     # the right behaviour and the reason it needs a number: a degraded answer is indistinguishable
     # from a good one in the transcript, and `open_reachable` returned the list to four callers that
@@ -179,6 +187,9 @@ _COUNTER_LABELS: dict[str, tuple[str, ...]] = {
     "chemclaw_output_tokens_total": ("profile",),
     "chemclaw_cache_read_tokens_total": ("profile",),
     "chemclaw_cache_write_tokens_total": ("profile",),
+    # Four values, fixed by a CHECK constraint in `infra/sql/027_note_proposals.sql` — the only
+    # label in this registry whose cardinality is bounded by the database rather than by trust.
+    "chemclaw_note_proposals_total": ("state",),
 }
 
 # The most label-sets one counter may hold. A label *value* is not bounded by this module — it comes

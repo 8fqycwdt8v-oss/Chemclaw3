@@ -119,17 +119,21 @@ QM path. The rows below are what survives that merge, narrowed to say so.
 
 **The write-back paths are open loops.**
 
-- [ ] **The PR-gate opens no PR and notifies nobody** — [L], and it is the highest-value gap in the
-      repo: the control every other control is justified by is not operable. `git_submitter` pushes
-      a branch and returns its name; nothing calls a git platform API, there is no `/proposals`
-      endpoint among the 16 routes, no notification, and **no record of a proposal that was
-      rejected** (a rejection is a deleted branch). A reviewer's only discovery mechanism is
-      browsing `note/*` refs. Wants either a platform adapter behind the existing `NoteSubmitter`
-      protocol or an owner-scoped proposal surface backed by a `note_proposals` table.
-- [ ] **A failed proposal is counted but not recorded** — [S]. D-156 added
-      `chemclaw_notes_publish_failures_total`, so a dead git remote is now distinguishable from an
-      idle system — but the note itself is still gone, with nothing to replay. Belongs with the
-      proposal store above.
+- [x] **The PR-gate opens no PR and notifies nobody** — the proposal-surface half is closed by
+      D-2026-07-31-a-proposal-is-a-record-not-a-branch: `note_proposals` records every submission
+      with its provenance and the rendered note, `GET /proposals`, `GET /proposals/{id}` and
+      `POST /proposals/{id}/decision` make the queue operable, and the merge webhook — now
+      HMAC-signed, because its body carries an authorization-shaped claim — closes rows so the
+      queue drains. `rejected` is a state the system has for the first time.
+- [ ] **The gate is findable, not pushed, and still opens no PR object** — [M], what the row above
+      deliberately left. (a) **No notification**: a new proposal reaches nobody until someone opens
+      the queue; routing it through the existing `notify` seam is a decision about who gets told
+      what. (b) **No platform adapter**: opening the actual PR needs a real token and base URL to
+      be verifiable, so it is unwritten. The shape is settled — a `NoteSubmitter` decorator that
+      pushes, opens the PR, and returns its URL as the `reference` the record already stores.
+- [x] **A failed proposal is counted but not recorded** — closed by the same ADR. A submission that
+      never reached git now leaves a `failed` row carrying the rendered note, so the knowledge is
+      replayable rather than only countable.
 - [ ] **The inline BO path persists nothing at all** — [M]. `suggest_next_experiment` is the path the
       conversational agent actually uses; it takes a problem and observations, calls BoFire, returns
       candidates, and writes nothing — not the problem, not the observations the agent assembled

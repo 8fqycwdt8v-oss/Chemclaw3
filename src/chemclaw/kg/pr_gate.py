@@ -15,7 +15,18 @@ from pydantic import BaseModel, Field
 from chemclaw.core.config import settings
 from chemclaw.core.metrics_bridge import record_metric
 from chemclaw.kg.note import Note
+from chemclaw.kg.proposal import (
+    NoteProposal,
+    ambient_provenance,
+    record_proposal_failed,
+    record_proposal_submitted,
+)
 from chemclaw.kg.render import render_note
+
+# How much of a submitter's error message the record keeps. Bounded because the text is whatever
+# git wrote to stderr, and an unbounded field on a compliance table is a place for a repository
+# path or a token-bearing remote URL to be stored forever.
+_REASON_CHARS = 300
 
 
 class NoteFile(BaseModel):
@@ -132,10 +143,38 @@ async def propose_note(
             + ".\n\nRequires human review before merge — GxP: AI proposes, human signs off."
         ),
     )
-    reference = await submitter.submit(submission)
+    # The durable record, built here rather than at the eight call sites: an obligation that must
+    # hold for every proposal belongs to the one wrapper they all run inside, which is the
+    # placement rule the actor stamp and the job record already follow. Recording happens on *both*
+    # sides of the submit because the two outcomes are the two halves of an operable gate — what is
+    # awaiting review, and what never reached review at all.
+    actor, session_id, correlation_id = ambient_provenance()
+    proposal = NoteProposal(
+        note_id=note.id,
+        note_type=note.type,
+        content=files[0].content,
+        branch=submission.branch,
+        actor=actor,
+        session_id=session_id,
+        correlation_id=correlation_id,
+    )
+    try:
+        reference = await submitter.submit(submission)
+    except Exception as exc:
+        # A submission that never reached git is the case `chemclaw_notes_publish_failures_total`
+        # made countable and still left unrecoverable: the note itself was gone, with nothing to
+        # replay. The row keeps the rendered bytes, so the knowledge survives the outage that lost
+        # the branch. Recorded on every retry, which is harmless — the record keys on the content,
+        # so N attempts at one note collapse onto one row.
+        failure = proposal.model_copy(update={"reason": str(exc)[:_REASON_CHARS]})
+        await record_proposal_failed(failure)
+        raise
     # Counted after the submitter returns, so the number means "a note reached the branch", not "we
     # tried". A failing submitter raises, and a metric incremented before it would have reported a
     # healthy PR-gate while every write was failing — which is the exact condition this counter was
     # declared to make visible and, until now, never did.
     record_metric(lambda m: m.increment("chemclaw_notes_proposed_total"))
+    # Never raises: the note has already reached the branch, and losing the record must not undo
+    # the thing the record is about.
+    await record_proposal_submitted(proposal.model_copy(update={"reference": reference}))
     return reference

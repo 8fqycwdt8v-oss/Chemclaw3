@@ -207,6 +207,11 @@ secrets:
     # Push credential for the knowledge repo (gap DEP-2). Without it the PR-gate cannot open a
     # branch for any agent-authored note, so every knowledge write fails at push in-cluster.
     knowledgeRepoToken: "CHEMCLAW_KNOWLEDGE_REPO_TOKEN"
+    # The shared secret the git host signs its post-merge webhook with. Without it
+    # `/events/knowledge-merged` can still force a reindex but may not close a proposal as merged
+    # (D-2026-07-31-a-proposal-is-a-record-not-a-branch), so every reviewed note would stay in the
+    # queue forever — a review surface that only ever grows is one nobody works.
+    noteWebhookSecret: "CHEMCLAW_NOTE_WEBHOOK_SECRET"
   # Temporal mTLS is mounted as files; the env points at the mount paths.
   temporalTls:
     secretName: "chemclaw-temporal-tls"
