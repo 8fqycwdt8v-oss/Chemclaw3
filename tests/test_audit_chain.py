@@ -13,6 +13,7 @@ from chemclaw.agent.audit_store import PostgresAuditSink, chain_hash
 from chemclaw.cli.verify_audit_chain import ChainRow, check_chain, verify_chain
 from chemclaw.core.config import settings
 from chemclaw.core.db import connect
+from chemclaw.core.ids import stable_hash
 from tests.pg import migrated_db_or_skip
 
 _DEFAULT_ACTOR = "u-1"
@@ -120,3 +121,101 @@ def test_postgres_sink_writes_a_verifiable_chain() -> None:
         assert await verify_chain() == []  # and the restore is proven, not assumed
 
     asyncio.run(_run())
+
+
+# --- the record grows without invalidating what is already in it (D-166) ---------------------
+
+
+# The pre-D-166 hash, reimplemented from the old source rather than called through `chain_hash`.
+# That independence is the whole point: a helper that built v1 rows *with* the function under test
+# moves with it, so deleting the version switch leaves both sides agreeing and the tests green
+# while the mechanism does nothing. Verified rather than assumed — the first draft of this file did
+# exactly that, and the two most important tests below passed with the switch removed.
+_V1_HASH_FIELDS = (
+    "correlation_id",
+    "actor",
+    "tool",
+    "arguments",
+    "outcome",
+    "detail",
+    "latency_ms",
+    "revision",
+)
+
+
+def _legacy_chain_hash(prev_hash: str, event: AuditEvent) -> str:
+    """`chain_hash` exactly as it was before the event grew — the bytes real v1 rows carry."""
+    payload = {field: getattr(event, field) for field in _V1_HASH_FIELDS}
+    return stable_hash({"prev": prev_hash, "event": payload}, chars=64)
+
+
+def test_the_versioned_hash_reproduces_the_legacy_bytes_exactly() -> None:
+    """v1 must be the *old* hash, not merely a different one — otherwise history still fails.
+
+    `stable_hash` canonicalizes with `sort_keys=True`, so selecting the eight original keys
+    serializes byte-identically to what the narrower model used to dump. This asserts that rather
+    than assuming it.
+    """
+    event = _event("find_notes").model_copy(update={"session_id": "s-1", "purpose": "why"})
+    assert chain_hash("abc", event, version=1) == _legacy_chain_hash("abc", event)
+
+
+def _linked_v1(events: list[AuditEvent], *, start: int = 1) -> list[ChainRow]:
+    """Rows as the pre-D-166 writer produced them: hashed over the eight original fields."""
+    rows: list[ChainRow] = []
+    prev = ""
+    for i, event in enumerate(events, start=start):
+        row_hash = _legacy_chain_hash(prev, event)
+        rows.append(ChainRow(id=i, prev_hash=prev, row_hash=row_hash, event=event, chain_version=1))
+        prev = row_hash
+    return rows
+
+
+def test_a_v1_row_still_verifies_after_the_event_grew() -> None:
+    """The property this versioning exists for.
+
+    `chain_hash` covers the whole `AuditEvent`, so adding `session_id`/`purpose` changes what every
+    *historical* row would hash to. Without a per-row version the first deployment to run this
+    migration would report its entire trail as tampered with — and a compliance record that accuses
+    itself is worse than one that says nothing, because "was it altered, or did we change the
+    schema?" is exactly what an auditor needs answered and would no longer be answerable.
+    """
+    rows = _linked_v1([_event("find_notes"), _event("predict_pka")])
+    assert check_chain(rows) == []
+
+
+def test_a_trail_spanning_the_migration_verifies_end_to_end() -> None:
+    """A real deployment's table holds both shapes: rows from before the migration and after it."""
+    old = _linked_v1([_event("find_notes"), _event("expand_note")])
+    prev = old[-1].row_hash
+    new: list[ChainRow] = []
+    for i, event in enumerate([_event("predict_pka"), _event("gather_evidence")], start=3):
+        # v2 events carry the new fields; the chain continues from the v1 tip.
+        event = event.model_copy(update={"session_id": "s-1"})
+        row_hash = chain_hash(prev, event)
+        new.append(ChainRow(id=i, prev_hash=prev, row_hash=row_hash, event=event))
+        prev = row_hash
+    assert check_chain([*old, *new]) == []
+
+
+def test_tampering_with_a_v1_row_is_still_caught() -> None:
+    """Versioning must not become a way to launder a modified row: v1 rows stay tamper-evident."""
+    rows = _linked_v1([_event("find_notes"), _event("predict_pka")])
+    tampered = rows[1]._replace(event=_event("predict_pka", actor="attacker"))
+    assert any("tampered" in problem for problem in check_chain([rows[0], tampered]))
+
+
+def test_the_new_fields_are_covered_by_the_v2_hash() -> None:
+    """`session_id` is audited data, not metadata — altering it must break the row's hash."""
+    event = _event("find_notes").model_copy(update={"session_id": "s-1"})
+    forged = event.model_copy(update={"session_id": "s-2"})
+    assert chain_hash("", event) != chain_hash("", forged)
+
+
+def test_a_v1_row_rehashed_as_v2_does_not_verify() -> None:
+    """The versions are genuinely different hashes, so the switch is doing real work.
+
+    If v1 and v2 happened to agree, every test above would pass while the mechanism did nothing.
+    """
+    event = _event("find_notes")
+    assert chain_hash("", event, version=1) != chain_hash("", event)

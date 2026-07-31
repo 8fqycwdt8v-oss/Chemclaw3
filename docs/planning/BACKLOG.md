@@ -45,25 +45,25 @@ QM path. The rows below are what survives that merge, narrowed to say so.
 
 **The record says what happened, never why.** This is the largest theme and none of it is closed.
 
-- [ ] **An audit row cannot be traced back to the conversation that caused it** — [S], and it is now
-      the *only* remaining half of this. D-157 closed the durable-job side: `job_records` carries
-      `rationale`, `session_id` and `correlation_id`, so "why was this BO campaign started" is
-      answerable for anything that runs through `ConnectorJobWorkflow`. Every **other** tool call is
-      still stranded. `api/runner.py` mints a per-turn `correlation_id` and stamps it on
-      `audit_events`; `audit_events` has no `session_id` and `session_messages` has no
-      `correlation_id`, so nothing joins `gather_evidence`, `predict_pka`, `suggest_next_experiment`
-      or `propose_knowledge_note` to the conversation that asked for them — which is most of the
-      trail. Two indexed columns close it. **Note the constraint:** `chain_hash` hashes
-      `event.model_dump()`, so adding a field to `AuditEvent` changes what every historical row
-      should hash to and breaks verification; this needs a `chain_version` column and a verifier
-      that switches on it, which is a GxP change wanting its own ADR.
+- [x] **An audit row cannot be traced back to the conversation that caused it** — closed by D-166.
+      `audit_events.session_id` and `session_messages.correlation_id` give the words and the tool
+      calls a shared key. The chain is versioned in the same commit, because `chain_hash` covers the
+      whole `AuditEvent` and widening it would otherwise have reported every historical row as
+      tampered with — indistinguishable from the tampering the chain exists to detect.
+- [ ] **The reasoning a `correlation_id` now reaches is still erodible** — [M], and it is what makes
+      D-166 necessary-but-not-sufficient. The join lands on `session_messages`, whose rows
+      `session_store._compact` rewrites, `durable/retention.py` prunes by age, and `rollback_to`
+      deletes on client disconnect. So a trail can point at a conversation that has since been
+      compacted out of recognisability. Wants a decision about what a GxP deployment must retain,
+      not more plumbing.
 - [ ] **No field holds an intent for a *non-job* tool call** — [M]. D-157 gave
-      `ConnectorJobInput` a required `rationale`, so durable jobs now state why they ran. `AuditEvent`
-      still has none, so for every inline tool the trail records what was called with which arguments
-      and by whom, and reconstruction remains "read the transcript and infer". The same
-      model-authored, audited, never-authorization-bearing one-liner extends naturally from the job
-      launcher to the audit middleware (`dry_run` is the precedent for an ambient value the model
-      cannot forge; this is the inverse — one it should author).
+      `ConnectorJobInput` a required `rationale`; D-166 added an `AuditEvent.purpose` column and
+      deliberately left it empty, because the honest way to fill it is undecided. Authoring a reason
+      per call means changing every tool signature; deriving one from the harness's active todo step
+      is a heuristic, and a provenance field that is sometimes an inference is worse than an empty
+      one — a reader cannot tell which rows are which. D-157's `rationale` works because a job launch
+      is a discrete, deliberate act with an obvious author; an inline tool call is not. Needs a
+      decision, not code.
 - [ ] **The reasoning that does exist is compacted, pruned and rolled back** — [M]. The only durable
       trace of intent is the raw MAF message blob in `session_messages`, and three mechanisms erode
       it: `session_store._compact` rewrites rows, `durable/retention.py` prunes by age, and

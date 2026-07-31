@@ -26,6 +26,7 @@ from agent_framework import FunctionInvocationContext, function_middleware
 from pydantic import BaseModel
 
 from chemclaw.agent.identity_context import get_current_actor, get_current_correlation_id
+from chemclaw.agent.session_context import get_current_session_id
 from chemclaw.core.config import settings
 from chemclaw.core.metrics_bridge import record_metric
 
@@ -49,6 +50,20 @@ class AuditEvent(BaseModel):
     """One recorded tool invocation — the row an `AuditSink` persists."""
 
     correlation_id: str
+    # The conversation this call belongs to (D-166). `correlation_id` identifies the *turn* and was
+    # stamped on nothing holding the user's words, so a tool call could not be joined to the
+    # question that caused it — the trail proved *that* a tool ran and never *why*. D-157 closed
+    # this for durable jobs (`job_records` carries the session and a rationale); an ordinary tool
+    # call — `gather_evidence`, `predict_pka`, `suggest_next_experiment` — had no such row, and
+    # those are most of the trail. Empty off the request path, where there genuinely is no session.
+    session_id: str = ""
+    # Why this call was made, in the requester's terms. Reserved and deliberately unpopulated: the
+    # column is here because schema churn on a hash-chained table is worth doing once, but nothing
+    # fills it yet. Making the model author a reason per call means changing every tool signature,
+    # and deriving one from the harness's active todo step is a *heuristic* — a provenance field
+    # that is sometimes an inference is worse than an empty one, so it stays empty until it can be
+    # authored honestly.
+    purpose: str = ""
     actor: str
     tool: str
     arguments: str
@@ -157,6 +172,10 @@ def make_audit_middleware(
         event_actor = get_current_actor() or actor
         # Same precedence, same reason: per-turn if a turn stamped one, else the build-time id.
         event_cid = get_current_correlation_id() or correlation_id
+        # The conversation, read ambiently for the same reason the actor is: a tool has no request
+        # context, and an agent is cached per profile for the process's life, so anything bound at
+        # build time would be shared by every user on the pod. Empty off the request path.
+        event_session = get_current_session_id() or ""
         start = time.perf_counter()
         try:
             await call_next()
@@ -176,6 +195,7 @@ def make_audit_middleware(
                 audit_sink,
                 AuditEvent(
                     correlation_id=event_cid,
+                    session_id=event_session,
                     actor=event_actor,
                     tool=name,
                     arguments=args,
@@ -201,6 +221,7 @@ def make_audit_middleware(
             audit_sink,
             AuditEvent(
                 correlation_id=event_cid,
+                session_id=event_session,
                 actor=event_actor,
                 tool=name,
                 arguments=args,

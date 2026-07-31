@@ -200,3 +200,4 @@ this reason; the filenames make that ordering irrelevant now, and the numbers st
 | [D-163](D-163-prose-named-two-note-types-the-schema-refused-and-a.md) | Prose named two note types the schema refused, and a lost note could not be counted |
 | [D-164](D-164-the-plan-approval-binds-to-the-plan-not-to-the.md) | The plan approval binds to the plan, not to the session |
 | [D-165](D-165-the-deployment-envelope-a-sidecar-that-emptied-the.md) | The deployment envelope: a sidecar that emptied the tree, and three assertions the chart never made |
+| [D-166](D-166-the-audit-chain-is-versioned-so-widening-the-record.md) | The audit chain is versioned, so widening the record does not invalidate the record |

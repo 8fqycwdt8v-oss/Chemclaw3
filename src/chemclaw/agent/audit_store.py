@@ -26,6 +26,29 @@ from chemclaw.core.ids import stable_hash
 # Full 256-bit digest (all 64 hex chars) for the chain link — this is tamper evidence, not a
 # content-addressed cache key, so it uses the strongest width `stable_hash` offers.
 _CHAIN_HASH_CHARS = 64
+
+# Which field set a row's `row_hash` covers (`infra/sql/024_audit_provenance.sql`, D-166).
+#
+# `chain_hash` hashes the whole `AuditEvent`, so **adding a field to that model changes what every
+# historical row should hash to**. Widening the event without this would fail verification across
+# the entire trail — and a compliance record that reports itself tampered with is worse than one
+# that reports nothing, because the first question an auditor asks is which of the two happened,
+# and that would be unanswerable. So each row records the shape it was hashed under.
+#
+# v1 is everything written before `session_id`/`purpose` existed. Reconstructing it by *selecting*
+# those eight keys is exact rather than approximate: `stable_hash` canonicalizes with
+# `sort_keys=True`, so the subset serializes byte-identically to what the old model dumped.
+CHAIN_VERSION = 2
+_V1_FIELDS = (
+    "correlation_id",
+    "actor",
+    "tool",
+    "arguments",
+    "outcome",
+    "detail",
+    "latency_ms",
+    "revision",
+)
 # A fixed key for the transaction advisory lock that serializes chain appends. Arbitrary but
 # stable; scoped to this table's append path so it never contends with unrelated locks.
 _AUDIT_CHAIN_LOCK_KEY = 0x43484D4157_00_01  # "CHMAW" + a table-local discriminator
@@ -33,21 +56,29 @@ _AUDIT_CHAIN_LOCK_KEY = 0x43484D4157_00_01  # "CHMAW" + a table-local discrimina
 _TIP = "SELECT row_hash FROM audit_events ORDER BY id DESC LIMIT 1"
 _INSERT = """
     INSERT INTO audit_events
-        (correlation_id, actor, tool, arguments, outcome, detail, latency_ms,
-         revision, prev_hash, row_hash)
-    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+        (correlation_id, session_id, purpose, actor, tool, arguments, outcome, detail, latency_ms,
+         revision, prev_hash, row_hash, chain_version)
+    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
 """
 
 
-def chain_hash(prev_hash: str, event: AuditEvent) -> str:
+def chain_hash(prev_hash: str, event: AuditEvent, *, version: int = CHAIN_VERSION) -> str:
     """The chain link for `event` following `prev_hash`: SHA-256 over both (deterministic).
 
     Shared by the writer (`PostgresAuditSink.record`) and the verifier
     (`chemclaw.cli.verify_audit_chain`) so the exact bytes hashed can never drift — the single
-    definition of "what a row's `row_hash` must be". `event.model_dump()` covers every audited
-    field, so tampering with any of them changes the hash.
+    definition of "what a row's `row_hash` must be". Every audited field is covered, so tampering
+    with any of them changes the hash.
+
+    `version` selects which field set to cover, and the verifier passes each row's stored
+    `chain_version` rather than the current one. That is what lets the audited record grow without
+    invalidating what is already in it: a v1 row keeps hashing over the eight fields it was written
+    with, whatever `AuditEvent` gains later.
     """
-    return stable_hash({"prev": prev_hash, "event": event.model_dump()}, chars=_CHAIN_HASH_CHARS)
+    payload = event.model_dump()
+    if version < CHAIN_VERSION:
+        payload = {field: payload[field] for field in _V1_FIELDS}
+    return stable_hash({"prev": prev_hash, "event": payload}, chars=_CHAIN_HASH_CHARS)
 
 
 class PostgresAuditSink:
@@ -73,6 +104,8 @@ class PostgresAuditSink:
                 _INSERT,
                 (
                     event.correlation_id,
+                    event.session_id,
+                    event.purpose,
                     event.actor,
                     event.tool,
                     event.arguments,
@@ -82,6 +115,7 @@ class PostgresAuditSink:
                     event.revision,
                     prev_hash,
                     row_hash,
+                    CHAIN_VERSION,
                 ),
             )
             await conn.commit()
