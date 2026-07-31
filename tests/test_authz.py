@@ -11,7 +11,14 @@ instead of once per hand-written tool.
 
 import pytest
 
-from chemclaw.agent.authz import AuthorizationError, authorize_trigger, require_actor
+from chemclaw.agent.authz import (
+    DEFAULT_WRITE_TOOL_GATES,
+    READ_ONLY_TOOLS,
+    STATE_CHANGING_TOOLS,
+    AuthorizationError,
+    authorize_trigger,
+    require_actor,
+)
 from chemclaw.agent.identity_context import reset_current_identity, set_current_identity
 from chemclaw.core.config import settings
 
@@ -84,3 +91,52 @@ def test_require_actor_rejects_absent_user(monkeypatch: pytest.MonkeyPatch) -> N
     monkeypatch.setattr(settings, "entra_required", True)
     with pytest.raises(AuthorizationError):
         require_actor()
+
+
+# --- the write/read classification, held to the registry it describes (D-157) ------------------
+
+
+def test_every_advertised_tool_is_classified_write_or_read() -> None:
+    """A new tool must be classified, or this fails — the gate cannot infer what a tool does.
+
+    `chemclaw.agent.plan_gate.gated_tools` is what the harness's plan gate refuses under an
+    unapproved plan, and a name it does not know is silently treated as a read. That is the failure
+    mode this test exists to make impossible: an ungated write ships looking exactly like a gated
+    one, and nothing about the running system says otherwise.
+
+    The classification has three sources and the test checks all three at once, because the whole
+    surface is what has to be covered: the in-process sets here, each connector's own
+    `state_changing` declaration plus its jobs, and the template launchers. Checking only the first
+    would have passed while `compute_xtb_energy` — a `calc` endpoint tool, and one of the two
+    things the live unapproved turn actually ran — sat unclassified.
+
+    `build_agent` is called first because that is what registers the job and template launchers
+    into the shared registry; without it the registry holds only the `@tool` functions and the test
+    would silently check a third of what it claims to.
+    """
+    from chemclaw.agent.chemclaw_agent import build_agent
+    from chemclaw.agent.plan_gate import gated_tools
+    from chemclaw.agent.tool_registry import registered_tool_names
+
+    build_agent(chat_client=object())
+    advertised = set(registered_tool_names())
+    classified = gated_tools() | READ_ONLY_TOOLS
+    assert advertised - classified == set(), (
+        "these advertised tools are classified neither state-changing nor read-only, so the "
+        "harness plan gate treats them as reads; add an in-process tool to one of the two sets in "
+        "chemclaw.agent.authz, and a connector tool to its bundle's `endpoint.state_changing`"
+    )
+    assert not (advertised & STATE_CHANGING_TOOLS & READ_ONLY_TOOLS), (
+        "a tool cannot be both a write and a read"
+    )
+
+
+def test_the_write_gate_is_a_subset_of_the_state_changing_set() -> None:
+    """The RBAC fallback is narrower than the plan gate's set, and must stay inside it.
+
+    The two are separate on purpose — membership of `DEFAULT_WRITE_TOOL_GATES` costs an
+    unconfigured deployment access to a tool, so it is not widened lightly — but a tool that closes
+    by default under RBAC and is *not* considered state-changing by the plan gate would be an
+    outright contradiction.
+    """
+    assert DEFAULT_WRITE_TOOL_GATES <= STATE_CHANGING_TOOLS

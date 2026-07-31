@@ -22,7 +22,13 @@ from chemclaw.connectors.manifest import (
     StdioEndpoint,
 )
 
-_HTTP = {"transport": "http", "url": "http://127.0.0.1:9/mcp", "tools": ["search"]}
+# Every endpoint must classify each tool it serves (D-157), so the shared fixture does too.
+_HTTP = {
+    "transport": "http",
+    "url": "http://127.0.0.1:9/mcp",
+    "tools": ["search"],
+    "read_only": ["search"],
+}
 _JOB = {
     "name": "run_thing",
     "workflow": "ThingWorkflow",
@@ -52,7 +58,12 @@ def test_the_allow_list_lives_on_the_endpoint_for_both_transports() -> None:
     unrepresentable rather than something a validator has to catch after the fact.
     """
     stdio = _manifest(
-        endpoint={"transport": "stdio", "command": "python", "tools": ["similar_molecules"]}
+        endpoint={
+            "transport": "stdio",
+            "command": "python",
+            "tools": ["similar_molecules"],
+            "read_only": ["similar_molecules"],
+        }
     )
     assert stdio.endpoint is not None and stdio.endpoint.tools == ["similar_molecules"]
     with pytest.raises(ValidationError):
@@ -149,3 +160,44 @@ def test_a_job_name_must_be_a_valid_tool_name() -> None:
     """
     with pytest.raises(ValidationError):
         JobSpec.model_validate({**_JOB, "name": "Run-Thing"})
+
+
+def test_a_typo_in_the_classification_is_refused_rather_than_ignored() -> None:
+    """Every way of getting the classification wrong fails **open**, so none of them is tolerated.
+
+    A misspelled `state_changing` entry matches no tool, leaves the real one ungated, and looks
+    exactly like a correct manifest. So it is a load-time error — and the tool it was meant to name
+    then shows up as unclassified, which is also an error (D-157).
+    """
+    with pytest.raises(ValidationError, match="does not serve"):
+        HttpEndpoint.model_validate(
+            {
+                "url": "http://127.0.0.1:8899/mcp",
+                "tools": ["compute_xtb_energy"],
+                "state_changing": ["compute_xtb_enrgy"],
+                "read_only": ["compute_xtb_energy"],
+            }
+        )
+    with pytest.raises(ValidationError, match="both state_changing and read_only"):
+        HttpEndpoint.model_validate(
+            {
+                "url": "http://127.0.0.1:8899/mcp",
+                "tools": ["compute_xtb_energy"],
+                "state_changing": ["compute_xtb_energy"],
+                "read_only": ["compute_xtb_energy"],
+            }
+        )
+
+
+def test_an_unclassified_tool_refuses_to_load() -> None:
+    """Silence is not "read-only": a bundle has to say, because core cannot tell.
+
+    Defaulting an omission to "read" would put the entire harness gate on a bundle author
+    remembering, and defaulting it to "write" would gate every connector's lookups and make the
+    approval-first posture unusable. Refusing to load is the only answer that cannot be wrong
+    quietly, and it costs one line per tool, once.
+    """
+    with pytest.raises(ValidationError, match="does not say whether"):
+        HttpEndpoint.model_validate(
+            {"url": "http://127.0.0.1:8899/mcp", "tools": ["resolve_compound"]}
+        )

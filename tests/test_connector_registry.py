@@ -70,6 +70,8 @@ def _http_manifest(name: str, port: int = 9001, tools: str = "search") -> str:
         f"  health_url: http://127.0.0.1:{port}/healthz\n"
         "  tools:\n"
         f"    - {tools}\n"
+        "  read_only:\n"
+        f"    - {tools}\n"
     )
 
 
@@ -161,7 +163,7 @@ def test_each_transport_builds_its_matching_maf_tool(
         "local",
         "name: local\ndescription: a local capability\n"
         "endpoint:\n  transport: stdio\n  command: python\n  args: ['-m', 'x']\n"
-        "  tools:\n    - compute\n",
+        "  tools:\n    - compute\n  read_only:\n    - compute\n",
     )
     _use(monkeypatch, tmp_path)
     built = {tool.name: tool for tool in mcp_tools()}
@@ -228,7 +230,8 @@ def test_a_connector_declaring_no_health_route_stays_unprobed(
         tmp_path,
         "alpha",
         "name: alpha\ndescription: the alpha capability\n"
-        "endpoint:\n  transport: http\n  url: http://127.0.0.1:9001/mcp\n  tools:\n    - search\n",
+        "endpoint:\n  transport: http\n  url: http://127.0.0.1:9001/mcp\n"
+        "  tools:\n    - search\n  read_only:\n    - search\n",
     )
     _use(monkeypatch, tmp_path)
     (manifest,) = enabled()

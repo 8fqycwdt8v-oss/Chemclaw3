@@ -50,7 +50,7 @@ from chemclaw.agent.interaction_tools import (
     decide_approval,
     list_pending_approvals,
 )
-from chemclaw.agent.plan_approval_store import PlanApprovalStore
+from chemclaw.agent.plan_approval_store import ApprovalStore, plan_approval_store
 from chemclaw.agent.profile_discovery import load_profiles
 from chemclaw.agent.profiles import get_profile
 from chemclaw.agent.session_events import stream_new_events
@@ -515,7 +515,10 @@ def create_app(
     # only a DSN and the in-memory one holds nothing at all (its messages live in
     # `session.state`), so one instance is correct for both and neither carries per-session
     # state.
-    app.state.plan_approvals = PlanApprovalStore()
+    # Through the factory, not by construction, so this route and the enforcement gate
+    # (`chemclaw.agent.plan_gate`) hold the *same* store: a decision recorded here has to be a
+    # decision the gate can see, which under the in-memory backend means the same object (D-157).
+    app.state.plan_approvals = plan_approval_store()
     app.state.history = history_provider()
     # One agent — and therefore one chat client — per concurrent turn (D-123). The cached
     # `_agent()` below still serves everything that does not stream; only a streaming turn needs
@@ -628,13 +631,15 @@ def create_app(
         session = _agent(profile).create_session(session_id=session_id)
         return _live_sessions().add(session_id, session, owner, profile)
 
-    def _plan_approvals() -> PlanApprovalStore:
-        """The durable plan-approval store, read through one annotated accessor.
+    def _plan_approvals() -> ApprovalStore:
+        """The plan-approval store, read through one annotated accessor.
 
-        Built once on `app.state` beside the other stores: it holds only a DSN, so one instance
-        serves every request and there is no per-session state to keep straight.
+        Built once on `app.state` beside the other stores: the Postgres backend holds only a DSN
+        and the in-memory one holds the decisions themselves, so one instance is right for both —
+        and for the in-memory backend it is *required*, since a second instance would be a second,
+        empty store.
         """
-        store: PlanApprovalStore = app.state.plan_approvals
+        store: ApprovalStore = app.state.plan_approvals
         return store
 
     def _live_sessions() -> _LiveSessions:

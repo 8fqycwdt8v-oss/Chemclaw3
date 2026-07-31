@@ -109,6 +109,14 @@ class HttpEndpoint(BaseModel):
     request_timeout: int | None = Field(default=None, gt=0)
     auth: ConnectorAuth = Field(default_factory=NoAuth, discriminator="mode")
     tools: list[str] = Field(default_factory=list)
+    state_changing: list[str] = Field(default_factory=list)
+    read_only: list[str] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def _every_tool_is_classified(self) -> Self:
+        """Reject an endpoint that does not classify each of its tools exactly once."""
+        _check_classification(self.tools, self.state_changing, self.read_only)
+        return self
 
 
 class StdioEndpoint(BaseModel):
@@ -127,6 +135,49 @@ class StdioEndpoint(BaseModel):
     command: str = Field(min_length=1)
     args: list[str] = Field(default_factory=list)
     tools: list[str] = Field(default_factory=list)
+    state_changing: list[str] = Field(default_factory=list)
+    read_only: list[str] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def _every_tool_is_classified(self) -> Self:
+        """Reject an endpoint that does not classify each of its tools exactly once."""
+        _check_classification(self.tools, self.state_changing, self.read_only)
+        return self
+
+
+def _check_classification(
+    tools: list[str], state_changing: list[str], read_only: list[str]
+) -> None:
+    """Raise unless every served tool is in exactly one of `state_changing` and `read_only`.
+
+    **A partition, not two optional hints, and the strictness is the whole point.** Whether a tool
+    spends real resources or merely looks something up decides whether the harness's plan gate
+    refuses it under an unapproved plan (D-157), and every way of getting that wrong fails *open* —
+    a typo matches nothing, an omission reads as "harmless", and either ships a write that looks
+    exactly like a gated one. Defaulting an undeclared tool to "read" would put the whole burden on
+    a bundle author remembering; defaulting it to "write" would gate a connector's lookups and make
+    the approval-first posture unusable. Refusing to load is the only option that cannot be wrong
+    quietly, and it costs a bundle author one line per tool, once.
+
+    Core still cannot infer the answer — that is exactly why the bundle has to state it.
+    """
+    classified = set(state_changing) | set(read_only)
+    served = set(tools)
+    unknown = sorted(classified - served)
+    if unknown:
+        raise ValueError(
+            f"endpoint classifies tool(s) {unknown} it does not serve; tools: {sorted(served)}"
+        )
+    unclassified = sorted(served - classified)
+    if unclassified:
+        raise ValueError(
+            f"endpoint does not say whether tool(s) {unclassified} change state; list each under "
+            "`state_changing` (it spends resources or writes data) or `read_only` (it looks "
+            "something up)"
+        )
+    both = sorted(set(state_changing) & set(read_only))
+    if both:
+        raise ValueError(f"endpoint lists tool(s) {both} as both state_changing and read_only")
 
 
 # One connector endpoint, discriminated on `transport`. A new transport is one variant here plus
@@ -134,6 +185,15 @@ class StdioEndpoint(BaseModel):
 # allow-list — because it is a property of *an endpoint's* surface: nesting it here rather than
 # at the manifest's top level makes "an allow-list with no endpoint to serve it" unrepresentable
 # instead of something a validator has to catch.
+#
+# `state_changing` names the subset of `tools` that spends real resources or writes data a person
+# would care about — the ones the harness's plan gate refuses under an unapproved plan (D-157).
+# It is declared **here, by the bundle**, and not as a list in core, for the same reason the queue
+# and the params model are: whether `predict_pka` is a lookup or a calculation is the capability's
+# own fact, and a copy of it in core is a second source of truth that goes stale the first time a
+# bundle changes what a tool does. An undeclared tool is treated as a read: core cannot infer a
+# bundle's semantics, and guessing "write" would gate every connector's whole surface the day this
+# shipped.
 Endpoint = HttpEndpoint | StdioEndpoint
 
 

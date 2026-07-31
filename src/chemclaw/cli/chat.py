@@ -38,6 +38,10 @@ from chemclaw.core.logging import configure_logging
 
 _EXIT_WORDS = {"exit", "quit", ":q"}
 
+# The two REPL lines that are operator commands rather than questions — the terminal's counterpart
+# to `GET /sessions/{id}/plan` and `POST /sessions/{id}/plan/decision`.
+_PLAN_COMMANDS = {"/plan", "/approve"}
+
 # The session id every CLI run uses. A fixed name, not a fresh uuid: under `session_store=postgres`
 # it makes a terminal session resumable across invocations, which is the CLI's actual use — and the
 # CLI is single-user admin by construction (`resolve_identity`), so there is no one to collide with.
@@ -149,8 +153,20 @@ async def _repl(agent: Any, connectors: Sequence[Any] = (), session: Any = None)
     """Read a question, print the answer, repeat — until EOF, Ctrl-C, or an exit word.
 
     Prompts/errors go to stderr so a redirected stdout carries only the answers.
+
+    Two lines are commands rather than questions, `/plan` and `/approve`, and they exist because
+    the plan gate is now enforced rather than merely recorded (D-157). Under `harness_enabled` with
+    `plan_only` autonomy a state-changing tool needs a human approval for the plan it belongs to,
+    and the front door's approval is an HTTP route — deliberately not an agent tool, so the model
+    cannot approve its own candidate (D-005). A terminal with no way to answer would have left the
+    CLI unable to write anything at all under the shipped Helm configuration, so it gets the same
+    two operations the route pair offers, and for the same reason they are typed by the person
+    rather than callable by the model.
     """
-    print("Chemclaw CLI — type a question, or 'exit' to quit.", file=sys.stderr)
+    print(
+        "Chemclaw CLI — type a question, '/plan', '/approve', or 'exit' to quit.",
+        file=sys.stderr,
+    )
     while True:
         try:
             prompt = input("chemclaw> ").strip()
@@ -162,9 +178,42 @@ async def _repl(agent: Any, connectors: Sequence[Any] = (), session: Any = None)
         if prompt.lower() in _EXIT_WORDS:
             return
         try:
+            if prompt.lower() in _PLAN_COMMANDS:
+                print(await _plan_command(prompt, session), file=sys.stderr)
+                continue
             print((await converse(agent, prompt, connectors, session)).strip())
         except Exception as exc:  # keep the session alive across a single failed turn
             print(f"error: {exc}", file=sys.stderr)
+
+
+async def _plan_command(prompt: str, session: Any) -> str:
+    """Run `/plan` or `/approve` against the session, returning the line to show the operator.
+
+    `/approve` binds to the plan as it stands *now*, exactly as
+    `POST /sessions/{id}/plan/decision` does — there is no hash to mistype here, but there is also
+    no window in which a plan could change between being shown and being approved, because the
+    person reading it and the person approving it are the same terminal.
+    """
+    from chemclaw.agent.harness_mode import current_plan_hash, grant_execute, session_mode
+    from chemclaw.agent.harness_todo import todo_titles
+    from chemclaw.agent.plan_approval_store import plan_approval_store
+
+    if session is None:
+        return "no session; plan commands need a chat session"
+    plan = await todo_titles(session)
+    plan_hash = await current_plan_hash(session)
+    if prompt.lower() == "/plan":
+        decision = await plan_approval_store().decision(session.session_id, plan_hash)
+        verdict = "approved" if decision and decision[0] else "not approved"
+        lines = plan or ["(no plan yet)"]
+        return "\n".join([*lines, f"[{plan_hash} — {verdict}, mode={session_mode(session)}]"])
+    if not plan:
+        return "there is no plan to approve yet; ask a question first"
+    await plan_approval_store().record(
+        session.session_id, plan_hash, settings.cli_admin_actor, True
+    )
+    grant_execute(session)
+    return f"approved {plan_hash} ({len(plan)} item(s)); the session may now execute"
 
 
 def _parse_args(argv: Sequence[str] | None) -> argparse.Namespace:

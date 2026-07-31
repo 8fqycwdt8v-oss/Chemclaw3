@@ -43,6 +43,62 @@ DEFAULT_WRITE_TOOL_GATES: frozenset[str] = frozenset(
     }
 )
 
+# Every in-process tool that changes stored state or starts durable work — the set the harness's
+# plan gate refuses under an unapproved plan (`chemclaw.agent.plan_gate`, D-157).
+#
+# **This is a superset of `DEFAULT_WRITE_TOOL_GATES`, and the two are deliberately not merged.**
+# That set is the RBAC *fallback*: membership makes a tool require a privileged role under
+# `entra_required` with no operator config, so widening it would silently narrow live deployments'
+# access to tools they can call today. Whether a tool writes and whether an unconfigured deployment
+# should close it out of the box are different questions with different blast radii, so they get
+# different sets and this one is derived from that one rather than duplicating it.
+#
+# The plan gate's full set is this ∪ every enabled connector job ∪ every enabled template launcher,
+# assembled in `plan_gate.gated_tools()`. Those two are structural — every declared job and every
+# template starts durable work — so they need no list here and grow on their own.
+STATE_CHANGING_TOOLS: frozenset[str] = (
+    frozenset(
+        {
+            "propose_knowledge_note",  # pushes a branch to the knowledge repo
+            "record_confirmed_answer",  # pushes a branch to the knowledge repo
+            "remember_preference",  # writes user_preferences
+            "forget_preference",  # deletes from user_preferences
+            "watch_for",  # writes subscriptions
+            "stop_watching",  # deletes from subscriptions
+            "request_development_report",  # starts a durable report workflow
+        }
+    )
+    | DEFAULT_WRITE_TOOL_GATES
+)
+
+# The in-process tools that only read. Not consulted at run time — the gate asks whether a tool is
+# in `STATE_CHANGING_TOOLS`, and a name in neither set would simply be treated as a read.
+#
+# It exists so that cannot happen silently. `tests/test_authz.py` asserts that every name in
+# `registered_tool_names()` falls in exactly one of the two sets, so adding a tool without
+# classifying it fails the suite rather than shipping an ungated write. A hand-kept allow-list is
+# only as good as the day it was written; a hand-kept *partition* is checked against reality on
+# every run.
+#
+# The check runs over the registry, not over the union: `STATE_CHANGING_TOOLS` also names tools
+# that are not in-process at all (`compute_dft_energy` is a connector job, `index_*` are MCP tools
+# behind an `allowed_tools` boundary), inherited from `DEFAULT_WRITE_TOOL_GATES`. Those are correct
+# entries and correctly absent from the registry.
+READ_ONLY_TOOLS: frozenset[str] = frozenset(
+    {
+        "ask_clarifying_question",
+        "expand_note",
+        "find_knowledge_gaps",
+        "find_notes",
+        "gather_evidence",
+        "get_durable_job_status",
+        "list_attachments",
+        "list_watches",
+        "read_attachment",
+        "recall_preferences",
+    }
+)
+
 
 def _actor() -> str:
     """Name the turn's user for a refusal message, or say plainly that there isn't one."""
