@@ -22,7 +22,7 @@ from chemclaw.connectors.manifest import (
     StdioEndpoint,
 )
 
-# Every endpoint must classify each tool it serves (D-165), so the shared fixture does too.
+# Every endpoint must classify each tool it serves (D-167), so the shared fixture does too.
 _HTTP = {
     "transport": "http",
     "url": "http://127.0.0.1:9/mcp",
@@ -167,7 +167,7 @@ def test_a_typo_in_the_classification_is_refused_rather_than_ignored() -> None:
 
     A misspelled `state_changing` entry matches no tool, leaves the real one ungated, and looks
     exactly like a correct manifest. So it is a load-time error — and the tool it was meant to name
-    then shows up as unclassified, which is also an error (D-165).
+    then shows up as unclassified, which is also an error (D-167).
     """
     with pytest.raises(ValidationError, match="does not serve"):
         HttpEndpoint.model_validate(

@@ -141,7 +141,7 @@ def test_a_changed_plan_has_a_different_hash() -> None:
     something else under the same authorization".
 
     Driven through the *todo store* rather than through `mark_awaiting_job`, which this test used
-    to use. That helper writes the system-authored `awaiting-job:` row, and D-165 excludes those
+    to use. That helper writes the system-authored `awaiting-job:` row, and D-167 excludes those
     from the identity on purpose — see `test_a_launched_job_does_not_revoke_its_own_approval`. What
     is being asserted here is that a change to the **work items** changes the hash, so the change
     has to be a work item.
@@ -158,7 +158,7 @@ def test_a_changed_plan_has_a_different_hash() -> None:
 
 
 def test_ticking_a_box_does_not_change_the_plans_identity() -> None:
-    """Working through an approved plan must not revoke the approval it is working under (D-165).
+    """Working through an approved plan must not revoke the approval it is working under (D-167).
 
     The hash used to cover the rendered `[x]`/`[ ] title` lines, so it moved on the first completed
     step. An approval could therefore be recorded but never checked against the plan being

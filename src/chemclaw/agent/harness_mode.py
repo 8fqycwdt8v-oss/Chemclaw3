@@ -147,7 +147,7 @@ async def current_plan_hash(session: AgentSession) -> str:
     Over the plan's **work items** (`chemclaw.agent.harness_todo.todo_plan_items`): the titles in
     order, without the checkbox and without the `awaiting-job:` rows the launcher writes.
 
-    **This used to hash the rendered lines, and that made the gate unenforceable** (D-165). The
+    **This used to hash the rendered lines, and that made the gate unenforceable** (D-167). The
     argument for including completion state was that "a plan whose steps have been ticked off is
     not the plan that was approved, and re-approval is the correct outcome" — coherent in the
     abstract, and fatal in practice: the hash moves on the *first* ticked box, so an approval can
@@ -190,7 +190,7 @@ _CONSUMED_STATE_KEY = "chemclaw_plans_consumed"
 def consume_plan(session: AgentSession, plan_hash: str) -> None:
     """Record that an approved plan has now had the turn it was approved for.
 
-    **This is what makes an approval authorize a request rather than a session** (D-165), and it
+    **This is what makes an approval authorize a request rather than a session** (D-167), and it
     exists because the first version of that fix did not close the finding. Binding the approval to
     the plan's *work items* — rather than to its rendered lines, whose hash moved on the first
     ticked box — made the approval checkable at last. It also made it durable in a way nobody
@@ -226,7 +226,7 @@ def rearm_plan(session: AgentSession, plan_hash: str) -> None:
 
 
 def revoke_execute(session: AgentSession) -> str:
-    """Return the session to plan mode — the mirror `grant_execute` never had (D-165).
+    """Return the session to plan mode — the mirror `grant_execute` never had (D-167).
 
     Its absence was half of DARK-1. `grant_execute` was a latch: one approval moved a session into
     execute and *nothing* moved it back, so the authorization outlived the plan it was given for,

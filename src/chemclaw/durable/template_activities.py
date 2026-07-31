@@ -90,7 +90,7 @@ class JobStepInput(BaseModel):
 class ResolvedJob(BaseModel):
     """Where a declared job runs, and the payload it was authorized to run with.
 
-    `payload` is here because resolution and authorization are one act, not two (D-166). The
+    `payload` is here because resolution and authorization are one act, not two (D-168). The
     activity that resolves a job step is the same activity that validated its arguments, checked
     `authorize_trigger` against the requester and ran the job's declared precondition — so handing
     back the *validated* payload is what stops the workflow starting a child with the raw,
@@ -113,7 +113,7 @@ class ResolvedJob(BaseModel):
 async def authorize_job_step(step: JobStepInput) -> ResolvedJob:
     """Resolve, validate and authorize one `job` step as its requester — outside the workflow.
 
-    **The template's job step used to do none of this** (DARK-2, D-166). `ResolvedJob` carried the
+    **The template's job step used to do none of this** (DARK-2, D-168). `ResolvedJob` carried the
     connector, workflow and queue and dropped `expensive` and `precondition` on the floor, and
     `TemplateWorkflow._run_job_step` started the child workflow with `resolve(step.arguments,
     scope)` exactly as written. So a template naming `compute_dft_energy` started HPC work for
@@ -218,7 +218,7 @@ async def _audited(
 # — a template's `tool` and `agent` steps failed with "Activity function run_tool_step ... is not
 # registered on this worker" the first time one ran against a real server, which is to say the
 # shipped `hazard-briefing` template could not execute a single step. Found by running it live for
-# D-166; it is the same class as the eight defects D-155 collected, where a feature is written,
+# D-168; it is the same class as the eight defects D-155 collected, where a feature is written,
 # tested and served by nothing.
 @durable_activity("background")
 @activity.defn
@@ -270,7 +270,7 @@ async def _invoke(
     for connector in connectors:
         for function in connector.functions:
             if function.name == step.tool:
-                # Through the *same* governed path as the in-process branch above (D-166). This
+                # Through the *same* governed path as the in-process branch above (D-168). This
                 # used to be `connector.call_tool(...)`, which reaches the connector directly and
                 # therefore skipped both `enforce_tool_authz` and the audit middleware — while the
                 # branch three lines up hand-applied both, and this module's own docstring said
@@ -299,7 +299,7 @@ async def _call_function_tool(tool: Any, step: ToolStepInput) -> Any:
     the same two middlewares by hand here is what keeps the template path identical to the chat
     path in the way that matters: the call is audited, and an unauthorized one is refused.
 
-    Used for both halves of the surface since D-166. The connector half used to call
+    Used for both halves of the surface since D-168. The connector half used to call
     `connector.call_tool` and reach the connector directly, skipping both middlewares; MAF's MCP
     tools are ordinary `FunctionTool`s, so nothing about the call had to change except the decision
     to govern it.
@@ -353,7 +353,7 @@ async def run_agent_step(step: AgentStepInput) -> str:
     is not. `profile` narrows which agent runs it, so a summarizing step need not hold the
     durable-job launchers — attenuation applies here exactly as it does to a chat session.
 
-    **Run without the harness, whatever the deployment's default is** (D-166). Two reasons, and the
+    **Run without the harness, whatever the deployment's default is** (D-168). Two reasons, and the
     first was found by running the shipped template live: the harness middleware refuses a
     session-less `agent.run` ("ToolApprovalMiddleware requires an AgentSession" — the same wall
     D-152 hit for the CLI), so under `harness_enabled=true`, which is what the Helm chart sets, an

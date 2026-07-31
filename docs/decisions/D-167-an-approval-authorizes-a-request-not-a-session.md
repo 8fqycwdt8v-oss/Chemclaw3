@@ -1,4 +1,4 @@
-# D-165 — An approval authorizes a request, not a session
+# D-167 — An approval authorizes a request, not a session
 
 **Status:** accepted · **Supersedes part of:** D-137 · **Closes:** DARK-1
 

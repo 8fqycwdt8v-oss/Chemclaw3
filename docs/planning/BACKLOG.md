@@ -59,7 +59,7 @@ plus three parallel code reviews. Eight defects fixed under D-155; what follows 
 deliberately not fixed there, each because it needs a decision rather than a patch.
 
 - [x] ~~**DARK-1 [High] — the harness plan-approval gate authorizes a session, not a plan.**~~ —
-  **fixed (D-165).** Both blocking decisions taken: an approval binds to the plan's *work items*
+  **fixed (D-167).** Both blocking decisions taken: an approval binds to the plan's *work items*
   (reversing D-137, whose rendered-lines hash moved on the first ticked box and so could never be
   checked against the plan being executed), and the store follows the session store — which
   dissolves the fail-open/fail-closed question rather than answering it, since the approval and the
@@ -68,10 +68,10 @@ deliberately not fixed there, each because it needs a decision rather than a pat
   built. Running it live then found the fix incomplete: the model answered a *different* question
   without touching its todo list, so the plan identity never changed and the approval never lapsed.
   An approval is therefore also spent by the turn it authorizes. One residual limit, stated in
-  D-165: the system cannot tell "proceed" from "a new question" in the single turn that follows an
+  D-167: the system cannot tell "proceed" from "a new question" in the single turn that follows an
   approval — bounded, audited, and immediately preceded by a human decision, but not zero.
 - [x] ~~**DARK-2 [High] — a template step is a route around `authorize_trigger` and the audit
-  trail.**~~ — **fixed (D-166).** A template step runs with the requester's entitlements, which is
+  trail.**~~ — **fixed (D-168).** A template step runs with the requester's entitlements, which is
   what the module's own docstring already claimed. The connector branch goes through the same
   audited, authorized path as the in-process one; the job step's pre-flight became one shared
   function (`prepare_job_launch`) called by both the chat launcher and the new `authorize_job_step`,

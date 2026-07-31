@@ -252,7 +252,7 @@ def build_agent(
         enforce_tool_authz,
         announce_tool_failures,
     ]
-    # A sixth, conditionally: the harness's pre-execution approval (D-165). It goes *inside* audit,
+    # A sixth, conditionally: the harness's pre-execution approval (D-167). It goes *inside* audit,
     # so a refusal is a recorded `error` outcome, and inside `surface_authorization_denials`, so the
     # model is told why — the same layering `enforce_tool_authz` gets, because it is the same kind
     # of decision. Conditional because it is meaningless otherwise: with no harness there is no
@@ -352,7 +352,7 @@ def _build_harness_agent(
         mode_provider=PlanApprovalModeProvider(default_mode=start_mode),
         # Loop only in execute mode while todos remain — so plan_only stops for approval — capped.
         # Under `plan_only` the predicate is additionally conditioned on the plan actually being
-        # approved (D-165): without that an unapproved session still loops, has every write
+        # approved (D-167): without that an unapproved session still loops, has every write
         # refused, and spends the whole runaway budget achieving nothing.
         loop_should_continue=(
             approved_todos_remaining(todos_remaining(looping_modes=["execute"]))

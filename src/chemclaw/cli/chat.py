@@ -155,7 +155,7 @@ async def _repl(agent: Any, connectors: Sequence[Any] = (), session: Any = None)
     Prompts/errors go to stderr so a redirected stdout carries only the answers.
 
     Two lines are commands rather than questions, `/plan` and `/approve`, and they exist because
-    the plan gate is now enforced rather than merely recorded (D-165). Under `harness_enabled` with
+    the plan gate is now enforced rather than merely recorded (D-167). Under `harness_enabled` with
     `plan_only` autonomy a state-changing tool needs a human approval for the plan it belongs to,
     and the front door's approval is an HTTP route — deliberately not an agent tool, so the model
     cannot approve its own candidate (D-005). A terminal with no way to answer would have left the

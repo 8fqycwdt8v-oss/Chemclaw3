@@ -272,7 +272,7 @@ def prepare_job_launch(connector: str, job: JobSpec, params: Any) -> dict[str, A
     function because there is more than one launcher: the agent tool below, and the template
     workflow's job step (`chemclaw.durable.template_activities.authorize_job_step`).
 
-    **It is one function because it was two, and one of them was empty** (D-166). The template's
+    **It is one function because it was two, and one of them was empty** (D-168). The template's
     `ResolvedJob` carried the connector, workflow and queue and dropped `expensive` and
     `precondition` on the floor, so a template naming an HPC job started it for anyone entitled to
     run the *template*, and a job's own domain guard — the one `JobSpec.precondition` documents as
@@ -342,14 +342,14 @@ def build_job_tool(connector: str, job: JobSpec) -> CapabilityTool:
         #
         # Checked *here* rather than inside `prepare_job_launch`, because `rationale` is an argument
         # of this tool and not a property of the job: the template job step shares the pre-flight
-        # but has no model to author a sentence, and it records the template run instead (D-166).
+        # but has no model to author a sentence, and it records the template run instead (D-168).
         if not rationale.strip():
             raise ConnectorJobError(
                 f"{job.name}: rationale must say why this run is being started — it is stored with "
                 "the run and is the only record of what question it was meant to answer"
             )
         # Validate, authorize and check the domain precondition — all of it in `prepare_job_launch`,
-        # which is the *only* pre-flight and is shared with the template job step (D-166). It used
+        # which is the *only* pre-flight and is shared with the template job step (D-168). It used
         # to live inline here, which is why the template path had none of it.
         payload = prepare_job_launch(connector, job, params)
         workflow_id = job_workflow_id(connector, job.name, payload)

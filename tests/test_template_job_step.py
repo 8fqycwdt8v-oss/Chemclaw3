@@ -52,7 +52,7 @@ def fixture_bundle(monkeypatch: pytest.MonkeyPatch) -> Iterator[str]:
 
     The shipped bundles all declare their arguments by `params_model` reference, so none of them
     can be launched from a dict this test could write by hand — and the step now *validates* before
-    resolving (D-166), which is the behaviour under test rather than an obstacle to it. The fixture
+    resolving (D-168), which is the behaviour under test rather than an obstacle to it. The fixture
     bundle exists precisely so the durable path can be exercised without inventing a production
     capability, and its one job takes a single declared string.
     """
@@ -206,7 +206,7 @@ def test_a_template_naming_an_unknown_job_fails_instead_of_hanging() -> None:
     asyncio.run(_run())
 
 
-# --- DARK-2: the step is authorized and audited as its requester (D-166) -----------------------
+# --- DARK-2: the step is authorized and audited as its requester (D-168) -----------------------
 
 
 def _record_audit(monkeypatch: pytest.MonkeyPatch) -> list[Any]:
@@ -357,7 +357,7 @@ def test_every_template_step_activity_is_registered_on_a_worker() -> None:
     Only the job-step resolver carried `@durable_activity`; `run_tool_step` and `run_agent_step`
     had a bare `@activity.defn`, so nothing registered them and the shipped `hazard-briefing`
     template failed on its *first* step against a real server with "Activity function
-    run_tool_step ... is not registered on this worker". Found by running it live for D-166.
+    run_tool_step ... is not registered on this worker". Found by running it live for D-168.
 
     Asserted over all three together rather than one at a time, because the failure mode is a new
     step kind arriving without its registration — which is exactly what happened here, twice.

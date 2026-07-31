@@ -411,7 +411,7 @@ def test_a_template_run_executes_its_steps_in_order(monkeypatch: pytest.MonkeyPa
     assert result.template == "probe"
 
 
-# --- DARK-2: a connector tool step is governed exactly as an in-process one (D-166) ------------
+# --- DARK-2: a connector tool step is governed exactly as an in-process one (D-168) ------------
 
 
 class _Recorder:
@@ -537,7 +537,7 @@ def test_a_connector_tool_step_the_requester_may_not_call_is_refused(
 
 
 def test_a_step_result_is_something_temporal_can_carry() -> None:
-    """`list[Content]` is not, and a step result crosses an activity boundary (D-166).
+    """`list[Content]` is not, and a step result crosses an activity boundary (D-168).
 
     Live, the shipped `hazard-briefing` template failed with "Unable to serialize unknown type:
     agent_framework._types.Content" — after the missing worker registration was fixed and before
