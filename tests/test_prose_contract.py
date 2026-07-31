@@ -10,6 +10,7 @@ checks frontmatter.
 
 from chemclaw.agent.chemclaw_agent import available_tool_names
 from chemclaw.cli.validate_prose_contract import _ALLOWED_NON_TOOLS, check_prose_contract
+from chemclaw.kg.note import KNOWN_NOTE_TYPES
 
 
 def test_shipped_prose_names_only_real_tools() -> None:
@@ -55,6 +56,41 @@ def test_pointing_the_agent_at_a_workflow_is_caught(monkeypatch: object) -> None
     assert len(problems) == 1
     assert "BoCampaignWorkflow" in problems[0]
     assert "cannot invoke" in problems[0]
+
+
+def test_a_note_type_the_graph_does_not_know_is_caught(monkeypatch: object) -> None:
+    """The `experiment-batch` case (D-163): reachable tool, unwritable artifact.
+
+    Two shipped skills told the agent to propose a `protocol` / `experiment-batch` note. Both
+    calls succeed and open a branch; `kg-validate` then rejects it on the PR the agent just
+    created. Rule 1 could not see it — the tool name was real, only the type was not.
+    """
+    import chemclaw.cli.validate_prose_contract as module
+
+    monkeypatch.setattr(  # type: ignore[attr-defined]
+        module,
+        "_prose_sources",
+        lambda: {"fake/SKILL.md": "Record it with `propose_knowledge_note`, type `field-trial`."},
+    )
+    problems = check_prose_contract()
+    assert len(problems) == 1
+    assert "field-trial" in problems[0]
+
+
+def test_a_known_note_type_passes() -> None:
+    """The rule must not fire on the types the graph does mint, or prose cannot name them."""
+    import chemclaw.cli.validate_prose_contract as module
+
+    for note_type in ("reaction", "experiment-proposal", "optimization-campaign"):
+        assert module.referenced_note_types(f"write it as type `{note_type}`") <= KNOWN_NOTE_TYPES
+
+
+def test_the_rule_reads_note_types_not_every_backticked_word() -> None:
+    """Narrow on purpose: this prose is full of backticked tools, fields and chemistry."""
+    import chemclaw.cli.validate_prose_contract as module
+
+    prose = "filter on `type` or `tag`, then call `expand_note`"
+    assert module.referenced_note_types(prose) == set()
 
 
 def test_the_allowlist_is_small_and_deliberate() -> None:

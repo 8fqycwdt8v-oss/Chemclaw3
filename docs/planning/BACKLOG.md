@@ -3,6 +3,28 @@
 Prioritized open action items. Top = next. Keep in sync with `docs/planning/implementation-plan.md`
 (phase/step numbers) at session end.
 
+## Done — Reviewing the experiment-progression change (2026-07-31, D-163)
+
+Re-reading D-162 with fresh eyes. One real defect, found because the new `experiment-proposal`
+type sat next to two that were never registered, plus three cleanups in the new code itself:
+
+- [x] **PROSE-1** `make prose-validate` gains rule 4: a note type named in agent prose must be in
+      `KNOWN_NOTE_TYPES`. It immediately failed on `protocol` and `experiment-batch`, both of
+      which the agent was being told to write — a real tool producing an artifact `kg-validate`
+      rejects on the agent's own PR. Both fold into `experiment-proposal`; `bo-candidate` is now
+      explicitly the durable campaign's to mint, not the agent's.
+- [x] **PROSE-2** The campaign table is driven off `Progression.steps` with the run looked up by
+      id, instead of zipping two independently-sorted lists — equal lengths meant a sort
+      disagreement would have mispaired rows silently.
+- [x] **PROSE-3** `gather_evidence`'s docstring states that a date window scopes the note sources
+      only: fingerprint hits from a `reaction_smiles` anchor carry no date and come back
+      unwindowed.
+- [ ] **PROSE-4** `propose_knowledge_note`'s docstring lists the note types with an ellipsis — a
+      third copy of `KNOWN_NOTE_TYPES` kept in sync by nothing. The model-facing description
+      should be derived from the frozenset rather than restated. Left open because it means
+      building the tool description at registration time, which is a change to how every tool's
+      docstring reaches the model, not a one-line edit.
+
 ## Open — Left open by the durable job record (2026-07-31, D-157)
 
 The record closed "a finished run's data, and the reason for it, survive nowhere". Three things it

@@ -12,7 +12,7 @@ Both are cheap to catch mechanically, and this is the check that does it. It is 
 *deterministic half* of the deferred agent-behavior eval (AG-13): AG-13 waits on a live LLM to
 observe tool **selection**, but whether a named tool exists at all needs no model.
 
-Three rules, each deliberately narrow so the check stays true rather than noisy:
+Four rules, each deliberately narrow so the check stays true rather than noisy:
 
 1. Every `name(`-style call mentioned in a skill or in the agent instructions must be a registered
    agent tool, a tool an enabled connector advertises, a generated template launcher, or an
@@ -28,6 +28,13 @@ Three rules, each deliberately narrow so the check stays true rather than noisy:
    false positive — an argument name inside a call — which the pattern now excludes.
 3. A skill must not direct the agent at a `*Workflow` class. The agent cannot invoke a workflow;
    it can only call a tool. Naming one is always either a dangling pointer or a missing tool.
+4. Every note type the prose tells the agent to *write* must be in `KNOWN_NOTE_TYPES`. This is rule
+   1's shape applied to the other half of the write path, and it was missing: two skills instructed
+   `propose_knowledge_note(type="protocol")` and `type="experiment-batch"`, neither of which is a
+   known type, so an agent that followed either opened a PR that `kg-validate` then rejected — the
+   capability was reachable and the artifact was not (D-163). A note type is named in the gated
+   form **`type `x``** (the word, then the backticked slug); write it that way in prose so this
+   rule can see it.
 
 Run via `make prose-validate`; gated in CI beside `kg-validate` and `skill-validate`.
 """
@@ -39,6 +46,7 @@ from pathlib import Path
 from chemclaw.agent.chemclaw_agent import _INSTRUCTIONS, available_tool_names
 from chemclaw.connectors.registry import skills_dirs as connector_skills_dirs
 from chemclaw.core.config import settings
+from chemclaw.kg.note import KNOWN_NOTE_TYPES
 
 # Symbols a skill may legitimately name in call form that are not agent tools: library/graph
 # internals a skill explains conceptually. Kept explicit and short — adding one is a review
@@ -57,6 +65,22 @@ _WORKFLOW = re.compile(r"`([A-Za-z][A-Za-z0-9]*Workflow)`")
 # parameter rather than a tool (`similar_reactions(reaction_smiles)`). The lookahead skips a
 # trailing `(`, which is rule 1's pattern, so the two rules never double-report one name.
 _BARE = re.compile(r"(?<![\w`/.,(-])([a-z][a-z0-9]*(?:_[a-z0-9]+)+)(?![\w(])")
+# `type `x`` / `types `x``: the one phrasing that means "write a note of this kind". Deliberately
+# anchored on the word rather than matching every backticked slug, which in this prose is mostly
+# tools, fields and chemistry — the narrowness is what keeps the rule true instead of noisy, at
+# the cost of a convention prose has to follow. It is stated in the module docstring and in
+# `skills/README.md`.
+_NOTE_TYPE = re.compile(r"\btypes?\s+`([a-z][a-z0-9-]*)`")
+
+
+def referenced_note_types(text: str) -> set[str]:
+    """Every note type `text` tells the model to write, in the one gated phrasing.
+
+    Public for the same reason `referenced_tool_names` is: the test suite asserts the contract
+    from the other side, and a second extractor would let the two disagree about what the prose
+    says.
+    """
+    return set(_NOTE_TYPE.findall(text))
 
 
 def referenced_tool_names(text: str) -> set[str]:
@@ -89,6 +113,11 @@ def check_prose_contract() -> list[str]:
     for origin, text in _prose_sources().items():
         for name in sorted(referenced_tool_names(text) - tools):
             problems.append(f"{origin}: names {name} but no such agent tool is registered")
+        for note_type in sorted(referenced_note_types(text) - KNOWN_NOTE_TYPES):
+            problems.append(
+                f"{origin}: tells the agent to write a `{note_type}` note, which is not a known "
+                "note type — the PR-gate would open a branch that `kg-validate` then rejects"
+            )
         for workflow_name in sorted(set(_WORKFLOW.findall(text))):
             problems.append(
                 f"{origin}: directs the agent at `{workflow_name}`, which it cannot invoke — "
@@ -98,14 +127,14 @@ def check_prose_contract() -> list[str]:
 
 
 def main() -> int:
-    """CLI: report every prose/tool mismatch; non-zero exit fails the CI gate."""
+    """CLI: report every prose/capability mismatch; non-zero exit fails the CI gate."""
     problems = check_prose_contract()
     for problem in problems:
         print(problem, file=sys.stderr)
     if problems:
-        print(f"\n{len(problems)} prose/tool mismatch(es)", file=sys.stderr)
+        print(f"\n{len(problems)} prose/capability mismatch(es)", file=sys.stderr)
         return 1
-    print("prose contract OK: every named tool exists")
+    print("prose contract OK: every named tool and note type exists")
     return 0
 
 

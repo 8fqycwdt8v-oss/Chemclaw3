@@ -20,13 +20,14 @@ graph.
 
 ## Shaping the note
 
-- **type**: the smallest accurate kind (`compound`, `reaction`, `job-result`,
-  `campaign`, `optimization-campaign`, `playbook`, `report`, `protocol`,
-  `experiment-batch`). Use `protocol` for an agent-proposed set of
-  conditions/procedure and `experiment-batch` for a proposed set of next runs from
-  `suggest_next_experiment` — both are proposals, not observed results, and must
-  cite the evidence they rest on. Eval cases are *not*
-  graph notes — they live under `eval_case_dir`, outside the graph (D-014).
+- **type**: the smallest accurate kind — `compound`, `reaction`, `job-result`,
+  `campaign`, `optimization-campaign`, `playbook`, `report`, `failure-mode`,
+  `interaction`. For anything you are proposing be *run* rather than reporting as
+  done — a set of conditions for an untried substrate, the next step in a series,
+  a batch from `suggest_next_experiment` — the kind is type `experiment-proposal`:
+  one type for one decision a reviewer makes, whatever produced it. It must cite
+  the evidence it rests on. Eval cases are *not* graph notes — they live under
+  `eval_case_dir`, outside the graph (D-014).
 - **id**: stable, human-readable, unique (e.g. `reaction-suzuki-<substrate>`);
   the id is how other notes link to this one, so it should not change.
 - **links**: connect the note to what it relates to with `[[wikilinks]]` in the

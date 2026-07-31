@@ -71,3 +71,22 @@ Verified: new `tests/test_progression.py` (18 cases) plus date-window cases in
 `tests/test_research_tools.py` and hypothesis-mapping cases in `tests/test_eln.py`;
 `make lint type test` green (2061 passed) and all four affected validators
 (`skill-validate`, `kg-validate`, `prose-validate`, `eln-validate`) pass.
+
+## Follow-up review (D-163)
+
+Re-read the merged change with fresh eyes. It found one defect the change did not introduce but
+made visible, and three cleanups in the new code:
+
+- [x] **The real one.** `deep-research` and `experiment-design` instructed the agent to write
+      `protocol` / `experiment-batch` notes; neither type exists, so the proposal opens a branch
+      `kg-validate` rejects. `make prose-validate` gains a note-type rule (it checked tool names
+      only, so the blind spot and the bug were the same shape), and both fold into
+      `experiment-proposal`. ADR **D-163**.
+- [x] The campaign table is driven off `Progression.steps` with the run looked up by id, not two
+      independently-sorted lists zipped positionally.
+- [x] `_in_window` reads as two early returns instead of a double negative.
+- [x] `gather_evidence` documents that a date window scopes the note sources, not the structural
+      anchor.
+- [ ] Left open (PROSE-4): `propose_knowledge_note`'s docstring restates the type list with an
+      ellipsis — a third copy synced by nothing. Deriving it needs a change to how tool
+      descriptions are built, so it is a backlog item rather than a drive-by.

@@ -97,6 +97,10 @@ async def gather_evidence(
         since: Optional ISO date (YYYY-MM-DD); keep only notes dated on or after it — for a
             reaction note, the day the experiment was run. Use it for "what have we tried
             recently"; note that a note with no date is excluded, not assumed to be in range.
+            It windows the **note** sources only: the fingerprint store holds structures, not
+            dates, so hits from a `reaction_smiles` anchor come back unwindowed and a call that
+            uses both returns a mix. Filter on the anchor or on the window, not both, when the
+            answer has to be "only what happened in this period".
         until: Optional ISO date (YYYY-MM-DD); keep only notes dated on or before it.
 
     Returns:
