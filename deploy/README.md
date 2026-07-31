@@ -1,7 +1,7 @@
 # Deploy — Chemclaw on OpenShift (plan F6)
 
 The stack runs in-cluster with OIDC, secrets, workers, and probes. One image, many roles; one
-config source (the pydantic `Settings`) fed from a `ConfigMap` + three plain `Secret`s.
+config source (the pydantic `Settings`) fed from a `ConfigMap` + a small set of plain `Secret`s.
 
 ## What ships
 
@@ -27,11 +27,16 @@ does not read this file, so the row survived. Fingerprints deploy as `connector-
 
 - **Non-secret** config is the Helm `values.yaml` `config:` block → a `ConfigMap` → `CHEMCLAW_*` env.
   Keys mirror `chemclaw/config.Settings` **exactly** — there is no second config system in-cluster.
-- **Only three plain secrets** exist: the generic LLM API key (F0, the one documented Entra
-  exception), the Temporal mTLS certs, and the HPC-bridge credential. Everything else is **Workload
-  Identity Federation** (F4-T2): the pod's ServiceAccount is annotated so its projected token is
-  exchanged for an Entra token — no client secret at rest.
-- Populate the three secrets via `ExternalSecret`/`SealedSecret`; the chart only *names* them.
+- **Plain secrets are the exceptions, not the model.** Five exist, and each is a credential for a
+  system that does not speak Entra: the generic LLM API key (F0, the one documented Entra
+  exception), the Postgres DSN, the HPC-bridge credential, the knowledge-repo push token, and the
+  git host's webhook-signing secret. The Temporal mTLS certs are a sixth, mounted as files rather
+  than env. Everything that *can* federate does: **Workload Identity Federation** (F4-T2) annotates
+  the pod's ServiceAccount so its projected token is exchanged for an Entra token, with no client
+  secret at rest. (This section said "only three" from F6-T6 until each later gap added one; the
+  count is now derived from `values.yaml`'s `secrets.keys` rather than restated here, because a
+  number in prose is exactly what went stale.)
+- Populate them via `ExternalSecret`/`SealedSecret`; the chart only *names* them.
 
 ### Two settings that decide whether the pod boots at all
 

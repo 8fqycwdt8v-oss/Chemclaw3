@@ -405,3 +405,36 @@ cost this review a wrong estimate:
 Per-model attribution for the same spend is on the OTel side, not here: MAF emits
 `gen_ai.client.token.usage` labelled by request model, response model, provider and token type, and
 the shipped chart turns OTel on. These counters carry `profile`, which OTel has never heard of.
+
+## (ix) Work the PR-gate review queue
+
+Agent-authored notes never land directly; each is pushed to `note/<id>` and waits for a human
+(D-005). Until D-2026-07-31-a-proposal-is-a-record-not-a-branch the only way to find one was to
+browse `note/*` refs in the git host, and a rejection left no trace at all. Both are now routes.
+
+- **What is waiting**: `GET /proposals?state=open`. Paged newest-first by row id; pass the last id
+  you saw as `before_id` for the next page (`CHEMCLAW_PROPOSAL_LIST_LIMIT` bounds a page). A
+  reviewer — anyone holding a role in `CHEMCLAW_ENTRA_PRIVILEGED_ROLES` — sees every proposal;
+  everyone else sees their own. With `CHEMCLAW_ENTRA_REQUIRED=false` (dev) everything is visible.
+- **What it says**: `GET /proposals/{id}` returns the rendered note exactly as it would land in the
+  tree, plus the `session_id` and `correlation_id` of the turn that produced it — so
+  `chemclaw explain <session-id>` reaches the conversation behind a proposal.
+- **Decide**: `POST /proposals/{id}/decision` with `{"approved": true}` or
+  `{"approved": false, "reason": "…"}`. A rejection **must** state why; that is the record's whole
+  purpose. Deciding twice is a `409`, not a silent overwrite — the first decision stands.
+- **Merges close themselves** when the git host's post-merge webhook calls
+  `POST /events/knowledge-merged` with `{"note_ids": ["…"]}`. That body must be signed:
+  `X-Chemclaw-Signature: sha256=<HMAC-SHA256 of the raw body under CHEMCLAW_NOTE_WEBHOOK_SECRET>`.
+  Without the secret configured the route still forces a reindex for an operator running it by
+  hand, and refuses to close anything.
+
+**If the queue only ever grows**, the webhook is the first thing to check: `curl` it with a signed
+body naming a note you know was merged and read `proposals_closed` in the response. A `401` means
+the signature does not match — the secret differs between the host and
+`CHEMCLAW_NOTE_WEBHOOK_SECRET`, or the host signed a re-serialized body rather than the bytes it
+sent.
+
+**The metric to watch is `chemclaw_note_proposals_total{state}`.** A rising `open` against a flat
+`merged` is a queue nobody is working. A non-zero `failed` means submissions are not reaching git
+at all — the note is still recoverable, because a `failed` row keeps the rendered content:
+`SELECT note_id, content FROM note_proposals WHERE state = 'failed';`.

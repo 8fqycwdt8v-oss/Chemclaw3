@@ -1120,6 +1120,16 @@ class KgSettings(BaseSettings):
     # remote, credential prompt) is killed after this, so it can never deadlock the process-wide
     # submit lock; the failed activity then retries.
     git_command_timeout_seconds: float = Field(default=60.0, gt=0)
+    # The shared secret a git host signs its post-merge webhook with (HMAC-SHA256 over the raw
+    # body, sent as `X-Chemclaw-Signature: sha256=<hex>`). Empty means unsigned, which is what
+    # `/events/knowledge-merged` accepted from any authenticated principal before it could close a
+    # proposal — tolerable while it only kicked an idempotent reindex, not once it records a
+    # decision. Set it in any deployment where the webhook may move a proposal to `merged`.
+    note_webhook_secret: str = ""
+    # Page size for `GET /proposals`. Bounded like every other listing: the review queue is
+    # unbounded in principle, and a surface that asks for "all of it" should page rather than ask
+    # the database for an unbounded scan.
+    proposal_list_limit: int = Field(default=50, ge=1, le=500)
 
     # How long a confirmed-answer note is held pending a human Yes/No before the hold expires
     # unpublished (plan step 5.5, async approval seam). The button click is a Temporal signal

@@ -1,0 +1,175 @@
+"""Postgres backing for the note-proposal record (`infra/sql/027_note_proposals.sql`).
+
+Kept separate from `chemclaw.kg.proposal` for the reason `chemclaw.durable.job_record_store` is
+kept separate from `job_record`: the module the PR-gate imports carries no database dependency, so
+a deployment, a test or a connector worker that runs without Postgres never pulls psycopg for a
+store it will not use.
+
+Writes are an **upsert on `(note_id, content_hash)`**, so a re-proposal of a byte-identical note
+touches the existing row rather than appending — matching `GitNoteSubmitter`, which pushes nothing
+when there is no diff. A *changed* note is a new version and appends, leaving any decision already
+recorded against the earlier version standing: overwriting a rejection with a fresh `open` row
+would erase the one thing this table exists to keep.
+"""
+
+from contextlib import AbstractAsyncContextManager
+
+import psycopg
+from psycopg.rows import TupleRow
+
+from chemclaw.core import db
+from chemclaw.core.config import settings
+from chemclaw.kg.proposal import NoteProposal, ProposalState
+
+_COLUMNS = (
+    "id, note_id, note_type, content_hash, content, branch, reference, actor, session_id, "
+    "correlation_id, state, submitted_at, decided_at, decided_by, reason"
+)
+
+# The mutable columns of an unchanged re-proposal: a fresh reference (the submitter may have
+# returned a different one), refreshed provenance (a second chemist proposing the same note is who
+# the row should now name), and a bumped `submitted_at` so the review queue orders by the most
+# recent ask. `state` is deliberately absent — a note re-proposed unchanged after a rejection must
+# not silently reopen itself; the rejection stands until the content actually changes.
+_UPSERT = """
+    INSERT INTO note_proposals
+        (note_id, note_type, content_hash, content, branch, reference, actor, session_id,
+         correlation_id, state, reason)
+    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+    ON CONFLICT (note_id, content_hash) DO UPDATE SET
+        reference = EXCLUDED.reference,
+        actor = EXCLUDED.actor,
+        session_id = EXCLUDED.session_id,
+        correlation_id = EXCLUDED.correlation_id,
+        submitted_at = now()
+    RETURNING id
+"""
+
+# Both filters are self-disabling through the `%s = ''` arm, so "any state, any proposer" needs no
+# second statement — the shape `job_record_store._SEARCH` established. `before_id` is the cursor:
+# ids are monotonic from a `BIGSERIAL`, so "older than the last row I saw" is one comparison and
+# cannot skip or repeat a row the way an offset can when rows are inserted mid-page.
+_SELECT_MANY = f"""
+    SELECT {_COLUMNS} FROM note_proposals
+    WHERE (%s = '' OR state = %s)
+      AND (%s = '' OR actor = %s)
+      AND (%s = 0 OR id < %s)
+    ORDER BY id DESC
+    LIMIT %s
+"""
+
+_SELECT_ONE = f"SELECT {_COLUMNS} FROM note_proposals WHERE id = %s"
+
+# `state = 'open'` in the predicate is the concurrency control, not a courtesy: two reviewers
+# deciding at once means the second `UPDATE` matches no row and returns nothing, so the caller
+# learns the decision was already taken instead of overwriting it.
+_DECIDE = f"""
+    UPDATE note_proposals
+       SET state = %s, decided_at = now(), decided_by = %s, reason = %s
+     WHERE id = %s AND state = 'open'
+    RETURNING {_COLUMNS}
+"""
+
+# The webhook's half. Scoped to open rows so a duplicate delivery — which webhooks routinely are —
+# is a no-op rather than a second decision that restamps `decided_at`.
+_MARK_MERGED = """
+    UPDATE note_proposals
+       SET state = 'merged', decided_at = now(), decided_by = %s
+     WHERE note_id = ANY(%s) AND state = 'open'
+"""
+
+
+def _connect() -> AbstractAsyncContextManager[psycopg.AsyncConnection[TupleRow]]:
+    """The configured connection, with the shared statement timeout (one place, DRY)."""
+    return db.connection(
+        settings.postgres_dsn, statement_timeout_seconds=settings.pg_statement_timeout_seconds
+    )
+
+
+def _proposal(row: TupleRow) -> NoteProposal:
+    """Build a `NoteProposal` from a `_COLUMNS`-ordered row.
+
+    Through the pydantic model rather than around it, so a schema drift fails here — where the
+    column order is visible — instead of flowing on as a plausible-looking wrong field.
+    """
+    return NoteProposal(
+        id=row[0],
+        note_id=row[1],
+        note_type=row[2],
+        content=row[4],
+        branch=row[5],
+        reference=row[6],
+        actor=row[7],
+        session_id=row[8],
+        correlation_id=row[9],
+        state=ProposalState(row[10]),
+        submitted_at=row[11],
+        decided_at=row[12],
+        decided_by=row[13],
+        reason=row[14],
+    )
+
+
+class PostgresProposalStore:
+    """The durable `ProposalStore`: one short-lived connection per call (KISS, the house choice)."""
+
+    async def upsert(self, proposal: NoteProposal) -> int:
+        """Insert the proposal (or refresh an unchanged re-proposal); return the row id."""
+        async with _connect() as conn:
+            cursor = await conn.execute(
+                _UPSERT,
+                (
+                    proposal.note_id,
+                    proposal.note_type,
+                    proposal.content_hash,
+                    proposal.content,
+                    proposal.branch,
+                    proposal.reference,
+                    proposal.actor,
+                    proposal.session_id,
+                    proposal.correlation_id,
+                    proposal.state.value,
+                    proposal.reason,
+                ),
+            )
+            row = await cursor.fetchone()
+            await conn.commit()
+        return int(row[0]) if row is not None else 0
+
+    async def read(self, proposal_id: int) -> NoteProposal | None:
+        """One proposal in full, or None when there is no such row."""
+        async with _connect() as conn:
+            cursor = await conn.execute(_SELECT_ONE, (proposal_id,))
+            row = await cursor.fetchone()
+        return _proposal(row) if row is not None else None
+
+    async def listing(
+        self, state: ProposalState | None, actor: str, limit: int, before_id: int | None
+    ) -> list[NoteProposal]:
+        """Proposals newest-first, filtered by state and proposer, paged by `before_id`."""
+        wanted = state.value if state is not None else ""
+        cursor_id = before_id or 0
+        async with _connect() as conn:
+            cursor = await conn.execute(
+                _SELECT_MANY, (wanted, wanted, actor, actor, cursor_id, cursor_id, limit)
+            )
+            rows = await cursor.fetchall()
+        return [_proposal(row) for row in rows]
+
+    async def decide(
+        self, proposal_id: int, state: ProposalState, decided_by: str, reason: str
+    ) -> NoteProposal | None:
+        """Record a decision on an open proposal; None when absent or already decided."""
+        async with _connect() as conn:
+            cursor = await conn.execute(_DECIDE, (state.value, decided_by, reason, proposal_id))
+            row = await cursor.fetchone()
+            await conn.commit()
+        return _proposal(row) if row is not None else None
+
+    async def mark_merged(self, note_ids: list[str], decided_by: str) -> int:
+        """Close every open proposal for the named notes as merged; return how many moved."""
+        async with _connect() as conn:
+            cursor = await conn.execute(_MARK_MERGED, (decided_by, note_ids))
+            moved = cursor.rowcount
+            await conn.commit()
+        return int(moved)
