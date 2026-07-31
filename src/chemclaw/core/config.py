@@ -1248,6 +1248,12 @@ class FingerprintSettings(BaseSettings):
     # fingerprint-search analog of the `graph_max_hops` clamp on `expand_note`. Generous for a
     # real neighbor list.
     fingerprint_max_top_k: int = Field(default=100, ge=1)
+    # How much deeper a *filtered* structural search looks than the page it returns (D-170). The
+    # fingerprint index knows bits and a label, never note metadata, so a type/tag/date filter can
+    # only be applied to neighbours after they come back — and applying it to the page would let
+    # one unwanted neighbour cost a wanted one. Bounded by `fingerprint_max_top_k` regardless, so
+    # this cannot become a way around the one cap on how much of the index a query pulls in.
+    retrieval_filter_overfetch: int = Field(default=5, ge=1)
     # Bound on how many stored fingerprints one substructure scan materializes (SEC-4). The scan
     # has no similarity prefilter, so it loads records and RDKit-matches each; without a cap a
     # large corpus is a full-table load into the worker heap (the 30s statement_timeout bounds
@@ -1480,6 +1486,26 @@ class MemorySettings(BaseSettings):
     # chemistry, so the grouping must be tight to avoid merging distinct transformations.
     optimization_similarity_threshold: float = Field(default=0.7, ge=0.0, le=1.0)
     memory_job_timeout_seconds: float = Field(default=300.0, gt=0)
+    # Most notes one synthesis run may propose (0 = unbounded). The three jobs rescan the whole
+    # corpus daily with no cursor, so a large import would open a PR per cluster on the first
+    # night. The window rotates by run date rather than truncating, so the cap bounds the flood
+    # without the tail of the corpus being proposed *never* — see `_slice_for_this_run`.
+    memory_max_notes_per_run: int = Field(default=25, ge=0)
+    # The ungated observations tier (D-161). Off by default and deliberately: it is the first
+    # knowledge surface no human signs off before the agent can read it, and a deployment must
+    # choose that rather than inherit it. `promote_min_*` are the two thresholds at which an
+    # observation earns a human's review as a playbook PR — evidence count says the finding is not
+    # a coincidence, project count says it is not one team's local habit, and neither alone does.
+    # `retire_after_days` is how long an observation nothing re-observes stays open; without it the
+    # tier only ever grows and becomes a write-only log.
+    observations_enabled: bool = False
+    observation_promote_min_evidence: int = Field(default=3, ge=1)
+    observation_promote_min_projects: int = Field(default=2, ge=1)
+    observation_retire_after_days: int = Field(default=30, ge=0)
+    observation_max_results: int = Field(default=10, ge=1)
+    # Cadence for the observation lifecycle job (mine, retire, promote). Daily, like the memory
+    # jobs it sits beside and for the same reason: it re-scans the whole corpus.
+    observation_schedule_minutes: float = Field(default=1440.0, gt=0)
     # Temporal Schedule cadence for the memory-synthesis jobs (`cli/schedules.py`): they
     # re-scan the whole corpus, so they run less often than the cursor-driven ELN sync.
     memory_synthesis_schedule_minutes: float = Field(default=1440.0, gt=0)
@@ -1527,6 +1553,10 @@ class MemorySettings(BaseSettings):
     # — while a 76-atom Hessian is single-digit megabytes of text that no answer is built by
     # reading. This is what separates them, since both are text and neither can be refused on type.
     calc_artifact_max_chars: int = Field(default=20_000, ge=1)
+    # Ceiling on one `calculator_outliers` page. The listing exists to be *read* — a chemist looks
+    # at the worst misses and asks what they have in common — and a hundred rows is not read, it is
+    # scrolled past while spending the model's context.
+    calc_outliers_max_results: int = Field(default=25, ge=1)
     # Standing-query digests (gap IDEA-1). Off by default: it needs the `subscriptions` table
     # (migration 017), and a deployment nobody has subscribed on would just run an empty sweep.
     digest_enabled: bool = False

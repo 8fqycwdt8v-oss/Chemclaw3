@@ -193,8 +193,8 @@ and is kept only for reservations that were in flight when this changed.
 | [D-157](D-157-a-durable-record-of-every-connector-job-what-ran.md) | A durable record of every connector job: what ran, with what data, and why |
 | [D-158](D-158-the-expensive-calculation-is-the-one-that-was-not.md) | The expensive calculation is the one that was not cached |
 | [D-159](D-159-the-turn-stream-reports-a-tool-s-lifecycle-not.md) | The turn stream reports a tool's lifecycle, not just that a call happened |
-| D-160 | RESERVED — retrieval carries provenance, so a claim can be qualified by who authored its evidence |
-| D-161 | RESERVED — an ungated observations tier, with the human gate moved from every observation to the few worth promoting |
+| [D-160](D-160-retrieval-carries-provenance-so-a-claim-can-be.md) | Retrieval carries provenance, so a claim can be qualified by who authored its evidence |
+| [D-161](D-161-the-human-gate-moves-from-every-observation-to.md) | The human gate moves from every observation to the few worth promoting |
 | [D-162](D-162-a-series-of-experiments-is-a-sequence-not-a-set.md) | A series of experiments is a sequence, not a set |
 | [D-163](D-163-a-store-you-can-only-address-is-not-a-store-you.md) | A store you can only address is not a store you can ask |
 | [D-164](D-164-the-prose-gate-learns-note-types-and-the-two-dead.md) | The prose gate learns note types, and the two dead ones it finds |
@@ -202,6 +202,8 @@ and is kept only for reservations that were in flight when this changed.
 | [D-166](D-166-the-queue-is-reported-on-the-stream-not-as-a.md) | The queue is reported on the stream, not as a refusal |
 | [D-167](D-167-an-approval-authorizes-a-request-not-a-session.md) | An approval authorizes a request, not a session |
 | [D-168](D-168-a-template-step-runs-as-its-requester.md) | A template step runs as its requester, and four steps that had never run |
+| [D-169](D-169-trust-is-a-distribution-not-a-number-the-residual.md) | Trust is a distribution, not a number: the residual listing, and the property table behind it |
+| [D-170](D-170-a-similarity-hit-you-cannot-qualify-is-a.md) | A similarity hit you cannot qualify is a similarity hit you cannot use |
 | [D-2026-07-31-adr-ids-that-cannot-collide](D-2026-07-31-adr-ids-that-cannot-collide.md) | ADR ids that cannot collide |
 | [D-2026-07-31-the-audit-chain-is-versioned](D-2026-07-31-the-audit-chain-is-versioned.md) | The audit chain is versioned, so widening the record does not invalidate it |
 | [D-2026-07-31-the-deployment-envelope](D-2026-07-31-the-deployment-envelope.md) | The deployment envelope: a sidecar that emptied the tree, and three assertions the chart never made |

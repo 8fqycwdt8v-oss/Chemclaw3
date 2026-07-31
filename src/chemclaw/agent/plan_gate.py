@@ -35,6 +35,7 @@ session can research and propose and can do nothing else.
 """
 
 import inspect
+import logging
 from collections.abc import Awaitable, Callable
 from typing import Any
 
@@ -52,6 +53,9 @@ from chemclaw.agent.harness_mode import (
 )
 from chemclaw.agent.plan_approval_store import plan_approval_store
 from chemclaw.agent.session_context import get_current_session
+from chemclaw.core.config import settings
+
+logger = logging.getLogger(__name__)
 
 
 class PlanNotApprovedError(AuthorizationError):
@@ -209,25 +213,64 @@ def approved_todos_remaining(
     return _should_continue
 
 
+def gate_applies(profile: Any) -> bool:
+    """Whether the plan gate governs an agent built for `profile` — the one predicate, twice used.
+
+    `build_agent` decides from it whether to attach the middleware, and `chemclaw.api.runner`
+    decides from it whether a finished turn spends its approval. **They have to be the same
+    question.** Reading `settings` directly in the runner was a real gap: a profile setting
+    `harness_autonomy="plan_only"` under a global `execute` got the gate attached and its approval
+    never spent, so one decision authorized every later turn — DARK-1 again, for exactly the
+    sessions a deployment had narrowed on purpose.
+    """
+    harness = (
+        settings.harness_enabled if profile.harness_enabled is None else profile.harness_enabled
+    )
+    autonomy = (
+        settings.harness_autonomy if profile.harness_autonomy is None else profile.harness_autonomy
+    )
+    return bool(harness) and str(autonomy) == "plan_only"
+
+
 async def consume_turn_approval(session: AgentSession) -> None:
     """Spend the approval this turn ran under, so the next request needs its own.
 
-    Called once when a turn finishes, from `chemclaw.api.runner.run_turn`. Placed at the *end*
-    rather than the start because the harness loop is what executes an approved plan and it runs
-    inside a single `agent.run`: consuming on entry would refuse the plan's own second iteration.
+    Called once when a turn finishes, from `chemclaw.api.runner.run_turn`. At the *end* rather than
+    the start because the harness loop is what executes an approved plan and it runs inside a
+    single `agent.run`: consuming on entry would refuse the plan's own second iteration.
 
-    Silent when nothing was approved — there is then nothing to spend, and this must never be the
-    reason a turn reports a failure.
+    **Not from the runner's `finally`, and that is not a style preference.** `run_turn` is an async
+    generator whose `finally` also runs on the disconnect path — which production reaches through
+    `CancelledError`, not `aclose()` (D-130). An `await` there re-raises the cancellation
+    immediately and *everything after it in the block is skipped*: the budget booking, the turn
+    metrics, `end_turn`, and all five context-var resets. Leaking the ambient identity of a
+    disconnected turn into the next turn on that worker is a worse defect than the one this
+    function exists to fix. So it is called on the two paths where awaiting is safe, and the
+    disconnect path deliberately does not spend the approval — that path rolls `session.state` back
+    to its pre-turn snapshot, which is where the consumed marker lives, so a turn that was undone
+    has not used its authorization.
+
+    Never raises. A store that cannot be reached must not turn a completed turn into a failed one;
+    the gate itself fails closed on the next call regardless, because an unreadable decision is not
+    an approval.
     """
-    plan_hash = await current_plan_hash(session)
-    if plan_consumed(session, plan_hash):
-        return
-    decision = await plan_approval_store().decision(session.session_id, plan_hash)
-    if decision and decision[0]:
-        consume_plan(session, plan_hash)
-        # The mode represented the authorization, so it ends with it. Without this the surface
-        # keeps reporting `execute` for a session whose every state-changing call would now be
-        # refused — the same disagreement between the displayed mode and the enforced one that let
-        # the original defect go unnoticed.
-        if session_mode(session) == EXECUTE_MODE:
-            revoke_execute(session)
+    try:
+        plan_hash = await current_plan_hash(session)
+        if plan_consumed(session, plan_hash):
+            return
+        decision = await plan_approval_store().decision(session.session_id, plan_hash)
+        if decision and decision[0]:
+            consume_plan(session, plan_hash)
+            # The mode represented the authorization, so it ends with it. Without this the surface
+            # keeps reporting `execute` for a session whose every state-changing call would now be
+            # refused — the same disagreement between the displayed mode and the enforced one that
+            # let the original defect go unnoticed.
+            if session_mode(session) == EXECUTE_MODE:
+                revoke_execute(session)
+    except Exception:  # noqa: BLE001 - a turn must not fail on its way out
+        logger.warning(
+            "could not spend the plan approval for session %s; the gate still refuses an "
+            "unreadable decision, so this costs an extra approval rather than authorizing one",
+            session.session_id,
+            exc_info=True,
+        )

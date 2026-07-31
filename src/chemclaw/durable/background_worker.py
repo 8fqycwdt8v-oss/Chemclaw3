@@ -38,6 +38,7 @@ from chemclaw.durable import interaction_approval as _interaction_approval  # no
 from chemclaw.durable import memory_jobs as _memory_jobs  # noqa: F401
 from chemclaw.durable import note_index as _note_index  # noqa: F401
 from chemclaw.durable import notify as _notify  # noqa: F401
+from chemclaw.durable import observation_jobs as _observation_jobs  # noqa: F401
 from chemclaw.durable import orchestrator as _orchestrator  # noqa: F401
 from chemclaw.durable import report_workflow as _report_workflow  # noqa: F401
 from chemclaw.durable import retention as _retention  # noqa: F401

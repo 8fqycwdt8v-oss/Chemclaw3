@@ -35,7 +35,7 @@ generates enters the graph through a **PR-gate**, so a human signs off before it
 | `kg/` | 4 (Graph) | The graph indexer, the schema and link validators, the PR-gate that writes notes. |
 | `ingest/` | — | Getting records in: `sources` is the generic `DataSource` seam, `eln` the ELN adapters hosted behind it. |
 | `retrieval/` | — | Reading back out: the retrievers, hybrid search, the vector index, the report harness. |
-| `memory/` | — | The memory layers over past campaigns, interactions and failures. |
+| `memory/` | — | The memory layers over past campaigns, interactions and failures, plus the ungated observations tier (D-161). |
 | `templates/` | — | Step templates: the manifest, registry and resolver. |
 | `evals/` | — | The eval harness and metrics. |
 | `cli/` | — | Every terminal entrypoint in one place: `chat` (the admin CLI, and the `chemclaw` console script) and the eight validators `make` runs. |

@@ -29,6 +29,7 @@ endpoint:
     - predict_logd
     - predict_developability_profile
     - calculator_trust
+    - calculator_outliers
     - find_calculations
     - list_artifacts
     - fetch_artifact
@@ -54,6 +55,10 @@ endpoint:
   # prediction before deciding whether to authorize the work that depends on it.
   read_only:
     - calculator_trust
+    # The residual listing behind that aggregate (D-169). It reads the same ledger and, like the
+    # aggregate, is what a chemist consults *before* authorizing work — refusing it under an
+    # unapproved plan would gate the check rather than the thing being checked.
+    - calculator_outliers
     # A search over the job record (D-163) — it answers "has this already been run", which is
     # exactly the lookup a chemist makes *before* deciding whether to authorize an expensive run.
     - find_calculations

@@ -33,6 +33,23 @@ class EvidenceChunk(BaseModel):
     # corroboration. Empty for the ordinary case, so a reader sees the marker only when there is
     # something to see.
     conflicts_with: list[str] = Field(default_factory=list)
+    # Who authored the source note, where it came from, and how sure it is (D-160). `NoteRef` has
+    # exposed all three to `find_notes`/`expand_note` since KM-6; the sweep that gathers most of
+    # the evidence an answer is built on carried none of them, so the model saw a claim and no way
+    # to weigh who was claiming it. `confidence` did reach here — as `score`, a truncation-order
+    # signal — which is not the same thing as being *told* a note is uncertain.
+    #
+    # This is harmless while everything readable was human-merged, and becomes a correctness bug
+    # the moment a second, ungated tier exists (D-161). It ships first and on its own for that
+    # reason.
+    #
+    # `created_by` is deliberately `""`, not `"human"`, when the retriever could not establish it:
+    # a structural hit is generated from the fingerprint index and has no note author. Defaulting
+    # to "human" would assert provenance nobody checked, in the one field whose whole purpose is
+    # to be trusted.
+    created_by: str = ""
+    source: str = ""
+    confidence: float | None = None
 
 
 @runtime_checkable

@@ -13,7 +13,7 @@ import logging
 from pydantic import BaseModel
 from rdkit import Chem
 
-from chemclaw.core.chem import InvalidSmilesError, compound_id
+from chemclaw.core.chem import InvalidSmilesError, compound_id, substructure_pattern
 from chemclaw.core.config import settings
 from chemclaw.science.fingerprints.molfp.fingerprint import ecfp_bitstring, molecule_definition
 from chemclaw.science.fingerprints.store import (
@@ -121,11 +121,12 @@ async def find_substructure_matches(store: FingerprintStore, query: str) -> list
             f"substructure query exceeds {max_length} characters ({len(query)}); "
             "pass a smaller fragment (or raise CHEMCLAW_SUBSTRUCTURE_QUERY_MAX_LENGTH)"
         )
-    pattern = Chem.MolFromSmarts(query) or Chem.MolFromSmiles(query)
-    if pattern is None:
-        raise FingerprintError(f"unparseable substructure query: {query!r}")
-    if pattern.GetNumAtoms() == 0:
-        raise FingerprintError(f"empty substructure query (no atoms): {query!r}")
+    try:
+        pattern = substructure_pattern(query)
+    except InvalidSmilesError as exc:
+        # Re-raised as this module's own error so the connector's failure type is unchanged; the
+        # *rule* for what a valid pattern is now lives in one place (`core.chem`).
+        raise FingerprintError(str(exc)) from exc
     cap = settings.substructure_scan_max_records
     records = await store.all_records(limit=cap)
     if len(records) == cap:

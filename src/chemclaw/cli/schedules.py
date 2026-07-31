@@ -46,6 +46,7 @@ from chemclaw.durable.memory_jobs import (
     PlaybookDistillationWorkflow,
 )
 from chemclaw.durable.note_index import NoteReindexWorkflow
+from chemclaw.durable.observation_jobs import ObservationSynthesisWorkflow
 from chemclaw.durable.retention import RetentionWorkflow
 
 logger = logging.getLogger(__name__)
@@ -76,6 +77,7 @@ OWNED_SCHEDULE_IDS = frozenset(
         "audit-verify",
         "digest",
         "artifact-eviction",
+        "observations",
     }
 )
 
@@ -128,6 +130,14 @@ def planned_schedules() -> list[PlannedSchedule]:
         eviction_every = timedelta(minutes=settings.artifact_eviction_schedule_minutes)
         schedules.append(
             PlannedSchedule("artifact-eviction", ArtifactEvictionWorkflow, eviction_every)
+        )
+    # The observations tier is the one knowledge surface no human reviews before the agent reads
+    # it, so it fires only where a deployment has consciously turned it on (D-161). Without this
+    # guard the table would fill on a default nobody chose.
+    if settings.observations_enabled:
+        observations_every = timedelta(minutes=settings.observation_schedule_minutes)
+        schedules.append(
+            PlannedSchedule("observations", ObservationSynthesisWorkflow, observations_every)
         )
     return schedules
 

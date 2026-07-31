@@ -33,6 +33,7 @@ from chemclaw.agent.plan_gate import (
     approved_todos_remaining,
     consume_turn_approval,
     enforce_plan_approval,
+    gate_applies,
     gated_tools,
 )
 from chemclaw.core.config import settings
@@ -52,11 +53,14 @@ def approvals(monkeypatch: pytest.MonkeyPatch) -> Iterator[InMemoryPlanApprovalS
     leaves one behind.
     """
     monkeypatch.setattr(settings, "session_store", "memory")
-    store_module.plan_approval_store.cache_clear()
-    store = store_module.plan_approval_store()
+    # Bound up front, so teardown clears *this* cache even if a test swaps the module attribute
+    # for a stand-in — otherwise one test replacing the factory breaks the next test's fixture.
+    factory = store_module.plan_approval_store
+    factory.cache_clear()
+    store = factory()
     assert isinstance(store, InMemoryPlanApprovalStore)
     yield store
-    store_module.plan_approval_store.cache_clear()
+    factory.cache_clear()
 
 
 class _Function:
@@ -359,5 +363,57 @@ def test_consuming_is_silent_when_nothing_was_approved(
         await _set_plan(session, ["a step"])
         await consume_turn_approval(session)
         await consume_turn_approval(session)
+
+    asyncio.run(_run())
+
+
+# --- review fixes: one predicate, a non-fatal spend, and an honest display --------------------
+
+
+def test_the_gate_and_the_spend_ask_the_same_question(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A profile that overrides autonomy must not get the gate without the spend.
+
+    `build_agent` attached the middleware from the *profile's* resolved autonomy while the runner
+    decided whether to spend the approval from `settings` alone. A profile setting
+    `harness_autonomy="plan_only"` under a global `execute` therefore got a gate whose approval was
+    never spent — one decision authorizing every later turn, which is DARK-1 again for exactly the
+    sessions a deployment had narrowed on purpose. Both now call `gate_applies`.
+    """
+    from chemclaw.agent.profiles import AgentProfile
+
+    monkeypatch.setattr(settings, "harness_enabled", False)
+    monkeypatch.setattr(settings, "harness_autonomy", "execute")
+
+    narrowed = AgentProfile(name="p", harness_enabled=True, harness_autonomy="plan_only")
+    assert gate_applies(narrowed), "a profile that asks for the approval-first posture is gated"
+
+    autonomous = AgentProfile(name="p", harness_enabled=True, harness_autonomy="execute")
+    assert not gate_applies(autonomous), "a profile that asks for autonomy is not gated"
+
+    assert not gate_applies(AgentProfile(name="p")), "the default follows the deployment"
+
+
+def test_spending_never_raises_when_the_store_is_unreachable(
+    approvals: InMemoryPlanApprovalStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A turn must not fail on its way out because the approval store hiccupped.
+
+    The gate still fails closed on the next call regardless — an unreadable decision is not an
+    approval — so a swallowed error costs one extra approval rather than authorizing anything.
+    """
+
+    class _Broken:
+        async def decision(self, *_: Any) -> None:
+            raise RuntimeError("store is down")
+
+        async def record(self, *_: Any) -> None:
+            raise RuntimeError("store is down")
+
+    monkeypatch.setattr(store_module, "plan_approval_store", lambda: _Broken())
+
+    async def _run() -> None:
+        session = AgentSession(session_id="broken-store")
+        await _set_plan(session, ["a step"])
+        await consume_turn_approval(session)  # must not raise
 
     asyncio.run(_run())

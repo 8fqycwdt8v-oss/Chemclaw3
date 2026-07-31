@@ -94,6 +94,10 @@ READ_ONLY_TOOLS: frozenset[str] = frozenset(
         # should make *before* asking for an expensive run to be authorized.
         "find_past_jobs",
         "gather_evidence",
+        # The ungated observations tier (D-161). A read of a table nothing but the durable
+        # mining job writes, and its whole purpose is to point at evidence worth gathering
+        # *before* anything is authorized.
+        "recall_observations",
         "get_durable_job_status",
         "list_attachments",
         "list_watches",

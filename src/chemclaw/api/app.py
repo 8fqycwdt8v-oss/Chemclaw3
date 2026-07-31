@@ -44,6 +44,7 @@ from chemclaw.agent.durable_tools import request_note_reindex
 from chemclaw.agent.harness_mode import (
     current_plan_hash,
     grant_execute,
+    plan_consumed,
     rearm_plan,
     session_mode,
 )
@@ -56,7 +57,6 @@ from chemclaw.agent.interaction_tools import (
     list_pending_approvals,
 )
 from chemclaw.agent.plan_approval_store import ApprovalStore, plan_approval_store
-from chemclaw.agent.plan_gate import plan_is_approved
 from chemclaw.agent.profile_discovery import load_profiles
 from chemclaw.agent.profiles import get_profile
 from chemclaw.agent.session_events import stream_new_events
@@ -1208,12 +1208,16 @@ def create_app(
         plan = await todo_titles(live.session)
         plan_hash = await current_plan_hash(live.session)
         decision = await _plan_approvals().decision(session_id, plan_hash)
+        # One read, then two questions of it. Calling `plan_is_approved` here as well would issue a
+        # second query whose answer could differ from this one — a route reporting `approved=false`
+        # beside the name of whoever approved it is a worse surface than either fact alone.
+        approved = bool(decision and decision[0]) and not plan_consumed(live.session, plan_hash)
         return PlanStatusOut(
             session_id=session_id,
             plan_hash=plan_hash,
             plan=plan,
             mode=session_mode(live.session),
-            approved=await plan_is_approved(live.session),
+            approved=approved,
             decided_by=decision[1] if decision else None,
         )
 

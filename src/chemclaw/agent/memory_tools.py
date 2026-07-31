@@ -1,15 +1,23 @@
-"""Agent tool for the interaction memory layer (plan step 5.5).
+"""Agent tools for the memory layers: capturing a confirmed answer, and recalling observations.
 
 A confirmed or corrected answer from a chemist is evidence too. `record_confirmed_answer`
 lets the agent capture such an exchange as an episodic `interaction` note and route it
 through the **same** PR-gate as every other agent note (a human validates it before it
 becomes trusted knowledge, D-005) — the fourth memory source, on the one shared write path.
+
+`recall_observations` reads the ungated tier (D-161), and is a **separate tool on purpose**. An
+observation is not evidence and must never arrive as a chunk in the evidence list: fusing the two
+would make "what the record shows" and "what the agent noticed" the same kind of thing at the
+moment of ranking, which is the distinction the human gate exists to preserve. Keeping it a
+distinct call is what makes the separation structural rather than a naming convention.
 """
 
 from chemclaw.agent.tool_registry import tool
 from chemclaw.agent.turn_signals import record_proposal
+from chemclaw.core.config import settings
 from chemclaw.kg.git_submitter import default_submitter
 from chemclaw.memory.interaction import propose_confirmed_answer
+from chemclaw.memory.observations import Observation, open_observations
 
 
 @tool
@@ -41,3 +49,32 @@ async def record_confirmed_answer(
     # instead of the PR-gate being visible only in a git host's UI (gap RCH-4).
     record_proposal(f"interaction-{interaction_id}", reference)
     return reference
+
+
+@tool
+async def recall_observations(limit: int = 0) -> list[Observation]:
+    """Recall cross-project patterns the system has noticed but that no human has validated.
+
+    These are **not** knowledge. Each one is a reading the system formed by looking across
+    projects — usually something the knowledge graph will never contain, because the rules that
+    govern what becomes a note deliberately exclude it (a playbook may only be distilled from
+    successes, so a transformation that has gone badly in three projects is nobody's note).
+
+    Use them to decide **where to look**, never as the answer. An observation may point you at
+    reactions worth gathering evidence on, or at a question worth asking the chemist. It may not
+    support a claim: check `evidence_note_ids` and read those notes with `expand_note`, then make
+    the claim from the notes.
+
+    If an answer rests on an observation and nothing more, say so explicitly — that it is a pattern
+    the system noticed and no one has confirmed. `support` is how many merged notes back it and
+    `projects_seen` which projects it spans; both low means a thin reading, not a weak fact.
+
+    Args:
+        limit: How many to return, best-supported first. 0 uses the configured page size.
+
+    Returns:
+        Open observations with their statements, scope, supporting merged note ids, and projects.
+    """
+    if not settings.observations_enabled:
+        return []
+    return await open_observations(limit or None)

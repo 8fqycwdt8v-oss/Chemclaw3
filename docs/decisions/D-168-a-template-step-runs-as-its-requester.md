@@ -65,7 +65,11 @@ that had never executed:
    `list[Content]`, which Temporal's converter refuses: *"Unable to serialize unknown type"*. Both
    branches, so no template with a tool step had ever completed a run. Results are now rendered to
    what the converter can carry — which is also what `${steps.<id>.result}` should hold: the tool's
-   answer, not the framework's envelope around it.
+   answer, not the framework's envelope around it. That rendering identifies `Content` by
+   `isinstance` and not by having a `.type` attribute: `find_notes` returns `list[NoteRef]` and a
+   `NoteRef`'s `type` is the note's *kind*, so a duck-typed check matched it, found no `.text`, and
+   flattened a structured result into a Python repr — silently, for every template step naming such
+   a tool.
 3. **An `agent` step could not run under `harness_enabled`** — the configuration the Helm chart
    sets. It calls `agent.run` with no session, which the harness middleware refuses ("ToolApproval
    Middleware requires an AgentSession"), the same wall D-152 hit for the CLI.
