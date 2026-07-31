@@ -395,6 +395,18 @@ def _clear_prefixed_env() -> Iterator[None]:
             "embedding_dim must match the note_index vector column when vector search is on",
             {"embedding_dim": 768, "data_sources": "graph,vector"},
         ),
+        # DARK-8: the check asked whether the *vector* source was on, while `reindex_notes` writes
+        # the embedding column for every note-index-backed source. So these two configurations
+        # passed validation and then failed every reindex on a pgvector dimension error, with
+        # nothing pointing at the setting that caused it.
+        (
+            "a lexical-only deployment reaches the same vector column",
+            {"embedding_dim": 768, "data_sources": "graph,lexical"},
+        ),
+        (
+            "the scheduled reindex writes it with no retrieve source at all",
+            {"embedding_dim": 768, "data_sources": "graph", "note_reindex_enabled": True},
+        ),
     ],
 )
 def test_configurations_the_comments_forbid_are_rejected(name: str, overrides: dict) -> None:  # type: ignore[type-arg]
@@ -406,3 +418,17 @@ def test_configurations_the_comments_forbid_are_rejected(name: str, overrides: d
 def test_the_shipped_defaults_still_construct() -> None:
     """The new guards must not reject the configuration the repository actually ships."""
     assert Settings(_env_file=None) is not None  # type: ignore[call-arg]
+
+
+def test_the_embedding_width_check_still_leaves_the_standalone_embedder_alone() -> None:
+    """Widening the scope must not make it unconditional.
+
+    The embedder is used on its own — the hash embedder's unit tests pick a small dim and touch no
+    database — so a deployment that cannot reach pgvector at all must still be free to choose any
+    width. The question the check asks is "does anything here write `note_index`", not "is an
+    embedding configured".
+    """
+    settings = Settings(  # type: ignore[call-arg]
+        _env_file=None, embedding_dim=768, data_sources="graph", note_reindex_enabled=False
+    )
+    assert settings.embedding_dim == 768

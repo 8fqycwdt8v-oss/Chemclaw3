@@ -113,9 +113,15 @@ def _window_days(table: str) -> int:
 async def prune_expired_rows() -> RetentionOutcome:
     """Delete rows past their table's retention window; return the per-table counts.
 
-    Each table is pruned in its own statement so one failure cannot roll back the others, and the
-    cutoff is computed in SQL (`now() - interval`) so the app clock and the database clock cannot
-    disagree about what "expired" means.
+    Each table is pruned **and committed** in its own statement, so one failure cannot roll back
+    the others. That was the docstring's claim before it was true: there was a single `commit()`
+    after the loop, so a timeout on the second table discarded the first table's deletions and the
+    run reported them as done — a sweep that says it removed rows it then rolled back is worse than
+    one that fails outright, because the growth it was meant to bound continues while the log says
+    otherwise. Committing per table also bounds each transaction to one table's locks.
+
+    The cutoff is computed in SQL (`now() - interval`) so the app clock and the database clock
+    cannot disagree about what "expired" means.
     """
     outcome = RetentionOutcome(deleted={}, skipped=[])
     async with connection(
@@ -132,6 +138,7 @@ async def prune_expired_rows() -> RetentionOutcome:
                 # that may not be expiring (see the module docstring). Per session, through the
                 # pairing closure.
                 outcome.deleted[table] = await _prune_session_messages(conn, days)
+                await conn.commit()
                 continue
             async with conn.cursor() as cur:
                 # Table and column come from the closed `_PRUNABLE` map above, never from a caller,
@@ -142,7 +149,7 @@ async def prune_expired_rows() -> RetentionOutcome:
                     (days,),
                 )
                 outcome.deleted[table] = cur.rowcount
-        await conn.commit()
+            await conn.commit()
     return outcome
 
 

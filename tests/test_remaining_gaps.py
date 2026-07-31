@@ -231,3 +231,43 @@ def test_one_measurement_scores_every_version(monkeypatch: pytest.MonkeyPatch) -
 
     hi_bias, lo_bias = asyncio.run(_run())
     assert hi_bias > 0 > lo_bias
+
+
+def test_a_measurement_with_no_prediction_survives_and_scores_the_next_one(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The common case for new chemistry, and the one that used to be thrown away (DARK-9).
+
+    `record_observation` was a bare `UPDATE` against `predictions`, so a value for a molecule
+    nothing had predicted matched no row and vanished — while `report_measurement` answered
+    "Recorded". A chemist reporting a solubility for a compound the system has never been asked
+    about is not an edge case; it is how measurement and prediction are actually ordered, and it
+    meant the ledger could only ever learn from molecules the agent happened to guess at first.
+    """
+    monkeypatch.setattr(settings, "calibration_enabled", True)
+
+    async def _run() -> Calibration:
+        await migrated_db_or_skip()
+        # Measured first. Nothing has predicted it, so nothing is scored — and it must still be
+        # kept, which is the whole point.
+        scored = await record_observation(
+            "dark9-measure-first", "molecule-x", 2.0, source="bench", subject="CCO", unit="log S"
+        )
+        assert scored == 0
+
+        # Predicted afterwards: the stored measurement scores it on write.
+        await record_prediction(
+            PredictionRecord(
+                calc_type="dark9-measure-first",
+                calc_version="v1",
+                input_hash="molecule-x",
+                subject="CCO",
+                predicted_value=2.5,
+                unit="log S",
+            )
+        )
+        return await calibration_for("dark9-measure-first", "v1", unit="log S")
+
+    calibration = asyncio.run(_run())
+    assert calibration.n == 1, "the measurement was discarded, so the later prediction scored 0"
+    assert calibration.bias == pytest.approx(0.5)

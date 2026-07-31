@@ -1540,6 +1540,12 @@ class MemorySettings(BaseSettings):
     audit_verify_enabled: bool = False
     audit_verify_schedule_minutes: float = Field(default=1440.0, gt=0)
     audit_verify_timeout_seconds: float = Field(default=600.0, gt=0)
+    # How many audit rows the verifier holds at once. It used to hold all of them — and this is the
+    # one table `retention_*` above refuses to prune, because deleting from a hash chain is
+    # indistinguishable from tampering, so it is the one table with no upper bound. A whole-table
+    # read in the shared background worker was on a path to OOM it (DARK-6). The fold carries the
+    # chain link across pages, so this bounds memory without weakening the check.
+    audit_verify_page_rows: int = Field(default=5000, ge=1)
     # Mid-turn durable-job resume (gap AGT-2): when a turn launches a durable job, wait this
     # long for its result and continue the *same* turn with it, so "compute this, then reason
     # about the result" is one exchange. Off by default — holding a turn open holds an admission
@@ -1724,6 +1730,11 @@ class SafetySettings(BaseSettings):
 # against it — the validator below fails startup if the two disagree.
 _NOTE_INDEX_VECTOR_DIM = 1536
 
+# The retrieve sources backed by `note_index`. Both of them, not just `vector`: `reindex_notes`
+# embeds and upserts every row it writes regardless of which half will read it, so a `lexical`-only
+# deployment reaches the `vector(N)` column exactly as a `vector` one does (DARK-8).
+_NOTE_INDEX_SOURCES = frozenset({"vector", "lexical"})
+
 
 class Settings(
     ObservabilitySettings,
@@ -1782,11 +1793,16 @@ class Settings(
         - **Budgets enabled with every cap at zero.** `0` means unlimited for each cap, so this is
           a guard that guards nothing while reporting itself as on.
         - **`embedding_dim` disagreeing with the `vector(N)` column** in migration 012, *while
-          the vector data source is enabled*. pgvector rejects the insert at write time, so the
+          anything writes the note index*. pgvector rejects the insert at write time, so the
           mismatch surfaces as a failed reindex rather than as the configuration error it is.
-          Scoped to the enabled case deliberately: the embedder is used on its own (the hash
-          embedder's unit tests pick a small dim and touch no database), so an unconditional check
-          would reject configurations that cannot reach pgvector at all.
+          Still scoped rather than unconditional, because the embedder is used on its own (the hash
+          embedder's unit tests pick a small dim and touch no database) — but the scope was wrong
+          (DARK-8): it asked whether the *vector* source was enabled, while `reindex_notes` writes
+          the embedding column for **every** note-index-backed source. A `lexical`-only deployment
+          with a 768-wide model therefore passed validation and failed every reindex on a pgvector
+          dimension error, with nothing pointing at the setting that caused it. The question is
+          "does anything in this deployment write `note_index`", and `note_reindex_enabled` is the
+          third way that happens — the scheduled rebuild, which needs no retrieve source at all.
         """
         if self.session_store == "memory" and self.service_uvicorn_workers > 1:
             raise ValueError(
@@ -1811,7 +1827,10 @@ class Settings(
                 "budget_enabled=true with every cap at 0 (unlimited) guards nothing; set at least "
                 "one budget_max_* cap or disable budgets"
             )
-        if "vector" in self.data_source_list and self.embedding_dim != _NOTE_INDEX_VECTOR_DIM:
+        writes_note_index = self.note_reindex_enabled or bool(
+            _NOTE_INDEX_SOURCES & set(self.data_source_list)
+        )
+        if writes_note_index and self.embedding_dim != _NOTE_INDEX_VECTOR_DIM:
             raise ValueError(
                 f"embedding_dim={self.embedding_dim} disagrees with the note_index vector column "
                 f"({_NOTE_INDEX_VECTOR_DIM}, infra/sql/012_note_index.sql); pgvector would reject "

@@ -86,20 +86,35 @@ def _matches(note: object, subscription: Subscription) -> bool:
 
 
 def _is_new(note: object, subscription: Subscription) -> bool:
-    """Whether a note became knowledge after this subscriber was last told."""
+    """Whether a note became knowledge after this subscriber was last told.
+
+    `>=` rather than `>` on the date, because a note's `valid_from` is a *date* and the digest
+    runs hourly: `>` would silently drop a note that appeared later on the same day the digest
+    ran, which is the common case and the failure this feature exists to prevent.
+
+    `>=` alone re-qualified every same-day note on every run — up to 24 deliveries a day, against
+    `agent/subscriptions.py`'s promise that "asking twice does not double-notify" (DARK-7). The
+    subscription therefore also remembers which ids it sent *at that date*, which separates
+    "dated today and already sent" from "dated today and new" without having to choose between
+    the two failures.
+    """
     valid_from = getattr(note, "valid_from", None)
     if valid_from is None or subscription.last_seen_at is None:
         # No date on either side: report it once. Being told about something already seen is a
         # nuisance; never being told is the failure this feature exists to prevent.
         return True
-    return bool(valid_from >= subscription.last_seen_at.date())
+    if valid_from > subscription.last_seen_at.date():
+        return True
+    if valid_from < subscription.last_seen_at.date():
+        return False
+    return getattr(note, "id", "") not in subscription.last_seen_note_ids
 
 
 @durable_activity("background")
 @activity.defn
-async def acknowledge_digest(subscription_id: int) -> None:
-    """Advance a subscription's watermark, once its digest has actually been delivered."""
-    await mark_reported(subscription_id)
+async def acknowledge_digest(subscription_id: int, note_ids: list[str]) -> None:
+    """Advance a subscription's watermark and record what it delivered, once delivery succeeded."""
+    await mark_reported(subscription_id, note_ids)
 
 
 @durable_workflow("background")
@@ -133,7 +148,7 @@ class DigestWorkflow:
                 continue
             await workflow.execute_activity(
                 acknowledge_digest,
-                item.subscription_id,
+                args=[item.subscription_id, item.note_ids],
                 start_to_close_timeout=timeout,
                 retry_policy=BAD_DATA_RETRY,
             )

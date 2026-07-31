@@ -21,7 +21,7 @@ from typing import Any
 
 import psycopg
 from psycopg.rows import TupleRow
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from chemclaw.agent.authz import require_actor
 from chemclaw.agent.tool_registry import tool
@@ -35,13 +35,25 @@ INSERT INTO subscriptions (owner, query, note_type)
 VALUES (%s, %s, %s)
 ON CONFLICT (owner, query, coalesce(note_type, '')) DO NOTHING
 """
-_SELECT_OWNER = """
-SELECT id, owner, query, note_type, last_seen_at
-  FROM subscriptions WHERE owner = %s ORDER BY id
-"""
-_SELECT_ALL = "SELECT id, owner, query, note_type, last_seen_at FROM subscriptions ORDER BY id"
+_COLUMNS = "id, owner, query, note_type, last_seen_at, last_seen_note_ids"
+_SELECT_OWNER = f"SELECT {_COLUMNS} FROM subscriptions WHERE owner = %s ORDER BY id"
+_SELECT_ALL = f"SELECT {_COLUMNS} FROM subscriptions ORDER BY id"
 _DELETE = "DELETE FROM subscriptions WHERE owner = %s AND query = %s"
-_TOUCH = "UPDATE subscriptions SET last_seen_at = now() WHERE id = %s"
+
+# Accumulate within the watermark's date, reset when it rolls over (DARK-7). Done in SQL rather
+# than read-modify-write in Python because the date comparison and the write have to be one
+# statement: two digest runs overlapping would otherwise each read the same list and the second
+# would overwrite the first's additions, re-reporting exactly what this is meant to stop.
+_TOUCH = """
+UPDATE subscriptions
+   SET last_seen_note_ids = CASE
+           WHEN last_seen_at::date = now()::date
+           THEN ARRAY(SELECT DISTINCT unnest(last_seen_note_ids || %s::text[]))
+           ELSE %s::text[]
+       END,
+       last_seen_at = now()
+ WHERE id = %s
+"""
 
 
 class Subscription(BaseModel):
@@ -52,6 +64,10 @@ class Subscription(BaseModel):
     query: str
     note_type: str | None = None
     last_seen_at: datetime | None = None
+    # The note ids already delivered *at `last_seen_at`'s date*. Only that date's, so the list is
+    # bounded by one day of matches: anything older is already excluded by the date comparison
+    # itself, and keeping it would make this grow with the corpus (DARK-7).
+    last_seen_note_ids: list[str] = Field(default_factory=list)
 
 
 @asynccontextmanager
@@ -95,7 +111,14 @@ async def _fetch(sql: str, params: tuple[Any, ...]) -> list[Subscription]:
             await cur.execute(sql, params)
             rows = await cur.fetchall()
     return [
-        Subscription(id=r[0], owner=r[1], query=r[2], note_type=r[3], last_seen_at=r[4])
+        Subscription(
+            id=r[0],
+            owner=r[1],
+            query=r[2],
+            note_type=r[3],
+            last_seen_at=r[4],
+            last_seen_note_ids=list(r[5] or []),
+        )
         for r in rows
     ]
 
@@ -108,16 +131,22 @@ async def remove(owner: str, query: str) -> None:
         await conn.commit()
 
 
-async def mark_reported(subscription_id: int) -> None:
-    """Advance a subscription's watermark after its digest was delivered.
+async def mark_reported(subscription_id: int, note_ids: list[str]) -> None:
+    """Advance a subscription's watermark and remember what it just delivered.
 
     Advanced *after* delivery, never before: a crash between the two must re-report rather than
     silently skip, because a duplicate digest line is a nuisance and a missed one defeats the
     feature.
+
+    `note_ids` is what makes the watermark exact rather than merely approximate. The date
+    comparison alone cannot separate "dated today and already sent" from "dated today and new",
+    because a note's `valid_from` is a date and the digest runs hourly — so `>=` re-sent every
+    same-day note every hour, and `>` would have dropped the ones that arrived later that day.
+    Remembering the ids settles it without choosing between the two failures (DARK-7).
     """
     async with _connection() as conn:
         async with conn.cursor() as cur:
-            await cur.execute(_TOUCH, (subscription_id,))
+            await cur.execute(_TOUCH, (note_ids, note_ids, subscription_id))
         await conn.commit()
 
 
