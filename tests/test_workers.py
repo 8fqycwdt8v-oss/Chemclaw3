@@ -59,12 +59,15 @@ def test_the_calc_connectors_worker_serves_every_expensive_xtb_task() -> None:
     assert jobs and {job.workflow for job in jobs} == {"CalcJobWorkflow"}
 
 
-def test_the_qm_connectors_worker_serves_the_hpc_job_and_all_four_activities() -> None:
+def test_the_qm_connectors_worker_serves_the_hpc_job_and_all_its_activities() -> None:
     """The HPC/DFT job reaches a worker — the assertion core's `hpc-jobs` worker used to carry.
 
     Importing `chemclaw.connectors.qm.worker` is the whole registration, exactly as for `calc`: no
     `_WORKFLOWS`/`_ACTIVITIES` list to fall out of step with what the modules define. A workflow
-    registered without its four activities would poll forever on the first `prepare_input`.
+    registered without all of its activities would poll forever on the first one it reached — which
+    is why this is an exact set and not a subset check. The two cache activities joined the spine
+    with D-158; `tests/temporal_env.py::QM_ACTIVITIES` is the same list for the test workers and
+    has to move with it.
     """
     import chemclaw.connectors.qm.worker  # noqa: F401 — importing it is what registers the bundle
     from chemclaw.connectors.qm.workflows import QMJobWorkflow
@@ -74,9 +77,14 @@ def test_the_qm_connectors_worker_serves_the_hpc_job_and_all_four_activities() -
 
     queue = bundle_queue("qm")
     assert QMJobWorkflow in registered_workflows(queue)
-    assert {"prepare_input", "submit_to_hpc", "poll_hpc_status", "parse_qm_output"} == set(
-        _names(registered_activities(queue))
-    )
+    assert {
+        "prepare_input",
+        "submit_to_hpc",
+        "poll_hpc_status",
+        "parse_qm_output",
+        "lookup_qm_result",
+        "persist_qm_result",
+    } == set(_names(registered_activities(queue)))
     _, manifest = discovered()["qm"]
     jobs = manifest.jobs
     # The Temporal *type name* is what binds the manifest to the class, and renaming that class
