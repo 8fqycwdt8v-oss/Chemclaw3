@@ -72,13 +72,21 @@ was wrong.
 
 ## Call and present
 
-- `suggest_next_experiment(problem, observations, count)` returns candidate point(s). Ask for a
-  small batch (1–3) unless the user wants a screen.
+- `suggest_next_experiment(problem, observations, count)` returns the candidate point(s), the
+  `campaign_id` they belong to, and the `calc_refs` behind the decision space. Ask for a small
+  batch (1–3) unless the user wants a screen.
 - **These are proposals, not results.** Present each as conditions to run, note it rests on the
   cited historic runs, and be explicit about what the model is extrapolating (a solvent never
   tried, a temperature beyond the observed range) and any safety/selectivity risk there.
+- **Quote the `campaign_id` back.** The campaign is identified by its decision space, so asking
+  again about the same problem — with the run you just did added to `observations` — accumulates
+  onto the same campaign instead of starting over. That id is how a chemist, or you in a later
+  session, picks the thread back up.
 - If the user wants the batch recorded, draft it through `propose_knowledge_note` with type
   `experiment-proposal` so a human approves it via the PR-gate before it becomes plan-of-record.
+  Pass the returned `calc_refs` on that note: the descriptors that shaped the space came from real
+  calculations, and citing them is what lets a stale one be traced to the experiments it
+  suggested.
   That is the same type a reasoned proposal uses — the note body says which path produced it, and
   a reviewer approving "run this next" should not have to learn two note kinds for one decision.
   `bo-candidate` is a different thing and is not yours to write: it is what a *durable* campaign

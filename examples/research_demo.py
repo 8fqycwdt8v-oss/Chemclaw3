@@ -111,10 +111,14 @@ async def _investigate() -> str:
         Observation(params={"temperature": 40.0, "solvent": "THF"}, value=55.0),
         Observation(params={"temperature": 80.0, "solvent": "THF"}, value=85.0),
     ]
-    candidates = await suggest_next_experiment(problem, observations, count=1)
-    nxt = candidates[0].params
+    suggestion = await suggest_next_experiment(problem, observations, count=1)
+    nxt = suggestion.candidates[0].params
     lines.append("\n## 4. Suggested next experiment (a proposal a human runs)")
     lines.append(f"- temperature {nxt['temperature']:.0f} C, solvent {nxt['solvent']}")
+    # The suggestion belongs to a campaign now, and the campaign is identified by the problem —
+    # so asking again about this decision space accumulates onto the same one rather than starting
+    # over. Quoting the id is what lets a later turn add the measured result to it.
+    lines.append(f"- campaign: `{suggestion.campaign_id}`")
 
     lines.append("\n## Answer the agent would compose")
     lines.append(

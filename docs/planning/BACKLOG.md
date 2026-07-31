@@ -108,10 +108,12 @@ QM path. The rows below are what survives that merge, narrowed to say so.
       `propose_knowledge_note` accepts only `id/type/body/compound_smiles/tags/source`, so the model
       cannot attach `calc_refs`, `artifact_refs`, typed `relations`, `confidence` or a validity
       window — every field D-133/D-134 added for exactly this.
-- [ ] **`calc_refs` is written on one path of three** — [S]. D-158 wired the QM note, which was the
-      worst case and is now closed. `connectors/bo/knowledge.py` and the ELN reaction notes still set
-      none, so `notes_for_calculation()` answers for DFT runs and for nothing else — a BO
-      recommendation still cannot be traced to the evaluations behind it.
+- [ ] **`calc_refs` is written on two paths of three** — [S]. D-158 wired the QM note;
+      D-2026-07-31-a-campaign-is-an-entity now carries the featurization's calculation keys out to
+      the BO suggestion and onto any `experiment-proposal` note drafted from it. What remains is
+      `connectors/bo/knowledge.py` — the *durable* campaign's note, which never featurizes, so it
+      has no calculation to cite until the durable path is reconciled with the inline one. ELN
+      reaction notes rest on no calculation at all and correctly cite none.
 - [ ] **`Note.confidence` is never set by any machine path — and the obvious fix would make
       things worse** — [M], re-diagnosed while implementing it. The consequences stand
       (`GraphRetriever` scores every machine note at the default, so KM-5's truncation ordering is
@@ -146,21 +148,29 @@ QM path. The rows below are what survives that merge, narrowed to say so.
 - [x] **A failed proposal is counted but not recorded** — closed by the same ADR. A submission that
       never reached git now leaves a `failed` row carrying the rendered note, so the knowledge is
       replayable rather than only countable.
-- [ ] **The inline BO path persists nothing at all** — [M]. `suggest_next_experiment` is the path the
-      conversational agent actually uses; it takes a problem and observations, calls BoFire, returns
-      candidates, and writes nothing — not the problem, not the observations the agent assembled
-      from ELN history, not the candidates, not the actor. The expensive part (framing an
-      optimization problem out of scattered history) is discarded every turn. The note type to record
-      one into is `experiment-proposal` (D-162/D-164); what is missing is anything that writes it.
-- [ ] **There is no first-class campaign entity** — [L]. `knowledge/optimization-campaign/` notes
-      come from DRFP clustering of ingested reactions (`memory/optimization.py`) — a retrospective
-      mechanism with no identity link to any BO run. Nothing a chemist starts, that suggestions
-      attach to, and that results accrue into.
-- [ ] **The BO closed loop is open at both ends** — [L]. No path from a `bo-candidate` to what was
-      actually run and measured, and no mechanism to inject a lab result into a running campaign
-      (`connectors/bo/activities.py` stamps every observation `provenance="predicted"`). So the
-      system proposes experiments and never learns whether its proposals were good — the only way
-      `bo_regret` could ever be scored against reality rather than a benchmark surrogate.
+- [x] **The inline BO path persists nothing at all** — closed by
+      D-2026-07-31-a-campaign-is-an-entity-not-a-turn. The problem, the observations it rested on,
+      the candidates, the calculations behind the decision space, and the caller are all recorded
+      against a campaign; the tool returns the `campaign_id` so a later turn adds to the same one.
+      The skill tells the agent to quote it back and to cite `calc_refs` on any
+      `experiment-proposal` note it drafts.
+- [x] **There is no first-class campaign entity** — closed by the same ADR, and by *not* making it
+      something a chemist starts: `campaign_id` is a hash of the decision space and objective, so
+      three refinements of one optimization accumulate against one campaign with nobody having to
+      open one first. A chemist does not know at the first question that they are beginning a
+      campaign, which is why "start one" was the wrong shape.
+- [ ] **The retrospective `optimization-campaign` note still has no link to a BO campaign** — [M].
+      DRFP clustering mints one from ingested reactions and `bo_campaigns` now exists beside it,
+      with nothing joining them. The join wants the same matching rule as the row below, so the two
+      belong together.
+- [ ] **The BO loop is open at one end now, not two** — [L]. The proposing half is recorded: a
+      suggestion, its evidence and its campaign survive the turn. What is still missing is the
+      return path — nothing decides that an ingested `reaction` note *is* the execution of a given
+      candidate. That needs a matching rule over conditions with tolerances, on parameters an ELN
+      records inconsistently, and getting it wrong attributes a result to an experiment nobody ran,
+      which is worse than the open loop. It wants its own decision rather than a heuristic. Until
+      then `bo_regret` can only be scored against a benchmark surrogate, and
+      `connectors/bo/activities.py` still stamps every observation `provenance="predicted"`.
 - [x] **The BO note is a graph island** — closed by D-157: `note_with_run_provenance` stamps the run
       and its reason onto any connector's note, and the BO note now carries its decision space.
 - [ ] **Two of ~12 calculators log predictions, and nothing reconciles ELN data** — [M]. Only

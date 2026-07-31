@@ -200,6 +200,58 @@ def test_the_turn_identity_actually_arrives_at_the_connector() -> None:
     ), received
 
 
+def test_a_tool_body_can_read_the_caller_core_stamped() -> None:
+    """The headers reach a *tool*, not only a log line — which is what they were sent for.
+
+    `CallerLogMiddleware`'s own docstring said these exist "so a connector's own records can be
+    joined to the core audit trail by actor and session", and a connector could only ever put them
+    in a log. A connector that writes a durable row — a persisted BO suggestion — had no way to
+    stamp it with the conversation that asked, so the row could not be traced back to a chemist or
+    a turn. Advisory throughout: the tool reads them to attribute a record, never to decide
+    anything.
+    """
+    from mcp.server.fastmcp import FastMCP
+
+    from chemclaw.connectors.caller import caller_provenance
+
+    seen: list[tuple[str, str, str]] = []
+    server = FastMCP("caller-probe")
+
+    @server.tool()
+    async def whoami() -> str:
+        """Record what the tool body can see of its caller."""
+        seen.append(caller_provenance())
+        return "ok"
+
+    app = connector_app(server, name="caller-probe")
+    port = _free_port()
+
+    async def _call() -> None:
+        tool = DegradingHttpConnector(
+            name="caller-probe",
+            url=f"http://127.0.0.1:{port}/mcp",
+            load_prompts=False,
+            http_client=httpx.AsyncClient(
+                follow_redirects=True, event_hooks={"request": [stamp_turn_identity]}
+            ),
+        )
+        async with tool:
+            await tool.call_tool("whoami")
+
+    identity = set_current_identity("user-77", frozenset({"process-chemist"}))
+    session = set_current_session_id("session-abc")
+    try:
+        with _Server(app, port):
+            asyncio.run(_call())
+    finally:
+        reset_current_session_id(session)
+        reset_current_identity(identity)
+
+    assert seen, "the tool never ran"
+    actor, session_id, _correlation = seen[-1]
+    assert (actor, session_id) == ("user-77", "session-abc")
+
+
 def test_an_unreachable_connector_costs_its_tools_not_the_turn() -> None:
     """The degrade posture, at the layer it has to live in (`chemclaw.connectors.transport`).
 

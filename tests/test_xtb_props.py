@@ -162,10 +162,15 @@ def test_cached_properties_compute_once() -> None:
 
     async def _run() -> None:
         store = InMemoryStore()
-        first, cached_first = await run_cached_properties(store, "CCO")
-        second, cached_second = await run_cached_properties(store, "CCO")
+        first, cached_first, first_key = await run_cached_properties(store, "CCO")
+        second, cached_second, second_key = await run_cached_properties(store, "CCO")
         assert (cached_first, cached_second) == (False, True)
         assert first.total_energy_hartree == second.total_energy_hartree
+        # The key now travels out with the result (D-2026-07-31-a-campaign-is-an-entity): it is
+        # what lets a BO suggestion cite the calculations its decision space was built from, and
+        # it must name the same calculation on the miss and on the hit.
+        assert first_key == second_key
+        assert first_key
 
     asyncio.run(_run())
 

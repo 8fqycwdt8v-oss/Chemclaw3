@@ -24,7 +24,10 @@ import asyncio
 import json
 
 from mcp.server.fastmcp import FastMCP
+from pydantic import BaseModel, Field
 
+from chemclaw.connectors.caller import caller_provenance
+from chemclaw.science.bo.campaign_record import record_suggestion
 from chemclaw.science.bo.engine import factorial_design, initial_candidates, propose_candidates
 from chemclaw.science.bo.featurize import featurize_problem
 from chemclaw.science.bo.problem import Candidate, Observation, OptimizationProblem, ScreeningDesign
@@ -33,12 +36,28 @@ from chemclaw.science.calc.postgres_store import default_store
 server = FastMCP("bo")
 
 
+class ExperimentSuggestion(BaseModel):
+    """Proposed experiments, the campaign they belong to, and the calculations behind the space.
+
+    A richer return than the bare `list[Candidate]` it replaces, because the candidates alone were
+    the part that was never the problem: they were computed, returned, and — with nothing else
+    carried out of the call — the framing that produced them was discarded every turn. The
+    `campaign_id` is what a later turn quotes to add observations to the same optimization, and
+    `calc_refs` is what an `experiment-proposal` note cites so a stale calculation can be traced to
+    the experiment it suggested.
+    """
+
+    campaign_id: str = Field(min_length=1)
+    candidates: list[Candidate] = Field(default_factory=list)
+    calc_refs: list[str] = Field(default_factory=list)
+
+
 @server.tool()
 async def suggest_next_experiment(
     problem: OptimizationProblem,
     observations: list[Observation] | str | None = None,
     count: int = 1,
-) -> list[Candidate]:
+) -> ExperimentSuggestion:
     """Suggest the next experiment(s) to run for an optimization problem (Bayesian optimization).
 
     Answers "what should I try next?" Give the decision space (which conditions may vary and
@@ -66,8 +85,17 @@ async def suggest_next_experiment(
             value. Omit or pass an empty list to get seed points for a fresh campaign.
         count: How many candidates to propose (a batch).
 
+    The suggestion is **recorded** against the campaign this problem defines, and the returned
+    `campaign_id` is the handle for it. Quote that id back to the chemist: asking again about the
+    same decision space accumulates onto the same campaign, so the sequence of proposals — and the
+    evidence each rested on — becomes the campaign's history instead of being discarded with the
+    turn. `calc_refs` names the calculations behind the decision space's descriptors; pass them to
+    `propose_knowledge_note` if you draft an `experiment-proposal` note from this, so a stale
+    calculation can be traced to the experiment it suggested.
+
     Returns:
-        The proposed candidate point(s), each a mapping of parameter name to value.
+        The proposed candidate point(s), the campaign they belong to, and the calculation keys the
+        decision space was built from.
     """
     # A tool call arrives as JSON, so the framework hands this function plain dicts and lists —
     # never `OptimizationProblem`/`Observation` instances, because the wire format has no model
@@ -90,8 +118,23 @@ async def suggest_next_experiment(
     # Runs *after* the coercion above, because it needs a real `OptimizationProblem`.
     featurized = await featurize_problem(default_store(), problem)
     if history:
-        return await asyncio.to_thread(propose_candidates, featurized, history, count)
-    return await asyncio.to_thread(initial_candidates, featurized, count)
+        candidates = await asyncio.to_thread(propose_candidates, featurized.problem, history, count)
+    else:
+        candidates = await asyncio.to_thread(initial_candidates, featurized.problem, count)
+    # Recorded after the candidates exist and never at the cost of them: `record_suggestion`
+    # swallows its own failures, because the chemist asked for a suggestion and a database blip
+    # must not turn one into an error. The campaign id is a pure function of the problem, so it is
+    # the right handle to return even on the turn where the write did not land.
+    campaign_id = await record_suggestion(
+        problem=featurized.problem,
+        candidates=candidates,
+        observations=history,
+        calc_refs=featurized.calc_refs,
+        provenance=caller_provenance(),
+    )
+    return ExperimentSuggestion(
+        campaign_id=campaign_id, candidates=candidates, calc_refs=featurized.calc_refs
+    )
 
 
 @server.tool()

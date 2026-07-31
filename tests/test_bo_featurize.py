@@ -49,7 +49,7 @@ def _ligand_problem(structures: dict[str, str] | None = _LIGANDS) -> Optimizatio
 
 
 def _featurized(problem: OptimizationProblem) -> OptimizationProblem:
-    return asyncio.run(featurize_problem(InMemoryStore(), problem))
+    return asyncio.run(featurize_problem(InMemoryStore(), problem)).problem
 
 
 def test_featurization_describes_every_category() -> None:
@@ -209,8 +209,8 @@ def test_featurization_is_cached() -> None:
 
     async def _run() -> None:
         store = InMemoryStore()
-        first = await featurize_problem(store, _ligand_problem())
-        second = await featurize_problem(store, _ligand_problem())
+        first = (await featurize_problem(store, _ligand_problem())).problem
+        second = (await featurize_problem(store, _ligand_problem())).problem
         assert first == second
 
     asyncio.run(_run())
