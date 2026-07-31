@@ -93,6 +93,11 @@ function addApproval(evt) {
 // Apply one decoded event to the transcript; `answerEl` accumulates streamed tokens.
 function applyEvent(evt, answerEl) {
   switch (evt.type) {
+    case "queued":
+      // Only a turn that had to wait emits this, and it is the first thing it emits (D-166).
+      // Before it existed the same wait was a blank page followed by a 503.
+      add("trace", "⏸ waiting for a free turn slot…");
+      return answerEl;
     case "plan":
       add("trace", "Plan:\n- " + (evt.todos || []).join("\n- "));
       return answerEl;

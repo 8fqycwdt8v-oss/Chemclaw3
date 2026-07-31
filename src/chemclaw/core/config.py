@@ -1522,6 +1522,11 @@ class MemorySettings(BaseSettings):
     # full scan of it, and every returned row spends the model's context. The tool clamps its own
     # `limit` to this rather than trusting the argument.
     calc_find_max_results: int = Field(default=50, ge=1)
+    # Ceiling on how much of one artifact `fetch_artifact` puts into the model's context. The
+    # by-products worth reading are small — an `xtbopt.xyz` is a few kB, a `vibspectrum` under ten
+    # — while a 76-atom Hessian is single-digit megabytes of text that no answer is built by
+    # reading. This is what separates them, since both are text and neither can be refused on type.
+    calc_artifact_max_chars: int = Field(default=20_000, ge=1)
     # Standing-query digests (gap IDEA-1). Off by default: it needs the `subscriptions` table
     # (migration 017), and a deployment nobody has subscribed on would just run an empty sweep.
     digest_enabled: bool = False

@@ -37,6 +37,7 @@ from chemclaw.science.calc.logd import LogdInput, LogdResult
 from chemclaw.science.calc.logd import predict_logd as _predict_logd
 from chemclaw.science.calc.pka import PkaInput, PkaResult, run_cached_pka
 from chemclaw.science.calc.pka import calc_version as pka_calc_version
+from chemclaw.science.calc.postgres_artifacts import default_artifact_store
 from chemclaw.science.calc.postgres_store import PostgresStore
 from chemclaw.science.calc.solubility import (
     SolubilityInput,
@@ -223,6 +224,133 @@ def _record(stored: StoredResult) -> CalculationRecord:
         provenance=stored.provenance,
         computed_at=stored.created_at,
         compute_seconds=stored.compute_seconds,
+    )
+
+
+class StoredArtifact(BaseModel):
+    """One by-product a calculation left behind, described without being read.
+
+    `artifact_ref` is the same `<calculation key>#<name>` string a knowledge note's `artifact_refs`
+    cites, so a listing and a citation name the same thing and `fetch_artifact` takes either.
+    """
+
+    artifact_ref: str
+    name: str
+    media_type: str
+    byte_size: int
+
+
+class ArtifactContent(BaseModel):
+    """One artifact's contents, as text, bounded.
+
+    `byte_size` is the artifact's *full* size and `truncated` says whether `text` is all of it —
+    together they are what keeps a partial read from being quoted as a complete one.
+    """
+
+    artifact_ref: str
+    name: str
+    media_type: str
+    byte_size: int
+    text: str
+    truncated: bool
+
+
+@server.tool()
+async def list_artifacts(calc_ref: str) -> list[StoredArtifact]:
+    """List the files a stored calculation left behind — geometries, Hessians, spectra.
+
+    A calculation's *answer* is a small set of numbers, and `find_calculations` returns it. This is
+    everything else the run produced and the system kept: the relaxed coordinates, the second
+    derivatives, the raw vibrational spectrum. Those are the inputs that make the *next* question
+    cheap — thermochemistry at another temperature, a conformer search seeded from a known
+    structure — and until now nothing could see that they existed.
+
+    An empty list is a real answer and usually the right one: most calculations produce no
+    by-products worth keeping. It does not mean the calculation is missing — ask
+    `find_calculations` for that.
+
+    Args:
+        calc_ref: A calculation key as `find_calculations` returns it, or as a note cites it
+            (`calc_type@version:input_hash:params_hash`).
+
+    Returns:
+        One entry per stored by-product, with its size and type, ordered by name. Read one with
+        `fetch_artifact`; check `byte_size` first, because a Hessian is megabytes and is meant to
+        seed another calculation rather than to be read.
+    """
+    refs = await default_artifact_store().list_for(calc_ref)
+    return [
+        StoredArtifact(
+            artifact_ref=ref.as_str(),
+            name=ref.name,
+            media_type=ref.media_type,
+            byte_size=ref.byte_size,
+        )
+        for ref in refs
+    ]
+
+
+@server.tool()
+async def fetch_artifact(artifact_ref: str, max_chars: int = 0) -> ArtifactContent:
+    """Read a stored calculation by-product — an optimized geometry, a spectrum, a log.
+
+    Use it to quote a computed structure or spectrum exactly rather than describing it from
+    memory: the coordinates of a relaxed geometry, the band positions in a `vibspectrum`, the
+    contents of a file a knowledge note cites in its `artifact_refs`.
+
+    Two things it will not do, both deliberately. It refuses a binary artifact (a packed `.npy`
+    array, an SCF restart) instead of returning something unreadable — those exist to seed a
+    further calculation, not to be read. And it truncates at a configured ceiling, reporting
+    `truncated` and the full `byte_size`, so a large file costs a bounded amount of context; if
+    `truncated` is set, say the value came from part of the file.
+
+    Args:
+        artifact_ref: `<calculation key>#<name>`, as `list_artifacts` returns it and as a note's
+            `artifact_refs` cites it.
+        max_chars: Read at most this many characters. 0 uses the configured ceiling, which also
+            caps any larger request.
+
+    Returns:
+        The artifact's text with its type and full size, and whether the text is all of it.
+    """
+    calc_key, separator, name = artifact_ref.rpartition("#")
+    if not separator or not name:
+        raise ValueError(
+            f"{artifact_ref!r} is not an artifact reference "
+            "(expected '<calculation key>#<name>', as list_artifacts returns)"
+        )
+    store = default_artifact_store()
+    stored = {ref.name: ref for ref in await store.list_for(calc_key)}
+    ref = stored.get(name)
+    if ref is None:
+        known = ", ".join(sorted(stored)) or "none"
+        raise ValueError(
+            f"no artifact {name!r} is stored for calculation {calc_key!r} "
+            f"(stored under it: {known}). By-products are eviction-managed, so a reference from "
+            "an older note may point at something that has since been reclaimed."
+        )
+    data = await store.open(ref.content_hash)
+    if data is None:  # evicted between the listing and the read
+        raise ValueError(f"artifact {artifact_ref!r} is no longer stored")
+    try:
+        # Decoding is the test, rather than a table of readable media types: the store accepts any
+        # producer-given name and `media_type_for` falls back to opaque bytes for one it does not
+        # know, so a type-based rule would refuse perfectly readable output from any tool added
+        # later. What actually matters is whether the bytes are text, and this asks them.
+        text = data.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise ValueError(
+            f"{artifact_ref!r} is binary ({ref.media_type}, {ref.byte_size} bytes), not text. "
+            "It is stored to seed a further calculation, not to be read."
+        ) from exc
+    limit = min(max_chars or settings.calc_artifact_max_chars, settings.calc_artifact_max_chars)
+    return ArtifactContent(
+        artifact_ref=ref.as_str(),
+        name=ref.name,
+        media_type=ref.media_type,
+        byte_size=ref.byte_size,
+        text=text[:limit],
+        truncated=len(text) > limit,
     )
 
 
