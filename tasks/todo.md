@@ -1,95 +1,122 @@
-# Task: an intense review of the agentic system — performance, reliability, configurability, monitorability
+# Task: make the restructured repository consistent — the second, smaller pass
 
-Requested 2026-07-29/30. Branch: `claude/agentic-system-review-iu3gjz`.
-ADRs: **D-145**, **D-151**, **D-152**, **D-153**.
+Requested 2026-07-31, as a follow-up to the restructure that merged as PR #51: *"The repo still is a
+bit overwhelming. Is there a way to make it even more consistent or would I overshoot doing that
+removing needed granularity?"* Branch: `claude/github-repo-structure-6yyibc`, restarted from
+`origin/main` because #51 is merged. ADR: **D-156**.
 
-The review itself is in `docs/archive/audit/2026-07-agentic-system-review.md`; its findings became
-`REV-*` entries in `docs/planning/BACKLOG.md`. This file records the *closing* pass — the four items
-left open because each needed a judgment call rather than an implementation, plus what verifying
-them turned up.
+(The previous occupant of this file, the agentic-system review, is merged; its record is D-145 and
+D-151…D-153, its findings the `REV-*` entries in `docs/planning/BACKLOG.md`.)
 
-(The previous occupant of this file, the codebase-cleanup pass, is merged and its record lives in
-D-149, its backlog entries, and git history.)
+## The question, and why both halves of it get an answer
 
-## What shipped
+The user asked whether more consistency was available *or* whether chasing it would cost needed
+granularity. Measured against `origin/main`, three real inconsistencies survive PR #51 — and four
+plausible-looking ones would each destroy a distinction. Recording both is the point: the second
+list is what keeps the next pass from "tidying" the architecture.
 
-- [x] **§1 Retention safety (D-145)** — `droppable_rows`, a union-find closure over `call_id` that
-      contracts and never expands; `retention.py` routes `session_messages` through it; migration
-      022 for the candidate scan.
-- [x] **§2 Durable compaction (D-151)** — `plan_compaction`, a pure translation between MAF's
-      annotate-and-insert and storage's delete-and-rewrite; run from `save_messages` in a second
-      best-effort transaction, behind a default-off flag, with a `MAX(id)` watermark protecting the
-      turn's own rows.
-- [x] **§3 Push-back (D-153)** — `await_job_results` waits on Temporal workflow handles instead of
-      destructively claiming the shared mailbox.
-- [x] **§4 Metrics labels (D-152)** — declared labels, a per-counter series cap, `profile` on the
-      five spend counters; per-model closed as already-solved by MAF's OTel emission.
-- [x] **§5 REV-9 (D-152)** — no mechanism, a measurement: runbook §(viii), corrected HELP text,
-      rewritten backlog entry.
-- [x] **§6 Live harness smoke test (D-152)** — the first turn of the production construction path
-      against a live model. It found a High.
-- [x] Both corrections owed from earlier batches (D-143's `_SELECT` citation; the review report's
-      §4).
+### The three that are real
+
+1. **`src/chemclaw/mcp/` is a false duplicate.** `mcp/molfp` beside `connectors/molfp` looks exactly
+   like `science/calc` beside `connectors/calc`, which *is* principled. Its own README concedes it:
+   "moving the bodies into the bundles would be churn with no behavioural change". True when the
+   only destination was `connectors/`; false since `science/` exists.
+2. **Directory READMEs are the exception** — 5 of 14 subpackages, 4 of 12 root directories. GitHub
+   renders a folder's README on click, which is the exact surface called messy.
+3. **`evals/` and `templates/` exist twice**, once as code and once as root data.
+
+### The four that would be over-shooting
+
+- Merging `science/*` into `connectors/*` — puts Temporal imports inside the physics.
+- Merging `memory/` into `retrieval/` — episodic layer vs. evidence harness; a level of depth for a
+  word.
+- Uniform file sets across connector bundles — the variance says which capabilities own durable work.
+- Burying `knowledge/` and `skills/` under `data/` — they are layers 4 and 3; root position is their
+  documentation. (User chose the exception deliberately.)
+
+Splitting `core/config.py` (1726 lines) and `api/app.py` (1350) was also raised and declined: file
+size is a different problem from repository structure, and mixing them makes the diff unreviewable.
+
+## Steps
+
+- [x] Restart the branch from `origin/main`; reserve **D-156** in `docs/decisions/README.md` in the
+      first commit, per `CLAUDE.md`.
+- [x] **Dissolve `src/chemclaw/mcp/`.** Engines → `science/fingerprints/{store.py,molfp/,rxnfp/}`;
+      the two `FastMCP` instances → `connectors/{molfp,rxnfp}/server/tools.py`, the shape every other
+      bundle already has. Carry the `mcp_servers/calc` cautionary history into
+      `connectors/README.md`, and state the D-016 shadowing rule accurately in the ADR (a *top-level*
+      `mcp/` shadows the SDK; `chemclaw.mcp` never did — the deleted README claimed the directory
+      "cannot be named `mcp`" while being named `mcp`).
+- [x] **A README in every directory**, plus `tests/test_repo_map.py`: README coverage, and
+      `ARCHITECTURE.md`'s tables matching the directories on disk in both directions.
+- [x] **Fold `evals/`, `templates/`, `profiles/` into `data/`** and repoint the five config defaults,
+      `.env.example`, the Containerfile COPY set, `_RUNTIME_DATA`, and the Helm chart.
+- [x] **Archive the five finished `*-plan.md`**; repoint the eight code citations. Fix the stale
+      `mcp_servers/` directory paths and `retrieval/__init__.py`'s docstring.
+- [x] **ADR D-156**, `ARCHITECTURE.md`, `CLAUDE.md`; verify; ship.
+
+## Verification plan
+
+`make lint type test`, `make cov`, all eight validators, `make eval`, and both workflows — `image`
+is the only thing that proves the entrypoint dispatch and the COPY set, because it smokes every
+component as UID 1001.
+
+**`tests/test_repo_map.py` must be shown failing before it is trusted.** Last pass hit the same
+failure mode twice: `test_image_ships_every_first_party_package` iterated an empty set and reported
+green, and `make db-migrate` globbed a missing directory and applied zero migrations in silence. A
+structural test that can find nothing has to be caught finding something.
 
 ## Review
 
-**Verification changed three of the four open items, and every change was in the same direction:**
-the backlog entry was written from a reading, and the code said something slightly different —
-usually worse.
+### What the pass actually found
 
-- REV-4's hazard was worse than documented *and already live*: retention could strand a
-  `function_result`, which nothing can see and nothing repairs — a permanently bricked session.
-- REV-7 had a second consumer that *destroys* events rather than losing them to a crash.
-- REV-9 had been measured on the wrong provider, and its "cacheable half" is not cacheable through
-  `Agent` at all.
-- Half of REV-10 was already done, upstream, by a system nobody had looked at.
+Three things the plan predicted, and three it did not.
 
-**Two dormant live defects, both fixed while dormant.** Retention (D-145) and the mid-turn wait
-(D-153) are each behind a default-off flag. That is the cheapest possible moment to fix a
-data-destroying bug, and it is the same argument REV-12 made.
+**Predicted.** `chemclaw.mcp` dissolved along the `science/` ↔ `connectors/` line into
+`science/fingerprints/` plus two `server/tools.py`; 17 READMEs written and enforced by
+`tests/test_repo_map.py`; `evals/`, `templates/` and `profiles/` folded into `data/` (root: 13
+directories → 10, both code/data name collisions gone).
 
-**My own §3 design was refuted by exploration and withdrawn, not pushed through.** "Select, yield,
-then confirm" re-selects an unconfirmed event on every poll, because the tailer has no
-`try`/`finally`. Preventing that *is* a visibility timeout — which is what the backlog entry I was
-trying to shortcut had already concluded. The withdrawal is in D-153 rather than edited out.
+**Not predicted, and each the same shape — prose asserting something no test reads:**
 
-**Six refuted leads are kept in the record**, including one refuted by this review's own earlier
-fix and one where the guard I proposed already existed.
+1. **`deploy/README.md` documented an `mcp-molfp`/`mcp-rxnfp` component** that `entrypoint.sh` has
+   no case for and the chart has never declared. This is D-117 exactly, in the one file
+   `tests/test_deploy_chart.py` does not read. Fixed; the bundles deploy as `connector-molfp` and
+   `connector-rxnfp` like every other.
+2. **A quotation of history had been rewritten by D-148.** `tests/test_deploy_chart.py` quotes the
+   entrypoint line that kept `mcp-calc` routable — `python -m mcp_servers.calc.server`. The
+   repository-wide `mcp_servers.…` rewrite caught the quotation too, so it said something the file
+   never said. Restored.
+3. **The deleted `mcp/README.md` insisted the directory "cannot be named `mcp`"** while sitting in a
+   directory named `mcp`. Both halves were true — a *top-level* `mcp/` shadows the SDK, a submodule
+   never could — and the rule outlived the condition that made it absolute.
 
-**The smoke test earned its place.** `CHEMCLAW_HARNESS_ENABLED=true` ships in the chart; the code
-default and all 2068 tests run `false`. The first live turn under the shipped configuration crashed
-before reaching the model, and `make chat` had been unusable under it for as long as the flag has
-been in the chart. Ten minutes of running the real entrypoint under the real configuration. The
-general lesson — *a configuration only production sets is a configuration nothing tests* — is in
-`tasks/lessons.md` with a rule that makes it mechanical, and the offline regression test now
-reproduces that exact `RuntimeError` without a credential.
+### The one real breakage, and why it is the useful part
 
-**One thing I would do differently.** I wrote the metrics label support with a rendering branch that
-papered over an ambiguity (a bare sample beside labelled ones) instead of removing the ambiguity.
-The elegance pass caught it and the fix was smaller than the workaround: make the declaration bind
-in both directions, and the branch disappears. The prompt for that pass is in `CLAUDE.md`; it paid
-for itself here.
+Moving `evals/` broke `tests/test_retrieval_eval.py`, which pinned the corpus at a hardcoded
+`_REPO / "evals" / "retrieval_corpus"`. Every gold case then scored `0/2 expected sources
+retrieved` — **which reads as a retrieval regression, not as a missing directory.** Same family as
+D-148's silent `glob` over the moved migrations directory.
 
-## Verification
+The fix is two-part and worth copying: derive the literal from the setting's own default so it
+cannot drift again, *and* assert the directory exists, because an empty corpus and a wrong path
+produce identical numbers.
 
-Every fix has a test **verified to fail on the unfixed code** by reverting the source — including
-the two that carry the real burden: a straddling call/result pair surviving retention, and a
-session's row count plateauing across 40 turns where it previously grew by 4/turn. When the
-plateau assertion caught a local peak, I measured the real curve over 80 turns rather than widening
-the threshold, found it oscillates in a band, and rewrote the assertion against the linear count.
+### Verification
 
-`make lint`, `make type`, `make test` green against live Postgres: **2068 passed, 32 skipped** (19
-Temporal test server, 13 xtb/crest binaries — none Postgres). Migration 022 applied.
+`make lint type test` green (419 files type-checked), all seven offline validators pass, `make eval`
+scores the case-set with its three intended gate failures and no others — the 21 moved data files
+are `R100` byte-identical renames, so the numbers cannot have moved.
 
-## Still open, recorded rather than done
+**`tests/test_repo_map.py` was broken five ways and observed failing each time** before being
+trusted: a missing subpackage README, a missing root README, an unmapped directory, a row for a
+vanished directory, and a `.py` file beside `src/`. This is not ceremony — two tests in this
+repository have already gone green by iterating an empty set.
 
-- **REV-7's original** — a notification lost between claim-commit and delivery. Needs a
-  visibility-timeout lease, a migration, a per-*stream* holder id, a cancellation-shielded confirm
-  (D-130's trap), and `event_id` in the SSE payload. It is an operator-facing contract change, so it
-  gets its own ADR.
-- **Healing stranded `function_result`s on read** — the only repair path for a session already
-  bricked by the retention bug, deliberately not shipped alongside D-145 because it would *mask* a
-  regression in the closure primitive rather than surface it.
-- **A recurring live check of the harness path.** The smoke test closes "never executed", not
-  "tested". CI has no credential, and inventing one is a decision about secrets.
-- **REV-9's mechanism** — upstream in `agent_framework`, both halves.
+### For next time
+
+- A mechanical substitution cannot tell a claim about the present from a quotation of the past.
+  Scope it to files the branch authored, or read the diff.
+- A rule written as an absolute ("cannot be named X") should name its condition, or it will outlive
+  it and be believed.
+- When a structural test moves, break it on purpose before trusting the green.

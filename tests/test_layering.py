@@ -93,7 +93,6 @@ def test_retrieval_does_not_import_orchestration(module: str) -> None:
         "chemclaw.evals",
         "chemclaw.ingest",
         "chemclaw.kg",
-        "chemclaw.mcp",
         "chemclaw.memory",
         "chemclaw.retrieval",
         "chemclaw.science",

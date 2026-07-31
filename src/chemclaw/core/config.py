@@ -549,7 +549,7 @@ class LlmSettings(BaseSettings):
     # the internal OpenAI-compatible ("OpenLLM-like") endpoint without any code change, keeping
     # Anthropic as a local-dev path. `openai_compatible` reaches the endpoint with **one generic
     # API credential** (`llm_api_key`) — deliberately *not* per-user Entra: the raw inference
-    # call is not a user-scoped resource (see docs/planning/foundation-plan.md §0).
+    # call is not a user-scoped resource (see docs/archive/plans/foundation-plan.md §0).
     # `llm_base_url`/`llm_model` are required for `openai_compatible` (validated below); the TLS
     # CA bundle, timeout, and retry budget shape the transport so an internal endpoint with a
     # private CA works from config alone. `llm_temperature`/`llm_max_tokens` are the default
@@ -734,12 +734,13 @@ class AgentSettings(BaseSettings):
     # OS-path-separator delimited like `PATH` and like `skills_dir`. A profile selects *across*
     # capabilities, so a shared tree is its common home; a profile genuinely about one
     # capability lives in that connector's bundle instead and is found there.
-    profiles_dir: str = "profiles"
+    profiles_dir: str = "data/profiles"
 
-    # Where deterministic step templates are discovered (`templates/`). A template fixes the order
-    # of a procedure and runs it as a durable workflow, where a profile configures an agent and
-    # lets the model choose the order — `templates/README.md` says which to reach for.
-    templates_dir: str = "templates"
+    # Where deterministic step templates are discovered (`data/templates/`). A template fixes the
+    # order of a procedure and runs it as a durable workflow, where a profile configures an agent
+    # and leaves the order to the model. `src/chemclaw/templates/README.md` says which one a task
+    # wants.
+    templates_dir: str = "data/templates"
     # Which discovered templates are enabled; empty (the default) means every one found.
     templates_enabled: str = ""
     # Per-step wall clock for a template run. Generous because an `agent` step is a model turn and
@@ -1158,7 +1159,7 @@ class EvalSettings(BaseSettings):
     # them per chemistry. Versioned eval case-set. Its own directory, not under `knowledge_dir`:
     # an eval case is a structured evaluation payload (output/reference), not a relational note,
     # so it neither uses the note schema nor passes through kg-validate.
-    eval_case_dir: str = "evals/cases"
+    eval_case_dir: str = "data/evals/cases"
     eval_efactor_max: float = 50.0
     eval_pmi_max: float = 50.0
     # Absolute error (in the prediction's own unit, e.g. log S) still counted as an accurate
@@ -1176,7 +1177,7 @@ class EvalSettings(BaseSettings):
     # Eval drift detection (plan F10-F2). A `background-jobs` workflow re-runs the committed
     # case-set on a cadence and alerts when an aggregate metric moves further than a *relative*
     # band (`eval_drift_epsilon` × the baseline value) from the Git-committed baseline
-    # (`evals/baseline.json`). Relative, so one knob is scale-appropriate across metrics of
+    # (`data/evals/baseline.json`). Relative, so one knob is scale-appropriate across metrics of
     # different magnitudes (an `f1` in [0, 1] vs an `e_factor` near 35); 0.05 = a 5%
     # proportional move. Off by default; enabling it adds the Schedule (D-035).
     eval_drift_enabled: bool = False
@@ -1186,7 +1187,7 @@ class EvalSettings(BaseSettings):
     # cases score in well under this, but a dedicated knob keeps the two jobs' timeouts
     # independent.
     eval_drift_timeout_seconds: float = Field(default=300.0, gt=0)
-    eval_baseline_path: str = "evals/baseline.json"
+    eval_baseline_path: str = "data/evals/baseline.json"
     # Minimum share of the pinned hazard rules that must still fire on their reference molecules
     # (`hazard_flag_recall`, D-080). 1.0: the rule table is small enough that one
     # silently-broken SMARTS means a whole hazard class goes unflagged, which the screen reports
@@ -1197,7 +1198,7 @@ class EvalSettings(BaseSettings):
     # live `knowledge_dir`, so the score is reproducible). `retrieval_recall_min` is the floor
     # the "did we surface the expected evidence?" recall metric gates against — the seam that
     # catches a substring-filter or evidence-cap change quietly dropping recall.
-    eval_retrieval_corpus_dir: str = "evals/retrieval_corpus"
+    eval_retrieval_corpus_dir: str = "data/evals/retrieval_corpus"
     retrieval_recall_min: float = Field(default=0.75, ge=0.0, le=1.0)
 
 
@@ -1380,8 +1381,9 @@ class ConnectorSettings(BaseSettings):
 
     Its own section because a connector is the one mechanism for adding *any* capability — the
     MCP tools a FastAPI server serves, the durable jobs a Temporal worker runs, and the skills
-    and agent profiles that come with them (`connectors/`, `docs/planning/connector-plan.md`). It
-    replaces the old `mcp_servers` list, which could only describe the first of those four.
+    and agent profiles that come with them (`connectors/`,
+    `docs/archive/plans/connector-plan.md`). It replaces the old `mcp_servers` list, which could
+    only describe the first of those four.
     """
 
     # Where connector bundles are discovered: one or more directories, OS-path-separator

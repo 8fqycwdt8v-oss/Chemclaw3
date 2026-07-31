@@ -49,7 +49,7 @@ finished, which is worse than absent — the backlog marks all three phases comp
 Phase 5b's entire deliverable — source-agnostic report harness, per-section durable activities,
 child-workflow fan-out (F10-D2), PR-gated report note citing every source — is registered on the
 background worker (`workers/background_worker.py:52`) and referenced by nothing else. Grep for the
-symbol outside tests returns the worker registration, `docs/planning/parity-plan.md`, and `docs/planning/BACKLOG.md`.
+symbol outside tests returns the worker registration, `docs/archive/plans/parity-plan.md`, and `docs/planning/BACKLOG.md`.
 There is no agent tool, no HTTP route, no Temporal Schedule. The only way to start a development
 report in a running deployment is the Temporal CLI.
 
@@ -301,7 +301,7 @@ Both halves of the machinery exist: the durable hold (D-032) and the awaiting-to
 There is no upload route and no non-text input path. A chemist cannot hand the agent a spectrum, a
 CSV of runs, a vendor CoA, or a PDF SOP. The *only* way data enters the system is the scheduled ELN
 sync. For a lab assistant this is the highest-frequency real request, and it is the natural first
-consumer of the gated OCR/vision item in `docs/planning/parity-plan.md` — which is currently gated on "a real
+consumer of the gated OCR/vision item in `docs/archive/plans/parity-plan.md` — which is currently gated on "a real
 scanned-notebook source attaches via the F7 seam," a trigger that can never fire while there is no
 way to attach anything.
 
@@ -623,7 +623,7 @@ not read as contradicting `docs/planning/DEFERRED.md`:
   substructure pattern-fingerprint prefilter** — all gated on a corpus scale not yet reached, each
   with a numeric trigger. Correct as written.
 - **Conversational multi-agent mesh** — a single agent plus role-scoped skills is the KISS answer, and
-  the trigger in `docs/planning/parity-plan.md` is a good one. Building it now would be the one-caller
+  the trigger in `docs/archive/plans/parity-plan.md` is a good one. Building it now would be the one-caller
   abstraction the repo's own rules forbid.
 - **GAMP 5 / 21 CFR Part 11 artifacts** — process deliverables, QA-owned, not code. The repo's job is
   emitting the substrate, which it does.

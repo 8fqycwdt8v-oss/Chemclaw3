@@ -8,7 +8,7 @@ report that must always gather the same evidence in the same order.
 
 Both exist because they answer different questions, and using the wrong one is the common mistake:
 
-| | **Profile** (`profiles/`) | **Template** (`templates/`) |
+| | **Profile** (`data/profiles/`) | **Template** (`data/templates/`) |
 |---|---|---|
 | Decides the order of work | the model | the file |
 | Runs on | a chat turn | Temporal (durable, resumable) |
@@ -21,7 +21,7 @@ while the procedure is still being figured out.
 ## Shape
 
 ```yaml
-# templates/<name>.yaml — the filename is the template name.
+# data/templates/<name>.yaml — the filename is the template name.
 summary: One line the model reads when deciding to run this.
 description: >-
   The rest of what the model needs: when this applies and what it produces.

@@ -3,7 +3,7 @@
 A template is the deterministic counterpart to a profile. A profile configures an agent and lets the
 model choose the order of work; a template fixes the order and lets the model fill the gaps. That is
 the whole distinction, and it is why the two are separate things rather than one thing with a flag —
-they answer different questions and fail in different ways (`templates/README.md`).
+they answer different questions and fail in different ways (`src/chemclaw/templates/README.md`).
 
 Everything here is about making a bad template impossible to *start*, because the alternative is
 discovering it halfway through a durable run that has already spent money. The reference resolver is
@@ -116,7 +116,7 @@ def references(value: Any) -> set[str]:
 
 
 class Template(BaseModel):
-    """One `templates/<name>.yaml`: the inputs, the ordered steps, and what the model is told.
+    """One `data/templates/<name>.yaml`: the inputs, the ordered steps, and what the model is told.
 
     The name comes from the filename, as a profile's does, so a file and its identity cannot
     disagree.
