@@ -24,6 +24,7 @@ from chemclaw.ingest.eln.ord import Component, OrdReaction, Role
 from chemclaw.ingest.eln.ord_adapter import OrdJsonAdapter
 from chemclaw.ingest.eln.sync import sync_entries
 from chemclaw.ingest.eln.validate import validate_ord
+from chemclaw.kg.render import render_note
 from chemclaw.science.fingerprints.store import InMemoryFingerprintStore
 from tests.conftest import FakeSubmitter
 
@@ -133,7 +134,10 @@ def test_adapter_extracts_conditions_from_free_text() -> None:
     assert reaction.temperature_c == 65.0  # from prose
     assert reaction.time_h == 2.5  # from prose
     assert reaction.yield_percent == 50.0  # from structured field
-    assert reaction.provenance == "eln:chemist-c"
+    # The source system and the entry id, not only the operator: with two ELN sources enabled,
+    # colliding entry ids produced the same note id with nothing saying they came from different
+    # systems.
+    assert reaction.provenance == "eln-json:e1:chemist-c"
 
 
 def test_structured_field_wins_over_free_text() -> None:
@@ -741,14 +745,17 @@ def test_sync_fetches_an_overlap_window_behind_the_cursor(
     asyncio.run(_run())
 
 
-def _write_merged_note(knowledge: Path, note_id: str) -> None:
-    """Lay a merged reaction note in a fake knowledge dir (what an approved PR leaves behind)."""
+def _write_merged_note(knowledge: Path, entry: RawEntry) -> None:
+    """Lay the merged reaction note for `entry` — exactly what an approved PR leaves behind.
+
+    Rendered from the entry rather than stubbed, because the sync now compares the note's *body*
+    and not only its id: a stub would make "already merged" and "unchanged" indistinguishable
+    again, which is the very thing being fixed.
+    """
+    note = note_from_ord_reaction(JsonExportAdapter().map_to_ord(entry))
     note_dir = knowledge / "reaction"
     note_dir.mkdir(parents=True, exist_ok=True)
-    (note_dir / f"{note_id}.md").write_text(
-        f"---\nid: {note_id}\ntype: reaction\ncreated_by: agent\n---\nbody\n",
-        encoding="utf-8",
-    )
+    (note_dir / f"{note.id}.md").write_text(render_note(note), encoding="utf-8")
 
 
 def test_sync_skips_overlap_entry_whose_note_already_merged(
@@ -757,16 +764,17 @@ def test_sync_skips_overlap_entry_whose_note_already_merged(
     """An overlap-window entry whose note is already merged is skipped, not re-ingested.
 
     The hourly overlap replay must not pay fingerprint upserts plus a full PR-gate git
-    cycle per already-ingested entry: a merged note proves the entry was fully ingested
-    (ELN exports are immutable), so the replay costs a lookup and is reported under
-    `skipped_existing`, never inflating `ingested`.
+    cycle per already-ingested entry. What proves the entry was fully ingested is a merged note
+    whose **body matches** — not merely one with the same id, which is what this checked before and
+    is why every in-place ELN amendment was dropped. An unchanged entry costs a lookup and is
+    reported under `skipped_existing`, never inflating `ingested`.
     """
 
     async def _run() -> None:
         monkeypatch.setattr(settings, "knowledge_dir", str(tmp_path))
-        _write_merged_note(tmp_path, "reaction-late")
         cursor = datetime(2026, 1, 2, tzinfo=UTC)
         late = _good_entry("late", cursor - timedelta(hours=2))
+        _write_merged_note(tmp_path, late)
         rxn, mol, sub = InMemoryFingerprintStore(), InMemoryFingerprintStore(), FakeSubmitter()
         summary = await sync_entries(_ListAdapter([late]), rxn, mol, sub, cursor)
 
@@ -790,9 +798,9 @@ def test_sync_still_ingests_new_entry_even_if_its_note_exists(
 
     async def _run() -> None:
         monkeypatch.setattr(settings, "knowledge_dir", str(tmp_path))
-        _write_merged_note(tmp_path, "reaction-new")
         cursor = datetime(2026, 1, 2, tzinfo=UTC)
         new = _good_entry("new", cursor + timedelta(hours=2))
+        _write_merged_note(tmp_path, new)
         rxn, mol, sub = InMemoryFingerprintStore(), InMemoryFingerprintStore(), FakeSubmitter()
         summary = await sync_entries(_ListAdapter([new]), rxn, mol, sub, cursor)
 
@@ -941,3 +949,157 @@ def test_a_multi_product_reaction_names_no_principal_compound() -> None:
         }
     )
     assert note_from_ord_reaction(two_products).compound_smiles is None
+
+
+def test_solvent_and_catalyst_go_in_the_agent_slot() -> None:
+    """DRFP hashes the whole string, so a solvent on the left dominated the similarity.
+
+    A solvent is often the largest fragment present and is present in every run, so it contributed
+    a large, nearly constant share of the set bits — and in process development the solvent is
+    usually the variable *being optimized*. Two runs of one coupling in THF and in 2-MeTHF looked
+    less alike than two unrelated reactions sharing a solvent, which is backwards for the two
+    things that similarity drives: campaign grouping and `similar_reactions`.
+
+    A *reagent* stays on the left: a base or an oxidant participates stoichiometrically and is part
+    of what the transformation is.
+    """
+    reaction = OrdReaction(
+        reaction_id="rxn-agents",
+        inputs=[
+            Component(smiles="Brc1ccccc1", role=Role.REACTANT),
+            Component(smiles="OB(O)c1ccccc1", role=Role.REACTANT),
+            Component(smiles="[K+].[OH-]", role=Role.REAGENT),
+            Component(smiles="C1CCOC1", role=Role.SOLVENT),
+            Component(smiles="[Pd]", role=Role.CATALYST),
+        ],
+        outcomes=[Component(smiles="c1ccc(-c2ccccc2)cc1", role=Role.PRODUCT)],
+        provenance="eln:chemist-a",
+    )
+
+    assert reaction.reaction_smiles() == (
+        "Brc1ccccc1.OB(O)c1ccccc1.[K+].[OH-]>C1CCOC1.[Pd]>c1ccc(-c2ccccc2)cc1"
+    )
+
+
+def test_a_reaction_with_no_agents_still_renders_the_three_part_form() -> None:
+    """An empty agent slot is the convention's own shape, not a special case to branch on."""
+    assert _ester().reaction_smiles() == "CCO.CC(=O)O>>CCOC(C)=O"
+
+
+def test_an_amended_entry_is_re_proposed_rather_than_dropped(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A yield corrected after assay must reach the graph, not vanish into `skipped_existing`.
+
+    The check was on the note *id*, which treats "already seen" and "unchanged" as the same thing.
+    They are not: an ELN amends an entry in place — a yield revised, an impurity added, a
+    retraction — while keeping its `created_at`, so every correction was silently dropped and
+    reported as an already-ingested replay. The justification given was "ELN exports are
+    immutable", which is an assumption about someone else's system.
+
+    The corrected entry is simply re-proposed, so the PR-gate shows a reviewer the diff. That is
+    what a git-backed graph is for, and why an amendment needs no separate note-versioning scheme.
+    """
+
+    async def _run() -> None:
+        monkeypatch.setattr(settings, "knowledge_dir", str(tmp_path))
+        cursor = datetime(2026, 1, 2, tzinfo=UTC)
+        original = _good_entry("amended", cursor - timedelta(hours=2))
+        _write_merged_note(tmp_path, original)
+
+        corrected = original.model_copy(
+            update={
+                "payload": {
+                    **original.payload,
+                    "products": [{"smiles": "CCOC(C)=O", "yield_percent": 31}],
+                },
+                "modified_at": cursor + timedelta(hours=1),
+            }
+        )
+        rxn, mol, sub = InMemoryFingerprintStore(), InMemoryFingerprintStore(), FakeSubmitter()
+        summary = await sync_entries(_ListAdapter([corrected]), rxn, mol, sub, cursor)
+
+        assert summary.ingested == ["amended"]
+        assert summary.skipped_existing == []
+        assert len(sub.submissions) == 1
+        assert "31" in sub.submissions[0].files[0].content
+
+    asyncio.run(_run())
+
+
+def test_an_unchanged_entry_reported_as_amended_still_costs_nothing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A source that stamps `modified` on every export must not re-propose the whole corpus.
+
+    The comparison is on content, not on the presence of a modification timestamp — otherwise an
+    exporter that touches every record would turn each sync into a full re-submission, which is a
+    worse failure than the one being fixed because it is loud and continuous.
+    """
+
+    async def _run() -> None:
+        monkeypatch.setattr(settings, "knowledge_dir", str(tmp_path))
+        cursor = datetime(2026, 1, 2, tzinfo=UTC)
+        entry = _good_entry("touched", cursor - timedelta(hours=2))
+        _write_merged_note(tmp_path, entry)
+        touched = entry.model_copy(update={"modified_at": cursor + timedelta(hours=1)})
+
+        rxn, mol, sub = InMemoryFingerprintStore(), InMemoryFingerprintStore(), FakeSubmitter()
+        summary = await sync_entries(_ListAdapter([touched]), rxn, mol, sub, cursor)
+
+        assert summary.skipped_existing == ["touched"]
+        assert sub.submissions == []
+
+    asyncio.run(_run())
+
+
+def test_an_amended_export_re_enters_the_fetch_window(tmp_path: Path) -> None:
+    """An adapter filtering on creation time alone can never see an in-place correction.
+
+    This is the half upstream of the sync's content check: an ELN amends an entry and leaves its
+    `timestamp` alone, so an entry created before the cursor is never fetched again no matter what
+    changed in it. `entry_window` filters on the later of the two, which is what brings the
+    corrected record back into view.
+    """
+    created = datetime(2026, 1, 1, tzinfo=UTC)
+    cursor = datetime(2026, 1, 5, tzinfo=UTC)
+    (tmp_path / "amended.json").write_text(
+        json.dumps(
+            {
+                "id": "amended",
+                "timestamp": created.isoformat(),
+                "modified": (cursor + timedelta(hours=1)).isoformat(),
+                "reactants": [{"smiles": "CCO"}],
+                "products": [{"smiles": "CCOC(C)=O"}],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    entries = asyncio.run(JsonExportAdapter(str(tmp_path)).fetch_new_entries(cursor))
+
+    assert [entry.entry_id for entry in entries] == ["amended"]
+    assert entries[0].created_at == created  # the cursor still advances on the entry's own time
+    assert entries[0].modified_at is not None
+
+
+def test_an_old_unamended_export_stays_out_of_the_window(tmp_path: Path) -> None:
+    """The guard on the above: widening the window must not re-fetch the whole corpus."""
+    (tmp_path / "old.json").write_text(
+        json.dumps(
+            {
+                "id": "old",
+                "timestamp": datetime(2026, 1, 1, tzinfo=UTC).isoformat(),
+                "reactants": [{"smiles": "CCO"}],
+                "products": [{"smiles": "CCOC(C)=O"}],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    assert (
+        asyncio.run(
+            JsonExportAdapter(str(tmp_path)).fetch_new_entries(datetime(2026, 1, 5, tzinfo=UTC))
+        )
+        == []
+    )

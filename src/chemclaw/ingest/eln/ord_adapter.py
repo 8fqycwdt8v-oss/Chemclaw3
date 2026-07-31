@@ -29,6 +29,7 @@ from chemclaw.core.config import settings
 from chemclaw.ingest.eln.adapter import (
     ElnMappingError,
     RawEntry,
+    entry_window,
     is_late_arrival,
     parse_iso_utc,
     warn_late_arrivals,
@@ -100,14 +101,19 @@ class OrdJsonAdapter:
                     logger.warning("skipping ORD export %s: not a JSON object", path.name)
                     continue
                 created = _created_at(payload)
+                # ORD's own `record_modified` list, if the exporter populates it: the record is
+                # amended in place and `record_created` does not move, so creation time alone can
+                # never bring a correction back into the fetch window.
+                modified = _modified_at(payload)
             except (OSError, json.JSONDecodeError, OrdFormatError) as exc:
                 logger.warning("skipping unreadable ORD export %s: %s", path.name, exc)
                 continue
-            if created >= since:
+            if entry_window(created, modified) >= since:
                 entries.append(
                     RawEntry(
                         entry_id=str(_get(payload, "reaction_id", "reactionId") or path.stem),
                         created_at=created,
+                        modified_at=modified,
                         payload=payload,
                     )
                 )
@@ -367,6 +373,30 @@ def _provenance_msg(payload: dict[str, Any]) -> dict[str, Any]:
     """Return the `provenance` sub-message (empty dict if absent)."""
     provenance = payload.get("provenance")
     return provenance if isinstance(provenance, dict) else {}
+
+
+def _modified_at(payload: dict[str, Any]) -> datetime | None:
+    """The newest `provenance.record_modified[*].time.value`, or None when the record has none.
+
+    ORD models amendments as a *list*, so the newest entry is the one that decides whether this
+    record has changed since the sync last looked. Unparseable members are ignored rather than
+    raised: an exporter that writes a malformed modification stamp should not make the whole
+    record unreadable, and the overlap replay still catches the change on its own timescale.
+    """
+    records = _get(_provenance_msg(payload), "record_modified", "recordModified")
+    if not isinstance(records, list):
+        return None
+    stamps: list[datetime] = []
+    for record in records:
+        time = record.get("time") if isinstance(record, dict) else None
+        value = time.get("value") if isinstance(time, dict) else None
+        if not isinstance(value, str):
+            continue
+        try:
+            stamps.append(parse_iso_utc(value))
+        except ValueError:
+            continue
+    return max(stamps) if stamps else None
 
 
 def _created_at(payload: dict[str, Any]) -> datetime:

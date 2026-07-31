@@ -210,14 +210,27 @@ class OrdReaction(BaseModel):
         return [c for step in self.steps for c in step.components]
 
     def reaction_smiles(self) -> str:
-        """Build the reaction SMILES (`inputs>>products`) for DRFP fingerprinting.
+        """Build the reaction SMILES (`reactants>agents>products`) for DRFP fingerprinting.
 
-        All inputs (reactants, reagents, solvent, catalyst) go on the left, products on
-        the right — the whole-reaction form DRFP expects.
+        **Solvent and catalyst belong in the agent slot, and putting them on the left was a real
+        distortion.** DRFP hashes circular substructures over the whole string, so a solvent —
+        often the largest fragment present, and present in every run — contributed a large, nearly
+        constant share of the set bits. Similarity was therefore dominated by the solvent, which in
+        process development is usually the variable *being optimized*: two runs of one coupling in
+        THF and in 2-MeTHF looked less alike than two unrelated reactions that shared a solvent.
+        That similarity drives campaign grouping (`memory.optimization`) and `similar_reactions`,
+        so the effect was not cosmetic.
+
+        The three-part form is what the reaction-SMILES convention has always meant by an agent:
+        a species present in the reaction that is not consumed into the product skeleton. Reagents
+        stay on the left with the reactants — a base or an oxidant participates stoichiometrically
+        and is part of what the transformation *is*.
         """
-        left = ".".join(c.smiles for c in self.inputs)
+        agent_roles = {Role.SOLVENT, Role.CATALYST}
+        left = ".".join(c.smiles for c in self.inputs if c.role not in agent_roles)
+        agents = ".".join(c.smiles for c in self.inputs if c.role in agent_roles)
         right = ".".join(c.smiles for c in self.outcomes)
-        return f"{left}>>{right}"
+        return f"{left}>{agents}>{right}"
 
     def compounds(self) -> list[Component]:
         """Every distinct component (inputs + outcomes), for per-compound indexing."""

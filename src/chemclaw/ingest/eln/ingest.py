@@ -9,7 +9,7 @@ signs off. Stores and submitter are injected, so the whole flow is testable in-m
 no database or git. Indexing is idempotent (id-keyed upserts), so re-ingesting is safe.
 """
 
-from chemclaw.core.chem import canonical_smiles
+from chemclaw.core.chem import standard_smiles
 from chemclaw.core.errors import ChemclawError
 from chemclaw.ingest.eln.note import note_from_ord_reaction
 from chemclaw.ingest.eln.ord import OrdReaction
@@ -40,7 +40,7 @@ async def ingest_reaction(
         raise IngestError(f"reaction {reaction.reaction_id!r} invalid: {'; '.join(problems)}")
 
     await reaction_store.add(record_for_reaction(reaction.reaction_id, reaction.reaction_smiles()))
-    for smiles in {canonical_smiles(c.smiles) for c in reaction.compounds()}:
+    for smiles in {standard_smiles(c.smiles) for c in reaction.compounds()}:
         await molecule_store.add(record_for(smiles, smiles))
 
     return await propose_note(note_from_ord_reaction(reaction), submitter)

@@ -11,7 +11,7 @@ ordered so the narrative reads reactant→product. Pure and deterministic — no
 import networkx as nx
 from pydantic import BaseModel
 
-from chemclaw.core.chem import canonical_smiles
+from chemclaw.core.chem import standard_smiles
 from chemclaw.ingest.eln.ord import OrdReaction, Role
 
 
@@ -43,12 +43,12 @@ class Chain(BaseModel):
 
 def _products(reaction: OrdReaction) -> set[str]:
     """Canonical SMILES of the reaction's products."""
-    return {canonical_smiles(c.smiles) for c in reaction.outcomes}
+    return {standard_smiles(c.smiles) for c in reaction.outcomes}
 
 
 def _reactant_inputs(reaction: OrdReaction) -> set[str]:
     """Canonical SMILES of the reaction's true reactant inputs (not reagent/solvent/catalyst)."""
-    return {canonical_smiles(c.smiles) for c in reaction.inputs if c.role == Role.REACTANT}
+    return {standard_smiles(c.smiles) for c in reaction.inputs if c.role == Role.REACTANT}
 
 
 def detect_chains(reactions: list[OrdReaction]) -> list[Chain]:

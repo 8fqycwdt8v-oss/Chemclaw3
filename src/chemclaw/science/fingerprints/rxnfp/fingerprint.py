@@ -9,6 +9,7 @@ the store are the shared, domain-neutral `chemclaw.science.fingerprints.store`.
 
 from drfp import DrfpEncoder
 
+from chemclaw.core.chem import STANDARDIZATION_VERSION
 from chemclaw.core.config import settings
 from chemclaw.science.fingerprints.store import FingerprintError
 
@@ -32,9 +33,15 @@ def drfp_bitstring(reaction_smiles: str) -> str:
 
 
 def reaction_definition() -> str:
-    """The current DRFP definition signature (folded width) stored on each reaction row.
+    """The current DRFP definition signature stored on each reaction row.
 
     Recorded per row so the store never ranks DRFP bits folded to a different width against
     each other — changing `drfp_bits` and re-indexing can't silently mix incomparable rows.
+
+    `agents` marks reaction SMILES built in the three-part form, with solvent and catalyst in the
+    agent slot rather than among the reactants (`OrdReaction.reaction_smiles`). A row indexed under
+    the old two-part form encoded the solvent as part of the transformation, so its bits are not
+    comparable with a row that does not — ranking across them would compare a solvent-dominated
+    fingerprint against a solvent-neutral one and report the difference as chemistry.
     """
-    return f"drfp:b{settings.drfp_bits}"
+    return f"drfp:b{settings.drfp_bits}:agents:{STANDARDIZATION_VERSION}"

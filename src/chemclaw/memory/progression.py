@@ -24,7 +24,7 @@ from datetime import date
 
 from pydantic import BaseModel
 
-from chemclaw.core.chem import canonical_smiles
+from chemclaw.core.chem import standard_smiles
 from chemclaw.core.reagents import display_name
 from chemclaw.ingest.eln.ord import Component, OrdReaction, Role
 
@@ -177,7 +177,7 @@ def _species_change(
 
 def _species(reaction: OrdReaction, role: Role) -> frozenset[str]:
     """The canonical structures playing `role` in this run."""
-    return frozenset(canonical_smiles(c.smiles) for c in _components(reaction, role))
+    return frozenset(standard_smiles(c.smiles) for c in _components(reaction, role))
 
 
 def _components(reaction: OrdReaction, role: Role) -> list[Component]:

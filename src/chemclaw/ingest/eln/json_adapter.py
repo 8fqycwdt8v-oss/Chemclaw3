@@ -36,6 +36,7 @@ from chemclaw.core.config import settings
 from chemclaw.ingest.eln.adapter import (
     ElnMappingError,
     RawEntry,
+    entry_window,
     is_late_arrival,
     parse_iso_utc,
     warn_late_arrivals,
@@ -135,14 +136,18 @@ class JsonExportAdapter:
                     logger.warning("skipping ELN export %s: not a JSON object", path.name)
                     continue
                 created = _parse_timestamp(payload.get("timestamp"), path)
+                # An in-place amendment keeps `timestamp` and moves this one, so filtering on
+                # creation alone would never re-fetch a corrected entry.
+                modified = _optional_timestamp(payload.get("modified"), path)
             except (OSError, json.JSONDecodeError, ElnFormatError) as exc:
                 logger.warning("skipping unreadable ELN export %s: %s", path.name, exc)
                 continue
-            if created >= since:
+            if entry_window(created, modified) >= since:
                 entries.append(
                     RawEntry(
                         entry_id=str(payload.get("id") or path.stem),
                         created_at=created,
+                        modified_at=modified,
                         payload=payload,
                     )
                 )
@@ -190,7 +195,7 @@ class JsonExportAdapter:
             performed_at=raw.created_at.date(),
             outcome_class=_outcome_class(payload),
             failure_reason=payload.get("failure_reason"),
-            provenance=f"eln:{payload.get('operator', 'unknown')}",
+            provenance=_provenance(payload, raw),
             project=payload.get("project"),
             # What the run was testing, when the entry records it (D-162). Read from the entry's
             # own field rather than guessed out of the procedure prose: a hypothesis extracted by
@@ -345,6 +350,33 @@ def _impurities(payload: dict[str, Any]) -> list[Impurity]:
             )
         )
     return profile
+
+
+def _provenance(payload: dict[str, Any], raw: RawEntry) -> str:
+    """Where this record came from: the source system, its entry id, and who ran it.
+
+    It used to be `eln:<operator>` — a person's name and nothing else. With two ELN sources
+    enabled, two entries whose `entry_id`s collide produce the same note id `reaction-<id>` and the
+    second silently loses to the already-merged check, with nothing in either record to say they
+    came from different systems. Naming the source is what makes that visible, and it is also the
+    first thing an auditor asks of a piece of evidence: which system, which record.
+
+    `eln-json` is the *format* this adapter reads rather than an instance name, which is as much as
+    a file-drop adapter can honestly claim — it is handed a directory, not a tenant. A connector
+    that talks to a real ELN knows its instance and should say so here.
+    """
+    operator = payload.get("operator") or "unknown"
+    return f"eln-json:{raw.entry_id}:{operator}"
+
+
+def _optional_timestamp(value: Any, path: Path) -> datetime | None:
+    """Parse an optional amendment timestamp; `None` when absent, `ElnFormatError` when malformed.
+
+    Absent is the normal case and means "this source does not report amendments" — not "never
+    amended". A *present but unparseable* value is bad data and is raised, because silently
+    treating it as absent would reinstate the exact silence this field exists to break.
+    """
+    return None if value is None else _parse_timestamp(value, path)
 
 
 def _parse_timestamp(value: Any, path: Path) -> datetime:
