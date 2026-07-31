@@ -32,7 +32,8 @@ def _problem() -> OptimizationProblem:
 def test_seeds_when_no_observations() -> None:
     """With no runs yet, the tool returns space-filling seed points inside the space."""
     problem = _problem()
-    candidates = asyncio.run(suggest_next_experiment(problem, None, count=3))
+    suggestion = asyncio.run(suggest_next_experiment(problem, None, count=3))
+    candidates = suggestion.candidates
     assert len(candidates) == 3
     for candidate in candidates:
         temperature = candidate.params["temperature"]
@@ -48,7 +49,7 @@ def test_proposes_from_observations() -> None:
         Observation(params={"temperature": 80.0, "solvent": "THF"}, value=78.0),
         Observation(params={"temperature": 100.0, "solvent": "toluene"}, value=64.0),
     ]
-    candidates = asyncio.run(suggest_next_experiment(problem, observations))
+    candidates = asyncio.run(suggest_next_experiment(problem, observations)).candidates
     assert len(candidates) == 1
     temperature = candidates[0].params["temperature"]
     assert isinstance(temperature, float) and 20.0 <= temperature <= 120.0
@@ -76,7 +77,7 @@ def test_accepts_plain_dicts_as_maf_actually_delivers_them() -> None:
         {"params": {"temperature": 40.0, "solvent": "THF"}, "value": 55.0},
         {"params": {"temperature": 80.0, "solvent": "THF"}, "value": 78.0},
     ]
-    candidates = asyncio.run(suggest_next_experiment(problem, observations))
+    candidates = asyncio.run(suggest_next_experiment(problem, observations)).candidates
     assert len(candidates) == 1
     temperature = candidates[0].params["temperature"]
     assert isinstance(temperature, float) and 20.0 <= temperature <= 120.0
@@ -96,7 +97,9 @@ def test_accepts_observations_json_encoded_as_a_string() -> None:
         '[{"params": {"temperature": 40.0, "solvent": "THF"}, "value": 55.0}, '
         '{"params": {"temperature": 80.0, "solvent": "THF"}, "value": 78.0}]'
     )
-    candidates = asyncio.run(suggest_next_experiment(problem, observations_json, count=1))
+    candidates = asyncio.run(
+        suggest_next_experiment(problem, observations_json, count=1)
+    ).candidates
     assert len(candidates) == 1
     temperature = candidates[0].params["temperature"]
     assert isinstance(temperature, float) and 20.0 <= temperature <= 120.0

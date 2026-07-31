@@ -620,7 +620,7 @@ async def compute_electronic_properties(
         the bond orders. Atom indices match the heavy atoms of the canonical SMILES,
         with hydrogens following them.
     """
-    result, _ = await run_cached_properties(default_store(), smiles, solvent)
+    result = (await run_cached_properties(default_store(), smiles, solvent)).properties
     return result
 
 

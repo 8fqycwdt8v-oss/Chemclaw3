@@ -30,18 +30,31 @@ from starlette.requests import Request
 from starlette.responses import Response
 from starlette.types import ASGIApp
 
-from chemclaw.connectors.identity import HEADER_ACTOR, HEADER_DRY_RUN, HEADER_SESSION
+from chemclaw.connectors.caller import bind_caller, reset_caller
+from chemclaw.connectors.identity import (
+    HEADER_ACTOR,
+    HEADER_CORRELATION,
+    HEADER_DRY_RUN,
+    HEADER_SESSION,
+)
 from chemclaw.core import db
 
 logger = logging.getLogger(__name__)
 
 
 class CallerLogMiddleware(BaseHTTPMiddleware):
-    """Log the `X-Chemclaw-*` caller identity of every request, at INFO like the core audit trail.
+    """Log the `X-Chemclaw-*` caller identity of every request, and bind it for the tools.
 
-    Advisory only. The headers say who core says is asking; they are recorded so a connector's logs
-    can be joined to the core audit trail by actor and session, and they are never an input to an
-    access decision — a connector that gated on one would be trusting an unauthenticated string.
+    Advisory only, in both roles. The headers say who core says is asking; they are recorded so a
+    connector's own records and logs can be joined to the core audit trail by actor and session,
+    and they are never an input to an access decision — a connector that gated on one would be
+    trusting an unauthenticated string.
+
+    Binding is what makes the second half of that sentence reachable. Logging alone let a connector
+    correlate its *log lines*; a connector that writes a durable row — a persisted BO suggestion —
+    had no way to stamp it with the conversation that asked for it, so the row could not be traced
+    back to a chemist or a turn. `chemclaw.connectors.caller` holds the contextvars and the trust
+    rule; this is where they are set and, importantly, reset.
     """
 
     def __init__(self, app: ASGIApp, connector: str) -> None:
@@ -50,16 +63,26 @@ class CallerLogMiddleware(BaseHTTPMiddleware):
         self._connector = connector
 
     async def dispatch(self, request: Request, call_next: RequestResponseEndpoint) -> Response:
-        """Log the caller, then serve the request unchanged."""
+        """Log the caller, bind it for the duration of the request, then serve it unchanged."""
+        actor = request.headers.get(HEADER_ACTOR, "")
+        session = request.headers.get(HEADER_SESSION, "")
         logger.info(
             "connector %s request: path=%s actor=%s session=%s dry_run=%s",
             self._connector,
             request.url.path,
-            request.headers.get(HEADER_ACTOR, "-"),
-            request.headers.get(HEADER_SESSION, "-"),
+            actor or "-",
+            session or "-",
             request.headers.get(HEADER_DRY_RUN, "-"),
         )
-        return await call_next(request)
+        tokens = bind_caller(actor, session, request.headers.get(HEADER_CORRELATION, ""))
+        try:
+            return await call_next(request)
+        finally:
+            # Defensive rather than load-bearing, and worth being honest about: each request runs
+            # in its own task context, so a `ContextVar` set here is already invisible to the next
+            # one. The reset costs nothing and holds if that ever stops being true — but no test
+            # can fail without it, so it is not claimed as a guarantee.
+            reset_caller(tokens)
 
 
 def connector_app(server: FastMCP, *, name: str) -> FastAPI:

@@ -23,7 +23,13 @@ That is a real limitation for phosphine selection specifically, and it is what t
 tasks (plan X3) would add.
 """
 
-from chemclaw.science.bo.problem import CategoricalParameter, OptimizationProblem
+from typing import NamedTuple
+
+from chemclaw.science.bo.problem import (
+    CategoricalParameter,
+    OptimizationProblem,
+    Parameter,
+)
 from chemclaw.science.calc.store import ResultStore
 from chemclaw.science.calc.xtb_props import ElectronicProperties, run_cached_properties
 
@@ -60,9 +66,26 @@ def descriptors_from_properties(properties: ElectronicProperties) -> dict[str, f
     }
 
 
+class Featurized(NamedTuple):
+    """A featurized problem and the calculation keys its descriptors came from.
+
+    The keys are what lets a suggestion cite its own evidence. Descriptors are real xTB results
+    from the shared calculation cache, and until now their identity was derived inside
+    `run_cached_properties` and discarded — so an `experiment-proposal` note could describe the
+    conditions a surrogate recommended and could not point at the calculations that shaped the
+    space it searched. D-158 plumbed exactly this out of the QM activity for the same reason.
+
+    Sorted and deduplicated, because two categories may resolve to one molecule and the order a
+    dict happens to iterate in is not a property of the campaign.
+    """
+
+    problem: OptimizationProblem
+    calc_refs: list[str]
+
+
 async def featurize_parameter(
     store: ResultStore, parameter: CategoricalParameter
-) -> CategoricalParameter:
+) -> tuple[CategoricalParameter, list[str]]:
     """Return `parameter` with `descriptors` computed from its `structures`.
 
     A parameter with no `structures` is returned unchanged — featurization is opt-in, and a
@@ -70,40 +93,52 @@ async def featurize_parameter(
     compute. Results come from the calculation cache, so re-featurizing a parameter whose
     molecules were seen before costs nothing.
 
+    Also returns the calculation keys the descriptors came from, so a suggestion built on them can
+    say so (`Featurized`).
+
     Raises:
         ValueError: When one of the structures cannot be featurized. The category is named,
             because "which one" is the only useful part of that message.
     """
     if parameter.structures is None:
-        return parameter
+        return parameter, []
     descriptors: dict[str, dict[str, float]] = {}
+    calc_refs: list[str] = []
     for category in parameter.categories:
         smiles = parameter.structures[category]
         try:
-            properties, _ = await run_cached_properties(store, smiles)
-            descriptors[category] = descriptors_from_properties(properties)
+            cached = await run_cached_properties(store, smiles)
+            descriptors[category] = descriptors_from_properties(cached.properties)
         except ValueError as error:
             raise ValueError(
                 f"parameter {parameter.name!r}: cannot featurize category {category!r} "
                 f"({smiles!r}): {error}"
             ) from error
-    return parameter.model_copy(update={"descriptors": descriptors})
+        calc_refs.append(cached.key)
+    return parameter.model_copy(update={"descriptors": descriptors}), calc_refs
 
 
-async def featurize_problem(
-    store: ResultStore, problem: OptimizationProblem
-) -> OptimizationProblem:
+async def featurize_problem(store: ResultStore, problem: OptimizationProblem) -> Featurized:
     """Return `problem` with every structure-carrying categorical parameter featurized.
 
     The one entry point a caller needs: continuous parameters and categoricals without
     structures pass through untouched, so it is safe to call on any problem. Call it once,
     before the campaign starts — the descriptors then travel with the spec, which is what
     keeps a durable campaign's featurization stable across rounds and worker restarts.
+
+    Returns the calculation keys alongside, so a persisted suggestion can cite the evidence its
+    decision space was built from.
     """
-    parameters = [
-        await featurize_parameter(store, parameter)
-        if isinstance(parameter, CategoricalParameter)
-        else parameter
-        for parameter in problem.parameters
-    ]
-    return problem.model_copy(update={"parameters": parameters})
+    parameters: list[Parameter] = []
+    calc_refs: set[str] = set()
+    for parameter in problem.parameters:
+        if not isinstance(parameter, CategoricalParameter):
+            parameters.append(parameter)
+            continue
+        featurized, keys = await featurize_parameter(store, parameter)
+        parameters.append(featurized)
+        calc_refs.update(keys)
+    return Featurized(
+        problem=problem.model_copy(update={"parameters": parameters}),
+        calc_refs=sorted(calc_refs),
+    )

@@ -16,7 +16,7 @@ they produce compares sites *within* one molecule and never across molecules.
 """
 
 import asyncio
-from typing import Literal
+from typing import Literal, NamedTuple
 
 import numpy as np
 from pydantic import BaseModel, Field
@@ -262,9 +262,26 @@ def _property_structure(smiles: str) -> Structure:
     return structure_from_smiles(smiles, optimize=True)
 
 
+class CachedProperties(NamedTuple):
+    """One molecule's electronic properties, whether they were cached, and the key they live under.
+
+    The key used to be derived here and thrown away, which made `calc_refs` unreachable from the
+    featurization path: a BO suggestion rests on descriptors computed from real calculations, and a
+    note could not cite them because nothing above this function ever saw their identity (D-158
+    solved the same problem for QM by plumbing the key out of its activity).
+
+    A `NamedTuple` rather than a third tuple slot so the existing two-value unpacks fail *loudly*
+    at every call site instead of silently binding `cached` to a key string.
+    """
+
+    properties: ElectronicProperties
+    cached: bool
+    key: str
+
+
 async def run_cached_properties(
     store: ResultStore, smiles: str, solvent: str | None = None
-) -> tuple[ElectronicProperties, bool]:
+) -> CachedProperties:
     """Return the electronic properties of `smiles`, reusing the store on a repeat."""
     structure = await asyncio.to_thread(_property_structure, smiles)
     spec = XtbSpec(task="properties", solvent=solvent)
@@ -273,12 +290,13 @@ async def run_cached_properties(
     # hash walks every atom. Both are synchronous, and this runs inside the connector's
     # one-loop MCP server and inside Temporal activities that are coroutines.
     key = await asyncio.to_thread(spec.cache_key, structure)
-    return await run_cached(
+    properties, cached = await run_cached(
         store,
         key,
         lambda: compute_properties(spec, structure),
         ElectronicProperties,
     )
+    return CachedProperties(properties=properties, cached=cached, key=key.as_str())
 
 
 async def run_cached_fukui(
