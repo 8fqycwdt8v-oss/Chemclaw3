@@ -198,3 +198,4 @@ this reason; the filenames make that ordering irrelevant now, and the numbers st
 | D-161 | RESERVED — an ungated observations tier, with the human gate moved from every observation to the few worth promoting |
 | [D-162](D-162-a-series-of-experiments-is-a-sequence-not-a-set.md) | A series of experiments is a sequence, not a set |
 | [D-163](D-163-a-store-you-can-only-address-is-not-a-store-you.md) | A store you can only address is not a store you can ask |
+| [D-164](D-164-the-prose-gate-learns-note-types-and-the-two-dead.md) | The prose gate learns note types, and the two dead ones it finds |

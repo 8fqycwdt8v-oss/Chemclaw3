@@ -77,8 +77,12 @@ was wrong.
 - **These are proposals, not results.** Present each as conditions to run, note it rests on the
   cited historic runs, and be explicit about what the model is extrapolating (a solvent never
   tried, a temperature beyond the observed range) and any safety/selectivity risk there.
-- If the user wants the batch recorded, draft it through `propose_knowledge_note` (type
-  `experiment-batch`) so a human approves it via the PR-gate before it becomes plan-of-record.
+- If the user wants the batch recorded, draft it through `propose_knowledge_note` with type
+  `experiment-proposal` so a human approves it via the PR-gate before it becomes plan-of-record.
+  That is the same type a reasoned proposal uses — the note body says which path produced it, and
+  a reviewer approving "run this next" should not have to learn two note kinds for one decision.
+  `bo-candidate` is a different thing and is not yours to write: it is what a *durable* campaign
+  (`start_optimization_campaign`) mints for itself when a round completes.
 
 ## One shot vs. a campaign
 
