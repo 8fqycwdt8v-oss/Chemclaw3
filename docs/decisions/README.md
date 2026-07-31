@@ -184,3 +184,4 @@ this reason; the filenames make that ordering irrelevant now, and the numbers st
 | [D-147](D-147-one-file-per-adr-and-a-docs-tree-with-an-archive.md) | One file per ADR, and a `docs/` tree with a living half and an archive |
 | [D-148](D-148-the-packages-regrouped-under-src-chemclaw-by-layer.md) | The packages regrouped under `src/chemclaw/` by the four architecture layers |
 | [D-149](D-149-what-two-finished-migrations-left-behind-and-a-guard.md) | What two finished migrations left behind, and the guard for the kind that rots silently |
+| D-150 | RESERVED — every capability exercised live with the flags on: what the dark half of the system does the first time it runs |
