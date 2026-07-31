@@ -29,8 +29,6 @@ from chemclaw.agent.search_tools import find_similar_reactions
 from chemclaw.connectors.bo.server.tools import suggest_next_experiment
 from chemclaw.connectors.calc.server.tools import predict_solubility
 from chemclaw.core.config import settings
-from chemclaw.mcp.fpstore import InMemoryFingerprintStore
-from chemclaw.mcp.rxnfp.search import record_for_reaction
 from chemclaw.science.bo.problem import (
     CategoricalParameter,
     ContinuousParameter,
@@ -39,6 +37,8 @@ from chemclaw.science.bo.problem import (
     OptimizationProblem,
 )
 from chemclaw.science.calc.store import InMemoryStore
+from chemclaw.science.fingerprints.rxnfp.search import record_for_reaction
+from chemclaw.science.fingerprints.store import InMemoryFingerprintStore
 
 # The transformation under study and two of its recorded runs.
 _ESTER = "CCO.CC(=O)O>>CCOC(C)=O"

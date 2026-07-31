@@ -13,8 +13,8 @@ import pytest
 import chemclaw.agent.research_tools as research_tools
 from chemclaw.agent.research_tools import gather_evidence
 from chemclaw.core.config import settings
-from chemclaw.mcp.fpstore import InMemoryFingerprintStore
-from chemclaw.mcp.rxnfp.search import record_for_reaction
+from chemclaw.science.fingerprints.rxnfp.search import record_for_reaction
+from chemclaw.science.fingerprints.store import InMemoryFingerprintStore
 
 _ESTER = "CCO.CC(=O)O>>CCOC(C)=O"
 

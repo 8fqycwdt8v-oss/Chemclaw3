@@ -192,7 +192,7 @@ class JsonExportAdapter:
             failure_reason=payload.get("failure_reason"),
             provenance=f"eln:{payload.get('operator', 'unknown')}",
             project=payload.get("project"),
-            # What the run was testing, when the entry records it (D-156). Read from the entry's
+            # What the run was testing, when the entry records it (D-157). Read from the entry's
             # own field rather than guessed out of the procedure prose: a hypothesis extracted by
             # pattern-matching would be indistinguishable, downstream, from one the chemist wrote.
             hypothesis=payload.get("hypothesis"),

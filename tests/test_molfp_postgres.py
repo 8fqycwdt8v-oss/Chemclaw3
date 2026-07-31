@@ -11,16 +11,16 @@ import asyncio
 import pytest
 
 from chemclaw.core.config import settings
-from chemclaw.mcp.fpstore import (
-    InMemoryFingerprintStore,
-    PostgresFingerprintStore,
-    find_matches,
-)
-from chemclaw.mcp.molfp.fingerprint import ecfp_bitstring, molecule_definition
-from chemclaw.mcp.molfp.search import (
+from chemclaw.science.fingerprints.molfp.fingerprint import ecfp_bitstring, molecule_definition
+from chemclaw.science.fingerprints.molfp.search import (
     find_similar_molecules,
     find_substructure_matches,
     record_for,
+)
+from chemclaw.science.fingerprints.store import (
+    InMemoryFingerprintStore,
+    PostgresFingerprintStore,
+    find_matches,
 )
 from tests.pg import migrated_db_or_skip
 

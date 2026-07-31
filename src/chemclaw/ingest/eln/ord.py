@@ -170,7 +170,7 @@ class OrdReaction(BaseModel):
     # The project/campaign this experiment belongs to — the grouping key for the semantic
     # memory layer (a playbook distils patterns that recur across >=2 projects, plan 5.4).
     project: str | None = None
-    # What this run was set up to test, in the chemist's own words (D-156). Process development is
+    # What this run was set up to test, in the chemist's own words (D-157). Process development is
     # a sequence of hypotheses, not a screen: "does dropping to 60 °C keep the yield and kill the
     # des-bromo impurity" is the *reason* a run exists, and without it the record shows only that
     # a condition moved, leaving the agent to invent a motive or ignore the question. Optional and

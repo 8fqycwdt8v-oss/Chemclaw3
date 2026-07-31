@@ -24,7 +24,7 @@ from chemclaw.ingest.eln.ord import Component, OrdReaction, Role
 from chemclaw.ingest.eln.ord_adapter import OrdJsonAdapter
 from chemclaw.ingest.eln.sync import sync_entries
 from chemclaw.ingest.eln.validate import validate_ord
-from chemclaw.mcp.fpstore import InMemoryFingerprintStore
+from chemclaw.science.fingerprints.store import InMemoryFingerprintStore
 from tests.conftest import FakeSubmitter
 
 _EPOCH = datetime.min.replace(tzinfo=UTC)
@@ -205,7 +205,7 @@ def test_zero_celsius_structured_field_is_preserved() -> None:
 
 
 def test_the_entrys_hypothesis_is_carried_onto_the_record() -> None:
-    """The question the run's conditions answer must survive ingestion (D-156)."""
+    """The question the run's conditions answer must survive ingestion (D-157)."""
     raw = RawEntry(
         entry_id="e-hyp",
         created_at=_EPOCH,

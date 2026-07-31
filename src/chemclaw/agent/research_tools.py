@@ -24,10 +24,10 @@ from chemclaw.agent.framing import frame_untrusted
 from chemclaw.agent.tool_registry import tool
 from chemclaw.core.config import settings
 from chemclaw.ingest.sources.registry import active_retrieve_sources
-from chemclaw.mcp.fpstore import default_reaction_store
 from chemclaw.retrieval.evidence import EvidenceChunk, SourceRetriever
 from chemclaw.retrieval.hybrid import reciprocal_rank_fusion
 from chemclaw.retrieval.retrievers import FingerprintReactionRetriever
+from chemclaw.science.fingerprints.store import default_reaction_store
 
 # Test seam: swap the production reaction store for an in-memory one without a database.
 _reaction_store = default_reaction_store

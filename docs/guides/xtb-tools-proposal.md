@@ -772,7 +772,7 @@ options — build it last, once real usage has shown which options are actually 
 - **Backend equivalence**: `tblite` and `cli` single points agree within a documented tolerance —
   this is what makes backend substitution defensible at all.
 - **Determinism**: same input, same seed, same answer across processes (the D-011 property).
-- **Eval cases** (`evals/cases/`) for the new questions: a regioselectivity case with a known
+- **Eval cases** (`data/evals/cases/`) for the new questions: a regioselectivity case with a known
   outcome, a tautomer-ranking case, a solvent-selection case that connects to the existing
   `pharma-solvent-heavy` and `green-esterification` cases.
 - **Skill validation**: `make skill-validate` already checks declared tool names against the

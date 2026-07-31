@@ -6,7 +6,7 @@ would hit the production store. The capability logic is proven in `test_molfp.py
 
 import asyncio
 
-from chemclaw.mcp.molfp.server import server
+from chemclaw.connectors.molfp.server.tools import server
 
 
 def test_server_advertises_the_capability_tools() -> None:

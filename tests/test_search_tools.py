@@ -15,9 +15,9 @@ from chemclaw.agent.search_tools import (
     find_similar_reactions,
     find_substructure_matches,
 )
-from chemclaw.mcp.fpstore import InMemoryFingerprintStore
-from chemclaw.mcp.molfp.search import record_for
-from chemclaw.mcp.rxnfp.search import record_for_reaction
+from chemclaw.science.fingerprints.molfp.search import record_for
+from chemclaw.science.fingerprints.rxnfp.search import record_for_reaction
+from chemclaw.science.fingerprints.store import InMemoryFingerprintStore
 
 
 def _reaction_store() -> InMemoryFingerprintStore:

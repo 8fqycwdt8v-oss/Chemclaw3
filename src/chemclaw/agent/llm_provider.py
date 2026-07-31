@@ -8,7 +8,7 @@ calls this factory and stays provider-agnostic.
 
 The internal endpoint is reached with **one generic API credential** (`settings.llm_api_key`),
 deliberately not per-user Entra: the raw inference call is not a user-scoped resource access (see
-`docs/planning/foundation-plan.md` §0). Entra scoping applies to *who* is taking the turn and
+`docs/archive/plans/foundation-plan.md` §0). Entra scoping applies to *who* is taking the turn and
 *which* authorized workflow runs (Phase F4), not to this credential. Transport concerns (private-CA
 TLS, timeout, retry budget) come from config so a firewalled internal endpoint works with no code
 change.
