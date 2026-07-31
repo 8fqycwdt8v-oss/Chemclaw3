@@ -196,3 +196,4 @@ this reason; the filenames make that ordering irrelevant now, and the numbers st
 | D-159 | RESERVED — the turn stream reports a tool's lifecycle and its result, not just that a call happened |
 | D-160 | RESERVED — retrieval carries provenance, so a claim can be qualified by who authored its evidence |
 | D-161 | RESERVED — an ungated observations tier, with the human gate moved from every observation to the few worth promoting |
+| [D-162](D-162-a-series-of-experiments-is-a-sequence-not-a-set.md) | A series of experiments is a sequence, not a set |
