@@ -12,6 +12,7 @@ a way to run a tool the requester could not run directly, and this is where that
 """
 
 import logging
+from collections.abc import Callable
 from contextlib import AsyncExitStack
 from typing import Any
 
@@ -21,6 +22,7 @@ from temporalio import activity
 from chemclaw.agent.audit import make_audit_middleware
 from chemclaw.agent.identity_context import reset_current_identity, set_current_identity
 from chemclaw.agent.tool_authz import enforce_tool_authz
+from chemclaw.connectors.jobs import prepare_job_launch
 from chemclaw.connectors.queues import bundle_queue
 from chemclaw.connectors.registry import find_job, open_reachable
 from chemclaw.durable.registry import durable_activity
@@ -75,8 +77,26 @@ class AgentStepInput(BaseModel):
     identity: StepIdentity
 
 
+class JobStepInput(BaseModel):
+    """One resolved `job` step: which declared job, with which already-substituted arguments."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    job: str = Field(min_length=1)
+    arguments: dict[str, Any] = Field(default_factory=dict)
+    identity: StepIdentity
+
+
 class ResolvedJob(BaseModel):
-    """Where a declared job name actually runs — the four facts a child workflow start needs."""
+    """Where a declared job runs, and the payload it was authorized to run with.
+
+    `payload` is here because resolution and authorization are one act, not two (D-158). The
+    activity that resolves a job step is the same activity that validated its arguments, checked
+    `authorize_trigger` against the requester and ran the job's declared precondition — so handing
+    back the *validated* payload is what stops the workflow starting a child with the raw,
+    unchecked arguments it happened to have. There is no representable state in which a caller
+    holds a `ResolvedJob` and has not passed the pre-flight.
+    """
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
@@ -85,12 +105,32 @@ class ResolvedJob(BaseModel):
     workflow: str
     task_queue: str
     publish_to_graph: bool
+    payload: dict[str, Any] = Field(default_factory=dict)
 
 
 @durable_activity("background")
 @activity.defn
-async def resolve_job_step(name: str) -> ResolvedJob:
-    """Resolve a declared job name to its connector, workflow type and queue — outside the workflow.
+async def authorize_job_step(step: JobStepInput) -> ResolvedJob:
+    """Resolve, validate and authorize one `job` step as its requester — outside the workflow.
+
+    **The template's job step used to do none of this** (DARK-2, D-158). `ResolvedJob` carried the
+    connector, workflow and queue and dropped `expensive` and `precondition` on the floor, and
+    `TemplateWorkflow._run_job_step` started the child workflow with `resolve(step.arguments,
+    scope)` exactly as written. So a template naming `compute_dft_energy` started HPC work for
+    anyone entitled to run its `run_<name>` tool, a job's declared domain guard — the one
+    `JobSpec.precondition` documents as having no other replay-safe home — never ran on this path,
+    and the launch left no GxP audit row. The module docstring above claimed the opposite.
+
+    The pre-flight is `chemclaw.connectors.jobs.prepare_job_launch`, shared with the chat launcher
+    rather than reimplemented, so the two cannot drift; the identity is stamped from the step first,
+    so `authorize_trigger` decides against the person who asked rather than against nobody. A
+    refusal raises `AuthorizationError` — a `ValueError`, which `BAD_DATA_RETRY` lists
+    non-retryable — so an unentitled step fails on its first attempt naming the reason instead of
+    retrying an authorization decision that will never change.
+
+    Everything below about resolving off the workflow thread is unchanged (REV-13), and it is why
+    the authorization belongs here too: this is the last place before the child starts that can
+    read config and import a bundle's precondition without making a replay depend on the disk.
 
     `TemplateWorkflow._run_job_step` used to call `chemclaw.connectors.registry.find_job` directly,
     inside
@@ -116,14 +156,61 @@ async def resolve_job_step(name: str) -> ResolvedJob:
     boundary the same error arrives as an `ActivityError`, and `BAD_DATA_RETRY` lists `ValueError`
     non-retryable, so it fails on the first attempt with the message naming the declared jobs.
     """
-    connector, job = find_job(name)
+    connector, job = find_job(step.job)
+    tokens = set_current_identity(step.identity.actor, frozenset(step.identity.roles))
+    try:
+        payload = await _audited(
+            step.identity,
+            job.name,
+            step.arguments,
+            lambda: prepare_job_launch(connector, job, step.arguments),
+        )
+    finally:
+        reset_current_identity(tokens)
     return ResolvedJob(
         connector=connector,
         job=job.name,
         workflow=job.workflow,
         task_queue=bundle_queue(connector),
         publish_to_graph=job.publish_to_graph,
+        payload=payload,
     )
+
+
+async def _audited(
+    identity: StepIdentity,
+    tool: str,
+    arguments: dict[str, Any],
+    action: Callable[[], dict[str, Any]],
+) -> dict[str, Any]:
+    """Run a job step's pre-flight inside the audit middleware, so the launch leaves a GxP row.
+
+    Through `make_audit_middleware` over a real `FunctionTool` rather than by emitting an
+    `AuditEvent` directly: there is exactly one place that decides what an audit record looks like,
+    and a second emitter would drift from it the first time that shape changed. The tool is named
+    for the job, so the row reads the same as the one a chat turn's launch of the same job writes —
+    which is the point, since the whole finding was that these two paths were governed differently.
+
+    A refusal propagates after being recorded as an `error` outcome, exactly as a denied chat tool
+    call is.
+    """
+    from agent_framework import FunctionInvocationContext, FunctionTool
+
+    async def _run() -> dict[str, Any]:
+        return action()
+
+    context = FunctionInvocationContext(
+        function=FunctionTool(func=_run, name=tool, description=f"launch the {tool!r} job"),
+        arguments=arguments,
+    )
+    audit = make_audit_middleware(correlation_id=identity.correlation_id, actor=identity.actor)
+
+    async def _invoke() -> None:
+        context.result = await _run()
+
+    await audit(context, _invoke)
+    payload: dict[str, Any] = context.result
+    return payload
 
 
 @activity.defn
@@ -175,7 +262,17 @@ async def _invoke(
     for connector in connectors:
         for function in connector.functions:
             if function.name == step.tool:
-                return await connector.call_tool(step.tool, **step.arguments)
+                # Through the *same* governed path as the in-process branch above (D-158). This
+                # used to be `connector.call_tool(...)`, which reaches the connector directly and
+                # therefore skipped both `enforce_tool_authz` and the audit middleware — while the
+                # branch three lines up hand-applied both, and this module's own docstring said
+                # applying them was the point. The consequence was not theoretical: both tool steps
+                # of the shipped `hazard-briefing` template left no GxP audit row, and a template
+                # naming a role-gated tool ran it for anyone who could run the template.
+                #
+                # MAF's MCP tools are ordinary `FunctionTool`s, so nothing about the call shape has
+                # to change to route them through the middleware — only the decision to do it.
+                return await _call_function_tool(function, step, skip_parsing=True)
     available = sorted(
         [t.name for t in agent.default_options["tools"]]
         + [f.name for c in connectors for f in c.functions]
@@ -186,13 +283,20 @@ async def _invoke(
     )
 
 
-async def _call_function_tool(tool: Any, step: ToolStepInput) -> Any:
-    """Invoke an in-process tool with the audit + authz middleware a chat turn would apply.
+async def _call_function_tool(tool: Any, step: ToolStepInput, *, skip_parsing: bool = False) -> Any:
+    """Invoke one tool with the audit + authz middleware a chat turn would apply.
 
     MAF applies the agent's middleware inside its own tool-calling loop, which a template does not
     go through — so calling `tool.invoke(...)` directly would run the tool *ungoverned*. Applying
     the same two middlewares by hand here is what keeps the template path identical to the chat
     path in the way that matters: the call is audited, and an unauthorized one is refused.
+
+    Used for both halves of the surface, in-process and connector, since D-158. `skip_parsing` is
+    what makes the connector half a pure governance change: `invoke` parses a result into
+    `list[Content]`, while the `call_tool` this replaced returned it raw, and a step's result is
+    written into Temporal history and substituted into `${steps.<id>.result}`. Passing it through
+    unparsed keeps every existing template producing byte-identical output — the call is now
+    audited and authorized, and it is *only* that.
     """
     from agent_framework import FunctionInvocationContext
 
@@ -202,7 +306,7 @@ async def _call_function_tool(tool: Any, step: ToolStepInput) -> Any:
     )
 
     async def _run_tool() -> None:
-        context.result = await tool.invoke(arguments=context.arguments)
+        context.result = await tool.invoke(arguments=context.arguments, skip_parsing=skip_parsing)
 
     async def _gated() -> None:
         await enforce_tool_authz(context, _run_tool)

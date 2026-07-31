@@ -20,6 +20,7 @@ from typing import Any
 import pytest
 from pydantic import ValidationError
 
+from chemclaw.core.config import settings
 from chemclaw.templates.manifest import AgentStep, Template
 from chemclaw.templates.registry import (
     TemplateError,
@@ -407,3 +408,126 @@ def test_a_template_run_executes_its_steps_in_order(monkeypatch: pytest.MonkeyPa
     assert result.steps == {"hazards": {"flags": ["azide"]}, "brief": "briefing text"}
     assert result.result == "briefing text"
     assert result.template == "probe"
+
+
+# --- DARK-2: a connector tool step is governed exactly as an in-process one (D-158) ------------
+
+
+class _Recorder:
+    """An audit sink that keeps what it is handed."""
+
+    def __init__(self) -> None:
+        self.events: list[Any] = []
+
+    async def record(self, event: Any) -> None:
+        """Keep one event."""
+        self.events.append(event)
+
+
+class _FakeMcpFunction:
+    """A stand-in for the `FunctionTool` MAF builds per MCP tool.
+
+    Only two things matter about the real one and both are reproduced: it has a `name` the
+    middleware reads, and `invoke(arguments=..., skip_parsing=True)` returns the connector's raw
+    result. That is the whole interface the step uses.
+    """
+
+    def __init__(self, name: str) -> None:
+        self.name = name
+        self.calls: list[dict[str, Any]] = []
+
+    async def invoke(self, *, arguments: Any = None, skip_parsing: bool = False, **_: Any) -> Any:
+        """Record the call and hand back a raw result, as `call_tool` used to."""
+        self.calls.append(dict(arguments or {}))
+        assert skip_parsing, (
+            "the connector branch must not re-wrap the result (see _call_function_tool)"
+        )
+        return "hazard: none found"
+
+
+class _FakeConnector:
+    """A connector exposing one function, with the `call_tool` the step must no longer use."""
+
+    def __init__(self, function: _FakeMcpFunction) -> None:
+        self.functions = [function]
+        self.call_tool_used = False
+
+    async def call_tool(self, name: str, **kwargs: Any) -> Any:
+        """The ungoverned path. Reaching it is the defect, so reaching it fails the test."""
+        self.call_tool_used = True
+        raise AssertionError(
+            f"the template step called {name!r} through connector.call_tool, which skips both "
+            "enforce_tool_authz and the audit middleware"
+        )
+
+
+class _EmptyAgent:
+    """An agent whose in-process tool list is empty, so lookup falls through to the connector."""
+
+    default_options: dict[str, Any] = {"tools": []}
+
+
+def _tool_step(tool: str, **arguments: Any) -> Any:
+    from chemclaw.durable.template_activities import StepIdentity, ToolStepInput
+
+    return ToolStepInput(
+        tool=tool,
+        arguments=dict(arguments),
+        identity=StepIdentity(actor="chemist-1", roles=[], correlation_id="template-run-1"),
+    )
+
+
+def test_a_connector_tool_step_is_audited_under_the_requester(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Both tool steps of the shipped `hazard-briefing` used to leave no GxP audit row at all.
+
+    The in-process branch hand-applied audit + authz; the connector branch two lines below called
+    `connector.call_tool` and reached the connector directly. The module's own docstring said
+    applying them was the point of the module.
+    """
+    from chemclaw.durable.template_activities import _invoke
+
+    sink = _Recorder()
+    monkeypatch.setattr("chemclaw.agent.audit.default_audit_sink", lambda: sink)
+    function = _FakeMcpFunction("screen_hazards")
+    connector = _FakeConnector(function)
+
+    result = asyncio.run(
+        _invoke(_EmptyAgent(), [connector], _tool_step("screen_hazards", smiles=["CCO"]), [])
+    )
+
+    assert result == "hazard: none found", "the step's result shape changed; templates would break"
+    assert function.calls == [{"smiles": ["CCO"]}]
+    assert not connector.call_tool_used
+    (event,) = sink.events
+    assert (event.tool, event.actor, event.outcome) == ("screen_hazards", "chemist-1", "ok")
+    assert event.correlation_id == "template-run-1"
+
+
+def test_a_connector_tool_step_the_requester_may_not_call_is_refused(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A template must not be a way to run a tool you could not run directly.
+
+    With the gate skipped it was exactly that: anyone who could start the template got every
+    connector tool inside it, whatever `tool_role_gates` said.
+    """
+    from chemclaw.agent.authz import AuthorizationError
+    from chemclaw.durable.template_activities import _invoke
+
+    sink = _Recorder()
+    monkeypatch.setattr("chemclaw.agent.audit.default_audit_sink", lambda: sink)
+    monkeypatch.setattr(settings, "entra_required", True)
+    monkeypatch.setattr(settings, "tool_role_gates", {"screen_hazards": ["safety"]})
+    function = _FakeMcpFunction("screen_hazards")
+    connector = _FakeConnector(function)
+
+    with pytest.raises(AuthorizationError):
+        asyncio.run(
+            _invoke(_EmptyAgent(), [connector], _tool_step("screen_hazards", smiles=["CCO"]), [])
+        )
+
+    assert function.calls == [], "the tool body ran despite the refusal"
+    (event,) = sink.events
+    assert event.outcome == "error", "a denied connector step left no audit row"

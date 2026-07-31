@@ -32,9 +32,10 @@ with workflow.unsafe.imports_passed_through():
     from chemclaw.durable.notify import notify_session_best_effort
     from chemclaw.durable.template_activities import (
         AgentStepInput,
+        JobStepInput,
         StepIdentity,
         ToolStepInput,
-        resolve_job_step,
+        authorize_job_step,
         run_agent_step,
         run_tool_step,
     )
@@ -176,9 +177,18 @@ class TemplateWorkflow:
         # plain `ValueError` into workflow code, which Temporal retries as a suspected bug forever
         # instead of failing the run (REV-13). Local, because it is a cached in-process lookup, not
         # a network call; the point is recording the answer, not offloading the work.
+        #
+        # It also *authorizes* the step, as the run's requester, and returns the validated payload
+        # (D-158). The arguments are handed to it rather than substituted into the child start
+        # below, because a payload that has not been through `prepare_job_launch` is precisely what
+        # this step used to start an HPC job with.
         resolved = await workflow.execute_local_activity(
-            resolve_job_step,
-            step.job,
+            authorize_job_step,
+            JobStepInput(
+                job=step.job,
+                arguments=resolve(step.arguments, scope),
+                identity=identity,
+            ),
             start_to_close_timeout=timeout,
             retry_policy=BAD_DATA_RETRY,
         )
@@ -193,7 +203,7 @@ class TemplateWorkflow:
                     job=resolved.job,
                     workflow=resolved.workflow,
                     task_queue=resolved.task_queue,
-                    payload=resolve(step.arguments, scope),
+                    payload=resolved.payload,
                     requested_by=identity.actor,
                     publish_to_graph=resolved.publish_to_graph,
                 ),
