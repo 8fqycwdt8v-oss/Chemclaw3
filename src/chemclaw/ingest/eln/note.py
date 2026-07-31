@@ -27,6 +27,7 @@ def note_from_ord_reaction(reaction: OrdReaction) -> Note:
         type="reaction",
         created_by="agent",
         source=reaction.provenance,
+        compound_smiles=_principal_product(reaction),
         # The experiment's own date is what makes the note time-scopable (gap KNW-1). F10-G2 added
         # `valid_from`/`valid_to` to answer "what did we know at time T", and for the largest note
         # class nothing populated them — a reaction became valid-since-forever. A run is evidence
@@ -35,6 +36,26 @@ def note_from_ord_reaction(reaction: OrdReaction) -> Note:
         valid_from=reaction.performed_at,
         body=body,
     )
+
+
+def _principal_product(reaction: OrdReaction) -> str | None:
+    """The molecule this note is *about*, when the record names exactly one product.
+
+    The largest note class in the graph carried no `compound_smiles` at all, which is why nothing
+    that groups by compound could ever see a reaction: `kg.conflicts` groups on
+    `(type, compound_smiles)`, `find_notes` searches it, and every future by-compound question
+    starts there. The structure was in the record the whole time — it goes into the body as part
+    of the reaction SMILES — it simply never reached the field.
+
+    **Only when there is one outcome.** "The molecule this note is about" has no honest answer for
+    a reaction that reports a product and two by-products, and picking the first (or the largest
+    by amount, which an ELN often omits) would file the note under a compound the chemist did not
+    mean. A wrong `compound_smiles` is worse than none: it is what a by-compound search would
+    return, and it would look right.
+    """
+    if len(reaction.outcomes) != 1:
+        return None
+    return reaction.outcomes[0].smiles
 
 
 def _hypothesis_block(reaction: OrdReaction) -> str:

@@ -11,8 +11,13 @@ Scoped deliberately narrowly, because a gate that fires on the wrong notes gets 
 
 - **agent-authored only** — a human writing up their own procedure has made their own hazard
   judgment; the PR-gate exists to review the *agent's* proposals (D-005);
-- **procedure notes only** — a note with a `## Procedure` section is telling someone how to run
-  something. A reaction record or a distilled rule that merely mentions a structure is not;
+- **notes that tell someone what to run** — a `## Procedure` section, *or* a note whose very type
+  is a proposal of conditions (`experiment-proposal`, `bo-candidate`). The heading alone was the
+  whole test, and it missed exactly the class that matters most: a `bo-candidate` names the
+  conditions a surrogate model wants a human to physically run, and it has no `## Procedure`
+  heading because it is a table of parameters. So the one note type that proposes an experiment
+  nobody has performed was the one type never screened. A reaction record or a distilled rule that
+  merely mentions a structure is still out of scope;
 - **at or above `safety_gate_severity`** — the gate must fire rarely enough that a firing means
   something.
 """
@@ -27,6 +32,17 @@ from chemclaw.science.safety.screen import SafetyRulesError, at_least, screen_re
 _CODE_SPAN = re.compile(r"`([^`\n]+)`")
 _PROCEDURE_HEADING = re.compile(r"(?mi)^##\s+procedure\b")
 _HAZARDS_HEADING = re.compile(r"(?mi)^##\s+hazards\b")
+
+# Note types that *are* a proposal of conditions, heading or no heading. Both are minted by
+# machines and describe work nobody has run yet, which is precisely when a structural alert is
+# worth a reviewer's attention: there is no chemist who has already stood at the bench and formed
+# their own judgment about the mixture.
+_PROPOSES_CONDITIONS: frozenset[str] = frozenset({"experiment-proposal", "bo-candidate"})
+
+
+def proposes_a_procedure(note: Note) -> bool:
+    """Whether `note` tells someone what to run, by its section structure or by its type."""
+    return note.type in _PROPOSES_CONDITIONS or bool(_PROCEDURE_HEADING.search(note.body))
 
 
 def structures_in(note: Note) -> list[str]:
@@ -62,7 +78,7 @@ def hazard_problems(note: Note) -> list[str]:
     """
     if not settings.safety_gate_enabled or note.created_by != "agent":
         return []
-    if not _PROCEDURE_HEADING.search(note.body) or _HAZARDS_HEADING.search(note.body):
+    if not proposes_a_procedure(note) or _HAZARDS_HEADING.search(note.body):
         return []
     structures = structures_in(note)
     if not structures:

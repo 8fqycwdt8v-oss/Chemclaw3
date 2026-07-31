@@ -41,17 +41,6 @@ def is_dry_run() -> bool:
     return _dry_run.get()
 
 
-def dry_run_notice(action: str, detail: str) -> str:
-    """The uniform message an expensive tool returns instead of acting, during a dry run.
-
-    One phrasing in one place, so every tool's dry-run answer reads the same and a caller can never
-    mistake it for a real result (which would be the one genuinely harmful failure mode here).
-    """
-    return (
-        f"DRY RUN — would {action}: {detail}. Nothing was started; re-ask without dry-run to do it."
-    )
-
-
 @tool
 async def ask_clarifying_question(question: str, options: list[str] | None = None) -> str:
     """Ask the chemist to disambiguate, instead of guessing across several possible readings.

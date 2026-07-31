@@ -42,7 +42,7 @@ from typing import Any
 from agent_framework import AgentSession, FunctionInvocationContext, function_middleware
 from agent_framework._harness._loop import ShouldContinueCallable, ShouldContinueResult
 
-from chemclaw.agent.authz import STATE_CHANGING_TOOLS, AuthorizationError
+from chemclaw.agent.authz import AuthorizationError, side_effecting_tools
 from chemclaw.agent.harness_mode import (
     EXECUTE_MODE,
     consume_plan,
@@ -68,36 +68,6 @@ class PlanNotApprovedError(AuthorizationError):
     A subclass rather than the base so a caller — and a test — can still tell "you lack a role"
     apart from "nobody has approved this yet", which are different problems with different remedies.
     """
-
-
-def gated_tools() -> frozenset[str]:
-    """Every tool an unapproved plan may not call.
-
-    Three sources, each owned where its knowledge lives:
-
-    - `STATE_CHANGING_TOOLS` — the in-process writes, classified in `chemclaw.agent.authz` and held
-      to a partition of the tool registry by `tests/test_authz.py`;
-    - every enabled connector's own declaration (`state_changing_tool_names`): its endpoint's
-      declared `state_changing` subset, plus every declared job, since a job is durable work by
-      construction. **This half is what makes the gate cover the live repro** — `compute_xtb_energy`
-      is a `calc` *endpoint* tool, not a job, so a set built only from in-process names and job
-      names would have missed one of the two things the unapproved turn actually ran;
-    - every enabled template launcher — a template starts a fixed sequence of the above, and is the
-      one thing that can reach a job step without the model naming the job.
-
-    Nothing here is a list core maintains about other people's tools, which is the property that
-    matters: a bundle added next year is gated the day it is enabled, not the day someone
-    remembers. Imported lazily because the connector and template registries reach the agent
-    builder, which reaches this module.
-    """
-    from chemclaw.connectors.registry import state_changing_tool_names
-    from chemclaw.templates.registry import template_tool_names
-
-    return (
-        STATE_CHANGING_TOOLS
-        | frozenset(state_changing_tool_names())
-        | frozenset(template_tool_names())
-    )
 
 
 async def plan_is_approved(session: AgentSession) -> bool:
@@ -145,7 +115,7 @@ async def enforce_plan_approval(
     if session is None:
         await call_next()
         return
-    if context.function.name not in gated_tools():
+    if context.function.name not in side_effecting_tools():
         await call_next()
         return
     if await plan_is_approved(session):

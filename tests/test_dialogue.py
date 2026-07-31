@@ -22,11 +22,11 @@ from agent_framework import AgentSession
 
 from chemclaw.agent.dialogue_tools import (
     ask_clarifying_question,
-    dry_run_notice,
     is_dry_run,
     reset_dry_run,
     set_dry_run,
 )
+from chemclaw.agent.tool_authz import DryRunRefusal, refuse_writes_on_dry_run
 from chemclaw.api.runner import run_turn
 
 
@@ -111,57 +111,80 @@ def test_the_runner_binds_and_clears_the_flag() -> None:
     assert is_dry_run() is False, "the flag leaked past the turn"
 
 
-def test_the_notice_can_never_be_mistaken_for_a_real_result() -> None:
-    """The one genuinely harmful failure mode: a dry-run answer read as a real one."""
-    notice = dry_run_notice("submit a QM job", "CCO at B3LYP/def2-SVP")
-    assert notice.startswith("DRY RUN")
-    assert "Nothing was started" in notice
+class _Function:
+    """The one attribute the gate reads off an invocation context's function: its name."""
+
+    def __init__(self, name: str) -> None:
+        self.name = name
 
 
-def test_a_dry_run_does_not_launch_a_durable_job(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The whole point: the expensive path is described, not taken."""
-    from chemclaw.agent import durable_tools
+class _Context:
+    """The slice of `FunctionInvocationContext` the dry-run gate touches."""
 
-    async def _explode(*args: Any, **kwargs: Any) -> Any:
-        raise AssertionError("a dry run reached the Temporal client")
-
-    monkeypatch.setattr(durable_tools, "connect", _explode)
-    monkeypatch.setattr(durable_tools, "require_actor", lambda: "u1")
-    token = set_dry_run(True)
-    try:
-        result = asyncio.run(durable_tools.request_development_report("A report", []))
-    finally:
-        reset_dry_run(token)
-    assert result.startswith("DRY RUN")
+    def __init__(self, tool: str) -> None:
+        self.function = _Function(tool)
+        self.arguments: dict[str, Any] = {}
+        self.result: Any = None
 
 
-def test_a_dry_run_does_not_submit_a_qm_job(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Same guard on the most expensive tool in the system, now that it is a declared job.
+def _call(tool: str) -> bool:
+    """Drive one tool call through the dry-run gate; return whether the tool body ran."""
+    ran = False
 
-    Worth keeping as its own case rather than folding into the generic launcher tests: the QM job
-    is the one whose side effect is a cluster reservation, and a dry run that reached the Temporal
-    client would start one.
+    async def _body() -> None:
+        nonlocal ran
+        ran = True
+
+    asyncio.run(refuse_writes_on_dry_run(_Context(tool), _body))  # type: ignore[arg-type]
+    return ran
+
+
+def test_a_dry_run_refuses_every_write_not_just_the_three_that_remembered() -> None:
+    """The gate is the control; three tools checking for themselves was three that happened to.
+
+    `propose_knowledge_note` is the case that made this necessary: it pushes a branch to the
+    knowledge repository and had no dry-run check at all, so `dry_run: true` mutated the graph.
     """
-    from chemclaw.connectors import jobs as connector_jobs
-    from chemclaw.connectors.jobs import build_job_tool
-    from chemclaw.connectors.registry import enabled
-
-    (spec,) = next(m for m in enabled() if m.name == "qm").jobs
-
-    async def _explode(*args: Any, **kwargs: Any) -> Any:
-        raise AssertionError("a dry run reached the Temporal client")
-
-    monkeypatch.setattr(connector_jobs, "connect", _explode)
-    tool = build_job_tool("qm", spec)
-    params = tool.__annotations__["params"]
     token = set_dry_run(True)
     try:
-        result = asyncio.run(
-            tool(
-                params(molecule_smiles="CCO", method="B3LYP", basis_set="def2-SVP"),
-                "the reviewer questioned the reported barrier",
-            )
-        )
+        for tool in ("propose_knowledge_note", "record_confirmed_answer", "remember_preference"):
+            with pytest.raises(DryRunRefusal):
+                _call(tool)
+        # And the three that did check are still refused, now by the same gate.
+        with pytest.raises(DryRunRefusal):
+            _call("request_development_report")
     finally:
         reset_dry_run(token)
-    assert isinstance(result, str) and result.startswith("DRY RUN")
+
+
+def test_a_dry_run_leaves_reads_alone() -> None:
+    """A rehearsal that could not look anything up would be useless, and `plan_only` needs reads."""
+    token = set_dry_run(True)
+    try:
+        assert _call("gather_evidence") is True
+        assert _call("find_notes") is True
+    finally:
+        reset_dry_run(token)
+
+
+def test_a_normal_turn_is_untouched() -> None:
+    """A no-op off a dry run — including off the request path, where the flag is always False."""
+    assert _call("propose_knowledge_note") is True
+
+
+def test_the_refusal_can_never_be_mistaken_for_a_real_result() -> None:
+    """The one genuinely harmful failure mode: a dry-run answer read as a real one.
+
+    It reaches the model as a refusal rather than a return value, so
+    `surface_authorization_denials` relays it verbatim — the path `PlanNotApprovedError` already
+    proves works — instead of MAF's opaque "Function failed."
+    """
+    token = set_dry_run(True)
+    try:
+        with pytest.raises(DryRunRefusal) as refusal:
+            _call("propose_knowledge_note")
+    finally:
+        reset_dry_run(token)
+    message = str(refusal.value)
+    assert message.startswith("DRY RUN")
+    assert "Nothing was started" in message

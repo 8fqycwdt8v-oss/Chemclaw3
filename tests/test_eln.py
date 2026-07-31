@@ -913,3 +913,31 @@ def test_nested_yield_object_is_a_mapping_error() -> None:
 # The ELN-specific adapter registry (`eln/registry.py`) was removed in DUP-1: source selection is
 # unified in `ingest/sources/registry.py` (config-driven via `data_sources`), covered by
 # `tests/test_datasource_seam.py`. Both adapters are still exercised directly throughout this file.
+
+
+def test_a_single_product_reaction_note_says_which_compound_it_is_about() -> None:
+    """The largest note class in the graph carried no `compound_smiles` at all.
+
+    Nothing that groups by compound could therefore ever see a reaction: `kg.conflicts` groups on
+    `(type, compound_smiles)`, and every by-compound question starts there. The structure was in
+    the record the whole time — it goes into the body as part of the reaction SMILES — it simply
+    never reached the field.
+    """
+    assert note_from_ord_reaction(_ester()).compound_smiles == "CCOC(C)=O"
+
+
+def test_a_multi_product_reaction_names_no_principal_compound() -> None:
+    """A wrong `compound_smiles` is worse than none: it is what a by-compound search returns.
+
+    "The molecule this note is about" has no honest answer for a run reporting a product and a
+    by-product, and an ELN frequently omits the amounts that would rank them.
+    """
+    two_products = _ester().model_copy(
+        update={
+            "outcomes": [
+                Component(smiles="CCOC(C)=O", role=Role.PRODUCT),
+                Component(smiles="CCOCC", role=Role.PRODUCT),
+            ]
+        }
+    )
+    assert note_from_ord_reaction(two_products).compound_smiles is None

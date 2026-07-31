@@ -53,9 +53,9 @@ DEFAULT_WRITE_TOOL_GATES: frozenset[str] = frozenset(
 # should close it out of the box are different questions with different blast radii, so they get
 # different sets and this one is derived from that one rather than duplicating it.
 #
-# The plan gate's full set is this ∪ every enabled connector job ∪ every enabled template launcher,
-# assembled in `plan_gate.gated_tools()`. Those two are structural — every declared job and every
-# template starts durable work — so they need no list here and grow on their own.
+# The *complete* side-effecting set is this ∪ every enabled connector job ∪ every enabled template
+# launcher, assembled in `side_effecting_tools()` below. Those two are structural — every declared
+# job and every template starts durable work — so they need no list here and grow on their own.
 STATE_CHANGING_TOOLS: frozenset[str] = (
     frozenset(
         {
@@ -105,6 +105,44 @@ READ_ONLY_TOOLS: frozenset[str] = frozenset(
         "recall_preferences",
     }
 )
+
+
+def side_effecting_tools() -> frozenset[str]:
+    """Every tool that changes something outside the turn — the one set the write gates share.
+
+    Three sources, each owned where its knowledge lives:
+
+    - `STATE_CHANGING_TOOLS` — the in-process writes, classified above and held to a partition of
+      the tool registry by `tests/test_authz.py`;
+    - every enabled connector's own declaration (`state_changing_tool_names`): its endpoint's
+      declared `state_changing` subset, plus every declared job, since a job is durable work by
+      construction. **This half is what made the plan gate cover DARK-1's live repro** —
+      `compute_xtb_energy` is a `calc` *endpoint* tool, not a job, so a set built only from
+      in-process names and job names would have missed one of the two things the unapproved turn
+      actually ran;
+    - every enabled template launcher — a template starts a fixed sequence of the above, and is the
+      one thing that can reach a job step without the model naming the job.
+
+    Nothing here is a list core maintains about other people's tools, which is the property that
+    matters: a bundle added next year is gated the day it is enabled, not the day someone
+    remembers. Imported lazily because the connector and template registries reach the agent
+    builder, which reaches this module.
+
+    **It lives here rather than beside one of its consumers.** It was born in
+    `chemclaw.agent.plan_gate` as `gated_tools`, which read correctly while the plan gate was the
+    only caller and stopped reading correctly the moment dry-run needed the same answer: dry-run
+    applies whether or not the harness is on, so the definitive list of "tools that change things"
+    cannot be owned by a harness module. It belongs where the classification it extends already
+    lives.
+    """
+    from chemclaw.connectors.registry import state_changing_tool_names
+    from chemclaw.templates.registry import template_tool_names
+
+    return (
+        STATE_CHANGING_TOOLS
+        | frozenset(state_changing_tool_names())
+        | frozenset(template_tool_names())
+    )
 
 
 def _actor() -> str:

@@ -60,6 +60,7 @@ from chemclaw.agent.skill_access import EnabledSkillsSource, RoleScopedSkillsSou
 from chemclaw.agent.tool_authz import (
     announce_tool_failures,
     enforce_tool_authz,
+    refuse_writes_on_dry_run,
     surface_authorization_denials,
     surface_domain_errors,
 )
@@ -272,6 +273,11 @@ def build_agent(
         surface_domain_errors,
         audit,
         enforce_tool_authz,
+        # Inside authz and inside audit, for the same reasons those two orderings exist: a dry-run
+        # refusal is a recorded outcome, and the model is told plainly that nothing ran. Attached
+        # unconditionally because `is_dry_run()` is False off the request path, so this is a no-op
+        # on every turn nobody asked to rehearse.
+        refuse_writes_on_dry_run,
         announce_tool_failures,
     ]
     # A sixth, conditionally: the harness's pre-execution approval (D-167). It goes *inside* audit,

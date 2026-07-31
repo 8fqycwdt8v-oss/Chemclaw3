@@ -19,6 +19,7 @@ import pytest
 from agent_framework import DEFAULT_TODO_SOURCE_ID, AgentSession, TodoItem, TodoSessionStore
 
 from chemclaw.agent import plan_approval_store as store_module
+from chemclaw.agent.authz import side_effecting_tools
 from chemclaw.agent.harness_mode import (
     EXECUTE_MODE,
     PLAN_MODE,
@@ -34,7 +35,6 @@ from chemclaw.agent.plan_gate import (
     consume_turn_approval,
     enforce_plan_approval,
     gate_applies,
-    gated_tools,
 )
 from chemclaw.core.config import settings
 
@@ -143,7 +143,7 @@ def test_both_tools_the_unapproved_turn_ran_are_gated() -> None:
     a gated set built from in-process names plus declared jobs looks complete, passes every test
     anyone would think to write, and still misses half of the finding it was written for.
     """
-    gated = gated_tools()
+    gated = side_effecting_tools()
     assert "propose_knowledge_note" in gated
     assert "compute_xtb_energy" in gated
     # A declared job, gated structurally — no bundle has to remember to list one.
