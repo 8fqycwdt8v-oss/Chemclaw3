@@ -18,8 +18,8 @@ the `molfp`/`rxnfp` connector bundles (`similar_reactions`/`similar_molecules`/
 exist as the credential-free, subprocess-free in-process seam for the examples and tests; the
 MCP path is the production one. Keep the two in sync if the search surface changes.
 
-The molecule half now stays in sync by construction: it re-exports the connector's own
-`MoleculeHit` instead of defining a parallel model. The two had already drifted — the connector
+The molecule half now stays in sync by construction: it re-exports the capability's own
+`MoleculeHit` instead of defining a parallel model. The two had already drifted — the capability
 grew `compound_note_id` for the citation and a copy here would have kept returning a bare SMILES.
 """
 
