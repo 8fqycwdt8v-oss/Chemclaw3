@@ -118,3 +118,50 @@ def test_an_unknown_job_id_reads_as_absent_rather_than_raising() -> None:
         assert await read_job_record("pg-no-such-job") is None
 
     asyncio.run(_run())
+
+
+def test_a_second_run_under_one_id_does_not_keep_the_first_runs_attribution() -> None:
+    """A row must not carry run 2's reason beside run 1's name (review of D-157).
+
+    Reachable, and on exactly the horizon this table exists for: once Temporal has expired an
+    execution, the identical payload derives the same workflow id, runs again, and upserts. The
+    first version of the upsert refreshed `rationale`, `summary` and `result` but not
+    `requested_by`/`session_id`/`correlation_id`, so the row said Bob's question was asked by
+    Alice — the worst possible answer for the field an audit joins on.
+    """
+
+    async def _run() -> None:
+        sink = await _sink_or_skip()
+        first = _CAMPAIGN.model_copy(
+            update={
+                "job_id": "pg-reattributed-1",
+                "rationale": "alice: does 2-MeTHF dissolve the amine",
+                "requested_by": "oid-alice",
+                "session_id": "sess-alice",
+                "correlation_id": "turn-alice",
+            }
+        )
+        await sink.record(first)
+        await sink.record(
+            first.model_copy(
+                update={
+                    "rationale": "bob: re-run now the objective is fixed",
+                    "requested_by": "oid-bob",
+                    "session_id": "sess-bob",
+                    "correlation_id": "turn-bob",
+                    "summary": "re-run",
+                    "result": {"best": {"value": -0.4}},
+                }
+            )
+        )
+
+        stored = await read_job_record("pg-reattributed-1")
+        assert stored is not None
+        # The row is one run's story throughout, not a splice of two.
+        assert stored.rationale.startswith("bob:")
+        assert stored.requested_by == "oid-bob"
+        assert stored.session_id == "sess-bob"
+        assert stored.correlation_id == "turn-bob"
+        assert stored.result == {"best": {"value": -0.4}}
+
+    asyncio.run(_run())

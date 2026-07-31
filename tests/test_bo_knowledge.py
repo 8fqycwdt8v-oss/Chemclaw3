@@ -169,3 +169,42 @@ def test_campaign_publishes_recommendation_to_graph(monkeypatch: pytest.MonkeyPa
         assert fake.submissions[0].files[0].path.startswith("knowledge/bo-candidate/bo-")
 
     asyncio.run(_run())
+
+
+def test_a_library_campaigns_note_stays_readable(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A screening library is one categorical with hundreds of levels — not a note line.
+
+    `molecule_library_problem` makes every SMILES in the library a level, so listing them all put
+    a single multi-kilobyte line into the note a chemist reads to approve *one* experiment
+    (review of D-157). Bounded by the shared note-excerpt budget, with the omitted count stated
+    and the complete space still in the run record.
+    """
+    from chemclaw.science.bo.objectives import molecule_library_problem
+
+    library = [
+        f"{'C' * (1 + index // 6)}c1ccc({'O' * (index % 6) or 'N'}C)cc1" for index in range(60)
+    ]
+    problem = molecule_library_problem(library)
+    # Asserted, not cast: the whole point of this case is that the library *is* one categorical
+    # with a level per molecule, so a change that made it anything else should fail here loudly.
+    parameter = problem.parameters[0]
+    assert isinstance(parameter, CategoricalParameter)
+    levels = parameter.categories
+    result = CampaignResult(
+        best=Observation(params={"molecule": levels[0]}, value=-1.2, provenance="predicted"),
+        history=[
+            Observation(params={"molecule": s}, value=-2.0, provenance="predicted")
+            for s in levels[:9]
+        ],
+    )
+
+    body = note_from_campaign_result("solubility_max", problem, result).body
+    (line,) = [ln for ln in body.splitlines() if ln.startswith("- molecule: one of")]
+
+    assert len(line) <= settings.note_excerpt_chars + 120  # the listing, plus the "+N more" tail
+    assert "more; the full set is in the run record" in line
+    # Bounded, not emptied: the first levels are still named, which is what makes the line useful.
+    assert levels[0] in line
+    # A small space is still listed in full, with no truncation tail invented for it.
+    small = note_from_campaign_result("reizman_suzuki", _PROBLEM, _RESULT).body
+    assert "catalyst: one of P1, P2" in small and "more" not in small

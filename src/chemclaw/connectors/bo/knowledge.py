@@ -16,6 +16,7 @@ and over what space", and never has to know the job id or the requester — whic
 mapping a pure function of the campaign.
 """
 
+from chemclaw.core.config import settings
 from chemclaw.core.ids import stable_hash
 from chemclaw.kg.note import Note
 from chemclaw.science.bo.problem import (
@@ -74,9 +75,31 @@ def note_from_campaign_result(
 def _parameter_range(parameter: Parameter) -> str:
     """One decision variable as a single line: its name and what it was allowed to be.
 
-    Categorical options are listed in full rather than counted — "one of 4 ligands" tells a
-    reviewer nothing about whether the ligand they would have tried was even on the list.
+    Categorical options are listed rather than counted — "one of 4 ligands" tells a reviewer
+    nothing about whether the ligand they would have tried was even on the list — but the listing
+    is **bounded**, because one shipped objective makes it unbounded: `molecule_library_problem`
+    turns a screening library into one categorical whose levels are every SMILES in it, so a
+    500-molecule campaign would write a single 12 KB line into a note whose job is to let a chemist
+    decide on one experiment. Past the budget it says how many were left out, and the complete
+    space stays one lookup away in the run's durable record (D-157), which is the column that
+    exists for exactly this.
+
+    The budget is the shared `note_excerpt_chars` — the one note-excerpt allowance the report
+    harness and the memory layer already spend — so this cannot drift into a second answer to
+    "how much prose belongs in a note".
     """
-    if isinstance(parameter, CategoricalParameter):
-        return f"{parameter.name}: one of {', '.join(parameter.categories)}"
-    return f"{parameter.name}: {parameter.lower:g} to {parameter.upper:g}"
+    if not isinstance(parameter, CategoricalParameter):
+        return f"{parameter.name}: {parameter.lower:g} to {parameter.upper:g}"
+    shown: list[str] = []
+    budget = settings.note_excerpt_chars
+    for category in parameter.categories:
+        # +2 for the ", " this level costs once it is not the first.
+        budget -= len(category) + 2
+        if budget < 0 and shown:
+            break
+        shown.append(category)
+    listed = ", ".join(shown)
+    omitted = len(parameter.categories) - len(shown)
+    if omitted:
+        listed += f", … (+{omitted} more; the full set is in the run record)"
+    return f"{parameter.name}: one of {listed}"
