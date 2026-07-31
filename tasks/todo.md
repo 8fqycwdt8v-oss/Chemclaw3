@@ -215,7 +215,7 @@ computation, and that store is readable.* W2.1 and W2.2 are the two halves.
 
 ### W3.2 Cap the memory jobs (rides D-161)
 
-- [ ] The three synthesis jobs run daily, rescan the whole corpus with no cursor, and have **no cap**
+- [x] **Shipped (rides D-161).** The three synthesis jobs run daily, rescan the whole corpus with no cursor, and had **no cap**
       on notes produced (worst case ≈1.5 notes per corpus reaction per day, plus one retirement note
       per superseded cluster, each its own branch and PR). In practice it stays quiet because of
       three good accidents — ids anchor on the cluster's smallest member so a grown cluster reuses
@@ -223,6 +223,11 @@ computation, and that store is readable.* W2.1 and W2.2 are the two halves.
       updates in place. But nothing *bounds* it, and a large corpus import would produce a PR flood
       on the first night. Add `max_notes_per_run` with the dropped count logged explicitly — the
       repo's own "no silent caps" rule, applied to the one place with no ceiling.
+      **A plain cap would have been the worse bug**, and that is the part worth recording: the
+      builders are deterministic over the corpus, so `notes[:cap]` proposes the same first N every
+      night and the tail is proposed *never* — a visible flood traded for silently lost knowledge.
+      So the window **rotates by the run's own date** (`workflow.now()`, replay-safe), covering the
+      whole corpus within one cycle. Default 25, `0` = unbounded.
 
 ### W3.3 The observations tier (D-161)
 

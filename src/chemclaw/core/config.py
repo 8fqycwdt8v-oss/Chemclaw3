@@ -1486,6 +1486,11 @@ class MemorySettings(BaseSettings):
     # chemistry, so the grouping must be tight to avoid merging distinct transformations.
     optimization_similarity_threshold: float = Field(default=0.7, ge=0.0, le=1.0)
     memory_job_timeout_seconds: float = Field(default=300.0, gt=0)
+    # Most notes one synthesis run may propose (0 = unbounded). The three jobs rescan the whole
+    # corpus daily with no cursor, so a large import would open a PR per cluster on the first
+    # night. The window rotates by run date rather than truncating, so the cap bounds the flood
+    # without the tail of the corpus being proposed *never* — see `_slice_for_this_run`.
+    memory_max_notes_per_run: int = Field(default=25, ge=0)
     # Temporal Schedule cadence for the memory-synthesis jobs (`cli/schedules.py`): they
     # re-scan the whole corpus, so they run less often than the cursor-driven ELN sync.
     memory_synthesis_schedule_minutes: float = Field(default=1440.0, gt=0)

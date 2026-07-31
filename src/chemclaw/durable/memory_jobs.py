@@ -118,19 +118,58 @@ class PublishNoteWorkflow:
         )
 
 
+def _slice_for_this_run(notes: list[Note], id_prefix: str) -> list[Note]:
+    """Take at most `memory_max_notes_per_run` notes, rotating the window on each daily run.
+
+    These jobs rescan the whole corpus with no cursor and had no ceiling on what one run could
+    propose. In practice they stay quiet — an id anchored on a cluster's smallest member reuses its
+    branch, a byte-identical note produces no diff and no push — but nothing *bounded* them, and a
+    large corpus import would open a PR per cluster on the first night.
+
+    A plain cap would have replaced that with a worse bug. The builders are deterministic over the
+    corpus, so `notes[:cap]` proposes the same first N every night and the tail is proposed *never*
+    — knowledge silently lost, which is exactly what a "silent cap" means here. So the window
+    rotates by the run's own date: consecutive daily runs cover consecutive slices and the whole
+    corpus is reached within one cycle, after which every note is a no-op re-proposal.
+
+    Sorted by id so the ordering is stable rather than incidental to build order, and
+    `workflow.now()` rather than a wall clock because a workflow must replay identically.
+    """
+    cap = settings.memory_max_notes_per_run
+    if cap <= 0 or len(notes) <= cap:
+        return notes
+    ordered = sorted(notes, key=lambda note: note.id)
+    start = (workflow.now().date().toordinal() * cap) % len(ordered)
+    window = (ordered + ordered)[start : start + cap]
+    workflow.logger.warning(
+        "%s synthesis capped at %d of %d notes this run (window from index %d); the rest are "
+        "proposed on following runs — raise CHEMCLAW_MEMORY_MAX_NOTES_PER_RUN to widen it",
+        id_prefix,
+        cap,
+        len(ordered),
+        start,
+    )
+    return window
+
+
 async def _synthesize(build_activity: Any, id_prefix: str) -> list[str]:
     """Build the notes in one activity, then fan each out to a `PublishNoteWorkflow` child (DRY).
 
     The three synthesis jobs differ only in which builder runs; the detect-then-fan-out topology is
     identical, so it lives here once. Detection reads the whole corpus (one activity); publishing is
     per-note and independent (one child each), so a slow or failing note never blocks the others.
+
+    What one run may propose is capped, and what the cap drops is said out loud — see
+    `_slice_for_this_run`.
     """
     notes = await workflow.execute_activity(
         build_activity,
         start_to_close_timeout=timedelta(seconds=settings.memory_job_timeout_seconds),
         retry_policy=BAD_DATA_RETRY,
     )
-    return await fan_out(PublishNoteWorkflow, notes, id_prefix=id_prefix)
+    return await fan_out(
+        PublishNoteWorkflow, _slice_for_this_run(notes, id_prefix), id_prefix=id_prefix
+    )
 
 
 @durable_workflow("background")
