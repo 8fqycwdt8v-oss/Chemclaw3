@@ -1,7 +1,7 @@
 """Eval baseline + drift detection (plan F10-F2): catch silent quality regressions.
 
-A committed baseline (`evals/baseline.json`) records the aggregate value of each metric over the
-versioned case-set at a known-good point. `detect_drift` re-aggregates a fresh run and flags any
+A committed baseline (`data/evals/baseline.json`) records the aggregate value of each metric over
+the versioned case-set at a known-good point. `detect_drift` re-aggregates a fresh run and flags any
 metric that moved further than a *relative* noise band (`eval_drift_epsilon`, a fraction of the
 baseline value) from that baseline. Relative, not absolute, because the metrics live on
 heterogeneous scales (an `f1` in [0, 1] next to an `e_factor` near 35): one absolute band would be
@@ -100,5 +100,5 @@ def load_baseline(path: str) -> Baseline:
 
 
 def save_baseline(baseline: Baseline, path: str) -> None:
-    """Write the baseline JSON (used to (re)generate the committed `evals/baseline.json`)."""
+    """Write the baseline JSON (used to (re)generate the committed `data/evals/baseline.json`)."""
     Path(path).write_text(baseline.model_dump_json(indent=2) + "\n", encoding="utf-8")

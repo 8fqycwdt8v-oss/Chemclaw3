@@ -54,18 +54,16 @@ COPY pyproject.toml uv.lock README.md ./
 # how `connectors/` and `templates/` came to be absent from the wheel and coverage lists too.
 # One package means there is nothing left to forget.
 COPY src ./src
-# The data the application reads from disk at start-up, none of which is code. `skills/` IS the
-# agent's judgment layer (an image without it advertises no skills at all); `profiles/` holds the
-# cross-capability agent profiles and `templates/` the shipped step templates — both discovered
-# from disk, so an image missing them silently advertises fewer capabilities rather than failing.
-# `evals/` carries the committed case-set and baseline the drift job scores against, `data/` the
-# vendored dataset and the sample ELN exports, and `knowledge/` seeds the note tree so the mount
-# point exists even before the first sync. `infra/` holds the SQL migrations the migrate Job runs.
-COPY skills ./skills
-COPY profiles ./profiles
-COPY templates ./templates
-COPY evals ./evals
+# The data the application reads from disk at start-up, none of which is code. Since D-154 the
+# corpora are one tree: `data/` holds the agent profiles and step templates (both discovered from
+# disk, so an image missing them silently advertises fewer capabilities rather than failing), the
+# committed eval case-set and baseline the drift job scores against, the vendored dataset and the
+# sample ELN exports. `skills/` and `knowledge/` stay separate because they are architecture layers
+# 3 and 4 rather than configuration — `skills/` IS the agent's judgment layer (an image without it
+# advertises no skills at all) and `knowledge/` seeds the note tree so the mount point exists before
+# the first sync. `infra/` holds the SQL migrations the migrate Job runs.
 COPY data ./data
+COPY skills ./skills
 COPY knowledge ./knowledge
 COPY infra ./infra
 COPY deploy/entrypoint.sh /usr/local/bin/chemclaw-entrypoint

@@ -1,10 +1,11 @@
 """Pin the retrieval gold-set metrics against the fixed corpus (audit KM-13).
 
 These are regression pins, not mocks: each expected recall/precision is computed from the real
-`GraphRetriever` over the versioned `evals/retrieval_corpus/` fixture. If a change to the substring
-filter or the evidence path moves what a query surfaces, one of these numbers moves and the test
+`GraphRetriever` over the versioned `data/evals/retrieval_corpus/` fixture. If a change to the
+substring filter or the evidence path moves what a query surfaces, one of these numbers moves and
+the test
 fails — which is the whole point of the KM-13 gate. The gold cases and their expected-source lists
-live in `evals/cases/retrieval-*.md`; this file loads those exact cases and scores them.
+live in `data/evals/cases/retrieval-*.md`; this file loads those exact cases and scores them.
 """
 
 import shutil
@@ -14,14 +15,19 @@ from typing import Any
 import pytest
 
 import chemclaw.evals  # noqa: F401 — registers the retrieval metrics on import
-from chemclaw.core.config import settings
+from chemclaw.core.config import EvalSettings, settings
 from chemclaw.evals.harness import load_eval_cases, run_eval
 from chemclaw.evals.metric import get_metric, registered_names
 from chemclaw.retrieval.evidence import EvidenceChunk
 from chemclaw.retrieval.retrievers import GraphRetriever
 
 _REPO = Path(__file__).resolve().parent.parent
-_CORPUS = _REPO / "evals" / "retrieval_corpus"
+# Derived from the setting's own default rather than spelled out, so moving the corpus (D-154 put it
+# under `data/`) cannot leave this pointing at nothing. It did exactly that once: the stale literal
+# made every gold case score `0/2 expected sources retrieved`, which reads as a retrieval regression
+# rather than as a missing directory. `_corpus` below asserts the directory exists for the same
+# reason — an empty corpus and a wrong path produce identical numbers.
+_CORPUS = _REPO / EvalSettings.model_fields["eval_retrieval_corpus_dir"].default
 
 # (case id, expected recall, expected precision, gate pass). Pinned from the fixture corpus.
 _EXPECTED = {
@@ -37,6 +43,10 @@ _EXPECTED = {
 @pytest.fixture
 def _corpus(monkeypatch: pytest.MonkeyPatch) -> None:
     """Point the retrieval metrics at the repo's gold corpus regardless of the test cwd."""
+    assert _CORPUS.is_dir(), (
+        f"the gold retrieval corpus is not at {_CORPUS}; every case below would score zero recall "
+        "and read as a retrieval regression"
+    )
     monkeypatch.setattr(settings, "eval_retrieval_corpus_dir", str(_CORPUS))
     # Pin the gate floor so the expected pass/fail column does not drift with a config edit.
     monkeypatch.setattr(settings, "retrieval_recall_min", 0.75)
