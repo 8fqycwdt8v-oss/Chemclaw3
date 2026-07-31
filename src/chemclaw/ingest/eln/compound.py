@@ -12,8 +12,9 @@ consequences the analysis traced back to the same root:
   `CN(C)C=O` were three unrelated tokens to every lexical path, and the optimization-campaign
   grouping compared conditions that were textually different and chemically identical (KNW-4).
 
-A compound note is the one identity both needed. The id is derived from the canonical SMILES via the
-shared `stable_hash`, so the same molecule always maps to the same note from any source — which is
+A compound note is the one identity both needed. The id is derived from the canonical SMILES
+(`chemclaw.core.chem.compound_id`, which lives in `core` so a connector can cite a note without
+importing the graph), so the same molecule always maps to the same note from any source — which is
 what makes a citation stable and a vocabulary possible.
 
 The note deliberately records only what is *known with certainty*: the canonical structure, the
@@ -21,20 +22,9 @@ recognised name when `chemclaw.core.reagents` knows one, and the synonyms that r
 predicted properties — those live in the calculation cache and would go stale here.
 """
 
-from chemclaw.core.chem import require_canonical_smiles
-from chemclaw.core.ids import stable_hash
+from chemclaw.core.chem import compound_id, require_canonical_smiles
 from chemclaw.core.reagents import display_name, known_names, resolve_compound_name
 from chemclaw.kg.note import Note
-
-
-def compound_id(smiles: str) -> str:
-    """The stable note id for a molecule, derived from its canonical structure.
-
-    Structure-derived rather than name-derived, so two sources that spell the same molecule
-    differently still reach one note — the property that makes a citation from a fingerprint hit
-    meaningful at all.
-    """
-    return f"compound-{stable_hash(require_canonical_smiles(smiles), chars=12)}"
 
 
 def synonyms_for(smiles: str) -> list[str]:
