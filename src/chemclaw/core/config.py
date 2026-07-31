@@ -1377,8 +1377,9 @@ class ConnectorSettings(BaseSettings):
 
     Its own section because a connector is the one mechanism for adding *any* capability — the
     MCP tools a FastAPI server serves, the durable jobs a Temporal worker runs, and the skills
-    and agent profiles that come with them (`connectors/`, `docs/archive/plans/connector-plan.md`). It
-    replaces the old `mcp_servers` list, which could only describe the first of those four.
+    and agent profiles that come with them (`connectors/`,
+    `docs/archive/plans/connector-plan.md`). It replaces the old `mcp_servers` list, which could
+    only describe the first of those four.
     """
 
     # Where connector bundles are discovered: one or more directories, OS-path-separator
