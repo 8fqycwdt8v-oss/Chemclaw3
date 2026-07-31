@@ -24,18 +24,21 @@ dropped rather than deferred.
 from datetime import timedelta
 
 from temporalio import workflow
+from temporalio.exceptions import ActivityError
 
 # Activities, models, and config are ordinary modules that must bypass the workflow sandbox's
 # re-import isolation (the standard Temporal pattern).
 with workflow.unsafe.imports_passed_through():
     from chemclaw.connectors.qm.activities import (
+        lookup_qm_result,
         parse_qm_output,
+        persist_qm_result,
         poll_hpc_status,
         prepare_input,
         submit_to_hpc,
     )
     from chemclaw.connectors.qm.knowledge import note_from_qm_result
-    from chemclaw.connectors.qm.specs import QMJobInput, QmJobSpec
+    from chemclaw.connectors.qm.specs import QmCacheLookup, QMJobInput, QMJobResult, QmJobSpec
     from chemclaw.core.config import settings
     from chemclaw.durable.connector_job import ConnectorJobResult
 
@@ -71,6 +74,29 @@ class QMJobWorkflow:
         prepared = await workflow.execute_activity(
             prepare_input, job, start_to_close_timeout=activity_timeout, retry_policy=BAD_DATA_RETRY
         )
+
+        # Compute-once for the most expensive thing the system runs (D-011/D-154). The workflow id
+        # already deduplicates identical requests, but only while Temporal retains the execution —
+        # once it ages out, the id is free again and the same molecule re-ran hours of cluster time.
+        # The store has no such horizon, so this is the lookup that actually makes the rule hold.
+        # A lookup failure is not fatal: the worst case is the recompute we would have done anyway.
+        try:
+            cached = await workflow.execute_activity(
+                lookup_qm_result,
+                prepared,
+                start_to_close_timeout=activity_timeout,
+                retry_policy=BAD_DATA_RETRY,
+            )
+        except ActivityError:
+            workflow.logger.warning(
+                "could not read the calculation store for %s; recomputing",
+                prepared.molecule_smiles,
+                exc_info=True,
+            )
+            cached = QmCacheLookup()
+        if cached.result is not None:
+            return _envelope(cached.result, cached.calc_key)
+
         handle = await workflow.execute_activity(
             submit_to_hpc,
             prepared,
@@ -101,17 +127,52 @@ class QMJobWorkflow:
             retry_policy=BAD_DATA_RETRY,
         )
 
-        # The note is *built* here and published by core (step 2.8): the QM→note mapping is this
-        # domain's knowledge, while the PR-gate is the GxP boundary a connector must not be able to
-        # reach around. Returned unconditionally — whether it is published is the manifest's
-        # `publish_to_graph`, which core reads, so this workflow carries no second switch for the
-        # same decision.
-        return ConnectorJobResult(
-            summary=(
-                f"{result.method}/{result.basis_set} on {result.molecule_smiles}: "
-                f"{result.total_energy_hartree:.6f} Hartree "
-                f"({'converged' if result.converged else 'NOT converged'})"
-            ),
-            data=result.model_dump(mode="json"),
-            note=note_from_qm_result(result),
-        )
+        # Persist the number itself (D-154), so an hours-long run survives independently of whether
+        # a human merges the note's PR and of how long Temporal retains this execution. Failure is
+        # absorbed rather than fatal: Temporal has already retried the activity `activity_max_
+        # attempts` times by the time this raises, so what is left is a persistently unreachable
+        # store — and losing the cache entry is worth far less than the completed science, which is
+        # still returned and still published. The empty key degrades the note to today's shape.
+        try:
+            calc_key = await workflow.execute_activity(
+                persist_qm_result,
+                result,
+                start_to_close_timeout=activity_timeout,
+                retry_policy=BAD_DATA_RETRY,
+            )
+        except ActivityError:
+            # WARNING, not ERROR: the job succeeded. This is the cache write behind it failing,
+            # which costs a recompute on the next identical request — the exact regression D-154
+            # exists to prevent, so it must be visible rather than silent.
+            workflow.logger.warning(
+                "could not persist the QM result for %s; the job stands but its calculation "
+                "store entry and the note's calc_refs are missing",
+                result.molecule_smiles,
+                exc_info=True,
+            )
+            calc_key = ""
+
+        return _envelope(result, calc_key)
+
+
+def _envelope(result: QMJobResult, calc_key: str) -> ConnectorJobResult:
+    """Wrap a finished result in the envelope core reads — the one exit both paths take.
+
+    The note is *built* here and published by core (step 2.8): the QM→note mapping is this domain's
+    knowledge, while the PR-gate is the GxP boundary a connector must not be able to reach around.
+    Returned unconditionally — whether it is published is the manifest's `publish_to_graph`, which
+    core reads, so this workflow carries no second switch for the same decision.
+
+    Shared by the computed path and the cache-hit path so the two can never answer differently: a
+    result served from the store has to look exactly like the run that produced it, including the
+    note, or "cached" would become a visible and confusing distinction for the chemist.
+    """
+    return ConnectorJobResult(
+        summary=(
+            f"{result.method}/{result.basis_set} on {result.molecule_smiles}: "
+            f"{result.total_energy_hartree:.6f} Hartree "
+            f"({'converged' if result.converged else 'NOT converged'})"
+        ),
+        data=result.model_dump(mode="json"),
+        note=note_from_qm_result(result, calc_key),
+    )

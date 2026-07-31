@@ -19,12 +19,15 @@ from temporalio.exceptions import ActivityError, ApplicationError
 from temporalio.testing import ActivityEnvironment
 from temporalio.worker import Replayer, Worker
 
+from chemclaw.connectors.qm import activities as qm_activities
 from chemclaw.connectors.qm.activities import parse_qm_output, poll_hpc_status, prepare_input
+from chemclaw.connectors.qm.cache import calculation_key
 from chemclaw.connectors.qm.hpc import nextflow
-from chemclaw.connectors.qm.specs import HpcJobHandle, QMJobInput, QmJobSpec
+from chemclaw.connectors.qm.specs import HpcJobHandle, QMJobInput, QMJobResult, QmJobSpec
 from chemclaw.connectors.qm.workflows import QMJobWorkflow
 from chemclaw.core.config import settings
 from chemclaw.durable.connector_job import ConnectorJobResult
+from chemclaw.science.calc.store import InMemoryStore, StoredResult
 from tests.temporal_env import QM_ACTIVITIES, pydantic_client, start_env_or_skip
 
 _TASK_QUEUE = "test-connector-qm"
@@ -282,3 +285,86 @@ def test_a_success_resets_the_consecutive_error_count(
         ActivityEnvironment().run(poll_hpc_status, HpcJobHandle(scheduler_job_id="run-80"))
     )
     assert output == "energy=-2.000000 converged=True"
+
+
+def test_the_finished_result_is_persisted_and_cited(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A completed run leaves the number in the calculation store and the note pointing at it.
+
+    The durability half of D-154. Before it, the only homes for an hours-long cluster result were
+    Temporal's event history and a note that exists *only if* a human merges its PR — so an
+    unmerged PR plus an aged-out execution lost the result outright.
+    """
+    store = InMemoryStore()
+    monkeypatch.setattr(qm_activities, "default_store", lambda: store)
+
+    async def _run() -> ConnectorJobResult:
+        async with await start_env_or_skip() as env:
+            client = pydantic_client(env)
+            async with Worker(
+                client,
+                task_queue=_TASK_QUEUE,
+                workflows=[QMJobWorkflow],
+                activities=QM_ACTIVITIES,
+            ):
+                result: ConnectorJobResult = await client.execute_workflow(
+                    QMJobWorkflow.run,
+                    QmJobSpec(molecule_smiles="CCO", method="B3LYP", basis_set="def2-SVP"),
+                    id="qm-persist-1",
+                    task_queue=_TASK_QUEUE,
+                )
+                return result
+
+    result = asyncio.run(_run())
+    key = calculation_key(QmJobSpec(molecule_smiles="CCO", method="B3LYP", basis_set="def2-SVP"))
+
+    assert asyncio.run(store.get(key)) is not None
+    assert result.note is not None
+    assert result.note.calc_refs == [key.as_str()]
+
+
+def test_an_identical_second_run_is_served_from_the_store(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The reuse half of D-154 — the part that actually stops paying twice for cluster time.
+
+    Seeded with a sentinel energy no mock run can produce (the mock's is bounded by -99.9), so the
+    assertion can only pass if the workflow read the store and skipped submit/poll entirely. The
+    workflow id deduplicates identical requests too, but only while Temporal retains the execution;
+    once it ages out the id is free again and this lookup is the only thing left.
+    """
+    store = InMemoryStore()
+    monkeypatch.setattr(qm_activities, "default_store", lambda: store)
+    spec = QmJobSpec(molecule_smiles="CCO", method="B3LYP", basis_set="def2-SVP")
+    seeded = QMJobResult(
+        molecule_smiles="CCO",
+        method="B3LYP",
+        basis_set="def2-SVP",
+        total_energy_hartree=-12345.678,
+        converged=True,
+        requested_by="oid-seed",
+    )
+    asyncio.run(
+        store.put(
+            StoredResult(key=calculation_key(spec), result=seeded.model_dump(mode="json")),
+        )
+    )
+
+    async def _run() -> ConnectorJobResult:
+        async with await start_env_or_skip() as env:
+            client = pydantic_client(env)
+            async with Worker(
+                client,
+                task_queue=_TASK_QUEUE,
+                workflows=[QMJobWorkflow],
+                activities=QM_ACTIVITIES,
+            ):
+                result: ConnectorJobResult = await client.execute_workflow(
+                    QMJobWorkflow.run,
+                    spec,
+                    id="qm-persist-2",
+                    task_queue=_TASK_QUEUE,
+                )
+                return result
+
+    result = asyncio.run(_run())
+    assert result.data["total_energy_hartree"] == pytest.approx(-12345.678)

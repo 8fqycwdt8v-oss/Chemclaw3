@@ -15,7 +15,9 @@ from temporalio.contrib.pydantic import pydantic_data_converter
 from temporalio.testing import WorkflowEnvironment
 
 from chemclaw.connectors.qm.activities import (
+    lookup_qm_result,
     parse_qm_output,
+    persist_qm_result,
     poll_hpc_status,
     prepare_input,
     submit_to_hpc,
@@ -27,6 +29,8 @@ QM_ACTIVITIES: Sequence[Callable[..., Any]] = [
     submit_to_hpc,
     poll_hpc_status,
     parse_qm_output,
+    lookup_qm_result,
+    persist_qm_result,
 ]
 
 

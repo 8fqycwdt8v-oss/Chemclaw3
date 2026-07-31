@@ -16,8 +16,18 @@ from chemclaw.ingest.eln.compound import compound_id
 from chemclaw.kg.note import Note
 
 
-def note_from_qm_result(result: QMJobResult) -> Note:
+def note_from_qm_result(result: QMJobResult, calc_key: str = "") -> Note:
     """Map a QM job result to an agent-authored `job-result` note.
+
+    **The note also links its calculation** when `calc_key` is given (D-154) — the flat
+    `CalculationKey` string the persist activity returns, recorded in `calc_refs`. That is the
+    second half of the same graph-island problem the compound link below closed: `calc_refs` and
+    `chemclaw.kg.crosslink` (`cited_calculations`, `notes_for_calculation`) have existed since
+    D-133 with **no producer anywhere in `src/`**, so the read side was complete and unreachable.
+    A QM result is the natural first writer, being the most expensive number the system holds.
+
+    Empty when the persist step is disabled or did not complete, because a reference to a row that
+    was never written would fail `chemclaw.kg.validate` on the very PR this note opens.
 
     **The note links its compound.** It used to refuse to, and said so: a wikilink to a compound
     note that might not exist yet would dangle and fail `chemclaw.kg.validate` on the very PR this
@@ -52,5 +62,6 @@ def note_from_qm_result(result: QMJobResult) -> Note:
         compound_smiles=result.molecule_smiles,
         created_by="agent",
         source=f"qm:{result.requested_by}",
+        calc_refs=[calc_key] if calc_key else [],
         body=body,
     )

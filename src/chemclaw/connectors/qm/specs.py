@@ -107,3 +107,19 @@ class QMJobResult(BaseModel):
     converged: bool
     # Provenance for the audit trail (mirrors QMJobInput.requested_by).
     requested_by: str
+
+
+class QmCacheLookup(BaseModel):
+    """What the calculation store holds for one job: its key, and the result if already computed.
+
+    The key travels even on a miss, so the workflow has one shape to handle either way and never
+    re-derives it — which it could not do anyway, since deriving the key canonicalizes through
+    RDKit and the workflow has to stay deterministic and sandbox-safe.
+
+    `calc_key` is empty when persistence is switched off, which every consumer already reads as
+    "no reference to record" (`note_from_qm_result`). Defined after `QMJobResult` rather than beside
+    the other request models because it *contains* one — no forward reference to rebuild.
+    """
+
+    calc_key: str = ""
+    result: QMJobResult | None = None

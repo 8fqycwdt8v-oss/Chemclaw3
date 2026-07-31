@@ -188,7 +188,7 @@ this reason; the filenames make that ordering irrelevant now, and the numbers st
 | [D-151](D-151-the-durable-history-compacts-itself-because-maf-s.md) | The durable history compacts itself, because MAF's after-run compaction cannot reach it |
 | [D-152](D-152-metrics-carry-labels-caching-is-measured-not-built.md) | Metrics carry labels, caching is measured rather than built, and the CLI meets the harness |
 | [D-153](D-153-the-mid-turn-wait-asks-the-jobs-not-the-mailbox.md) | The mid-turn wait asks the jobs, not the mailbox |
-| D-154 | RESERVED — a durable connector result is persisted in the calculation store, and that store becomes readable |
+| [D-154](D-154-the-expensive-calculation-is-the-one-that-was-not.md) | The expensive calculation is the one that was not cached |
 | D-155 | RESERVED — the turn stream reports a tool's lifecycle and its result, not just that a call happened |
 | D-156 | RESERVED — retrieval carries provenance, so a claim can be qualified by who authored its evidence |
 | D-157 | RESERVED — an ungated observations tier, with the human gate moved from every observation to the few worth promoting |

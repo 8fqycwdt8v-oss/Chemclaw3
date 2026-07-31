@@ -103,7 +103,7 @@ breaking window.
 One decision: *a durable connector result is persisted in the calculation store like any other
 computation, and that store is readable.* W2.1 and W2.2 are the two halves.
 
-- [ ] **W2.1 Persist the QM result.** Constraints found while planning, all load-bearing:
+- [x] **W2.1 Persist the QM result.** — shipped, D-154. Constraints found while planning, all load-bearing:
       - The workflow is deterministic and cannot touch Postgres → persistence is a **new activity**
         on `bundle_queue("qm")`, called after `parse_qm_output`.
       - `connectors/qm/specs.py` is a **strict leaf module** (`tests/test_connector_isolation.py`
