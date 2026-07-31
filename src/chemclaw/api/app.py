@@ -932,7 +932,7 @@ def create_app(
                 ) from exc
             acquired = True
             METRICS.increment("chemclaw_turns_started_total")
-            response = EventSourceResponse(_turn_events())
+            response = EventSourceResponse(_turn_events(), ping=settings.service_sse_ping_seconds)
             handed_off = True
             return response
         finally:
@@ -1005,7 +1005,7 @@ def create_app(
 
         handed_off = False
         try:
-            response = EventSourceResponse(_events())
+            response = EventSourceResponse(_events(), ping=settings.service_sse_ping_seconds)
             handed_off = True
             return response
         finally:

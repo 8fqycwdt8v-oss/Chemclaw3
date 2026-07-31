@@ -6,7 +6,7 @@ Renumbered from D-154–D-159 on merge: another branch landed its own D-154/D-15
 branch merging second renumbers (`CLAUDE.md`).
 
 The review is in the session's two artifacts (a dataflow atlas and a gaps/proposals companion).
-This file is the implementation plan for every proposal it made. **W1.6, W1.7, W1.8 and W2.1 are shipped; everything else is still plan only.**
+This file is the implementation plan for every proposal it made. **W1.1, W1.2, W1.3, W1.6, W1.7, W1.8 and W2.1 are shipped. W1.4 is held pending a decision; everything else is still plan only.**
 
 (The previous occupant of this file, the restructure-consistency pass, is merged; its record is
 D-156. The one before it, the agentic-system review, is D-145 and D-151…D-153.)
@@ -55,7 +55,7 @@ breaking window.
 
 ### Backend (`src/chemclaw/api/`)
 
-- [ ] **W1.1 Announce a tool call when it is issued, not when it returns.** Today `_ToolCallTrace`
+- [x] **W1.1 Announce a tool call when it is issued, not when it returns.** — shipped, D-159 (completeness-by-parse, not a separate start event). Today `_ToolCallTrace`
       flushes when an update passes without adding to the call — and for a streamed call that
       terminating update is the one carrying the *result*. Split the lifecycle: emit `ToolCallEvent`
       at issue, and let the existing `tool_failed` / a new `tool_result` close it. This is the
@@ -63,15 +63,15 @@ breaking window.
       timeouts) into visible progress.
       *Acceptance*: a test with a fake agent that streams a call then a delayed result asserts the
       `tool_call` event is yielded **before** the result update is consumed.
-- [ ] **W1.2 Add `ToolResultEvent`** to `api/events.py` (`tool`, truncated `preview`, `ok: bool`),
+- [x] **W1.2 Add `ToolResultEvent`** — shipped, D-159. Success-only: a raised call already has `tool_failed`, so no `ok` field. to `api/events.py` (`tool`, truncated `preview`, `ok: bool`),
       emitted on completion. Reuse the existing `_ARG_PREVIEW_CHARS` truncation discipline. Right
       now a computed number reaches the chemist only as the model's paraphrase, and a turn that dies
       after a successful calculation loses it entirely.
       *Acceptance*: the value appears in the stream independently of the model's own text.
-- [ ] **W1.3 Configure SSE `ping`** on both `EventSourceResponse` constructions (the turn stream and
+- [x] **W1.3 Configure SSE `ping`** — shipped, D-159 (`service_sse_ping_seconds`, default 15). on both `EventSourceResponse` constructions (the turn stream and
       the job-event stream). Neither passes `ping=` today, so there is not even a transport-level
       keepalive during a long tool wait.
-- [ ] **W1.4 Open the stream before admission.** The durable turn claim and the semaphore both
+- [ ] **W1.4 Open the stream before admission.** — HELD, still needs the requester's call: it turns a 503 under load into a 200 whose body reports the problem, which is an API contract change for any client retrying on 503. The durable turn claim and the semaphore both
       complete before `EventSourceResponse` is constructed, so a queued turn waits up to
       `service_turn_admission_timeout_seconds` (5 s) with no response and may then 503. Move
       acquisition inside the generator and emit a `queued` event first.
