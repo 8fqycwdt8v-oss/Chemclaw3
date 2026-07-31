@@ -43,6 +43,7 @@ _EXPECTED_INPROCESS_TOOLS = {
     "find_knowledge_gaps",
     "propose_knowledge_note",
     "record_confirmed_answer",
+    "recall_observations",
     # The one durable launcher core still owns — the report's workflow has not moved into a bundle
     # (D-115: its closure *is* core's) — and the one status tool every durable job is collected
     # with, connector-owned or not. The QM launcher and its bespoke status tool were the last pair

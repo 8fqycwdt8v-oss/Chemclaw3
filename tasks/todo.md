@@ -234,38 +234,52 @@ computation, and that store is readable.* W2.1 and W2.2 are the two halves.
 The proposal in one line: **the human gate does not disappear, it moves from every observation to
 the few worth promoting.**
 
-- [ ] **Store in Postgres, not git** (migration **024**). Git's value is human review, diff and
+**Shipped, D-161.** Migration **025**, not 024 — D-163 took that. What the plan asked for, minus
+two things it turned out could not be built and plus one it did not anticipate; see the ADR.
+
+- [x] **Store in Postgres, not git** (migration **025**). Git's value is human review, diff and
       audit; with no review it buys PR noise and repo churn and returns nothing. A table gives cheap
       upsert-counters for accumulating support, TTL eviction (the `ArtifactEvictionWorkflow` is the
       precedent), and no branch-per-note explosion. This *preserves* "git is the source of truth"
       precisely because observations are explicitly **not** truth. Follow the
       `agent/subscriptions.py` idiom (module SQL constants, `db.connection`, explicit commit).
-- [ ] **Shape**: `statement`, `scope` (transformation class / chemotype / step), `evidence_note_ids`,
+- [x] **Shape**: (no `support_count` — support is `len(evidence_note_ids)`, derived, because a
+      counter can be incremented by something that is not a merged note; no `contradiction_count` —
+      see below.) Fields: `statement`, `scope` (transformation class / chemotype / step), `evidence_note_ids`,
       `projects_seen`, `support_count`, `contradiction_count`, `first_seen`, `last_seen`,
       `status ∈ {open, promoted, retired}`, `origin ∈ {interaction, corpus-mining}`.
-- [ ] **Generation**: a scheduled Temporal workflow on the core `background` queue, shaped exactly
+- [x] **Generation**: a scheduled Temporal workflow on the core `background` queue, shaped exactly
       like the existing memory jobs (`durable/memory_jobs.py`) — no new infrastructure, the same
       constraint D-019 imposed on the memory layers. Mines (a) merged-corpus clusters below the
       playbook bar and (b) **interaction history across sessions**, which is the thing that does not
       exist today. Register in `cli/schedules.py` (`OWNED_SCHEDULE_IDS` + `planned_schedules`),
       behind `observations_enabled: bool = False`.
-- [ ] **Retrieval discipline (load-bearing)**: observations return in a **separate, labelled bucket**
+- [x] **Retrieval discipline** — shipped as a *separate tool* (`recall_observations`), not a
+      labelled bucket inside `gather_evidence`: a label is the part a model skips, and a separate
+      call means an observation cannot arrive as an evidence chunk by any path. Original wording: observations return in a **separate, labelled bucket**
       — never fused into the same ranked list as notes. One added instruction, parallel to the
       episodic-vs-semantic separation the architecture already demands: *an observation may direct
       what you look for; it may never be the evidence for a claim.* An answer resting only on an
       observation must say so.
-- [ ] **Anti-feedback rule — the dangerous failure mode.** Support counts **distinct merged evidence
+- [x] **Anti-feedback rule** — a CHECK in `025` plus a validator on the model, *and* it turned
+      out to decide what may be mined at all: support counts merged notes, so a miner reading raw
+      session transcripts would produce observations that can never accumulate support and
+      therefore never promote. Both miners read merged notes only. Original wording — the dangerous failure mode.** Support counts **distinct merged evidence
       notes** only; observation-cites-observation is structurally forbidden (a schema constraint, not
       a guideline). Otherwise the agent writes an observation, later retrieves its own observation,
       counts it as corroboration, and inflates past the promotion threshold into a PR — a
       self-confirming loop wearing the costume of cross-project evidence.
-- [ ] **Promotion**: crossing ≥N distinct projects and ≥M distinct merged evidence notes with no open
+- [x] **Promotion**: crossing ≥N distinct projects and ≥M distinct merged evidence notes with no open
       contradictions auto-opens **one** PR proposing a `playbook` note, through the existing
       `propose_note`. No second write path (D-019/D-078's rule).
-- [ ] **Decay + instrumentation**: unsupported observations retire on a window; track the promotion
+- [x] **Decay + instrumentation**: unsupported observations retire on a window; track the promotion
       rate. If nothing ever promotes, the tier is a write-only log and should be deleted rather than
       defended.
-- [ ] **Contradiction detection comes nearly free**: `kg/conflicts.py` already flags same-compound,
+- [ ] ~~**Contradiction detection comes nearly free**~~ — **dropped, and the reason is in D-161**:
+      `kg/conflicts.py` compares two notes' claims about the same *compound* with a confidence gap;
+      an observation is a statement about a transformation class or a conversation, so that
+      detector cannot evaluate one. A `contradiction_count` column nothing can populate is the
+      "reserved for later" stub this repo deletes on sight. Original claim: `kg/conflicts.py` already flags same-compound,
       concurrently-valid notes with a confidence gap; "this observation contradicts merged knowledge"
       is exactly the signal a process chemist wants.
 

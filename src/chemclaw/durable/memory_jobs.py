@@ -37,7 +37,7 @@ from chemclaw.durable.publish import BAD_DATA_RETRY, note_publish_retry
 logger = logging.getLogger(__name__)
 
 
-async def _all_reactions() -> list[OrdReaction]:
+async def all_reactions() -> list[OrdReaction]:
     """Read and map every reaction from the *configured active* ingest sources (the memory corpus).
 
     Reads the ingest halves of `settings.data_sources` (via `chemclaw.ingest.sources.registry`),
@@ -68,21 +68,21 @@ async def _all_reactions() -> list[OrdReaction]:
 @activity.defn
 async def build_campaign_notes_activity() -> list[Note]:
     """Detect reaction chains across the corpus and build (not publish) one campaign note each."""
-    return build_campaign_notes(await _all_reactions())
+    return build_campaign_notes(await all_reactions())
 
 
 @durable_activity("background")
 @activity.defn
 async def build_playbook_notes_activity() -> list[Note]:
     """Distil cross-project candidates across the corpus and build a playbook note per candidate."""
-    return build_playbook_notes(await _all_reactions())
+    return build_playbook_notes(await all_reactions())
 
 
 @durable_activity("background")
 @activity.defn
 async def build_optimization_notes_activity() -> list[Note]:
     """Group same-transformation runs across the corpus and build an optimization note per group."""
-    return build_optimization_notes(await _all_reactions())
+    return build_optimization_notes(await all_reactions())
 
 
 @durable_activity("background")
