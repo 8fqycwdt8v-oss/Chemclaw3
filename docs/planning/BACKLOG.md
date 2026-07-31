@@ -247,35 +247,48 @@ QM path. The rows below are what survives that merge, narrowed to say so.
 
 **Data correctness, in rough order of how expensive it gets to fix later.**
 
-- [ ] **No molecule standardization** — [M], and **it should be fixed before first real ingest**.
-      `core/chem.py::canonical_smiles` is `MolToSmiles(MolFromSmiles(s))`; there is no
-      `rdMolStandardize` anywhere — no uncharger, no largest-fragment chooser, no tautomer
-      canonicalization, no salt stripping. So a free base and its HCl salt, two tautomers, and a
-      racemate written without stereo each mint distinct `compound_id`s — and that key also drives
-      the calculation cache and both fingerprint indices, so identity fragmentation becomes cache
-      misses on work D-011 promises never to repeat. Retrofitting after real data lands means
-      migrating the cache, both fingerprint tables and the graph at once.
-- [ ] **An amended ELN entry is silently discarded** — [M]. `ingest/eln/sync.py` skips any entry
-      whose note id already exists, without comparing content, and `OrdReaction` has no
-      `record_modified`/version/revision. ELNs amend in place — a yield corrected after assay, an
-      impurity added, an entry retracted — while keeping `created_at`, so every correction is
-      dropped. There is also no retraction path at all: a withdrawn entry stays current evidence
-      forever. The docstring's premise ("ELN exports are immutable") is an assumption about someone
-      else's system.
-- [ ] **No source-system provenance on ingested records** — [S]. `provenance` is
-      `f"eln:{operator}"`; no system id, tenant, instance, export batch or schema version. With two
-      sources enabled, colliding `entry_id`s produce the same note id and the second loses to the
-      skip above.
+- [x] **No molecule standardization** — closed by D-2026-07-31-two-spellings-of-one-molecule,
+      before first real ingest as the row asked. The pipeline splits the one function in two,
+      because there were always two questions: `canonical_smiles` answers "same structure" and
+      keys the calculation cache (an anion must not silently become its conjugate acid — the test
+      suite caught that immediately), while `standard_smiles` answers "same compound" and keys
+      `compound_id`, both fingerprint indices, chain matching and progression grouping.
+      `STANDARDIZATION_VERSION` in the fingerprint definitions retires stale rows rather than
+      ranking two notions of sameness against each other.
+- [ ] **Stereochemistry is left exactly as RDKit reports it** — [M], and deliberately out of the
+      row above. Collapsing a racemate onto a single enantiomer is a chemistry decision with real
+      consequences for a chiral route, and it is not one to make as a side effect of stripping
+      counterions. Wants its own argument, and probably a per-deployment answer.
+- [x] **An amended ELN entry is silently discarded** — closed by
+      D-2026-07-31-an-eln-entry-is-versioned-not-immutable, at both layers. The adapters filter on
+      `entry_window(created, modified)`, so a correction re-enters the fetch window at all — it
+      could not before, which is why the sync never even saw one — and the sync compares the note's
+      *body* rather than its id. An amendment is a re-proposal of the same note, so the PR-gate
+      shows a reviewer the diff; no second versioning scheme, because git already expresses this.
+- [ ] **A retracted ELN entry stays current evidence** — [M], the half the row above deliberately
+      did not close. A withdrawn entry that simply disappears from the export is invisible to a
+      sync that only reads what is present, and treating a missing file as a retraction would make
+      an export glitch indistinguishable from a withdrawal. Noticing absence needs a full
+      reconciliation pass against the source, which is a different mechanism from the incremental
+      cursor and wants its own decision.
+- [x] **No source-system provenance on ingested records** — closed for what a file-drop adapter
+      can honestly claim: `eln-json:<entry_id>:<operator>` names the source *format* and the record,
+      so two systems' colliding entry ids are at least distinguishable in the note. A file adapter
+      is handed a directory, not a tenant, so it cannot name an instance; a connector talking to a
+      real ELN knows its own and should say so there.
 - [ ] **Mass balance is element-set subsumption only** — [M]. `ingest/eln/validate.py` checks that
       no product element is absent from the inputs, so `benzene + methanol >> paracetamol` passes.
       No charge balance, no yield-vs-limiting-reagent check despite `amount_mmol` being parsed. The
       stronger check already exists and is not reused (`science/calc/reaction.py:178`).
-- [ ] **`note_index` has no embedding-model identity, and there is no chunking** — [M]. Changing
-      `CHEMCLAW_EMBEDDING_MODEL` serves mixed-generation vectors until someone remembers
-      `make reindex`, and nothing detects it — while the in-process embed cache *is* keyed on the
-      model and its docstring names this hazard. Separately, a note is one vector over its whole
-      body and the returned excerpt is `body[:240]`, so a reaction note's matched procedure step is
-      never what comes back.
+- [ ] **`note_index` has no embedding-model identity, and there is no chunking** — [M], **and it
+      is the one item of this block that was not attempted**, so it is stated rather than
+      half-done. Changing `CHEMCLAW_EMBEDDING_MODEL` serves mixed-generation vectors until someone
+      remembers `make reindex`, and nothing detects it — while the in-process embed cache *is*
+      keyed on the model and its docstring names this hazard. Separately, a note is one vector over
+      its whole body and the returned excerpt is `body[:240]`, so a reaction note's matched
+      procedure step is never what comes back. The two halves are one migration and one reindex,
+      and chunking in particular changes what a retrieval hit *is* — every eval baseline moves with
+      it — so it earns its own change rather than riding along with molecule identity.
 - [x] **Hazard screening misses the notes that propose conditions** — the note-type half is
       closed: the gate covers `experiment-proposal` and `bo-candidate` by type, not only by a
       `## Procedure` heading a parameter table does not have.
@@ -283,9 +296,11 @@ QM path. The rows below are what survives that merge, narrowed to say so.
       components of one mixture SMILES, so a quench reagent added at step 8 is screened against one
       consumed at step 1. Needs a `same_step` scope on the rule table, which is a change to
       `rules.yaml`'s schema rather than to the matcher.
-- [ ] **Reaction fingerprints are dominated by solvent choice** — [M]. `ord.py::reaction_smiles`
-      puts solvent and catalyst on the reactant side, so the DRFP similarity driving campaign
-      grouping and `similar_reactions` is weighted by the variable usually being optimized.
+- [x] **Reaction fingerprints are dominated by solvent choice** — closed. `reaction_smiles` builds
+      the three-part `reactants>agents>products` form, with solvent and catalyst in the agent slot;
+      reagents stay on the left because a base or an oxidant participates stoichiometrically.
+      `drfp:b2048:agents` retires rows built under the old form rather than ranking a
+      solvent-dominated fingerprint against a solvent-neutral one.
 
 **Operations.**
 

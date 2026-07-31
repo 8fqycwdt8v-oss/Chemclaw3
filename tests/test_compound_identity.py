@@ -15,7 +15,13 @@ import asyncio
 
 import pytest
 
-from chemclaw.core.chem import InvalidSmilesError, compound_id
+from chemclaw.core.chem import (
+    STANDARDIZATION_VERSION,
+    InvalidSmilesError,
+    canonical_smiles,
+    compound_id,
+    standard_smiles,
+)
 from chemclaw.ingest.eln.compound import compound_note, synonyms_for
 from chemclaw.kg.note import KNOWN_NOTE_TYPES
 from chemclaw.memory.optimization import canonical_condition
@@ -25,6 +31,7 @@ from chemclaw.science.fingerprints.molfp.search import (
     find_substructure_matches,
     record_for,
 )
+from chemclaw.science.fingerprints.rxnfp.fingerprint import reaction_definition
 from chemclaw.science.fingerprints.store import FingerprintRecord, InMemoryFingerprintStore
 
 
@@ -169,3 +176,49 @@ def test_an_unciteable_row_yields_no_citation_rather_than_sinking_the_search() -
     cited = asyncio.run(_run())
     assert compound_id("CCO") in cited
     assert None in cited
+
+
+# --- standardization: the "same compound" question (D-2026-07-31-two-spellings) ---------------
+
+
+def test_a_salt_and_its_free_base_are_one_compound() -> None:
+    """The classic production failure: identity fragmenting on the counterion.
+
+    `compound_id` keys the calculation cache and both fingerprint indices, so a hydrochloride
+    minting its own id means cache misses on work D-011 promises never to repeat, and a similarity
+    search that ranks a molecule against itself as merely similar.
+    """
+    assert compound_id("CCN.Cl") == compound_id("CCN")
+    assert compound_id("CC(=O)[O-].[Na+]") == compound_id("CC(=O)O")
+
+
+def test_two_tautomers_are_one_compound() -> None:
+    """Two spellings of one substance, which a chemist would never file separately."""
+    assert compound_id("CC(O)=NC") == compound_id("CC(=O)NC")
+
+
+def test_two_different_molecules_stay_different() -> None:
+    """The guard on the above: a pipeline that collapsed everything would pass those tests too."""
+    assert compound_id("CCO") != compound_id("CCN")
+    assert compound_id("c1ccccc1") != compound_id("c1ccncc1")
+
+
+def test_a_calculation_input_keeps_the_charge_it_was_given() -> None:
+    """The other direction, and the one that makes this two functions rather than one.
+
+    A chemist submitting acetate means acetate. Standardizing the *calculation* key would neutralize
+    it and silently compute the conjugate acid — so `canonical_smiles` answers "same structure" and
+    stays spelling-only, while `standard_smiles` answers "same compound".
+    """
+    assert canonical_smiles("CC(=O)[O-]") != canonical_smiles("CC(=O)O")
+    assert standard_smiles("CC(=O)[O-]") == standard_smiles("CC(=O)O")
+
+
+def test_standardization_is_recorded_in_the_fingerprint_definition() -> None:
+    """Rows indexed under an older notion of sameness must fall out, not be ranked against new ones.
+
+    The same failure-safe behaviour a changed ECFP radius already gets: the store filters on the
+    definition, so a stale row is invisible to search until a re-index rebuilds it.
+    """
+    assert STANDARDIZATION_VERSION in molecule_definition()
+    assert STANDARDIZATION_VERSION in reaction_definition()

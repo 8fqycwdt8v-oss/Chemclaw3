@@ -79,6 +79,21 @@ def warn_late_arrivals(logger: Logger, source: str, names: list[str]) -> None:
     )
 
 
+def entry_window(created_at: datetime, modified_at: datetime | None) -> datetime:
+    """The timestamp an entry should be filtered on: the later of creation and amendment.
+
+    One definition, because an adapter that filtered on `created_at` alone would silently drop
+    every in-place correction its source makes — the failure this exists to close — and an adapter
+    that filtered on `modified_at` alone would drop every entry that has never been amended.
+
+    `max` rather than "modified if present, else created" only differs when a source reports an
+    amendment *older* than the creation it amends, which is clock skew rather than chemistry. It is
+    cheap insurance and no test can distinguish the two; said here so the choice does not read as
+    load-bearing.
+    """
+    return max(created_at, modified_at) if modified_at is not None else created_at
+
+
 class ElnMappingError(ChemclawError):
     """An adapter could not map a raw entry to a canonical reaction (G4).
 
@@ -98,6 +113,15 @@ class RawEntry(BaseModel):
     entry_id: str = Field(min_length=1)
     created_at: datetime
     payload: dict[str, Any]
+    # When the source last *amended* this entry, if it says. An ELN corrects an entry in place — a
+    # yield revised after assay, an impurity added, a retraction — while keeping `created_at`, so
+    # an entry filtered on creation time alone is never fetched again and the correction is lost
+    # with no rejection and no counter. An adapter that maps a modification timestamp lets the
+    # fetch window see the amendment and the sync compare content rather than skipping on id.
+    #
+    # Optional because a source may genuinely not record one; `None` means "not reported", not
+    # "never amended", and the overlap replay remains the only thing that catches those.
+    modified_at: datetime | None = None
 
 
 @runtime_checkable
@@ -105,12 +129,17 @@ class ElnAdapter(Protocol):
     """Fetch new ELN entries and map them to the canonical schema. One per ELN source."""
 
     async def fetch_new_entries(self, since: datetime) -> list[RawEntry]:
-        """Return entries created at or after `since` (the sync's high-water cursor).
+        """Return entries created *or amended* at or after `since` (the sync's high-water cursor).
 
         Inclusive on purpose: the cursor is the newest timestamp already seen, and an
         entry stamped in that same second but exported after the run would be skipped
         forever under strictly-after semantics. Re-fetching the boundary entry is safe
         because ingestion is idempotent (id-keyed upserts + idempotent note branch).
+
+        **Amended entries count as new.** An adapter whose source reports a modification time must
+        compare the later of the two against `since` and set `RawEntry.modified_at` — otherwise a
+        correction to an old entry is never fetched, and the sync cannot notice what it never
+        sees. `entry_window` is that comparison, written once so two adapters cannot disagree.
         """
         ...
 

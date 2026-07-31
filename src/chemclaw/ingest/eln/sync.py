@@ -111,7 +111,7 @@ async def sync_entries(
     ingested: list[str] = []
     skipped_existing: list[str] = []
     rejected: list[RejectedEntry] = []
-    existing_ids: set[str] | None = None
+    merged: dict[str, str] | None = None
     cursor = since
     horizon = datetime.now(UTC) + timedelta(seconds=settings.eln_sync_future_tolerance_seconds)
     for raw in entries:
@@ -131,12 +131,21 @@ async def sync_entries(
         cursor = max(cursor, raw.created_at)
         try:
             reaction = adapter.map_to_ord(raw)
+            note = note_from_ord_reaction(reaction)
             if raw.created_at <= since:
-                # Overlap replay: the merged-note lookup is loaded lazily (once per run,
-                # off the event loop) and only when the fetch actually replayed entries.
-                if existing_ids is None:
-                    existing_ids = await asyncio.to_thread(_merged_note_ids)
-                if note_from_ord_reaction(reaction).id in existing_ids:
+                # The entry was seen before, so what is merged decides whether there is anything
+                # new in it. An *amendment* arrives here too: an ELN corrects an entry in place and
+                # `created_at` does not move, so a corrected entry is by definition an old one —
+                # which is also why the adapter has to widen its fetch window (`entry_window`) or
+                # this branch never sees it at all. The lookup is loaded lazily, once per run and
+                # off the event loop, and only when a replay actually happened.
+                if merged is None:
+                    merged = await asyncio.to_thread(_merged_note_bodies)
+                if merged.get(note.id) == note.body.strip():
+                    # Byte-identical to what is merged: nothing to review, so skip the whole
+                    # ingest. A *different* body falls through and is re-proposed, which the
+                    # PR-gate renders as a diff for a human — which is what a git-backed graph is
+                    # for, and why an amendment needs no separate versioning scheme.
                     skipped_existing.append(raw.entry_id)
                     continue
             await ingest_reaction(reaction, reaction_store, molecule_store, submitter)
@@ -184,18 +193,29 @@ async def sync_entries(
     )
 
 
-def _merged_note_ids() -> set[str]:
-    """Ids of every note already merged into the knowledge dir (the already-ingested check).
+def _merged_note_bodies() -> dict[str, str]:
+    """Every merged note's id mapped to its body (the already-ingested check).
 
     Why: the hourly overlap replay must not pay a full ingest (fingerprint upserts + the
     PR-gate's fetch/checkout/push dance) per already-merged entry just to discover it was a
     no-op. Reads through the graph loader's stat-fingerprint cache, so a run where nothing
-    merged costs a directory stat, and each replayed entry costs one set lookup.
+    merged costs a directory stat, and each replayed entry costs one dict lookup.
+
+    **The body, not just the id.** An id-only check treats "already seen" and "unchanged" as the
+    same thing, and they are not: an ELN amends an entry *in place* — a yield corrected after
+    assay, an impurity added, a retraction — while keeping its `created_at`. Every such correction
+    was therefore dropped, silently, with the sync reporting it as `skipped_existing`. The
+    docstring justified that with "ELN exports are immutable", which is an assumption about
+    someone else's system that v1 cannot make.
     """
     knowledge = settings.knowledge_path
     if not knowledge.is_dir():
-        return set()
-    return {note.id for note in load_notes(knowledge)}
+        return {}
+    # Stripped, and compared against a stripped body: reading a note back through
+    # `kg.note.read_note` drops the rendered file's trailing newline, so an exact comparison would
+    # call every merged note amended and re-propose the entire corpus on the first overlap replay.
+    # Trailing whitespace is not an amendment.
+    return {note.id: note.body.strip() for note in load_notes(knowledge)}
 
 
 def _fetch_floor(since: datetime) -> datetime:
