@@ -456,3 +456,35 @@ is between reverting someone's merged decision inside a merge commit and throwin
    clearly better.** Say which and why in the PR — "theirs survives an eviction, mine did not" is
    the useful record, and re-adding what another session deliberately deleted is never a merge
    commit's job.
+
+## Writing the rule is not applying it (2026-07-31, reviewing my own W2/W3 diff)
+
+I committed "the obvious implementation fails silently" to this file, and then — asked to review
+the same branch's diff — found four defects in it, **two of which are that exact shape**:
+
+- a promotion that minted `[[reaction-interaction-42]]`, a citation to a note that cannot exist,
+  failing `kg-validate` on the PR it had just opened, after marking the source observation
+  `promoted` so nothing would retry it;
+- an observation id hashed from a statement containing mutable counts, so a cluster gaining a
+  member minted a *second* row instead of accumulating onto the first — silently defeating the
+  support mechanism the whole tier's promotion rule rests on, and leaving two rows contradicting
+  each other in the retrieval bucket for the retirement window.
+
+The second one is the sharper lesson: `memory/ids.py` documents that exact failure for note ids
+("hashing the exact set would mint a brand-new id whenever a cluster gains a member"), I read that
+file while building the tier, and I reproduced the bug anyway. Knowing a rule and checking my own
+code against it are separate acts, and I only performed the second when asked to.
+
+Both were found in minutes by *running* the code — building the object the way production builds
+it and printing what came out — not by re-reading it. I had re-read all of it before merging.
+
+**Rules:**
+
+1. **Review the diff as its own step, after the gate is green.** "Tests pass" and "I have read
+   this diff for defects" are different claims, and I have been treating the first as evidence for
+   the second. It is not: every one of these four passed a full green `make check`.
+2. **Execute the interesting path, do not read it.** For each new code path, construct the input
+   the way production does and print the output. `playbook_note(...)` printed once would have shown
+   the dangling link immediately; `with_id()` on a grown cluster would have shown two ids.
+3. **When a module documents a failure mode, check my new code against it explicitly** — by name,
+   as a step. Proximity to the warning is not protection from the bug.
