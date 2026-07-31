@@ -10,5 +10,6 @@
     {"smiles": "c1ccc(-c2ccccc2)cc1", "yield_percent": 78}
   ],
   "procedure": "Suzuki–Miyaura coupling of phenylboronic acid and bromobenzene, 90 °C for 12 h in aqueous dioxane; biphenyl obtained in 78% yield.",
+  "hypothesis": "does aqueous dioxane at 90 °C hold conversion without protodeboronation?",
   "operator": "chemist-b"
 }

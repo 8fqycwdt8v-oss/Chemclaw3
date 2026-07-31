@@ -1,4 +1,4 @@
-# D-164 — The deployment envelope: a sidecar that emptied the tree, and three assertions the chart never made
+# D-165 — The deployment envelope: a sidecar that emptied the tree, and three assertions the chart never made
 
 **Status:** accepted · **Date:** 2026-07-31
 

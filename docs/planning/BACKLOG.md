@@ -29,14 +29,14 @@ deliberately did not close, each because it is a design rather than a line of co
       still cannot say how long a running deployment keeps workflow history. It is one Helm value
       plus a runbook line, and it wants a stated policy rather than a copied default — [S].
 
-## Open — v1.0 readiness analysis (2026-07-31, D-162/D-163/D-164)
+## Open — v1.0 readiness analysis (2026-07-31, D-163/D-164/D-165)
 
 A whole-repo sweep for what is missing before v1.0, prompted by two observations: an inline BO
 suggestion is never persisted, and nothing anywhere records *why* a tool was called. Both turned
 out to be instances of wider patterns. Closed in this pass: the two note types the skills taught
-but the schema refused (D-162), a lost knowledge note that could not be counted (D-162), the
-sidecar that emptied the tree it published and three assertions the chart never made (D-164), and
-the plan approval that authorized a session rather than a plan (D-163).
+but the schema refused (D-163), a lost knowledge note that could not be counted (D-163), the
+sidecar that emptied the tree it published and three assertions the chart never made (D-165), and
+the plan approval that authorized a session rather than a plan (D-164).
 
 **Re-checked against `main` after D-156/D-157/D-158 landed from other branches.** Those closed
 four rows this analysis had opened — the durable job record now carries a run's reason, session and
@@ -385,6 +385,27 @@ deliberately not fixed there, each because it needs a decision rather than a pat
   `invalidate_cache()` is called *inside* that window, so a concurrent turn can retrieve an
   agent-proposed, unreviewed note as authoritative evidence. `_return_to_base` fixed the permanent
   version of this; the transient one spans a commit, a fetch and a push.
+## Done — The daily experiment progression (2026-07-31, D-162)
+
+Asked whether the system could read a technician's week-by-week series on one step and propose the
+next run without BO. Most of it was already there; three data gaps were not, and are closed:
+
+- [x] **PROG-1** Chronology. `memory/progression.py` orders a series by `performed_at` and names
+      what changed between consecutive runs; the `optimization-campaign` note gains **Performed**
+      and **Changed vs previous** columns and states in words when its row order is *not* a
+      timeline. `performed_at` existed and reached no artifact the agent reads.
+- [x] **PROG-2** Intent. `OrdReaction.hypothesis` (mapped by the JSON ELN adapter, rendered first
+      in the reaction note) and the `follows` relation — minted by whoever can read the intent,
+      never derived from two dates.
+- [x] **PROG-3** The reasoned path. `experiment-progression` skill + the `experiment-proposal` note
+      type through the existing PR-gate; `deep-research` §6 and `experiment-design` now name the
+      fork between reasoning and BoFire and require the answer to say which it took.
+- [x] **PROG-4** `since`/`until` on `gather_evidence` and `_eligible_notes`, so "what have I tried
+      in the last two weeks" reaches the dates already on the notes.
+
+Not addressed, and worth stating: nothing here reads an instrument trace or correlates impurity
+profiles across runs beyond what the notes say in prose.
+
 ## Open — Surfaced by the deferral-register rewrite (2026-07-31, D-154)
 
 Rewriting `docs/planning/DEFERRED.md` into a register meant checking each row against the tree. Two

@@ -22,11 +22,25 @@ graph.
 
 - **type**: the smallest accurate kind (`compound`, `reaction`, `job-result`,
   `campaign`, `optimization-campaign`, `playbook`, `report`, `protocol`,
-  `experiment-batch`). Use `protocol` for an agent-proposed set of
-  conditions/procedure and `experiment-batch` for a proposed set of next runs from
-  `suggest_next_experiment` — both are proposals, not observed results, and must
-  cite the evidence they rest on. Eval cases are *not*
-  graph notes — they live under `eval_case_dir`, outside the graph (D-014).
+  `experiment-batch`, `experiment-proposal`). Eval cases are *not* graph notes —
+  they live under `eval_case_dir`, outside the graph (D-014).
+
+  **Four of those propose rather than record, and picking the wrong one is easy**,
+  because they differ by *how the suggestion was arrived at* and not by what it
+  looks like. All four must cite the evidence they rest on.
+
+  | type | one or many | where it came from |
+  | --- | --- | --- |
+  | `experiment-proposal` | one next run | your reasoning over the series, arguing from the record (`experiment-progression`) |
+  | `experiment-batch` | a set of runs | `suggest_next_experiment` — a surrogate model's ask, with the design space that produced it |
+  | `protocol` | neither — a procedure | a route or method you are proposing, not a point in a campaign |
+  | `bo-candidate` | one best point | **not yours to write**: minted from a finished durable campaign |
+
+  The line between the first two is the one that matters. If you reasoned your way
+  to the suggestion, it is an `experiment-proposal` and the reasoning is the note.
+  If a model proposed the points, it is an `experiment-batch` and the decision space
+  is the note — a reviewer cannot judge "1.2 mol% Pd" without knowing whether the
+  space went to 5 or stopped at 1.2.
 
   Three further types exist and are **not** yours to hand-draft, because a dedicated
   tool mints each one with provenance you cannot reconstruct by hand: an

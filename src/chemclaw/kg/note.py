@@ -122,6 +122,9 @@ KNOWN_NOTE_TYPES: frozenset[str] = frozenset(
         "report",  # a drafted development report (report/harness.py)
         "job-result",  # a durable calculation's result (connectors/qm/knowledge.py)
         "bo-candidate",  # a BO campaign's recommendation (connectors/bo/knowledge.py)
+        # The agent's reasoned proposal for the next run in a series, argued from the record
+        # rather than from a surrogate model (D-162) — the non-BO sibling of `bo-candidate`.
+        "experiment-proposal",
         "failure-mode",  # a negative result worth not repeating (gap KNW-3)
         # The two proposal types, distinct from every type above because they record what someone
         # *should* run rather than what was observed or computed. Kept apart from `bo-candidate`,

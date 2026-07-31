@@ -36,7 +36,7 @@ it approved, then rewrite its todo list and run something else under the same au
 Hashing the plan the human actually saw makes that a different plan, and a different plan is
 unapproved.
 
-**And why nothing enforced that (D-163).** The binding above described the *record*: the
+**And why nothing enforced that (D-164).** The binding above described the *record*: the
 `plan_approvals` row was keyed by hash, so the durable evidence was correct. Nothing consulted it
 at execution time. `set_agent_mode` had exactly one caller, `grant_execute`, and no counterpart —
 so a session that reached execute mode stayed there for the rest of its life, and the second plan,

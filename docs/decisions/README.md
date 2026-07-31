@@ -196,6 +196,7 @@ this reason; the filenames make that ordering irrelevant now, and the numbers st
 | D-159 | RESERVED — the turn stream reports a tool's lifecycle and its result, not just that a call happened |
 | D-160 | RESERVED — retrieval carries provenance, so a claim can be qualified by who authored its evidence |
 | D-161 | RESERVED — an ungated observations tier, with the human gate moved from every observation to the few worth promoting |
-| [D-162](D-162-prose-named-two-note-types-the-schema-refused-and-a.md) | Prose named two note types the schema refused, and a lost note could not be counted |
-| [D-163](D-163-the-plan-approval-binds-to-the-plan-not-to-the.md) | The plan approval binds to the plan, not to the session |
-| [D-164](D-164-the-deployment-envelope-a-sidecar-that-emptied-the.md) | The deployment envelope: a sidecar that emptied the tree, and three assertions the chart never made |
+| [D-162](D-162-a-series-of-experiments-is-a-sequence-not-a-set.md) | A series of experiments is a sequence, not a set |
+| [D-163](D-163-prose-named-two-note-types-the-schema-refused-and-a.md) | Prose named two note types the schema refused, and a lost note could not be counted |
+| [D-164](D-164-the-plan-approval-binds-to-the-plan-not-to-the.md) | The plan approval binds to the plan, not to the session |
+| [D-165](D-165-the-deployment-envelope-a-sidecar-that-emptied-the.md) | The deployment envelope: a sidecar that emptied the tree, and three assertions the chart never made |

@@ -17,6 +17,7 @@ def note_from_ord_reaction(reaction: OrdReaction) -> Note:
     """Map an `OrdReaction` to an agent-authored `reaction` note (idempotent id)."""
     body = (
         f"Reaction `{reaction.reaction_smiles()}` from ELN entry {reaction.reaction_id}.\n\n"
+        f"{_hypothesis_block(reaction)}"
         f"{_conditions_block(reaction)}"
         f"{_impurity_block(reaction)}"
         f"{_procedure_block(reaction)}"
@@ -34,6 +35,18 @@ def note_from_ord_reaction(reaction: OrdReaction) -> Note:
         valid_from=reaction.performed_at,
         body=body,
     )
+
+
+def _hypothesis_block(reaction: OrdReaction) -> str:
+    """Lead with what the run was testing, when the source recorded it (D-162).
+
+    First in the body rather than buried among the conditions, because it is what makes the run
+    legible: every condition below is an answer, and this is the question. Empty when unrecorded —
+    the note never says "no hypothesis", which would assert something the record does not.
+    """
+    if not reaction.hypothesis:
+        return ""
+    return f"Tested: {' '.join(reaction.hypothesis.split())}\n\n"
 
 
 def _conditions_block(reaction: OrdReaction) -> str:
