@@ -98,9 +98,14 @@ def test_the_entrypoint_has_no_case_the_chart_never_declares() -> None:
     The check above catches a chart component with no entrypoint case — a crash loop. It cannot
     catch the reverse: an entrypoint case for a component nothing deploys. That is what happened
     to `mcp-calc`. Its module was described as deleted in three separate documents, yet
-    `entrypoint.sh` still carried `mcp-calc) exec python -m chemclaw.mcp.calc.server`, so the image
+    `entrypoint.sh` still carried `mcp-calc) exec python -m mcp_servers.calc.server`, so the image
     went on shipping and dispatching a second live copy of seven `calc`-bundle tools. Nothing
     failed, because nothing looked this way.
+
+    That module path is the pre-D-148 spelling and is left as written: it quotes a file as it
+    actually was. D-148's rewrite of every `mcp_servers.…` path caught this line too and made the
+    quotation say something the entrypoint never said — a small instance of the same class of error
+    the paragraph is about.
 
     `*` is the unknown-component guard, and the two `<prefix>-*` cases are the generic connector
     dispatch — the whole point of the seam is that they match names no chart line spells out.
@@ -140,7 +145,7 @@ def _all_templates() -> str:
 # find them. Each absence is invisible offline and silent in production: the agent simply advertises
 # no skills or fewer capabilities, the graph is empty, migrations have no SQL. `tests/` and
 # `examples/` are the two first-party trees deliberately not shipped.
-_RUNTIME_DATA = ("skills", "profiles", "templates", "evals", "data", "knowledge", "infra")
+_RUNTIME_DATA = ("data", "skills", "knowledge", "infra")
 
 
 def _copied() -> set[str]:
@@ -179,6 +184,10 @@ def test_every_runtime_data_directory_actually_exists() -> None:
     The pairing matters: `eln/exports` became `data/eln-exports` in D-148, and had the Containerfile
     kept COPYing `eln/` the build would have broken loudly — but had the *config default* alone
     moved, the image would have started fine and read an empty export directory forever.
+
+    D-154 moved three more (`profiles`, `templates`, `evals`) under `data/`, so this list shrank
+    rather than grew. Four entries now: `data/` is every corpus the code reads, and `skills/`,
+    `knowledge/` and `infra/` are the three that are not configuration: layers 3 and 4, and the SQL.
     """
     root = DEPLOY.parent
     for required in _RUNTIME_DATA:

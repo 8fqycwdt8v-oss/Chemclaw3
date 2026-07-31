@@ -14,14 +14,14 @@ from pydantic import BaseModel
 from rdkit import Chem
 
 from chemclaw.core.config import settings
-from chemclaw.mcp.fpstore import (
+from chemclaw.science.fingerprints.molfp.fingerprint import ecfp_bitstring, molecule_definition
+from chemclaw.science.fingerprints.store import (
     FingerprintError,
     FingerprintRecord,
     FingerprintStore,
     Match,
     find_matches,
 )
-from chemclaw.mcp.molfp.fingerprint import ecfp_bitstring, molecule_definition
 
 log = logging.getLogger(__name__)
 

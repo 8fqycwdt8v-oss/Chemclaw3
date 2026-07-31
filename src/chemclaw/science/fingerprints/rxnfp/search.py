@@ -6,8 +6,13 @@ store. Reactions have no substructure search — DRFP is a whole-reaction differ
 fingerprint, not a substructure screen — so this module exposes similarity only.
 """
 
-from chemclaw.mcp.fpstore import FingerprintRecord, FingerprintStore, Match, find_matches
-from chemclaw.mcp.rxnfp.fingerprint import drfp_bitstring, reaction_definition
+from chemclaw.science.fingerprints.rxnfp.fingerprint import drfp_bitstring, reaction_definition
+from chemclaw.science.fingerprints.store import (
+    FingerprintRecord,
+    FingerprintStore,
+    Match,
+    find_matches,
+)
 
 
 def record_for_reaction(record_id: str, reaction_smiles: str) -> FingerprintRecord:

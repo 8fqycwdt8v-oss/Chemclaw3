@@ -24,7 +24,7 @@ from chemclaw.ingest.eln.ord import Component, OrdReaction, Role
 from chemclaw.ingest.eln.ord_adapter import OrdJsonAdapter
 from chemclaw.ingest.eln.sync import sync_entries
 from chemclaw.ingest.eln.validate import validate_ord
-from chemclaw.mcp.fpstore import InMemoryFingerprintStore
+from chemclaw.science.fingerprints.store import InMemoryFingerprintStore
 from tests.conftest import FakeSubmitter
 
 _EPOCH = datetime.min.replace(tzinfo=UTC)

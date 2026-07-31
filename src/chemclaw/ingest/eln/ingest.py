@@ -15,9 +15,9 @@ from chemclaw.ingest.eln.note import note_from_ord_reaction
 from chemclaw.ingest.eln.ord import OrdReaction
 from chemclaw.ingest.eln.validate import validate_ord
 from chemclaw.kg.pr_gate import NoteSubmitter, propose_note
-from chemclaw.mcp.fpstore import FingerprintStore
-from chemclaw.mcp.molfp.search import record_for
-from chemclaw.mcp.rxnfp.search import record_for_reaction
+from chemclaw.science.fingerprints.molfp.search import record_for
+from chemclaw.science.fingerprints.rxnfp.search import record_for_reaction
+from chemclaw.science.fingerprints.store import FingerprintStore
 
 
 class IngestError(ChemclawError):

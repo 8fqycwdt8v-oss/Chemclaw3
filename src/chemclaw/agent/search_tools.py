@@ -3,8 +3,9 @@
 Exposes the molecule/reaction fingerprint capabilities to the conversation agent so it can
 answer "what related chemistry have we done?" by structure, not just by text: reaction
 similarity (DRFP), molecule similarity (ECFP4), and substructure match (e.g. "reactions on a
-substrate bearing a free primary amine"). The capability lives in `mcp_servers`; these are the
-thin agent-facing wrappers that inject the production stores and return compact results.
+substrate bearing a free primary amine"). The capability lives in `chemclaw.science.fingerprints`;
+these are the thin agent-facing wrappers that inject the production stores and return compact
+results.
 
 Layer discipline (D-005/G6): these are read-only *capability* — the judgment on which search
 to use, what Tanimoto counts as precedent, and how to combine hits lives in the
@@ -20,10 +21,12 @@ MCP path is the production one. Keep the two in sync if the search surface chang
 
 from pydantic import BaseModel
 
-from chemclaw.mcp.fpstore import default_molecule_store, default_reaction_store
-from chemclaw.mcp.molfp.search import find_similar_molecules as _similar_molecules
-from chemclaw.mcp.molfp.search import find_substructure_matches as _substructure_matches
-from chemclaw.mcp.rxnfp.search import find_similar_reactions as _similar_reactions
+from chemclaw.science.fingerprints.molfp.search import find_similar_molecules as _similar_molecules
+from chemclaw.science.fingerprints.molfp.search import (
+    find_substructure_matches as _substructure_matches,
+)
+from chemclaw.science.fingerprints.rxnfp.search import find_similar_reactions as _similar_reactions
+from chemclaw.science.fingerprints.store import default_molecule_store, default_reaction_store
 
 # Module-level indirection so tests swap the production Postgres stores for in-memory ones
 # (the same seam `workflows.eln_sync` uses).

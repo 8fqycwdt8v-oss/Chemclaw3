@@ -15,7 +15,15 @@ import pytest
 
 from chemclaw.core import db
 from chemclaw.core.config import settings
-from chemclaw.mcp.fpstore import (
+from chemclaw.science.fingerprints.molfp import search
+from chemclaw.science.fingerprints.molfp.fingerprint import ecfp_bitstring, molecule_definition
+from chemclaw.science.fingerprints.molfp.search import (
+    SubstructureHit,
+    find_similar_molecules,
+    find_substructure_matches,
+    record_for,
+)
+from chemclaw.science.fingerprints.store import (
     FingerprintError,
     FingerprintRecord,
     InMemoryFingerprintStore,
@@ -23,14 +31,6 @@ from chemclaw.mcp.fpstore import (
     PostgresFingerprintStore,
     find_matches,
     tanimoto,
-)
-from chemclaw.mcp.molfp import search
-from chemclaw.mcp.molfp.fingerprint import ecfp_bitstring, molecule_definition
-from chemclaw.mcp.molfp.search import (
-    SubstructureHit,
-    find_similar_molecules,
-    find_substructure_matches,
-    record_for,
 )
 
 

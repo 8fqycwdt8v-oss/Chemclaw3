@@ -10,8 +10,6 @@ import asyncio
 from pathlib import Path
 from typing import Any
 
-from chemclaw.mcp.fpstore import InMemoryFingerprintStore
-from chemclaw.mcp.rxnfp.search import record_for_reaction
 from chemclaw.retrieval.evidence import EvidenceChunk, SourceRetriever
 from chemclaw.retrieval.harness import (
     Claim,
@@ -24,6 +22,8 @@ from chemclaw.retrieval.harness import (
     verify_claims,
 )
 from chemclaw.retrieval.retrievers import FingerprintReactionRetriever, GraphRetriever
+from chemclaw.science.fingerprints.rxnfp.search import record_for_reaction
+from chemclaw.science.fingerprints.store import InMemoryFingerprintStore
 
 _ESTER = "CCO.CC(=O)O>>CCOC(C)=O"
 
