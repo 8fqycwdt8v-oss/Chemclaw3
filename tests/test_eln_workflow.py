@@ -33,7 +33,7 @@ from chemclaw.ingest.eln.adapter import RawEntry
 from chemclaw.ingest.eln.ord import OrdReaction
 from chemclaw.ingest.eln.sync import IngestSummary, RejectedEntry, sync_entries
 from chemclaw.ingest.sources.registry import active_ingest_source_names
-from chemclaw.mcp.fpstore import InMemoryFingerprintStore
+from chemclaw.science.fingerprints.store import InMemoryFingerprintStore
 from tests.conftest import FakeSubmitter
 from tests.temporal_env import pydantic_client, start_env_or_skip
 

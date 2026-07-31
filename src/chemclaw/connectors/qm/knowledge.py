@@ -19,7 +19,7 @@ from chemclaw.kg.note import Note
 def note_from_qm_result(result: QMJobResult, calc_key: str = "") -> Note:
     """Map a QM job result to an agent-authored `job-result` note.
 
-    **The note also links its calculation** when `calc_key` is given (D-156) — the flat
+    **The note also links its calculation** when `calc_key` is given (D-157) — the flat
     `CalculationKey` string the persist activity returns, recorded in `calc_refs`. That is the
     second half of the same graph-island problem the compound link below closed: `calc_refs` and
     `chemclaw.kg.crosslink` (`cited_calculations`, `notes_for_calculation`) have existed since

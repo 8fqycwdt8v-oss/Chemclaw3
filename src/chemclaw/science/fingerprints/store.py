@@ -286,7 +286,7 @@ async def find_matches(
 
 def default_molecule_store() -> PostgresFingerprintStore:
     """The production molecule (ECFP4) store — one place pairs table, width, and definition."""
-    from chemclaw.mcp.molfp.fingerprint import molecule_definition
+    from chemclaw.science.fingerprints.molfp.fingerprint import molecule_definition
 
     return PostgresFingerprintStore(
         "molecule_fingerprints", settings.ecfp_bits, molecule_definition()
@@ -295,7 +295,7 @@ def default_molecule_store() -> PostgresFingerprintStore:
 
 def default_reaction_store() -> PostgresFingerprintStore:
     """The production reaction (DRFP) store — one place pairs table, width, and definition."""
-    from chemclaw.mcp.rxnfp.fingerprint import reaction_definition
+    from chemclaw.science.fingerprints.rxnfp.fingerprint import reaction_definition
 
     return PostgresFingerprintStore(
         "reaction_fingerprints", settings.drfp_bits, reaction_definition()

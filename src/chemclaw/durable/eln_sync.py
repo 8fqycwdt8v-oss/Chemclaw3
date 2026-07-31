@@ -36,7 +36,7 @@ with workflow.unsafe.imports_passed_through():
     from chemclaw.ingest.sources.base import IngestHalf
     from chemclaw.ingest.sources.registry import active_ingest_source_names, make_data_source
     from chemclaw.kg.git_submitter import default_submitter
-    from chemclaw.mcp.fpstore import default_molecule_store, default_reaction_store
+    from chemclaw.science.fingerprints.store import default_molecule_store, default_reaction_store
 
 from chemclaw.durable.publish import BAD_DATA_RETRY
 

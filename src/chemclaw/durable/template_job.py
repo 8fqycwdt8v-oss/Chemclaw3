@@ -6,9 +6,10 @@ the one part of the system that is *replayable*. That is this workflow: it subst
 pushes back to the launching session at the end.
 
 **The resolved template travels in the input.** Not its name — the template itself. Editing
-`templates/<name>.yaml` therefore cannot change a run already in flight, which is both the
-versioning story (`templates/README.md`) and a hard replay requirement: a workflow that re-read a
-file on replay would take a different path than its own history and Temporal would refuse it.
+`data/templates/<name>.yaml` therefore cannot change a run already in flight, which is both the
+versioning story (`src/chemclaw/templates/README.md`) and a hard replay requirement: a workflow
+that re-read a file on replay would take a different path than its own history and Temporal would
+refuse it.
 Pinning the definition makes "edit a template" a safe, boring operation with no migration.
 
 **Identity travels too**, and is stamped by each activity before the work happens

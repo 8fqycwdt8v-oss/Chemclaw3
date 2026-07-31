@@ -75,7 +75,7 @@ class QMJobWorkflow:
             prepare_input, job, start_to_close_timeout=activity_timeout, retry_policy=BAD_DATA_RETRY
         )
 
-        # Compute-once for the most expensive thing the system runs (D-011/D-156). The workflow id
+        # Compute-once for the most expensive thing the system runs (D-011/D-157). The workflow id
         # already deduplicates identical requests, but only while Temporal retains the execution —
         # once it ages out, the id is free again and the same molecule re-ran hours of cluster time.
         # The store has no such horizon, so this is the lookup that actually makes the rule hold.
@@ -127,7 +127,7 @@ class QMJobWorkflow:
             retry_policy=BAD_DATA_RETRY,
         )
 
-        # Persist the number itself (D-156), so an hours-long run survives independently of whether
+        # Persist the number itself (D-157), so an hours-long run survives independently of whether
         # a human merges the note's PR and of how long Temporal retains this execution. Failure is
         # absorbed rather than fatal: Temporal has already retried the activity `activity_max_
         # attempts` times by the time this raises, so what is left is a persistently unreachable
@@ -142,7 +142,7 @@ class QMJobWorkflow:
             )
         except ActivityError:
             # WARNING, not ERROR: the job succeeded. This is the cache write behind it failing,
-            # which costs a recompute on the next identical request — the exact regression D-156
+            # which costs a recompute on the next identical request — the exact regression D-157
             # exists to prevent, so it must be visible rather than silent.
             workflow.logger.warning(
                 "could not persist the QM result for %s; the job stands but its calculation "

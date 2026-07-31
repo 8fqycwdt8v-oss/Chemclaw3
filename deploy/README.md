@@ -10,10 +10,18 @@ config source (the pydantic `Settings`) fed from a `ConfigMap` + three plain `Se
 | Front door | `service` | `uvicorn chemclaw.api.app:create_app` behind an OIDC **Route** |
 | Background worker | `background-worker` | `python -m chemclaw.durable.background_worker` — `background-jobs` (light) |
 | Connector worker | `connector-worker-<name>` | `python -m chemclaw.connectors.<name>.worker` — that bundle's own queue |
-| MCP servers | `mcp-molfp` / `mcp-rxnfp` | fingerprint capability servers |
+| Connector server | `connector-<name>` | `uvicorn chemclaw.connectors.<name>.server.app:app` — that bundle's MCP tools |
 
-All five are the **same image** (`deploy/Containerfile`), rootless (UID 1001, arbitrary-UID safe for
+All four are the **same image** (`deploy/Containerfile`), rootless (UID 1001, arbitrary-UID safe for
 OpenShift SCC), no secret baked in. `deploy/entrypoint.sh` dispatches on `CHEMCLAW_COMPONENT`.
+
+The last two are *patterns*, not a fixed list — that is the connector seam (D-109) working: adding a
+bundle adds pods, not entrypoint cases. There is deliberately no `mcp-molfp`/`mcp-rxnfp` row here.
+This table carried one until D-156, naming a component `entrypoint.sh` had no case for and the chart
+never declared, which is the D-117 failure in miniature: prose asserting a deployable that does not
+exist. `tests/test_deploy_chart.py` checks the chart against the entrypoint in both directions; it
+does not read this file, so the row survived. Fingerprints deploy as `connector-molfp` and
+`connector-rxnfp` like every other bundle.
 
 ## Config & secrets (F6-T2 / F6-T6)
 

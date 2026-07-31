@@ -45,7 +45,8 @@ def test_a_bare_wikilink_still_means_exactly_what_it_meant() -> None:
 
 def test_the_shipped_corpus_parses_to_the_same_edges_it_always_did() -> None:
     """The real fixture corpus, not a synthetic one — the compatibility claim's actual subject."""
-    corpus = Path(__file__).resolve().parents[1] / "evals" / "retrieval_corpus"
+    corpus = Path(__file__).resolve().parents[1] / "data" / "evals" / "retrieval_corpus"
+    assert corpus.is_dir(), f"the shipped corpus is not at {corpus}; an empty graph proves nothing"
     invalidate_cache()
     graph = build_graph(corpus)
     assert graph.number_of_nodes() > 0

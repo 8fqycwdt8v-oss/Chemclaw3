@@ -4,13 +4,13 @@ Pure, GPU-free, model-free: a reaction SMILES (`reactants>>products`) becomes a 
 (Differential Reaction FingerPrint) folded to `settings.drfp_bits` and stored as a
 fixed-width bitstring, so it maps onto a Postgres `bit(drfp_bits)` column exactly like the
 molecule ECFP4. DRFP is the reaction-specific "reaction SMILES → bits" step; ranking and
-the store are the shared, domain-neutral `chemclaw.mcp.fpstore`.
+the store are the shared, domain-neutral `chemclaw.science.fingerprints.store`.
 """
 
 from drfp import DrfpEncoder
 
 from chemclaw.core.config import settings
-from chemclaw.mcp.fpstore import FingerprintError
+from chemclaw.science.fingerprints.store import FingerprintError
 
 
 def drfp_bitstring(reaction_smiles: str) -> str:

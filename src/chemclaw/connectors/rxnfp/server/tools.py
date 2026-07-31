@@ -1,14 +1,15 @@
-"""mcp-rxnfp: the FastMCP server exposing the reaction capability (plan step 3.4).
+"""The `rxnfp` bundle's MCP tool surface (plan step 3.4).
 
-A thin transport wrapper over the production (Postgres) reaction table — all logic lives
-in `fingerprint`/`search` and the generic `fpstore`. Run as
-`python -m chemclaw.mcp.rxnfp.server` (stdio transport). Judgment stays out (G6).
+Declaration, not logic: each function delegates to `chemclaw.science.fingerprints.rxnfp` over the
+production (Postgres) reaction table, and what this file contributes is the `@server.tool()`
+decoration the agent sees. `app.py` serves it over HTTP; `main()` runs the same tools over stdio for
+running the capability by hand. Judgment stays out (G6) — see the `molfp` twin for the full note.
 """
 
 from mcp.server.fastmcp import FastMCP
 
-from chemclaw.mcp.fpstore import FingerprintStore, Match, default_reaction_store
-from chemclaw.mcp.rxnfp.search import find_similar_reactions, record_for_reaction
+from chemclaw.science.fingerprints.rxnfp.search import find_similar_reactions, record_for_reaction
+from chemclaw.science.fingerprints.store import FingerprintStore, Match, default_reaction_store
 
 server = FastMCP("mcp-rxnfp")
 _store: FingerprintStore = default_reaction_store()

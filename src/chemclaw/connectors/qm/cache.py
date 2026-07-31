@@ -1,4 +1,4 @@
-"""How a finished QM calculation is addressed in the shared calculation store (D-156).
+"""How a finished QM calculation is addressed in the shared calculation store (D-157).
 
 **Why this bundle needs it at all.** `calc` writes every result it computes into
 `calculation_results` and never recomputes one (D-011); `qm` wrote nothing. So a two-second xTB
