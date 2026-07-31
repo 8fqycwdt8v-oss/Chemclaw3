@@ -165,10 +165,17 @@ computation, and that store is readable.* W2.1 and W2.2 are the two halves.
       opaque bytes for an unlisted name, so a type-based rule would refuse readable output from any
       tool added later. A Hessian is text and so cannot be refused on type; the
       `calc_artifact_max_chars` ceiling with `truncated` + the full `byte_size` is what handles it.
-- [ ] **W2.4 Generalize `calculator_trust`.** It reduces the `predictions` ledger to six aggregates
-      for two hardcoded property names. Make it accept any registered calculator and add an
-      outlier/residual listing scoped by substructure or tag, so the agent can say "this predictor
-      is unreliable for *this kind* of molecule" — which is what trust means in practice.
+- [x] **W2.4 Generalize `calculator_trust`.** — shipped, D-167. The "two hardcoded names" was a
+      live defect, not just inflexibility: `if property_name == "solubility"` plus two ternaries
+      meant every *other* name got pKa's version and pKa's unit — a confident report about the
+      wrong calculator. A `_CALIBRATED` table replaces it and an unknown property now raises,
+      naming the known ones. `calculator_outliers` is the listing half: signed residuals, ranked,
+      optionally filtered by a SMARTS/SMILES class, with per-molecule uncertainty coverage.
+      `reconciled_for` is now the single read and `calibration_for` summarizes it, so the aggregate
+      and the listing cannot describe different rows. **No tag filter** — a prediction's subject is
+      a molecule and the row carries no tags, so that half of the plan would have shipped an
+      always-empty filter. `substructure_pattern` moved to `core.chem`; the fingerprint index's
+      identical copy now calls it.
 - [ ] **W2.5 Metadata-filtered similarity.** `similar_reactions` returns `(id, label, similarity)`,
       so "similar reactions that used Pd and gave >80% yield" is unanswerable. Let
       `FingerprintReactionRetriever` accept the same `type`/`tag` filters the note retrievers take

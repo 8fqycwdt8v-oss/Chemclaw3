@@ -58,6 +58,30 @@ def require_canonical_smiles(smiles: str) -> str:
     return str(Chem.MolToSmiles(mol))
 
 
+def substructure_pattern(query: str) -> Chem.Mol:
+    """Compile a substructure query — SMARTS first, then SMILES — or raise `InvalidSmilesError`.
+
+    SMARTS first because every SMILES is also valid SMARTS but not the other way round, and a
+    chemist asking for "a carbonyl next to anything aromatic" can only say it in SMARTS. Falling
+    back to SMILES is what lets a plain fragment (`"c1ccccc1"`) work without the caller knowing
+    which language they typed.
+
+    A zero-atom pattern is rejected rather than run: RDKit matches it against every molecule, so
+    the answer to a query that said nothing would be "everything", which reads as a finding.
+
+    Here rather than beside one caller because two subsystems now filter by structure — the
+    fingerprint index's substructure search and the calibration ledger's outlier listing — and a
+    second copy of "SMARTS or SMILES, and reject the empty one" is exactly the kind of chemistry
+    rule that drifts apart unnoticed.
+    """
+    pattern = Chem.MolFromSmarts(query) or Chem.MolFromSmiles(query)
+    if pattern is None:
+        raise InvalidSmilesError(f"unparseable substructure query: {query!r}")
+    if pattern.GetNumAtoms() == 0:
+        raise InvalidSmilesError(f"empty substructure query (no atoms): {query!r}")
+    return pattern
+
+
 def compound_id(smiles: str) -> str:
     """The stable knowledge-graph note id for a molecule, derived from its structure.
 

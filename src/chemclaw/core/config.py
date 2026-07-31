@@ -1527,6 +1527,10 @@ class MemorySettings(BaseSettings):
     # — while a 76-atom Hessian is single-digit megabytes of text that no answer is built by
     # reading. This is what separates them, since both are text and neither can be refused on type.
     calc_artifact_max_chars: int = Field(default=20_000, ge=1)
+    # Ceiling on one `calculator_outliers` page. The listing exists to be *read* — a chemist looks
+    # at the worst misses and asks what they have in common — and a hundred rows is not read, it is
+    # scrolled past while spending the model's context.
+    calc_outliers_max_results: int = Field(default=25, ge=1)
     # Standing-query digests (gap IDEA-1). Off by default: it needs the `subscriptions` table
     # (migration 017), and a deployment nobody has subscribed on would just run an empty sweep.
     digest_enabled: bool = False

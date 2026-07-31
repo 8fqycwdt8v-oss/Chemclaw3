@@ -29,6 +29,7 @@ endpoint:
     - predict_logd
     - predict_developability_profile
     - calculator_trust
+    - calculator_outliers
     - find_calculations
     - list_artifacts
     - fetch_artifact
