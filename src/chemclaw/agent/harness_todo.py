@@ -58,24 +58,39 @@ async def todo_titles(
     return [f"[{'x' if item.is_complete else ' '}] {item.title}" for item in items]
 
 
-async def todo_steps(
+async def todo_plan_items(
     session: AgentSession, *, source_id: str = DEFAULT_TODO_SOURCE_ID
 ) -> list[str]:
-    """The plan's *steps*, without their completion state — what the plan is, not how far it got.
+    """The plan's *work items* — the titles in order, with neither checkbox nor bookkeeping.
 
-    `todo_titles` deliberately renders progress, because that is what a chemist must see and what
-    the approval handshake hashes: a plan whose steps have been ticked off is not the plan that was
-    shown, so re-approval is correct there.
+    The identity half of the same read `todo_titles` renders for display, and the two are separate
+    because they answer different questions. A surface asks "what does this plan look like right
+    now", which must include completion state. An authorization asks "which plan is this", which
+    must **not**: an approval bound to a hash that moves the moment a box is ticked cannot survive
+    the execution it authorizes, and re-approving after every step is not a control anyone would
+    operate (D-167 reverses D-137 on exactly this point).
 
-    Authorization needs the opposite question. Binding "may this session keep executing?" to a hash
-    that changes on every completed step would revoke the approval the moment the first step
-    finished — the loop would stop after one iteration, every time. What must revoke it is the plan
-    being *rewritten*: presenting a modest plan, having it approved, then swapping the steps and
-    running something else under the same authorization. That is exactly the difference between
-    these two functions, and it is why they are two functions rather than one with a flag.
+    Two exclusions, both load-bearing:
+
+    - the checkbox, per above;
+    - every todo this system authored itself, identified by the `awaiting-job:` marker
+      `mark_awaiting_job` writes. Those appear *during* an approved run — a durable launch adds one
+      (`chemclaw.connectors.jobs._mark_awaiting_if_harness`) — so counting them would let an
+      approved plan revoke its own approval the first time it started a job. They are also not work
+      a human ever agreed to: the launcher created them to record that work already agreed to is in
+      flight.
+
+    What remains is exactly the set of items a person read and said yes to, so adding, removing or
+    rewording a step is a different plan and is unapproved, while working through the agreed steps
+    is not.
+
+    `description` is optional on `TodoItem` and the model routinely omits it, so the `or ""` is the
+    ordinary case rather than a defensive flourish.
     """
     items, _ = await _store.load_state(session, source_id=source_id)
-    return [item.title for item in items]
+    return [
+        item.title for item in items if not (item.description or "").startswith(_AWAITING_PREFIX)
+    ]
 
 
 async def complete_awaiting_job(

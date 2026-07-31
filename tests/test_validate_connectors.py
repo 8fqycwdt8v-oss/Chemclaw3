@@ -28,6 +28,7 @@ _MANIFEST = {
         "url": "http://127.0.0.1:8899/mcp",
         "auth": {"mode": "none"},
         "tools": ["probe_tool"],
+        "read_only": ["probe_tool"],
     },
 }
 

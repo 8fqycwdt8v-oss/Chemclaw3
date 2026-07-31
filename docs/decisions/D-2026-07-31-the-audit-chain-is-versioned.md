@@ -39,7 +39,7 @@ called it the trail.
 
 ## Decision
 
-**Each row records which field set its `row_hash` covers.** `infra/sql/024_audit_provenance.sql`
+**Each row records which field set its `row_hash` covers.** `infra/sql/025_audit_provenance.sql`
 adds `chain_version SMALLINT NOT NULL DEFAULT 1`; `chain_hash` takes `version` and the verifier
 passes each row's stored value rather than the current one.
 

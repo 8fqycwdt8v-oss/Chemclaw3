@@ -48,13 +48,9 @@ from chemclaw.agent import preferences as _preferences  # noqa: F401
 from chemclaw.agent import research_tools as _research_tools  # noqa: F401
 from chemclaw.agent import subscriptions as _subscriptions  # noqa: F401
 from chemclaw.agent.audit import AuditSink, make_audit_middleware
-from chemclaw.agent.harness_mode import (
-    EXECUTE_MODE,
-    PLAN_MODE,
-    PlanApprovalModeProvider,
-    plan_bound,
-)
+from chemclaw.agent.harness_mode import PlanApprovalModeProvider
 from chemclaw.agent.llm_provider import build_chat_client
+from chemclaw.agent.plan_gate import approved_todos_remaining, enforce_plan_approval
 from chemclaw.agent.profiles import AgentProfile, get_profile
 from chemclaw.agent.skill_access import EnabledSkillsSource, RoleScopedSkillsSource
 from chemclaw.agent.tool_authz import (
@@ -256,6 +252,15 @@ def build_agent(
         enforce_tool_authz,
         announce_tool_failures,
     ]
+    # A sixth, conditionally: the harness's pre-execution approval (D-167). It goes *inside* audit,
+    # so a refusal is a recorded `error` outcome, and inside `surface_authorization_denials`, so the
+    # model is told why — the same layering `enforce_tool_authz` gets, because it is the same kind
+    # of decision. Conditional because it is meaningless otherwise: with no harness there is no
+    # plan, and under `harness_autonomy="execute"` the deployment has said it does not want an
+    # approval-first posture, so imposing one would refuse every write on a path nothing can
+    # approve. Inserted before `announce_tool_failures` to keep that one innermost.
+    if harness_enabled and _resolved_autonomy(prof) == "plan_only":
+        middleware.insert(-1, enforce_plan_approval)
     # Default generation params from config (F0.3), applied to every turn unless a run overrides
     # them — so temperature/length are a deployment setting, not a per-call literal.
     #
@@ -325,20 +330,8 @@ def _build_harness_agent(
     """
     strategy, tokenizer = compaction_strategy()
     instructions = profile.instructions if profile.instructions is not None else _INSTRUCTIONS
-    autonomy = (
-        profile.harness_autonomy
-        if profile.harness_autonomy is not None
-        else settings.harness_autonomy
-    )
-    start_mode = PLAN_MODE if autonomy == "plan_only" else EXECUTE_MODE
-    # The loop predicate, and whether a human approval binds it. Under `plan_only` — the shipped
-    # pharma-safe posture — the loop may only run the plan a human approved, which `plan_bound`
-    # enforces by comparing the session's authorized plan against the one it is proposing now.
-    # Under `execute` the operator has declared there is no approval gate, so binding the loop to
-    # an approval that will never be granted would simply mean the loop never runs.
-    loop_predicate = todos_remaining(looping_modes=[EXECUTE_MODE])
-    if autonomy == "plan_only":
-        loop_predicate = plan_bound(loop_predicate)
+    autonomy = _resolved_autonomy(profile)
+    start_mode = "plan" if autonomy == "plan_only" else "execute"
     agent = create_harness_agent(
         client,
         name="chemclaw",
@@ -357,8 +350,15 @@ def _build_harness_agent(
         tokenizer=tokenizer,
         # Plan/execute mode: start in plan for approval-first autonomy, execute for autonomous runs.
         mode_provider=PlanApprovalModeProvider(default_mode=start_mode),
-        # Built above, because whether an approval binds it depends on the configured autonomy.
-        loop_should_continue=loop_predicate,
+        # Loop only in execute mode while todos remain — so plan_only stops for approval — capped.
+        # Under `plan_only` the predicate is additionally conditioned on the plan actually being
+        # approved (D-167): without that an unapproved session still loops, has every write
+        # refused, and spends the whole runaway budget achieving nothing.
+        loop_should_continue=(
+            approved_todos_remaining(todos_remaining(looping_modes=["execute"]))
+            if autonomy == "plan_only"
+            else todos_remaining(looping_modes=["execute"])
+        ),
         loop_max_iterations=settings.harness_max_loop_iterations,
         middleware=middleware,
     )
@@ -385,6 +385,19 @@ def _build_harness_agent(
     # `tests/test_harness_execution.py` pins the behaviour so this cannot silently rot.
     agent.require_per_service_call_history_persistence = False
     return agent
+
+
+def _resolved_autonomy(profile: AgentProfile) -> str:
+    """This agent's harness autonomy: the profile's override, or the deployment's default.
+
+    Extracted because two decisions now read it and they must agree. `_build_harness_agent` picks
+    the starting mode from it, and `build_agent` decides from it whether to attach the plan gate —
+    a profile that starts in execute mode while the gate refuses every write would be a deployment
+    that cannot do anything and cannot be made to.
+    """
+    if profile.harness_autonomy is not None:
+        return str(profile.harness_autonomy)
+    return str(settings.harness_autonomy)
 
 
 def history_provider() -> HistoryProvider:

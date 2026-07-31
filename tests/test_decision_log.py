@@ -24,8 +24,10 @@ _DECISIONS = Path(__file__).resolve().parents[1] / "docs" / "decisions"
 _INDEX = _DECISIONS / "README.md"
 # Two id shapes, and the second is the one new ADRs use.
 #
-# `D-NNN` is the original sequence. It is **frozen**: 167 ADRs and ~971 citations across ~475 files
-# carry those numbers, and a merged ADR can never collide, so nothing is gained by renaming them.
+# `D-NNN` is the original sequence. It is **frozen**: every numbered ADR keeps its name, and the
+# citations to them across the tree keep resolving. A merged ADR can never collide — only an
+# unallocated number was ever contended — so renaming them would buy nothing and break every
+# citation. (Deliberately no counts here: they were wrong within a day of being written.)
 #
 # `D-YYYY-MM-DD-<slug>` is what an author writes now. The whole stem is the id — not the date —
 # because two ADRs on one day is routine here, and an id that identifies two decisions is the exact

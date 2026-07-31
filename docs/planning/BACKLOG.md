@@ -57,15 +57,17 @@ A whole-repo sweep for what is missing before v1.0, prompted by two observations
 suggestion is never persisted, and nothing anywhere records *why* a tool was called. Both turned
 out to be instances of wider patterns. Closed in this pass: a lost knowledge note that could not be counted, the
 sidecar that emptied the tree it published and three assertions the chart never made
-(D-2026-07-31-the-deployment-envelope), the plan approval that authorized a session rather than a
-plan (D-2026-07-31-plan-approval-binds-to-the-plan), the audit trail that could not be joined to the
+(D-2026-07-31-the-deployment-envelope), the audit trail that could not be joined to the
 conversation that caused it (D-2026-07-31-the-audit-chain-is-versioned), and the ADR numbering that
 kept colliding (D-2026-07-31-adr-ids-that-cannot-collide).
 
-**The note-type half was dropped**: `main`'s D-164 found the same defect independently and resolved
-it the other way — deleting `protocol`/`experiment-batch` from the prose rather than adding them to
-`KNOWN_NOTE_TYPES`. It merged first and, with D-162's `experiment-proposal` already covering the
-proposal case, is the better call. This branch defers to it.
+**Two halves were dropped because other sessions built them first and built them better.** `main`'s
+D-164 found the note-type defect independently and resolved it the other way — deleting
+`protocol`/`experiment-batch` rather than adding them — which with D-162's `experiment-proposal`
+already covering the proposal case is the better call. `main`'s D-167 fixed the plan-approval
+escalation by demoting against the **durable** approval store and by excluding system-authored
+`awaiting-job:` todos from the plan's identity; this branch's version compared in-process state and
+would have let a launched job revoke its own approval. Both defer to main.
 
 **Re-checked against `main` after D-156/D-157/D-158 landed from other branches.** Those closed
 four rows this analysis had opened — the durable job record now carries a run's reason, session and
@@ -132,8 +134,8 @@ QM path. The rows below are what survives that merge, narrowed to say so.
       conversational agent actually uses; it takes a problem and observations, calls BoFire, returns
       candidates, and writes nothing — not the problem, not the observations the agent assembled
       from ELN history, not the candidates, not the actor. The expensive part (framing an
-      optimization problem out of scattered history) is discarded every turn. D-156 made the
-      `experiment-batch` note type writable, which is the prerequisite, not the fix.
+      optimization problem out of scattered history) is discarded every turn. The note type to record
+      one into is `experiment-proposal` (D-162/D-164); what is missing is anything that writes it.
 - [ ] **There is no first-class campaign entity** — [L]. `knowledge/optimization-campaign/` notes
       come from DRFP clustering of ingested reactions (`memory/optimization.py`) — a retrospective
       mechanism with no identity link to any BO run. Nothing a chemist starts, that suggestions
@@ -154,11 +156,10 @@ QM path. The rows below are what survives that merge, narrowed to say so.
 
 **Controls that are advisory where the documents say binding.**
 
-- [ ] **The plan gate gates loop continuation, not side effects** — [M]. `session_mode` is consumed
-      by exactly one thing (the loop predicate) and read once more for display; `enforce_tool_authz`
-      never consults it. So in `plan` mode the model still executes tools inside its single run,
-      including durable job launchers and `propose_knowledge_note`. D-157 fixed *which* plan may
-      loop; it did not make plan mode withhold side effects.
+- [x] **The plan gate gates loop continuation, not side effects** — closed by D-167:
+      `agent/plan_gate.py::enforce_plan_approval` gates the *act*, and the approval is checked
+      against the durable store rather than in-process state. D-168 extends the same to a template
+      step, which now runs as its requester.
 - [ ] **Dry-run does not cover the write tools it advertises** — [S]. `is_dry_run()` is checked in
       three places and not in `propose_knowledge_note` (which pushes a git branch),
       `record_confirmed_answer`, `remember_preference`, or any connector call. A `dry_run: true`
@@ -247,7 +248,7 @@ QM path. The rows below are what survives that merge, narrowed to say so.
       body and the returned excerpt is `body[:240]`, so a reaction note's matched procedure step is
       never what comes back.
 - [ ] **Hazard screening misses the notes that propose conditions** — [S]. The note-level gate fires
-      only on a literal `## Procedure` heading, which `bo-candidate`/`experiment-batch` notes do not
+      only on a literal `## Procedure` heading, which `bo-candidate`/`experiment-proposal` notes do not
       have — so the one note type proposing conditions a human will physically run is never
       screened. Pair rules also fire across components of one mixture SMILES with no notion of
       sequence, screening a quench reagent against one consumed at step 1.
@@ -358,31 +359,28 @@ off-by-default flag enabled, driven with real Anthropic traffic and one signed i
 plus three parallel code reviews. Eight defects fixed under D-155; what follows is confirmed and
 deliberately not fixed there, each because it needs a decision rather than a patch.
 
-- [ ] **DARK-1 [High] — the harness plan-approval gate authorizes a session, not a plan.**
-  Reproduced live: approve a four-item plan (`mode` flips to `execute`, a `plan_approvals` row is
-  written), then ask a *completely different* question in the same session. `GET /sessions/{id}/plan`
-  reports a new `plan_hash` with `approved=false`, the session is still in `execute`, and the turn
-  autonomously ran `compute_xtb_energy` and `propose_knowledge_note` — a graph write — with no
-  approval for that plan. `PlanApprovalStore.decision` is read in exactly one place,
-  `api/app.py`'s *display* route; no execution path consults it. The only thing gating the loop is
-  MAF's session mode, and nothing ever returns a session to `plan`. A recorded rejection after an
-  approval therefore does not revoke it either, contrary to migration 020's stated contract.
-  Two coupled decisions block the fix, which is why it is here and not in D-155:
-  **(a)** `current_plan_hash` hashes the *rendered* todo lines, so completion state is part of the
-  identity and the hash changes on the first ticked box — execution cannot be bound to a hash that
-  moves as it executes. Binding it means deciding that what a human approves is the set of work
-  items, not their completion state, which reverses a documented choice.
-  **(b)** the store is Postgres-backed, so a deployment without it (the CLI harness) must be decided
-  fail-open or fail-closed. Fail-closed is right for a GxP gate and breaks `make chat --admin`.
-- [ ] **DARK-2 [High] — a template step is a route around `authorize_trigger` and the audit trail.**
-  `durable/template_activities.py`'s `ResolvedJob` drops `expensive` and `precondition`, and the
-  connector-tool branch calls `connector.call_tool(...)` with neither `enforce_tool_authz` nor
-  `make_audit_middleware` — which the in-process branch two lines below hand-applies, and which the
-  module docstring says is the point of the module. So a template naming `compute_dft_energy` starts
-  HPC work for anyone who may run its `run_<name>` tool, and both tool steps of the shipped
-  `hazard-briefing` leave no GxP audit row. Needs a decision on whether a template runs with the
-  requester's entitlements (then thread them through) or as a declared service identity (then say so
-  and audit it as such).
+- [x] ~~**DARK-1 [High] — the harness plan-approval gate authorizes a session, not a plan.**~~ —
+  **fixed (D-167).** Both blocking decisions taken: an approval binds to the plan's *work items*
+  (reversing D-137, whose rendered-lines hash moved on the first ticked box and so could never be
+  checked against the plan being executed), and the store follows the session store — which
+  dissolves the fail-open/fail-closed question rather than answering it, since the approval and the
+  mode it authorizes must share a lifetime. Enforcement is a function middleware at the tool
+  boundary, inside audit and inside the denial converter; reads stay open so a plan can still be
+  built. Running it live then found the fix incomplete: the model answered a *different* question
+  without touching its todo list, so the plan identity never changed and the approval never lapsed.
+  An approval is therefore also spent by the turn it authorizes. One residual limit, stated in
+  D-167: the system cannot tell "proceed" from "a new question" in the single turn that follows an
+  approval — bounded, audited, and immediately preceded by a human decision, but not zero.
+- [x] ~~**DARK-2 [High] — a template step is a route around `authorize_trigger` and the audit
+  trail.**~~ — **fixed (D-168).** A template step runs with the requester's entitlements, which is
+  what the module's own docstring already claimed. The connector branch goes through the same
+  audited, authorized path as the in-process one; the job step's pre-flight became one shared
+  function (`prepare_job_launch`) called by both the chat launcher and the new `authorize_job_step`,
+  which returns the *validated* payload so the workflow cannot start a child with raw arguments.
+  Running the shipped `hazard-briefing` template live then found four further defects in the same
+  path, all of which meant no template had ever executed a step in a deployment: `run_tool_step` and
+  `run_agent_step` were registered on no worker, a tool step's `list[Content]` result could not
+  cross the activity boundary, and an agent step could not run under `harness_enabled` at all.
 - [x] ~~**DARK-3 — mid-turn resume claims other jobs' completions and drops them.**~~ — **fixed on main by D-153** while this pass was running. `await_job_results` no longer consumes the push-back mailbox at all: each job is awaited on its own Temporal handle, so there is no destructive claim to steal another job's completion with. Recorded rather than deleted because the review found it independently against the pre-D-153 tree.
 - [ ] **DARK-4 [Med] — the durable job idempotency key omits every versioned input.**
   `job_workflow_id` hashes `[connector, job, payload]` only. Change `xtb_method` or a calibration

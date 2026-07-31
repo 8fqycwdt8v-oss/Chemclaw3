@@ -17,3 +17,6 @@ endpoint:
     mode: none
   tools:
     - similar_reactions
+  # A search over the reaction index; the writer is off the agent-facing allow-list (D-029).
+  read_only:
+    - similar_reactions

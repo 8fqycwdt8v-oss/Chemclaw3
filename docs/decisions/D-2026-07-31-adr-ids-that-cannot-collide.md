@@ -51,9 +51,9 @@ nobody notices. The cost is that citations get longer, and that is accepted know
 
 **The `D-NNN` sequence is frozen, not migrated.** This is where the decision departs from what
 `CLAUDE.md` anticipated. That sentence assumed the change "costs every existing citation" — a full
-rename of every ADR and rewrite of every reference. Measured, that is 167 files and ~971 citations
-across ~475 files, and it buys nothing: a merged ADR has never collided and never can, because only
-unallocated numbers are contended and after this there are none. So the numbered ids stay exactly as
+rename of every ADR and rewrite of every reference. Measured on the day this was decided: ~167 ADR
+files and ~971 citations across ~475 files — and it buys nothing: a merged ADR has never collided
+and never can, because only unallocated numbers are contended and after this there are none. So the numbered ids stay exactly as
 they are, every citation keeps resolving, and no in-flight branch conflicts with a rename it did not
 ask for.
 

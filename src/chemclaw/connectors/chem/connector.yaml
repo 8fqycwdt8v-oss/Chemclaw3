@@ -20,3 +20,10 @@ endpoint:
     - stoichiometry_table
     - green_metrics
     - render_structure
+  # Pure functions of their input plus a vendored-dataset lookup: nothing here spends real compute
+  # or writes, so an agent can use all four to build the plan a human is asked to approve.
+  read_only:
+    - resolve_compound
+    - stoichiometry_table
+    - green_metrics
+    - render_structure

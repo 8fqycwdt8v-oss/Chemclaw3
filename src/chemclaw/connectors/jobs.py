@@ -146,6 +146,16 @@ def resolve_precondition(reference: str) -> Callable[[Any], None]:
     return check  # type: ignore[no-any-return]
 
 
+# One generated params class per (connector, job definition), because a *class* is an identity and
+# two of them for one job is a bug waiting to be found. `create_model` returns a fresh class every
+# call, so `isinstance` and `model_validate` reject a spec built from the other one — which is
+# exactly what happened the moment the pre-flight moved into `prepare_job_launch` and started
+# generating its own. Keyed on the job's serialized definition rather than its name so a test that
+# reloads the manifests with different content gets a matching class rather than a stale one; the
+# `JobSpec` itself cannot be the key because pydantic's frozen hash trips over its list fields.
+_PARAMS_MODELS: dict[tuple[str, str], type[BaseModel]] = {}
+
+
 def _params_model(connector: str, job: JobSpec) -> type[BaseModel]:
     """The pydantic model for one job's launch arguments — referenced, or generated from `params`.
 
@@ -153,7 +163,22 @@ def _params_model(connector: str, job: JobSpec) -> type[BaseModel]:
     argument for the model reading it. An optional param defaults to `None` and widens to `T |
     None`, because "the caller may omit this" and "the value may be absent" must agree — a
     required-typed field with a `None` default would validate a payload the workflow cannot use.
+
+    Memoized: see `_PARAMS_MODELS`. A referenced `params_model` is already a single class by
+    construction and needs no help, but it goes through the same lookup so callers never have to
+    know which kind of job they hold.
     """
+    key = (connector, job.model_dump_json())
+    cached = _PARAMS_MODELS.get(key)
+    if cached is not None:
+        return cached
+    model = _build_params_model(connector, job)
+    _PARAMS_MODELS[key] = model
+    return model
+
+
+def _build_params_model(connector: str, job: JobSpec) -> type[BaseModel]:
+    """Construct the params model for `job` — the uncached half of `_params_model`."""
     if job.params_model is not None:
         return resolve_params_model(job.params_model)
     fields: dict[str, Any] = {}
@@ -240,6 +265,54 @@ def job_workflow_id(connector: str, job: str, payload: dict[str, Any]) -> str:
     return f"{connector}-{job}-{stable_hash([connector, job, payload])}"
 
 
+def prepare_job_launch(connector: str, job: JobSpec, params: Any) -> dict[str, Any]:
+    """Everything that must be true before a job's durable work starts, and the payload it yields.
+
+    Validate → authorize the expensive trigger → run the declared precondition → serialize. One
+    function because there is more than one launcher: the agent tool below, and the template
+    workflow's job step (`chemclaw.durable.template_activities.authorize_job_step`).
+
+    **It is one function because it was two, and one of them was empty** (D-168). The template's
+    `ResolvedJob` carried the connector, workflow and queue and dropped `expensive` and
+    `precondition` on the floor, so a template naming an HPC job started it for anyone entitled to
+    run the *template*, and a job's own domain guard — the one `JobSpec.precondition` documents as
+    having no other replay-safe home — never ran on that path at all. Duplicating the four steps
+    would have fixed today's instance and left the next launcher to rediscover it.
+
+    Args:
+        connector: The owning connector's name, for the refusal message only.
+        job: The declared job.
+        params: The launch arguments, as a `dict` or an already-built params model.
+
+    Returns:
+        The validated launch payload, JSON-ready, as the workflow input's `payload`.
+
+    Raises:
+        AuthorizationError: The job is `expensive` and the ambient user is not entitled to it.
+        ValidationError: `params` does not satisfy the job's declared schema.
+        Exception: Whatever the declared precondition raises to refuse the launch.
+    """
+    # **Validate here, because nothing upstream does** (D-138). MAF publishes the params model's
+    # JSON schema but hands the tool body the decoded JSON *object* — a plain `dict` — rather than
+    # constructing the model from it. Until this call existed every declared job died on `'dict'
+    # object has no attribute 'model_dump'` the first time a chemist asked for one, and the
+    # precondition below was handed a dict whose attributes it could not read. Accept an
+    # already-built model too: a caller that holds one (a test, a template step) is not wrong, and
+    # `model_validate` is the one entry point that takes either.
+    spec = _params_model(connector, job).model_validate(params)
+    # Authorize the expensive trigger against the turn's user *before* any durable work (F4-T5), so
+    # an autonomously-planned todo — or a template step — cannot start a costly run outside the
+    # user's entitlements.
+    if job.expensive:
+        authorize_trigger(job.name)
+    # Then the job's own domain guard, if it declared one, for the reason `JobSpec.precondition`
+    # records: this is the only replay-safe place such a check can live.
+    if job.precondition:
+        resolve_precondition(job.precondition)(spec)
+    payload: dict[str, Any] = spec.model_dump(mode="json", exclude_none=True)
+    return payload
+
+
 def build_job_tool(connector: str, job: JobSpec) -> CapabilityTool:
     """Build the agent tool that launches one declared connector job.
 
@@ -257,41 +330,28 @@ def build_job_tool(connector: str, job: JobSpec) -> CapabilityTool:
         knows which connectors are enabled (`chemclaw.connectors.registry`).
     """
     params_model = _params_model(connector, job)
-    precondition = resolve_precondition(job.precondition) if job.precondition else None
 
     async def launch(
         params: params_model,  # type: ignore[valid-type]
         rationale: str,
     ) -> str | ConnectorJobResult:
-        # **Validate here, because nothing upstream does** (D-138). The annotation above is a
-        # pydantic model and MAF publishes its JSON schema, but MAF hands the body the decoded
-        # JSON *object* — a plain `dict` — rather than constructing the model from it. Until this
-        # call existed every declared job died on `'dict' object has no attribute 'model_dump'`
-        # the first time a chemist asked for one, and the precondition below was handed a dict
-        # whose attributes it could not read. Accept an already-built model too: a caller that
-        # holds one (a test, a template step) is not wrong, and `model_validate` is the one entry
-        # point that takes either.
-        spec = params_model.model_validate(params)
         # Reject-if-absent, the polarity `require_actor` established (F4-T3): a durable run with no
-        # recorded reason is the gap D-157 exists to close, and a blank string accepted here would
-        # reopen it silently for every job in the system. Raised as a `ValueError` the model reads
-        # and can correct in the same turn, before any durable work is started.
+        # recorded reason is the gap D-157 exists to close, and a blank string accepted here
+        # would reopen it silently for every job in the system. Raised as a `ValueError` the model
+        # reads and can correct in the same turn, before any durable work is started.
+        #
+        # Checked *here* rather than inside `prepare_job_launch`, because `rationale` is an argument
+        # of this tool and not a property of the job: the template job step shares the pre-flight
+        # but has no model to author a sentence, and it records the template run instead (D-168).
         if not rationale.strip():
             raise ConnectorJobError(
                 f"{job.name}: rationale must say why this run is being started — it is stored with "
                 "the run and is the only record of what question it was meant to answer"
             )
-        # Authorize the expensive trigger against the turn's user *before* any durable work
-        # (F4-T5), so an autonomously-planned todo cannot start a costly run outside the user's
-        # entitlements.
-        if job.expensive:
-            authorize_trigger(job.name)
-        # Then the job's own domain guard, if it declared one, for the reason
-        # `JobSpec.precondition` records: this is the only replay-safe place such a check can
-        # live.
-        if precondition is not None:
-            precondition(spec)
-        payload: dict[str, Any] = spec.model_dump(mode="json", exclude_none=True)
+        # Validate, authorize and check the domain precondition — all of it in `prepare_job_launch`,
+        # which is the *only* pre-flight and is shared with the template job step (D-168). It used
+        # to live inline here, which is why the template path had none of it.
+        payload = prepare_job_launch(connector, job, params)
         workflow_id = job_workflow_id(connector, job.name, payload)
         if is_dry_run():
             return dry_run_notice(f"start the {job.name} job", _detail(connector, payload))

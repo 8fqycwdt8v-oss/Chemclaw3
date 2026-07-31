@@ -18,6 +18,11 @@ endpoint:
     mode: none
   tools:
     - screen_hazards
+  # A rule-table lookup. It must stay open under an unapproved plan for a reason beyond
+  # convenience: a hazard screen is exactly the check a chemist wants *before* deciding whether to
+  # approve the work.
+  read_only:
+    - screen_hazards
 
 skills:
   - safety-screening
