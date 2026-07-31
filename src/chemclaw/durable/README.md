@@ -40,7 +40,7 @@ The xTB tasks went the same way earlier, as `CalcJobWorkflow` on `connector-calc
 image holds none of it (D-118). D-006's heavy/light split is intact: one core
 queue plus one per bundle, each sized for its own work.
 
-**Event history is not an archive** (`job_record.py`, D-155). A closed workflow's
+**Event history is not an archive** (`job_record.py`, D-157). A closed workflow's
 history — and with it the result it returned — expires on the namespace's retention
 clock, which no deployment here sets. So `connector_job.py` writes every finished
 run to `job_records`: the launch arguments, the whole result envelope, and the

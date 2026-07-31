@@ -1,4 +1,4 @@
-"""Postgres backing for the durable job record (`infra/sql/023_job_records.sql`, D-155).
+"""Postgres backing for the durable job record (`infra/sql/023_job_records.sql`, D-157).
 
 Kept separate from `chemclaw.durable.job_record` for the reason `chemclaw.agent.audit_store` is
 kept separate from `chemclaw.agent.audit`: the module the workflow and the agent tools import

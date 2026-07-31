@@ -25,14 +25,14 @@ core owns the obligations that must never vary per capability:
 - **Session push-back** — the launching chat is woken through the one existing channel (F3-T3), so
   a connector job surfaces in the UI exactly as a QM job does, with no per-connector plumbing.
 - **The durable record** — what ran, on what arguments, what came out, and *why it was asked for*
-  is written to `job_records` (D-155), because a workflow result is not an archive: Temporal
+  is written to `job_records` (D-157), because a workflow result is not an archive: Temporal
   expires a closed run's history and the result goes with it. Here for the same reason the other
   three are: it must hold for every capability, and "each connector remembers" is the discipline
   that fails silently.
 
 The child is addressed by **workflow type name + task queue**, both strings from the manifest, so
 this module imports nothing from any connector — and moving a workflow between workers is a one-line
-manifest change rather than a code change (`docs/planning/connector-plan.md` §5.3).
+manifest change rather than a code change (`docs/archive/plans/connector-plan.md` §5.3).
 """
 
 from datetime import timedelta
@@ -71,7 +71,7 @@ class ConnectorJobInput(BaseModel):
     workflow: str = Field(min_length=1)
     task_queue: str = Field(min_length=1)
     payload: dict[str, Any] = Field(default_factory=dict)
-    # **Why this run was asked for**, in the requester's own terms (D-155). Required, and
+    # **Why this run was asked for**, in the requester's own terms (D-157). Required, and
     # deliberately *not* part of `payload`: the payload is hashed into the idempotency key, so a
     # rationale there would make two identical campaigns launched for differently-worded reasons
     # two separate expensive runs. It is the one fact no other store in this system held — a note
@@ -113,7 +113,7 @@ class ConnectorJobResult(BaseModel):
 
 
 def job_record_for(job_id: str, job: ConnectorJobInput, result: ConnectorJobResult) -> JobRecord:
-    """Assemble the durable record of one finished run from its input and its result (D-155).
+    """Assemble the durable record of one finished run from its input and its result (D-157).
 
     A module-level function rather than a block inside the workflow because it is pure, and
     because everything around it needs a live Temporal server to exercise — this way "the record

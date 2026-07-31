@@ -1,5 +1,5 @@
 -- One durable row per finished connector job: what was run, on what arguments, what came out —
--- and **why it was run at all** (D-155).
+-- and **why it was run at all** (D-157).
 --
 -- Before this table a durable job's own result lived in exactly one place, the Temporal workflow
 -- result. Temporal is an execution engine, not an archive: namespace retention expires a closed

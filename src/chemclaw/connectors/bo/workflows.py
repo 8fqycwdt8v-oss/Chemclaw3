@@ -102,7 +102,7 @@ class BoCampaignWorkflow:
         # Always built, never conditional: whether it is *published* is the manifest's
         # `publish_to_graph`, which core reads. The spec used to carry a second, model-authored
         # switch that could suppress it, which meant a campaign could finish and leave nothing
-        # behind (D-155).
+        # behind (D-157).
         note = note_from_campaign_result(spec.objective_name, spec.problem, result)
         best = result.best
         return ConnectorJobResult(

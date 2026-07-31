@@ -172,7 +172,7 @@ class CampaignSpec(BaseModel):
     Temporal workflow cannot carry a Python callable across its boundary, so the
     objective is referenced by name and looked up in the evaluate activity.
 
-    **There is no `publish_to_graph` here** (D-155). There used to be, and it was the model-facing
+    **There is no `publish_to_graph` here** (D-157). There used to be, and it was the model-facing
     half of a decision declared twice: the manifest's `publish_to_graph` said the deployment wants
     campaign recommendations reviewed, while this field — default `False`, filled in by the LLM —
     could silently suppress the only permanent artifact a campaign produced. A campaign launched
@@ -214,6 +214,22 @@ def require_rounds_within_ceiling(n_rounds: int) -> None:
             f"n_rounds={n_rounds} exceeds the configured ceiling "
             f"bo_max_rounds={settings.bo_max_rounds}"
         )
+
+
+def require_campaign_within_ceiling(spec: CampaignSpec) -> None:
+    """The same ceiling, in the shape a declared `precondition` is called with.
+
+    `JobSpec.precondition` is documented as taking *the validated params object*, and
+    `connectors/jobs.py` calls it that way. `connectors/bo/connector.yaml` named the function above
+    instead, which takes an `int`, so `start_optimization_campaign` raised
+    `TypeError: '>' not supported between instances of 'CampaignSpec' and 'int'` on every call —
+    the reference connector's flagship job could not be started at all, while CI stayed green
+    because the only tests call the ceiling rule with a bare int.
+
+    Two entry points with two shapes, so this is an adapter rather than a widened signature: the
+    creation path in `bo.campaign` genuinely holds a round count and nothing else.
+    """
+    require_rounds_within_ceiling(spec.n_rounds)
 
 
 class CampaignResult(BaseModel):

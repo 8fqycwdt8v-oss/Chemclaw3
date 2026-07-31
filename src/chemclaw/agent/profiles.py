@@ -18,7 +18,7 @@ Design (see `docs/archive/audit/10-config-extensibility.md` §6):
   `build_agent` *after* this narrowing, so a profile that names a tool the caller may not use is
   still denied at call time, and a profile that omits the PR-gate tools merely removes capability.
   A profile is a narrowing seam layered *under* RBAC, never a bypass.
-- **Files, not code.** A profile is a YAML file discovered from `profiles/` or from a connector
+- **Files, not code.** A profile is a YAML file discovered from `data/profiles/` or from a connector
   bundle (`chemclaw.agent.profile_discovery`, D-112), selected per session by name. This module
   holds the
   model and the registry those files populate; nothing here needs editing to add one.

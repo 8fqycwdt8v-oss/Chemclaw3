@@ -3,7 +3,7 @@
 Prioritized open action items. Top = next. Keep in sync with `docs/planning/implementation-plan.md`
 (phase/step numbers) at session end.
 
-## Open — Left open by the durable job record (2026-07-31, D-155)
+## Open — Left open by the durable job record (2026-07-31, D-157)
 
 The record closed "a finished run's data, and the reason for it, survive nowhere". Three things it
 deliberately did not close, each because it is a design rather than a line of code.
@@ -24,11 +24,74 @@ deliberately did not close, each because it is a design rather than a line of co
       subject, where a campaign's artifact was a single best point. Same for anything else that ever
       starts a durable workflow outside the seam — [S].
 - [ ] **Temporal namespace retention is still unset.** Nothing in the repo configures it, so a
-      deployment inherits the server's default. D-155 removed the *dependence* on that number (the
+      deployment inherits the server's default. D-157 removed the *dependence* on that number (the
       result no longer lives only in history) but not the ambiguity: an operator reading the runbook
       still cannot say how long a running deployment keeps workflow history. It is one Helm value
       plus a runbook line, and it wants a stated policy rather than a copied default — [S].
 
+## Open — Every capability exercised live with the flags on (2026-07-31, D-155)
+
+Full record: `docs/archive/live-matrix-2026-07.md`. The whole stack up natively with **every**
+off-by-default flag enabled, driven with real Anthropic traffic and one signed identity per probe,
+plus three parallel code reviews. Eight defects fixed under D-155; what follows is confirmed and
+deliberately not fixed there, each because it needs a decision rather than a patch.
+
+- [ ] **DARK-1 [High] — the harness plan-approval gate authorizes a session, not a plan.**
+  Reproduced live: approve a four-item plan (`mode` flips to `execute`, a `plan_approvals` row is
+  written), then ask a *completely different* question in the same session. `GET /sessions/{id}/plan`
+  reports a new `plan_hash` with `approved=false`, the session is still in `execute`, and the turn
+  autonomously ran `compute_xtb_energy` and `propose_knowledge_note` — a graph write — with no
+  approval for that plan. `PlanApprovalStore.decision` is read in exactly one place,
+  `api/app.py`'s *display* route; no execution path consults it. The only thing gating the loop is
+  MAF's session mode, and nothing ever returns a session to `plan`. A recorded rejection after an
+  approval therefore does not revoke it either, contrary to migration 020's stated contract.
+  Two coupled decisions block the fix, which is why it is here and not in D-155:
+  **(a)** `current_plan_hash` hashes the *rendered* todo lines, so completion state is part of the
+  identity and the hash changes on the first ticked box — execution cannot be bound to a hash that
+  moves as it executes. Binding it means deciding that what a human approves is the set of work
+  items, not their completion state, which reverses a documented choice.
+  **(b)** the store is Postgres-backed, so a deployment without it (the CLI harness) must be decided
+  fail-open or fail-closed. Fail-closed is right for a GxP gate and breaks `make chat --admin`.
+- [ ] **DARK-2 [High] — a template step is a route around `authorize_trigger` and the audit trail.**
+  `durable/template_activities.py`'s `ResolvedJob` drops `expensive` and `precondition`, and the
+  connector-tool branch calls `connector.call_tool(...)` with neither `enforce_tool_authz` nor
+  `make_audit_middleware` — which the in-process branch two lines below hand-applies, and which the
+  module docstring says is the point of the module. So a template naming `compute_dft_energy` starts
+  HPC work for anyone who may run its `run_<name>` tool, and both tool steps of the shipped
+  `hazard-briefing` leave no GxP audit row. Needs a decision on whether a template runs with the
+  requester's entitlements (then thread them through) or as a declared service identity (then say so
+  and audit it as such).
+- [x] ~~**DARK-3 — mid-turn resume claims other jobs' completions and drops them.**~~ — **fixed on main by D-153** while this pass was running. `await_job_results` no longer consumes the push-back mailbox at all: each job is awaited on its own Temporal handle, so there is no destructive claim to steal another job's completion with. Recorded rather than deleted because the review found it independently against the pre-D-153 tree.
+- [ ] **DARK-4 [Med] — the durable job idempotency key omits every versioned input.**
+  `job_workflow_id` hashes `[connector, job, payload]` only. Change `xtb_method` or a calibration
+  constant and the calculation store correctly misses and recomputes, while `start_workflow` raises
+  `WorkflowAlreadyStartedError`, rejoins the *completed* prior run, and returns numbers produced by
+  the old method. `science/calc/store.py` takes the opposite and correct position for the same
+  computations (`calc_version` is in the key). Fix needs to decide what "the version of a job" is.
+- [ ] **DARK-5 [Med] — retention is one transaction over an unindexed column.** The docstring claims
+  each table is pruned "in its own statement so one failure cannot roll back the others"; there is a
+  single commit after the loop. And `session_events` has no index on `created_at` — the gap
+  migration 022 closed for `session_messages` — so under the 30 s statement timeout the sweep starts
+  failing permanently once the table is big enough to need it. Wants a migration.
+- [ ] **DARK-6 [Med] — `verify_chain` loads the whole audit table into memory.** No LIMIT, no
+  watermark, `fetchall()`. This is the one table retention refuses to prune, so the scheduled check
+  eventually times out or OOMs the shared background worker.
+- [ ] **DARK-7 [Low] — the digest re-reports every note at least twice.** `_is_new` compares a
+  `date` against `last_seen_at.date()` with `>=`, so a note whose `valid_from` is the day of the
+  last report re-qualifies; at an hourly cadence the same note is sent 24 times, against
+  `subscriptions.py`'s promise that "asking twice does not double-notify".
+- [ ] **DARK-8 [Low] — `embedding_dim` is cross-validated only when the `vector` source is on**, but
+  `reindex_notes` writes the embedding column unconditionally, so a `lexical`-only deployment with a
+  768-wide model passes config validation and fails every reindex on a pgvector dimension error.
+- [ ] **DARK-9 [Low] — a reported measurement with no matching prediction is silently discarded**
+  while the tool reports success. `_RECORD_OBSERVATION` is a bare `UPDATE` with no insert path;
+  `record_observation`'s own docstring says the caller logs the zero-row case and the caller does
+  not. This is the common case for new chemistry.
+- [ ] **DARK-10 [Low] — the PR-gate's checkout window exposes unreviewed notes to readers.**
+  `knowledge_path` is the same tree the submitter runs `checkout -B note/<id>` against, and
+  `invalidate_cache()` is called *inside* that window, so a concurrent turn can retrieve an
+  agent-proposed, unreviewed note as authoritative evidence. `_return_to_base` fixed the permanent
+  version of this; the transient one spans a commit, a fetch and a push.
 ## Open — Surfaced by the deferral-register rewrite (2026-07-31, D-154)
 
 Rewriting `docs/planning/DEFERRED.md` into a register meant checking each row against the tree. Two
@@ -339,7 +402,7 @@ missing prerequisite), in D-092.
       implementation and its dedicated workflow/models/activities were removed.
 
 > **Every open item below was assessed on 2026-07-25** — trigger held? real defect? offline-verifiable?
-> KISS? — in **`docs/planning/backlog-plan.md`** (verdict table + specs for the survivors + the working queue in
+> KISS? — in **`docs/archive/plans/backlog-plan.md`** (verdict table + specs for the survivors + the working queue in
 > `tasks/todo.md`). Verdicts: 8 BUILD (waves A/B/C), 14 DEFER, 5 DROP, 12 BLOCKED. The DROP verdicts are
 > corrected in place below, because they were claims about the tree that are no longer true.
 
@@ -657,11 +720,11 @@ Substrate verdict: **evolve the flat `pydantic-settings` singleton additively** 
 discriminated unions); do **not** adopt entry-points/pluggy/Django-apps — all target the
 out-of-tree plugin problem this single-repo app does not have.
 
-## Open — the connector seam (D-109, docs/planning/connector-plan.md)
+## Open — the connector seam (D-109, docs/archive/plans/connector-plan.md)
 
 Stages A, B, D and E are **done** (the seam, the reference bundles, the durable path, profiles, step
 templates — D-109/D-110/D-111/D-112). Stage C is partly done: `molfp`, `rxnfp`, `safety`, `chem`,
-`calc` and `bo` have moved. What remains is staged in `docs/planning/connector-plan.md` §9, with the trigger
+`calc` and `bo` have moved. What remains is staged in `docs/archive/plans/connector-plan.md` §9, with the trigger
 for each recorded here rather than left implicit.
 
 - [x] ~~**Stage C, remainder — the `kg` bundle**~~ — **WON'T BUILD**, and the reason is also the
@@ -752,7 +815,7 @@ durable job execution (Temporal) already covered; three residual gaps closed, ea
       *mid-flight same-turn* resume stays open (see the harness follow-ups below) — distinct from the
       front-door restart-reattach closed here.
 
-## Phase F11 — Gap closure (docs/planning/gap-closure-plan.md; analysis: docs/archive/audit/12-capability-gap-analysis.md)
+## Phase F11 — Gap closure (docs/archive/plans/gap-closure-plan.md; analysis: docs/archive/audit/12-capability-gap-analysis.md)
 
 Implementing the whole-codebase capability gap analysis. **Waves 0–2 complete and W3 partial**;
 everything below is built, tested, and green under `make lint type test` (688+ passing).
@@ -896,10 +959,10 @@ everything below is built, tested, and green under `make lint type test` (688+ p
 tenant / Temporal broker / OpenShift cluster) plus the audit-trail archive-then-reseal design, which
 is recorded in `docs/planning/DEFERRED.md` as needing its own ADR with QA sign-off rather than a cleanup job.
 
-## Next — Platform-parity hardening (docs/planning/parity-plan.md, Phase F10)
+## Next — Platform-parity hardening (docs/archive/plans/parity-plan.md, Phase F10)
 
 Closes the platform-capability deltas found against a commercial pharma-agent platform. Full
-tickets + disposition table: `docs/planning/parity-plan.md`.
+tickets + disposition table: `docs/archive/plans/parity-plan.md`.
 
 - [x] **F10-E** per-task model routing: `build_chat_client(task)` consults `model_routes`
       (task→model) in the one provider seam; empty map = today's single model. Test:
@@ -965,9 +1028,9 @@ tickets + disposition table: `docs/planning/parity-plan.md`.
       is KISS).
 - [ ] Gate-until-trigger (documented, not built): OCR/vision ingestion, vendor connectors
       (Veeva/SAP/LIMS), GAMP-5 validation artifacts, conversational multi-agent mesh — each with its
-      trigger recorded in `docs/planning/parity-plan.md`.
+      trigger recorded in `docs/archive/plans/parity-plan.md`.
 
-## Now — Foundation build (docs/planning/foundation-plan.md + docs/planning/implementation-tickets.md)
+## Now — Foundation build (docs/archive/plans/foundation-plan.md + docs/planning/implementation-tickets.md)
 
 The target-stack foundation: MAF harness experience on OpenShift + HPC/Nextflow, internal
 OpenAI-compatible LLM (generic credential), Entra everywhere with every backend workflow
@@ -1552,7 +1615,7 @@ MAF ships the harness natively (`create_harness_agent` + `TodoProvider`/`AgentMo
       reports (5b) publish agent-authored procedures today with no hazard awareness anywhere in the
       tree. Promoted to **wave C2** with a proposed advisory-only, deterministic slice (committed
       SMARTS rule table + `@tool` + skill + `kg-validate` hazard-section rule + a recall metric);
-      three scope questions await the user — `docs/planning/backlog-plan.md` §3/§5.
+      three scope questions await the user — `docs/archive/plans/backlog-plan.md` §3/§5.
 - [ ] Retrosynthesis + reaction prediction · DoE/Bayesian optimization · lab automation/SiLA2
       closed-loop · process flowsheet synthesis · multimodal analytical data · domain foundation
       models — all currently in `docs/planning/DEFERRED.md` with triggers; confirm or pull forward.
@@ -1581,7 +1644,7 @@ MAF ships the harness natively (`create_harness_agent` + `TodoProvider`/`AgentMo
 
 ## Post-campaign follow-ups (2026-07-24, D-072) — worked off 2026-07-25
 
-Assessed then implemented per `docs/planning/backlog-plan.md` (waves A/B/C); all six are now closed.
+Assessed then implemented per `docs/archive/plans/backlog-plan.md` (waves A/B/C); all six are now closed.
 
 - [x] **ELN late-file detection** — both file adapters compare a dropped file's mtime against the
       fetch floor and emit one aggregated WARNING naming the late files plus the backfill recovery

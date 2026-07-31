@@ -2,7 +2,7 @@
 
 Why this exists: both the calculation store (`chemclaw.science.calc.postgres_store`) and the
 fingerprint
-store (`chemclaw.mcp.fpstore`) open short-lived psycopg connections, and a down or
+store (`chemclaw.science.fingerprints.store`) open short-lived psycopg connections, and a down or
 misconfigured database otherwise surfaces as a raw `psycopg.OperationalError` traceback that
 never says *which* database or *why*. This wraps the connect once (DRY) so every caller
 reports "Postgres unreachable at <host>: <cause>" with the DSN password redacted.

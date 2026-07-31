@@ -126,7 +126,7 @@ def _expired(monkeypatch: pytest.MonkeyPatch) -> None:
 def test_a_job_whose_history_expired_is_still_collected_from_the_record(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The gap D-155 closes: an old job id must not read as "no such job".
+    """The gap D-157 closes: an old job id must not read as "no such job".
 
     Temporal expires a closed workflow's history on the namespace's retention clock, and before
     the durable record that took the campaign's result with it — so the tool told a chemist their

@@ -104,7 +104,7 @@ def _launch(tool: Any, rationale: str = "why the tests run it", **values: Any) -
     A sync wrapper because the suite has no pytest-asyncio: each test drives one event loop
     through `asyncio.run`, which is the convention everywhere else here. The rationale has a
     default so the tests that are about something else stay about that; the ones that are about
-    the reason itself (D-155) pass their own.
+    the reason itself (D-157) pass their own.
     """
     return str(asyncio.run(tool(_params(tool, **values), rationale)))
 
@@ -578,7 +578,7 @@ def test_a_job_without_the_budget_still_returns_only_an_id(monkeypatch: pytest.M
 
 
 def test_a_launch_must_say_why_it_is_being_started(client: _FakeClient) -> None:
-    """A durable run with no recorded reason is the gap D-155 closes; blank must not slip past.
+    """A durable run with no recorded reason is the gap D-157 closes; blank must not slip past.
 
     Refused *before* `start_workflow`, so the correction costs nothing: the model reads the error
     and re-calls with a reason in the same turn, and no expensive run was started meanwhile.

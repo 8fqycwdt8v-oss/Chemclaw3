@@ -50,7 +50,7 @@ kg-validate:  ## Validate the knowledge graph (schema, duplicate ids, broken lin
 eval:  ## Score the versioned eval case-set and print the citable report (Phase 2b).
 	uv run python -m chemclaw.evals.harness
 
-eval-baseline:  ## Regenerate evals/baseline.json from a scoring run (after a reviewed change).
+eval-baseline:  ## Regenerate data/evals/baseline.json from a scoring run (after a reviewed change).
 	uv run python -m chemclaw.cli.refresh_baseline
 
 eln-validate:  ## Validate the ELN export's reactions (RDKit structure + mass balance).

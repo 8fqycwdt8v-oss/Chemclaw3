@@ -28,7 +28,7 @@ a records story with no disposal story is incomplete.
   consequences and belongs in an ADR with QA sign-off — not in a cleanup job. The job says so out
   loud rather than silently skipping the table.
 
-- `job_records` is **refused**, and it is the newest reason to be careful here (D-155). The table
+- `job_records` is **refused**, and it is the newest reason to be careful here (D-157). The table
   exists precisely because a durable run's result used to expire — with Temporal's own history —
   and take a campaign's entire evaluation record with it. Ageing those rows out on a clock would
   restore the failure this system just removed, one retention window later. Its disposal story is
@@ -61,11 +61,20 @@ with workflow.unsafe.imports_passed_through():
 
 from chemclaw.durable.publish import BAD_DATA_RETRY
 
-# Tables this job is allowed to prune, with the timestamp column that dates a row. Explicit and
-# closed: a new table is a deliberate addition here, never something a wildcard sweeps up.
-_PRUNABLE: dict[str, str] = {
-    "session_events": "created_at",
-    "session_messages": "created_at",
+# Tables this job is allowed to prune, with the timestamp column that dates a row and the extra
+# predicate that decides whether a row of that table is disposable at all. Explicit and closed: a
+# new table is a deliberate addition here, never something a wildcard sweeps up.
+#
+# `session_events` carries `consumed_at IS NOT NULL` because the module docstring's justification
+# for pruning it is that "a **consumed** push-back mailbox row is spent". Age alone was the whole
+# predicate, so an undelivered `job_completed` older than the window was destroyed: a durable job
+# that outran the retention window — a QM/HPC run, exactly what this channel exists for — lost its
+# completion, the session waited on it forever, and the harness "awaiting job" todo never flipped.
+# It also destroyed the `system-audit-integrity` and `system-eval-drift` alerts, which by
+# construction are never consumed, so retention silently deleted the tamper evidence.
+_PRUNABLE: dict[str, tuple[str, str]] = {
+    "session_events": ("created_at", "consumed_at IS NOT NULL"),
+    "session_messages": ("created_at", "TRUE"),
 }
 
 # The three statements the per-session conversation prune needs. Only sessions that actually have an
@@ -113,7 +122,7 @@ async def prune_expired_rows() -> RetentionOutcome:
         settings.postgres_dsn,
         statement_timeout_seconds=settings.pg_statement_timeout_seconds,
     ) as conn:
-        for table, column in _PRUNABLE.items():
+        for table, (column, disposable) in _PRUNABLE.items():
             days = _window_days(table)
             if days <= 0:
                 outcome.skipped.append(f"{table} (retention disabled)")
@@ -128,7 +137,8 @@ async def prune_expired_rows() -> RetentionOutcome:
                 # Table and column come from the closed `_PRUNABLE` map above, never from a caller,
                 # so the interpolation cannot carry untrusted input; the *value* is bound.
                 await cur.execute(
-                    f"DELETE FROM {table} WHERE {column} < now() - make_interval(days => %s)",  # noqa: S608
+                    f"DELETE FROM {table} "  # noqa: S608
+                    f"WHERE {disposable} AND {column} < now() - make_interval(days => %s)",
                     (days,),
                 )
                 outcome.deleted[table] = cur.rowcount

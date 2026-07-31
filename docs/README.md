@@ -5,10 +5,17 @@ Which of these are true today, and which are not, is the point of the layout.
 | Directory | Maintained? | What is in it |
 | --- | --- | --- |
 | `decisions/` | **yes** — append-only | One file per architecture decision, `D-NNN-<slug>.md`, plus the allocation ledger in its `README.md`. This is the authoritative record of *why* the system is the way it is. A merged ADR is never edited; a decision that changed gets a new ADR. |
-| `planning/` | **yes** | `BACKLOG.md` (prioritized open items), `DEFERRED.md` (postponed, each with the reason), and the build plans and ticket lists. |
+| `planning/` | **yes** | Four living documents and no more: `BACKLOG.md` (prioritized open items), `DEFERRED.md` (postponed, each with the reason it is not now), and `implementation-plan.md` + `implementation-tickets.md` (the build order and per-phase status `CLAUDE.md` reads). |
 | `guides/` | **yes** | Operational how-to: the runbook, workflow versioning, the xTB catalogues. |
 | `reference/` | partly | `architektur.md` — the original four-layer design. Right about the layers, **silent on connectors**, which now carry every tool, job and skill (D-118). Read it for intent, not for detail. |
-| `archive/` | **no** | Point-in-time documents: audits, load tests, reviews, assessments. Accurate as of their date and deliberately not updated. Do not treat any of these as current. |
+| `archive/` | **no** | Point-in-time documents: audits, load tests, reviews, assessments, and in `plans/` the build plans whose work is finished. Accurate as of their date and deliberately not updated. Do not treat any of these as current. |
+
+**Why `archive/plans/` exists.** A completed plan reads exactly like a current one — same
+imperative voice, same ticket numbers — so leaving five of them in `planning/` beside the two
+documents a session actually maintains made the directory a guess rather than a place. D-156 moved
+`backlog-plan`, `connector-plan`, `foundation-plan`, `gap-closure-plan` and `parity-plan` here. They
+are still cited from code, as the rationale for a seam; the ADRs remain the durable record of *why*,
+and these are how it was built.
 
 For what the *code* directories are, see `ARCHITECTURE.md` at the repository root.
 

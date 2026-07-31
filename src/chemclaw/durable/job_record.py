@@ -1,4 +1,4 @@
-"""The durable record of one finished connector job — what ran, on what, and **why** (D-155).
+"""The durable record of one finished connector job — what ran, on what, and **why** (D-157).
 
 Why this exists: a durable job's result lived in exactly one place, the Temporal workflow result,
 and Temporal is an execution engine rather than an archive. A closed workflow's history expires

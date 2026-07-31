@@ -66,7 +66,7 @@ def test_note_from_campaign_result_maps_fields() -> None:
 
 
 def test_the_note_says_what_space_was_searched() -> None:
-    """A recommended value is uninterpretable without the range it was chosen from (D-155).
+    """A recommended value is uninterpretable without the range it was chosen from (D-157).
 
     "1.2 mol% Pd" means one thing when the campaign could have gone to 5 and another when 1.2 was
     the ceiling — and the person reading the merged markdown has no other copy of the spec: it

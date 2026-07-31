@@ -14,6 +14,7 @@ say so.
 from datetime import date
 from pathlib import Path
 
+from chemclaw.core.config import EvalSettings
 from chemclaw.kg.conflicts import find_conflicts
 from chemclaw.kg.crosslink import cited_calculations
 from chemclaw.kg.graph import build_graph, invalidate_cache, load_notes, related
@@ -22,6 +23,12 @@ from chemclaw.kg.relations import KNOWN_RELATIONS
 from chemclaw.kg.validate import validate
 
 _KNOWLEDGE = Path(__file__).resolve().parents[1] / "knowledge"
+# Derived from the setting rather than spelled out: D-156 moved the corpus under `data/`, and the
+# literal that used to be here would have gone on naming a directory that no longer exists.
+_GOLD_CORPUS = (
+    Path(__file__).resolve().parents[1]
+    / EvalSettings.model_fields["eval_retrieval_corpus_dir"].default
+)
 
 
 def _notes() -> list[Note]:
@@ -97,7 +104,7 @@ def test_a_computed_note_cites_the_calculation_behind_it() -> None:
 
 
 def test_the_seed_corpus_and_the_eval_corpus_stay_separate() -> None:
-    """`evals/retrieval_corpus/` must not be absorbed into the live graph.
+    """`data/evals/retrieval_corpus/` must not be absorbed into the live graph.
 
     Its own README says why: keeping the gold corpus outside `knowledge_dir` is what makes the
     recall/precision numbers reproducible and independent of whatever is in the live graph. The
@@ -106,5 +113,6 @@ def test_the_seed_corpus_and_the_eval_corpus_stay_separate() -> None:
     """
     seeded = {note.id for note in _notes()}
     invalidate_cache()
-    gold = {note.id for note in load_notes(_KNOWLEDGE.parent / "evals" / "retrieval_corpus")}
-    assert gold and not seeded & gold
+    gold = {note.id for note in load_notes(_GOLD_CORPUS)}
+    assert gold, f"the gold corpus is not at {_GOLD_CORPUS}; an empty set intersects nothing"
+    assert not seeded & gold

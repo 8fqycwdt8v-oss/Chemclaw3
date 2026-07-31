@@ -1,4 +1,4 @@
-"""Integration tests for the durable job-record store (D-155, `infra/sql/023_job_records.sql`).
+"""Integration tests for the durable job-record store (D-157, `infra/sql/023_job_records.sql`).
 
 Runs against a real database (CI provides Postgres; the offline sandbox has none, so these skip).
 What is proven here is what only a database can prove: the round-trip keeps the nested result JSON

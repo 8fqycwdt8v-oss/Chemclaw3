@@ -1,4 +1,4 @@
-# D-155 — A durable record of every connector job: what ran, with what data, and why
+# D-157 — A durable record of every connector job: what ran, with what data, and why
 
 **Status:** accepted · **Context:** a review of what survives a finished Bayesian-optimization
 campaign. Five defects, one cause. The BO connector is where they were found and the *seam* is

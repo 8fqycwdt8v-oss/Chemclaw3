@@ -15,13 +15,13 @@ from rdkit import Chem
 
 from chemclaw.core.chem import InvalidSmilesError, compound_id
 from chemclaw.core.config import settings
-from chemclaw.mcp.fpstore import (
+from chemclaw.science.fingerprints.molfp.fingerprint import ecfp_bitstring, molecule_definition
+from chemclaw.science.fingerprints.store import (
     FingerprintError,
     FingerprintRecord,
     FingerprintStore,
     find_matches,
 )
-from chemclaw.mcp.molfp.fingerprint import ecfp_bitstring, molecule_definition
 
 log = logging.getLogger(__name__)
 

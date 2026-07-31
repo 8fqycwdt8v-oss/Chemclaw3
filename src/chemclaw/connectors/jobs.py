@@ -79,7 +79,7 @@ class ConnectorJobError(ValueError):
     entry point should catch all of them.
 
     It covers both a misconfigured deployment and a caller that asked for something this seam
-    refuses — today, a launch with no stated reason (D-155). Both are "this job is not going to
+    refuses — today, a launch with no stated reason (D-157). Both are "this job is not going to
     run, and here is the sentence explaining why", and the audience differs only in who reads it:
     an operator for the first, the model itself for the second.
     """
@@ -173,7 +173,7 @@ def _params_model(connector: str, job: JobSpec) -> type[BaseModel]:
     )
 
 
-# The `rationale` argument, documented once for every generated job tool (D-155). Written at the
+# The `rationale` argument, documented once for every generated job tool (D-157). Written at the
 # model rather than at the developer, because this is the text that decides whether the stored
 # reason is a usable sentence or a restatement of the arguments.
 _RATIONALE_DOC = [
@@ -273,7 +273,7 @@ def build_job_tool(connector: str, job: JobSpec) -> CapabilityTool:
         # point that takes either.
         spec = params_model.model_validate(params)
         # Reject-if-absent, the polarity `require_actor` established (F4-T3): a durable run with no
-        # recorded reason is the gap D-155 exists to close, and a blank string accepted here would
+        # recorded reason is the gap D-157 exists to close, and a blank string accepted here would
         # reopen it silently for every job in the system. Raised as a `ValueError` the model reads
         # and can correct in the same turn, before any durable work is started.
         if not rationale.strip():

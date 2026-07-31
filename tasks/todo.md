@@ -1,9 +1,9 @@
-# Task: durable job records — "what was run, with what data, and *why*" (D-155)
+# Task: durable job records — "what was run, with what data, and *why*" (D-157)
 
 Requested 2026-07-31. Branch: `claude/bo-campaign-storage-docs-x87dmj`.
 
-(The previous occupant of this file, the agentic-system review, is merged; its record lives in
-D-145/D-151/D-152/D-153, `docs/archive/audit/2026-07-agentic-system-review.md` and git history.)
+(The previous occupant of this file, the restructure-consistency pass, is merged; its record is
+D-156. The agentic-system review before it is D-145/D-151…D-153.)
 
 ## The problem, as found
 
@@ -32,7 +32,10 @@ tools and models").
 
 ## Plan
 
-- [x] Reserve **D-155** in `docs/decisions/README.md`, in the first commit.
+- [x] Reserve the ADR number in `docs/decisions/README.md`, in the first commit. It was
+      D-155 and became **D-157**: two branches merged ahead of this one while it was in review, so
+      the branch merging second renumbers (CLAUDE.md's rule 3) — the file moved, its heading and
+      every citation with it.
 - [x] **1. A launch states its reason.** `ConnectorJobInput.rationale`; the generated job tool takes
       `rationale` beside its params and refuses a blank one (`require_actor`'s polarity — a
       forgotten reason must not silently downgrade the record). Deliberately **not** in `payload`,
@@ -52,7 +55,7 @@ tools and models").
 - [x] **5. BO leaves no silent gap.** Drop `CampaignSpec.publish_to_graph` (one decision, in the
       manifest, where the deployment owns it); the note gains the decision space and the objective
       direction, so it is self-contained.
-- [x] ADR D-155, BACKLOG entries, `durable/README.md`, the retention docstring's refusal list.
+- [x] ADR D-157, BACKLOG entries, `durable/README.md`, the retention docstring's refusal list.
 - [x] `make lint type test` plus `connector-validate`, `template-validate`, `prose-validate`,
       `kg-validate`, `skill-validate`.
 
@@ -90,7 +93,7 @@ Implemented as planned. Five things the plan did not foresee, all recorded rathe
 
 ## Verification
 
-`make lint`, `make type`, `make test` green: **2104 passed, 32 skipped**. The skips are the
+`make lint`, `make type`, `make test` green: **2105 passed, 32 skipped**. The skips are the
 Temporal test server (`temporal.download` is blocked by this environment's network policy) and the
 xtb/crest binaries.
 

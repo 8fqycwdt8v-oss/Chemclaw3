@@ -1,4 +1,4 @@
-"""The durable record of a finished connector job (D-155) — the offline half.
+"""The durable record of a finished connector job (D-157) — the offline half.
 
 What is under test here is everything about the record that does *not* need a Temporal server or a
 database: the mapping from a run to its record, the provenance footer core stamps onto a

@@ -18,10 +18,10 @@ from chemclaw.core.embeddings import embed_texts
 from chemclaw.kg.conflicts import conflicts_by_note, find_conflicts
 from chemclaw.kg.graph import load_notes
 from chemclaw.kg.note import WIKILINK, Note, split_link
-from chemclaw.mcp.fpstore import FingerprintError, FingerprintStore
-from chemclaw.mcp.rxnfp.search import find_similar_reactions
 from chemclaw.retrieval.evidence import EvidenceChunk
 from chemclaw.retrieval.vector_index import IndexHit, NoteIndex, default_note_index, note_text
+from chemclaw.science.fingerprints.rxnfp.search import find_similar_reactions
+from chemclaw.science.fingerprints.store import FingerprintError, FingerprintStore
 
 # Words that carry no retrieval signal but do carry the difference between "biaryl" (three hits)
 # and "the biaryl" (none) under a whole-phrase match. Deliberately tiny and English-only: this is

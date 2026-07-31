@@ -71,6 +71,42 @@ def test_deterministic_uncited_answer_is_not_flagged(monkeypatch: pytest.MonkeyP
     assert not result.unsupported
 
 
+def test_an_unreachable_judge_does_not_certify_an_uncited_answer(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A verifier that could not run must not produce a *stronger* signal than one that did.
+
+    The degradation path returned the deterministic gate's verdict, and for an ordinary chat answer
+    — which carries no `[[wikilinks]]` — that gate has nothing to check and said `confidence=1.0`.
+    So with the judge endpoint down, every answer in the deployment came back maximally confident
+    with `review_required=False`, while nothing had been verified at all. The failure was invisible
+    on precisely the surface that exists to make it visible.
+    """
+    monkeypatch.setattr(settings, "verifier_enabled", True)
+
+    class _Broken:
+        async def get_response(self, *_args: object, **_kwargs: object) -> object:
+            raise RuntimeError("verifier endpoint unreachable")
+
+    result = asyncio.run(verify_answer("A general remark with no citation.", [], client=_Broken()))
+    assert result.confidence == 0.0
+    assert result.unsupported, "an unverifiable answer must be routed to a human, not certified"
+    assert result.confidence < settings.verifier_confidence_threshold
+
+
+def test_a_working_judge_still_certifies_an_uncited_answer(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The guard above must not fire on the healthy path — only degradation changes the verdict."""
+    monkeypatch.setattr(settings, "verifier_enabled", True)
+    verdict = VerificationResult(
+        claims=[ClaimCheck(text="a general remark", supported=True)], confidence=1.0
+    )
+    result = asyncio.run(
+        verify_answer("A general remark with no citation.", [], client=_FakeVerifierClient(verdict))
+    )
+    assert result.confidence == 1.0
+    assert not result.unsupported
+
+
 def test_llm_verifier_returns_the_judges_verdict(monkeypatch: pytest.MonkeyPatch) -> None:
     """Verifier on: the structured judge verdict (a low-confidence unsupported claim) comes back."""
     monkeypatch.setattr(settings, "verifier_enabled", True)

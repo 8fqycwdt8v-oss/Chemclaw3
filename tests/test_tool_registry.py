@@ -49,7 +49,7 @@ _EXPECTED_INPROCESS_TOOLS = {
     # to go; the HPC job is a declared `qm` connector job now (D-118).
     "request_development_report",
     "get_durable_job_status",
-    # The retrospective half of that pair (D-155): the durable record of every finished run, which
+    # The retrospective half of that pair (D-157): the durable record of every finished run, which
     # is core's for the same reason the status tool is — it is generic over every job, and a
     # connector must not be able to see another bundle's runs.
     "find_past_jobs",

@@ -64,7 +64,7 @@ class DurableJobStatus(BaseModel):
     status: str
     summary: str | None = None
     result: dict[str, Any] = Field(default_factory=dict)
-    # Why the run was asked for, when the answer came from the durable record (D-155). Empty on the
+    # Why the run was asked for, when the answer came from the durable record (D-157). Empty on the
     # live-Temporal path, which reads the workflow's result rather than the record — the launching
     # turn is right there in the conversation, so restating its own reason back to the model would
     # be noise; months later, when only the record survives, it is the whole point.
@@ -156,7 +156,7 @@ async def get_durable_job_status(job_id: str) -> DurableJobStatus:
     so there is no second call to make.
 
     It answers for **finished** jobs indefinitely, not only while Temporal remembers them: a
-    completed connector job's result is also stored durably (D-155), so an id from months ago —
+    completed connector job's result is also stored durably (D-157), so an id from months ago —
     found with `find_past_jobs`, or quoted from an old conversation — still returns its result
     after the workflow history has been retained away.
 

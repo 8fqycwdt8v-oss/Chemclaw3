@@ -1,21 +1,28 @@
-"""mcp-molfp: the FastMCP server exposing the molecule capability (plan step 3.1).
+"""The `molfp` bundle's MCP tool surface (plan step 3.1).
 
-A thin transport wrapper — all logic lives in `fingerprint`/`search` and the generic
-`fpstore`, so this file just advertises the capability as MCP tools over the production
-(Postgres) molecule table. Run as `python -m chemclaw.mcp.molfp.server` (stdio transport).
-Judgment stays out: the tools compute and search; when a similarity counts as precedent
-is the `reaction-search` skill's call (G6).
+Declaration, not logic: every function here is a one-line delegation to
+`chemclaw.science.fingerprints.molfp`, over the production (Postgres) molecule table. What this file
+adds is the `@server.tool()` decoration — the argument names, defaults and docstrings the agent
+actually sees — which is why it belongs beside `app.py` in the bundle rather than beside the
+engine.
+
+`app.py` serves this `server` over HTTP, which is how the connector seam reaches it. The `main()`
+below runs the same tools over stdio, the transport MCP defaults to, and is kept for running one
+capability by hand without the FastAPI layer.
+
+Judgment stays out: the tools compute and search; when a similarity counts as precedent is the
+`reaction-search` skill's call (G6).
 """
 
 from mcp.server.fastmcp import FastMCP
 
-from chemclaw.mcp.fpstore import FingerprintStore, default_molecule_store
-from chemclaw.mcp.molfp.search import (
+from chemclaw.science.fingerprints.molfp.search import (
     MoleculeHit,
     find_similar_molecules,
     find_substructure_matches,
     record_for,
 )
+from chemclaw.science.fingerprints.store import FingerprintStore, default_molecule_store
 
 server = FastMCP("mcp-molfp")
 _store: FingerprintStore = default_molecule_store()

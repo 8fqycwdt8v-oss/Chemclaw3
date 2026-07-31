@@ -180,7 +180,7 @@ def test_a_connector_job_runs_its_own_workflow_and_core_does_the_rest(
         )
 
     class _CapturingSink:
-        """Keeps the durable job record instead of writing it to Postgres (D-155)."""
+        """Keeps the durable job record instead of writing it to Postgres (D-157)."""
 
         async def record(self, record: JobRecord) -> None:
             recorded.append(record)
@@ -274,7 +274,7 @@ def test_a_connector_job_runs_its_own_workflow_and_core_does_the_rest(
     assert kind == "job_completed"
     assert payload["connector"] == "fixture" and payload["job"] == "run_fixture_job"
     assert payload["summary"] == "fixture job ran on benzene"
-    # And core wrote the run's durable record (D-155) — the copy that outlives Temporal's own
+    # And core wrote the run's durable record (D-157) — the copy that outlives Temporal's own
     # history retention, carrying the arguments, the whole result envelope, and the reason.
     assert len(recorded) == 1
     record = recorded[0]
