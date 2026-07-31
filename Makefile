@@ -8,7 +8,7 @@ KUBE_VERSION ?= 1.29.0
 
 .DEFAULT_GOAL := help
 
-.PHONY: help install lint type test cov check chat db-migrate schedules-apply kg-validate eval eval-baseline eln-validate skill-validate connector-validate datasource-validate template-validate connectors prose-validate helm-validate audit-verify reindex up down
+.PHONY: help install lint type test cov check chat db-migrate schedules-apply kg-validate eval eval-baseline eln-validate skill-validate connector-validate datasource-validate template-validate connectors prose-validate helm-validate audit-verify explain reindex up down
 
 help:  ## List every target with its one-line description (the default).
 	@# Reads the `## ` comments beside each target, so a new target documents itself the day it is
@@ -93,6 +93,10 @@ helm-validate:  ## Render the Helm chart and validate it against the Kubernetes 
 
 audit-verify:  ## Verify the tamper-evident hash chain over the GxP audit trail (F10-G1).
 	uv run python -m chemclaw.cli.verify_audit_chain
+
+explain:  ## Reconstruct why a session's tools ran: SESSION=<id> (D-166).
+	@test -n "$(SESSION)" || { echo "usage: make explain SESSION=<session-id>"; exit 64; }
+	uv run python -m chemclaw.cli.explain $(SESSION)
 
 reindex:  ## Rebuild the derived note index (dense + lexical) for hybrid retrieval (F10-A).
 	uv run python -m chemclaw.retrieval.vector_index
