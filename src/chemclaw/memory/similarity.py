@@ -10,8 +10,8 @@ job. Pure and deterministic: no store, no LLM, no I/O.
 import networkx as nx
 
 from chemclaw.ingest.eln.ord import OrdReaction
-from chemclaw.mcp.fpstore import FingerprintError, tanimoto
-from chemclaw.mcp.rxnfp.fingerprint import drfp_bitstring
+from chemclaw.science.fingerprints.rxnfp.fingerprint import drfp_bitstring
+from chemclaw.science.fingerprints.store import FingerprintError, tanimoto
 
 
 def reaction_fingerprints(reactions: list[OrdReaction]) -> dict[str, str]:

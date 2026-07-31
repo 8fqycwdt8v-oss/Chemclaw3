@@ -98,13 +98,15 @@ def _params(tool: Any, **values: Any) -> BaseModel:
     return model(**values)
 
 
-def _launch(tool: Any, **values: Any) -> str:
-    """Call the generated tool with `values`.
+def _launch(tool: Any, rationale: str = "why the tests run it", **values: Any) -> str:
+    """Call the generated tool with `values` and a stated reason.
 
     A sync wrapper because the suite has no pytest-asyncio: each test drives one event loop
-    through `asyncio.run`, which is the convention everywhere else here.
+    through `asyncio.run`, which is the convention everywhere else here. The rationale has a
+    default so the tests that are about something else stay about that; the ones that are about
+    the reason itself (D-157) pass their own.
     """
-    return str(asyncio.run(tool(_params(tool, **values))))
+    return str(asyncio.run(tool(_params(tool, **values), rationale)))
 
 
 def test_the_generated_tool_is_named_and_documented_for_the_model() -> None:
@@ -195,7 +197,7 @@ def test_launching_works_when_the_argument_arrives_as_the_raw_json_object(
     between the wire and the tool builds the model.
     """
     tool = build_job_tool("calc", _SPEC)
-    job_id = str(asyncio.run(tool({"smiles": "CCO", "cycles": 3})))
+    job_id = str(asyncio.run(tool({"smiles": "CCO", "cycles": 3}, "why the tests run it")))
     (call,) = client.calls
     payload: ConnectorJobInput = call["input"]
     assert payload.payload == {"smiles": "CCO", "cycles": 3}
@@ -211,9 +213,9 @@ def test_the_raw_object_is_validated_rather_than_passed_through(client: _FakeCli
     """
     tool = build_job_tool("calc", _SPEC)
     with pytest.raises(ValidationError):
-        asyncio.run(tool({"smiles": "CCO", "cycles": "not-an-integer"}))
+        asyncio.run(tool({"smiles": "CCO", "cycles": "not-an-integer"}, "why the tests run it"))
     with pytest.raises(ValidationError):
-        asyncio.run(tool({"cycles": 3}))  # the required param is missing
+        asyncio.run(tool({"cycles": 3}, "why the tests run it"))  # the required param is missing
     assert client.calls == []  # nothing durable was started on an invalid launch
 
 
@@ -228,10 +230,16 @@ def test_launching_survives_the_framework_s_own_invocation_path(client: _FakeCli
 
     fn = build_job_tool("calc", _SPEC)
     invocable = as_tool(fn, name=fn.__name__, description="Start a calculation.")
-    asyncio.run(invocable.invoke(arguments={"params": {"smiles": "CCO"}}))
+    asyncio.run(
+        invocable.invoke(
+            arguments={"params": {"smiles": "CCO"}, "rationale": "confirm the reported barrier"}
+        )
+    )
     (call,) = client.calls
     payload: ConnectorJobInput = call["input"]
     assert payload.payload == {"smiles": "CCO"}
+    # The reason travels the framework's path too, and stays *out* of the hashed payload.
+    assert payload.rationale == "confirm the reported barrier"
 
 
 def test_identical_arguments_produce_the_same_id_and_different_ones_do_not(
@@ -500,7 +508,7 @@ def test_a_quick_job_returns_its_result_inside_the_turn(monkeypatch: pytest.Monk
     """
     fake = _install(monkeypatch, _ResultClient(_ENVELOPE))
     tool = build_job_tool("calc", _INLINE_SPEC)
-    result = asyncio.run(tool(_params(tool, smiles="CCO")))
+    result = asyncio.run(tool(_params(tool, smiles="CCO"), "why the tests run it"))
     assert result.summary == "Computed it."
     assert result.data == {"value": 1.5}
     assert len(fake.calls) == 1  # it really did start a durable run
@@ -521,7 +529,7 @@ def test_a_slow_job_falls_back_to_a_job_id_and_announces_it(
     tool = build_job_tool("calc", spec)
     token = begin_turn()
     try:
-        result = asyncio.run(tool(_params(tool, smiles="CCO")))
+        result = asyncio.run(tool(_params(tool, smiles="CCO"), "why the tests run it"))
         signals = [signal for signal in drain() if isinstance(signal, JobSignal)]
     finally:
         end_turn(token)
@@ -540,7 +548,7 @@ def test_a_failed_job_raises_rather_than_degrading_to_a_job_id(
     _install(monkeypatch, _ResultClient(RuntimeError("the SCF diverged")))
     tool = build_job_tool("calc", _INLINE_SPEC)
     with pytest.raises(RuntimeError, match="SCF diverged"):
-        asyncio.run(tool(_params(tool, smiles="CCO")))
+        asyncio.run(tool(_params(tool, smiles="CCO"), "why the tests run it"))
 
 
 def test_re_asking_a_finished_job_returns_its_result_not_its_id(
@@ -556,7 +564,7 @@ def test_re_asking_a_finished_job_returns_its_result_not_its_id(
     already = WorkflowAlreadyStartedError("exists", "CalculationWorkflow", run_id=None)
     fake = _install(monkeypatch, _ResultClient(_ENVELOPE, error=already))
     tool = build_job_tool("calc", _INLINE_SPEC)
-    result = asyncio.run(tool(_params(tool, smiles="CCO")))
+    result = asyncio.run(tool(_params(tool, smiles="CCO"), "why the tests run it"))
     assert result.summary == "Computed it."
     assert fake.rejoined == [job_workflow_id("calc", "compute_something", {"smiles": "CCO"})]
 
@@ -565,5 +573,45 @@ def test_a_job_without_the_budget_still_returns_only_an_id(monkeypatch: pytest.M
     """Opting out is the default: no `inline_wait_seconds` means no wait and no behaviour change."""
     fake = _install(monkeypatch, _ResultClient(_ENVELOPE))
     tool = build_job_tool("calc", _SPEC)  # the spec without the budget
-    result = asyncio.run(tool(_params(tool, smiles="CCO")))
+    result = asyncio.run(tool(_params(tool, smiles="CCO"), "why the tests run it"))
     assert result == fake.calls[0]["id"]
+
+
+def test_a_launch_must_say_why_it_is_being_started(client: _FakeClient) -> None:
+    """A durable run with no recorded reason is the gap D-157 closes; blank must not slip past.
+
+    Refused *before* `start_workflow`, so the correction costs nothing: the model reads the error
+    and re-calls with a reason in the same turn, and no expensive run was started meanwhile.
+    """
+    tool = build_job_tool("calc", _SPEC)
+    for blank in ("", "   ", "\n"):
+        with pytest.raises(ConnectorJobError, match="must say why"):
+            asyncio.run(tool(_params(tool, smiles="CCO"), blank))
+    assert client.calls == []
+
+
+def test_the_reason_reaches_the_run_without_entering_its_identity(client: _FakeClient) -> None:
+    """The rationale is recorded, and two differently-worded asks for one job stay one run.
+
+    The second half is why it is not in `payload`: the id hashes the payload, so a reason folded
+    in there would turn "the same campaign, explained differently" into a second expensive run
+    (D-011).
+    """
+    tool = build_job_tool("calc", _SPEC)
+    first = _launch(tool, "the reviewer questioned the barrier", smiles="CCO")
+    second = _launch(tool, "sanity-checking last week's number", smiles="CCO")
+    assert first == second
+    assert [call["input"].rationale for call in client.calls] == [
+        "the reviewer questioned the barrier",
+        "sanity-checking last week's number",
+    ]
+    # Stored trimmed, so trailing whitespace from a model's formatting is not part of the record.
+    _launch(tool, "  padded reason  ", smiles="CCC")
+    assert client.calls[-1]["input"].rationale == "padded reason"
+
+
+def test_the_model_is_told_what_the_reason_is_for() -> None:
+    """The docstring is the only place the model learns what to put there, so it must say."""
+    doc = build_job_tool("calc", _SPEC).__doc__ or ""
+    assert "rationale:" in doc
+    assert "do not restate the arguments" in doc.lower()

@@ -4,8 +4,8 @@ Pure, GPU-free, model-free: a SMILES becomes an ECFP4 (Morgan radius 2, 2048-bit
 fingerprint via RDKit, stored as a fixed-width bitstring so it maps directly onto a
 Postgres `bit(2048)` column. Radius and width come from config, so the fingerprint
 definition is a versioned choice, not a magic number. Ranking (`tanimoto`) and the store
-are the domain-neutral `chemclaw.mcp.fpstore`; this module is only the molecule-specific
-"SMILES → bits" step and holds no judgment (G6).
+are the domain-neutral `chemclaw.science.fingerprints.store`; this module is only the
+molecule-specific "SMILES → bits" step and holds no judgment (G6).
 """
 
 from functools import lru_cache
@@ -14,7 +14,7 @@ from rdkit import Chem
 from rdkit.Chem import rdFingerprintGenerator
 
 from chemclaw.core.config import settings
-from chemclaw.mcp.fpstore import FingerprintError
+from chemclaw.science.fingerprints.store import FingerprintError
 
 
 @lru_cache(maxsize=8)

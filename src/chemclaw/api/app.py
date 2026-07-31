@@ -1209,7 +1209,7 @@ def create_app(
         await _plan_approvals().record(session_id, plan_hash, principal.oid or "", body.approved)
         # The authorization is per-plan in both directions. `grant_execute` records *which* plan
         # was approved, so a later rewrite of the todo list is unapproved rather than inheriting
-        # this decision (D-157); `revoke_execute` returns the session to plan mode, because
+        # this decision (D-163); `revoke_execute` returns the session to plan mode, because
         # `plan_approvals` keeps every decision and reads the latest — clicking "no" after "yes" is
         # meant to revoke, and previously the row said rejected while the session kept executing.
         if body.approved:

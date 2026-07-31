@@ -87,7 +87,7 @@ class BearerAuth(BaseModel):
 # in-cluster. The Entra service-identity and on-behalf-of modes are a documented extension
 # point, not a stub — OBO needs the user's raw access token, which `service.auth.Principal`
 # deliberately does not carry, and neither exchange can be verified without a real tenant (see
-# `docs/planning/connector-plan.md` §11).
+# `docs/archive/plans/connector-plan.md` §11).
 ConnectorAuth = NoAuth | BearerAuth
 
 

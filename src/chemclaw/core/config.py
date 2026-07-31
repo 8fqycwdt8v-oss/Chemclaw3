@@ -298,6 +298,17 @@ class HpcSettings(BaseSettings):
     # the artifact fetch is unauthenticated — unless the store shares the launcher's origin, in
     # which case the launcher token still applies.
     hpc_artifact_store_token: str = ""
+    # Persist a finished QM result in the shared calculation store (D-158). On by default, which
+    # is the *un*usual choice for a new flag here and deliberate: D-011 already says every result
+    # is persisted once and never recomputed, and `qm` was the one capability not doing it — so
+    # this is the bundle complying with an existing rule, not a new opt-in behaviour. The write is
+    # an idempotent upsert keyed by content, so re-running a job cannot corrupt anything.
+    #
+    # The switch exists for the deployment that runs the `qm` worker without a reachable Postgres:
+    # there, every job would log a failed persist. Turning it off restores exactly the old
+    # behaviour — the result still reaches the session and the PR-gated note, just without the
+    # durable cache entry or the note's `calc_refs`.
+    qm_persist_to_calc_store: bool = True
     # The HPC/Nextflow identity bridge (plan F4-T6, §7.2): the other non-Entra bridge. HPC is
     # not an Entra relying party, so user jobs run under one service identity while the
     # requesting Entra `oid` is carried in the payload (F4-T3) and *every* oid→HPC-identity
@@ -549,7 +560,7 @@ class LlmSettings(BaseSettings):
     # the internal OpenAI-compatible ("OpenLLM-like") endpoint without any code change, keeping
     # Anthropic as a local-dev path. `openai_compatible` reaches the endpoint with **one generic
     # API credential** (`llm_api_key`) — deliberately *not* per-user Entra: the raw inference
-    # call is not a user-scoped resource (see docs/planning/foundation-plan.md §0).
+    # call is not a user-scoped resource (see docs/archive/plans/foundation-plan.md §0).
     # `llm_base_url`/`llm_model` are required for `openai_compatible` (validated below); the TLS
     # CA bundle, timeout, and retry budget shape the transport so an internal endpoint with a
     # private CA works from config alone. `llm_temperature`/`llm_max_tokens` are the default
@@ -734,12 +745,13 @@ class AgentSettings(BaseSettings):
     # OS-path-separator delimited like `PATH` and like `skills_dir`. A profile selects *across*
     # capabilities, so a shared tree is its common home; a profile genuinely about one
     # capability lives in that connector's bundle instead and is found there.
-    profiles_dir: str = "profiles"
+    profiles_dir: str = "data/profiles"
 
-    # Where deterministic step templates are discovered (`templates/`). A template fixes the order
-    # of a procedure and runs it as a durable workflow, where a profile configures an agent and
-    # lets the model choose the order — `templates/README.md` says which to reach for.
-    templates_dir: str = "templates"
+    # Where deterministic step templates are discovered (`data/templates/`). A template fixes the
+    # order of a procedure and runs it as a durable workflow, where a profile configures an agent
+    # and leaves the order to the model. `src/chemclaw/templates/README.md` says which one a task
+    # wants.
+    templates_dir: str = "data/templates"
     # Which discovered templates are enabled; empty (the default) means every one found.
     templates_enabled: str = ""
     # Per-step wall clock for a template run. Generous because an `agent` step is a model turn and
@@ -1158,7 +1170,7 @@ class EvalSettings(BaseSettings):
     # them per chemistry. Versioned eval case-set. Its own directory, not under `knowledge_dir`:
     # an eval case is a structured evaluation payload (output/reference), not a relational note,
     # so it neither uses the note schema nor passes through kg-validate.
-    eval_case_dir: str = "evals/cases"
+    eval_case_dir: str = "data/evals/cases"
     eval_efactor_max: float = 50.0
     eval_pmi_max: float = 50.0
     # Absolute error (in the prediction's own unit, e.g. log S) still counted as an accurate
@@ -1176,7 +1188,7 @@ class EvalSettings(BaseSettings):
     # Eval drift detection (plan F10-F2). A `background-jobs` workflow re-runs the committed
     # case-set on a cadence and alerts when an aggregate metric moves further than a *relative*
     # band (`eval_drift_epsilon` × the baseline value) from the Git-committed baseline
-    # (`evals/baseline.json`). Relative, so one knob is scale-appropriate across metrics of
+    # (`data/evals/baseline.json`). Relative, so one knob is scale-appropriate across metrics of
     # different magnitudes (an `f1` in [0, 1] vs an `e_factor` near 35); 0.05 = a 5%
     # proportional move. Off by default; enabling it adds the Schedule (D-035).
     eval_drift_enabled: bool = False
@@ -1186,7 +1198,7 @@ class EvalSettings(BaseSettings):
     # cases score in well under this, but a dedicated knob keeps the two jobs' timeouts
     # independent.
     eval_drift_timeout_seconds: float = Field(default=300.0, gt=0)
-    eval_baseline_path: str = "evals/baseline.json"
+    eval_baseline_path: str = "data/evals/baseline.json"
     # Minimum share of the pinned hazard rules that must still fire on their reference molecules
     # (`hazard_flag_recall`, D-080). 1.0: the rule table is small enough that one
     # silently-broken SMARTS means a whole hazard class goes unflagged, which the screen reports
@@ -1197,7 +1209,7 @@ class EvalSettings(BaseSettings):
     # live `knowledge_dir`, so the score is reproducible). `retrieval_recall_min` is the floor
     # the "did we surface the expected evidence?" recall metric gates against — the seam that
     # catches a substring-filter or evidence-cap change quietly dropping recall.
-    eval_retrieval_corpus_dir: str = "evals/retrieval_corpus"
+    eval_retrieval_corpus_dir: str = "data/evals/retrieval_corpus"
     retrieval_recall_min: float = Field(default=0.75, ge=0.0, le=1.0)
 
 
@@ -1380,8 +1392,9 @@ class ConnectorSettings(BaseSettings):
 
     Its own section because a connector is the one mechanism for adding *any* capability — the
     MCP tools a FastAPI server serves, the durable jobs a Temporal worker runs, and the skills
-    and agent profiles that come with them (`connectors/`, `docs/planning/connector-plan.md`). It
-    replaces the old `mcp_servers` list, which could only describe the first of those four.
+    and agent profiles that come with them (`connectors/`,
+    `docs/archive/plans/connector-plan.md`). It replaces the old `mcp_servers` list, which could
+    only describe the first of those four.
     """
 
     # Where connector bundles are discovered: one or more directories, OS-path-separator
@@ -1421,6 +1434,14 @@ class ConnectorSettings(BaseSettings):
     # one global ceiling rather than a per-manifest field: a bundle in the repo must not be able
     # to grant itself unlimited runtime — that is a deployment's call.
     connector_job_timeout_seconds: float = Field(default=86_400.0, gt=0)
+
+    # Bound on the record write every finished connector job performs (D-157). Small: it is one
+    # upsert of a row the job has already earned, and a database that cannot take it in this long
+    # is down — in which case the retries, and then the log line, are the right outcome.
+    job_record_timeout_seconds: float = Field(default=30.0, gt=0)
+    # How many past runs `find_past_jobs` returns by default. Bounded because the results land in
+    # the model's context: enough to recognise the campaign being looked for, not a table dump.
+    job_record_search_limit: int = Field(default=20, ge=1)
 
     @property
     def connectors_dirs(self) -> list[str]:
@@ -1462,8 +1483,8 @@ class MemorySettings(BaseSettings):
     # so every durable table grew for the deployment's lifetime. 0 disables pruning for that
     # table, which is the default: a retention period is a *policy* decision (GxP: keep for N
     # years, then dispose, provably), so a deployment must state it rather than inherit a number
-    # from code. `audit_events` and `calculation_results` are deliberately absent — see
-    # workflows/retention.py for why each needs its own design rather than an age cutoff.
+    # from code. `audit_events`, `calculation_results` and `job_records` are deliberately absent —
+    # see durable/retention.py for why each needs its own design rather than an age cutoff.
     retention_enabled: bool = False
     retention_schedule_minutes: float = Field(default=1440.0, gt=0)
     retention_timeout_seconds: float = Field(default=600.0, gt=0)

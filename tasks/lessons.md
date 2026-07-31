@@ -265,3 +265,107 @@ configuration, once. Ten minutes.
    caught this without a credential and without a network call.
 3. **When a flag cannot be tested offline, say so where the flag is defined**, not in a backlog
    entry — the next person to read the setting is who needs to know its *on* state is unverified.
+
+---
+
+## Prose is not covered by any gate, and it makes claims that a test would refuse (D-156)
+
+A consistency pass over the repository structure found three defects. None were in code, all three
+were the same shape, and every one of them had survived a full `make lint type test` plus eight
+validators:
+
+- `deploy/README.md` documented an `mcp-molfp`/`mcp-rxnfp` component that `entrypoint.sh` has no
+  case for and the Helm chart has never declared. This is **D-117 verbatim** — a document asserting
+  a deployable that does not exist — and D-117's own fix (`tests/test_deploy_chart.py`, chart ↔
+  entrypoint in both directions) does not read README files, so the check that exists for exactly
+  this failure could not see it.
+- `src/chemclaw/mcp/README.md` stated the directory *"cannot be named `mcp`"* while sitting in a
+  directory named `mcp`. The rule was true of a **top-level** package shadowing the SDK, and D-148
+  had made it a submodule where it never applied. The rule outlived its condition and stayed
+  quotable.
+- `tests/test_deploy_chart.py` quoted a historical entrypoint line, and D-148's repository-wide
+  rewrite of `mcp_servers.…` paths had edited the *quotation*, so it recorded something the file had
+  never said.
+
+The common cause is not carelessness. Code that goes stale fails; **prose that goes stale gets
+believed**, and the more carefully it is written the longer it is believed.
+
+**Rules:**
+
+1. **When moving or deleting a thing, grep for its name in prose, not only in code.** The import
+   rewrite is the easy half and the tooling does it. `git grep -n '<oldname>' -- '*.md'` is the half
+   nothing does for you.
+2. **A mechanical substitution cannot tell a claim about the present from a quotation of the past.**
+   Scope it to files this branch authored, or read the whole diff before committing. This has now
+   caused two defects: D-148 corrupted other branches' ADR citations by renumbering repository-wide,
+   and edited a quoted historical path in a test docstring.
+3. **Never write a rule as an absolute without naming its condition.** "Cannot be named `mcp`"
+   should have been "a *top-level* `mcp/` shadows the SDK". The unconditional form is what survived
+   into a context where it was false.
+4. **When a document asserts something structural, ask what would fail if it were wrong.** If the
+   answer is "nothing", either add the check or write the claim as a pointer to the thing that is
+   checked. `ARCHITECTURE.md` promised for two restructures to stay in sync with the tree; D-156
+   made `tests/test_repo_map.py` enforce it in both directions instead.
+
+---
+
+## A conflict-marker scan that matched an exact width exempted the conflicts it most needed to catch
+
+Resolving a rename-heavy merge, the sweep for leftover markers was
+`grep '^<<<<<<< \|^>>>>>>> '` — seven characters and a space. Git writes **eight** for a
+rename/rename conflict, because the marker carries the two paths (`<<<<<<<< HEAD:old/path.md`). So
+the one file that was still full of conflict markers reported clean, and it was the ADR — the single
+file where a corrupted heading breaks the identity the whole `docs/decisions/` mechanism rests on.
+
+`tests/test_decision_log.py::test_every_filename_matches_its_heading` caught it, by noticing the
+file carried two `# D-NNN` headings. That is the check doing exactly its job, and it should not have
+had to.
+
+The shape is familiar enough to be worth naming: **a validator written against one example of a
+pattern silently exempts the variants**. Same family as a `glob` over a moved directory returning
+empty and a discovery loop iterating a set that is now empty — the check runs, finds nothing, and
+reports success.
+
+**Rules:**
+
+1. **Match conflict markers by class, not by width**: `^(<{4,8}|>{4,8})[ <>]|^={4,8}$`. Rename and
+   submodule conflicts do not use the seven-character form.
+2. **When a hand-rolled scan and a test disagree, the scan is wrong.** The test asserts a property;
+   the scan asserts a spelling. Fix the scan and keep both.
+3. **After `git checkout --ours <file>` on a rename/rename conflict, read the file.** `--ours` there
+   resolves *which path* wins, not which content — the result can still contain markers.
+
+## A test that skips is not a test that passes — and an infrastructure skip can often be removed (2026-07-31, D-157)
+
+The Temporal-backed and Postgres-backed suites here skip in the sandbox, which is documented and
+accepted. Working on D-157 I first wrote the write-path assertions into the Temporal e2e test and
+moved on, and the honest state of that work was: *the property is unasserted anywhere I can run*.
+Two different corrections came out of it.
+
+**The Postgres half did not have to skip at all.** `postgresql-16` was installed in the sandbox the
+whole time; the only thing missing was pgvector (an `apt-get install`, then a source build when the
+packaged 0.6.0 predated `bit_jaccard_ops`). Twenty minutes turned four skipped store tests into four
+that ran — and they ran against the real migration, which is the thing a hand-checked `INSERT`
+cannot verify. "The offline sandbox has none" was true of the *default* environment, not of the
+environment I was allowed to build.
+
+**The Temporal half genuinely cannot run** (`temporal.download` is blocked by the network policy),
+so the fix was structural: pull the pure part out — `job_record_for`, a plain function from a run to
+its record — and pin it offline, leaving only the orchestration to CI. That is the same move
+`completed_job_status` made for D-153, and the test it makes possible is the one that would actually
+catch a wrong field.
+
+What is left unasserted offline is now *known*: core applying the provenance footer is only
+exercised in the CI-only e2e run. I checked that by mutating the source and watching the offline
+suite stay green, rather than by assuming.
+
+**Rules:**
+
+1. **Before accepting an environment skip, try to remove it.** Check what is actually installed
+   (`which`, the package manager) rather than trusting the skip message; a skip reason written when
+   the sandbox was different is not a current fact.
+2. **When a path truly cannot run locally, extract the pure part and test that.** "It needs a
+   server" is usually true of the orchestration and false of the mapping the orchestration performs.
+3. **Verify a coverage claim by mutation, not by reading.** Break the line, run the suite, and see
+   which test fails. Every "verified to fail without the fix" claim in a review section must be one
+   you actually ran — I wrote one in `tasks/todo.md` before running it, and it was wrong.

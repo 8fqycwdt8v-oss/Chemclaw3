@@ -20,7 +20,6 @@ with workflow.unsafe.imports_passed_through():
     from chemclaw.ingest.sources.registry import active_retrieve_sources
     from chemclaw.kg.git_submitter import default_submitter
     from chemclaw.kg.pr_gate import propose_note
-    from chemclaw.mcp.fpstore import default_reaction_store
     from chemclaw.retrieval.evidence import SourceRetriever
     from chemclaw.retrieval.harness import (
         Report,
@@ -31,6 +30,7 @@ with workflow.unsafe.imports_passed_through():
         report_note,
     )
     from chemclaw.retrieval.retrievers import FingerprintReactionRetriever
+    from chemclaw.science.fingerprints.store import default_reaction_store
 
 from chemclaw.durable.orchestrator import fan_out
 from chemclaw.durable.publish import BAD_DATA_RETRY, publish_note

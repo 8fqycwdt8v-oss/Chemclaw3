@@ -171,6 +171,14 @@ class CampaignSpec(BaseModel):
     `objective_name` names the objective a worker resolves via `chemclaw.science.bo.objectives`; a
     Temporal workflow cannot carry a Python callable across its boundary, so the
     objective is referenced by name and looked up in the evaluate activity.
+
+    **There is no `publish_to_graph` here** (D-157). There used to be, and it was the model-facing
+    half of a decision declared twice: the manifest's `publish_to_graph` said the deployment wants
+    campaign recommendations reviewed, while this field — default `False`, filled in by the LLM —
+    could silently suppress the only permanent artifact a campaign produced. A campaign launched
+    without it left no trace at all once Temporal's history expired. Whether a job's knowledge
+    reaches the graph is the deployment's call, so it is declared once, in `connector.yaml`, where
+    the deployment can see it.
     """
 
     problem: OptimizationProblem
@@ -186,8 +194,6 @@ class CampaignSpec(BaseModel):
     # Per-campaign RNG seed so replicate campaigns can vary independently;
     # None means the config default (`settings.bo_seed`), resolved in `bo.engine`.
     seed: int | None = None
-    # Opt-in: publish the campaign's recommendation as a PR-gated graph note (1d.5).
-    publish_to_graph: bool = False
 
 
 def require_rounds_within_ceiling(n_rounds: int) -> None:

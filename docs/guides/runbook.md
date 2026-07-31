@@ -102,6 +102,13 @@ must match `CHEMCLAW_ECFP_BITS` / `CHEMCLAW_DRFP_BITS` (see `config.py`). Applie
 recorded in the `schema_migrations` ledger with a checksum (D-034), so re-running is safe and an
 edited already-applied file is flagged as drift rather than silently skipped.
 
+**`job_records` is the one table a chemist's answers now depend on** (023, D-157): every finished
+connector job writes what it ran, on what arguments, its whole result, and the reason it was
+started. It is what `get_durable_job_status` reads for a job Temporal has forgotten and what
+`find_past_jobs` searches, so a deployment that skips this migration — or that runs with
+`CHEMCLAW_SESSION_STORE=memory`, which selects the null sink — silently loses every finished run
+once its workflow history expires. Nothing prunes it (`durable/retention.py` says why).
+
 ## (iii) Add / switch a data source (an ELN, a warehouse, a retrieval index)
 
 A source is a folder with a `datasource.yaml`, exactly as a capability is a folder with a
@@ -260,9 +267,9 @@ Reach for this only when the *order* must not vary. A profile is the first answe
 agent and lets the model choose the sequence, which is what you want while a procedure is still being
 figured out. A template pins the sequence and runs it as a durable Temporal job: use it for a
 validated protocol, a standard screening sweep, a report that must always gather the same evidence in
-the same order. `templates/README.md` has the full comparison and the field reference.
+the same order. `src/chemclaw/templates/README.md` has the full comparison and the field reference.
 
-**To add one:** drop `templates/<name>.yaml`. The filename is the name here too.
+**To add one:** drop `data/templates/<name>.yaml`. The filename is the name here too.
 
 ```yaml
 summary: Screen a molecule for hazards and write a briefing.
@@ -343,7 +350,7 @@ intentional:
   created_at DESC LIMIT 20;`.
 
 Over the committed (deterministic) case-set this is a *deployment-consistency tripwire*: it fires
-when the deployed code, cases, and `evals/baseline.json` are inconsistent. After a deliberate
+when the deployed code, cases, and `data/evals/baseline.json` are inconsistent. After a deliberate
 metric change, refresh the committed baseline — otherwise every scheduled run re-alerts.
 
 ## (viii) Answer "is prompt caching paying off?"

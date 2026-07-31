@@ -90,7 +90,10 @@ def test_a_durable_launch_stamps_the_current_session(monkeypatch) -> None:  # ty
     async def _run() -> None:
         token = set_current_session_id("sess-42")
         try:
-            await tool(params(molecule_smiles="CCO", method="B3LYP", basis_set="def2-SVP"))
+            await tool(
+                params(molecule_smiles="CCO", method="B3LYP", basis_set="def2-SVP"),
+                "confirm the barrier before proposing the route",
+            )
         finally:
             reset_current_session_id(token)
 

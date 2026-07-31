@@ -24,10 +24,15 @@ core owns the obligations that must never vary per capability:
   graph itself, so "AI proposes, human signs off" cannot be bypassed by adding a connector.
 - **Session push-back** — the launching chat is woken through the one existing channel (F3-T3), so
   a connector job surfaces in the UI exactly as a QM job does, with no per-connector plumbing.
+- **The durable record** — what ran, on what arguments, what came out, and *why it was asked for*
+  is written to `job_records` (D-157), because a workflow result is not an archive: Temporal
+  expires a closed run's history and the result goes with it. Here for the same reason the other
+  three are: it must hold for every capability, and "each connector remembers" is the discipline
+  that fails silently.
 
 The child is addressed by **workflow type name + task queue**, both strings from the manifest, so
 this module imports nothing from any connector — and moving a workflow between workers is a one-line
-manifest change rather than a code change (`docs/planning/connector-plan.md` §5.3).
+manifest change rather than a code change (`docs/archive/plans/connector-plan.md` §5.3).
 """
 
 from datetime import timedelta
@@ -36,9 +41,11 @@ from typing import Any
 from pydantic import BaseModel, ConfigDict, Field
 from temporalio import workflow
 from temporalio.common import WorkflowIDReusePolicy
+from temporalio.exceptions import ActivityError
 
 with workflow.unsafe.imports_passed_through():
     from chemclaw.core.config import settings
+    from chemclaw.durable.job_record import JobRecord, note_with_run_provenance, record_job
     from chemclaw.durable.memory_jobs import publish_memory_note_activity
     from chemclaw.durable.notify import notify_session_best_effort
     from chemclaw.kg.note import Note
@@ -64,6 +71,14 @@ class ConnectorJobInput(BaseModel):
     workflow: str = Field(min_length=1)
     task_queue: str = Field(min_length=1)
     payload: dict[str, Any] = Field(default_factory=dict)
+    # **Why this run was asked for**, in the requester's own terms (D-157). Required, and
+    # deliberately *not* part of `payload`: the payload is hashed into the idempotency key, so a
+    # rationale there would make two identical campaigns launched for differently-worded reasons
+    # two separate expensive runs. It is the one fact no other store in this system held — a note
+    # records what a job produced (output-neutral by design, D-005) and `audit_events` records
+    # that a tool was called, but neither says what question the run was meant to answer, which is
+    # exactly what is needed months later to judge whether the result still applies.
+    rationale: str = Field(min_length=1)
     # The Entra actor this run is attributed to (`require_actor` at the tool boundary guarantees it
     # is present under Entra). Carried in the payload rather than read ambiently, because a workflow
     # has no request context — the same reason `QMJobInput.requested_by` exists.
@@ -95,6 +110,31 @@ class ConnectorJobResult(BaseModel):
     summary: str = Field(min_length=1)
     data: dict[str, Any] = Field(default_factory=dict)
     note: Note | None = None
+
+
+def job_record_for(job_id: str, job: ConnectorJobInput, result: ConnectorJobResult) -> JobRecord:
+    """Assemble the durable record of one finished run from its input and its result (D-157).
+
+    A module-level function rather than a block inside the workflow because it is pure, and
+    because everything around it needs a live Temporal server to exercise — this way "the record
+    carries the arguments, the *whole* result and the note it proposed" is a property the offline
+    suite can hold, instead of one that is only ever checked in CI.
+    """
+    return JobRecord(
+        job_id=job_id,
+        connector=job.connector,
+        job=job.job,
+        rationale=job.rationale,
+        requested_by=job.requested_by,
+        session_id=job.session_id,
+        correlation_id=job.correlation_id,
+        payload=job.payload,
+        summary=result.summary,
+        # The envelope's own data, whole: for a campaign that is every observation it made, which
+        # is the part Temporal's expiring history was the only copy of.
+        result=result.data,
+        note_id=result.note.id if result.note is not None else "",
+    )
 
 
 # On the light queue: this wrapper does no work itself — it starts a child on the
@@ -138,11 +178,24 @@ class ConnectorJobWorkflow:
             retry_policy=BAD_DATA_RETRY,
             execution_timeout=timedelta(seconds=settings.connector_job_timeout_seconds),
         )
+        record = job_record_for(workflow.info().workflow_id, job, result)
+        # Written *before* the note publish, because this is the durable copy: the graph write is a
+        # proposal a human may never merge, while this row is what makes the result survive
+        # Temporal's own history retention. Best-effort for the same reason the publish is — the
+        # science is finished, so a database that is down must not fail a completed job and send an
+        # expensive campaign round the retry loop — but logged at error level, because unlike a
+        # failed note this loses data nothing else holds.
+        await self._record_run(record)
         if job.publish_to_graph and result.note is not None:
             # The same PR-gate activity the memory-synthesis jobs use — one write path into the
-            # graph, on the light background queue, bounded retries, never failing the job.
+            # graph, on the light background queue, bounded retries, never failing the job. The
+            # note is stamped with the run and its reason on the way through, here rather than in
+            # each connector, so no bundle can forget and every merged note answers "why was this
+            # done" as well as "what came out".
             await publish_note_best_effort(
-                publish_memory_note_activity, [result.note], label=f"{job.connector}:{job.job}"
+                publish_memory_note_activity,
+                [note_with_run_provenance(result.note, record)],
+                label=f"{job.connector}:{job.job}",
             )
         if job.session_id:
             await notify_session_best_effort(
@@ -156,3 +209,28 @@ class ConnectorJobWorkflow:
                 },
             )
         return result
+
+    async def _record_run(self, record: JobRecord) -> None:
+        """Persist the run's durable record, logging rather than failing the job if it cannot be.
+
+        A method rather than an inline block so the "never fail a finished job" decision has one
+        place to be read and one place to change — the same shape, and the same reasoning, as
+        `publish_note_best_effort`.
+        """
+        try:
+            await workflow.execute_activity(
+                record_job,
+                record,
+                # Named explicitly although this workflow already runs there: the activity is
+                # registered on the background queue alone, so were the wrapper ever moved, the
+                # default would route the write to a queue where nothing serves it — a silent
+                # loss, discovered when an id expires months later.
+                task_queue=settings.background_task_queue,
+                start_to_close_timeout=timedelta(seconds=settings.job_record_timeout_seconds),
+                retry_policy=BAD_DATA_RETRY,
+            )
+        except ActivityError:
+            workflow.logger.error(
+                "job record write failed for %s; this run survives only in Temporal's history",
+                record.job_id,
+            )

@@ -1,4 +1,4 @@
-"""Regenerate `evals/baseline.json` from a real scoring run (REV-5, D-136).
+"""Regenerate `data/evals/baseline.json` from a real scoring run (REV-5, D-136).
 
 `chemclaw.evals.baseline.save_baseline` existed with **no caller anywhere in the repository**, so
 the

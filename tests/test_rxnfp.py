@@ -11,9 +11,9 @@ import asyncio
 import pytest
 
 from chemclaw.core.config import settings
-from chemclaw.mcp.fpstore import FingerprintError, InMemoryFingerprintStore
-from chemclaw.mcp.rxnfp.fingerprint import drfp_bitstring
-from chemclaw.mcp.rxnfp.search import find_similar_reactions, record_for_reaction
+from chemclaw.science.fingerprints.rxnfp.fingerprint import drfp_bitstring
+from chemclaw.science.fingerprints.rxnfp.search import find_similar_reactions, record_for_reaction
+from chemclaw.science.fingerprints.store import FingerprintError, InMemoryFingerprintStore
 
 # Three esterifications (similar) and one unrelated halogenation.
 _ESTER_ETHYL = "CCO.CC(=O)O>>CCOC(C)=O"

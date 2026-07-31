@@ -190,6 +190,12 @@ this reason; the filenames make that ordering irrelevant now, and the numbers st
 | [D-153](D-153-the-mid-turn-wait-asks-the-jobs-not-the-mailbox.md) | The mid-turn wait asks the jobs, not the mailbox |
 | [D-154](D-154-a-register-that-had-become-a-log-and-the-one.md) | A register that had become a log, and the one trigger it was hiding |
 | [D-155](D-155-what-the-dark-half-of-the-system-does-the-first-time.md) | What the dark half of the system does the first time it runs |
-| [D-156](D-156-prose-named-two-note-types-the-schema-refused-and-a.md) | Prose named two note types the schema refused, and a lost note could not be counted |
-| [D-157](D-157-the-plan-approval-binds-to-the-plan-not-to-the.md) | The plan approval binds to the plan, not to the session |
-| [D-158](D-158-the-deployment-envelope-a-sidecar-that-emptied-the.md) | The deployment envelope: a sidecar that emptied the tree, and three assertions the chart never made |
+| [D-156](D-156-the-last-false-duplicate-and-a-map-that-is-enforced.md) | The last false duplicate, the corpora in one place, and a map that is enforced |
+| [D-157](D-157-a-durable-record-of-every-connector-job-what-ran.md) | A durable record of every connector job: what ran, with what data, and why |
+| [D-158](D-158-the-expensive-calculation-is-the-one-that-was-not.md) | The expensive calculation is the one that was not cached |
+| D-159 | RESERVED — the turn stream reports a tool's lifecycle and its result, not just that a call happened |
+| D-160 | RESERVED — retrieval carries provenance, so a claim can be qualified by who authored its evidence |
+| D-161 | RESERVED — an ungated observations tier, with the human gate moved from every observation to the few worth promoting |
+| [D-162](D-162-prose-named-two-note-types-the-schema-refused-and-a.md) | Prose named two note types the schema refused, and a lost note could not be counted |
+| [D-163](D-163-the-plan-approval-binds-to-the-plan-not-to-the.md) | The plan approval binds to the plan, not to the session |
+| [D-164](D-164-the-deployment-envelope-a-sidecar-that-emptied-the.md) | The deployment envelope: a sidecar that emptied the tree, and three assertions the chart never made |

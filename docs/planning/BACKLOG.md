@@ -3,30 +3,67 @@
 Prioritized open action items. Top = next. Keep in sync with `docs/planning/implementation-plan.md`
 (phase/step numbers) at session end.
 
-## Open — v1.0 readiness analysis (2026-07-31, D-156/D-157/D-158)
+## Open — Left open by the durable job record (2026-07-31, D-157)
+
+The record closed "a finished run's data, and the reason for it, survive nowhere". Three things it
+deliberately did not close, each because it is a design rather than a line of code.
+
+- [ ] **A failed run leaves no record.** The child failure propagates out of `ConnectorJobWorkflow`
+      before the write, so `job_records` holds successes only — and "what have we already tried that
+      did not work" is exactly the retrospective question the table exists to answer. Needs three
+      decisions before code: which status a row carries (a run that failed *after* several rounds is
+      not the same as one that never started), where the write happens (the failure path is an
+      exception, not a return value, so it is a `try/finally` around the child or a
+      workflow-level handler), and whether a later successful re-run under the same id supersedes the
+      failed row or joins it. The attempt is already in `audit_events`, so nothing is lost today
+      beyond the campaign's partial history — [M].
+- [ ] **`request_development_report` writes no record.** It does not run through
+      `ConnectorJobWorkflow` (D-115 kept it in core), so it would need its own write site — either by
+      lifting the record write into a helper both call, or by moving the report onto the wrapper. Its
+      gap is the smaller one: a report's artifact is a PR-gated note whose headings state its
+      subject, where a campaign's artifact was a single best point. Same for anything else that ever
+      starts a durable workflow outside the seam — [S].
+- [ ] **Temporal namespace retention is still unset.** Nothing in the repo configures it, so a
+      deployment inherits the server's default. D-157 removed the *dependence* on that number (the
+      result no longer lives only in history) but not the ambiguity: an operator reading the runbook
+      still cannot say how long a running deployment keeps workflow history. It is one Helm value
+      plus a runbook line, and it wants a stated policy rather than a copied default — [S].
+
+## Open — v1.0 readiness analysis (2026-07-31, D-162/D-163/D-164)
 
 A whole-repo sweep for what is missing before v1.0, prompted by two observations: an inline BO
 suggestion is never persisted, and nothing anywhere records *why* a tool was called. Both turned
 out to be instances of wider patterns. Closed in this pass: the two note types the skills taught
-but the schema refused (D-156), a lost knowledge note that could not be counted (D-156), the
-sidecar that emptied the tree it published and three assertions the chart never made (D-158), and
-the plan approval that authorized a session rather than a plan (D-157).
+but the schema refused (D-162), a lost knowledge note that could not be counted (D-162), the
+sidecar that emptied the tree it published and three assertions the chart never made (D-164), and
+the plan approval that authorized a session rather than a plan (D-163).
+
+**Re-checked against `main` after D-156/D-157/D-158 landed from other branches.** Those closed
+four rows this analysis had opened — the durable job record now carries a run's reason, session and
+correlation id; the BO note carries its decision space; and `calc_refs` is finally written on the
+QM path. The rows below are what survives that merge, narrowed to say so.
 
 **The record says what happened, never why.** This is the largest theme and none of it is closed.
 
-- [ ] **A durable job cannot be traced back to the question that prompted it** — [S] to unblock.
-      `api/runner.py` mints a per-turn `correlation_id` and stamps it on `audit_events`, on the
-      connector job's Temporal memo, and on the connector request header. It is stamped on nothing
-      that holds the user's words: `session_messages` has no `correlation_id` column and
-      `audit_events` has no `session_id`, so no query joins a tool call to the conversation that
-      caused it. Two indexed columns make "why was this BO campaign started" a single join, and
-      everything below depends on them.
-- [ ] **No field anywhere holds an intent** — [M]. `AuditEvent` and `ConnectorJobInput` both record
-      what was called with which arguments and by whom; neither has a `purpose`. Even with the join
-      above, reconstruction is "read the transcript and infer". A model-authored, audited,
-      never-authorization-bearing one-liner on expensive/durable actions would make intent a record
-      rather than an inference (`dry_run` is the precedent for an ambient value the model cannot
-      forge; this is the inverse — one it should author).
+- [ ] **An audit row cannot be traced back to the conversation that caused it** — [S], and it is now
+      the *only* remaining half of this. D-157 closed the durable-job side: `job_records` carries
+      `rationale`, `session_id` and `correlation_id`, so "why was this BO campaign started" is
+      answerable for anything that runs through `ConnectorJobWorkflow`. Every **other** tool call is
+      still stranded. `api/runner.py` mints a per-turn `correlation_id` and stamps it on
+      `audit_events`; `audit_events` has no `session_id` and `session_messages` has no
+      `correlation_id`, so nothing joins `gather_evidence`, `predict_pka`, `suggest_next_experiment`
+      or `propose_knowledge_note` to the conversation that asked for them — which is most of the
+      trail. Two indexed columns close it. **Note the constraint:** `chain_hash` hashes
+      `event.model_dump()`, so adding a field to `AuditEvent` changes what every historical row
+      should hash to and breaks verification; this needs a `chain_version` column and a verifier
+      that switches on it, which is a GxP change wanting its own ADR.
+- [ ] **No field holds an intent for a *non-job* tool call** — [M]. D-157 gave
+      `ConnectorJobInput` a required `rationale`, so durable jobs now state why they ran. `AuditEvent`
+      still has none, so for every inline tool the trail records what was called with which arguments
+      and by whom, and reconstruction remains "read the transcript and infer". The same
+      model-authored, audited, never-authorization-bearing one-liner extends naturally from the job
+      launcher to the audit middleware (`dry_run` is the precedent for an ambient value the model
+      cannot forge; this is the inverse — one it should author).
 - [ ] **The reasoning that does exist is compacted, pruned and rolled back** — [M]. The only durable
       trace of intent is the raw MAF message blob in `session_messages`, and three mechanisms erode
       it: `session_store._compact` rewrites rows, `durable/retention.py` prunes by age, and
@@ -40,11 +77,10 @@ the plan approval that authorized a session rather than a plan (D-157).
       `propose_knowledge_note` accepts only `id/type/body/compound_smiles/tags/source`, so the model
       cannot attach `calc_refs`, `artifact_refs`, typed `relations`, `confidence` or a validity
       window — every field D-133/D-134 added for exactly this.
-- [ ] **`calc_refs` is dead in every production write path** — [S]. Worse than the row above: the
-      *machine* paths do not set it either. Only the seed corpus and tests populate `calc_refs`;
-      `connectors/qm/knowledge.py` — the note type that exists *because* a calculation ran — sets
-      none, so `notes_for_calculation()` returns `[]` in production, always, and STO-7's stated goal
-      is architecturally present and operationally zero.
+- [ ] **`calc_refs` is written on one path of three** — [S]. D-158 wired the QM note, which was the
+      worst case and is now closed. `connectors/bo/knowledge.py` and the ELN reaction notes still set
+      none, so `notes_for_calculation()` answers for DFT runs and for nothing else — a BO
+      recommendation still cannot be traced to the evaluations behind it.
 - [ ] **`Note.confidence` is never set by any machine path** — [S], and it kills two shipped
       features: `GraphRetriever` scores every machine note at the default so KM-5's truncation
       ordering is a no-op, and `kg/conflicts.py` requires a confidence on *both* sides so conflict
@@ -78,9 +114,8 @@ the plan approval that authorized a session rather than a plan (D-157).
       (`connectors/bo/activities.py` stamps every observation `provenance="predicted"`). So the
       system proposes experiments and never learns whether its proposals were good — the only way
       `bo_regret` could ever be scored against reality rather than a benchmark surrogate.
-- [ ] **The BO note is a graph island** — [S]. `connectors/bo/knowledge.py` emits no wikilink,
-      documented as avoiding a dangling link — which is exactly the constraint `NoteSubmission.files`
-      removed (STO-7/D-133) and which `connectors/qm/knowledge.py` already uses. Never migrated.
+- [x] **The BO note is a graph island** — closed by D-157: `note_with_run_provenance` stamps the run
+      and its reason onto any connector's note, and the BO note now carries its decision space.
 - [ ] **Two of ~12 calculators log predictions, and nothing reconciles ELN data** — [M]. Only
       `predict_solubility`/`predict_pka` write to the `predictions` ledger, and its only reconciler
       is `report_measurement`, a chat tool a human must type. The ELN sync ingests measured yields
@@ -660,7 +695,7 @@ missing prerequisite), in D-092.
       implementation and its dedicated workflow/models/activities were removed.
 
 > **Every open item below was assessed on 2026-07-25** — trigger held? real defect? offline-verifiable?
-> KISS? — in **`docs/planning/backlog-plan.md`** (verdict table + specs for the survivors + the working queue in
+> KISS? — in **`docs/archive/plans/backlog-plan.md`** (verdict table + specs for the survivors + the working queue in
 > `tasks/todo.md`). Verdicts: 8 BUILD (waves A/B/C), 14 DEFER, 5 DROP, 12 BLOCKED. The DROP verdicts are
 > corrected in place below, because they were claims about the tree that are no longer true.
 
@@ -978,11 +1013,11 @@ Substrate verdict: **evolve the flat `pydantic-settings` singleton additively** 
 discriminated unions); do **not** adopt entry-points/pluggy/Django-apps — all target the
 out-of-tree plugin problem this single-repo app does not have.
 
-## Open — the connector seam (D-109, docs/planning/connector-plan.md)
+## Open — the connector seam (D-109, docs/archive/plans/connector-plan.md)
 
 Stages A, B, D and E are **done** (the seam, the reference bundles, the durable path, profiles, step
 templates — D-109/D-110/D-111/D-112). Stage C is partly done: `molfp`, `rxnfp`, `safety`, `chem`,
-`calc` and `bo` have moved. What remains is staged in `docs/planning/connector-plan.md` §9, with the trigger
+`calc` and `bo` have moved. What remains is staged in `docs/archive/plans/connector-plan.md` §9, with the trigger
 for each recorded here rather than left implicit.
 
 - [x] ~~**Stage C, remainder — the `kg` bundle**~~ — **WON'T BUILD**, and the reason is also the
@@ -1073,7 +1108,7 @@ durable job execution (Temporal) already covered; three residual gaps closed, ea
       *mid-flight same-turn* resume stays open (see the harness follow-ups below) — distinct from the
       front-door restart-reattach closed here.
 
-## Phase F11 — Gap closure (docs/planning/gap-closure-plan.md; analysis: docs/archive/audit/12-capability-gap-analysis.md)
+## Phase F11 — Gap closure (docs/archive/plans/gap-closure-plan.md; analysis: docs/archive/audit/12-capability-gap-analysis.md)
 
 Implementing the whole-codebase capability gap analysis. **Waves 0–2 complete and W3 partial**;
 everything below is built, tested, and green under `make lint type test` (688+ passing).
@@ -1217,10 +1252,10 @@ everything below is built, tested, and green under `make lint type test` (688+ p
 tenant / Temporal broker / OpenShift cluster) plus the audit-trail archive-then-reseal design, which
 is recorded in `docs/planning/DEFERRED.md` as needing its own ADR with QA sign-off rather than a cleanup job.
 
-## Next — Platform-parity hardening (docs/planning/parity-plan.md, Phase F10)
+## Next — Platform-parity hardening (docs/archive/plans/parity-plan.md, Phase F10)
 
 Closes the platform-capability deltas found against a commercial pharma-agent platform. Full
-tickets + disposition table: `docs/planning/parity-plan.md`.
+tickets + disposition table: `docs/archive/plans/parity-plan.md`.
 
 - [x] **F10-E** per-task model routing: `build_chat_client(task)` consults `model_routes`
       (task→model) in the one provider seam; empty map = today's single model. Test:
@@ -1286,9 +1321,9 @@ tickets + disposition table: `docs/planning/parity-plan.md`.
       is KISS).
 - [ ] Gate-until-trigger (documented, not built): OCR/vision ingestion, vendor connectors
       (Veeva/SAP/LIMS), GAMP-5 validation artifacts, conversational multi-agent mesh — each with its
-      trigger recorded in `docs/planning/parity-plan.md`.
+      trigger recorded in `docs/archive/plans/parity-plan.md`.
 
-## Now — Foundation build (docs/planning/foundation-plan.md + docs/planning/implementation-tickets.md)
+## Now — Foundation build (docs/archive/plans/foundation-plan.md + docs/planning/implementation-tickets.md)
 
 The target-stack foundation: MAF harness experience on OpenShift + HPC/Nextflow, internal
 OpenAI-compatible LLM (generic credential), Entra everywhere with every backend workflow
@@ -1873,7 +1908,7 @@ MAF ships the harness natively (`create_harness_agent` + `TodoProvider`/`AgentMo
       reports (5b) publish agent-authored procedures today with no hazard awareness anywhere in the
       tree. Promoted to **wave C2** with a proposed advisory-only, deterministic slice (committed
       SMARTS rule table + `@tool` + skill + `kg-validate` hazard-section rule + a recall metric);
-      three scope questions await the user — `docs/planning/backlog-plan.md` §3/§5.
+      three scope questions await the user — `docs/archive/plans/backlog-plan.md` §3/§5.
 - [ ] Retrosynthesis + reaction prediction · DoE/Bayesian optimization · lab automation/SiLA2
       closed-loop · process flowsheet synthesis · multimodal analytical data · domain foundation
       models — all currently in `docs/planning/DEFERRED.md` with triggers; confirm or pull forward.
@@ -1902,7 +1937,7 @@ MAF ships the harness natively (`create_harness_agent` + `TodoProvider`/`AgentMo
 
 ## Post-campaign follow-ups (2026-07-24, D-072) — worked off 2026-07-25
 
-Assessed then implemented per `docs/planning/backlog-plan.md` (waves A/B/C); all six are now closed.
+Assessed then implemented per `docs/archive/plans/backlog-plan.md` (waves A/B/C); all six are now closed.
 
 - [x] **ELN late-file detection** — both file adapters compare a dropped file's mtime against the
       fetch floor and emit one aggregated WARNING naming the late files plus the backfill recovery

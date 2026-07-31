@@ -18,10 +18,14 @@ import pytest
 from chemclaw.core.chem import InvalidSmilesError, compound_id
 from chemclaw.ingest.eln.compound import compound_note, synonyms_for
 from chemclaw.kg.note import KNOWN_NOTE_TYPES
-from chemclaw.mcp.fpstore import FingerprintRecord, InMemoryFingerprintStore
-from chemclaw.mcp.molfp.fingerprint import ecfp_bitstring, molecule_definition
-from chemclaw.mcp.molfp.search import find_similar_molecules, find_substructure_matches, record_for
 from chemclaw.memory.optimization import canonical_condition
+from chemclaw.science.fingerprints.molfp.fingerprint import ecfp_bitstring, molecule_definition
+from chemclaw.science.fingerprints.molfp.search import (
+    find_similar_molecules,
+    find_substructure_matches,
+    record_for,
+)
+from chemclaw.science.fingerprints.store import FingerprintRecord, InMemoryFingerprintStore
 
 
 def test_the_same_molecule_gets_one_id_however_it_is_written() -> None:

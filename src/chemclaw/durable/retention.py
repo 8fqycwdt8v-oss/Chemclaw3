@@ -28,6 +28,12 @@ a records story with no disposal story is incomplete.
   consequences and belongs in an ADR with QA sign-off — not in a cleanup job. The job says so out
   loud rather than silently skipping the table.
 
+- `job_records` is **refused**, and it is the newest reason to be careful here (D-157). The table
+  exists precisely because a durable run's result used to expire — with Temporal's own history —
+  and take a campaign's entire evaluation record with it. Ageing those rows out on a clock would
+  restore the failure this system just removed, one retention window later. Its disposal story is
+  the same *archive-then-record* design `audit_events` needs, and it belongs in the same ADR.
+
 - `calculation_results` is **refused** for a different reason: D-011 ("never compute twice") is a
   correctness *and* cost guarantee, and evicting a cached result silently converts a cache hit into
   a recomputation — potentially an HPC run. A cache is bounded by cost policy, not by a retention
