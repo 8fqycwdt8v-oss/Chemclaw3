@@ -91,14 +91,21 @@ async def notify_session(session_id: str, kind: str, payload: dict[str, Any]) ->
     )
 
 
-async def notify_session_best_effort(session_id: str, kind: str, payload: dict[str, Any]) -> None:
+async def notify_session_best_effort(session_id: str, kind: str, payload: dict[str, Any]) -> bool:
     """Record a session push-back event, but never fail the caller on a delivery failure.
 
     For a workflow whose real result is the calculation (QM, BO): the science is done and cached, so
     a failed notification must not fail the job — the same discipline as `publish_note_best_effort`
     for the note write. It runs on the light background queue (a small DB insert, not HPC).
+
+    Returns whether the event was recorded. Most callers ignore it, exactly because the science is
+    the result and the notification is not. A caller that advances a *watermark* past what it just
+    tried to send must not: for it, "delivered" and "swallowed" are different facts, and treating
+    them alike loses the matches the failed send covered forever (`durable/digest.py`).
     """
     try:
         await notify_session(session_id, kind, payload)
     except ActivityError:
         workflow.logger.warning("session push-back failed for %s", session_id)
+        return False
+    return True

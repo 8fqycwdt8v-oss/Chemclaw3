@@ -217,6 +217,10 @@ class StoreSettings(BaseSettings):
     # Eviction targets blobs only; `calculation_results` is never evicted (D-011).
     artifact_store_max_bytes: int = Field(default=0, ge=0)
     artifact_evict_idle_days: int = Field(default=0, ge=0)
+    # How often the eviction sweep runs, once either bound above turns it on. A day: eviction is a
+    # cost policy, not a correctness one, and a blob that survives an extra few hours costs storage
+    # rather than accuracy.
+    artifact_eviction_schedule_minutes: float = Field(default=1440.0, gt=0)
     # How stale a blob's access stamp must be before a read bothers to refresh it. Bumping on
     # every hit would turn each read into a write on the reuse hot path; at most one write per
     # blob per window is enough for an idle-based eviction decision.

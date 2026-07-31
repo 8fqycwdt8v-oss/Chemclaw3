@@ -171,6 +171,80 @@ def test_a_hyphenated_template_name_becomes_a_valid_tool_name() -> None:
     assert tool_name(_template(name="hazard-briefing")) == "run_hazard_briefing"
 
 
+class _FakeClient:
+    """A Temporal client that records the start it was asked for instead of making one."""
+
+    def __init__(self) -> None:
+        self.calls: list[dict[str, Any]] = []
+
+    async def start_workflow(self, _run: Any, arg: Any, **kwargs: Any) -> Any:
+        self.calls.append({"input": arg, **kwargs})
+        return type("Handle", (), {"id": kwargs["id"]})()
+
+
+@pytest.fixture
+def client(monkeypatch: pytest.MonkeyPatch) -> _FakeClient:
+    """Point the launcher at a recording client, and give the turn an actor to attribute to."""
+    fake = _FakeClient()
+
+    async def connect() -> _FakeClient:
+        return fake
+
+    monkeypatch.setattr("chemclaw.templates.registry.connect", connect)
+    monkeypatch.setattr("chemclaw.templates.registry.require_actor", lambda: "chemist@lab")
+    return fake
+
+
+def test_launching_accepts_the_raw_json_object_the_framework_hands_it(client: _FakeClient) -> None:
+    """MAF publishes the params model's schema but passes the body a decoded `dict`.
+
+    Every test above this one checked the generated tool's *name*, *docstring* and *schema*; none
+    ever called it. So `launch` carried `cast(BaseModel, params).model_dump(...)` — a `cast` is a
+    static no-op — and raised `AttributeError: 'dict' object has no attribute 'model_dump'` on
+    every call. The shipped `hazard-briefing` template had never once run from a conversation, and
+    `make template-validate` could not see it because it validates declarations, not invocation.
+    Same defect as D-138, which fixed only the connector-job sibling.
+    """
+    tool = build_template_tool(
+        _template(inputs=[{"name": "smiles", "type": "string", "description": "The molecule."}])
+    )
+    run_id = asyncio.run(tool(params={"smiles": "CCO"}))
+    (call,) = client.calls
+    assert call["input"].inputs == {"smiles": "CCO"}
+    assert run_id == call["id"]
+
+
+def test_launching_validates_rather_than_passing_the_object_through(client: _FakeClient) -> None:
+    """The dict is *validated*, not merely accepted — the declared types are the contract.
+
+    Without this the fix could be a `dict(params)`, which would forward whatever arrived and let a
+    wrong-typed input reach a durable run that has already spent compute.
+    """
+    tool = build_template_tool(
+        _template(inputs=[{"name": "smiles", "type": "string", "description": "The molecule."}])
+    )
+    with pytest.raises(ValidationError):
+        asyncio.run(tool(params={"wrong_field": "CCO"}))
+
+
+def test_launching_survives_the_frameworks_own_invocation_path(client: _FakeClient) -> None:
+    """Driven through `agent_framework.tool(...).invoke()` rather than through our idea of it.
+
+    The test above pins today's observed behaviour; this one pins the property that survives the
+    framework changing its mind — whatever MAF hands the body, a launch through MAF's own
+    dispatcher starts the run.
+    """
+    from agent_framework import tool as as_tool
+
+    fn = build_template_tool(
+        _template(inputs=[{"name": "smiles", "type": "string", "description": "The molecule."}])
+    )
+    invocable = as_tool(fn, name=fn.__name__, description="Run the probe template.")
+    asyncio.run(invocable.invoke(arguments={"params": {"smiles": "CCO"}}))
+    (call,) = client.calls
+    assert call["input"].inputs == {"smiles": "CCO"}
+
+
 def test_identical_inputs_produce_the_same_run_id() -> None:
     """The idempotency key: re-running the same procedure on the same input must not pay twice."""
     template = _template()
