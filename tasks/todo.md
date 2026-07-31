@@ -76,9 +76,12 @@ breaking window.
       `service_turn_admission_timeout_seconds` (5 s) with no response and may then 503. Move
       acquisition inside the generator and emit a `queued` event first.
       *Note*: keep the 409/429 pre-checks where they are — those are genuine refusals, not queueing.
-- [ ] **W1.5 Bundled dev page** (`api/static/app.js`): add the missing `capability_degraded`,
-      `job_completed`, `tool_result` cases and open the events stream. Low priority (it is a dev
-      surface, not the product) but it is what `make chat`-adjacent manual testing uses.
+- [x] **W1.5 Bundled dev page** (`api/static/app.js`) — shipped. All three cases added and the
+      push-back stream opened with the session. The drift itself was the finding: three events
+      reached the union over three changes and none reached the page, because a missing `case`
+      falls through to `default` and looks exactly like an event that was never sent. So the fix
+      is `tests/test_dev_page_events.py` — the union checked against the page's switch labels in
+      both directions — not just the three cases.
 
 ### Frontend (`Chemclaw3_ui` — separate branch, separate PR)
 
