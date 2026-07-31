@@ -4,8 +4,7 @@ Requested 2026-07-31. Branch: `claude/chemclaw-dataflows-architecture-gi467d`.
 ADRs: **D-154**, **D-155**, **D-156**, **D-157** (reserved in `docs/decisions/README.md`).
 
 The review is in the session's two artifacts (a dataflow atlas and a gaps/proposals companion).
-This file is the implementation plan for every proposal it made. **Nothing here is implemented yet
-— this is the plan-first check-in `CLAUDE.md` requires.**
+This file is the implementation plan for every proposal it made. **W1.6, W1.7 and W2.1 are shipped; everything else is still plan only.**
 
 (The previous occupant of this file, the agentic-system review, is merged; its record lives in
 D-145/D-151/D-152/D-153 and its backlog entries.)
@@ -81,12 +80,12 @@ breaking window.
 
 ### Frontend (`Chemclaw3_ui` — separate branch, separate PR)
 
-- [ ] **W1.6 Restore the test toolchain first.** `vitest` and `happy-dom` are absent from
+- [x] **W1.6 Restore the test toolchain first.** — done as part of W1.7 (vitest + happy-dom restored, `.tsx` added to the include pattern; the stale `ISSUES.md`, the missing `check-openapi.mjs` and the absent playwright config are still open). `vitest` and `happy-dom` are absent from
       `package.json`/lockfile while `vitest.config.ts` and 751 lines of suites still reference them,
       so `npm test` cannot run; `scripts/check-openapi.mjs` and any `playwright.config.*` do not
       exist. Nothing else in this workstream is verifiable until this is fixed. Also refresh the
       stale `ISSUES.md` claims (issues 2 and 3 are closed).
-- [ ] **W1.7 Render the job feed.** `jobFeed` is written by `useJobFeed` and read by nothing. Surface
+- [x] **W1.7 Render the job feed.** — shipped (Chemclaw3_ui `claude/render-job-feed`). `jobFeed` is written by `useJobFeed` and read by nothing. Surface
       completed durable jobs in the conversation (a card in `TracePanel`, or a toast). This switches
       on an entire finished backend subsystem.
 - [ ] **W1.8 Add `capability_degraded` and `tool_failed`** to `shared/events.ts` (type union +
