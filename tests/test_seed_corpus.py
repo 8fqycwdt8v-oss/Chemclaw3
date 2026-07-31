@@ -23,7 +23,7 @@ from chemclaw.kg.relations import KNOWN_RELATIONS
 from chemclaw.kg.validate import validate
 
 _KNOWLEDGE = Path(__file__).resolve().parents[1] / "knowledge"
-# Derived from the setting rather than spelled out: D-154 moved the corpus under `data/`, and the
+# Derived from the setting rather than spelled out: D-156 moved the corpus under `data/`, and the
 # literal that used to be here would have gone on naming a directory that no longer exists.
 _GOLD_CORPUS = (
     Path(__file__).resolve().parents[1]

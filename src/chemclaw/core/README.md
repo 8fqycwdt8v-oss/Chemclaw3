@@ -21,4 +21,4 @@ It is also by some distance the largest file here (~1700 lines, 21 `Settings` cl
 consequence of the rule, not a violation of it: one settings object means one file's worth of
 fields, and splitting it into a package would buy browsability at the cost of the single import
 seam (`from chemclaw.core.config import settings`, in 118 places) that makes the rule enforceable.
-Considered and declined in D-154.
+Considered and declined in D-156.

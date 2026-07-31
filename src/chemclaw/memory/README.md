@@ -20,4 +20,4 @@ wrote itself into the record would be exactly the thing the GxP line exists to p
 ## The boundary against `retrieval/`
 
 See `../retrieval/README.md`: retrieval finds what we *have*, memory holds what we *learned*.
-Deliberately separate packages (D-154).
+Deliberately separate packages (D-156).

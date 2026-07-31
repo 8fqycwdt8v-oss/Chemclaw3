@@ -2,7 +2,7 @@
 
 The repository was restructured twice in a week — `services/` flattened (D-146), eighteen packages
 regrouped under `src/chemclaw/` (D-148), the last false duplicate dissolved and the corpora folded
-into `data/` (D-154). Each pass ended with a map written by hand, and `ARCHITECTURE.md` closes by
+into `data/` (D-156). Each pass ended with a map written by hand, and `ARCHITECTURE.md` closes by
 *promising* to stay in sync ("adding a top-level directory means adding a row here") with nothing
 enforcing it. A map that has quietly drifted is worse than no map: it is the first thing a newcomer
 reads, and it is believed.
@@ -11,7 +11,7 @@ So the two halves of "can a human navigate this?" are checked mechanically:
 
 1. **Every directory has a `README.md`.** GitHub renders one the moment you click a folder, which
    makes it the highest-leverage documentation in the repository — and it was present in five of
-   fourteen packages before D-154.
+   fourteen packages before D-156.
 2. **The map and the tree name the same directories, in both directions.** A row for a directory
    that no longer exists sends a reader somewhere empty; a directory with no row is invisible to
    anyone who trusted the map.
@@ -81,7 +81,7 @@ def test_the_map_lists_every_directory_that_exists() -> None:
 def test_the_map_lists_nothing_that_has_gone() -> None:
     """The other direction: a row for a vanished directory sends a reader somewhere empty.
 
-    This is the half a restructure breaks. `src/chemclaw/mcp/` was dissolved in D-154 and its row
+    This is the half a restructure breaks. `src/chemclaw/mcp/` was dissolved in D-156 and its row
     would have sat in the map indefinitely, describing a package with a rationale that no longer
     applied to anything.
     """

@@ -185,7 +185,7 @@ def test_every_runtime_data_directory_actually_exists() -> None:
     kept COPYing `eln/` the build would have broken loudly — but had the *config default* alone
     moved, the image would have started fine and read an empty export directory forever.
 
-    D-154 moved three more (`profiles`, `templates`, `evals`) under `data/`, so this list shrank
+    D-156 moved three more (`profiles`, `templates`, `evals`) under `data/`, so this list shrank
     rather than grew. Four entries now: `data/` is every corpus the code reads, and `skills/`,
     `knowledge/` and `infra/` are the three that are not configuration: layers 3 and 4, and the SQL.
     """

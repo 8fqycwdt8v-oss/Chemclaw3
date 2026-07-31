@@ -3,7 +3,7 @@
 Requested 2026-07-31, as a follow-up to the restructure that merged as PR #51: *"The repo still is a
 bit overwhelming. Is there a way to make it even more consistent or would I overshoot doing that
 removing needed granularity?"* Branch: `claude/github-repo-structure-6yyibc`, restarted from
-`origin/main` because #51 is merged. ADR: **D-154**.
+`origin/main` because #51 is merged. ADR: **D-156**.
 
 (The previous occupant of this file, the agentic-system review, is merged; its record is D-145 and
 D-151…D-153, its findings the `REV-*` entries in `docs/planning/BACKLOG.md`.)
@@ -39,7 +39,7 @@ size is a different problem from repository structure, and mixing them makes the
 
 ## Steps
 
-- [x] Restart the branch from `origin/main`; reserve **D-154** in `docs/decisions/README.md` in the
+- [x] Restart the branch from `origin/main`; reserve **D-156** in `docs/decisions/README.md` in the
       first commit, per `CLAUDE.md`.
 - [x] **Dissolve `src/chemclaw/mcp/`.** Engines → `science/fingerprints/{store.py,molfp/,rxnfp/}`;
       the two `FastMCP` instances → `connectors/{molfp,rxnfp}/server/tools.py`, the shape every other
@@ -53,7 +53,7 @@ size is a different problem from repository structure, and mixing them makes the
       `.env.example`, the Containerfile COPY set, `_RUNTIME_DATA`, and the Helm chart.
 - [x] **Archive the five finished `*-plan.md`**; repoint the eight code citations. Fix the stale
       `mcp_servers/` directory paths and `retrieval/__init__.py`'s docstring.
-- [x] **ADR D-154**, `ARCHITECTURE.md`, `CLAUDE.md`; verify; ship.
+- [x] **ADR D-156**, `ARCHITECTURE.md`, `CLAUDE.md`; verify; ship.
 
 ## Verification plan
 

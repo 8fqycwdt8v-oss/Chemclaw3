@@ -12,7 +12,7 @@ source (gate G6), and every `EvidenceChunk` carries a back-reference to its sour
 unsupported claim is discarded rather than written. Sources are attached through
 `chemclaw.ingest.sources`, not by editing anything here — no new data store.
 
-The package was called `report` before D-148 and kept that docstring until D-154, which is why its
+The package was called `report` before D-148 and kept that docstring until D-156, which is why its
 name and its opening line disagreed for a while.
 
 **`chemclaw.memory` is next door and stays there.** This package answers "what do we have on this?";
