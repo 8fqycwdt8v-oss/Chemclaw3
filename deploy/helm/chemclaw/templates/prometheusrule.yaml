@@ -1,0 +1,152 @@
+{{- if and .Values.monitoring.enabled .Values.monitoring.alerts.enabled }}
+{{- /* The alerts the metrics were designed for.
+
+       REV-2 closed "nothing scrapes `/metrics`" by adding a ServiceMonitor, and its own comment
+       makes the argument that an endpoint which answers while nothing collects it is how
+       observability fails quietly. The same argument applies one level up: thirty-seven metrics
+       were collected and **no rule fired on any of them**. There was no PrometheusRule anywhere in
+       the repo, no SLO, and no Alertmanager route.
+
+       The tell is `agent/audit.py`, which logs `audit_sink_failure` at ERROR with a stable marker
+       and increments a counter, with a comment saying in as many words that a lost GxP audit
+       record "must be ALERTABLE, not a generic warning". Nothing alerted. Same for the turn-claim
+       lease lapsing (two turns on one session), the rollback watermark (which fired 32 times in a
+       126-second load test and leads to bricked sessions), and a note publish failing (knowledge
+       lost, silently, since the publish is best-effort by design).
+
+       Every rule below alerts on a *rate*, not a total, so a counter that moved once during a
+       deploy does not page anyone forever. Severities: `critical` = a GxP record or a correctness
+       invariant is being lost right now; `warning` = degraded, look at it today. */ -}}
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: {{ include "chemclaw.name" . }}
+  labels:
+    {{- include "chemclaw.labels" . | nindent 4 }}
+    {{- with .Values.monitoring.additionalLabels }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+spec:
+  groups:
+    - name: chemclaw.records
+      rules:
+        {{- /* Losing an audit row is not a degradation, it is a hole in the compliance record —
+               and `durable/retention.py` refuses to prune this table precisely because deleting
+               from a hash chain is indistinguishable from tampering. */}}
+        - alert: ChemclawAuditTrailIncomplete
+          expr: increase(chemclaw_audit_sink_failures_total[10m]) > 0
+          for: 0m
+          labels:
+            severity: critical
+          annotations:
+            summary: GxP audit records are not being persisted
+            description: >-
+              The audit sink failed to record at least one tool call in the last 10 minutes, so the
+              trail is incomplete. Tool calls keep succeeding, which is why this is invisible
+              without an alert. Check the `audit_sink_failure` log marker for the affected trail.
+
+        {{- /* The PR-gate publish is best-effort by design (a dead git remote must not fail a
+               finished calculation), so this counter is the only signal that knowledge is being
+               dropped. Nothing else distinguishes it from an idle system. */}}
+        - alert: ChemclawKnowledgeNotesLost
+          expr: increase(chemclaw_notes_publish_failures_total[15m]) > 0
+          for: 0m
+          labels:
+            severity: critical
+          annotations:
+            summary: Knowledge notes are failing to reach the PR-gate
+            description: >-
+              A note could not be opened on a branch and the failure was swallowed so the job could
+              complete. The knowledge is lost. Usual causes are a dead git remote, an expired push
+              credential, or two processes sharing one `note_repo_dir` (the submit lock).
+
+    - name: chemclaw.correctness
+      rules:
+        {{- /* The turn lease is what makes "one turn per session" true across pods (D-121). If
+               refreshes fail the lease ages out mid-turn and a second turn can be admitted, which
+               interleaves two conversations into one history. */}}
+        - alert: ChemclawTurnLeaseFailing
+          expr: increase(chemclaw_turn_claim_refresh_failures_total[5m]) > 0
+          for: 0m
+          labels:
+            severity: critical
+          annotations:
+            summary: The cross-process turn guard is lapsing
+            description: >-
+              A turn's lease could not be refreshed, so it may expire while the turn is still
+              running and admit a second turn on the same session.
+
+        - alert: ChemclawRollbackWatermarkUnavailable
+          expr: increase(chemclaw_rollback_watermark_unavailable_total[5m]) > 0
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            summary: The disconnect-rollback guard could not read its watermark
+            description: >-
+              A turn rolled back on client disconnect without a watermark, which risks leaving an
+              orphaned `tool_use` behind — the failure mode that bricks a session permanently,
+              because `message_pairing`'s repair only self-heals the other half of the pair.
+
+    - name: chemclaw.availability
+      rules:
+        - alert: ChemclawTurnsFailing
+          expr: >-
+            sum(rate(chemclaw_turns_failed_total[10m]))
+            / clamp_min(sum(rate(chemclaw_turns_started_total[10m])), 0.001) > 0.1
+          for: 10m
+          labels:
+            severity: critical
+          annotations:
+            summary: More than 10% of turns are ending in an error
+            description: Every failure reaches a chemist as an opaque internal-error message.
+
+        - alert: ChemclawTurnsShed
+          expr: sum(rate(chemclaw_turns_shed_total[10m])) > 0
+          for: 10m
+          labels:
+            severity: warning
+          annotations:
+            summary: Turns are being rejected for lack of admission capacity
+            description: >-
+              The admission guard is shedding load (503). Either the deployment is undersized or
+              `service_max_concurrent_turns` is set below what the LLM endpoint can serve.
+
+        {{- /* A degraded turn still answers, from whatever tools came up — which is the right
+               behaviour and exactly why it needs an alert: the transcript of a degraded answer is
+               indistinguishable from a good one. */}}
+        - alert: ChemclawConnectorsUnhealthy
+          expr: max(chemclaw_connectors_unhealthy) > 0
+          for: 10m
+          labels:
+            severity: warning
+          annotations:
+            summary: One or more connectors are unreachable
+            description: >-
+              Turns are being answered without these capabilities and nothing in the answer says
+              so.
+
+        - alert: ChemclawDatabaseUnavailable
+          expr: increase(chemclaw_db_unavailable_total[5m]) > 0
+          for: 0m
+          labels:
+            severity: critical
+          annotations:
+            summary: Postgres is unreachable from the front door
+            description: >-
+              Sessions, the audit trail and the calculation cache all live there; a turn that
+              cannot reach it fails or silently degrades to log-only auditing.
+
+    - name: chemclaw.cost
+      rules:
+        - alert: ChemclawTokenBurnHigh
+          expr: sum(rate(chemclaw_tokens_total[30m])) * 3600 > {{ .Values.monitoring.alerts.tokensPerHourWarning }}
+          for: 30m
+          labels:
+            severity: warning
+          annotations:
+            summary: Token consumption is above the configured hourly expectation
+            description: >-
+              The per-process budget guard bounds one runaway process; it says nothing about the
+              fleet. This is the fleet-wide signal.
+{{- end }}

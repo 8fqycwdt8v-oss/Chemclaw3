@@ -173,57 +173,30 @@ after each cluster of steps before moving on.
 Keep these current; they are the memory across sessions. For recurring patterns, prefer a
 `.claude/skills/<name>/SKILL.md` over bloating this file.
 
-### Allocating an ADR number
+### Writing an ADR
 
-ADR numbers collided three times, each costing a renumber during a merge. The cause was structural,
-not carelessness: several branches ran concurrently, all appending to the end of one `DECISIONS.md`,
-each picking "highest I can see, plus one" — against its *own* branch, which cannot see the others.
-So they picked the same number **and** conflicted on the same line, inside ninety lines of prose
-where it was easy to miss.
+**Name the file `D-YYYY-MM-DD-<slug>.md`, today's date plus a slug naming the decision, and add its
+row to `docs/decisions/README.md`.** That is the whole procedure. Nothing to enumerate, nothing to
+reserve, nothing to coordinate with other sessions.
 
-D-147 removed the shared append point: one file per ADR. Two branches adding different ADRs now
-touch disjoint files, and two branches claiming the same number collide on a **filename** — an
-add/add conflict git reports loudly. The procedure below is what remains.
+The id is the *whole stem*, not the date — two ADRs on one day is normal here, and an id naming two
+decisions is the failure the ledger exists to prevent.
 
-**1. Enumerate against `origin/main`, never against your branch.** Your branch's highest number is
-stale the moment another branch merges.
+**Why not numbers any more.** ADR numbers collided repeatedly, and the cause was structural rather
+than careless: many sessions run at once, and "highest on `origin/main`, plus one" is a read that is
+stale the moment another session pushes. D-147 made a collision *loud* (one file per ADR, so two
+claims to one number conflict on a filename) and left the allocation itself unfixed, so they kept
+happening — in a single day one branch renumbered three ADRs twice while another renumbered three
+times, five collisions, all on numbers nobody had merged. This file used to name date-plus-slug ids
+as the escape hatch to take deliberately if that continued. It continued; D-2026-07-31 takes it.
 
-```sh
-git fetch origin main
-# the highest number currently allocated (the ledger and the files must agree):
-git show origin/main:docs/decisions/README.md | grep -oE '^\| \[?D-[0-9]+' | grep -oE 'D-[0-9]+' | sort -V | tail -1
-git ls-tree --name-only origin/main docs/decisions/ | grep -oE 'D-[0-9]+' | sort -V | tail -1
-```
+**The `D-NNN` sequence is frozen, not migrated.** All 167 numbered ADRs keep their names, so every
+citation still resolves — a *merged* ADR never collided, and there are no unallocated numbers left
+to contend for. Never renumber one, and never renumber to close a gap: a gap is harmless, a moved
+number breaks every citation to it (`D-008` was written after `D-009` for exactly this reason).
 
-Your number is that highest one **+ 1**. Locally, `ls docs/decisions/` is the whole record.
-
-**2. Reserve it in your first commit, not your last.** Add the row to `docs/decisions/README.md` as
-soon as you know you will write an ADR — before the ADR file exists. A number you have not yet
-pushed is a number another session will take.
-
-Mark such a row `| D-NNN | RESERVED — what it will be about |` and swap the marker for the real
-title *and a link to the file* in the commit that adds the ADR. `tests/test_decision_log.py` exempts
-`RESERVED` rows from "the ledger and the files name the same ADRs" while still counting them as
-taken. Without that marker the two rules contradicted each other and the test won: `1f1f233`
-reserved six numbers as instructed here, and `8f6a319` deleted five of them to get CI green.
-
-**3. When it collides anyway, the branch merging *second* renumbers.** This is a rule, not a
-judgement call, so two sessions never both wait or both move. Whoever is merging (you, if you hit
-the conflict) takes the *new* free number — `git mv` the file to its new name, fix the `#` heading
-inside it, move the ledger row, and fix every reference:
-
-```sh
-git grep -n 'D-0*<old>'   # docs/decisions/, its README, docs/planning/, code comments
-```
-
-Never drop, reorder or edit an already-merged ADR to resolve this; only your own file moves.
-
-**4. Do not renumber a merged ADR to close a gap.** A gap is harmless; a moved number breaks every
-citation to it. `D-008` was written after `D-009` for this reason — the numbers stay put.
-
-If collisions somehow continue, the remaining fix is to abandon the global sequence for
-date-plus-slug ids (`D-2026-07-27-harness-streaming`), which cannot collide at all. That costs every
-existing citation, so it is a deliberate convention change — raise it, don't drift into it.
+`tests/test_decision_log.py` enforces both forms — unique ids, filename matching heading, and the
+ledger listing exactly the files beside it, in record order.
 
 ## Token / context management
 

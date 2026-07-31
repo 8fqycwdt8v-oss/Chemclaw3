@@ -38,11 +38,32 @@ _ROW = re.compile(r"^\| `([A-Za-z0-9_.-]+)/?` \|", re.MULTILINE)
 
 
 def _tracked_directories(parent: Path) -> set[str]:
-    """The real, non-hidden, non-cache directories directly under `parent`."""
+    """The real, non-hidden, non-cache directories directly under `parent`.
+
+    A directory holding no tracked file is skipped, and that is not a convenience. Git cannot store
+    an empty directory, so when a restructure moves a package away it deletes the files and leaves
+    the folders behind in every working tree that had them — `src/chemclaw/mcp/` after D-156 moved
+    `fingerprints` out of it. Those husks are not part of the repository: they exist in no commit,
+    reach no clone, and cannot be given a README or a map row because there is nothing to commit
+    them with. Counting them made this suite fail on every developer's machine after merging the
+    restructure while passing in CI, whose clone never had them — the worst shape a test can take,
+    because the failure looks like the map is wrong when the map is right.
+
+    Emptiness is judged by content rather than by asking git, so the check stays a plain filesystem
+    walk with no subprocess: a directory whose whole subtree is caches and other husks has no file
+    a reader could open, which is the same conclusion by a cheaper route.
+    """
+
+    def has_content(directory: Path) -> bool:
+        return any(
+            path.is_file() and not any(part.startswith((".", "__")) for part in path.parts)
+            for path in directory.rglob("*")
+        )
+
     return {
         entry.name
         for entry in parent.iterdir()
-        if entry.is_dir() and not entry.name.startswith((".", "__"))
+        if entry.is_dir() and not entry.name.startswith((".", "__")) and has_content(entry)
     }
 
 

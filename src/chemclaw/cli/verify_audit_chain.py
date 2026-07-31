@@ -28,18 +28,25 @@ from collections.abc import Iterable
 from typing import NamedTuple
 
 from chemclaw.agent.audit import AuditEvent
-from chemclaw.agent.audit_store import chain_hash
+from chemclaw.agent.audit_store import CHAIN_VERSION, chain_hash
 from chemclaw.core.config import settings
 from chemclaw.core.db import connection
 
 
 class ChainRow(NamedTuple):
-    """One `audit_events` row as the verifier reads it: its id, chain fields, and audited event."""
+    """One `audit_events` row as the verifier reads it: its id, chain fields, and audited event.
+
+    `chain_version` is which field set this row's `row_hash` covers
+    (D-2026-07-31-the-audit-chain-is-versioned). It travels with the
+    row rather than being assumed, because the audited record grows: hashing an old row under the
+    current shape would report the whole trail as tampered with the day a field is added.
+    """
 
     id: int
     prev_hash: str
     row_hash: str
     event: AuditEvent
+    chain_version: int = CHAIN_VERSION
 
 
 def check_chain(rows: Iterable[ChainRow]) -> list[str]:
@@ -69,7 +76,7 @@ def check_chain(rows: Iterable[ChainRow]) -> list[str]:
                 f"audit row {row.id}: broken link — prev_hash does not match the previous row "
                 "(a row was deleted, inserted, or reordered)"
             )
-        if chain_hash(row.prev_hash, row.event) != row.row_hash:
+        if chain_hash(row.prev_hash, row.event, version=row.chain_version) != row.row_hash:
             problems.append(
                 f"audit row {row.id}: content tampered — row_hash does not match its audited fields"
             )
@@ -78,8 +85,8 @@ def check_chain(rows: Iterable[ChainRow]) -> list[str]:
 
 
 _SELECT_ALL = """
-    SELECT id, correlation_id, actor, tool, arguments, outcome, detail, latency_ms,
-           revision, prev_hash, row_hash
+    SELECT id, correlation_id, session_id, purpose, actor, tool, arguments, outcome, detail,
+           latency_ms, revision, prev_hash, row_hash, chain_version
     FROM audit_events
     ORDER BY id ASC
 """
@@ -94,9 +101,22 @@ async def verify_chain(dsn: str | None = None) -> list[str]:
     ) as conn:
         cursor = await conn.execute(_SELECT_ALL)
         for record in await cursor.fetchall():
-            rid, cid, actor, tool, args, outcome, detail, latency, revision, prev_hash, row_hash = (
-                record
-            )
+            (
+                rid,
+                cid,
+                session_id,
+                purpose,
+                actor,
+                tool,
+                args,
+                outcome,
+                detail,
+                latency,
+                revision,
+                prev_hash,
+                row_hash,
+                chain_version,
+            ) = record
             rows.append(
                 ChainRow(
                     id=rid,
@@ -104,6 +124,8 @@ async def verify_chain(dsn: str | None = None) -> list[str]:
                     row_hash=row_hash,
                     event=AuditEvent(
                         correlation_id=cid,
+                        session_id=session_id,
+                        purpose=purpose,
                         actor=actor,
                         tool=tool,
                         arguments=args,
@@ -112,6 +134,7 @@ async def verify_chain(dsn: str | None = None) -> list[str]:
                         latency_ms=latency,
                         revision=revision,
                     ),
+                    chain_version=chain_version,
                 )
             )
     return check_chain(rows)

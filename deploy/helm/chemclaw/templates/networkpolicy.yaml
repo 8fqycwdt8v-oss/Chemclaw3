@@ -1,6 +1,19 @@
 {{- if .Values.networkPolicy.enabled }}
-{{- /* Default-deny egress with an allow-list: pods reach only Postgres, Temporal, and HTTPS */ -}}
-{{- /* (internal LLM + HPC launcher + Entra). DNS is allowed so those names resolve. */ -}}
+{{- /* Egress. DNS is always allowed so the names below resolve; everything else is the
+       destination list plus the port list.
+
+       **`to: []` means "anywhere", not "nothing".** That is what this rule shipped as, so TCP/443
+       to any host on the internet was permitted from every pod — while `tests/test_no_egress.py`
+       enforced "this system takes no external sources" (D-089) by scanning *source code* for host
+       literals. That scan is a good guard against a developer adding a third-party API and no
+       guard at all against a compromised dependency, an injected tool argument, or anything else
+       that reaches the network at runtime. The layer that could enforce the decision did not.
+
+       `egressDestinations` is how an operator states where these pods may actually talk. It is
+       empty by default because the addresses are deployment-specific and this chart must not
+       invent someone's Postgres CIDR — but empty is now a *visible* choice with a named knob and a
+       documented consequence, rather than an unremarked `to: []`. Set it and egress narrows to
+       those destinations on those ports; the residual gap is tracked in BACKLOG. */ -}}
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
@@ -14,12 +27,22 @@ spec:
   policyTypes:
     - Egress
   egress:
+    {{- /* DNS to the cluster, separated from the rule below so narrowing the destinations can
+           never accidentally take name resolution with it — a policy that blocks DNS fails in a
+           way that looks like every dependency being down at once. */}}
     - to: []
       ports:
         - protocol: UDP
           port: 53
         - protocol: TCP
           port: 53
+    - to:
+        {{- if .Values.networkPolicy.egressDestinations }}
+        {{- toYaml .Values.networkPolicy.egressDestinations | nindent 8 }}
+        {{- else }}
+        []
+        {{- end }}
+      ports:
         - protocol: TCP
           port: {{ .Values.networkPolicy.egressPorts.postgres }}
         - protocol: TCP
@@ -36,6 +59,46 @@ spec:
         - protocol: TCP
           port: {{ .Values.connectorPort }}
 ---
+{{- /* The front door's own ingress, which did not exist. `policyTypes` listed only `Egress`, so
+       any pod in any namespace could reach `chemclaw-service:8080` — including `/metrics`, which
+       `api/app.py` leaves unauthenticated on the stated grounds that "the NetworkPolicy is what
+       keeps it inside the cluster". That rule was never written. This is it.
+
+       Ingress is allowed from the router (so the Route works), from the monitoring namespace (so
+       the ServiceMonitor can scrape), and from Chemclaw's own pods. Both namespace selectors are
+       values, because the labels differ between OpenShift and vanilla Kubernetes — and because
+       getting them wrong locks the front door, this rule has its own toggle. Without one, an
+       operator whose router carries different labels would have to disable `networkPolicy`
+       wholesale and lose the egress rule with it, which is the opposite of what they need. */ -}}
+{{- if .Values.networkPolicy.serviceIngress.enabled }}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "chemclaw.name" . }}-service-ingress
+  labels:
+    {{- include "chemclaw.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "chemclaw.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: service
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              {{- include "chemclaw.selectorLabels" . | nindent 14 }}
+        {{- range .Values.networkPolicy.ingressNamespaces }}
+        - namespaceSelector:
+            matchLabels:
+              {{- toYaml . | nindent 14 }}
+        {{- end }}
+      ports:
+        - protocol: TCP
+          port: {{ .Values.service.port }}
+---
+{{- end }}
 {{- /* Connectors accept traffic only from Chemclaw's own pods. This is the boundary that makes the
        advisory X-Chemclaw-* identity headers safe: they are not authorization, so a connector must
        not be reachable by anything that could forge them. Authorization itself stays in core

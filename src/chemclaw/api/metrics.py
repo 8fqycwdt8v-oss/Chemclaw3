@@ -72,6 +72,15 @@ _COUNTERS: dict[str, str] = {
     ),
     "chemclaw_jobs_started_total": "Durable jobs launched by an agent tool.",
     "chemclaw_notes_proposed_total": "Notes opened on a branch through the PR-gate.",
+    # The counterpart to the line above, and the reason it could not stand alone: a best-effort
+    # publish that fails is logged inside a workflow and swallowed, because the science is already
+    # durable and a dead git remote must not fail a completed job. That is the right call about the
+    # *job* and the wrong shape for the *knowledge* — with only a success counter, a total git
+    # outage reads as "zero proposals", which is exactly what an idle system reads as. Two counters
+    # make the difference visible and give the alert a ratio to fire on.
+    "chemclaw_notes_publish_failures_total": (
+        "Knowledge notes that could not be opened on a branch; the knowledge was lost."
+    ),
     # A turn whose connectors did not come up still answers — from whatever tools remained. That is
     # the right behaviour and the reason it needs a number: a degraded answer is indistinguishable
     # from a good one in the transcript, and `open_reachable` returned the list to four callers that

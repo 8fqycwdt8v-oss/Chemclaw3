@@ -23,6 +23,7 @@ from temporalio.exceptions import ActivityError
 
 with workflow.unsafe.imports_passed_through():
     from chemclaw.core.config import settings
+    from chemclaw.core.metrics_bridge import record_metric
 
 # Temporal matches `non_retryable_error_types` by exact class name (not isinstance),
 # so every bad-data name that can cross an activity boundary is listed explicitly.
@@ -88,8 +89,17 @@ async def publish_note_best_effort(activity: Any, args: list[Any], label: str) -
 
     For workflows whose real result is the calculation, not the note (QM, BO):
     the science is done and cached, so a broken git remote must not fail the job.
+
+    Swallowing is right for the *job* and was wrong for the *knowledge*. A warning inside a
+    workflow log is not something anyone watches, and `chemclaw_notes_proposed_total` counts only
+    successes — so a dead git remote produced no proposals and no signal, which is byte-for-byte
+    what an idle deployment produces. The counter below is the difference between those two states.
+    Guarded on `is_replaying` for the same reason Temporal's own workflow logger is: a replayed
+    history would otherwise re-count every failure the workflow has ever seen.
     """
     try:
         await publish_note(activity, args)
     except ActivityError:
         workflow.logger.warning("knowledge-note publish failed for %s", label)
+        if not workflow.unsafe.is_replaying():
+            record_metric(lambda m: m.increment("chemclaw_notes_publish_failures_total"))

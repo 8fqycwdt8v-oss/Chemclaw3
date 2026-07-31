@@ -56,6 +56,7 @@ from psycopg.rows import TupleRow
 from psycopg.types.json import Jsonb
 
 from chemclaw.agent.history_compaction import plan_compaction
+from chemclaw.agent.identity_context import get_current_correlation_id
 from chemclaw.agent.message_pairing import strip_call_ids, unmatched_call_ids
 from chemclaw.core import db
 from chemclaw.core.config import settings
@@ -63,7 +64,12 @@ from chemclaw.core.metrics_bridge import record_metric
 
 log = logging.getLogger(__name__)
 
-_INSERT = "INSERT INTO session_messages (session_id, message) VALUES (%s, %s)"
+# The correlation id makes a stored message joinable to the audit rows of the turn that wrote it
+# (D-2026-07-31-the-audit-chain-is-versioned).
+# Without it the two halves of "what happened in this conversation" — the words and the
+# tool calls — sat in tables with no key between them, so the GxP trail could show *that* a tool ran
+# and never *why*.
+_INSERT = "INSERT INTO session_messages (session_id, message, correlation_id) VALUES (%s, %s, %s)"
 # Row ids come back too, so a repaired message can be written to the row it came from. There is no
 # id-less variant: every reader needs the id, and the one that existed was dead code that D-143's
 # prose then cited as the statement the read path runs.
@@ -273,7 +279,10 @@ class PostgresHistoryProvider(HistoryProvider):
         """
         if not session_id or not messages:
             return
-        rows = [(session_id, Jsonb(message.to_dict())) for message in messages]
+        # Read once for the whole batch: these messages are one turn's work, so they share its
+        # correlation id. Empty off the request path (the CLI, tests), where there is no turn.
+        correlation_id = get_current_correlation_id() or ""
+        rows = [(session_id, Jsonb(message.to_dict()), correlation_id) for message in messages]
         async with self._connection() as conn:
             async with conn.cursor() as cur:
                 # The watermark before the insert: everything above it is this turn's own work and

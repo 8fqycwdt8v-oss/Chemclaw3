@@ -403,3 +403,56 @@ what exists — which cost a few lines and no design complexity.
    exercises the two.
 3. **Before adding a cap, ask what the input looks like on the next run.** A cap over deterministic
    input is not a cap, it is a permanent filter.
+
+## A test that builds its fixture through the code it tests cannot fail (2026-07-31, v1 readiness)
+
+Four tests in one branch passed with their own fix removed. The rule above ("verify by mutation")
+caught them, so the rule works — what it did not do is explain *why* they were written that way,
+and three of the four shared one cause worth naming separately.
+
+- **The fixture came from the function under test.** To check that a v1 audit row still verifies
+  after the chain was versioned, I built the v1 rows by calling `chain_hash(..., version=1)` — the
+  very function whose version switch was the fix. Delete the switch and both sides move together.
+  The rewrite reimplements the v1 payload independently, in the test, from the migration's own
+  column list; it is duplication, and it is the only thing that makes the assertion mean anything.
+- **The fixture was too well-behaved to discriminate.** A sort-key test built from `D-009`/`D-010`
+  passes against a deliberately flattened key, because zero-padded ids make lexicographic order
+  numeric order. Only `D-900` breaks it, because `'9' > '2'`.
+- **The mutation itself was partial.** One re-run `sed`-ed a `return` that appeared twice and
+  mutated one branch, so the suite failed for the wrong reason and I nearly recorded it as proof.
+
+**Rules:**
+
+1. **Never construct a test's expected value with the function under test, or with anything that
+   shares its fix.** If the only honest fixture is a hand-rolled reimplementation, write it — a
+   test that duplicates ten lines of logic is cheap; one that tautologically agrees is worse than
+   absent.
+2. **Choose fixtures where the naive implementation gives the wrong answer.** If the case passes
+   under both the fix and its absence, it is documentation, not a test. Pick the value that
+   separates them and say in the docstring why that value.
+3. **After mutating, read the failure, not just the exit code.** Confirm the failing test is the
+   one meant to fail and that it fails for the mutated reason.
+
+## Three of my fixes were rebuilt by other sessions while I built them (2026-07-31, v1 readiness)
+
+Concurrent sessions do not only collide on ADR *numbers* — they collide on *work*. Over one branch,
+three substantive fixes (note types, plan-approval binding, job rationale) were independently found
+and merged to `main` by other sessions while mine were in flight. In two of the three, theirs was
+better: main's D-167 consulted the durable approval store where mine compared an in-process value,
+and main's D-164 deleted two dead note types where I had added them to the schema. The dated-id
+scheme fixes name clashes and does nothing about this.
+
+The cost is real on both sides, and the merge is the wrong place to discover it: by then the choice
+is between reverting someone's merged decision inside a merge commit and throwing away a day.
+
+**Rules:**
+
+1. **Before implementing a finding, grep `origin/main` for the defect, not just for your branch's
+   base.** A one-line `git log origin/main --oneline -20` and a grep for the symbol costs seconds
+   and is the whole check.
+2. **Re-fetch `origin/main` before every push, not only when a merge conflicts.** A clean
+   three-way merge is not evidence that nobody solved the same problem differently.
+3. **When both fixes exist, compare them on the merits and defer to the merged one unless yours is
+   clearly better.** Say which and why in the PR — "theirs survives an eviction, mine did not" is
+   the useful record, and re-adding what another session deliberately deleted is never a merge
+   commit's job.

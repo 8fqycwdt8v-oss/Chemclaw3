@@ -196,9 +196,53 @@ def test_every_runtime_data_directory_actually_exists() -> None:
         )
 
 
-def test_image_installs_git() -> None:
-    """The PR-gate shells out to git; an image without it fails every knowledge write at push."""
-    assert "dnf install -y git" in (DEPLOY / "Containerfile").read_text()
+def _dnf_installed_packages() -> set[str]:
+    """Every package the image installs with dnf, parsed rather than substring-matched.
+
+    Matching the literal install line meant a test could keep passing while the thing it named had
+    moved: `"dnf install -y git" in text` is satisfied by `dnf install -y git` and by
+    `dnf install -y github-cli`, and it says nothing about the second package the sync path needs.
+    """
+    text = (DEPLOY / "Containerfile").read_text()
+    return {
+        package
+        for line in re.findall(r"dnf install -y ([^\n&|]+)", text)
+        for package in line.split()
+        if not package.startswith("-")
+    }
+
+
+def test_image_installs_the_binaries_the_knowledge_layer_shells_out_to() -> None:
+    """Both directions of the knowledge layer are shell-outs, and both were not equally supplied.
+
+    `git` was installed and asserted from the start — the PR-gate pushes with it. `rsync` was
+    neither: `knowledge-sync.sh` publishes the read replica with it and fell back to
+    `rm -rf "${publish_dir}"/*` when the call failed, with stderr discarded — so a package that was
+    never installed became a silent, recurring deletion of the tree the front door reads live.
+    """
+    assert {"git", "rsync"} <= _dnf_installed_packages()
+
+
+def test_the_sync_never_deletes_what_it_is_about_to_replace() -> None:
+    """The publish step must fail loudly rather than empty the directory the app is reading.
+
+    Guarding the *shape* and not just the missing package: reintroducing any `rm -rf` of the publish
+    directory reintroduces the outage even with rsync present, because the destructive branch is
+    reachable on any rsync failure (a dead remote, a full disk, a permission change).
+    """
+    script = (DEPLOY / "knowledge-sync.sh").read_text()
+    destructive = [
+        line
+        for line in script.splitlines()
+        if "rm -rf" in line and "publish_dir" in line and not line.lstrip().startswith("#")
+    ]
+    assert not destructive, f"knowledge-sync.sh must never rm -rf the published tree: {destructive}"
+
+    publish = script.split("Publish into the directory")[1]
+    assert "command -v rsync" in publish, "a missing rsync must be detected, not swallowed"
+    assert "rsync -a --delete" in publish and "2>/dev/null" not in publish.split("rsync -a")[1], (
+        "rsync must run with its stderr visible, or a missing binary looks like a transfer error"
+    )
 
 
 def test_the_image_carries_the_revision_it_was_built_from() -> None:
@@ -364,10 +408,26 @@ def test_a_comment_never_swallows_the_line_after_it() -> None:
     assert not offenders, "comment closures that eat the next line: " + "; ".join(offenders)
 
 
-# Kinds kubeconform has no schema for, so `make helm-validate` runs with
-# `-ignore-missing-schemas` and *skips* them rather than failing. Keeping the set explicit is what
+# CRDs kubeconform validates against the **datreeio catalog** rather than its bundled defaults.
+# These are checked as strictly as a core kind; they are listed apart only because the `Makefile`
+# has to supply the catalog `-schema-location` for them to resolve at all.
+#
+# `ServiceMonitor` sat in `_UNVALIDATED_KINDS` and did not belong there. The CI run that first
+# rendered a `PrometheusRule` reported `29 resources found — Valid: 28, Skipped: 1`: exactly one
+# kind in the whole chart lacks a schema, so both Prometheus-operator CRDs were being validated all
+# along. The exemption had never been checked against what kubeconform actually did.
+_CATALOG_VALIDATED_KINDS = frozenset({"ServiceMonitor", "PrometheusRule"})
+
+# The one kind kubeconform genuinely has no schema for, so `make helm-validate` runs with
+# `-ignore-missing-schemas` and *skips* it rather than failing. Keeping the set explicit is what
 # stops that flag from being a hole: a skipped kind is a deliberate entry here, not a silent pass.
-_UNVALIDATED_KINDS = frozenset({"Route", "ServiceMonitor"})
+_UNVALIDATED_KINDS = frozenset({"Route"})
+
+# What the CI gate reports for the chart as it stands: every rendered resource validated except the
+# OpenShift `Route`. Pinned as a number because the two sets above are claims about kubeconform's
+# behaviour, and a claim about someone else's tool is worth stating in a form that can be compared
+# against its actual output rather than believed.
+_EXPECTED_SKIPPED_RESOURCES = 1
 
 
 def test_only_the_known_crd_is_unvalidated_by_kubeconform() -> None:
@@ -380,8 +440,8 @@ def test_only_the_known_crd_is_unvalidated_by_kubeconform() -> None:
     does not read (D-117).
 
     The cost of the flag is that an unknown kind is skipped instead of rejected. This test buys that
-    back offline: every kind the chart renders is either a core Kubernetes kind (which kubeconform
-    does validate) or is named here.
+    back offline: every kind the chart renders is a core Kubernetes kind, a CRD the catalog covers,
+    or the one genuinely unvalidated kind named above.
     """
     core_kinds = {
         "ConfigMap",
@@ -394,15 +454,18 @@ def test_only_the_known_crd_is_unvalidated_by_kubeconform() -> None:
         "ServiceAccount",
     }
     rendered = set(re.findall(r"^kind:\s*([A-Za-z]+)", _all_templates(), flags=re.MULTILINE))
-    unexpected = rendered - core_kinds - _UNVALIDATED_KINDS
+    unexpected = rendered - core_kinds - _CATALOG_VALIDATED_KINDS - _UNVALIDATED_KINDS
     assert not unexpected, (
         f"the chart renders kind(s) {sorted(unexpected)} that kubeconform may silently skip — "
         "add a schema location, or add them to _UNVALIDATED_KINDS with the reason"
     )
-    # And the exemption must stay earned: if Route ever gains a schema, drop it from the set.
-    assert _UNVALIDATED_KINDS <= rendered, (
-        f"_UNVALIDATED_KINDS names kind(s) the chart no longer renders: "
-        f"{sorted(_UNVALIDATED_KINDS - rendered)}"
+    # Both exemptions must stay earned: a kind the chart stopped rendering is stale bookkeeping,
+    # and — the failure this test itself had — an exemption nobody ever checked against the tool.
+    stale = (_UNVALIDATED_KINDS | _CATALOG_VALIDATED_KINDS) - rendered
+    assert not stale, f"exempted kind(s) the chart no longer renders: {sorted(stale)}"
+    assert len(_UNVALIDATED_KINDS) == _EXPECTED_SKIPPED_RESOURCES, (
+        "the count CI reports as `Skipped` must match what this file claims is unvalidated; "
+        "if they diverge, one of them is wrong about kubeconform rather than about the chart"
     )
 
 
@@ -464,3 +527,158 @@ def test_the_scraped_path_is_a_route_the_app_serves() -> None:
         f"the chart scrapes {path!r}, which the app does not serve; "
         f"the metrics route is one of {sorted(r for r in routes if r and 'metric' in r)}"
     )
+
+
+# Every file that carries a pod template, with how many pod specs it declares. Explicit rather than
+# discovered, so *adding* a pod spec without its security context is a failing test rather than a
+# silently-unchecked new workload.
+_POD_SPECS: dict[str, int] = {
+    "deployment-service.yaml": 1,
+    "deployment-workers.yaml": 1,
+    "deployment-connectors.yaml": 2,  # the MCP server and the bundle's Temporal worker
+    "migrate-job.yaml": 1,
+    "schedules-job.yaml": 1,
+}
+
+
+def test_every_pod_spec_declares_the_restricted_profile() -> None:
+    """A `restricted` PSA namespace rejects a pod that does not *declare* it runs as non-root.
+
+    The image has run as a non-root UID since F6-T1, and that is a different statement from the pod
+    saying it must — Pod Security Admission reads the declaration. With none of these present, a
+    namespace labelled `pod-security.kubernetes.io/enforce=restricted` (the default posture for a
+    regulated OpenShift cluster) rejected every workload in this chart. The image being correct is
+    what made it easy to miss: nothing fails until admission, in someone else's cluster.
+    """
+    for filename, expected in _POD_SPECS.items():
+        text = (CHART / "templates" / filename).read_text()
+        found = text.count('include "chemclaw.podSecurityContext"')
+        assert found == expected, (
+            f"{filename}: {found} pod securityContext blocks, expected {expected}"
+        )
+
+
+def test_every_container_drops_its_capabilities() -> None:
+    """The container half of the same profile, on main containers, init containers and sidecars.
+
+    PSA evaluates *every* container in the pod, so a compliant app container beside a sidecar that
+    declares nothing still fails admission. The knowledge-sync sidecar and the two init containers
+    are as much a part of this chart's attack surface as the app.
+    """
+    containers = sum(
+        (CHART / "templates" / name)
+        .read_text()
+        .count('include "chemclaw.containerSecurityContext"')
+        for name in [*_POD_SPECS, "_helpers.tpl"]
+    )
+    # 6 main containers (one per pod spec, two in the connectors file) + 3 helper-defined
+    # containers: the knowledge-sync init, the refresh sidecar, and the note-repo init.
+    assert containers == 9, f"{containers} containers declare a security context, expected 9"
+
+
+def test_the_restricted_profile_itself_is_not_a_toggle() -> None:
+    """`runAsNonRoot`/`drop: ALL`/`seccompProfile` are asserted, never read from values.
+
+    A chart that lets a deployment switch off `allowPrivilegeEscalation: false` is offering a
+    footgun rather than a knob. Only `readOnlyRootFilesystem` — which is *not* part of the
+    restricted profile and cannot be defaulted on while the workers shell out to xtb/crest — is
+    configurable, and it is documented in `values.yaml` with what must be provisioned first.
+    """
+    helpers = (CHART / "templates" / "_helpers.tpl").read_text()
+    profile = helpers.split('define "chemclaw.podSecurityContext"')[1].split("{{- end -}}")[0]
+    container = helpers.split('define "chemclaw.containerSecurityContext"')[1].split("{{- end -}}")[
+        0
+    ]
+    assert "runAsNonRoot: true" in profile and "RuntimeDefault" in profile
+    assert "allowPrivilegeEscalation: false" in container and "- ALL" in container
+    assert ".Values" not in profile, "the restricted profile must not be switchable"
+    assert _values()["securityContext"]["readOnlyRootFilesystem"] is False
+
+
+def test_the_front_door_has_an_ingress_policy_at_all() -> None:
+    """`/metrics` is unauthenticated *because* a NetworkPolicy is said to contain it.
+
+    `api/app.py` justifies serving `/metrics` without auth on the grounds that the NetworkPolicy
+    keeps it inside the cluster. The chart's only policy declared `policyTypes: [Egress]`, so no
+    ingress rule existed and any pod in any namespace could read live session counts, token totals
+    and pool state. The justification named a control that was never written.
+    """
+    policy = (CHART / "templates" / "networkpolicy.yaml").read_text()
+    assert "-service-ingress" in policy, "the front door has no ingress NetworkPolicy"
+    assert "app.kubernetes.io/component: service" in policy
+    assert _values()["networkPolicy"]["serviceIngress"]["enabled"] is True
+
+
+def test_egress_destinations_are_declarable() -> None:
+    """`to: []` in a NetworkPolicy means *any destination*, not none.
+
+    The egress rule shipped as `to: []` on the HTTPS/LLM/Temporal/Postgres ports, so TCP/443 to the
+    whole internet was permitted from every pod — while `tests/test_no_egress.py` enforced D-089
+    ("this system takes no external sources") by scanning source code for host literals. A source
+    scan catches a developer adding a data source and catches nothing at runtime.
+
+    The addresses are deployment-specific, so the chart cannot default them; what it can do is
+    make the choice visible and available rather than silent.
+    """
+    policy = (CHART / "templates" / "networkpolicy.yaml").read_text()
+    assert ".Values.networkPolicy.egressDestinations" in policy
+    assert _values()["networkPolicy"]["egressDestinations"] == []
+
+
+def test_dns_egress_survives_narrowing_the_destinations() -> None:
+    """DNS is its own rule, so scoping the destinations cannot take name resolution with it.
+
+    Folded into the destination-scoped rule, setting `egressDestinations` to the database CIDR
+    would silently stop DNS — which presents as every dependency being unreachable at once, the
+    hardest possible symptom to trace back to a values change.
+    """
+    policy = (CHART / "templates" / "networkpolicy.yaml").read_text()
+    egress = policy.split("policyTypes:")[1].split("---")[0]
+    dns_rule, scoped_rule = egress.split("- to:")[1], egress.split("- to:")[2]
+    assert "port: 53" in dns_rule and "egressDestinations" not in dns_rule
+    assert "egressDestinations" in scoped_rule and "port: 53" not in scoped_rule
+
+
+def test_the_metrics_that_were_designed_to_alert_actually_alert() -> None:
+    """Collected-and-un-alerted is the same failure REV-2 fixed one level down.
+
+    The ServiceMonitor made the metrics visible; not one of them fired anything, because no
+    PrometheusRule existed anywhere in the repo. The clearest case is the audit-sink failure
+    counter, whose emitter logs a stable `audit_sink_failure` marker at ERROR with a comment
+    saying a lost GxP audit record "must be ALERTABLE" — and nothing was watching.
+
+    Pinned by metric name rather than by rule count so renaming a metric without moving its alert
+    fails here, which is the drift that makes an alerting stack quietly stop covering anything.
+    """
+    rule = (CHART / "templates" / "prometheusrule.yaml").read_text()
+    assert "kind: PrometheusRule" in rule
+    for metric in [
+        "chemclaw_audit_sink_failures_total",
+        "chemclaw_notes_publish_failures_total",
+        "chemclaw_turn_claim_refresh_failures_total",
+        "chemclaw_rollback_watermark_unavailable_total",
+        "chemclaw_turns_failed_total",
+        "chemclaw_turns_shed_total",
+        "chemclaw_connectors_unhealthy",
+        "chemclaw_db_unavailable_total",
+        "chemclaw_tokens_total",
+    ]:
+        assert metric in rule, f"{metric} has no alert"
+
+
+def test_every_alerted_metric_is_a_metric_the_app_declares() -> None:
+    """The other direction: an alert on a metric that does not exist never fires and looks fine.
+
+    A PromQL expression naming a typo'd or deleted series is silently always-empty — the alert is
+    green forever, which reads exactly like "the condition never occurred".
+    """
+    from chemclaw.api.metrics import _COUNTERS, _GAUGES, _HISTOGRAMS
+
+    declared = {*_COUNTERS, *_GAUGES, *_HISTOGRAMS}
+    rule = (CHART / "templates" / "prometheusrule.yaml").read_text()
+    # Only the PromQL, not the prose: the annotations legitimately name metrics in explanations.
+    expressions = " ".join(re.findall(r"expr:\s*(?:>-\s*)?((?:.|\n)*?)\n\s*for:", rule))
+    referenced = set(re.findall(r"\b(chemclaw_[a-z_]+)\b", expressions))
+    assert referenced, "no PromQL expressions were parsed — the extraction is broken, not the rules"
+    unknown = referenced - declared
+    assert not unknown, f"alerts reference metrics the app never emits: {sorted(unknown)}"

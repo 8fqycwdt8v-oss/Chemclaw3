@@ -75,12 +75,31 @@ refresh() {
     git -C "${target}" reset --hard "origin/${branch}"
     git -C "${target}" clean -fd
   fi
-  # Publish atomically-ish into the directory the app reads. A plain copy (not a symlink) keeps the
-  # app's stat-fingerprint cache (`kg/graph.py`) honest and keeps the read path a real directory.
+  # Publish into the directory the app reads. A plain copy (not a symlink) keeps the app's
+  # stat-fingerprint cache (`kg/graph.py`) honest and keeps the read path a real directory.
+  #
+  # `rsync -a --delete` is the only acceptable mechanism here, and the reason is the failure this
+  # replaced. The previous form swallowed rsync's stderr and fell back to
+  # `rm -rf "${publish_dir}"/* && cp -a`. The image never installed rsync, so `command not found`
+  # took the fallback — meaning every sync interval emptied and refilled the directory the serving
+  # container was reading, and a retrieval landing in that window returned a partial or empty graph
+  # with no error anywhere (a missing note is not a failure, it is just less evidence).
+  #
+  # So: rsync is required, checked for by name, and its absence is a loud failure rather than a
+  # quiet deletion. rsync is also what makes the window small in the good case — it writes only the
+  # delta, where a wholesale copy rewrites the entire corpus on every tick. stderr is no longer
+  # discarded, because "the transfer failed" and "the tool is missing" must not look alike again.
+  #
+  # Failing (rather than falling back) is safe in both callers by design: `once` fails the init
+  # container, so a pod never serves against a half-published tree, and `loop` logs a warning and
+  # keeps serving the previous good snapshot. Neither path can destroy what is already published.
   mkdir -p "${publish_dir}"
   if [[ -d "${target}/${notes_subdir}" ]]; then
-    rsync -a --delete "${target}/${notes_subdir}/" "${publish_dir}/" 2>/dev/null \
-      || { rm -rf "${publish_dir:?}/"* ; cp -a "${target}/${notes_subdir}/." "${publish_dir}/"; }
+    if ! command -v rsync >/dev/null 2>&1; then
+      log "ERROR rsync is not installed — refusing to publish (see deploy/Containerfile)"
+      return 1
+    fi
+    rsync -a --delete "${target}/${notes_subdir}/" "${publish_dir}/"
     log "published $(find "${publish_dir}" -name '*.md' | wc -l) notes at $(git -C "${target}" rev-parse --short HEAD)"
   else
     log "WARNING ${notes_subdir}/ absent in ${repo_url}@${branch} — nothing published"
