@@ -40,13 +40,16 @@ internal
 state would let the authorized artifact drift from the displayed one.
 """
 
+import logging
 from typing import Any
 
 from agent_framework import AgentSession
 from agent_framework._harness._mode import AgentModeProvider, get_agent_mode, set_agent_mode
 
-from chemclaw.agent.harness_todo import todo_titles
+from chemclaw.agent.harness_todo import todo_plan_items
 from chemclaw.core.ids import stable_hash
+
+logger = logging.getLogger(__name__)
 
 # The tool MAF injects that lets the model change its own mode. Named here rather than inlined so
 # the retraction below and the test that pins it cannot drift apart.
@@ -65,13 +68,29 @@ class PlanApprovalModeProvider(AgentModeProvider):
     """
 
     async def before_run(self, *args: Any, **kwargs: Any) -> None:
-        """Run MAF's `before_run`, then retract the self-service mode tool it injected.
+        """Demote a session whose approval no longer covers its plan, then retract `mode_set`.
 
         The retraction is by advertised name and is deliberately tolerant of the tool being absent:
         an upstream version that stops injecting it, or renames it, must not raise here — it would
         turn a harmless upstream change into a failed turn. The regression test asserts the tool is
         gone, so a rename that silently reopened the gate fails there instead.
+
+        The demotion runs **first**, before MAF's `before_run`, so the mode instructions and the
+        `{current_mode}` the model is shown describe the mode it is actually in. Demoting afterwards
+        would inject "you are in execute mode" and then quietly move the session to plan, which is
+        the confusing half-state this is meant to remove.
+
+        It is not the enforcement — `chemclaw.agent.plan_gate` is, at the tool boundary, because
+        this method runs once per `agent.run` and the model rewrites its todo list *during* the run
+        that follows. What it fixes is a session that comes back later still holding an execute mode
+        nothing supports: a pod restart, a plan rewritten on a previous turn, or a rejection
+        recorded after an approval, which migration 020 says revokes and which nothing acted on.
         """
+        session = kwargs.get("session") or next(
+            (a for a in args if isinstance(a, AgentSession)), None
+        )
+        if isinstance(session, AgentSession):
+            await self._demote_if_unapproved(session)
         await super().before_run(*args, **kwargs)
         context = kwargs.get("context") or next(
             (a for a in args if hasattr(a, "tools") and hasattr(a, "extend_tools")), None
@@ -79,6 +98,37 @@ class PlanApprovalModeProvider(AgentModeProvider):
         tools = getattr(context, "tools", None)
         if isinstance(tools, list):
             tools[:] = [tool for tool in tools if _advertised_name(tool) != MODEL_MODE_TOOL]
+
+    async def _demote_if_unapproved(self, session: AgentSession) -> None:
+        """Return an execute-mode session to plan when its current plan has no approval.
+
+        Only meaningful for the approval-first posture, which is what `default_mode == PLAN_MODE`
+        identifies: a deployment configured for `harness_autonomy="execute"` starts every session in
+        execute deliberately and has no approval path at all, so demoting there would strand it.
+
+        Failures are swallowed on purpose. This is a *consistency* repair on a display value, and
+        the control that matters does not depend on it — `plan_gate` re-asks the same question at
+        the tool boundary and fails closed. Letting an unreachable approval store turn every turn
+        into an error would trade a cosmetic inconsistency for an outage.
+        """
+        if self.default_mode != PLAN_MODE:
+            return
+        if get_agent_mode(session, default_mode=self.default_mode) != EXECUTE_MODE:
+            return
+        from chemclaw.agent.plan_gate import plan_is_approved
+
+        try:
+            approved = await plan_is_approved(session)
+        except Exception:  # noqa: BLE001 - a display repair must never fail the turn it precedes
+            logger.warning(
+                "could not check the plan approval for session %s; leaving the displayed mode "
+                "alone (the tool-level gate still decides, and fails closed)",
+                session.session_id,
+                exc_info=True,
+            )
+            return
+        if not approved:
+            revoke_execute(session)
 
 
 def _advertised_name(tool: Any) -> str:
@@ -92,14 +142,27 @@ def _advertised_name(tool: Any) -> str:
 
 
 async def current_plan_hash(session: AgentSession) -> str:
-    """The hash of the plan this session is currently proposing.
+    """The hash of the plan this session is currently proposing — the approval key.
 
-    Over the rendered todo lines — the same strings the surfaces display — so what is approved and
-    what was shown cannot diverge. Completion state is part of the rendering and therefore part of
-    the hash, which is the behaviour wanted: a plan whose steps have been ticked off is not the
-    plan that was approved, and re-approval is the correct outcome rather than a silent carry-over.
+    Over the plan's **work items** (`chemclaw.agent.harness_todo.todo_plan_items`): the titles in
+    order, without the checkbox and without the `awaiting-job:` rows the launcher writes.
+
+    **This used to hash the rendered lines, and that made the gate unenforceable** (D-167). The
+    argument for including completion state was that "a plan whose steps have been ticked off is
+    not the plan that was approved, and re-approval is the correct outcome" — coherent in the
+    abstract, and fatal in practice: the hash moves on the *first* ticked box, so an approval can
+    never be checked against the plan being executed. It could only ever be recorded, which is
+    exactly what the system did — `PlanApprovalStore.decision` was read by one display route and by
+    nothing that runs anything. A four-item plan would have needed four approvals, and nobody would
+    have operated that; so the only reachable outcome was the one that shipped, where the approval
+    latched a session and authorized whatever came next.
+
+    What a person approves is the set of work items, not their completion state. Ticking a box is
+    the plan proceeding; adding, removing or rewording one is a different plan, and a different
+    plan is unapproved. The displayed rendering keeps its checkboxes (`todo_titles` is untouched),
+    so nothing a chemist reads changes.
     """
-    return stable_hash(await todo_titles(session))
+    return stable_hash(await todo_plan_items(session))
 
 
 def session_mode(session: AgentSession, *, default_mode: str = PLAN_MODE) -> str:
@@ -116,3 +179,63 @@ def grant_execute(session: AgentSession) -> str:
     believed and can keep behaving as though it were still planning.
     """
     return set_agent_mode(session, EXECUTE_MODE)
+
+
+# Where a session records which approved plans have already had their turn. Session state, not the
+# database, because it is scoped to exactly one conversation's progress and shares the lifetime of
+# the mode it qualifies — the same reasoning `plan_approval_store` uses for its backend choice.
+_CONSUMED_STATE_KEY = "chemclaw_plans_consumed"
+
+
+def consume_plan(session: AgentSession, plan_hash: str) -> None:
+    """Record that an approved plan has now had the turn it was approved for.
+
+    **This is what makes an approval authorize a request rather than a session** (D-167), and it
+    exists because the first version of that fix did not close the finding. Binding the approval to
+    the plan's *work items* — rather than to its rendered lines, whose hash moved on the first
+    ticked box — made the approval checkable at last. It also made it durable in a way nobody
+    approved: a live run showed the model answering a completely different question without
+    touching its todo list at all, so the plan identity never changed, the approval never lapsed,
+    and `compute_xtb_energy` ran under an authorization given for a hazard-screening plan.
+
+    The unit a person actually approves is *this plan, for this ask*. The harness loop runs a plan
+    to completion inside one `agent.run`, so one turn is exactly the scope of "execute the approved
+    plan" — and the next user message is a new request, which needs its own approval even if the
+    todo list happens to look the same.
+    """
+    consumed = session.state.setdefault(_CONSUMED_STATE_KEY, [])
+    if isinstance(consumed, list) and plan_hash not in consumed:
+        consumed.append(plan_hash)
+
+
+def plan_consumed(session: AgentSession, plan_hash: str) -> bool:
+    """Whether this plan's approval has already been spent on a turn."""
+    consumed = session.state.get(_CONSUMED_STATE_KEY)
+    return isinstance(consumed, list) and plan_hash in consumed
+
+
+def rearm_plan(session: AgentSession, plan_hash: str) -> None:
+    """Forget that a plan was consumed, so a fresh human decision authorizes a fresh turn.
+
+    Called when a decision is recorded. Re-approving the same unchanged plan is a person saying
+    "yes, again" — a deliberate act, and the only thing that revives a spent authorization.
+    """
+    consumed = session.state.get(_CONSUMED_STATE_KEY)
+    if isinstance(consumed, list) and plan_hash in consumed:
+        consumed.remove(plan_hash)
+
+
+def revoke_execute(session: AgentSession) -> str:
+    """Return the session to plan mode — the mirror `grant_execute` never had (D-167).
+
+    Its absence was half of DARK-1. `grant_execute` was a latch: one approval moved a session into
+    execute and *nothing* moved it back, so the authorization outlived the plan it was given for,
+    a rejection recorded afterwards changed nothing (against migration 020's stated contract), and
+    the mode a surface displayed stopped being a fact about anything.
+
+    Through `set_agent_mode` for the same reason `grant_execute` is: the helper records the
+    previous mode, so the next `before_run` injects the external-change notification. That matters
+    more here than on the way up — a model that has been executing will keep executing on
+    instructions alone, and it has to be *told* it is planning again.
+    """
+    return set_agent_mode(session, PLAN_MODE)

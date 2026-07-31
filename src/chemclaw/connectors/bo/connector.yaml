@@ -19,6 +19,11 @@ endpoint:
   tools:
     - suggest_next_experiment
     - generate_screening_design
+  # Both propose experiments and return them; neither runs one or writes anything. The campaign
+  # that *does* persist state is the declared job below, which is gated by being a job.
+  read_only:
+    - suggest_next_experiment
+    - generate_screening_design
 
 jobs:
   - name: start_optimization_campaign

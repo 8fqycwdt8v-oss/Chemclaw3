@@ -1,4 +1,4 @@
-"""Trust is a distribution, not a number: the residual listing and its property table (D-167).
+"""Trust is a distribution, not a number: the residual listing and its property table (D-169).
 
 `calculator_trust` reduced the whole ledger to six aggregates, and did it through
 `if property_name == "solubility"` followed by two ternaries — so *every* other name was answered

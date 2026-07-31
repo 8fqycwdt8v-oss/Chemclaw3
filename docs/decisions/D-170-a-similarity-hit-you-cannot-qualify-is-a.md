@@ -1,4 +1,4 @@
-# D-168 — A similarity hit you cannot qualify is a similarity hit you cannot use
+# D-170 — A similarity hit you cannot qualify is a similarity hit you cannot use
 
 ## Status
 

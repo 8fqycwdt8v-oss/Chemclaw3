@@ -240,7 +240,7 @@ class FingerprintReactionRetriever:
         note to the reviewer (the PR-gate working), not silently corrupting the graph. Reports
         are therefore run over the merged corpus, as campaigns are.
 
-        **`type`/`tag`/`since`/`until` narrow the result** when given (D-168). The fingerprint index
+        **`type`/`tag`/`since`/`until` narrow the result** when given (D-170). The fingerprint index
         holds bits and a label and knows nothing about note metadata, so the filter cannot go into
         its SQL: this searches *deeper* than the requested page and applies the corpus's own
         eligibility gate to the neighbours, then truncates. Filtering the page instead would let a

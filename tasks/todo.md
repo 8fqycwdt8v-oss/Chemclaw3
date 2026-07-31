@@ -165,7 +165,7 @@ computation, and that store is readable.* W2.1 and W2.2 are the two halves.
       opaque bytes for an unlisted name, so a type-based rule would refuse readable output from any
       tool added later. A Hessian is text and so cannot be refused on type; the
       `calc_artifact_max_chars` ceiling with `truncated` + the full `byte_size` is what handles it.
-- [x] **W2.4 Generalize `calculator_trust`.** — shipped, D-167. The "two hardcoded names" was a
+- [x] **W2.4 Generalize `calculator_trust`.** — shipped, D-169. The "two hardcoded names" was a
       live defect, not just inflexibility: `if property_name == "solubility"` plus two ternaries
       meant every *other* name got pKa's version and pKa's unit — a confident report about the
       wrong calculator. A `_CALIBRATED` table replaces it and an unknown property now raises,
@@ -176,7 +176,7 @@ computation, and that store is readable.* W2.1 and W2.2 are the two halves.
       a molecule and the row carries no tags, so that half of the plan would have shipped an
       always-empty filter. `substructure_pattern` moved to `core.chem`; the fingerprint index's
       identical copy now calls it.
-- [x] **W2.5 Metadata-filtered similarity.** — shipped, D-168. Two corrections to the plan.
+- [x] **W2.5 Metadata-filtered similarity.** — shipped, D-170. Two corrections to the plan.
       *Not* through `note_index`: it stores a note id, its text and an embedding — no type, tags or
       dates — so the shared `_eligible_notes` gate is the only thing that can answer, and reusing it
       avoids a second definition of "eligible". And the **MCP `similar_reactions` tool cannot have

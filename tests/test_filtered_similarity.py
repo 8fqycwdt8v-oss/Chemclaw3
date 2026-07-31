@@ -1,4 +1,4 @@
-"""A structural hit you cannot qualify is a structural hit you cannot use (D-168).
+"""A structural hit you cannot qualify is a structural hit you cannot use (D-170).
 
 `FingerprintReactionRetriever` ignored `filters` entirely, so "similar reactions, but only the
 ones on this campaign" had no answer: the retriever handed back the ten nearest neighbours

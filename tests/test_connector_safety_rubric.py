@@ -57,6 +57,8 @@ endpoint:
   url: {url}
   tools:
     - echo_subject
+  read_only:
+    - echo_subject
 """
 
 

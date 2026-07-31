@@ -394,6 +394,38 @@ def job_tools() -> list[CapabilityTool]:
     return list(tools.values())
 
 
+def job_names() -> list[str]:
+    """Every declared job name across the enabled connectors, sorted.
+
+    Distinct from `connector_tool_names`, which unions these with each endpoint's *MCP* tools. The
+    caller that wants this one wants the jobs specifically — `chemclaw.agent.plan_gate` gates
+    durable launches and must not gate a connector's read tools — and deriving it from the same
+    `enabled()` walk is what keeps the two answers consistent as bundles come and go.
+    """
+    return sorted(job.name for manifest in enabled() for job in manifest.jobs)
+
+
+def state_changing_tool_names() -> list[str]:
+    """Every enabled connector tool that spends real resources or writes data, sorted.
+
+    Both halves of a bundle's surface: each endpoint's declared `state_changing` subset, plus every
+    declared job — a job is durable work by construction, so it needs no declaration to be one.
+
+    Read by `chemclaw.agent.plan_gate` to decide what an unapproved harness plan may not call.
+    Assembled here rather than listed in core because whether a connector tool calculates or merely
+    looks up is the *bundle's* fact: `compute_xtb_energy` runs a semiempirical calculation and
+    caches it, `resolve_compound` is a lookup, and core cannot tell them apart from the name. A
+    copy of that knowledge in core would be a second source of truth that goes stale the first time
+    a bundle changes what a tool does.
+    """
+    names: set[str] = set()
+    for manifest in enabled():
+        if manifest.endpoint is not None:
+            names.update(manifest.endpoint.state_changing)
+        names.update(job.name for job in manifest.jobs)
+    return sorted(names)
+
+
 def find_job(name: str) -> tuple[str, JobSpec]:
     """Resolve a declared job name to its connector and spec, or raise naming the valid ones.
 

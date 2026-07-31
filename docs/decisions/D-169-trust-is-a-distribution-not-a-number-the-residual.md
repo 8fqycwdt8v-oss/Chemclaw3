@@ -1,4 +1,4 @@
-# D-167 — Trust is a distribution, not a number: the residual listing, and the property table behind it
+# D-169 — Trust is a distribution, not a number: the residual listing, and the property table behind it
 
 ## Status
 

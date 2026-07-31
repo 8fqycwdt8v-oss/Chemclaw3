@@ -58,31 +58,28 @@ off-by-default flag enabled, driven with real Anthropic traffic and one signed i
 plus three parallel code reviews. Eight defects fixed under D-155; what follows is confirmed and
 deliberately not fixed there, each because it needs a decision rather than a patch.
 
-- [ ] **DARK-1 [High] — the harness plan-approval gate authorizes a session, not a plan.**
-  Reproduced live: approve a four-item plan (`mode` flips to `execute`, a `plan_approvals` row is
-  written), then ask a *completely different* question in the same session. `GET /sessions/{id}/plan`
-  reports a new `plan_hash` with `approved=false`, the session is still in `execute`, and the turn
-  autonomously ran `compute_xtb_energy` and `propose_knowledge_note` — a graph write — with no
-  approval for that plan. `PlanApprovalStore.decision` is read in exactly one place,
-  `api/app.py`'s *display* route; no execution path consults it. The only thing gating the loop is
-  MAF's session mode, and nothing ever returns a session to `plan`. A recorded rejection after an
-  approval therefore does not revoke it either, contrary to migration 020's stated contract.
-  Two coupled decisions block the fix, which is why it is here and not in D-155:
-  **(a)** `current_plan_hash` hashes the *rendered* todo lines, so completion state is part of the
-  identity and the hash changes on the first ticked box — execution cannot be bound to a hash that
-  moves as it executes. Binding it means deciding that what a human approves is the set of work
-  items, not their completion state, which reverses a documented choice.
-  **(b)** the store is Postgres-backed, so a deployment without it (the CLI harness) must be decided
-  fail-open or fail-closed. Fail-closed is right for a GxP gate and breaks `make chat --admin`.
-- [ ] **DARK-2 [High] — a template step is a route around `authorize_trigger` and the audit trail.**
-  `durable/template_activities.py`'s `ResolvedJob` drops `expensive` and `precondition`, and the
-  connector-tool branch calls `connector.call_tool(...)` with neither `enforce_tool_authz` nor
-  `make_audit_middleware` — which the in-process branch two lines below hand-applies, and which the
-  module docstring says is the point of the module. So a template naming `compute_dft_energy` starts
-  HPC work for anyone who may run its `run_<name>` tool, and both tool steps of the shipped
-  `hazard-briefing` leave no GxP audit row. Needs a decision on whether a template runs with the
-  requester's entitlements (then thread them through) or as a declared service identity (then say so
-  and audit it as such).
+- [x] ~~**DARK-1 [High] — the harness plan-approval gate authorizes a session, not a plan.**~~ —
+  **fixed (D-167).** Both blocking decisions taken: an approval binds to the plan's *work items*
+  (reversing D-137, whose rendered-lines hash moved on the first ticked box and so could never be
+  checked against the plan being executed), and the store follows the session store — which
+  dissolves the fail-open/fail-closed question rather than answering it, since the approval and the
+  mode it authorizes must share a lifetime. Enforcement is a function middleware at the tool
+  boundary, inside audit and inside the denial converter; reads stay open so a plan can still be
+  built. Running it live then found the fix incomplete: the model answered a *different* question
+  without touching its todo list, so the plan identity never changed and the approval never lapsed.
+  An approval is therefore also spent by the turn it authorizes. One residual limit, stated in
+  D-167: the system cannot tell "proceed" from "a new question" in the single turn that follows an
+  approval — bounded, audited, and immediately preceded by a human decision, but not zero.
+- [x] ~~**DARK-2 [High] — a template step is a route around `authorize_trigger` and the audit
+  trail.**~~ — **fixed (D-168).** A template step runs with the requester's entitlements, which is
+  what the module's own docstring already claimed. The connector branch goes through the same
+  audited, authorized path as the in-process one; the job step's pre-flight became one shared
+  function (`prepare_job_launch`) called by both the chat launcher and the new `authorize_job_step`,
+  which returns the *validated* payload so the workflow cannot start a child with raw arguments.
+  Running the shipped `hazard-briefing` template live then found four further defects in the same
+  path, all of which meant no template had ever executed a step in a deployment: `run_tool_step` and
+  `run_agent_step` were registered on no worker, a tool step's `list[Content]` result could not
+  cross the activity boundary, and an agent step could not run under `harness_enabled` at all.
 - [x] ~~**DARK-3 — mid-turn resume claims other jobs' completions and drops them.**~~ — **fixed on main by D-153** while this pass was running. `await_job_results` no longer consumes the push-back mailbox at all: each job is awaited on its own Temporal handle, so there is no destructive claim to steal another job's completion with. Recorded rather than deleted because the review found it independently against the pre-D-153 tree.
 - [ ] **DARK-4 [Med] — the durable job idempotency key omits every versioned input.**
   `job_workflow_id` hashes `[connector, job, payload]` only. Change `xtb_method` or a calibration

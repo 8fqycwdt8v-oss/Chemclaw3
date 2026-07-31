@@ -1248,7 +1248,7 @@ class FingerprintSettings(BaseSettings):
     # fingerprint-search analog of the `graph_max_hops` clamp on `expand_note`. Generous for a
     # real neighbor list.
     fingerprint_max_top_k: int = Field(default=100, ge=1)
-    # How much deeper a *filtered* structural search looks than the page it returns (D-168). The
+    # How much deeper a *filtered* structural search looks than the page it returns (D-170). The
     # fingerprint index knows bits and a label, never note metadata, so a type/tag/date filter can
     # only be applied to neighbours after they come back — and applying it to the page would let
     # one unwanted neighbour cost a wanted one. Bounded by `fingerprint_max_top_k` regardless, so

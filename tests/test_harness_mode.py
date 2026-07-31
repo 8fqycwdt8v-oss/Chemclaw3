@@ -29,6 +29,27 @@ from chemclaw.agent.plan_approval_store import PlanApprovalStore
 from tests.pg import migrated_db_or_skip
 
 
+async def _set_plan(
+    session: AgentSession, titles: list[str], *, complete: set[int] | None = None
+) -> None:
+    """Write `titles` as the session's plan, marking the listed indices complete.
+
+    Straight into MAF's own todo store, because that is where the model's `todo_write` puts them —
+    a test for "what happens when the plan changes" has to change the plan the same way the model
+    does, not through a helper that writes a different kind of row.
+    """
+    from agent_framework import DEFAULT_TODO_SOURCE_ID, TodoItem, TodoSessionStore
+
+    done = complete or set()
+    items = [
+        TodoItem(id=index + 1, title=title, is_complete=index in done)
+        for index, title in enumerate(titles)
+    ]
+    await TodoSessionStore().save_state(
+        session, items, next_id=len(items) + 1, source_id=DEFAULT_TODO_SOURCE_ID
+    )
+
+
 class _Context:
     """The slice of MAF's invocation context the mode provider writes to."""
 
@@ -118,16 +139,62 @@ def test_a_changed_plan_has_a_different_hash() -> None:
 
     This is what stops "present a modest plan, get it approved, then rewrite the todo list and run
     something else under the same authorization".
+
+    Driven through the *todo store* rather than through `mark_awaiting_job`, which this test used
+    to use. That helper writes the system-authored `awaiting-job:` row, and D-167 excludes those
+    from the identity on purpose — see `test_a_launched_job_does_not_revoke_its_own_approval`. What
+    is being asserted here is that a change to the **work items** changes the hash, so the change
+    has to be a work item.
     """
 
     async def _hashes() -> tuple[str, str]:
         session = AgentSession(session_id="plan-hash")
         before = await current_plan_hash(session)
-        await mark_awaiting_job(session, "job-1", title="run something expensive")
+        await _set_plan(session, ["screen the species"])
         return before, await current_plan_hash(session)
 
     before, after = asyncio.run(_hashes())
     assert before != after
+
+
+def test_ticking_a_box_does_not_change_the_plans_identity() -> None:
+    """Working through an approved plan must not revoke the approval it is working under (D-167).
+
+    The hash used to cover the rendered `[x]`/`[ ] title` lines, so it moved on the first completed
+    step. An approval could therefore be recorded but never checked against the plan being
+    executed — which is precisely what the system did, and why the gate was decorative. Binding to
+    the work items makes "the plan proceeded" and "the plan changed" different events.
+    """
+
+    async def _hashes() -> tuple[str, str]:
+        session = AgentSession(session_id="plan-tick")
+        await _set_plan(session, ["screen the species", "find precedent"])
+        before = await current_plan_hash(session)
+        await _set_plan(session, ["screen the species", "find precedent"], complete={0})
+        return before, await current_plan_hash(session)
+
+    before, after = asyncio.run(_hashes())
+    assert before == after
+
+
+def test_a_launched_job_does_not_revoke_its_own_approval() -> None:
+    """A durable launch inside an approved plan appends a todo — and must not unapprove the plan.
+
+    `mark_awaiting_job` adds an `awaiting-job:` row from the launcher
+    (`chemclaw.connectors.jobs._mark_awaiting_if_harness`), so counting it in the identity would
+    mean every approved plan revoked itself the first time it started a job. It is also not work a
+    human agreed to: it records that work already agreed to is in flight.
+    """
+
+    async def _hashes() -> tuple[str, str]:
+        session = AgentSession(session_id="plan-awaiting")
+        await _set_plan(session, ["compute the energy"])
+        before = await current_plan_hash(session)
+        await mark_awaiting_job(session, "calc-7", title="awaiting compute_xtb_energy")
+        return before, await current_plan_hash(session)
+
+    before, after = asyncio.run(_hashes())
+    assert before == after
 
 
 def test_the_same_plan_hashes_stably() -> None:

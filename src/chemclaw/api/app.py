@@ -41,7 +41,12 @@ from chemclaw.agent.attachments import STORE as ATTACHMENTS
 from chemclaw.agent.attachments import AttachmentError, AttachmentSummary, parse_attachment
 from chemclaw.agent.chemclaw_agent import build_agent, connector_tools, history_provider
 from chemclaw.agent.durable_tools import request_note_reindex
-from chemclaw.agent.harness_mode import current_plan_hash, grant_execute, session_mode
+from chemclaw.agent.harness_mode import (
+    current_plan_hash,
+    grant_execute,
+    rearm_plan,
+    session_mode,
+)
 from chemclaw.agent.harness_todo import complete_awaiting_job, todo_titles
 from chemclaw.agent.interaction_tools import (
     PendingApproval,
@@ -50,7 +55,8 @@ from chemclaw.agent.interaction_tools import (
     decide_approval,
     list_pending_approvals,
 )
-from chemclaw.agent.plan_approval_store import PlanApprovalStore
+from chemclaw.agent.plan_approval_store import ApprovalStore, plan_approval_store
+from chemclaw.agent.plan_gate import plan_is_approved
 from chemclaw.agent.profile_discovery import load_profiles
 from chemclaw.agent.profiles import get_profile
 from chemclaw.agent.session_events import stream_new_events
@@ -521,7 +527,10 @@ def create_app(
     # only a DSN and the in-memory one holds nothing at all (its messages live in
     # `session.state`), so one instance is correct for both and neither carries per-session
     # state.
-    app.state.plan_approvals = PlanApprovalStore()
+    # Through the factory, not by construction, so this route and the enforcement gate
+    # (`chemclaw.agent.plan_gate`) hold the *same* store: a decision recorded here has to be a
+    # decision the gate can see, which under the in-memory backend means the same object (D-167).
+    app.state.plan_approvals = plan_approval_store()
     app.state.history = history_provider()
     # One agent — and therefore one chat client — per concurrent turn (D-123). The cached
     # `_agent()` below still serves everything that does not stream; only a streaming turn needs
@@ -634,13 +643,15 @@ def create_app(
         session = _agent(profile).create_session(session_id=session_id)
         return _live_sessions().add(session_id, session, owner, profile)
 
-    def _plan_approvals() -> PlanApprovalStore:
-        """The durable plan-approval store, read through one annotated accessor.
+    def _plan_approvals() -> ApprovalStore:
+        """The plan-approval store, read through one annotated accessor.
 
-        Built once on `app.state` beside the other stores: it holds only a DSN, so one instance
-        serves every request and there is no per-session state to keep straight.
+        Built once on `app.state` beside the other stores: the Postgres backend holds only a DSN
+        and the in-memory one holds the decisions themselves, so one instance is right for both —
+        and for the in-memory backend it is *required*, since a second instance would be a second,
+        empty store.
         """
-        store: PlanApprovalStore = app.state.plan_approvals
+        store: ApprovalStore = app.state.plan_approvals
         return store
 
     def _live_sessions() -> _LiveSessions:
@@ -1183,7 +1194,16 @@ def create_app(
         session_id: str,
         principal: Principal = Depends(require_principal),
     ) -> PlanStatusOut:
-        """The plan awaiting a decision, with the hash a client must post back to approve it."""
+        """The plan awaiting a decision, with the hash a client must post back to approve it.
+
+        `approved` is the **effective** state, not merely the recorded one: a decision exists, it
+        was a yes, and it has not already been spent by the turn it authorized
+        (`chemclaw.agent.plan_gate.plan_is_approved`). Reporting the stored row alone would tell a
+        surface a plan is approved while every state-changing call under it is refused — the same
+        disagreement between what a surface displays and what the system enforces that let DARK-1
+        sit unnoticed, reintroduced one layer up. `decided_by` still names whoever decided, because
+        "approved earlier, already used" is a different thing to show than "nobody has decided".
+        """
         live = await _resolve_session(session_id, principal)
         plan = await todo_titles(live.session)
         plan_hash = await current_plan_hash(live.session)
@@ -1193,7 +1213,7 @@ def create_app(
             plan_hash=plan_hash,
             plan=plan,
             mode=session_mode(live.session),
-            approved=bool(decision and decision[0]),
+            approved=await plan_is_approved(live.session),
             decided_by=decision[1] if decision else None,
         )
 
@@ -1223,6 +1243,10 @@ def create_app(
                 detail="the plan changed since it was shown; re-read it and decide again",
             )
         await _plan_approvals().record(session_id, plan_hash, principal.oid or "", body.approved)
+        # A decision re-arms the plan: an approval authorizes one turn and is spent when that turn
+        # ends (D-167), so re-approving an unchanged plan is how a person says "yes, again" rather
+        # than a no-op that silently leaves the session unable to act.
+        rearm_plan(live.session, plan_hash)
         if body.approved:
             grant_execute(live.session)
         return Response(status_code=204)
