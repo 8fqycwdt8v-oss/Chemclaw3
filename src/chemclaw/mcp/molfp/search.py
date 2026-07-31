@@ -13,12 +13,12 @@ import logging
 from pydantic import BaseModel
 from rdkit import Chem
 
+from chemclaw.core.chem import InvalidSmilesError, compound_id
 from chemclaw.core.config import settings
 from chemclaw.mcp.fpstore import (
     FingerprintError,
     FingerprintRecord,
     FingerprintStore,
-    Match,
     find_matches,
 )
 from chemclaw.mcp.molfp.fingerprint import ecfp_bitstring, molecule_definition
@@ -26,16 +26,42 @@ from chemclaw.mcp.molfp.fingerprint import ecfp_bitstring, molecule_definition
 log = logging.getLogger(__name__)
 
 
-class SubstructureHit(BaseModel):
-    """A substructure hit: the stored record's id and SMILES label.
+class MoleculeHit(BaseModel):
+    """A molecule hit: the compound note to cite, the structure, and (for similarity) its score.
 
     Deliberately lean — no bits, no definition. The fingerprint is an internal storage
-    detail no search consumer uses (the agent wrapper strips to SMILES immediately), and
-    returning it would ship ~2KB of '0'/'1' noise per hit into the model context over MCP.
+    detail no search consumer uses, and returning it would ship ~2KB of '0'/'1' noise per
+    hit into the model context over MCP. The stored record id is dropped for the same
+    reason: for molecules it is the SMILES again (`ingest.eln.ingest` keys the index by
+    structure), so it carried no information the `smiles` field does not.
+
+    **Why the note id is on the hit.** Reaction hits have always carried `reaction-<id>`,
+    and molecule hits carried nothing, so the model was told to bridge by re-running
+    `find_notes` on each SMILES — the literal substring path KM-4 flags as fragile. Compound
+    notes now exist with structure-derived ids, so the citation is simply computed here.
+
+    `compound_note_id` names the note a *merged* ingest produces. A structure whose note is
+    still on its PR-gate branch is proposed, not merged, and the citation will not resolve
+    until it is — the same latency `reaction_note_id` has always had, and the reason
+    `eln.compound.compound_dependencies` makes a note land together with the compound notes
+    it depends on (STO-7). It is `None` when the stored structure does not parse: ingestion
+    canonicalizes leniently, so a junk label can reach the index, and one unciteable row must
+    not raise out of a search that has real hits to return.
     """
 
-    id: str
-    label: str
+    compound_note_id: str | None
+    smiles: str
+    similarity: float | None = None
+
+    @classmethod
+    def for_molecule(cls, smiles: str, similarity: float | None = None) -> "MoleculeHit":
+        """Build a hit for a stored structure, deriving the note id from the structure itself."""
+        try:
+            note_id: str | None = compound_id(smiles)
+        except InvalidSmilesError:
+            log.warning("indexed molecule %r does not parse; hit cites no compound note", smiles)
+            note_id = None
+        return cls(compound_note_id=note_id, smiles=smiles, similarity=similarity)
 
 
 def record_for(record_id: str, smiles: str) -> FingerprintRecord:
@@ -50,16 +76,17 @@ async def find_similar_molecules(
     smiles: str,
     top_k: int | None = None,
     threshold: float | None = None,
-) -> list[Match]:
+) -> list[MoleculeHit]:
     """Return molecules structurally similar to `smiles`, most similar first.
 
     `top_k` and `threshold` default to the configured values. Raises `FingerprintError`
     on an unparseable query so the caller never searches with a meaningless fingerprint.
     """
-    return await find_matches(store, ecfp_bitstring(smiles), top_k, threshold)
+    matches = await find_matches(store, ecfp_bitstring(smiles), top_k, threshold)
+    return [MoleculeHit.for_molecule(match.label, match.similarity) for match in matches]
 
 
-async def find_substructure_matches(store: FingerprintStore, query: str) -> list[SubstructureHit]:
+async def find_substructure_matches(store: FingerprintStore, query: str) -> list[MoleculeHit]:
     """Return stored molecules that contain the `query` fragment.
 
     The query is interpreted as SMARTS (the right language for a substructure pattern; a
@@ -76,6 +103,9 @@ async def find_substructure_matches(store: FingerprintStore, query: str) -> list
     would flood the model context); hitting either cap logs a warning so a truncated
     result is never silent. A pattern-fingerprint prefilter is a later optimization for
     large corpora (ECFP bits cannot screen substructures soundly).
+
+    Each hit carries the compound note to cite (`MoleculeHit`), so a functional-group query
+    lands on the graph directly instead of via a substring search for the SMILES.
 
     The matching itself runs **off the event loop** in a worker thread, bounded by
     `substructure_match_timeout_seconds`. Bounding the inputs is not enough: a short but
@@ -116,7 +146,7 @@ async def find_substructure_matches(store: FingerprintStore, query: str) -> list
         ) from exc
 
 
-def _scan_for_matches(records: list[FingerprintRecord], pattern: Chem.Mol) -> list[SubstructureHit]:
+def _scan_for_matches(records: list[FingerprintRecord], pattern: Chem.Mol) -> list[MoleculeHit]:
     """Match `pattern` against each record, stopping at the result cap (the CPU-bound half).
 
     Split out as a plain synchronous function so it can run in a worker thread: it is the only
@@ -125,11 +155,11 @@ def _scan_for_matches(records: list[FingerprintRecord], pattern: Chem.Mol) -> li
     skipped rather than aborting the scan (one bad row must not hide every real hit).
     """
     max_matches = settings.fingerprint_max_top_k
-    matches: list[SubstructureHit] = []
+    matches: list[MoleculeHit] = []
     for record in records:
         mol = Chem.MolFromSmiles(record.label)
         if mol is not None and mol.HasSubstructMatch(pattern):
-            matches.append(SubstructureHit(id=record.id, label=record.label))
+            matches.append(MoleculeHit.for_molecule(record.label))
             if len(matches) == max_matches:
                 log.warning(
                     "substructure result capped at %d matches (id order); "
