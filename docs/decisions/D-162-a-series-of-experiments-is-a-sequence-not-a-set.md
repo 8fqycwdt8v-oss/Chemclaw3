@@ -1,4 +1,4 @@
-# D-158 — A series of experiments is a sequence, not a set
+# D-162 — A series of experiments is a sequence, not a set
 
 **Context.** The question that opened this: a lab technician works one step for weeks, running one
 experiment a day, each chosen in response to yesterday's result. With an ELN connected, can the

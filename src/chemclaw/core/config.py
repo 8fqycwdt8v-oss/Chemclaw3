@@ -298,6 +298,17 @@ class HpcSettings(BaseSettings):
     # the artifact fetch is unauthenticated — unless the store shares the launcher's origin, in
     # which case the launcher token still applies.
     hpc_artifact_store_token: str = ""
+    # Persist a finished QM result in the shared calculation store (D-158). On by default, which
+    # is the *un*usual choice for a new flag here and deliberate: D-011 already says every result
+    # is persisted once and never recomputed, and `qm` was the one capability not doing it — so
+    # this is the bundle complying with an existing rule, not a new opt-in behaviour. The write is
+    # an idempotent upsert keyed by content, so re-running a job cannot corrupt anything.
+    #
+    # The switch exists for the deployment that runs the `qm` worker without a reachable Postgres:
+    # there, every job would log a failed persist. Turning it off restores exactly the old
+    # behaviour — the result still reaches the session and the PR-gated note, just without the
+    # durable cache entry or the note's `calc_refs`.
+    qm_persist_to_calc_store: bool = True
     # The HPC/Nextflow identity bridge (plan F4-T6, §7.2): the other non-Entra bridge. HPC is
     # not an Entra relying party, so user jobs run under one service identity while the
     # requesting Entra `oid` is carried in the payload (F4-T3) and *every* oid→HPC-identity

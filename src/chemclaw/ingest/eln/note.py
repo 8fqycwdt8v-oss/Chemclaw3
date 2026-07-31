@@ -38,7 +38,7 @@ def note_from_ord_reaction(reaction: OrdReaction) -> Note:
 
 
 def _hypothesis_block(reaction: OrdReaction) -> str:
-    """Lead with what the run was testing, when the source recorded it (D-158).
+    """Lead with what the run was testing, when the source recorded it (D-162).
 
     First in the body rather than buried among the conditions, because it is what makes the run
     legible: every condition below is an answer, and this is the question. Empty when unrecorded —

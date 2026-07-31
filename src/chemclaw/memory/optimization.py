@@ -79,7 +79,7 @@ def optimization_campaign_note(
     a per-run block carrying the hypothesis it was testing and a short procedure excerpt, so the
     intent and the process detail are visible, not just the numbers.
 
-    The ordering is chronological (D-158), because a campaign is usually not a screen run in one
+    The ordering is chronological (D-162), because a campaign is usually not a screen run in one
     afternoon: it is a technician working one step for weeks, each day's experiment chosen in
     response to yesterday's result. Grouped by similarity alone, that reads as an unordered set,
     and the trajectory — the variable being walked, what the last three runs ruled out — is

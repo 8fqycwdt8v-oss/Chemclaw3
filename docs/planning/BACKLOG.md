@@ -92,7 +92,7 @@ deliberately not fixed there, each because it needs a decision rather than a pat
   `invalidate_cache()` is called *inside* that window, so a concurrent turn can retrieve an
   agent-proposed, unreviewed note as authoritative evidence. `_return_to_base` fixed the permanent
   version of this; the transient one spans a commit, a fetch and a push.
-## Done — The daily experiment progression (2026-07-31, D-158)
+## Done — The daily experiment progression (2026-07-31, D-162)
 
 Asked whether the system could read a technician's week-by-week series on one step and propose the
 next run without BO. Most of it was already there; three data gaps were not, and are closed:
