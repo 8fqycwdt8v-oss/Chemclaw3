@@ -67,6 +67,54 @@ def test_type_filter_scopes_the_graph_sweep(
     assert {c.source_note_id for c in chunks} == {"optimization-ester"}
 
 
+def _seed_dated_graph(tmp_path: Path) -> None:
+    """Two runs a fortnight apart, and one whose date nobody recorded."""
+    for note_id, valid_from in (("reaction-old", "2026-03-01"), ("reaction-new", "2026-03-15")):
+        (tmp_path / f"{note_id}.md").write_text(
+            f"---\nid: {note_id}\ntype: reaction\nvalid_from: {valid_from}\n---\nyield noted.\n",
+            encoding="utf-8",
+        )
+    (tmp_path / "undated.md").write_text(
+        "---\nid: reaction-undated\ntype: reaction\n---\nyield noted.\n", encoding="utf-8"
+    )
+
+
+def test_date_window_scopes_the_sweep_to_a_period(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """What have I tried in the last fortnight — unanswerable until the dates were filterable."""
+    _seed_dated_graph(tmp_path)
+    monkeypatch.setattr(settings, "knowledge_dir", str(tmp_path))
+
+    chunks = asyncio.run(gather_evidence("yield", since="2026-03-10"))
+
+    assert {c.source_note_id for c in chunks} == {"reaction-new"}
+
+
+def test_an_undated_note_is_excluded_from_a_windowed_sweep(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """It cannot be shown to fall in the window, and the unwindowed sweep still finds it."""
+    _seed_dated_graph(tmp_path)
+    monkeypatch.setattr(settings, "knowledge_dir", str(tmp_path))
+
+    windowed = asyncio.run(gather_evidence("yield", until="2026-03-31"))
+    everything = asyncio.run(gather_evidence("yield"))
+
+    assert "reaction-undated" not in {c.source_note_id for c in windowed}
+    assert "reaction-undated" in {c.source_note_id for c in everything}
+
+
+def test_a_malformed_date_argument_says_what_was_expected(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A bad tool argument is a prompt-level mistake: the message has to be actionable."""
+    monkeypatch.setattr(settings, "knowledge_dir", str(tmp_path))
+
+    with pytest.raises(ValueError, match="since must be an ISO date"):
+        asyncio.run(gather_evidence("yield", since="last Tuesday"))
+
+
 def test_empty_when_nothing_matches(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """A query with no hits returns nothing — silence, never invented evidence."""
     _seed_graph(tmp_path)

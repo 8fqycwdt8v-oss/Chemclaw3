@@ -204,6 +204,36 @@ def test_zero_celsius_structured_field_is_preserved() -> None:
     assert JsonExportAdapter().map_to_ord(raw).temperature_c == 0.0
 
 
+def test_the_entrys_hypothesis_is_carried_onto_the_record() -> None:
+    """The question the run's conditions answer must survive ingestion (D-156)."""
+    raw = RawEntry(
+        entry_id="e-hyp",
+        created_at=_EPOCH,
+        payload={
+            "reactants": [{"smiles": "CCO"}],
+            "products": [{"smiles": "CCO"}],
+            "hypothesis": "does dropping to 60 °C suppress the des-bromo impurity?",
+            "procedure": "Stirred at 60 °C for 4 h.",
+        },
+    )
+    reaction = JsonExportAdapter().map_to_ord(raw)
+    assert reaction.hypothesis == "does dropping to 60 °C suppress the des-bromo impurity?"
+
+
+def test_an_entry_without_a_hypothesis_does_not_get_one_from_the_prose() -> None:
+    """Never inferred: an extracted motive would be indistinguishable from a chemist's own."""
+    raw = RawEntry(
+        entry_id="e-nohyp",
+        created_at=_EPOCH,
+        payload={
+            "reactants": [{"smiles": "CCO"}],
+            "products": [{"smiles": "CCO"}],
+            "procedure": "Lowered the temperature to see whether the impurity went away.",
+        },
+    )
+    assert JsonExportAdapter().map_to_ord(raw).hypothesis is None
+
+
 def test_temperature_regex_ignores_nmr_labels() -> None:
     """Prose like '13C NMR' does not fabricate a 13 °C temperature (needs the degree sign)."""
     raw = RawEntry(

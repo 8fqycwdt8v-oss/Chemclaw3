@@ -26,22 +26,41 @@ evidence-based (non-BO) proposal path. Three things were structurally missing:
 
 ## Plan
 
-- [ ] **§0** Reserve D-156 in `docs/decisions/README.md` (first commit).
-- [ ] **§1 Chronology.** New `memory/progression.py`: order a series by `performed_at`, and name
+- [x] **§0** Reserve D-156 in `docs/decisions/README.md` (first commit).
+- [x] **§1 Chronology.** New `memory/progression.py`: order a series by `performed_at`, and name
       what changed between consecutive runs (temperature, time, and the species set per role).
       `optimization_campaign_note` renders Date + "Changed vs previous" columns, in time order, and
       states plainly when the ordering is *not* a timeline.
-- [ ] **§2 Intent.** `OrdReaction.hypothesis`, mapped by the JSON ELN adapter, rendered in the
+- [x] **§2 Intent.** `OrdReaction.hypothesis`, mapped by the JSON ELN adapter, rendered in the
       reaction note and carried into the campaign note's per-run block. New `follows` relation.
-- [ ] **§3 The proposal.** `experiment-proposal` note type; new `experiment-progression` skill
+- [x] **§3 The proposal.** `experiment-proposal` note type; new `experiment-progression` skill
       (judgment: read chronologically, name the moved variable, what is untested, what the failures
       rule out, propose one experiment with a rationale and a falsifiable expectation);
       `deep-research` §6 rewritten to route the two questions to their own paths.
-- [ ] **§4 Time-scoped retrieval.** `since`/`until` on `_eligible_notes` and on `gather_evidence`.
-- [ ] **§5 Corpus + docs.** Seed notes for the new type and the new relation; `knowledge/README.md`
+- [x] **§4 Time-scoped retrieval.** `since`/`until` on `_eligible_notes` and on `gather_evidence`.
+- [x] **§5 Corpus + docs.** Seed notes for the new type and the new relation; `knowledge/README.md`
       counts; ADR D-156.
-- [ ] **§6 Verify.** New `tests/test_progression.py`; `make lint type test` green.
+- [x] **§6 Verify.** New `tests/test_progression.py`; `make lint type test` green.
 
 ## Review
 
-(filled in at the end)
+Shipped as planned. Four judgment calls worth recording, each of them a place where the easy
+implementation would have been the wrong one:
+
+- **`follows` is never derived from dates.** Emitting it from the campaign's own chronology was one
+  line and was rejected: `performed_at` proves that run B came after run A, never that it was run
+  *because* of A. Manufacturing that edge is precisely the failure this work exists to prevent, so
+  the edge is minted only by an author who knows the intent.
+- **The hypothesis is read from a field, not extracted from prose.** A pattern-matched motive is
+  indistinguishable downstream from testimony.
+- **No new agent tool and no new note artifact.** The proposal goes through the existing
+  `propose_knowledge_note` with a new type; the chronology enriches the existing
+  `optimization-campaign` note instead of minting a parallel one over the same cluster. D-078's
+  supersede machinery then keeps a daily-growing series current for free.
+- **An undated note fails a windowed query** rather than passing it. It cannot be shown to fall in
+  the window, and a question about a period should not be answered with a note of unknown date.
+
+Verified: new `tests/test_progression.py` (18 cases) plus date-window cases in
+`tests/test_research_tools.py` and hypothesis-mapping cases in `tests/test_eln.py`;
+`make lint type test` green (2061 passed) and all four affected validators
+(`skill-validate`, `kg-validate`, `prose-validate`, `eln-validate`) pass.

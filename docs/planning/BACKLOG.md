@@ -66,6 +66,27 @@ deliberately not fixed there, each because it needs a decision rather than a pat
   `invalidate_cache()` is called *inside* that window, so a concurrent turn can retrieve an
   agent-proposed, unreviewed note as authoritative evidence. `_return_to_base` fixed the permanent
   version of this; the transient one spans a commit, a fetch and a push.
+## Done — The daily experiment progression (2026-07-31, D-156)
+
+Asked whether the system could read a technician's week-by-week series on one step and propose the
+next run without BO. Most of it was already there; three data gaps were not, and are closed:
+
+- [x] **PROG-1** Chronology. `memory/progression.py` orders a series by `performed_at` and names
+      what changed between consecutive runs; the `optimization-campaign` note gains **Performed**
+      and **Changed vs previous** columns and states in words when its row order is *not* a
+      timeline. `performed_at` existed and reached no artifact the agent reads.
+- [x] **PROG-2** Intent. `OrdReaction.hypothesis` (mapped by the JSON ELN adapter, rendered first
+      in the reaction note) and the `follows` relation — minted by whoever can read the intent,
+      never derived from two dates.
+- [x] **PROG-3** The reasoned path. `experiment-progression` skill + the `experiment-proposal` note
+      type through the existing PR-gate; `deep-research` §6 and `experiment-design` now name the
+      fork between reasoning and BoFire and require the answer to say which it took.
+- [x] **PROG-4** `since`/`until` on `gather_evidence` and `_eligible_notes`, so "what have I tried
+      in the last two weeks" reaches the dates already on the notes.
+
+Not addressed, and worth stating: nothing here reads an instrument trace or correlates impurity
+profiles across runs beyond what the notes say in prose.
+
 ## Open — Surfaced by the deferral-register rewrite (2026-07-31, D-154)
 
 Rewriting `docs/planning/DEFERRED.md` into a register meant checking each row against the tree. Two

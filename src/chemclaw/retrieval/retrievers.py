@@ -71,16 +71,22 @@ def _excerpt(body: str) -> str:
 async def _eligible_notes(directory: Path, filters: dict[str, Any]) -> dict[str, Note]:
     """Load the notes eligible as current evidence under `filters`, as an id→Note map.
 
-    The one eligibility gate for every graph-backed retriever (graph, dense, lexical): the type/tag
-    filters plus the currency check — a not-yet-valid or expired note is never served as current
-    evidence (KM-7), whichever entry point found it. It stays in Git and reachable by explicit id;
-    it is only dropped from current-evidence sweeps. Offloaded to a thread — `load_notes` is a
-    synchronous full parse. Empty when the directory is absent.
+    The one eligibility gate for every graph-backed retriever (graph, dense, lexical): the
+    type/tag/date filters plus the currency check — a not-yet-valid or expired note is never
+    served as current evidence (KM-7), whichever entry point found it. It stays in Git and
+    reachable by explicit id; it is only dropped from current-evidence sweeps. Offloaded to a
+    thread — `load_notes` is a synchronous full parse. Empty when the directory is absent.
+
+    `since`/`until` window the notes by `valid_from` — for a reaction note, the day the
+    experiment was run (D-156). "What have I tried on this step in the last two weeks" was
+    unanswerable without it: the dates were on the notes and no filter could reach them.
     """
     if not directory.exists():
         return {}
     want_type = filters.get("type")
     want_tag = filters.get("tag")
+    since = filters.get("since")
+    until = filters.get("until")
     today = date.today()
     notes: dict[str, Note] = {}
     for note in await asyncio.to_thread(load_notes, directory):
@@ -90,8 +96,27 @@ async def _eligible_notes(directory: Path, filters: dict[str, Any]) -> dict[str,
             continue
         if want_tag is not None and want_tag not in note.tags:
             continue
+        if not _in_window(note, since, until):
+            continue
         notes[note.id] = note
     return notes
+
+
+def _in_window(note: Note, since: date | None, until: date | None) -> bool:
+    """Whether the note falls inside the requested date window (no window = everything).
+
+    An undated note fails a windowed query rather than passing it. It cannot be *shown* to fall
+    in the window, and the query that asks for one is asking what happened in a period — serving
+    a note of unknown date would answer a question the caller did not ask. Unwindowed sweeps are
+    unaffected, which is every existing call.
+    """
+    if since is None and until is None:
+        return True
+    if note.valid_from is None:
+        return False
+    return not (since is not None and note.valid_from < since) and not (
+        until is not None and note.valid_from > until
+    )
 
 
 async def _conflict_index(directory: Path) -> dict[str, list[str]]:
