@@ -24,12 +24,14 @@ from chemclaw.agent.harness_mode import (
     PLAN_MODE,
     current_plan_hash,
     grant_execute,
+    rearm_plan,
     session_mode,
 )
 from chemclaw.agent.plan_approval_store import InMemoryPlanApprovalStore
 from chemclaw.agent.plan_gate import (
     PlanNotApprovedError,
     approved_todos_remaining,
+    consume_turn_approval,
     enforce_plan_approval,
     gated_tools,
 )
@@ -303,3 +305,59 @@ def test_the_default_deployment_has_no_plan_gate() -> None:
 def test_plan_mode_is_where_a_gated_session_ends_up() -> None:
     """The mode constants this module reasons about are the ones the harness actually uses."""
     assert (PLAN_MODE, EXECUTE_MODE) == ("plan", "execute")
+
+
+# --- an approval authorizes one request, not a standing session (the live finding) -------------
+
+
+def test_an_approval_is_spent_by_the_turn_that_used_it(
+    approvals: InMemoryPlanApprovalStore,
+) -> None:
+    """The gap the *first* version of this fix left, found live rather than reasoned about.
+
+    Binding the approval to the plan's work items made it checkable. It also made it durable in a
+    way nobody approved: the live run showed the model answering a completely different question
+    **without touching its todo list**, so the plan identity never changed, the approval never
+    lapsed, and `compute_xtb_energy` ran under an authorization given for a hazard-screening plan.
+    A plan-shaped identity cannot detect that on its own — the todo list is genuinely unchanged.
+
+    What changed is the request. So the approval is spent by the turn it authorizes: the harness
+    loop runs a plan to completion inside one `agent.run`, which is exactly the scope of "execute
+    the approved plan", and the next user message needs its own decision.
+    """
+
+    async def _run() -> tuple[bool, bool, bool]:
+        session = AgentSession(session_id="one-shot")
+        await _set_plan(session, ["screen the species"])
+        await _approve(approvals, session)
+        during = await _call("propose_knowledge_note", session)
+        await consume_turn_approval(session)  # the turn ends
+        after = False
+        try:
+            after = await _call("propose_knowledge_note", session)
+        except PlanNotApprovedError:
+            after = False
+        # Re-approving the same unchanged plan is a person saying "yes, again".
+        await _approve(approvals, session)
+        rearm_plan(session, await current_plan_hash(session))
+        again = await _call("propose_knowledge_note", session)
+        return during, after, again
+
+    during, after, again = asyncio.run(_run())
+    assert during, "the approved turn's own write was refused"
+    assert not after, "a second, unrelated request ran on a spent approval"
+    assert again, "re-approving an unchanged plan did not re-authorize it"
+
+
+def test_consuming_is_silent_when_nothing_was_approved(
+    approvals: InMemoryPlanApprovalStore,
+) -> None:
+    """Turn teardown runs on every path, so this must never fail a turn on its way out."""
+
+    async def _run() -> None:
+        session = AgentSession(session_id="never-approved")
+        await _set_plan(session, ["a step"])
+        await consume_turn_approval(session)
+        await consume_turn_approval(session)
+
+    asyncio.run(_run())

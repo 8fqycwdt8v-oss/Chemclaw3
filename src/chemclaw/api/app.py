@@ -41,7 +41,12 @@ from chemclaw.agent.attachments import STORE as ATTACHMENTS
 from chemclaw.agent.attachments import AttachmentError, AttachmentSummary, parse_attachment
 from chemclaw.agent.chemclaw_agent import build_agent, connector_tools, history_provider
 from chemclaw.agent.durable_tools import request_note_reindex
-from chemclaw.agent.harness_mode import current_plan_hash, grant_execute, session_mode
+from chemclaw.agent.harness_mode import (
+    current_plan_hash,
+    grant_execute,
+    rearm_plan,
+    session_mode,
+)
 from chemclaw.agent.harness_todo import complete_awaiting_job, todo_titles
 from chemclaw.agent.interaction_tools import (
     PendingApproval,
@@ -51,6 +56,7 @@ from chemclaw.agent.interaction_tools import (
     list_pending_approvals,
 )
 from chemclaw.agent.plan_approval_store import ApprovalStore, plan_approval_store
+from chemclaw.agent.plan_gate import plan_is_approved
 from chemclaw.agent.profile_discovery import load_profiles
 from chemclaw.agent.profiles import get_profile
 from chemclaw.agent.session_events import stream_new_events
@@ -1167,7 +1173,16 @@ def create_app(
         session_id: str,
         principal: Principal = Depends(require_principal),
     ) -> PlanStatusOut:
-        """The plan awaiting a decision, with the hash a client must post back to approve it."""
+        """The plan awaiting a decision, with the hash a client must post back to approve it.
+
+        `approved` is the **effective** state, not merely the recorded one: a decision exists, it
+        was a yes, and it has not already been spent by the turn it authorized
+        (`chemclaw.agent.plan_gate.plan_is_approved`). Reporting the stored row alone would tell a
+        surface a plan is approved while every state-changing call under it is refused — the same
+        disagreement between what a surface displays and what the system enforces that let DARK-1
+        sit unnoticed, reintroduced one layer up. `decided_by` still names whoever decided, because
+        "approved earlier, already used" is a different thing to show than "nobody has decided".
+        """
         live = await _resolve_session(session_id, principal)
         plan = await todo_titles(live.session)
         plan_hash = await current_plan_hash(live.session)
@@ -1177,7 +1192,7 @@ def create_app(
             plan_hash=plan_hash,
             plan=plan,
             mode=session_mode(live.session),
-            approved=bool(decision and decision[0]),
+            approved=await plan_is_approved(live.session),
             decided_by=decision[1] if decision else None,
         )
 
@@ -1207,6 +1222,10 @@ def create_app(
                 detail="the plan changed since it was shown; re-read it and decide again",
             )
         await _plan_approvals().record(session_id, plan_hash, principal.oid or "", body.approved)
+        # A decision re-arms the plan: an approval authorizes one turn and is spent when that turn
+        # ends (D-157), so re-approving an unchanged plan is how a person says "yes, again" rather
+        # than a no-op that silently leaves the session unable to act.
+        rearm_plan(live.session, plan_hash)
         if body.approved:
             grant_execute(live.session)
         return Response(status_code=204)

@@ -35,6 +35,7 @@ from chemclaw.agent.identity_context import (
     set_current_identity,
 )
 from chemclaw.agent.job_results import await_job_results
+from chemclaw.agent.plan_gate import consume_turn_approval
 from chemclaw.agent.session_context import (
     reset_current_session,
     reset_current_session_id,
@@ -349,6 +350,14 @@ async def run_turn(
             )
         )
     finally:
+        # Spend the plan approval this turn ran under, so the *next* user message is a new request
+        # needing its own decision (D-157). At the end, not the start: the harness loop executes an
+        # approved plan across several iterations of one `agent.run`, and consuming on entry would
+        # refuse the plan's own second iteration. On every path, including a failure — a turn that
+        # spent the authorization and then broke has still spent it, and re-running under the same
+        # approval is exactly what a person would want asked about again.
+        if settings.harness_enabled and settings.harness_autonomy == "plan_only":
+            await consume_turn_approval(session)
         if budget is not None:
             budget.record(session.session_id, actor, turn_usage.total)
         # Observed on every path — success, failure and disconnect — because a turn that failed

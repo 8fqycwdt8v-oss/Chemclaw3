@@ -15,6 +15,7 @@ here; everything above it is sandbox-safe and always runs.
 
 import asyncio
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -497,7 +498,9 @@ def test_a_connector_tool_step_is_audited_under_the_requester(
         _invoke(_EmptyAgent(), [connector], _tool_step("screen_hazards", smiles=["CCO"]), [])
     )
 
-    assert result == "hazard: none found", "the step's result shape changed; templates would break"
+    # Rendered to text, because Temporal's converter refuses `agent_framework._types.Content` and
+    # a step result crosses an activity boundary — the reason no `tool` step ever completed.
+    assert result == "hazard: none found"
     assert function.calls == [{"smiles": ["CCO"]}]
     assert not connector.call_tool_used
     (event,) = sink.events
@@ -531,3 +534,25 @@ def test_a_connector_tool_step_the_requester_may_not_call_is_refused(
     assert function.calls == [], "the tool body ran despite the refusal"
     (event,) = sink.events
     assert event.outcome == "error", "a denied connector step left no audit row"
+
+
+def test_a_step_result_is_something_temporal_can_carry() -> None:
+    """`list[Content]` is not, and a step result crosses an activity boundary (D-158).
+
+    Live, the shipped `hazard-briefing` template failed with "Unable to serialize unknown type:
+    agent_framework._types.Content" — after the missing worker registration was fixed and before
+    this was. Both branches were affected, so no template with a `tool` step had ever completed a
+    run. The offline tests could not see it: they call the activity in-process, where nothing
+    serializes anything.
+    """
+    from chemclaw.durable.template_activities import _serializable
+
+    assert (
+        _serializable(
+            [SimpleNamespace(type="text", text="a"), SimpleNamespace(type="text", text="b")]
+        )
+        == "a\nb"
+    )
+    # Anything the converter already understands is handed through untouched.
+    assert _serializable({"energy": -154.1}) == {"energy": -154.1}
+    assert _serializable("plain") == "plain"

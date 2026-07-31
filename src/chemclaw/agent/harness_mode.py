@@ -181,6 +181,50 @@ def grant_execute(session: AgentSession) -> str:
     return set_agent_mode(session, EXECUTE_MODE)
 
 
+# Where a session records which approved plans have already had their turn. Session state, not the
+# database, because it is scoped to exactly one conversation's progress and shares the lifetime of
+# the mode it qualifies — the same reasoning `plan_approval_store` uses for its backend choice.
+_CONSUMED_STATE_KEY = "chemclaw_plans_consumed"
+
+
+def consume_plan(session: AgentSession, plan_hash: str) -> None:
+    """Record that an approved plan has now had the turn it was approved for.
+
+    **This is what makes an approval authorize a request rather than a session** (D-157), and it
+    exists because the first version of that fix did not close the finding. Binding the approval to
+    the plan's *work items* — rather than to its rendered lines, whose hash moved on the first
+    ticked box — made the approval checkable at last. It also made it durable in a way nobody
+    approved: a live run showed the model answering a completely different question without
+    touching its todo list at all, so the plan identity never changed, the approval never lapsed,
+    and `compute_xtb_energy` ran under an authorization given for a hazard-screening plan.
+
+    The unit a person actually approves is *this plan, for this ask*. The harness loop runs a plan
+    to completion inside one `agent.run`, so one turn is exactly the scope of "execute the approved
+    plan" — and the next user message is a new request, which needs its own approval even if the
+    todo list happens to look the same.
+    """
+    consumed = session.state.setdefault(_CONSUMED_STATE_KEY, [])
+    if isinstance(consumed, list) and plan_hash not in consumed:
+        consumed.append(plan_hash)
+
+
+def plan_consumed(session: AgentSession, plan_hash: str) -> bool:
+    """Whether this plan's approval has already been spent on a turn."""
+    consumed = session.state.get(_CONSUMED_STATE_KEY)
+    return isinstance(consumed, list) and plan_hash in consumed
+
+
+def rearm_plan(session: AgentSession, plan_hash: str) -> None:
+    """Forget that a plan was consumed, so a fresh human decision authorizes a fresh turn.
+
+    Called when a decision is recorded. Re-approving the same unchanged plan is a person saying
+    "yes, again" — a deliberate act, and the only thing that revives a spent authorization.
+    """
+    consumed = session.state.get(_CONSUMED_STATE_KEY)
+    if isinstance(consumed, list) and plan_hash in consumed:
+        consumed.remove(plan_hash)
+
+
 def revoke_execute(session: AgentSession) -> str:
     """Return the session to plan mode — the mirror `grant_execute` never had (D-157).
 

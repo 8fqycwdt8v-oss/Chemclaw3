@@ -213,6 +213,14 @@ async def _audited(
     return payload
 
 
+# **On the background queue, because until now it was on no queue at all.** `resolve_job_step` (as
+# it then was) carried `@durable_activity` and these two did not, so no worker ever registered them
+# — a template's `tool` and `agent` steps failed with "Activity function run_tool_step ... is not
+# registered on this worker" the first time one ran against a real server, which is to say the
+# shipped `hazard-briefing` template could not execute a single step. Found by running it live for
+# D-158; it is the same class as the eight defects D-155 collected, where a feature is written,
+# tested and served by nothing.
+@durable_activity("background")
 @activity.defn
 async def run_tool_step(step: ToolStepInput) -> Any:
     """Call one tool as the run's actor, through the same audit + authz chain a chat turn uses.
@@ -272,7 +280,7 @@ async def _invoke(
                 #
                 # MAF's MCP tools are ordinary `FunctionTool`s, so nothing about the call shape has
                 # to change to route them through the middleware — only the decision to do it.
-                return await _call_function_tool(function, step, skip_parsing=True)
+                return await _call_function_tool(function, step)
     available = sorted(
         [t.name for t in agent.default_options["tools"]]
         + [f.name for c in connectors for f in c.functions]
@@ -283,7 +291,7 @@ async def _invoke(
     )
 
 
-async def _call_function_tool(tool: Any, step: ToolStepInput, *, skip_parsing: bool = False) -> Any:
+async def _call_function_tool(tool: Any, step: ToolStepInput) -> Any:
     """Invoke one tool with the audit + authz middleware a chat turn would apply.
 
     MAF applies the agent's middleware inside its own tool-calling loop, which a template does not
@@ -291,12 +299,18 @@ async def _call_function_tool(tool: Any, step: ToolStepInput, *, skip_parsing: b
     the same two middlewares by hand here is what keeps the template path identical to the chat
     path in the way that matters: the call is audited, and an unauthorized one is refused.
 
-    Used for both halves of the surface, in-process and connector, since D-158. `skip_parsing` is
-    what makes the connector half a pure governance change: `invoke` parses a result into
-    `list[Content]`, while the `call_tool` this replaced returned it raw, and a step's result is
-    written into Temporal history and substituted into `${steps.<id>.result}`. Passing it through
-    unparsed keeps every existing template producing byte-identical output — the call is now
-    audited and authorized, and it is *only* that.
+    Used for both halves of the surface since D-158. The connector half used to call
+    `connector.call_tool` and reach the connector directly, skipping both middlewares; MAF's MCP
+    tools are ordinary `FunctionTool`s, so nothing about the call had to change except the decision
+    to govern it.
+
+    **`skip_parsing=True`, and it is not a preference.** `invoke` otherwise wraps the result in
+    `list[Content]`, and a step's result crosses an activity boundary into Temporal history — where
+    the data converter refuses it outright: *"Unable to serialize unknown type:
+    agent_framework._types.Content"*. So a `tool` step could never return at all, on either branch,
+    which is why no template with one has ever completed. The raw value is what
+    `${steps.<id>.result}` should carry anyway: a chemist reading a run's trace wants the tool's
+    answer, not the framework's envelope around it.
     """
     from agent_framework import FunctionInvocationContext
 
@@ -306,15 +320,31 @@ async def _call_function_tool(tool: Any, step: ToolStepInput, *, skip_parsing: b
     )
 
     async def _run_tool() -> None:
-        context.result = await tool.invoke(arguments=context.arguments, skip_parsing=skip_parsing)
+        context.result = await tool.invoke(arguments=context.arguments, skip_parsing=True)
 
     async def _gated() -> None:
         await enforce_tool_authz(context, _run_tool)
 
     await audit(context, _gated)
-    return context.result
+    return _serializable(context.result)
 
 
+def _serializable(result: Any) -> Any:
+    """Render a tool result into something Temporal's converter can carry.
+
+    An MCP tool answers as `list[Content]` however it is invoked — `skip_parsing` skips MAF's
+    *re-wrapping*, not the MCP client's own parse — and `Content` is not a type the data converter
+    knows. Text parts are joined, because that is what an MCP tool's answer *is* on the wire; a
+    result with no text parts falls back to `str()` so a step never fails on the shape of a value
+    it managed to produce.
+    """
+    if isinstance(result, list) and result and all(hasattr(item, "type") for item in result):
+        texts = [str(getattr(item, "text", "")) for item in result if getattr(item, "text", None)]
+        return "\n".join(texts) if texts else str(result)
+    return result
+
+
+@durable_activity("background")
 @activity.defn
 async def run_agent_step(step: AgentStepInput) -> str:
     """Run one agent turn as the run's actor and return its answer text.
@@ -322,6 +352,17 @@ async def run_agent_step(step: AgentStepInput) -> str:
     The step that keeps a template agentic: the sequence around it is fixed, the reasoning inside it
     is not. `profile` narrows which agent runs it, so a summarizing step need not hold the
     durable-job launchers — attenuation applies here exactly as it does to a chat session.
+
+    **Run without the harness, whatever the deployment's default is** (D-158). Two reasons, and the
+    first was found by running the shipped template live: the harness middleware refuses a
+    session-less `agent.run` ("ToolApprovalMiddleware requires an AgentSession" — the same wall
+    D-152 hit for the CLI), so under `harness_enabled=true`, which is what the Helm chart sets, an
+    `agent` step could not run at all. The second is why the fix is *disable* rather than
+    *invent a session*: the harness adds a todo list, a plan/execute mode and an autonomous
+    completion loop, and a template exists precisely to fix the sequence instead. Running a
+    planning loop inside one step of a fixed procedure would give the step back the discretion the
+    template was written to remove — and, with the plan gate now enforced, would refuse every write
+    inside it for want of a plan nobody can approve.
     """
     build_agent, connector_tools = _agent_surface()
     tokens = set_current_identity(step.identity.actor, frozenset(step.identity.roles))
@@ -329,8 +370,22 @@ async def run_agent_step(step: AgentStepInput) -> str:
         async with AsyncExitStack() as stack:
             connectors = connector_tools(step.profile)
             await open_reachable(stack, connectors)
-            agent = build_agent(profile=step.profile, correlation_id=step.identity.correlation_id)
+            agent = build_agent(
+                profile=_classic(step.profile), correlation_id=step.identity.correlation_id
+            )
             response = await agent.run(step.prompt, tools=connectors or None)
             return str(response.text)
     finally:
         reset_current_identity(tokens)
+
+
+def _classic(profile: str | None) -> Any:
+    """The step's profile with the harness switched off — see `run_agent_step`.
+
+    Resolved through the profile registry rather than by passing a bare flag, so a step that names
+    a profile keeps every other narrowing that profile applies (its instructions, its tool subset,
+    its connectors) and loses only the autonomy loop.
+    """
+    from chemclaw.agent.profiles import get_profile
+
+    return get_profile(profile).model_copy(update={"harness_enabled": False})

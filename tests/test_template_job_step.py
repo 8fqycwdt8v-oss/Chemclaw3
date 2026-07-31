@@ -349,3 +349,21 @@ def test_a_step_with_bad_arguments_fails_before_any_workflow_starts(fixture_bund
     """
     with pytest.raises(ValidationError):
         asyncio.run(authorize_job_step(_step(fixture_bundle, subjekt="benzene")))
+
+
+def test_every_template_step_activity_is_registered_on_a_worker() -> None:
+    """A template's `tool` and `agent` steps were served by no worker at all.
+
+    Only the job-step resolver carried `@durable_activity`; `run_tool_step` and `run_agent_step`
+    had a bare `@activity.defn`, so nothing registered them and the shipped `hazard-briefing`
+    template failed on its *first* step against a real server with "Activity function
+    run_tool_step ... is not registered on this worker". Found by running it live for D-158.
+
+    Asserted over all three together rather than one at a time, because the failure mode is a new
+    step kind arriving without its registration — which is exactly what happened here, twice.
+    """
+    names = {activity.__name__ for activity in registered_activities("background")}
+    assert {"authorize_job_step", "run_tool_step", "run_agent_step"} <= names, (
+        f"template step activities missing from the background worker: "
+        f"{sorted({'authorize_job_step', 'run_tool_step', 'run_agent_step'} - names)}"
+    )

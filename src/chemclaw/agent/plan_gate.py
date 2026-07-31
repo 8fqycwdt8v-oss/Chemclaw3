@@ -44,7 +44,9 @@ from agent_framework._harness._loop import ShouldContinueCallable, ShouldContinu
 from chemclaw.agent.authz import STATE_CHANGING_TOOLS, AuthorizationError
 from chemclaw.agent.harness_mode import (
     EXECUTE_MODE,
+    consume_plan,
     current_plan_hash,
+    plan_consumed,
     revoke_execute,
     session_mode,
 )
@@ -95,13 +97,20 @@ def gated_tools() -> frozenset[str]:
 
 
 async def plan_is_approved(session: AgentSession) -> bool:
-    """Whether a human has approved the plan this session is proposing *right now*.
+    """Whether a human has approved the plan this session is proposing *right now*, for this turn.
+
+    Two conditions, and the second is the one a live run had to teach:
+
+    1. a decision exists for the current plan identity and it is a yes;
+    2. that approval has not already been spent (`harness_mode.plan_consumed`).
 
     Deliberately re-read per call rather than cached on the session: the question is about the plan
     as it stands at this instant, and the whole defect being fixed is an authorization that outlived
     the thing it authorized.
     """
     plan_hash = await current_plan_hash(session)
+    if plan_consumed(session, plan_hash):
+        return False
     decision = await plan_approval_store().decision(session.session_id, plan_hash)
     return bool(decision and decision[0])
 
@@ -198,3 +207,27 @@ def approved_todos_remaining(
         )
 
     return _should_continue
+
+
+async def consume_turn_approval(session: AgentSession) -> None:
+    """Spend the approval this turn ran under, so the next request needs its own.
+
+    Called once when a turn finishes, from `chemclaw.api.runner.run_turn`. Placed at the *end*
+    rather than the start because the harness loop is what executes an approved plan and it runs
+    inside a single `agent.run`: consuming on entry would refuse the plan's own second iteration.
+
+    Silent when nothing was approved — there is then nothing to spend, and this must never be the
+    reason a turn reports a failure.
+    """
+    plan_hash = await current_plan_hash(session)
+    if plan_consumed(session, plan_hash):
+        return
+    decision = await plan_approval_store().decision(session.session_id, plan_hash)
+    if decision and decision[0]:
+        consume_plan(session, plan_hash)
+        # The mode represented the authorization, so it ends with it. Without this the surface
+        # keeps reporting `execute` for a session whose every state-changing call would now be
+        # refused — the same disagreement between the displayed mode and the enforced one that let
+        # the original defect go unnoticed.
+        if session_mode(session) == EXECUTE_MODE:
+            revoke_execute(session)
