@@ -20,3 +20,8 @@ endpoint:
   tools:
     - similar_molecules
     - substructure_matches
+  # Searches over the fingerprint index. The tools that *write* that index (`index_molecule`,
+  # `index_reaction`) are deliberately not on this allow-list at all (D-029).
+  read_only:
+    - similar_molecules
+    - substructure_matches

@@ -201,3 +201,5 @@ this reason; the filenames make that ordering irrelevant now, and the numbers st
 | [D-164](D-164-the-prose-gate-learns-note-types-and-the-two-dead.md) | The prose gate learns note types, and the two dead ones it finds |
 | [D-165](D-165-a-cited-artifact-the-agent-can-open-and-the-ones.md) | A cited artifact the agent can open, and the ones it should not try to read |
 | [D-166](D-166-the-queue-is-reported-on-the-stream-not-as-a.md) | The queue is reported on the stream, not as a refusal |
+| [D-167](D-167-an-approval-authorizes-a-request-not-a-session.md) | An approval authorizes a request, not a session |
+| [D-168](D-168-a-template-step-runs-as-its-requester.md) | A template step runs as its requester, and four steps that had never run |
