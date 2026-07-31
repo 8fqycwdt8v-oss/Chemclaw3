@@ -20,7 +20,13 @@ class PlanEvent(BaseModel):
 
 
 class ToolCallEvent(BaseModel):
-    """A single tool invocation in the turn's trace (name + a short argument preview)."""
+    """A single tool invocation in the turn's trace (name + a short argument preview).
+
+    Emitted when the call is *issued* — as soon as its arguments are complete — not when it
+    returns (D-159). The difference is the whole dead-air window: an inline calc job waits up to
+    `inline_wait_seconds` and an MCP tool up to its `request_timeout`, and until this moved, none
+    of that was visible. A working twenty-second calculation and a hung server looked identical.
+    """
 
     type: Literal["tool_call"] = "tool_call"
     tool: str
@@ -141,6 +147,28 @@ class ToolFailedEvent(BaseModel):
     message: str
 
 
+class ToolResultEvent(BaseModel):
+    """What a tool call returned, as data rather than as the model's paraphrase (D-159).
+
+    The stream carried invocations only, so a computed number reached the chemist exclusively
+    through whatever the model chose to say about it — and a turn that died after a successful
+    twenty-second calculation lost the value entirely, with nothing on the wire to recover it
+    from. `TracePanel` in the UI even documents that constraint as an honesty rule: it says what
+    was called and never implies it is showing what came back. This is what lets that change.
+
+    Success only. A call that raised already has `ToolFailedEvent`, which carries the reason;
+    emitting both for one outcome would make every consumer decide which to believe. The pair is
+    exhaustive — a call ends in exactly one of them.
+
+    `preview` is truncated the same way `ToolCallEvent.arguments` is: enough to see the value,
+    never a whole evidence sweep streamed to a browser.
+    """
+
+    type: Literal["tool_result"] = "tool_result"
+    tool: str
+    preview: str = ""
+
+
 class ErrorEvent(BaseModel):
     """The turn failed; the message is safe to show the user (no stack traces)."""
 
@@ -162,5 +190,6 @@ Event = (
     | QuestionEvent
     | AnswerEvent
     | ToolFailedEvent
+    | ToolResultEvent
     | ErrorEvent
 )
