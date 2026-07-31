@@ -176,10 +176,19 @@ computation, and that store is readable.* W2.1 and W2.2 are the two halves.
       a molecule and the row carries no tags, so that half of the plan would have shipped an
       always-empty filter. `substructure_pattern` moved to `core.chem`; the fingerprint index's
       identical copy now calls it.
-- [ ] **W2.5 Metadata-filtered similarity.** `similar_reactions` returns `(id, label, similarity)`,
-      so "similar reactions that used Pd and gave >80% yield" is unanswerable. Let
-      `FingerprintReactionRetriever` accept the same `type`/`tag` filters the note retrievers take
-      and resolve through `note_index`, so the filter applies **before** truncation.
+- [x] **W2.5 Metadata-filtered similarity.** — shipped, D-168. Two corrections to the plan.
+      *Not* through `note_index`: it stores a note id, its text and an embedding — no type, tags or
+      dates — so the shared `_eligible_notes` gate is the only thing that can answer, and reusing it
+      avoids a second definition of "eligible". And the **MCP `similar_reactions` tool cannot have
+      this at all**: it lives in the `rxnfp` bundle, and a connector must not import the knowledge
+      graph (D-115). The filter belongs on the retriever because the retriever is in core.
+      "Before truncation" is the load-bearing part and now has its own test: the search asks for
+      `top_k × retrieval_filter_overfetch` neighbours, narrows those, then truncates — filtering
+      the page instead would return *fewer* hits the better the index got at clustering
+      near-duplicates. An unfiltered call is byte-for-byte unchanged, D-018's pending-note citation
+      included; a filtered one drops an unreadable note, because it cannot be shown to match.
+      Yield and reagent filters remain impossible: they live in note prose, not frontmatter, and
+      tagging them at ingestion is the ELN adapter's job.
 
 ---
 

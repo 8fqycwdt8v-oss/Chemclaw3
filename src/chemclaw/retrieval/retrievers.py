@@ -8,6 +8,7 @@ emit carries the id of the note it came from, so the harness can cite it (5b.2).
 """
 
 import asyncio
+import logging
 import re
 from datetime import date
 from pathlib import Path
@@ -21,7 +22,9 @@ from chemclaw.kg.note import WIKILINK, Note, split_link
 from chemclaw.retrieval.evidence import EvidenceChunk
 from chemclaw.retrieval.vector_index import IndexHit, NoteIndex, default_note_index, note_text
 from chemclaw.science.fingerprints.rxnfp.search import find_similar_reactions
-from chemclaw.science.fingerprints.store import FingerprintError, FingerprintStore
+from chemclaw.science.fingerprints.store import FingerprintError, FingerprintStore, Match
+
+log = logging.getLogger(__name__)
 
 # Words that carry no retrieval signal but do carry the difference between "biaryl" (three hits)
 # and "the biaryl" (none) under a whole-phrase match. Deliberately tiny and English-only: this is
@@ -215,14 +218,24 @@ class GraphRetriever:
         ]
 
 
+# The filter keys `_eligible_notes` understands. Named here so "did the caller ask to narrow this?"
+# is one check rather than four, and so a filter added to the gate is added in one place.
+_NOTE_FILTERS = ("type", "tag", "since", "until")
+
+
 class FingerprintReactionRetriever:
     """Retrieve reactions structurally similar to a reaction-SMILES query. A `SourceRetriever`."""
 
     name = "reaction-fingerprint"
 
-    def __init__(self, store: FingerprintStore) -> None:
-        """Search the given reaction fingerprint store (injected for testability)."""
+    def __init__(self, store: FingerprintStore, notes_dir: str | None = None) -> None:
+        """Search the given reaction fingerprint store, resolving notes from `notes_dir`.
+
+        The store is injected for testability; the directory is the corpus a metadata filter is
+        resolved against, and is only read when a filter is actually given.
+        """
         self._store = store
+        self._dir = Path(notes_dir) if notes_dir is not None else settings.knowledge_path
 
     async def retrieve(self, query: str, filters: dict[str, Any]) -> list[EvidenceChunk]:
         """Return chunks for reactions similar to `query` (a reaction SMILES), or none.
@@ -235,11 +248,26 @@ class FingerprintReactionRetriever:
         yields a citation the report PR's kg-validate flags as dangling — surfacing the pending
         note to the reviewer (the PR-gate working), not silently corrupting the graph. Reports
         are therefore run over the merged corpus, as campaigns are.
+
+        **`type`/`tag`/`since`/`until` narrow the result** when given (D-168). The fingerprint index
+        holds bits and a label and knows nothing about note metadata, so the filter cannot go into
+        its SQL: this searches *deeper* than the requested page and applies the corpus's own
+        eligibility gate to the neighbours, then truncates. Filtering the page instead would let a
+        single unwanted neighbour cost a wanted one, and a filtered search would return fewer hits
+        the *better* the index got at surfacing near-duplicates.
+
+        With no filter the behaviour is byte-for-byte what it was, pending-note citation included.
         """
+        wanted = {key: filters[key] for key in _NOTE_FILTERS if filters.get(key) is not None}
+        page = settings.fingerprint_top_k
         try:
-            matches = await find_similar_reactions(self._store, query)
+            matches = await find_similar_reactions(
+                self._store, query, top_k=self._depth(page) if wanted else None
+            )
         except FingerprintError:
             return []
+        if wanted:
+            matches = await self._eligible(matches, wanted, page)
         return [
             EvidenceChunk(
                 content=f"Similar reaction {match.label} (Tanimoto {match.similarity:.2f})",
@@ -251,6 +279,42 @@ class FingerprintReactionRetriever:
             )
             for match in matches
         ]
+
+    @staticmethod
+    def _depth(page: int) -> int:
+        """How many neighbours to ask the index for when a filter will thin them afterwards.
+
+        Bounded by `fingerprint_max_top_k`, the same ceiling every other caller of the index is
+        clamped to: the over-fetch may not become a way around the one cap on how much of the
+        index a single query can pull into memory.
+        """
+        return min(page * settings.retrieval_filter_overfetch, settings.fingerprint_max_top_k)
+
+    async def _eligible(
+        self, matches: list[Match], wanted: dict[str, Any], page: int
+    ) -> list[Match]:
+        """Keep the neighbours whose note passes `wanted`, most similar first, truncated to `page`.
+
+        A match whose note is not on disk is dropped here, which is the one place the pending-note
+        citation above does *not* apply — and deliberately. A filter says "only notes that are X";
+        a note nobody can read cannot be shown to be X, so serving it would answer a narrowed
+        question with an unnarrowed hit. Same rule as `_in_window`'s undated note, for the same
+        reason. An unfiltered sweep never reaches this and still surfaces the pending note.
+        """
+        eligible = await _eligible_notes(self._dir, wanted)
+        kept = [match for match in matches if f"reaction-{match.id}" in eligible]
+        if len(matches) >= self._depth(page) and len(kept) < page:
+            # The deeper search was itself exhausted and still did not fill a page, so there may be
+            # matching reactions further down the ranking that were never looked at. Said out loud
+            # rather than returning a short list that reads as "this is all there is".
+            log.warning(
+                "filtered reaction search returned %d of %d wanted hits after scanning the "
+                "%d-neighbour limit; raise CHEMCLAW_RETRIEVAL_FILTER_OVERFETCH to look deeper",
+                len(kept),
+                page,
+                len(matches),
+            )
+        return kept[:page]
 
 
 def _chunks_from_hits(

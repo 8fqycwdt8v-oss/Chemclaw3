@@ -1248,6 +1248,12 @@ class FingerprintSettings(BaseSettings):
     # fingerprint-search analog of the `graph_max_hops` clamp on `expand_note`. Generous for a
     # real neighbor list.
     fingerprint_max_top_k: int = Field(default=100, ge=1)
+    # How much deeper a *filtered* structural search looks than the page it returns (D-168). The
+    # fingerprint index knows bits and a label, never note metadata, so a type/tag/date filter can
+    # only be applied to neighbours after they come back — and applying it to the page would let
+    # one unwanted neighbour cost a wanted one. Bounded by `fingerprint_max_top_k` regardless, so
+    # this cannot become a way around the one cap on how much of the index a query pulls in.
+    retrieval_filter_overfetch: int = Field(default=5, ge=1)
     # Bound on how many stored fingerprints one substructure scan materializes (SEC-4). The scan
     # has no similarity prefilter, so it loads records and RDKit-matches each; without a cap a
     # large corpus is a full-table load into the worker heap (the 30s statement_timeout bounds

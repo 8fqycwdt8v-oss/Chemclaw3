@@ -202,4 +202,4 @@ this reason; the filenames make that ordering irrelevant now, and the numbers st
 | [D-165](D-165-a-cited-artifact-the-agent-can-open-and-the-ones.md) | A cited artifact the agent can open, and the ones it should not try to read |
 | [D-166](D-166-the-queue-is-reported-on-the-stream-not-as-a.md) | The queue is reported on the stream, not as a refusal |
 | [D-167](D-167-trust-is-a-distribution-not-a-number-the-residual.md) | Trust is a distribution, not a number: the residual listing, and the property table behind it |
-| D-168 | RESERVED — a similarity hit you cannot qualify is a similarity hit you cannot use |
+| [D-168](D-168-a-similarity-hit-you-cannot-qualify-is-a.md) | A similarity hit you cannot qualify is a similarity hit you cannot use |
