@@ -48,7 +48,12 @@ from chemclaw.agent import preferences as _preferences  # noqa: F401
 from chemclaw.agent import research_tools as _research_tools  # noqa: F401
 from chemclaw.agent import subscriptions as _subscriptions  # noqa: F401
 from chemclaw.agent.audit import AuditSink, make_audit_middleware
-from chemclaw.agent.harness_mode import PlanApprovalModeProvider
+from chemclaw.agent.harness_mode import (
+    EXECUTE_MODE,
+    PLAN_MODE,
+    PlanApprovalModeProvider,
+    plan_bound,
+)
 from chemclaw.agent.llm_provider import build_chat_client
 from chemclaw.agent.profiles import AgentProfile, get_profile
 from chemclaw.agent.skill_access import EnabledSkillsSource, RoleScopedSkillsSource
@@ -317,7 +322,15 @@ def _build_harness_agent(
         if profile.harness_autonomy is not None
         else settings.harness_autonomy
     )
-    start_mode = "plan" if autonomy == "plan_only" else "execute"
+    start_mode = PLAN_MODE if autonomy == "plan_only" else EXECUTE_MODE
+    # The loop predicate, and whether a human approval binds it. Under `plan_only` — the shipped
+    # pharma-safe posture — the loop may only run the plan a human approved, which `plan_bound`
+    # enforces by comparing the session's authorized plan against the one it is proposing now.
+    # Under `execute` the operator has declared there is no approval gate, so binding the loop to
+    # an approval that will never be granted would simply mean the loop never runs.
+    loop_predicate = todos_remaining(looping_modes=[EXECUTE_MODE])
+    if autonomy == "plan_only":
+        loop_predicate = plan_bound(loop_predicate)
     agent = create_harness_agent(
         client,
         name="chemclaw",
@@ -336,8 +349,8 @@ def _build_harness_agent(
         tokenizer=tokenizer,
         # Plan/execute mode: start in plan for approval-first autonomy, execute for autonomous runs.
         mode_provider=PlanApprovalModeProvider(default_mode=start_mode),
-        # Loop only in execute mode while todos remain — so plan_only stops for approval — capped.
-        loop_should_continue=todos_remaining(looping_modes=["execute"]),
+        # Built above, because whether an approval binds it depends on the configured autonomy.
+        loop_should_continue=loop_predicate,
         loop_max_iterations=settings.harness_max_loop_iterations,
         middleware=middleware,
     )

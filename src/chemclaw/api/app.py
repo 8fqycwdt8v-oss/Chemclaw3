@@ -41,7 +41,12 @@ from chemclaw.agent.attachments import STORE as ATTACHMENTS
 from chemclaw.agent.attachments import AttachmentError, AttachmentSummary, parse_attachment
 from chemclaw.agent.chemclaw_agent import build_agent, connector_tools, history_provider
 from chemclaw.agent.durable_tools import request_note_reindex
-from chemclaw.agent.harness_mode import current_plan_hash, grant_execute, session_mode
+from chemclaw.agent.harness_mode import (
+    current_plan_hash,
+    grant_execute,
+    revoke_execute,
+    session_mode,
+)
 from chemclaw.agent.harness_todo import complete_awaiting_job, todo_titles
 from chemclaw.agent.interaction_tools import (
     PendingApproval,
@@ -1202,8 +1207,15 @@ def create_app(
                 detail="the plan changed since it was shown; re-read it and decide again",
             )
         await _plan_approvals().record(session_id, plan_hash, principal.oid or "", body.approved)
+        # The authorization is per-plan in both directions. `grant_execute` records *which* plan
+        # was approved, so a later rewrite of the todo list is unapproved rather than inheriting
+        # this decision (D-157); `revoke_execute` returns the session to plan mode, because
+        # `plan_approvals` keeps every decision and reads the latest — clicking "no" after "yes" is
+        # meant to revoke, and previously the row said rejected while the session kept executing.
         if body.approved:
-            grant_execute(live.session)
+            await grant_execute(live.session)
+        else:
+            revoke_execute(live.session)
         return Response(status_code=204)
 
     if _STATIC_DIR.is_dir():

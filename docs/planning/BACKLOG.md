@@ -3,6 +3,290 @@
 Prioritized open action items. Top = next. Keep in sync with `docs/planning/implementation-plan.md`
 (phase/step numbers) at session end.
 
+## Open — v1.0 readiness analysis (2026-07-31, D-156/D-157/D-158)
+
+A whole-repo sweep for what is missing before v1.0, prompted by two observations: an inline BO
+suggestion is never persisted, and nothing anywhere records *why* a tool was called. Both turned
+out to be instances of wider patterns. Closed in this pass: the two note types the skills taught
+but the schema refused (D-156), a lost knowledge note that could not be counted (D-156), the
+sidecar that emptied the tree it published and three assertions the chart never made (D-158), and
+the plan approval that authorized a session rather than a plan (D-157).
+
+**The record says what happened, never why.** This is the largest theme and none of it is closed.
+
+- [ ] **A durable job cannot be traced back to the question that prompted it** — [S] to unblock.
+      `api/runner.py` mints a per-turn `correlation_id` and stamps it on `audit_events`, on the
+      connector job's Temporal memo, and on the connector request header. It is stamped on nothing
+      that holds the user's words: `session_messages` has no `correlation_id` column and
+      `audit_events` has no `session_id`, so no query joins a tool call to the conversation that
+      caused it. Two indexed columns make "why was this BO campaign started" a single join, and
+      everything below depends on them.
+- [ ] **No field anywhere holds an intent** — [M]. `AuditEvent` and `ConnectorJobInput` both record
+      what was called with which arguments and by whom; neither has a `purpose`. Even with the join
+      above, reconstruction is "read the transcript and infer". A model-authored, audited,
+      never-authorization-bearing one-liner on expensive/durable actions would make intent a record
+      rather than an inference (`dry_run` is the precedent for an ambient value the model cannot
+      forge; this is the inverse — one it should author).
+- [ ] **The reasoning that does exist is compacted, pruned and rolled back** — [M]. The only durable
+      trace of intent is the raw MAF message blob in `session_messages`, and three mechanisms erode
+      it: `session_store._compact` rewrites rows, `durable/retention.py` prunes by age, and
+      `rollback_to` deletes a turn's rows on client disconnect.
+- [ ] **The approved plan's text is still not durable** — [M]. D-157 made the authorization bind to
+      the plan, but the plan itself lives in an in-process `TodoSessionStore`, so a `plan_approvals`
+      row still points at a `plan_hash` whose subject exists nowhere durable — a signature on a
+      document nobody kept — and an eviction forces re-approval for reasons unrelated to the plan.
+      Wants a `session_plans` table read back on rehydration. Also the durable half of `SCALE-1b`.
+- [ ] **Agent-authored notes cannot carry the provenance fields built for them** — [S].
+      `propose_knowledge_note` accepts only `id/type/body/compound_smiles/tags/source`, so the model
+      cannot attach `calc_refs`, `artifact_refs`, typed `relations`, `confidence` or a validity
+      window — every field D-133/D-134 added for exactly this.
+- [ ] **`calc_refs` is dead in every production write path** — [S]. Worse than the row above: the
+      *machine* paths do not set it either. Only the seed corpus and tests populate `calc_refs`;
+      `connectors/qm/knowledge.py` — the note type that exists *because* a calculation ran — sets
+      none, so `notes_for_calculation()` returns `[]` in production, always, and STO-7's stated goal
+      is architecturally present and operationally zero.
+- [ ] **`Note.confidence` is never set by any machine path** — [S], and it kills two shipped
+      features: `GraphRetriever` scores every machine note at the default so KM-5's truncation
+      ordering is a no-op, and `kg/conflicts.py` requires a confidence on *both* sides so conflict
+      detection can only fire between two hand-written seed notes.
+
+**The write-back paths are open loops.**
+
+- [ ] **The PR-gate opens no PR and notifies nobody** — [L], and it is the highest-value gap in the
+      repo: the control every other control is justified by is not operable. `git_submitter` pushes
+      a branch and returns its name; nothing calls a git platform API, there is no `/proposals`
+      endpoint among the 16 routes, no notification, and **no record of a proposal that was
+      rejected** (a rejection is a deleted branch). A reviewer's only discovery mechanism is
+      browsing `note/*` refs. Wants either a platform adapter behind the existing `NoteSubmitter`
+      protocol or an owner-scoped proposal surface backed by a `note_proposals` table.
+- [ ] **A failed proposal is counted but not recorded** — [S]. D-156 added
+      `chemclaw_notes_publish_failures_total`, so a dead git remote is now distinguishable from an
+      idle system — but the note itself is still gone, with nothing to replay. Belongs with the
+      proposal store above.
+- [ ] **The inline BO path persists nothing at all** — [M]. `suggest_next_experiment` is the path the
+      conversational agent actually uses; it takes a problem and observations, calls BoFire, returns
+      candidates, and writes nothing — not the problem, not the observations the agent assembled
+      from ELN history, not the candidates, not the actor. The expensive part (framing an
+      optimization problem out of scattered history) is discarded every turn. D-156 made the
+      `experiment-batch` note type writable, which is the prerequisite, not the fix.
+- [ ] **There is no first-class campaign entity** — [L]. `knowledge/optimization-campaign/` notes
+      come from DRFP clustering of ingested reactions (`memory/optimization.py`) — a retrospective
+      mechanism with no identity link to any BO run. Nothing a chemist starts, that suggestions
+      attach to, and that results accrue into.
+- [ ] **The BO closed loop is open at both ends** — [L]. No path from a `bo-candidate` to what was
+      actually run and measured, and no mechanism to inject a lab result into a running campaign
+      (`connectors/bo/activities.py` stamps every observation `provenance="predicted"`). So the
+      system proposes experiments and never learns whether its proposals were good — the only way
+      `bo_regret` could ever be scored against reality rather than a benchmark surrogate.
+- [ ] **The BO note is a graph island** — [S]. `connectors/bo/knowledge.py` emits no wikilink,
+      documented as avoiding a dangling link — which is exactly the constraint `NoteSubmission.files`
+      removed (STO-7/D-133) and which `connectors/qm/knowledge.py` already uses. Never migrated.
+- [ ] **Two of ~12 calculators log predictions, and nothing reconciles ELN data** — [M]. Only
+      `predict_solubility`/`predict_pka` write to the `predictions` ledger, and its only reconciler
+      is `report_measurement`, a chat tool a human must type. The ELN sync ingests measured yields
+      and never touches it, so `calculator_trust` will report "not yet calibrated" indefinitely.
+      `calibration.record_prediction` also swallows every exception, so a wrong DSN produces a
+      permanently empty ledger that reports `n=0` forever.
+
+**Controls that are advisory where the documents say binding.**
+
+- [ ] **The plan gate gates loop continuation, not side effects** — [M]. `session_mode` is consumed
+      by exactly one thing (the loop predicate) and read once more for display; `enforce_tool_authz`
+      never consults it. So in `plan` mode the model still executes tools inside its single run,
+      including durable job launchers and `propose_knowledge_note`. D-157 fixed *which* plan may
+      loop; it did not make plan mode withhold side effects.
+- [ ] **Dry-run does not cover the write tools it advertises** — [S]. `is_dry_run()` is checked in
+      three places and not in `propose_knowledge_note` (which pushes a git branch),
+      `record_confirmed_answer`, `remember_preference`, or any connector call. A `dry_run: true`
+      turn mutates the knowledge repo and the preference store. Best fixed with the row above, as
+      one gate over one `side_effecting` set rather than three ad-hoc checks.
+- [ ] **Every shipped connector is unauthenticated** — [M]. All seven manifests ship
+      `auth: mode: none`; `connectors/server.py` correctly never trusts the `X-Chemclaw-*` headers,
+      which leaves the ingress NetworkPolicy as the only control. The `bearer` mode exists and is
+      unused, and a connector serves its *whole* FastMCP surface — `allowed_tools` is a client-side
+      filter.
+- [ ] **Egress is still port-scoped by default** — [S]. D-158 made destinations declarable
+      (`networkPolicy.egressDestinations`) but left the default empty, which renders `to: []` — any
+      destination on those ports. Closing it needs the operator's real CIDRs; until a deployment
+      sets them, `tests/test_no_egress.py` remains a source-scan rather than a control.
+- [ ] **Workload identity federation is dead code the docs lean on** — [M]. `identity/workload.py`
+      has no production caller (only its test and the dormant `obo.py`), while `values.yaml` enables
+      it and `deploy/README.md` presents it as *the reason* only three plain secrets are needed.
+      Either wire it or correct the documents; also `deployment-connectors.yaml` is the one pod spec
+      missing the `azure.workload.identity/use` label, on the `qm` worker that talks to HPC.
+- [ ] **Secrets are plain `str`, never rotated** — [M]. No `SecretStr` anywhere; `llm_api_key`,
+      `hpc_api_token`, `temporal_api_key` and the DSN are one `logger.debug("%s", settings)` from a
+      log. The "three-secret model" is four in `values.yaml`, and `hpc_artifact_store_token` has no
+      chart key at all — so a cross-origin artifact store is fetched unauthenticated.
+- [ ] **One database credential can rewrite the audit chain** — [M]. The migrations
+      `CREATE EXTENSION vector` (superuser on most managed Postgres) and that same DSN is the
+      runtime credential. `infra/sql/006` calls `audit_events` "append-only by contract": no
+      `REVOKE`, no trigger, no separate role.
+
+**Trust: the system predicts without saying when not to be trusted.**
+
+- [ ] **F8-T1 — no applicability domain and no uniform uncertainty contract** — [M], **and it is in
+      no other backlog item**. `implementation-tickets.md:639` specifies `calc/uncertainty.py` with
+      `value + uncertainty + in_domain + method` and conformal prediction where feasible. Verified
+      absent: no such module, zero occurrences of `in_domain`/`applicability`/`conformal`. So
+      `predict_solubility` on a molecule far outside its four-descriptor regression returns a
+      confident number with a training-set RMSE attached, and the `calculation-selection` skill has
+      nothing machine-readable to consult.
+- [ ] **Uncertainty stops at the calculator and never reaches a note** — [S]. The calculator layer
+      carries it well; `qm/knowledge.py` then writes `total energy: {x:.6f} Hartree` with no error
+      bar and `bo/knowledge.py` writes a bare objective value. Units are prose in a Markdown body,
+      never a structured field, so retrieval quotes the bare number.
+- [ ] **F9-T3 — zero evaluation of agent behaviour** — [M], **also in no other backlog item**.
+      `implementation-tickets.md:682` specifies plan quality, plan-vs-single-shot A/B, and
+      runaway/abort rate — all computable on a scripted transcript, which is what its own ticket
+      says, so `DEFERRED`'s AG-13 ("needs a live endpoint") does not cover it. Today a prompt
+      change, a skill edit or a model swap can regress behaviour arbitrarily and CI stays green.
+- [ ] **The retrieval eval scores the retriever nobody will run** — [S]. `evals/retrieval.py` builds
+      only `GraphRetriever`; `VectorRetriever`, `LexicalRetriever` and the RRF fusion have no
+      coverage, so switching `retrieval_mode` to `hybrid` — the point of F10-A — flips to an
+      unmeasured path with no baseline and no drift tripwire.
+- [ ] **The CI step named "the scientific quality gates" cannot fail on a science regression** —
+      [S]. `evals/harness.py::main` returns 0 whenever the case-set loads, which is deliberate and
+      documented (the real gate is a pinned assertion in `tests/test_evals.py`) — but `ci.yml`
+      labels `make eval` as the gate, so a reader trusts the wrong step. Rename it or add
+      `--strict`.
+
+**Data correctness, in rough order of how expensive it gets to fix later.**
+
+- [ ] **No molecule standardization** — [M], and **it should be fixed before first real ingest**.
+      `core/chem.py::canonical_smiles` is `MolToSmiles(MolFromSmiles(s))`; there is no
+      `rdMolStandardize` anywhere — no uncharger, no largest-fragment chooser, no tautomer
+      canonicalization, no salt stripping. So a free base and its HCl salt, two tautomers, and a
+      racemate written without stereo each mint distinct `compound_id`s — and that key also drives
+      the calculation cache and both fingerprint indices, so identity fragmentation becomes cache
+      misses on work D-011 promises never to repeat. Retrofitting after real data lands means
+      migrating the cache, both fingerprint tables and the graph at once.
+- [ ] **An amended ELN entry is silently discarded** — [M]. `ingest/eln/sync.py` skips any entry
+      whose note id already exists, without comparing content, and `OrdReaction` has no
+      `record_modified`/version/revision. ELNs amend in place — a yield corrected after assay, an
+      impurity added, an entry retracted — while keeping `created_at`, so every correction is
+      dropped. There is also no retraction path at all: a withdrawn entry stays current evidence
+      forever. The docstring's premise ("ELN exports are immutable") is an assumption about someone
+      else's system.
+- [ ] **No source-system provenance on ingested records** — [S]. `provenance` is
+      `f"eln:{operator}"`; no system id, tenant, instance, export batch or schema version. With two
+      sources enabled, colliding `entry_id`s produce the same note id and the second loses to the
+      skip above.
+- [ ] **Mass balance is element-set subsumption only** — [M]. `ingest/eln/validate.py` checks that
+      no product element is absent from the inputs, so `benzene + methanol >> paracetamol` passes.
+      No charge balance, no yield-vs-limiting-reagent check despite `amount_mmol` being parsed. The
+      stronger check already exists and is not reused (`science/calc/reaction.py:178`).
+- [ ] **`note_index` has no embedding-model identity, and there is no chunking** — [M]. Changing
+      `CHEMCLAW_EMBEDDING_MODEL` serves mixed-generation vectors until someone remembers
+      `make reindex`, and nothing detects it — while the in-process embed cache *is* keyed on the
+      model and its docstring names this hazard. Separately, a note is one vector over its whole
+      body and the returned excerpt is `body[:240]`, so a reaction note's matched procedure step is
+      never what comes back.
+- [ ] **Hazard screening misses the notes that propose conditions** — [S]. The note-level gate fires
+      only on a literal `## Procedure` heading, which `bo-candidate`/`experiment-batch` notes do not
+      have — so the one note type proposing conditions a human will physically run is never
+      screened. Pair rules also fire across components of one mixture SMILES with no notion of
+      sequence, screening a quench reagent against one consumed at step 1.
+- [ ] **Reaction fingerprints are dominated by solvent choice** — [M]. `ord.py::reaction_smiles`
+      puts solvent and catalyst on the reactant side, so the DRFP similarity driving campaign
+      grouping and `similar_reactions` is weighted by the variable usually being optimized.
+
+**Operations.**
+
+- [ ] **No backup, restore or DR anywhere** — [L]. Zero occurrences of backup/`pg_dump`/PITR/RPO
+      across `deploy/`, `infra/` and `docs/`. Four unowned stores: Postgres (audit chain, sessions,
+      calculation cache, note index), Temporal's own store, the knowledge git repo, and the external
+      HPC artifact store. **The GxP trap:** `retention.py` refuses to prune `audit_events` because
+      deleting from a hash chain is indistinguishable from tampering, and `DEFERRED` records that
+      *trailing* deletion is undetectable — and a point-in-time restore is exactly a trailing
+      deletion. Any restore silently truncates the compliance chain in the one way it cannot detect.
+      Wants an ADR pairing the backup story with a signed high-water anchor the verifier accepts.
+- [ ] **Postgres and Temporal are neither deployed nor owned** — [L]. The chart dials
+      `chemclaw-temporal-frontend.temporal.svc:7233` and namespace `chemclaw`; there is no subchart,
+      no operator manifest, no `register_namespace` call, no retention/archival config, no HA or
+      sizing guidance. `helm install` does not produce a working system.
+- [ ] **Worker and connector metrics go nowhere** — [M]. The ServiceMonitor targets only the front
+      door, on the reasoning that recording a metric elsewhere "is a no-op" — which is wrong:
+      `metrics_bridge` imports the registry lazily and the import succeeds in any process, so
+      counters increment into a registry with no HTTP surface. Everything the background worker and
+      six connector workers do is invisible.
+- [ ] **No PDB, no topology spread, no graceful shutdown** — [S]+[M]. The front door runs
+      `minReplicas: 2` that can land on one node, and the Route pins a browser to one pod *because*
+      that pod holds attachments and harness todos in memory — so a node drain loses conversation
+      state, not just capacity. No `terminationGracePeriodSeconds`/`preStop` against a 600 s turn
+      timeout. `workers.background.replicas: 1` is a hard singleton owning ELN sync, memory
+      synthesis, retention, eval drift and audit-chain verification.
+- [ ] **Workers and connectors have no probes** — [M]. "Liveness is the Temporal poll" is asserted,
+      not enforced: a worker whose poll loop died stays `Running` with no probe, no scrape target,
+      and no alert.
+- [ ] **Migrations take no advisory lock and have no lock timeout** — [M] (the forward-only half is
+      already tracked below). `infra/sql/011` documents that the *audit writer* takes a transaction
+      advisory lock; the migrator, which does DDL, does not, and opens its connection with no
+      statement timeout. The Job is a `pre-upgrade` hook with no `activeDeadlineSeconds`, so one
+      `ALTER TABLE` waiting on a long query takes `ACCESS EXCLUSIVE` and stalls live traffic
+      indefinitely, leaving the release `pending-upgrade` with no documented recovery.
+- [ ] **Image not pinned, supply chain ungated** — [S]+[M]. `values.yaml` deploys tag `0.1.0`; the
+      Containerfile builds `FROM …/python-311:latest`; no `imagePullSecrets` field exists. No
+      dependency scanning, SBOM, image scan, secret scanning or signing — and the Containerfile
+      explicitly flags xtb (LGPL-3.0) / crest (GPL-3.0) redistribution as an **unmade decision**.
+- [ ] **No rate limiting; attachments buffer before they are checked** — [M]. No per-principal
+      request limit anywhere; `app.py` does `await file.read()` before `parse_attachment` enforces
+      the 2 MB cap, so a 5 GB multipart is read into memory then rejected; uvicorn runs with no
+      `--limit-concurrency`/`--timeout-keep-alive`/header-size flags.
+- [ ] **Tracing is shallow and the docs overstate it** — [M]. One call to MAF's
+      `configure_otel_providers` is the whole story; zero first-party spans, no FastAPI/httpx/
+      Temporal instrumentation, no `traceparent` propagation (the tell is that `connectors/identity`
+      propagates a *custom* correlation header). `deploy/README.md` claims spans cover a turn and a
+      job and that dashboards track loop iterations — none exists.
+- [ ] **Logs are unstructured and unredacted** — [M]. A `%`-format string, no JSON option, no filter
+      injecting the correlation/actor/session contextvars that already exist — so an ordinary
+      WARNING has nothing to join on. `SECURITY.md` states the audit trail holds PII and that a
+      deployment's retention and PII policy must cover it; nothing implements redaction.
+- [ ] **Autoscaling defeats the admission guard's purpose** — [M]. The guard is per-process by
+      design to protect a shared LLM endpoint; `maxReplicas: 6` silently multiplies the real ceiling
+      to `6 × service_max_concurrent_turns`. No deployment-wide ceiling, no metric expressing one.
+- [ ] **No cost attribution** — [M]. Token metrics carry `profile` only, so "what did team X cost"
+      is unanswerable, and HPC/compute spend is entirely unmetered — no counter for jobs launched or
+      node-hours, on the most expensive thing the system does.
+
+**Product floor.**
+
+- [ ] **No durable-job surface for a user** — [M]. No `GET /jobs`, no cancel, no result retrieval
+      after the session is gone; status is reachable only as an agent tool inside a turn, and
+      `ConnectorJobResult.data` exists only in Temporal history until it ages out.
+- [ ] **No session delete, export, or pagination** — [M]. Only `POST`/`GET /sessions`; no per-user
+      erasure across the seven tables that hold a conversation (a data-subject request is currently
+      unimplementable, and `audit_events` is deliberately unprunable); `SessionSummary` is
+      `session_id + created_at` with a `LIMIT` and no cursor, so past 100 sessions the older ones
+      are unreachable.
+- [ ] **`GET /sessions/{id}/messages` loses the whole trace on reload** — [M]. It returns
+      `role + text`: no message id, timestamp, tool calls, job ids, plan, attachments, confidence or
+      pagination, while the live SSE stream carries 12 event types. A real UI cannot render history
+      at parity with the live view — the largest single item for the `Chemclaw3_ui` repo.
+- [ ] **Every turn failure collapses to one opaque string** — [S]. `runner.py` catches `Exception`
+      and returns "an internal error", with no code, no retryable flag, and not even the correlation
+      id — which is the only key the audit trail has. A UI cannot distinguish connector-down,
+      LLM-timeout, DB-down and bad-tool-arguments.
+- [ ] **No project as a first-class concept** — [M]. `project` is free text on a reaction and a note
+      *tag*; no registry, no project-scoped retrieval, no project-scoped access. Broad internal read
+      is a conscious call (`DEFERRED`, KM-9), but "which programme is this work part of" is how
+      pharma R&D is organized and the graph cannot answer it reliably.
+
+**Bookkeeping.**
+
+- [ ] **F8 and F9 have no backlog entries at all** — [S]. `implementation-tickets.md` defines F0–F9
+      and this file tracks F0–F7 per ticket. F8-T2 was absorbed into F10-A; **F8-T1, F9-T1 and
+      F9-T3 were never picked up**, so `CLAUDE.md` designates this file as the memory read at
+      session start and it is not a complete index of open work. Reconcile the two, or ADR that
+      F8/F9 are dropped and why.
+- [ ] **Eight documents assert capabilities the code does not have** — [S]. `deploy/README.md` on
+      federation and on tracing spans; `harness_mode.py`'s "waits for a human before executing";
+      `plan_approval_store.py` on where the mode lives; `infra/sql/006` on append-only;
+      `servicemonitor.yaml` on out-of-process metrics; `ci.yml` on the eval gate;
+      `architektur.md` §8 on multi-tenancy. Cheap systemic guard: extend the `prose-validate` idea —
+      which D-156 already widened from tool names to note types — to operator-facing prose and
+      config keys.
+
 ## Open — Every capability exercised live with the flags on (2026-07-31, D-155)
 
 Full record: `docs/archive/live-matrix-2026-07.md`. The whole stack up natively with **every**

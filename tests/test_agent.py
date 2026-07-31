@@ -7,10 +7,12 @@ construction in either backbone.
 """
 
 import asyncio
+from typing import Any
 
 import pytest
 from agent_framework import (
     AgentModeProvider,
+    AgentSession,
     CharacterEstimatorTokenizer,
     Message,
     SlidingWindowStrategy,
@@ -22,8 +24,11 @@ from agent_framework._compaction import (
     apply_compaction,
     included_token_count,
 )
+from agent_framework._harness._mode import set_agent_mode
 
 from chemclaw.agent.chemclaw_agent import _build_compaction, build_agent, connector_tools
+from chemclaw.agent.harness_mode import EXECUTE_MODE, grant_execute
+from chemclaw.agent.harness_todo import mark_awaiting_job
 from chemclaw.connectors.registry import connector_tool_names, discovered
 from chemclaw.core.config import settings
 from chemclaw.templates.registry import template_tool_names
@@ -347,3 +352,63 @@ def test_execute_autonomy_wires_a_bounded_loop(monkeypatch: pytest.MonkeyPatch) 
     loops = [m for m in middleware if type(m).__name__ == "AgentLoopMiddleware"]
     assert len(loops) == 1
     assert getattr(loops[0], "max_iterations", None) == 9
+
+
+def _loop_predicate(agent: Any) -> Any:
+    """The harness loop's continue-predicate, as MAF's loop middleware holds it."""
+    middleware = next(
+        m for m in (agent.middleware or []) if type(m).__name__ == "AgentLoopMiddleware"
+    )
+    return middleware.should_continue
+
+
+def test_plan_only_binds_the_loop_to_an_approved_plan(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Under the shipped posture the loop runs only the plan a human approved (D-157).
+
+    The discriminating case is the **rewrite**, not the unapproved session: an unapproved session
+    is also still in plan mode, so `todos_remaining` alone already refuses it and a test that
+    stopped there would pass with the binding removed. What the binding adds is that after a
+    granted approval, *changing the plan* stops the loop — which is precisely the escalation that
+    existed, because execute mode was granted once and never revoked, so every later plan in the
+    session inherited the first plan's approval.
+    """
+    _enable_harness(monkeypatch, autonomy="plan_only")
+    monkeypatch.setattr(settings, "session_store", "memory")
+    agent = build_agent(chat_client=object())
+    predicate = _loop_predicate(agent)
+
+    async def _run() -> tuple[object, object]:
+        # The real agent, not a stub: `todos_remaining` resolves the todo and mode providers from
+        # it, so a stub would make every branch refuse and the test pass for the wrong reason.
+        session = AgentSession(session_id="approved-then-rewritten")
+        await mark_awaiting_job(session, "job-1", title="the approved, modest step")
+        await grant_execute(session)
+        approved = await predicate(session=session, agent=agent)
+        # Same session, same execute mode, different work.
+        await mark_awaiting_job(session, "job-2", title="something else entirely")
+        return approved, await predicate(session=session, agent=agent)
+
+    approved, rewritten = asyncio.run(_run())
+    assert approved is True or (isinstance(approved, tuple) and approved[0] is True)
+    assert rewritten is False or (isinstance(rewritten, tuple) and rewritten[0] is False)
+
+
+def test_autonomous_execute_is_not_gated_on_an_approval(monkeypatch: pytest.MonkeyPatch) -> None:
+    """`harness_autonomy="execute"` is the operator declaring there is no approval gate.
+
+    Binding the loop to an approval that will never be granted would not harden that deployment,
+    it would stop it from ever looping — so the binding is applied only under `plan_only`.
+    """
+    _enable_harness(monkeypatch, autonomy="execute")
+    monkeypatch.setattr(settings, "session_store", "memory")
+    agent = build_agent(chat_client=object())
+    predicate = _loop_predicate(agent)
+
+    async def _run() -> object:
+        session = AgentSession(session_id="autonomous")
+        await mark_awaiting_job(session, "job-1", title="a step")
+        set_agent_mode(session, EXECUTE_MODE)
+        return await predicate(session=session, agent=agent)
+
+    outcome = asyncio.run(_run())
+    assert outcome is True or (isinstance(outcome, tuple) and outcome[0] is True)

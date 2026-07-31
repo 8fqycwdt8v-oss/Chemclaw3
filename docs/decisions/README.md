@@ -191,5 +191,5 @@ this reason; the filenames make that ordering irrelevant now, and the numbers st
 | [D-154](D-154-a-register-that-had-become-a-log-and-the-one.md) | A register that had become a log, and the one trigger it was hiding |
 | [D-155](D-155-what-the-dark-half-of-the-system-does-the-first-time.md) | What the dark half of the system does the first time it runs |
 | [D-156](D-156-prose-named-two-note-types-the-schema-refused-and-a.md) | Prose named two note types the schema refused, and a lost note could not be counted |
-| D-157 | RESERVED — the plan approval binds to the plan, not to the session |
+| [D-157](D-157-the-plan-approval-binds-to-the-plan-not-to-the.md) | The plan approval binds to the plan, not to the session |
 | [D-158](D-158-the-deployment-envelope-a-sidecar-that-emptied-the.md) | The deployment envelope: a sidecar that emptied the tree, and three assertions the chart never made |

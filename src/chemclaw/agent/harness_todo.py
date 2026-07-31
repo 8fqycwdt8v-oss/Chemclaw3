@@ -58,6 +58,26 @@ async def todo_titles(
     return [f"[{'x' if item.is_complete else ' '}] {item.title}" for item in items]
 
 
+async def todo_steps(
+    session: AgentSession, *, source_id: str = DEFAULT_TODO_SOURCE_ID
+) -> list[str]:
+    """The plan's *steps*, without their completion state — what the plan is, not how far it got.
+
+    `todo_titles` deliberately renders progress, because that is what a chemist must see and what
+    the approval handshake hashes: a plan whose steps have been ticked off is not the plan that was
+    shown, so re-approval is correct there.
+
+    Authorization needs the opposite question. Binding "may this session keep executing?" to a hash
+    that changes on every completed step would revoke the approval the moment the first step
+    finished — the loop would stop after one iteration, every time. What must revoke it is the plan
+    being *rewritten*: presenting a modest plan, having it approved, then swapping the steps and
+    running something else under the same authorization. That is exactly the difference between
+    these two functions, and it is why they are two functions rather than one with a flag.
+    """
+    items, _ = await _store.load_state(session, source_id=source_id)
+    return [item.title for item in items]
+
+
 async def complete_awaiting_job(
     session: AgentSession, job_id: str, *, reason: str, source_id: str = DEFAULT_TODO_SOURCE_ID
 ) -> bool:

@@ -34,18 +34,38 @@ calls
 would authorize whatever the plan happened to become — the model could present a modest plan, have
 it approved, then rewrite its todo list and run something else under the same authorization.
 Hashing the plan the human actually saw makes that a different plan, and a different plan is
-unapproved. The hash is over the rendered todo lines, because that is exactly what the surfaces
-show a chemist (`chemclaw.agent.harness_todo.todo_titles` feeds `PlanEvent`) — hashing richer
-internal
-state would let the authorized artifact drift from the displayed one.
+unapproved.
+
+**And why nothing enforced that (D-157).** The binding above described the *record*: the
+`plan_approvals` row was keyed by hash, so the durable evidence was correct. Nothing consulted it
+at execution time. `set_agent_mode` had exactly one caller, `grant_execute`, and no counterpart —
+so a session that reached execute mode stayed there for the rest of its life, and the second plan,
+and the tenth, looped with no human in the loop. The hash protected only the first plan, which is
+close to protecting nothing, and it silently defeated the posture the chart ships
+(`harness_autonomy=plan_only`). `grant_execute` now records *which* plan was authorized,
+`plan_bound` refuses to loop when the session is proposing a different one, and `revoke_execute`
+exists so a rejection after an approval actually revokes.
+
+**There are two plan hashes, and they answer different questions.** `current_plan_hash` is over the
+rendered todo lines — exactly what the surfaces show a chemist
+(`chemclaw.agent.harness_todo.todo_titles` feeds `PlanEvent`) — so the approval handshake cannot
+authorize something other than what was displayed; completion state is part of it, and a plan whose
+steps have been ticked off is correctly a different plan to re-approve. `plan_identity_hash` is
+over the steps alone (`todo_steps`), because binding *execution* to the displayed hash would revoke
+the approval the moment the first step completed and the loop would stop after one iteration, every
+time. What must revoke an authorization is the plan being rewritten, not progress through it.
 """
 
-from typing import Any
+import inspect
+from typing import TYPE_CHECKING, Any
 
 from agent_framework import AgentSession
 from agent_framework._harness._mode import AgentModeProvider, get_agent_mode, set_agent_mode
 
-from chemclaw.agent.harness_todo import todo_titles
+if TYPE_CHECKING:  # the predicate shape MAF's loop middleware accepts
+    from agent_framework._harness._loop import ShouldContinueCallable
+
+from chemclaw.agent.harness_todo import todo_steps, todo_titles
 from chemclaw.core.ids import stable_hash
 
 # The tool MAF injects that lets the model change its own mode. Named here rather than inlined so
@@ -55,6 +75,21 @@ MODEL_MODE_TOOL = "mode_set"
 # The mode in which the harness loop runs (`todos_remaining(looping_modes=["execute"])`).
 EXECUTE_MODE = "execute"
 PLAN_MODE = "plan"
+
+# Where the authorized plan is kept. Its own key in the session's state map, beside MAF's
+# `agent_mode` rather than inside it: that dict is upstream's, and writing our field into it would
+# make this repo's data a hostage to their schema.
+_APPROVAL_SOURCE_ID = "chemclaw_plan_approval"
+_APPROVED_PLAN_KEY = "approved_plan_hash"
+
+
+def _approval_state(session: AgentSession) -> dict[str, Any]:
+    """The mutable session state holding the approved plan, created on first use."""
+    state = session.state.get(_APPROVAL_SOURCE_ID)
+    if not isinstance(state, dict):
+        state = {}
+        session.state[_APPROVAL_SOURCE_ID] = state
+    return state
 
 
 class PlanApprovalModeProvider(AgentModeProvider):
@@ -107,12 +142,82 @@ def session_mode(session: AgentSession, *, default_mode: str = PLAN_MODE) -> str
     return get_agent_mode(session, default_mode=default_mode)
 
 
-def grant_execute(session: AgentSession) -> str:
-    """Move the session into execute mode — the one place that does, and never the model.
+async def plan_identity_hash(session: AgentSession) -> str:
+    """The hash of *which plan* this is, ignoring how far it has got (`todo_steps`).
+
+    The counterpart to `current_plan_hash`, and the one an authorization is bound to. See
+    `chemclaw.agent.harness_todo.todo_steps` for why the two must differ.
+    """
+    return stable_hash(await todo_steps(session))
+
+
+async def grant_execute(session: AgentSession) -> str:
+    """Authorize this session to execute *the plan it is proposing now* — never the session itself.
 
     Uses MAF's `set_agent_mode` rather than writing session state directly, because that helper
     also records the previous mode so the next `before_run` injects a message telling the agent
     the mode changed externally. Without that the agent stays anchored to whatever it last
     believed and can keep behaving as though it were still planning.
+
+    **The approved plan is recorded beside the mode, and that is the whole fix.** D-137 bound the
+    approval *record* to a plan hash so that "approve a modest plan, then rewrite it" would be a
+    different key — but nothing consulted that binding at execution time. `set_agent_mode` had
+    exactly one caller and no counterpart: once a session reached execute mode it stayed there for
+    the rest of its life, so the second plan, and the tenth, looped with no human in the loop. The
+    hash binding protected only the first plan, which is close to protecting nothing, and it
+    defeated the posture the chart ships (`harness_autonomy=plan_only`).
+
+    Storing the authorized plan next to the mode is what lets `plan_bound` compare them. Same
+    lifetime as the mode itself, so this introduces no new way for the two to disagree.
     """
+    _approval_state(session)[_APPROVED_PLAN_KEY] = await plan_identity_hash(session)
     return set_agent_mode(session, EXECUTE_MODE)
+
+
+def revoke_execute(session: AgentSession) -> str:
+    """Return the session to plan mode and drop the authorization — a rejection after an approval.
+
+    `plan_approvals` keeps every decision and reads the latest, so clicking "no" after "yes" is
+    meant to revoke. Without this the row said rejected while the session kept executing.
+    """
+    _approval_state(session).pop(_APPROVED_PLAN_KEY, None)
+    return set_agent_mode(session, PLAN_MODE)
+
+
+async def execute_is_authorized(session: AgentSession) -> bool:
+    """Whether the plan this session is proposing now is the plan a human approved."""
+    approved = _approval_state(session).get(_APPROVED_PLAN_KEY)
+    return bool(approved) and approved == await plan_identity_hash(session)
+
+
+def plan_bound(should_continue: "ShouldContinueCallable") -> "ShouldContinueCallable":
+    """Wrap a harness loop predicate so it only continues while the approved plan is still the plan.
+
+    Composed around MAF's `todos_remaining` rather than replacing it: that predicate resolves the
+    todo provider and the mode from the running agent, and reimplementing it here would silently
+    lose whatever upstream adds to it next — the same reasoning as `PlanApprovalModeProvider`
+    retracting one tool instead of rewriting `before_run`. For the same reason the inner result is
+    passed through *unchanged* rather than coerced to `bool`: MAF lets a predicate return
+    `(False, reason)`, and flattening that would discard the explanation upstream surfaces.
+
+    A session with no approval on file is unaffected in practice: it is also not in execute mode,
+    so the inner predicate already refuses. The check is stated independently anyway, because
+    "authorized" and "in execute mode" became the same thing only by accident and should not be
+    relied on to stay that way.
+    """
+
+    async def _should_continue(
+        *, session: Any = None, agent: Any = None, **kwargs: Any
+    ) -> bool | tuple[bool, str | None]:
+        """Continue only if the plan is still approved, then defer to the inner predicate."""
+        if session is None:
+            return False
+        if not await execute_is_authorized(session):
+            return False, (
+                "the plan changed since it was approved; it needs approving again before "
+                "execution continues"
+            )
+        outcome = should_continue(session=session, agent=agent, **kwargs)
+        return await outcome if inspect.isawaitable(outcome) else outcome
+
+    return _should_continue
