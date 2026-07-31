@@ -39,7 +39,7 @@ word `type`, then the backticked slug. `make prose-validate` checks exactly that
 `KNOWN_NOTE_TYPES`, and anything written another way is unchecked. This is not a style
 preference: two skills shipped instructing a `protocol` and an `experiment-batch` note, neither of
 which is a known type, so the agent's proposal opened a branch that `kg-validate` then rejected —
-a reachable tool writing an unwritable artifact (D-163).
+a reachable tool writing an unwritable artifact (D-164).
 
 ### Template
 

@@ -3,7 +3,7 @@
 Prioritized open action items. Top = next. Keep in sync with `docs/planning/implementation-plan.md`
 (phase/step numbers) at session end.
 
-## Done — Reviewing the experiment-progression change (2026-07-31, D-163)
+## Done — Reviewing the experiment-progression change (2026-07-31, D-164)
 
 Re-reading D-162 with fresh eyes. One real defect, found because the new `experiment-proposal`
 type sat next to two that were never registered, plus three cleanups in the new code itself:

@@ -193,8 +193,9 @@ this reason; the filenames make that ordering irrelevant now, and the numbers st
 | [D-156](D-156-the-last-false-duplicate-and-a-map-that-is-enforced.md) | The last false duplicate, the corpora in one place, and a map that is enforced |
 | [D-157](D-157-a-durable-record-of-every-connector-job-what-ran.md) | A durable record of every connector job: what ran, with what data, and why |
 | [D-158](D-158-the-expensive-calculation-is-the-one-that-was-not.md) | The expensive calculation is the one that was not cached |
-| D-159 | RESERVED — the turn stream reports a tool's lifecycle and its result, not just that a call happened |
+| [D-159](D-159-the-turn-stream-reports-a-tool-s-lifecycle-not.md) | The turn stream reports a tool's lifecycle, not just that a call happened |
 | D-160 | RESERVED — retrieval carries provenance, so a claim can be qualified by who authored its evidence |
 | D-161 | RESERVED — an ungated observations tier, with the human gate moved from every observation to the few worth promoting |
 | [D-162](D-162-a-series-of-experiments-is-a-sequence-not-a-set.md) | A series of experiments is a sequence, not a set |
-| [D-163](D-163-the-prose-gate-learns-note-types-and-the-two-dead.md) | The prose gate learns note types, and the two dead ones it finds |
+| [D-163](D-163-a-store-you-can-only-address-is-not-a-store-you.md) | A store you can only address is not a store you can ask |
+| [D-164](D-164-the-prose-gate-learns-note-types-and-the-two-dead.md) | The prose gate learns note types, and the two dead ones it finds |

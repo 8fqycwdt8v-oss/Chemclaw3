@@ -8,6 +8,11 @@ const input = document.getElementById("input");
 const send = document.getElementById("send");
 
 let sessionId = null;
+// The push-back stream (`GET /sessions/{id}/events`), opened once the session exists. A durable
+// job finishes long after the turn that launched it ended, so its completion arrives on this
+// connection and on no other — without it the dev page showed "⏳ job started" and then nothing,
+// forever, which is the one failure mode a manual test of an async job most needs to see.
+let events = null;
 
 function add(cls, text) {
   const el = document.createElement("div");
@@ -35,7 +40,20 @@ async function ensureSession() {
   const res = await fetch("/sessions", { method: "POST" });
   if (!res.ok) throw await httpError(res, "creating a session");
   sessionId = (await res.json()).session_id;
+  openEventStream(sessionId);
   return sessionId;
+}
+
+// Subscribe to the session's job push-back. `EventSource` rather than the hand-rolled reader
+// above because this route is a GET — the parsing only exists for the POSTed turn stream. Each
+// pushed event is applied with no answer element: it belongs to no turn's token stream.
+function openEventStream(id) {
+  if (events) events.close();
+  events = new EventSource(`/sessions/${encodeURIComponent(id)}/events`);
+  events.addEventListener("job_completed", (e) => applyEvent(JSON.parse(e.data), null));
+  // A dropped push-back connection must not be silent: the page would look identical to one where
+  // no job ever finished. `EventSource` reconnects on its own, so this reports rather than retries.
+  events.onerror = () => add("trace", "… job stream interrupted, reconnecting");
 }
 
 // Render an approval request. When the event carries a durable hold id, the prompt gets real
@@ -86,8 +104,23 @@ function applyEvent(evt, answerEl) {
       answerEl.textContent += evt.text;
       transcript.scrollTop = transcript.scrollHeight;
       return answerEl;
+    case "tool_result":
+      // The value itself, not the model's paraphrase of it (D-159). Paired with the `tool_call`
+      // line above, the trace now shows a call's whole lifecycle — issued, then what came back.
+      add("trace", `← ${evt.tool} → ${evt.preview || ""}`);
+      return answerEl;
     case "job_started":
       add("trace", `⏳ ${evt.kind || "job"} started (${evt.job_id})`);
+      return answerEl;
+    case "job_completed":
+      // Arrives on the push-back stream, outside any turn — see `openEventStream`.
+      add("trace", `✓ job ${evt.job_id} completed ${JSON.stringify(evt.summary || {})}`);
+      return answerEl;
+    case "capability_degraded":
+      // Its own lane, not the trace: this qualifies the answer that follows, and an answer
+      // assembled without the ELN is indistinguishable from one assembled with it unless the
+      // page says so where a reader will not scroll past it.
+      add("warn", `⚠ answering with fewer tools — unreachable: ${(evt.connectors || []).join(", ")}`);
       return answerEl;
     case "question":
       add("trace", `❓ ${evt.question}` + ((evt.options || []).length ? `\n   options: ${evt.options.join(" | ")}` : ""));

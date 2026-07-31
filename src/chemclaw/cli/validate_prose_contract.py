@@ -32,7 +32,7 @@ Four rules, each deliberately narrow so the check stays true rather than noisy:
    1's shape applied to the other half of the write path, and it was missing: two skills instructed
    `propose_knowledge_note(type="protocol")` and `type="experiment-batch"`, neither of which is a
    known type, so an agent that followed either opened a PR that `kg-validate` then rejected — the
-   capability was reachable and the artifact was not (D-163). A note type is named in the gated
+   capability was reachable and the artifact was not (D-164). A note type is named in the gated
    form **`type `x``** (the word, then the backticked slug); write it that way in prose so this
    rule can see it.
 

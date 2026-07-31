@@ -1,4 +1,4 @@
-# D-163 — The prose gate learns note types, and the two dead ones it finds
+# D-164 — The prose gate learns note types, and the two dead ones it finds
 
 **Context.** Reviewing D-162 turned up a defect it did not introduce but sits directly on top of.
 D-162 added `experiment-proposal` to `KNOWN_NOTE_TYPES` as the type an agent writes when it

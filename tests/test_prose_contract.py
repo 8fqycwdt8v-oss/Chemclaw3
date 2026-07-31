@@ -59,7 +59,7 @@ def test_pointing_the_agent_at_a_workflow_is_caught(monkeypatch: object) -> None
 
 
 def test_a_note_type_the_graph_does_not_know_is_caught(monkeypatch: object) -> None:
-    """The `experiment-batch` case (D-163): reachable tool, unwritable artifact.
+    """The `experiment-batch` case (D-164): reachable tool, unwritable artifact.
 
     Two shipped skills told the agent to propose a `protocol` / `experiment-batch` note. Both
     calls succeed and open a branch; `kg-validate` then rejects it on the PR the agent just
