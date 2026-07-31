@@ -103,6 +103,14 @@ _CALC_REF = re.compile(r"^[^\s@:]+@[^\s:]+:[0-9a-f]+:[0-9a-f]+$")
 # tool. The PR-gate is where a new type belongs — a human sees it, and `kg-validate` runs on that
 # same PR, so an unknown type cannot reach the graph unreviewed while an intended one costs one
 # line here.
+#
+# That placement had a blind spot, and two types fell through it. `knowledge-graph-write` and
+# `experiment-design` both instruct the agent to write `protocol` and `experiment-batch` notes —
+# neither was listed here, so `kg-validate` would have failed the very PR the agent was told to
+# open. Nobody saw it, because nothing opens that PR: the proposal lands on a branch and the
+# validator that would have objected never runs. Prose named a type, the set did not hold it, and
+# the gap was invisible from both ends. `cli/validate_prose_contract` now checks this direction
+# too, which is why the list below and the skills cannot drift apart again.
 KNOWN_NOTE_TYPES: frozenset[str] = frozenset(
     {
         "reaction",  # one ELN experiment (eln/note.py)
@@ -115,6 +123,12 @@ KNOWN_NOTE_TYPES: frozenset[str] = frozenset(
         "job-result",  # a durable calculation's result (connectors/qm/knowledge.py)
         "bo-candidate",  # a BO campaign's recommendation (connectors/bo/knowledge.py)
         "failure-mode",  # a negative result worth not repeating (gap KNW-3)
+        # The two proposal types, distinct from every type above because they record what someone
+        # *should* run rather than what was observed or computed. Kept apart from `bo-candidate`,
+        # which is machine-minted from a finished durable campaign: these are agent-drafted from an
+        # inline suggestion, so they carry a human's intent and must cite the evidence they rest on.
+        "protocol",  # agent-proposed conditions/procedure (skills/knowledge-graph-write)
+        "experiment-batch",  # agent-proposed set of next runs (bo skills/experiment-design)
     }
 )
 

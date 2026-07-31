@@ -10,8 +10,17 @@ FROM registry.access.redhat.com/ubi9/python-311:latest
 # `git` is a hard runtime dependency, not a convenience: the PR-gate submitter shells out to it
 # (`kg/git_submitter.py`) and the knowledge-sync sidecar clones/pulls the note repo with it, so an
 # image without git silently breaks both directions of the knowledge layer.
+#
+# `rsync` is a hard runtime dependency for the same reason, and its absence was worse than a broken
+# feature. `knowledge-sync.sh` publishes the read replica with `rsync -a --delete`, and its fallback
+# for a failed rsync was `rm -rf "${publish_dir}"/*` followed by `cp -a`. This image never installed
+# rsync, and the rsync call swallowed stderr — so `command not found` was indistinguishable from a
+# transfer error and the *destructive* branch was the one that always ran, every sync interval,
+# against the directory the serving container reads live. `kg/graph.py` caches on a stat
+# fingerprint with a short TTL, so a retrieval landing inside that window saw a partial or empty
+# graph and the agent answered with no evidence — silently, because a missing note is not an error.
 USER 0
-RUN dnf install -y git && dnf clean all && pip install --no-cache-dir uv
+RUN dnf install -y git rsync && dnf clean all && pip install --no-cache-dir uv
 WORKDIR /app
 
 # The two calculation binaries (xTB plan X5/X6). Pinned release tarballs rather than a

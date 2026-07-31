@@ -187,9 +187,53 @@ def test_every_runtime_data_directory_actually_exists() -> None:
         )
 
 
-def test_image_installs_git() -> None:
-    """The PR-gate shells out to git; an image without it fails every knowledge write at push."""
-    assert "dnf install -y git" in (DEPLOY / "Containerfile").read_text()
+def _dnf_installed_packages() -> set[str]:
+    """Every package the image installs with dnf, parsed rather than substring-matched.
+
+    Matching the literal install line meant a test could keep passing while the thing it named had
+    moved: `"dnf install -y git" in text` is satisfied by `dnf install -y git` and by
+    `dnf install -y github-cli`, and it says nothing about the second package the sync path needs.
+    """
+    text = (DEPLOY / "Containerfile").read_text()
+    return {
+        package
+        for line in re.findall(r"dnf install -y ([^\n&|]+)", text)
+        for package in line.split()
+        if not package.startswith("-")
+    }
+
+
+def test_image_installs_the_binaries_the_knowledge_layer_shells_out_to() -> None:
+    """Both directions of the knowledge layer are shell-outs, and both were not equally supplied.
+
+    `git` was installed and asserted from the start — the PR-gate pushes with it. `rsync` was
+    neither: `knowledge-sync.sh` publishes the read replica with it and fell back to
+    `rm -rf "${publish_dir}"/*` when the call failed, with stderr discarded — so a package that was
+    never installed became a silent, recurring deletion of the tree the front door reads live.
+    """
+    assert {"git", "rsync"} <= _dnf_installed_packages()
+
+
+def test_the_sync_never_deletes_what_it_is_about_to_replace() -> None:
+    """The publish step must fail loudly rather than empty the directory the app is reading.
+
+    Guarding the *shape* and not just the missing package: reintroducing any `rm -rf` of the publish
+    directory reintroduces the outage even with rsync present, because the destructive branch is
+    reachable on any rsync failure (a dead remote, a full disk, a permission change).
+    """
+    script = (DEPLOY / "knowledge-sync.sh").read_text()
+    destructive = [
+        line
+        for line in script.splitlines()
+        if "rm -rf" in line and "publish_dir" in line and not line.lstrip().startswith("#")
+    ]
+    assert not destructive, f"knowledge-sync.sh must never rm -rf the published tree: {destructive}"
+
+    publish = script.split("Publish into the directory")[1]
+    assert "command -v rsync" in publish, "a missing rsync must be detected, not swallowed"
+    assert "rsync -a --delete" in publish and "2>/dev/null" not in publish.split("rsync -a")[1], (
+        "rsync must run with its stderr visible, or a missing binary looks like a transfer error"
+    )
 
 
 def test_the_image_carries_the_revision_it_was_built_from() -> None:

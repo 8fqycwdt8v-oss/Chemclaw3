@@ -28,6 +28,12 @@ Three rules, each deliberately narrow so the check stays true rather than noisy:
    false positive — an argument name inside a call — which the pattern now excludes.
 3. A skill must not direct the agent at a `*Workflow` class. The agent cannot invoke a workflow;
    it can only call a tool. Naming one is always either a dangling pointer or a missing tool.
+4. Every knowledge-graph note *type* the prose names must be in `KNOWN_NOTE_TYPES`. Rules 1-3 cover
+   the capability the agent invokes; this covers the capability it *writes into*, which had the
+   same defect and no checker. Two skills told the agent to write `protocol` and `experiment-batch`
+   notes; neither type existed, so `kg-validate` would have failed the PR — except nothing opens
+   that PR, so the proposal died on a branch and the contradiction was visible from neither end.
+   A named type that does not exist is exactly rule 1's defect one layer down.
 
 Run via `make prose-validate`; gated in CI beside `kg-validate` and `skill-validate`.
 """
@@ -39,6 +45,7 @@ from pathlib import Path
 from chemclaw.agent.chemclaw_agent import _INSTRUCTIONS, available_tool_names
 from chemclaw.connectors.registry import skills_dirs as connector_skills_dirs
 from chemclaw.core.config import settings
+from chemclaw.kg.note import KNOWN_NOTE_TYPES
 
 # Symbols a skill may legitimately name in call form that are not agent tools: library/graph
 # internals a skill explains conceptually. Kept explicit and short — adding one is a review
@@ -58,6 +65,23 @@ _WORKFLOW = re.compile(r"`([A-Za-z][A-Za-z0-9]*Workflow)`")
 # trailing `(`, which is rule 1's pattern, so the two rules never double-report one name.
 _BARE = re.compile(r"(?<![\w`/.,(-])([a-z][a-z0-9]*(?:_[a-z0-9]+)+)(?![\w(])")
 
+# A note type named in prose, in the two forms the corpus actually uses: `type \`x\`` (how a skill
+# tells the agent what to pass) and `` `x` note `` (how it refers to one in passing). Deliberately
+# these two anchored forms rather than "every backticked kebab word" — a note type is a lowercase
+# slug, which is indistinguishable from a dozen other things a skill legitimately backticks, so an
+# unanchored pattern would be a false-positive generator. Narrow and true beats broad and noisy,
+# the same trade the `_BARE` underscore rule makes.
+_NOTE_TYPE = re.compile(r"`([a-z][a-z0-9-]*)`\s+notes?\b|\btypes?\s+`([a-z][a-z0-9-]*)`")
+
+# The third form, and the one that matters most: the parenthesised enumeration that follows a
+# `**type**` label. `knowledge-graph-write` is where the vocabulary is *taught*, so its list is the
+# one an agent copies from — and it is a hand-maintained duplicate of `KNOWN_NOTE_TYPES` that had
+# already drifted in both directions, naming two types that did not exist while omitting three that
+# did. The two forms above cannot see it because the types appear as a bare backticked list rather
+# than in a sentence. This matches the label, then the enumeration is mined for backticked slugs.
+_NOTE_TYPE_LIST = re.compile(r"\*\*types?\*\*[^(\n]{0,80}\(([^)]*)\)", re.DOTALL)
+_BACKTICKED_SLUG = re.compile(r"`([a-z][a-z0-9-]*)`")
+
 
 def referenced_tool_names(text: str) -> set[str]:
     """Every tool name `text` promises the model, in either form it can take.
@@ -69,6 +93,19 @@ def referenced_tool_names(text: str) -> set[str]:
     """
     names = set(_CALL.findall(text)) | set(_BARE.findall(text))
     return names - _ALLOWED_NON_TOOLS
+
+
+def referenced_note_types(text: str) -> set[str]:
+    """Every knowledge-graph note type `text` names, in either anchored form.
+
+    Both regex groups are collected because one alternation matches `` `x` note `` and the other
+    `` type `x` ``; a non-participating group yields `""`, which is dropped. The enumeration form
+    contributes every backticked slug inside the parenthesised list it labels.
+    """
+    named = {name for match in _NOTE_TYPE.findall(text) for name in match if name}
+    for enumeration in _NOTE_TYPE_LIST.findall(text):
+        named |= set(_BACKTICKED_SLUG.findall(enumeration))
+    return named
 
 
 def _prose_sources() -> dict[str, str]:
@@ -93,6 +130,11 @@ def check_prose_contract() -> list[str]:
             problems.append(
                 f"{origin}: directs the agent at `{workflow_name}`, which it cannot invoke — "
                 "name the tool that starts it instead"
+            )
+        for note_type in sorted(referenced_note_types(text) - KNOWN_NOTE_TYPES):
+            problems.append(
+                f"{origin}: tells the agent to write a {note_type!r} note, but that type is not in "
+                "chemclaw.kg.note.KNOWN_NOTE_TYPES — kg-validate would reject the PR it opens"
             )
     return problems
 
