@@ -6,7 +6,7 @@ Renumbered from D-154–D-157 on merge: another branch landed its own D-154/D-15
 branch merging second renumbers (`CLAUDE.md`).
 
 The review is in the session's two artifacts (a dataflow atlas and a gaps/proposals companion).
-This file is the implementation plan for every proposal it made. **W1.6, W1.7 and W2.1 are shipped; everything else is still plan only.**
+This file is the implementation plan for every proposal it made. **W1.6, W1.7, W1.8 and W2.1 are shipped; everything else is still plan only.**
 
 (The previous occupant of this file, the agentic-system review, is merged; its record lives in
 D-145/D-151/D-152/D-153 and its backlog entries.)
@@ -90,7 +90,7 @@ breaking window.
 - [x] **W1.7 Render the job feed.** — shipped (Chemclaw3_ui `claude/render-job-feed`). `jobFeed` is written by `useJobFeed` and read by nothing. Surface
       completed durable jobs in the conversation (a card in `TracePanel`, or a toast). This switches
       on an entire finished backend subsystem.
-- [ ] **W1.8 Add `capability_degraded` and `tool_failed`** to `shared/events.ts` (type union +
+- [x] **W1.8 Add `capability_degraded` and `tool_failed`** — shipped (Chemclaw3_ui #6; `tool_result` still waits on W1.2). to `shared/events.ts` (type union +
       `EVENT_TYPES` + `normalizeEvent`) and render them — degradation must visibly qualify the
       answer, not vanish. Add `tool_result` in the same pass once W1.2 lands.
 - [ ] **W1.9 Proxy and use the plan-approval routes.** Whitelist `GET /sessions/{id}/plan` and
