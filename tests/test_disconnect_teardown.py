@@ -282,3 +282,41 @@ def test_the_session_accepts_a_new_turn_immediately_after_a_disconnect() -> None
             assert status == 200
 
     asyncio.run(_drive())
+
+
+# --- the plan gate must not put an `await` in the teardown path (review of D-167) --------------
+
+
+def test_a_disconnected_turn_still_resets_every_ambient_context_var() -> None:
+    """`run_turn`'s `finally` must stay synchronous, or a disconnect leaks the turn's identity.
+
+    D-167 added approval-consumption to the end of a turn, and the obvious home for it — the
+    `finally` — is wrong here. Production reaches teardown by *cancellation* rather than
+    `aclose()` (D-130), and an `await` in that block re-raises the cancellation on the spot: every
+    step after it is skipped, including `end_turn` and the five `reset_current_*` calls. The next
+    turn on the worker would then run under the disconnected user's ambient identity, which is a
+    worse defect than the one the consumption fixes.
+
+    Asserted on the *source* rather than by driving a disconnect, because the failure is a
+    property of the block: any future `await` added there reintroduces it, whatever that await
+    happens to do.
+    """
+    import ast
+    from pathlib import Path
+
+    source = (
+        Path(__file__).resolve().parents[1] / "src" / "chemclaw" / "api" / "runner.py"
+    ).read_text()
+    run_turn = next(
+        node
+        for node in ast.walk(ast.parse(source))
+        if isinstance(node, ast.AsyncFunctionDef) and node.name == "run_turn"
+    )
+    finalizer = next(
+        node for node in ast.walk(run_turn) if isinstance(node, ast.Try) and node.finalbody
+    )
+    awaits = [n for stmt in finalizer.finalbody for n in ast.walk(stmt) if isinstance(n, ast.Await)]
+    assert not awaits, (
+        f"run_turn's finally block awaits ({len(awaits)} found); on the cancellation path that "
+        "skips the context-var resets below it and leaks the turn's ambient identity"
+    )

@@ -50,10 +50,27 @@ plan identity never changed, the approval never lapsed, and `compute_xtb_energy`
 authorization given for a hazard-screening plan. A plan-shaped identity cannot detect this, because
 the plan genuinely has not changed. What changed is the request.
 
-So an approval is **spent by the turn it authorizes**. `run_turn`'s teardown calls
-`consume_turn_approval`; the harness loop runs a plan to completion inside one `agent.run`, which is
-exactly the scope of "execute the approved plan". The next user message is a new request and needs
-its own decision. Re-approving an unchanged plan re-arms it — a person saying "yes, again".
+So an approval is **spent by the turn it authorizes**. The harness loop runs a plan to completion
+inside one `agent.run`, which is exactly the scope of "execute the approved plan". The next user
+message is a new request and needs its own decision. Re-approving an unchanged plan re-arms it — a
+person saying "yes, again".
+
+`run_turn` spends it on the two paths that can safely `await`: after the answer, and after a handled
+failure (the tools ran, so the authorization was used). **Not in the `finally`**, which is where it
+first went and where it was wrong: that block also runs on the disconnect path, which production
+reaches by cancellation rather than `aclose()` (D-130), and an `await` there re-raises the
+cancellation immediately — skipping the budget booking, the turn metrics, `end_turn`, and all five
+context-var resets. Leaking a disconnected turn's ambient identity into the next turn on that worker
+is a worse defect than the one being fixed. The disconnect path therefore does not spend the
+approval at all, which is right on its own terms: that path rolls `session.state` back to its
+pre-turn snapshot, and the consumed marker lives there, so a turn that was undone has not used its
+authorization. `tests/test_disconnect_teardown.py` asserts the block stays `await`-free.
+
+Both the attachment of the gate and the spending of the approval go through one predicate,
+`gate_applies`. They were two reads of two different things — `build_agent` resolved autonomy from
+the *profile*, the runner from `settings` — which meant a profile asking for `plan_only` under a
+global `execute` got a gate whose approval was never spent. One decision would then have authorized
+every later turn: DARK-1 again, for exactly the sessions a deployment had narrowed on purpose.
 
 Consuming also ends execute mode, and `GET /sessions/{id}/plan` reports the **effective** approval
 rather than the stored row. A surface that says `approved` for a plan whose every state-changing

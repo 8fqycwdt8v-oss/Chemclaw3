@@ -50,7 +50,11 @@ from chemclaw.agent import subscriptions as _subscriptions  # noqa: F401
 from chemclaw.agent.audit import AuditSink, make_audit_middleware
 from chemclaw.agent.harness_mode import PlanApprovalModeProvider
 from chemclaw.agent.llm_provider import build_chat_client
-from chemclaw.agent.plan_gate import approved_todos_remaining, enforce_plan_approval
+from chemclaw.agent.plan_gate import (
+    approved_todos_remaining,
+    enforce_plan_approval,
+    gate_applies,
+)
 from chemclaw.agent.profiles import AgentProfile, get_profile
 from chemclaw.agent.skill_access import EnabledSkillsSource, RoleScopedSkillsSource
 from chemclaw.agent.tool_authz import (
@@ -259,7 +263,7 @@ def build_agent(
     # plan, and under `harness_autonomy="execute"` the deployment has said it does not want an
     # approval-first posture, so imposing one would refuse every write on a path nothing can
     # approve. Inserted before `announce_tool_failures` to keep that one innermost.
-    if harness_enabled and _resolved_autonomy(prof) == "plan_only":
+    if gate_applies(prof):
         middleware.insert(-1, enforce_plan_approval)
     # Default generation params from config (F0.3), applied to every turn unless a run overrides
     # them — so temperature/length are a deployment setting, not a per-call literal.
