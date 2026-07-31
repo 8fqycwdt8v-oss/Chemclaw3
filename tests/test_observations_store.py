@@ -55,10 +55,36 @@ def test_a_second_sighting_accumulates_support_rather_than_restating_it() -> Non
         await store.record([_finding(evidence_note_ids=["reaction-r2"], projects_seen=["beta"])])
 
         found = await store.open_observations()
-        assert len(found) == 1  # one row, not two — the id is derived from content
+        assert len(found) == 1  # one row, not two — the id is the scope
         assert found[0].evidence_note_ids == ["reaction-r1", "reaction-r2"]
         assert found[0].projects_seen == ["alpha", "beta"]
         assert found[0].support == 2
+
+    asyncio.run(_run())
+
+
+def test_the_statement_follows_the_evidence_it_accumulated() -> None:
+    """A row backed by two projects must not still read as though it were backed by one.
+
+    The statement is the mutable part now that identity is the scope, so the upsert refreshes it.
+    Keeping the first run's wording would leave the tier saying one thing and its own evidence
+    column saying another — and the statement is what a reviewer reads on a promotion PR.
+    """
+
+    async def _run() -> None:
+        await _clean_db_or_skip()
+        await store.record([_finding("seen in 1 project")])
+        await store.record(
+            [
+                _finding(
+                    "seen in 2 projects", evidence_note_ids=["reaction-r2"], projects_seen=["beta"]
+                )
+            ]
+        )
+
+        found = await store.open_observations()
+        assert len(found) == 1
+        assert found[0].statement == "seen in 2 projects"
 
     asyncio.run(_run())
 

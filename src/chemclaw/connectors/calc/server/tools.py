@@ -347,7 +347,12 @@ async def fetch_artifact(artifact_ref: str, max_chars: int = 0) -> ArtifactConte
             f"{artifact_ref!r} is binary ({ref.media_type}, {ref.byte_size} bytes), not text. "
             "It is stored to seed a further calculation, not to be read."
         ) from exc
-    limit = min(max_chars or settings.calc_artifact_max_chars, settings.calc_artifact_max_chars)
+    # `max(1, ...)` because a negative argument would otherwise slice from the *end*
+    # (`text[:-5]` is all but the last five characters) and report itself as truncated — a
+    # near-complete read dressed as a bounded one, which is the reading this tool least affords.
+    limit = max(
+        1, min(max_chars or settings.calc_artifact_max_chars, settings.calc_artifact_max_chars)
+    )
     return ArtifactContent(
         artifact_ref=ref.as_str(),
         name=ref.name,

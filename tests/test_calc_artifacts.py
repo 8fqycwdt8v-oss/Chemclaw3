@@ -130,6 +130,24 @@ def test_a_smaller_read_is_honoured_and_a_larger_one_clamped(
     asyncio.run(_run())
 
 
+def test_a_negative_read_size_does_not_slice_from_the_wrong_end(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`text[:-5]` is all but the last five characters — a near-complete read reported as bounded.
+
+    The clamp is not defensive tidiness: `max_chars` arrives from a model, and this is the one
+    argument whose misuse produces content that looks right and is not what was asked for.
+    """
+
+    async def _run() -> None:
+        _use(monkeypatch, await _populated())
+        content = await tools.fetch_artifact(f"{_CALC_KEY}#xtbopt.xyz", max_chars=-5)
+        assert len(content.text) == 1
+        assert content.truncated is True
+
+    asyncio.run(_run())
+
+
 def test_a_missing_artifact_names_what_is_stored_instead(monkeypatch: pytest.MonkeyPatch) -> None:
     """Eviction is real, so "gone" must be distinguishable from "you asked for the wrong name"."""
 

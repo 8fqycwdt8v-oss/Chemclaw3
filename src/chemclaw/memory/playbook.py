@@ -64,17 +64,24 @@ def find_playbook_candidates(
     return candidates
 
 
-def playbook_note(note_id: str, summary: str, evidence_reaction_ids: list[str]) -> Note:
+def playbook_note(note_id: str, summary: str, evidence_note_ids: list[str]) -> Note:
     """Build an agent `playbook` note citing its evidence; reject one with no citations.
 
     `note_id` is the full note id (e.g. from `chemclaw.memory.ids.stable_id("playbook", ...)`).
     `summary` is the distilled rule (from the `playbook-distillation` skill); every playbook
-    must cite the reactions that evidence it via `[[reaction-<id>]]` wikilinks, so a reviewer
-    (a process chemist) can trace the rule to real experiments before approving the merge.
+    must cite the notes that evidence it via `[[wikilinks]]`, so a reviewer (a process chemist)
+    can trace the rule to real experiments before approving the merge.
+
+    `evidence_note_ids` are **full note ids**, cited verbatim. They used to be bare reaction ids
+    that this function prefixed with `reaction-`, which quietly required every caller's evidence to
+    be a reaction: the observations tier promotes findings whose evidence includes an `interaction`
+    note, and stripping-then-re-adding the prefix turned `interaction-42` into a link to
+    `reaction-interaction-42` — a dangling citation that fails `kg-validate` on the very PR the
+    promotion opens. A function that cites what it is given cannot make that mistake.
     """
-    if not evidence_reaction_ids:
+    if not evidence_note_ids:
         raise PlaybookError(f"playbook {note_id!r} has no evidence references")
-    citations = "\n".join(f"- [[reaction-{rid}]]" for rid in evidence_reaction_ids)
+    citations = "\n".join(f"- [[{note_id}]]" for note_id in evidence_note_ids)
     body = f"{summary}\n\nEvidence:\n{citations}\n"
     return Note(
         id=note_id,

@@ -12,6 +12,8 @@ into a playbook note, which still passes the same PR-gate as everything else.
 
 Two rules make that safe, and both are enforced rather than documented:
 
+- **An observation's identity is its scope**, so a finding that grows updates one row instead of
+  minting a near-duplicate every time the corpus does. See `with_id`.
 - **Support is `len(evidence_note_ids)`**, not a counter. A counter can be incremented by something
   that is not a merged note; a derived count cannot. Migration `025` additionally forbids an
   observation id from ever appearing in that column, because the dangerous failure is the agent
@@ -53,6 +55,9 @@ _UPSERT = """
 INSERT INTO observations (id, statement, scope, evidence_note_ids, projects_seen, origin)
 VALUES (%(id)s, %(statement)s, %(scope)s, %(evidence)s, %(projects)s, %(origin)s)
 ON CONFLICT (id) DO UPDATE SET
+    -- The statement restates what the accumulated evidence shows, so it is refreshed rather than
+    -- kept: a row whose evidence says three projects must not still read "two projects".
+    statement = EXCLUDED.statement,
     evidence_note_ids = (
         SELECT array_agg(DISTINCT e ORDER BY e)
           FROM unnest(observations.evidence_note_ids || EXCLUDED.evidence_note_ids) AS e
@@ -134,12 +139,22 @@ class Observation(BaseModel):
         return len(self.evidence_note_ids)
 
     def with_id(self) -> "Observation":
-        """The same observation carrying its content-derived id.
+        """The same observation carrying its scope-derived id.
 
-        Derived from scope + statement so re-mining the same finding lands on the same row and
-        accumulates support, rather than minting a near-identical row every night.
+        **Scope only, never the statement.** The statement names what the evidence currently shows
+        — "run in 2 projects … (2 runs)" — so it changes the moment a cluster gains a member, which
+        is routine under periodic ELN sync. Hashing it would mint a *new* row for every growth
+        step: support would never accumulate, `first_seen` would reset, and the superseded row
+        would sit open for the whole retirement window contradicting its own successor in
+        `recall_observations`. That is exactly the failure `memory/ids.py` documents for note ids,
+        and the fix is the same one — anchor on something stable.
+
+        Scope is that anchor by construction: `transformation:<smallest member id>` for a corpus
+        cluster (stable as the cluster grows, since clusters are disjoint partitions) and
+        `interaction:<note id>` for an interaction. The two miners cannot collide, because their
+        scopes carry different prefixes.
         """
-        digest = stable_hash({"scope": self.scope, "statement": self.statement}, chars=12)
+        digest = stable_hash({"scope": self.scope}, chars=12)
         return self.model_copy(update={"id": f"observation-{digest}"})
 
 

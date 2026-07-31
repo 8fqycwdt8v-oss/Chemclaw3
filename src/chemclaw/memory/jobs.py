@@ -47,7 +47,7 @@ def build_playbook_notes(reactions: list[OrdReaction]) -> list[Note]:
             playbook_note(
                 stable_id("playbook", candidate.reaction_ids),
                 _summary(candidate, by_id),
-                candidate.reaction_ids,
+                [f"reaction-{rid}" for rid in candidate.reaction_ids],
             )
             for candidate in find_playbook_candidates(reactions)
         ]

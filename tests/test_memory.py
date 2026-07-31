@@ -290,10 +290,17 @@ def test_degenerate_reaction_does_not_abort_distillation() -> None:
 
 def test_playbook_note_requires_evidence() -> None:
     """A playbook with citations builds; one without is rejected (Belegverweise verpflichtend)."""
-    note = playbook_note("playbook-ester", "Fischer esterification recurs.", ["x", "y"])
+    note = playbook_note(
+        "playbook-ester", "Fischer esterification recurs.", ["reaction-x", "reaction-y"]
+    )
     assert note.type == "playbook"
     assert note.id == "playbook-ester"  # the full note id is passed in, not re-prefixed
-    assert note.outgoing_links() == ["reaction-x", "reaction-y"]  # mandatory evidence
+    # Evidence is cited verbatim. It used to be bare reaction ids that this function prefixed,
+    # which quietly required every caller's evidence to be a reaction — and the observations tier
+    # promotes findings evidenced partly by an `interaction` note, which the prefixing turned into
+    # a link to a note that cannot exist.
+    assert note.outgoing_links() == ["reaction-x", "reaction-y"]
+    assert playbook_note("p", "s", ["interaction-42"]).outgoing_links() == ["interaction-42"]
     with pytest.raises(PlaybookError, match="no evidence"):
         playbook_note("playbook-empty", "no evidence here", [])
 
