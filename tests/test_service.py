@@ -252,20 +252,109 @@ def test_a_launched_job_reaches_the_browser_as_an_sse_event() -> None:
     assert events[0]["job_id"] == "qm-sse"
 
 
-def test_turn_is_shed_with_503_at_capacity(monkeypatch) -> None:  # type: ignore[no-untyped-def]
-    """A turn that cannot get an admission permit within the timeout is shed with 503 (AG-15)."""
+def _stream_events(  # type: ignore[no-untyped-def]
+    client, session_id: str, message: str = "hi"
+) -> list[dict[str, Any]]:
+    """POST a turn and collect its SSE payloads, draining the stream so the generator finishes."""
+    events: list[dict[str, Any]] = []
+    with client.stream(
+        "POST", f"/sessions/{session_id}/messages", json={"message": message}
+    ) as res:
+        assert res.status_code == 200
+        for line in res.iter_lines():
+            if line.startswith("data:"):
+                events.append(json.loads(line[len("data:") :].strip()))
+    return events
+
+
+def test_a_waiting_turn_says_so_and_is_shed_on_the_stream(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    """At capacity the turn reports `queued`, then ends with an error event — not an HTTP 503.
+
+    The admission wait used to happen before the response existed, so a client saw nothing at all
+    for up to `service_turn_admission_timeout_seconds` and then a bare 503: a busy front door and
+    a dead one were indistinguishable for the whole of that window (D-164). Now the stream opens
+    first and the wait is on it.
+    """
     import asyncio
 
     from chemclaw.core.config import settings
 
     monkeypatch.setattr(settings, "service_turn_admission_timeout_seconds", 0.05)
     app = create_app(agent_factory=lambda _profile: _FakeAgent())
-    # Zero permits → every turn is shed after the admission timeout (deterministic, no concurrency).
+    # Zero permits → the turn can only wait and then be shed (deterministic, no concurrency).
     app.state.turn_semaphore = asyncio.Semaphore(0)
     with TestClient(app) as client:
         session_id = client.post("/sessions").json()["session_id"]
-        res = client.post(f"/sessions/{session_id}/messages", json={"message": "hi"})
-        assert res.status_code == 503
+        events = _stream_events(client, session_id)
+
+    assert [e["type"] for e in events] == ["queued", "error"]
+    assert events[-1]["message"] == "server at capacity; retry shortly"
+    # And the shed turn left nothing behind: the session takes another turn immediately.
+    assert session_id not in app.state.active_turns
+
+
+def test_an_uncontended_turn_emits_no_queued_event() -> None:
+    """`queued` is a report of an actual wait, so the common case must not carry one.
+
+    An event on every turn would be noise a surface has to render and then immediately un-render,
+    and it would tell an operator the front door is contended when it is idle.
+    """
+    with _client(_FakeAgent()) as client:
+        session_id = client.post("/sessions").json()["session_id"]
+        events = _stream_events(client, session_id)
+
+    assert "queued" not in [e["type"] for e in events]
+    assert events[-1]["type"] == "answer"
+
+
+def test_a_queued_turn_runs_once_a_permit_frees(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    """Waiting is not failing: a turn that queues still answers when capacity returns.
+
+    The half a shed-only test cannot see. Moving admission inside the generator put the acquire
+    on the same code path as the run, and a mistake there (releasing a permit never taken, or
+    returning after the wait) would end the stream instead of continuing into the turn.
+    """
+    import httpx
+
+    from chemclaw.core.config import settings
+
+    monkeypatch.setattr(settings, "service_turn_admission_timeout_seconds", 30.0)
+    queued_before = METRICS.value("chemclaw_turns_queued_total")
+
+    async def _run() -> None:
+        app = create_app(agent_factory=lambda _profile: _FakeAgent())
+        semaphore = asyncio.Semaphore(0)  # nothing free yet
+        app.state.turn_semaphore = semaphore
+
+        async def _free_a_permit_once_the_turn_waits() -> None:
+            # Driven off the counter rather than a sleep, so the release lands *after* the turn
+            # has parked — the moment this test is about. `httpx.ASGITransport` buffers the whole
+            # response, so reacting to the `queued` line on the wire is not available here.
+            async with asyncio.timeout(5):
+                while METRICS.value("chemclaw_turns_queued_total") == queued_before:
+                    await asyncio.sleep(0.01)
+            semaphore.release()
+
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+            session_id = (await client.post("/sessions")).json()["session_id"]
+            releaser = asyncio.create_task(_free_a_permit_once_the_turn_waits())
+            res = await client.post(f"/sessions/{session_id}/messages", json={"message": "hi"})
+            await releaser
+            assert res.status_code == 200  # the stream opened *before* a permit existed
+            events = [
+                json.loads(line[len("data:") :].strip())
+                for line in res.text.splitlines()
+                if line.startswith("data:")
+            ]
+        types = [e["type"] for e in events]
+        assert types[0] == "queued"  # the wait is reported, and reported first
+        assert types[-1] == "answer"  # ...and the turn then runs to a real answer
+        assert "error" not in types
+        # The permit taken after the wait is handed back, not leaked.
+        assert semaphore._value == 1
+
+    asyncio.run(_run())
 
 
 def test_permit_is_released_after_each_turn(monkeypatch) -> None:  # type: ignore[no-untyped-def]

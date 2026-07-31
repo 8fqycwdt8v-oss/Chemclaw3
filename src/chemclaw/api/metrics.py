@@ -52,7 +52,18 @@ def _escape(value: str) -> str:
 _COUNTERS: dict[str, str] = {
     "chemclaw_turns_started_total": "Turns admitted and started.",
     "chemclaw_turns_failed_total": "Turns that ended in an error event.",
-    "chemclaw_turns_shed_total": "Turns rejected with 503 because no admission permit was free.",
+    # The two halves of a contended front door, and they mean different things: queueing is the
+    # system absorbing a burst, shedding is it declining one. A rising queue rate with a flat shed
+    # rate is capacity being used; both rising together is capacity being exceeded. Since D-164
+    # both are reported on the turn's own stream, so neither has an HTTP status left to be counted
+    # by at the load balancer.
+    "chemclaw_turns_queued_total": (
+        "Turns that had to wait for an admission permit (a `queued` event was streamed)."
+    ),
+    "chemclaw_turns_shed_total": (
+        "Turns ended by the admission timeout because no permit ever freed (D-164: an error "
+        "event on an open stream, previously an HTTP 503)."
+    ),
     "chemclaw_turns_refused_budget_total": "Turns refused with 429 by the turn/token budget.",
     "chemclaw_turns_conflict_total": "Turns rejected with 409 (a turn was already running).",
     "chemclaw_turn_timeouts_total": "Turns cancelled by the wall-clock turn timeout.",

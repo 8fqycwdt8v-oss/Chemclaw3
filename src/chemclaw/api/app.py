@@ -56,7 +56,7 @@ from chemclaw.agent.profiles import get_profile
 from chemclaw.agent.session_events import stream_new_events
 from chemclaw.api.auth import Principal, require_principal
 from chemclaw.api.budget import BudgetExceeded, BudgetTracker
-from chemclaw.api.events import ErrorEvent, JobCompletedEvent
+from chemclaw.api.events import ErrorEvent, JobCompletedEvent, QueuedEvent
 from chemclaw.api.metrics import CONTENT_TYPE, METRICS
 from chemclaw.api.runner import run_turn
 from chemclaw.cli.schedules import ScheduleHealth, describe_schedules
@@ -192,6 +192,12 @@ _WORKER_ID = uuid.uuid4().hex
 # config knob: it is a property of how the lease is maintained, not something a deployment tunes
 # independently of `service_turn_claim_lease_seconds`.
 _CLAIM_REFRESHES_PER_LEASE = 3
+
+# What a client is told when the process cannot take the work right now. One literal because it is
+# said in two shapes — an error *event* on an already-open turn stream (D-164) and a 503 body from
+# `_database_unavailable` — and the client behaviour it asks for is the same either way: back off
+# and retry. A browser has no business learning which piece of infrastructure was full.
+_AT_CAPACITY = "server at capacity; retry shortly"
 
 
 async def _hold_turn_claim(claims: SessionTurns, session_id: str, lease_seconds: float) -> None:
@@ -802,11 +808,15 @@ def create_app(
         """Run one turn for the session and stream its events as SSE.
 
         Admission-controlled (AG-15): the turn takes one of the process's turn permits for its
-        whole streamed run, and is shed with 503 if none frees within the admission timeout — so
-        a burst of concurrent turns cannot pile onto the shared internal LLM endpoint. The permit
-        hold is wall-clock bounded (`service_turn_timeout_seconds`): a hung model stream or a
-        slow-reading client cannot pin a permit forever — on expiry the client gets one error
-        event and the permit is released.
+        whole streamed run, so a burst of concurrent turns cannot pile onto the shared internal
+        LLM endpoint. That permit is taken **inside the stream** (D-164): a turn that has to wait
+        reports the wait as a `queued` event and, if no permit frees within the admission timeout,
+        ends with an error event on an open stream rather than an HTTP 503. The wait was
+        previously invisible — up to `service_turn_admission_timeout_seconds` with no response at
+        all — which is the one thing a busy front door and a dead one must not have in common.
+        The permit hold is wall-clock bounded (`service_turn_timeout_seconds`): a hung model
+        stream or a slow-reading client cannot pin a permit forever — on expiry the client gets
+        one error event and the permit is released.
 
         **One turn at a time per session**, claimed twice. The in-process `active_turns` set
         answers a double-submit that lands on this same process with no I/O and no race window
@@ -838,7 +848,33 @@ def create_app(
                 if claims is None
                 else asyncio.create_task(_hold_turn_claim(claims, session_id, lease))
             )
+            permit = False
             try:
+                # Admission, inside the stream (D-164). `locked()` is the whole reason the common
+                # case costs nothing: it is false exactly when `acquire()` will return without
+                # suspending, and there is no await between the test and the acquire for another
+                # turn to slip through, so an uncontended turn takes its permit and emits no
+                # `queued` event at all.
+                if semaphore.locked():
+                    METRICS.increment("chemclaw_turns_queued_total")
+                    queued_event = QueuedEvent()
+                    yield {"event": queued_event.type, "data": queued_event.model_dump_json()}
+                    try:
+                        await asyncio.wait_for(
+                            semaphore.acquire(),
+                            timeout=settings.service_turn_admission_timeout_seconds,
+                        )
+                    except TimeoutError:
+                        # Shedding is the admission control working as designed — and was
+                        # completely invisible from outside until this counter existed.
+                        METRICS.increment("chemclaw_turns_shed_total")
+                        shed = ErrorEvent(message=_AT_CAPACITY)
+                        yield {"event": shed.type, "data": shed.model_dump_json()}
+                        return
+                else:
+                    await semaphore.acquire()
+                permit = True
+                METRICS.increment("chemclaw_turns_started_total")
                 try:
                     # The deadline covers the whole streamed run *including* client consumption:
                     # the generator is suspended inside this scope at each `yield`, so a stalled
@@ -892,12 +928,12 @@ def create_app(
             finally:
                 if heartbeat is not None:
                     heartbeat.cancel()
-                semaphore.release()
+                if permit:
+                    semaphore.release()
                 active_turns.discard(session_id)
                 if claims is not None:
                     await _release_turn_claim(claims, session_id)
 
-        acquired = False
         claimed = False
         handed_off = False
         try:
@@ -909,29 +945,16 @@ def create_app(
             except BudgetExceeded as exc:
                 METRICS.increment("chemclaw_turns_refused_budget_total")
                 raise HTTPException(status_code=429, detail=str(exc)) from exc
-            # Claimed before the permit rather than after, so a turn that is already running
-            # elsewhere is refused without first occupying one of this process's permits for the
-            # duration of the admission wait. A failed checkout raises `ConnectionError` and is
-            # shed as a 503 by `_database_unavailable` — the guard fails closed, and retryably.
+            # Claimed here rather than inside the stream because it is a *refusal*, not a wait:
+            # a turn already running elsewhere must be told 409 by a status code, which only
+            # exists before the response is handed off. A failed checkout raises `ConnectionError`
+            # and is shed as a 503 by `_database_unavailable` — the guard fails closed, retryably.
             if claims is not None and not await claims.claim(session_id, _WORKER_ID, lease):
                 METRICS.increment("chemclaw_turns_conflict_total")
                 raise HTTPException(
                     status_code=409, detail="a turn is already running for this session"
                 )
             claimed = claims is not None
-            try:
-                await asyncio.wait_for(
-                    semaphore.acquire(), timeout=settings.service_turn_admission_timeout_seconds
-                )
-            except TimeoutError as exc:
-                # Shedding is the admission control working as designed — and was completely
-                # invisible from outside until this counter existed.
-                METRICS.increment("chemclaw_turns_shed_total")
-                raise HTTPException(
-                    status_code=503, detail="server at capacity; retry shortly"
-                ) from exc
-            acquired = True
-            METRICS.increment("chemclaw_turns_started_total")
             response = EventSourceResponse(_turn_events(), ping=settings.service_sse_ping_seconds)
             handed_off = True
             return response
@@ -942,8 +965,6 @@ def create_app(
             # off, this owns the cleanup; afterwards the generator's own finally does.
             if not handed_off:
                 active_turns.discard(session_id)
-                if acquired:
-                    semaphore.release()
                 if claimed and claims is not None:
                     await _release_turn_claim(claims, session_id)
 
@@ -1243,14 +1264,14 @@ async def _database_unavailable(request: Request, exc: Exception) -> Response:
     connection that was *available* and could not be handed to them, which is the same event-loop
     starvation that used to show up as a connect timeout.
 
-    Answered with the admission path's wording on purpose. "Server at capacity; retry shortly" is
-    what a shed turn already says, the client behaviour is identical (back off and retry), and a
-    browser has no business learning which piece of infrastructure is behind it — while a
-    misconfigured DSN still names itself loudly in the log line below.
+    Answered with the admission path's wording on purpose (`_AT_CAPACITY`): it is what a shed turn
+    already says, the client behaviour is identical (back off and retry), and a browser has no
+    business learning which piece of infrastructure is behind it — while a misconfigured DSN still
+    names itself loudly in the log line below.
     """
     METRICS.increment("chemclaw_db_unavailable_total")
     logger.warning("shedding %s %s: %s", request.method, request.url.path, exc)
-    return JSONResponse(status_code=503, content={"detail": "server at capacity; retry shortly"})
+    return JSONResponse(status_code=503, content={"detail": _AT_CAPACITY})
 
 
 def _refuse_unauthenticated_exposure() -> None:
