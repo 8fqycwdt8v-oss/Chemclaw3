@@ -89,12 +89,20 @@ def embed_texts(texts: list[str]) -> list[list[float]]:
         unique = list(dict.fromkeys(missing))
         for text, vector in zip(unique, _embed_uncached(unique), strict=True):
             _CACHE[_cache_key(text)] = vector
-        # FIFO, oldest first. Not LRU: keeping a recency order costs a move per *hit*, on the hot
-        # path, to better serve a workload — repeated identical queries — that a FIFO of this size
-        # already serves. A cheaper policy that is right for the actual access pattern.
-        while len(_CACHE) > size:
-            del _CACHE[next(iter(_CACHE))]
-    return [_CACHE[key] for key in keys]
+    # Read the batch out *before* trimming. The trim is a bound on the cache, not on the answer,
+    # and it deletes oldest-first from the whole dict — including keys this very call just inserted
+    # or is still holding. Trimming first therefore raised `KeyError` on the line below whenever the
+    # batch was larger than `embedding_cache_size`, or when it named a cached text old enough to be
+    # evicted by its own insert. `reindex_notes` embeds one text per note in a single batch, so the
+    # note-index rebuild failed outright — with a bare `KeyError` naming nothing — for any corpus
+    # above 2048 notes, and hybrid retrieval depends on that index.
+    vectors = [_CACHE[key] for key in keys]
+    # FIFO, oldest first. Not LRU: keeping a recency order costs a move per *hit*, on the hot
+    # path, to better serve a workload — repeated identical queries — that a FIFO of this size
+    # already serves. A cheaper policy that is right for the actual access pattern.
+    while len(_CACHE) > size:
+        del _CACHE[next(iter(_CACHE))]
+    return vectors
 
 
 def _embed_uncached(texts: list[str]) -> list[list[float]]:

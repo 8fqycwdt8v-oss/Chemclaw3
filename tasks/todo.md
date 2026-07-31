@@ -1,7 +1,9 @@
 # Task: close the gaps found by the dataflow review — persistence, reachability, visibility, knowledge tiers
 
 Requested 2026-07-31. Branch: `claude/chemclaw-dataflows-architecture-gi467d`.
-ADRs: **D-154**, **D-155**, **D-156**, **D-157** (reserved in `docs/decisions/README.md`).
+ADRs: **D-156** (written), **D-157**, **D-158**, **D-159** (reserved in `docs/decisions/README.md`).
+Renumbered from D-154–D-157 on merge: another branch landed its own D-154/D-155 first, and the
+branch merging second renumbers (`CLAUDE.md`).
 
 The review is in the session's two artifacts (a dataflow atlas and a gaps/proposals companion).
 This file is the implementation plan for every proposal it made. **W1.6, W1.7 and W2.1 are shipped; everything else is still plan only.**
@@ -45,7 +47,7 @@ last mile. Two further UI findings, both new:
 
 ---
 
-## W1 — Make the work visible (ADR **D-155**)
+## W1 — Make the work visible (ADR **D-157**)
 
 The turn-event contract is shared across two repos, so it gets one ADR covering both sides. The
 UI's unknown-type allowlist makes this safely ordered: **backend first, UI second**, with no
@@ -97,12 +99,12 @@ breaking window.
 
 ---
 
-## W2 — Make computation durable and reachable (ADR **D-154**)
+## W2 — Make computation durable and reachable (ADR **D-156**)
 
 One decision: *a durable connector result is persisted in the calculation store like any other
 computation, and that store is readable.* W2.1 and W2.2 are the two halves.
 
-- [x] **W2.1 Persist the QM result.** — shipped, D-154. Constraints found while planning, all load-bearing:
+- [x] **W2.1 Persist the QM result.** — shipped, D-156. Constraints found while planning, all load-bearing:
       - The workflow is deterministic and cannot touch Postgres → persistence is a **new activity**
         on `bundle_queue("qm")`, called after `parse_qm_output`.
       - `connectors/qm/specs.py` is a **strict leaf module** (`tests/test_connector_isolation.py`
@@ -148,9 +150,9 @@ computation, and that store is readable.* W2.1 and W2.2 are the two halves.
 
 ---
 
-## W3 — Knowledge tiers (ADRs **D-156**, **D-157**)
+## W3 — Knowledge tiers (ADRs **D-158**, **D-159**)
 
-### W3.1 Provenance-aware retrieval (D-156) — prerequisite, do first
+### W3.1 Provenance-aware retrieval (D-158) — prerequisite, do first
 
 - [ ] `EvidenceChunk` carries `content`, `source_note_id`, `retriever`, `score`, `conflicts_with` —
       and **no provenance**. `created_by`, `confidence` and `source` are not in what the model sees,
@@ -165,7 +167,7 @@ computation, and that store is readable.* W2.1 and W2.2 are the two halves.
       - Teach the answer contract to qualify a claim resting on a low-confidence or agent-authored
         note.
 
-### W3.2 Cap the memory jobs (rides D-157)
+### W3.2 Cap the memory jobs (rides D-159)
 
 - [ ] The three synthesis jobs run daily, rescan the whole corpus with no cursor, and have **no cap**
       on notes produced (worst case ≈1.5 notes per corpus reaction per day, plus one retirement note
@@ -176,7 +178,7 @@ computation, and that store is readable.* W2.1 and W2.2 are the two halves.
       on the first night. Add `max_notes_per_run` with the dropped count logged explicitly — the
       repo's own "no silent caps" rule, applied to the one place with no ceiling.
 
-### W3.3 The observations tier (D-157)
+### W3.3 The observations tier (D-159)
 
 The proposal in one line: **the human gate does not disappear, it moves from every observation to
 the few worth promoting.**

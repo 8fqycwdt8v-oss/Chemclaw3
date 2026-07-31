@@ -111,6 +111,11 @@ def require_closed_shell(mol: Chem.Mol, charge: int) -> None:
     acids. Callers that *can* state a multiplicity use `chemclaw.science.calc.structure.Structure`
     instead, which validates the electron count against it rather than refusing
     every open shell — that is what makes the Fukui ions computable.
+
+    Documented limit: this catches *odd*-electron species only. An **even**-electron open shell —
+    triplet dioxygen is the canonical case — is undetectable from a SMILES, which carries no spin
+    multiplicity, so it passes here and is treated as a singlet. That is a property of the input
+    format, not of this check, and it changes only if a spin-aware input format is adopted.
     """
     electrons = sum(atom.GetAtomicNum() for atom in mol.GetAtoms()) - charge
     if electrons % 2:

@@ -23,11 +23,13 @@ see:
 Read-only; touches nothing.
 """
 
+import inspect
 import sys
 from pathlib import Path
+from typing import Any
 
-from chemclaw.connectors.jobs import build_job_tool
-from chemclaw.connectors.manifest import ConnectorManifest
+from chemclaw.connectors.jobs import _params_model, build_job_tool, resolve_precondition
+from chemclaw.connectors.manifest import ConnectorManifest, JobSpec
 from chemclaw.connectors.registry import ConnectorError, discovered, enabled, job_tools
 from chemclaw.core.config import settings
 
@@ -86,6 +88,46 @@ def _tool_surface_problems(manifest: ConnectorManifest) -> list[str]:
     ]
 
 
+def _precondition_problems(connector: str, job: JobSpec) -> list[str]:
+    """Check that a declared `precondition` can accept the params model it will be handed.
+
+    `resolve_precondition` proves the reference imports and is callable, and stops there — so
+    `connectors/bo/connector.yaml` could name `require_rounds_within_ceiling(n_rounds: int)` while
+    `connectors/jobs.py` calls `precondition(spec)` with a `CampaignSpec`. Every
+    `start_optimization_campaign` raised `TypeError` before any durable work, and nothing caught it:
+    the type is erased to `Callable[[Any], None]` so mypy cannot see it, the validator built the
+    tool without invoking it, and the only tests called the rule directly with a bare `int`.
+
+    Binding the signature catches an arity mismatch; comparing the annotation catches the shape.
+    An unannotated or `Any` parameter is accepted — the contract is stated in prose for those, and
+    a validator that demanded annotations would be inventing a rule the manifest does not make.
+    """
+    if job.precondition is None:
+        return []
+    try:
+        check = resolve_precondition(job.precondition)
+        model = _params_model(connector, job)
+    except ValueError:
+        return []  # already reported by the build above; do not say it twice
+    try:
+        signature = inspect.signature(check)
+        signature.bind(model.model_construct())
+    except TypeError as exc:
+        return [
+            f"connector {connector!r}: job {job.name!r} precondition {job.precondition!r} "
+            f"cannot be called with the job's params object: {exc}"
+        ]
+    (parameter,) = signature.parameters.values()
+    annotation = parameter.annotation
+    if annotation in (inspect.Parameter.empty, Any) or annotation is model:
+        return []
+    return [
+        f"connector {connector!r}: job {job.name!r} precondition {job.precondition!r} takes "
+        f"{getattr(annotation, '__name__', annotation)!r}, but the launcher passes it the "
+        f"validated {model.__name__!r} params object"
+    ]
+
+
 def _job_problems(manifest: ConnectorManifest) -> list[str]:
     """Build each declared job's tool, so an unresolvable `params_model` fails here (rule 4).
 
@@ -101,6 +143,7 @@ def _job_problems(manifest: ConnectorManifest) -> list[str]:
             build_job_tool(manifest.name, job)
         except ValueError as exc:
             problems.append(f"connector {manifest.name!r}: job {job.name!r} cannot be built: {exc}")
+        problems.extend(_precondition_problems(manifest.name, job))
         budget = job.inline_wait_seconds
         if budget is not None and budget >= settings.service_turn_timeout_seconds:
             problems.append(

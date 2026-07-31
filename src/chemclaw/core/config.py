@@ -217,6 +217,10 @@ class StoreSettings(BaseSettings):
     # Eviction targets blobs only; `calculation_results` is never evicted (D-011).
     artifact_store_max_bytes: int = Field(default=0, ge=0)
     artifact_evict_idle_days: int = Field(default=0, ge=0)
+    # How often the eviction sweep runs, once either bound above turns it on. A day: eviction is a
+    # cost policy, not a correctness one, and a blob that survives an extra few hours costs storage
+    # rather than accuracy.
+    artifact_eviction_schedule_minutes: float = Field(default=1440.0, gt=0)
     # How stale a blob's access stamp must be before a read bothers to refresh it. Bumping on
     # every hit would turn each read into a write on the reuse hot path; at most one write per
     # blob per window is enough for an idle-based eviction decision.
@@ -294,7 +298,7 @@ class HpcSettings(BaseSettings):
     # the artifact fetch is unauthenticated — unless the store shares the launcher's origin, in
     # which case the launcher token still applies.
     hpc_artifact_store_token: str = ""
-    # Persist a finished QM result in the shared calculation store (D-154). On by default, which
+    # Persist a finished QM result in the shared calculation store (D-156). On by default, which
     # is the *un*usual choice for a new flag here and deliberate: D-011 already says every result
     # is persisted once and never recomputed, and `qm` was the one capability not doing it — so
     # this is the bundle complying with an existing rule, not a new opt-in behaviour. The write is

@@ -27,7 +27,7 @@ from chemclaw.mcp.fpstore import (
 from chemclaw.mcp.molfp import search
 from chemclaw.mcp.molfp.fingerprint import ecfp_bitstring, molecule_definition
 from chemclaw.mcp.molfp.search import (
-    SubstructureHit,
+    MoleculeHit,
     find_similar_molecules,
     find_substructure_matches,
     record_for,
@@ -81,11 +81,14 @@ def test_find_similar_ranks_by_tanimoto() -> None:
             await store.add(record_for(cid, smiles))
 
         hits = await find_similar_molecules(store, "CCO", threshold=0.1)
-        ids = [h.id for h in hits]
-        assert ids[0] == "ethanol"  # exact match ranks first
-        assert "benzene" not in ids  # disjoint, below threshold
+        found = [h.smiles for h in hits]
+        assert found[0] == "CCO"  # exact match ranks first
+        assert "c1ccccc1" not in found  # disjoint, below threshold
         # Similarity is monotonically non-increasing down the list.
-        assert all(hits[i].similarity >= hits[i + 1].similarity for i in range(len(hits) - 1))
+        assert all(
+            (hits[i].similarity or 0.0) >= (hits[i + 1].similarity or 0.0)
+            for i in range(len(hits) - 1)
+        )
 
         # top_k truncates to the closest neighbors only.
         assert len(await find_similar_molecules(store, "CCO", top_k=2, threshold=0.1)) == 2
@@ -124,8 +127,10 @@ def test_similarity_excludes_other_fingerprint_definitions() -> None:
         await store.add(stale)
 
         hits = await find_similar_molecules(store, "CCO", threshold=0.1)
-        ids = [h.id for h in hits]
-        assert ids == ["current"]  # the stale-definition row is excluded, not ranked
+        # Both rows carry the same structure, so the exclusion shows in the count: the
+        # stale-definition row is filtered out by the store, not ranked below the current one.
+        assert len(hits) == 1
+        assert hits[0].smiles == "CCO"
 
     asyncio.run(_run())
 
@@ -143,11 +148,11 @@ def test_substructure_matches_fragment() -> None:
         ]:
             await store.add(record_for(cid, smiles))
 
-        ring = {r.id for r in await find_substructure_matches(store, "c1ccccc1")}
-        assert ring == {"aspirin", "benzene"}  # only the aromatic molecules
+        ring = {r.smiles for r in await find_substructure_matches(store, "c1ccccc1")}
+        assert ring == {"CC(=O)Oc1ccccc1C(=O)O", "c1ccccc1"}  # only the aromatic molecules
 
-        acids = {r.id for r in await find_substructure_matches(store, "C(=O)[OH]")}
-        assert acids == {"aspirin", "acetic_acid"}  # carboxylic-acid SMARTS
+        acids = {r.smiles for r in await find_substructure_matches(store, "C(=O)[OH]")}
+        assert acids == {"CC(=O)Oc1ccccc1C(=O)O", "CC(=O)O"}  # carboxylic-acid SMARTS
 
     asyncio.run(_run())
 
@@ -217,14 +222,14 @@ def test_substructure_hits_are_lean_and_capped(
     asyncio.run(_run())
 
 
-def _sleeping_scan(seconds: float) -> Callable[..., list[SubstructureHit]]:
+def _sleeping_scan(seconds: float) -> Callable[..., list[MoleculeHit]]:
     """A stand-in for the CPU-bound scan that blocks its thread for `seconds`, then matches nothing.
 
     A real pathological SMARTS would take minutes and is not reproducible across RDKit versions;
     what both tests need is only that the scan blocks a *thread*, which this reproduces exactly.
     """
 
-    def _scan(*_args: object, **_kwargs: object) -> list[SubstructureHit]:
+    def _scan(*_args: object, **_kwargs: object) -> list[MoleculeHit]:
         time.sleep(seconds)
         return []
 
@@ -340,7 +345,7 @@ def test_agent_supplied_threshold_is_clamped() -> None:
         store = InMemoryFingerprintStore()
         await store.add(record_for("ethanol", "CCO"))
         hits = await find_similar_molecules(store, "CCO", threshold=99.0)
-        assert [h.id for h in hits] == ["ethanol"]
+        assert [h.smiles for h in hits] == ["CCO"]
 
     asyncio.run(_run())
 
