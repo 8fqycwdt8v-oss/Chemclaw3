@@ -369,3 +369,37 @@ suite stay green, rather than by assuming.
 3. **Verify a coverage claim by mutation, not by reading.** Break the line, run the suite, and see
    which test fails. Every "verified to fail without the fix" claim in a review section must be one
    you actually ran — I wrote one in `tasks/todo.md` before running it, and it was wrong.
+
+## The obvious implementation fails silently (2026-07-31, dataflow plan W2–W3)
+
+Five workstream items, and **three had an "obvious" implementation that was worse than the shipped
+one in the same way**: it would have produced a silently wrong or silently empty answer rather than
+a visible failure. The pattern is worth naming because it recurred across unrelated subsystems and
+I nearly shipped it twice.
+
+- **A filter that cannot be satisfied returned `[]`.** A molecule filter on the xTB task family
+  (keyed by 3-D structure, not by molecule) would have answered "nothing found" for a question that
+  cannot be asked that way — and `find_calculations` exists to be trusted when it says nothing was
+  computed, so a chemist would have gone and recomputed hours of DFT.
+- **A cap truncated deterministic output.** `notes[:cap]` on a memory job that rescans the whole
+  corpus every night proposes the same first N forever and the tail *never*. A visible PR flood
+  traded for silently lost knowledge, with a log line as the only trace.
+- **A two-branch conditional answered every third case wrongly.** `if property_name ==
+  "solubility"` plus two ternaries meant `logd` got a confident, well-formed calibration report
+  about pKa's calculator, in pKa's unit.
+
+They are the same shape: a code path that *cannot* serve the request answers as though it had, in
+the request's own vocabulary, so nothing downstream can tell. The fix each time was to make the
+impossible case loud — refuse and name the alternative, rotate rather than truncate, raise and list
+what exists — which cost a few lines and no design complexity.
+
+**Rules:**
+
+1. **For every branch that returns an empty/default result, ask what a caller would conclude from
+   it.** If "there is none" and "you cannot ask that here" are indistinguishable in the return
+   value, they must be distinguishable in the *type* of the response: refuse one of them.
+2. **A conditional over a closed set of names is a lookup table with a bug in the `else`.** Two
+   cases is already enough — the wrongness of the third is not caught by any test that only
+   exercises the two.
+3. **Before adding a cap, ask what the input looks like on the next run.** A cap over deterministic
+   input is not a cap, it is a permanent filter.
