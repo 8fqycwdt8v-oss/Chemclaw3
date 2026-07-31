@@ -66,6 +66,24 @@ rather than their instance: `make connector-validate` now checks a precondition 
 object it will be handed, and the template launcher is exercised through the framework's own
 dispatcher instead of through our idea of it.
 
+## The tracks that needed orchestration
+
+| Check | Result |
+|---|---|
+| A proposed note reaches the PR-gate as a branch | 9 branches minted across the run |
+| An unreviewed note is **not** on the served tree | invisible before merge, as the gate intends |
+| A merged note is readable in a **later** session | read back after merge, graph cache TTL 0 |
+| ELN sync ingests and records a per-source cursor | 2 cursors, both adapters |
+| A durable job survives its worker being killed | `report-c2ed042bb6c4fa82` completed after the background worker was killed mid-job and restarted |
+| Every enabled schedule is registered | all 9 |
+| `audit-verify`, `note-reindex`, `retention`, `digest` triggered | all four **Completed** |
+| The audit hash chain verifies over the live run | 160 rows, chain intact |
+
+State left behind by the run, as evidence that the paths executed rather than returned 200:
+`audit_events` 160 · `calculation_results` 85 · `artifact_blobs` 63 · `note_index` 37 ·
+`session_messages` 356 · `sync_cursors` 2 · `plan_approvals` 1 · `predictions` 2 ·
+`subscriptions` 1 · `user_preferences` 1.
+
 ## Two corrections worth recording
 
 **A failure I reported to myself was not a failure.** The RBAC probes searched the answer text for
