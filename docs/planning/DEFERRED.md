@@ -144,7 +144,7 @@ session reattach, in-process turn/token budgets). Two narrower pieces were consc
 
 ## Backlog-assessment outcomes (2026-07-25, waves A–C)
 
-The full per-item assessment lives in `docs/planning/backlog-plan.md`; the implemented items are marked done
+The full per-item assessment lives in `docs/archive/plans/backlog-plan.md`; the implemented items are marked done
 in `docs/planning/BACKLOG.md`. Three entries here changed state, and one deferral is newly recorded:
 
 - **Substructure pattern-fingerprint prefilter** — still deferred, but the *event-loop* half of the
@@ -177,7 +177,7 @@ and the conditions-vocabulary half of the ranking problem.
 | Item | Why not now | Trigger to revisit |
 |---|---|---|
 | ~~**External literature/patent retriever** (TOOL-6)~~ | **Rejected on scope, not deferred (D-089): this system takes no external sources.** It was built against PubChem, reviewed, and removed. The old wording here — "blocked on choosing a source" — is what invited the build, so it is corrected rather than left: there is no source to choose. `tests/test_no_egress.py` enforces it, because prose in this file demonstrably did not. | Nothing. A future need for external data is a new architectural decision, not a resumption of this one |
-| ~~**File/attachment ingress** (AGT-3)~~ | **Done.** Text/CSV/TSV, then PDF/PPTX/DOCX/XLSX (D-089), each read through the format's own document model. What remains deferred is narrower and unchanged: **spectra and images**, which need OCR/vision — the gated item in `docs/planning/parity-plan.md`. A scanned PDF is refused by name for the same reason. | OCR/vision is adopted |
+| ~~**File/attachment ingress** (AGT-3)~~ | **Done.** Text/CSV/TSV, then PDF/PPTX/DOCX/XLSX (D-089), each read through the format's own document model. What remains deferred is narrower and unchanged: **spectra and images**, which need OCR/vision — the gated item in `docs/archive/plans/parity-plan.md`. A scanned PDF is refused by name for the same reason. | OCR/vision is adopted |
 | **Predicted-vs-actual calibration** (IDEA-2) | The most valuable remaining item, and genuinely sizeable: a predictions table plus a reconciliation job matching a stored prediction to the ELN result that later lands. Warrants its own design note rather than being wedged into a wave. | Taken as its own phase |
 | **Standing queries / digest** (IDEA-1) | Needs a subscription store plus a Schedule. The push-back channel it would ride already exists, so this is bounded work — just not started. | A user asks to be notified rather than to poll |
 | **Corpus backfill** (IDEA-6) | Depends on AGT-3: a backfill driver over a document parser that does not exist would be a stub. | AGT-3 lands |

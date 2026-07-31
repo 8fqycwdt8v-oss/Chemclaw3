@@ -3,7 +3,7 @@
 Out-of-process capability makes every connector a network dependency in the tool path, and the
 default MAF behavior for a connector that will not connect is to raise — which turns one dead
 sidecar into a dead conversation. That is the wrong trade: losing a capability is a much smaller
-failure than losing the turn, and it is the trade decision 7 of `docs/planning/connector-plan.md`
+failure than losing the turn, and it is the trade decision 7 of `docs/archive/plans/connector-plan.md`
 records.
 
 Making it non-fatal at the *caller* is not possible, and finding that out is what shaped this

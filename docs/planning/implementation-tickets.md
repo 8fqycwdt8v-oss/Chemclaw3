@@ -1,6 +1,6 @@
 # Implementation Tickets: the foundation build, ticket by ticket
 
-> **Companion to** `docs/planning/foundation-plan.md` (the staged *how*) and `docs/archive/foundation-assessment.md`
+> **Companion to** `docs/archive/plans/foundation-plan.md` (the staged *how*) and `docs/archive/foundation-assessment.md`
 > (the *what/why*). This document is the **executable backlog**: every phase F0–F9 broken into
 > small, individually-shippable tickets grounded in the **real symbols in this repo**. Each ticket
 > names the files it touches, the concrete signatures/config it adds, the tests that prove it, and

@@ -287,7 +287,7 @@ missing prerequisite), in D-092.
       implementation and its dedicated workflow/models/activities were removed.
 
 > **Every open item below was assessed on 2026-07-25** — trigger held? real defect? offline-verifiable?
-> KISS? — in **`docs/planning/backlog-plan.md`** (verdict table + specs for the survivors + the working queue in
+> KISS? — in **`docs/archive/plans/backlog-plan.md`** (verdict table + specs for the survivors + the working queue in
 > `tasks/todo.md`). Verdicts: 8 BUILD (waves A/B/C), 14 DEFER, 5 DROP, 12 BLOCKED. The DROP verdicts are
 > corrected in place below, because they were claims about the tree that are no longer true.
 
@@ -605,11 +605,11 @@ Substrate verdict: **evolve the flat `pydantic-settings` singleton additively** 
 discriminated unions); do **not** adopt entry-points/pluggy/Django-apps — all target the
 out-of-tree plugin problem this single-repo app does not have.
 
-## Open — the connector seam (D-109, docs/planning/connector-plan.md)
+## Open — the connector seam (D-109, docs/archive/plans/connector-plan.md)
 
 Stages A, B, D and E are **done** (the seam, the reference bundles, the durable path, profiles, step
 templates — D-109/D-110/D-111/D-112). Stage C is partly done: `molfp`, `rxnfp`, `safety`, `chem`,
-`calc` and `bo` have moved. What remains is staged in `docs/planning/connector-plan.md` §9, with the trigger
+`calc` and `bo` have moved. What remains is staged in `docs/archive/plans/connector-plan.md` §9, with the trigger
 for each recorded here rather than left implicit.
 
 - [x] ~~**Stage C, remainder — the `kg` bundle**~~ — **WON'T BUILD**, and the reason is also the
@@ -700,7 +700,7 @@ durable job execution (Temporal) already covered; three residual gaps closed, ea
       *mid-flight same-turn* resume stays open (see the harness follow-ups below) — distinct from the
       front-door restart-reattach closed here.
 
-## Phase F11 — Gap closure (docs/planning/gap-closure-plan.md; analysis: docs/archive/audit/12-capability-gap-analysis.md)
+## Phase F11 — Gap closure (docs/archive/plans/gap-closure-plan.md; analysis: docs/archive/audit/12-capability-gap-analysis.md)
 
 Implementing the whole-codebase capability gap analysis. **Waves 0–2 complete and W3 partial**;
 everything below is built, tested, and green under `make lint type test` (688+ passing).
@@ -844,10 +844,10 @@ everything below is built, tested, and green under `make lint type test` (688+ p
 tenant / Temporal broker / OpenShift cluster) plus the audit-trail archive-then-reseal design, which
 is recorded in `docs/planning/DEFERRED.md` as needing its own ADR with QA sign-off rather than a cleanup job.
 
-## Next — Platform-parity hardening (docs/planning/parity-plan.md, Phase F10)
+## Next — Platform-parity hardening (docs/archive/plans/parity-plan.md, Phase F10)
 
 Closes the platform-capability deltas found against a commercial pharma-agent platform. Full
-tickets + disposition table: `docs/planning/parity-plan.md`.
+tickets + disposition table: `docs/archive/plans/parity-plan.md`.
 
 - [x] **F10-E** per-task model routing: `build_chat_client(task)` consults `model_routes`
       (task→model) in the one provider seam; empty map = today's single model. Test:
@@ -913,9 +913,9 @@ tickets + disposition table: `docs/planning/parity-plan.md`.
       is KISS).
 - [ ] Gate-until-trigger (documented, not built): OCR/vision ingestion, vendor connectors
       (Veeva/SAP/LIMS), GAMP-5 validation artifacts, conversational multi-agent mesh — each with its
-      trigger recorded in `docs/planning/parity-plan.md`.
+      trigger recorded in `docs/archive/plans/parity-plan.md`.
 
-## Now — Foundation build (docs/planning/foundation-plan.md + docs/planning/implementation-tickets.md)
+## Now — Foundation build (docs/archive/plans/foundation-plan.md + docs/planning/implementation-tickets.md)
 
 The target-stack foundation: MAF harness experience on OpenShift + HPC/Nextflow, internal
 OpenAI-compatible LLM (generic credential), Entra everywhere with every backend workflow
@@ -1500,7 +1500,7 @@ MAF ships the harness natively (`create_harness_agent` + `TodoProvider`/`AgentMo
       reports (5b) publish agent-authored procedures today with no hazard awareness anywhere in the
       tree. Promoted to **wave C2** with a proposed advisory-only, deterministic slice (committed
       SMARTS rule table + `@tool` + skill + `kg-validate` hazard-section rule + a recall metric);
-      three scope questions await the user — `docs/planning/backlog-plan.md` §3/§5.
+      three scope questions await the user — `docs/archive/plans/backlog-plan.md` §3/§5.
 - [ ] Retrosynthesis + reaction prediction · DoE/Bayesian optimization · lab automation/SiLA2
       closed-loop · process flowsheet synthesis · multimodal analytical data · domain foundation
       models — all currently in `docs/planning/DEFERRED.md` with triggers; confirm or pull forward.
@@ -1529,7 +1529,7 @@ MAF ships the harness natively (`create_harness_agent` + `TodoProvider`/`AgentMo
 
 ## Post-campaign follow-ups (2026-07-24, D-072) — worked off 2026-07-25
 
-Assessed then implemented per `docs/planning/backlog-plan.md` (waves A/B/C); all six are now closed.
+Assessed then implemented per `docs/archive/plans/backlog-plan.md` (waves A/B/C); all six are now closed.
 
 - [x] **ELN late-file detection** — both file adapters compare a dropped file's mtime against the
       fetch floor and emit one aggregated WARNING naming the late files plus the backfill recovery
