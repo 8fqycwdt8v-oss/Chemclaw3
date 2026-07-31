@@ -1,135 +1,116 @@
-# Task: make the restructured repository consistent — the second, smaller pass
+# Task: durable job records — "what was run, with what data, and *why*" (D-157)
 
-Requested 2026-07-31, as a follow-up to the restructure that merged as PR #51: *"The repo still is a
-bit overwhelming. Is there a way to make it even more consistent or would I overshoot doing that
-removing needed granularity?"* Branch: `claude/github-repo-structure-6yyibc`, restarted from
-`origin/main` because #51 is merged. ADR: **D-156**.
+Requested 2026-07-31. Branch: `claude/bo-campaign-storage-docs-x87dmj`.
 
-(The previous occupant of this file, the agentic-system review, is merged; its record is D-145 and
-D-151…D-153, its findings the `REV-*` entries in `docs/planning/BACKLOG.md`.)
+(The previous occupant of this file, the restructure-consistency pass, is merged; its record is
+D-156. The agentic-system review before it is D-145/D-151…D-153.)
 
-## The question, and why both halves of it get an answer
+## The problem, as found
 
-The user asked whether more consistency was available *or* whether chasing it would cost needed
-granularity. Measured against `origin/main`, three real inconsistencies survive PR #51 — and four
-plausible-looking ones would each destroy a distinction. Recording both is the point: the second
-list is what keeps the next pass from "tidying" the architecture.
+A multi-round BO campaign is durable *while it runs* — `BoCampaignWorkflow` carries the observation
+history as workflow state, so it resumes across worker restarts — and effectively **undurable once
+it finishes**:
 
-### The three that are real
+1. The finished `CampaignResult` (best point **plus every intermediate observation**) exists only as
+   the Temporal workflow result. No Postgres row, no file. Nothing configures namespace retention,
+   so the entire history expires with the server's default.
+2. A later session cannot find a past run at all: no listing tool, and the job id lives only in the
+   launching session's transcript. `get_durable_job_status` needs that id and asks Temporal, which
+   by then may have forgotten it.
+3. **Nothing records why a job was run** — not BO, not QM, not any connector job. `Note` has no
+   intent field and result notes are output-neutral by design (D-005).
+4. The `bo-candidate` note carries the best point alone: no decision space, no objective direction,
+   no link to the run that produced it.
+5. Publishing that note was *doubly* opt-in — `CampaignSpec.publish_to_graph` (model-authored,
+   default `False`) **and** the manifest flag — so a campaign whose spec omitted it left no
+   permanent trace whatsoever.
 
-1. **`src/chemclaw/mcp/` is a false duplicate.** `mcp/molfp` beside `connectors/molfp` looks exactly
-   like `science/calc` beside `connectors/calc`, which *is* principled. Its own README concedes it:
-   "moving the bodies into the bundles would be churn with no behavioural change". True when the
-   only destination was `connectors/`; false since `science/` exists.
-2. **Directory READMEs are the exception** — 5 of 14 subpackages, 4 of 12 root directories. GitHub
-   renders a folder's README on click, which is the exact surface called messy.
-3. **`evals/` and `templates/` exist twice**, once as code and once as root data.
+Root cause of all five: **the connector-job seam keeps no durable record of a run.** The fix
+therefore belongs in core (`durable/connector_job.py`, `connectors/jobs.py`), not in the BO bundle
+— every connector job gets it at once, which is what the report asked for ("relevant for all other
+tools and models").
 
-### The four that would be over-shooting
+## Plan
 
-- Merging `science/*` into `connectors/*` — puts Temporal imports inside the physics.
-- Merging `memory/` into `retrieval/` — episodic layer vs. evidence harness; a level of depth for a
-  word.
-- Uniform file sets across connector bundles — the variance says which capabilities own durable work.
-- Burying `knowledge/` and `skills/` under `data/` — they are layers 4 and 3; root position is their
-  documentation. (User chose the exception deliberately.)
+- [x] Reserve the ADR number in `docs/decisions/README.md`, in the first commit. It was
+      D-155 and became **D-157**: two branches merged ahead of this one while it was in review, so
+      the branch merging second renumbers (CLAUDE.md's rule 3) — the file moved, its heading and
+      every citation with it.
+- [x] **1. A launch states its reason.** `ConnectorJobInput.rationale`; the generated job tool takes
+      `rationale` beside its params and refuses a blank one (`require_actor`'s polarity — a
+      forgotten reason must not silently downgrade the record). Deliberately **not** in `payload`,
+      so the idempotency hash is untouched. A template `job` step passes its declared `purpose`.
+- [x] **2. One durable record per finished job.** `infra/sql/023_job_records.sql` +
+      `durable/job_record.py`: `JobRecord`, the sink protocol, `NullJobRecordSink`,
+      `PostgresJobRecordSink`, `default_job_record_sink()` gated on `session_store="postgres"`
+      (mirroring `default_audit_sink`), and the activity core's wrapper runs. It stores the payload
+      (the problem definition), the rationale, and the **whole** result envelope — so a campaign's
+      history outlives Temporal's history.
+- [x] **3. The note says why.** `note_with_run_provenance`, applied by core to *any* connector note
+      before the PR-gate, so no connector can forget and every merged md file answers "why was this
+      done" as well as "what came out".
+- [x] **4. Retrospective access.** `get_durable_job_status` falls back to the record when Temporal
+      no longer knows the id; a new `find_past_jobs` tool lets a *new* session ask what has been run
+      and why.
+- [x] **5. BO leaves no silent gap.** Drop `CampaignSpec.publish_to_graph` (one decision, in the
+      manifest, where the deployment owns it); the note gains the decision space and the objective
+      direction, so it is self-contained.
+- [x] ADR D-157, BACKLOG entries, `durable/README.md`, the retention docstring's refusal list.
+- [x] `make lint type test` plus `connector-validate`, `template-validate`, `prose-validate`,
+      `kg-validate`, `skill-validate`.
 
-Splitting `core/config.py` (1726 lines) and `api/app.py` (1350) was also raised and declined: file
-size is a different problem from repository structure, and mixing them makes the diff unreviewable.
+## Deliberate scope lines
 
-## Steps
-
-- [x] Restart the branch from `origin/main`; reserve **D-156** in `docs/decisions/README.md` in the
-      first commit, per `CLAUDE.md`.
-- [x] **Dissolve `src/chemclaw/mcp/`.** Engines → `science/fingerprints/{store.py,molfp/,rxnfp/}`;
-      the two `FastMCP` instances → `connectors/{molfp,rxnfp}/server/tools.py`, the shape every other
-      bundle already has. Carry the `mcp_servers/calc` cautionary history into
-      `connectors/README.md`, and state the D-016 shadowing rule accurately in the ADR (a *top-level*
-      `mcp/` shadows the SDK; `chemclaw.mcp` never did — the deleted README claimed the directory
-      "cannot be named `mcp`" while being named `mcp`).
-- [x] **A README in every directory**, plus `tests/test_repo_map.py`: README coverage, and
-      `ARCHITECTURE.md`'s tables matching the directories on disk in both directions.
-- [x] **Fold `evals/`, `templates/`, `profiles/` into `data/`** and repoint the five config defaults,
-      `.env.example`, the Containerfile COPY set, `_RUNTIME_DATA`, and the Helm chart.
-- [x] **Archive the five finished `*-plan.md`**; repoint the eight code citations. Fix the stale
-      `mcp_servers/` directory paths and `retrieval/__init__.py`'s docstring.
-- [x] **ADR D-156**, `ARCHITECTURE.md`, `CLAUDE.md`; verify; ship.
-
-## Verification plan
-
-`make lint type test`, `make cov`, all eight validators, `make eval`, and both workflows — `image`
-is the only thing that proves the entrypoint dispatch and the COPY set, because it smokes every
-component as UID 1001.
-
-**`tests/test_repo_map.py` must be shown failing before it is trusted.** Last pass hit the same
-failure mode twice: `test_image_ships_every_first_party_package` iterated an empty set and reported
-green, and `make db-migrate` globbed a missing directory and applied zero migrations in silence. A
-structural test that can find nothing has to be caught finding something.
+- **Only finished jobs are recorded.** A failed run raises out of the child workflow and never
+  reaches the record write. The audit trail already holds the attempt; a failure record is a second
+  design (which status, written from where, does a retry supersede it) and is logged in BACKLOG
+  rather than smuggled in here.
+- **`job_records` is not pruned.** It joins `durable/retention.py`'s documented refusals for the
+  reason `calculation_results` is there: it is now the record the system depends on for
+  retrospective truth, and disposing of it is a GxP policy decision that needs its own ADR.
 
 ## Review
 
-### What the pass actually found
+Implemented as planned. Five things the plan did not foresee, all recorded rather than papered over:
 
-Three things the plan predicted, and three it did not.
+- **The launcher has three exits, and only one of them starts a workflow.** `inline_wait_seconds`
+  returns a finished envelope inline, and a duplicate launch rejoins an existing run. Writing the
+  record from the *workflow* rather than from the launcher covers all three by construction — no
+  per-exit code and no per-exit test, because none of them is where the record is written.
+- **`ConnectorJobInput` has two construction sites**, not one: the generated tool and
+  `TemplateWorkflow._run_job_step`. The template path passes the step's declared `purpose`, falling
+  back to a deterministic `template step '<id>' (job <name>)` when a step declares none — so the
+  reject-if-absent rule holds on every path in, and no existing template breaks.
+- **The note footer must not contain a wikilink.** `note_from_campaign_result` already documented
+  this trap (a dangling link fails `kg-validate` on the very PR the note opens); the shared footer
+  inherits it for *every* connector at once, so it is pinned by its own test.
+- **`Note` is frozen**, so the footer builds a copy via `model_copy(update=...)` — which also leaves
+  the connector's own object intact for the envelope the tool returns.
+- **An activity nothing serves fails silently here.** The record write is best-effort, so an
+  unregistered `record_job` would retry to its bound, log, and lose every record — discovered only
+  when an id expired months later. `registered_activities("background")` is asserted directly, in a
+  test that runs offline.
 
-**Predicted.** `chemclaw.mcp` dissolved along the `science/` ↔ `connectors/` line into
-`science/fingerprints/` plus two `server/tools.py`; 17 READMEs written and enforced by
-`tests/test_repo_map.py`; `evals/`, `templates/` and `profiles/` folded into `data/` (root: 13
-directories → 10, both code/data name collisions gone).
+## Verification
 
-**Not predicted, and each the same shape — prose asserting something no test reads:**
+`make lint`, `make type`, `make test` green: **2105 passed, 32 skipped**. The skips are the
+Temporal test server (`temporal.download` is blocked by this environment's network policy) and the
+xtb/crest binaries.
 
-1. **`deploy/README.md` documented an `mcp-molfp`/`mcp-rxnfp` component** that `entrypoint.sh` has
-   no case for and the chart has never declared. This is D-117 exactly, in the one file
-   `tests/test_deploy_chart.py` does not read. Fixed; the bundles deploy as `connector-molfp` and
-   `connector-rxnfp` like every other.
-2. **A quotation of history had been rewritten by D-148.** `tests/test_deploy_chart.py` quotes the
-   entrypoint line that kept `mcp-calc` routable — `python -m mcp_servers.calc.server`. The
-   repository-wide `mcp_servers.…` rewrite caught the quotation too, so it said something the file
-   never said. Restored.
-3. **The deleted `mcp/README.md` insisted the directory "cannot be named `mcp`"** while sitting in a
-   directory named `mcp`. Both halves were true — a *top-level* `mcp/` shadows the SDK, a submodule
-   never could — and the rule outlived the condition that made it absolute.
+**The Postgres skips were removed rather than accepted**: `postgresql-16` was already installed
+here, so a local cluster plus pgvector 0.8 (built from source — the packaged 0.6.0 predates
+`bit_jaccard_ops`, which migration 002 needs) turns the whole Postgres-backed suite, including this
+change's four new store tests, from skipped into run. Migration 023 is therefore applied and
+exercised, not hand-checked.
 
-### The one real breakage, and why it is the useful part
+Verified **by mutation** — break the line, run the suite, confirm the named test fails:
 
-Moving `evals/` broke `tests/test_retrieval_eval.py`, which pinned the corpus at a hardcoded
-`_REPO / "evals" / "retrieval_corpus"`. Every gold case then scored `0/2 expected sources
-retrieved` — **which reads as a retrieval regression, not as a missing directory.** Same family as
-D-148's silent `glob` over the moved migrations directory.
+- blank rationale accepted → `test_a_launch_must_say_why_it_is_being_started` fails;
+- the record fallback removed from `get_durable_job_status` →
+  `test_a_job_whose_history_expired_is_still_collected_from_the_record` fails.
 
-The fix is two-part and worth copying: derive the literal from the setting's own default so it
-cannot drift again, *and* assert the directory exists, because an empty corpus and a wrong path
-produce identical numbers.
-
-### Verification
-
-`make lint type test` green (419 files type-checked), all seven offline validators pass, `make eval`
-scores the case-set with its three intended gate failures and no others — the 21 moved data files
-are `R100` byte-identical renames, so the numbers cannot have moved.
-
-**`tests/test_repo_map.py` was broken five ways and observed failing each time** before being
-trusted: a missing subpackage README, a missing root README, an unmapped directory, a row for a
-vanished directory, and a `.py` file beside `src/`. This is not ceremony — two tests in this
-repository have already gone green by iterating an empty set.
-
-### The third reconciliation, and a parallel session
-
-`main` took seven more commits (including **D-154 and D-155**), so this branch's ADR became
-**D-156**. The renumber was done *before* merging main in — verified safe because the merge base
-carried no D-154 at all, so every occurrence on the branch was provably the branch's own. That is
-the structural fix for the defect D-148 caused by renumbering after its merge.
-
-A **second session reconciled the same branch concurrently** and pushed first. Its work was merged
-rather than overwritten. 22 of the 25 conflicting files were identical once the ADR number and
-whitespace were normalised — two independent reconciliations agreeing is a stronger signal than
-either alone. It had renumbered to D-155, which collided with main's own D-155 landing after its
-merge base; D-156 stands.
-
-### For next time
-
-- A mechanical substitution cannot tell a claim about the present from a quotation of the past.
-  Scope it to files the branch authored, or read the diff.
-- A rule written as an absolute ("cannot be named X") should name its condition, or it will outlive
-  it and be believed.
-- When a structural test moves, break it on purpose before trusting the green.
+**Known gap, measured not assumed:** removing `note_with_run_provenance` from the wrapper leaves the
+offline suite green — core *applying* the footer is asserted only in `test_connector_job_workflow.py`,
+which needs a live Temporal server and therefore runs in CI alone. The footer function itself, and
+every other pure piece (`job_record_for`, the sink selection, the activity registration), is pinned
+offline. That is why `job_record_for` exists as a function at all.

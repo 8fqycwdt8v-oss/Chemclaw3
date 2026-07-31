@@ -1424,6 +1424,14 @@ class ConnectorSettings(BaseSettings):
     # to grant itself unlimited runtime — that is a deployment's call.
     connector_job_timeout_seconds: float = Field(default=86_400.0, gt=0)
 
+    # Bound on the record write every finished connector job performs (D-157). Small: it is one
+    # upsert of a row the job has already earned, and a database that cannot take it in this long
+    # is down — in which case the retries, and then the log line, are the right outcome.
+    job_record_timeout_seconds: float = Field(default=30.0, gt=0)
+    # How many past runs `find_past_jobs` returns by default. Bounded because the results land in
+    # the model's context: enough to recognise the campaign being looked for, not a table dump.
+    job_record_search_limit: int = Field(default=20, ge=1)
+
     @property
     def connectors_dirs(self) -> list[str]:
         """The connector bundle directories, split on the OS path separator (like `PATH`)."""
@@ -1464,8 +1472,8 @@ class MemorySettings(BaseSettings):
     # so every durable table grew for the deployment's lifetime. 0 disables pruning for that
     # table, which is the default: a retention period is a *policy* decision (GxP: keep for N
     # years, then dispose, provably), so a deployment must state it rather than inherit a number
-    # from code. `audit_events` and `calculation_results` are deliberately absent — see
-    # workflows/retention.py for why each needs its own design rather than an age cutoff.
+    # from code. `audit_events`, `calculation_results` and `job_records` are deliberately absent —
+    # see durable/retention.py for why each needs its own design rather than an age cutoff.
     retention_enabled: bool = False
     retention_schedule_minutes: float = Field(default=1440.0, gt=0)
     retention_timeout_seconds: float = Field(default=600.0, gt=0)
