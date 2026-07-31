@@ -488,3 +488,51 @@ it and printing what came out — not by re-reading it. I had re-read all of it 
    the dangling link immediately; `with_id()` on a grown cluster would have shown two ids.
 3. **When a module documents a failure mode, check my new code against it explicitly** — by name,
    as a step. Proximity to the warning is not protection from the bug.
+
+## The obvious fix for a real gap can be worse than the gap (2026-07-31, v1 readiness PR 2)
+
+Three items this session read as small and turned out to be mis-diagnosed — not by the person who
+filed them, but by me when I planned the fix. In each case the plan said "populate X" and the
+correct answer was "populating X naively makes something else worse".
+
+- **`Note.confidence` has no machine producer.** The plan said: derive it from ELN record
+  completeness. But `kg/conflicts._suspected` fires purely on a confidence *gap* between
+  same-`(type, compound_smiles)` notes — so completeness-derived confidence would flag "one run is
+  better documented than another" as a suspected conflict, manufacturing noise in a module whose
+  own docstring says a wrong answer there is worse than none. The one principled source
+  (calibration) reports `n=0` because nothing logs those predictions. I shipped the half that was
+  real (`compound_smiles` on the reaction note) and rewrote the row with the corrected diagnosis.
+- **`make eval` cannot fail on a regression.** The plan said: add `--strict` and use it in CI. That
+  would have made CI permanently red, because two shipped cases exist to *demonstrate* a gate
+  firing. The exit code was never the blocker; the missing concept was "expected to fail".
+- **The retrieval eval scores one retriever.** The plan said: score them all. Scoring the derived
+  paths needs the note index built over the eval fixture corpus, which needs Postgres — already a
+  `DEFERRED.md` row. The fixable defect was narrower and worse: reporting a graph-only number under
+  a name that promised the shipped path.
+
+**Rules for myself.**
+
+1. Before implementing "populate this empty field", read *every* consumer of it and ask what each
+   would do with the value. A field with two consumers may want two different signals.
+2. When a fix is "add a flag and turn it on in CI", run the flag against the shipped data first. If
+   it fails, the flag was not the missing piece.
+3. A row filed as [S] that turns out to need a schema change is not a small row. Say so in the
+   backlog, with the size corrected, rather than shipping a smaller thing under the old label.
+4. Rewriting a backlog row with what I learned is part of the work, not bookkeeping after it. The
+   next session reads the row, not the diff.
+
+## `git checkout --` does not revert an unstaged new file (2026-07-31)
+
+My mutation-check helper ended with `git checkout -- "$file"` to undo the mutation. For a file that
+was **new and untracked**, that fails with `pathspec did not match` — and because the helper had
+already applied the mutation, the mutation stayed. Worse, for a *tracked* file the same helper
+silently reverted my real edits along with the mutation: one run of it discarded the whole
+`pr_gate.py` change I had just written, and I only noticed because a later `git diff` was empty.
+
+**Rule.** Mutation-check by staging first (`git add -A`) and reverting with
+`git checkout-index -f -- <file>`, which restores from the index rather than from HEAD. Then a
+revert undoes exactly the mutation and nothing else, and it works for files that are not yet in a
+commit.
+
+**Rule.** After any scripted edit-and-revert loop, `git diff --stat HEAD` before moving on. A
+silent revert of real work looks exactly like a clean tree.
