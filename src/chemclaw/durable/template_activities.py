@@ -16,6 +16,7 @@ from collections.abc import Callable
 from contextlib import AsyncExitStack
 from typing import Any
 
+from agent_framework import Content
 from pydantic import BaseModel, ConfigDict, Field
 from temporalio import activity
 
@@ -337,9 +338,15 @@ def _serializable(result: Any) -> Any:
     knows. Text parts are joined, because that is what an MCP tool's answer *is* on the wire; a
     result with no text parts falls back to `str()` so a step never fails on the shape of a value
     it managed to produce.
+
+    **Identified by `isinstance`, not by having a `.type` attribute.** Duck-typing here is wrong in
+    a way that is easy to miss: `find_notes` returns `list[NoteRef]`, and a `NoteRef` *has* a
+    `type` field (the note's kind). A `hasattr` test therefore matched it, found no `.text`, and
+    flattened a structured result into a Python repr — turning the in-process branch's perfectly
+    serializable answer into a string, silently, for every template step that named such a tool.
     """
-    if isinstance(result, list) and result and all(hasattr(item, "type") for item in result):
-        texts = [str(getattr(item, "text", "")) for item in result if getattr(item, "text", None)]
+    if isinstance(result, list) and result and all(isinstance(item, Content) for item in result):
+        texts = [str(item.text) for item in result if getattr(item, "text", None)]
         return "\n".join(texts) if texts else str(result)
     return result
 

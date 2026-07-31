@@ -15,7 +15,6 @@ here; everything above it is sandbox-safe and always runs.
 
 import asyncio
 from pathlib import Path
-from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -545,14 +544,26 @@ def test_a_step_result_is_something_temporal_can_carry() -> None:
     run. The offline tests could not see it: they call the activity in-process, where nothing
     serializes anything.
     """
+    from agent_framework import Content
+
     from chemclaw.durable.template_activities import _serializable
 
-    assert (
-        _serializable(
-            [SimpleNamespace(type="text", text="a"), SimpleNamespace(type="text", text="b")]
-        )
-        == "a\nb"
-    )
+    assert _serializable([Content.from_text("a"), Content.from_text("b")]) == "a\nb"
     # Anything the converter already understands is handed through untouched.
     assert _serializable({"energy": -154.1}) == {"energy": -154.1}
     assert _serializable("plain") == "plain"
+
+
+def test_a_structured_tool_result_is_not_mistaken_for_mcp_content() -> None:
+    """`NoteRef` has a `type` field, and duck-typing on that flattened it to a repr string.
+
+    The first version of `_serializable` asked `hasattr(item, "type")`. `find_notes` returns
+    `list[NoteRef]`, whose `type` is the note's *kind* — so the check matched, found no `.text`,
+    and replaced a perfectly serializable structured result with `str(...)`. Silently, for every
+    template step naming such a tool. `isinstance` against the real `Content` cannot do that.
+    """
+    from chemclaw.agent.graph_tools import NoteRef
+    from chemclaw.durable.template_activities import _serializable
+
+    notes = [NoteRef(id="reaction-1", type="reaction", source="eln", confidence=0.9)]
+    assert _serializable(notes) is notes, "a structured result was flattened into a string"

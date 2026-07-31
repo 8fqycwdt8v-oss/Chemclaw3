@@ -35,7 +35,8 @@ from chemclaw.agent.identity_context import (
     set_current_identity,
 )
 from chemclaw.agent.job_results import await_job_results
-from chemclaw.agent.plan_gate import consume_turn_approval
+from chemclaw.agent.plan_gate import consume_turn_approval, gate_applies
+from chemclaw.agent.profiles import get_profile
 from chemclaw.agent.session_context import (
     reset_current_session,
     reset_current_session_id,
@@ -128,6 +129,10 @@ async def run_turn(
         `AnswerEvent` on success or an `ErrorEvent` on failure.
     """
     turn_started = time.perf_counter()
+    # Whether this turn's approval is spendable, asked exactly as `build_agent` asks whether to
+    # attach the gate — one predicate, so the two cannot disagree about a profile that overrides
+    # the deployment's autonomy.
+    plan_gated = gate_applies(get_profile(profile))
     answer_parts: list[str] = []
     # Metered across the turn's updates and booked once on teardown (even on failure — a failed
     # turn still spent tokens up to the point it broke, so its cost must count toward the next
@@ -272,6 +277,11 @@ async def run_turn(
                     last_plan = current_plan
                     yield PlanEvent(todos=last_plan)
         yield await _answer_event("".join(answer_parts))
+        # The turn used its authorization, so the authorization is spent (D-167). Here rather than
+        # in `finally`, which also runs on the disconnect path where an `await` would re-raise the
+        # cancellation and skip every teardown step after it — see `consume_turn_approval`.
+        if plan_gated:
+            await consume_turn_approval(session)
     except (GeneratorExit, asyncio.CancelledError):
         # The turn is being torn down from outside — the client went away, or the front door's
         # wall-clock deadline expired. Roll the session back to its pre-turn state: a half-written
@@ -350,15 +360,17 @@ async def run_turn(
                 f"(session {session.session_id})."
             )
         )
-    finally:
-        # Spend the plan approval this turn ran under, so the *next* user message is a new request
-        # needing its own decision (D-167). At the end, not the start: the harness loop executes an
-        # approved plan across several iterations of one `agent.run`, and consuming on entry would
-        # refuse the plan's own second iteration. On every path, including a failure — a turn that
-        # spent the authorization and then broke has still spent it, and re-running under the same
-        # approval is exactly what a person would want asked about again.
-        if settings.harness_enabled and settings.harness_autonomy == "plan_only":
+        # A turn that spent the authorization and then broke has still spent it: tools may have
+        # run before it failed, and re-running under the same approval is exactly what a person
+        # would want asked about again.
+        if plan_gated:
             await consume_turn_approval(session)
+    finally:
+        # **Nothing in this block may `await`.** It runs on the disconnect path too, which
+        # production reaches by cancellation rather than `aclose()` (D-130) — an `await` here
+        # re-raises the cancellation on the spot and silently skips everything below it, including
+        # the five context-var resets, which would leak one turn's ambient identity into the next
+        # turn on this worker.
         if budget is not None:
             budget.record(session.session_id, actor, turn_usage.total)
         # Observed on every path — success, failure and disconnect — because a turn that failed
