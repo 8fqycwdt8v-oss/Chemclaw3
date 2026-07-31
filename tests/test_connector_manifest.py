@@ -26,7 +26,6 @@ _HTTP = {"transport": "http", "url": "http://127.0.0.1:9/mcp", "tools": ["search
 _JOB = {
     "name": "run_thing",
     "workflow": "ThingWorkflow",
-    "task_queue": "connector-thing",
     "summary": "Run the thing.",
 }
 

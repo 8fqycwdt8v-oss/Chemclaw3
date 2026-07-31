@@ -23,7 +23,6 @@ endpoint:
 jobs:
   - name: start_optimization_campaign
     workflow: BoCampaignWorkflow
-    task_queue: connector-bo
     summary: Start a durable multi-round Bayesian-optimization campaign; return its job id.
     description: >-
       Use this when the optimization needs *many* rounds of propose→evaluate against a computable

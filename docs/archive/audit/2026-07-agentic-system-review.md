@@ -144,22 +144,28 @@ OTel pipeline that, until this review, could not start.
 
 ## 4. Monitorability
 
-**Nothing scrapes `/metrics`.** No ServiceMonitor, PodMonitor, or scrape annotation anywhere under
-`deploy/` — only a prose mention in `values.yaml`. Every metric in the system is currently
-uncollected in production. This is the cheapest high-value fix in the review and is not yet done.
+**~~Nothing scrapes `/metrics`.~~ Fixed (D-143).** As written, this was true: no ServiceMonitor,
+PodMonitor, or scrape annotation anywhere under `deploy/` — only a prose mention in `values.yaml`,
+so every metric in the system was uncollected in production. It was the cheapest high-value fix in
+the review, and it is now done.
 
 The metrics module itself is well-built: 14 counters, 2 histograms, 7 callable-bound gauges. Two
-structural limits:
+structural limits, **both since closed**:
 
-- **No labels, anywhere.** Storage is `dict[str, float]` keyed by bare name. So "20 % of turns fail
-  on a provider 400" is indistinguishable from "20 % fail because a tool broke"; the two distinct
-  409 causes fuse into one number; and no per-model, per-profile or per-actor attribution is
-  possible.
-- **Two declared counters are never incremented** — `chemclaw_jobs_started_total`,
-  `chemclaw_notes_proposed_total`. They render a permanent `0`. The gauge path explicitly refuses
-  to do this ("a fabricated zero would be indistinguishable from a genuinely idle service");
-  counters get no such protection. So a PR-gate that fails every note write, or a durable job
-  subsystem that launches nothing, looks identical to a quiet one.
+- **~~No labels, anywhere.~~ Partly fixed (D-152).** Storage was `dict[str, float]` keyed by bare
+  name, so "20 % of turns fail on a provider 400" was indistinguishable from "20 % fail because a
+  tool broke", the two distinct 409 causes fused into one number, and no per-model, per-profile or
+  per-actor attribution was possible. The registry now carries **declared** labels with a
+  per-counter series cap, and the five spend counters are labelled by `profile`. Per-**model**
+  attribution was already solved outside this registry — MAF emits `gen_ai.client.token.usage`
+  labelled by request model, response model, provider and token type — so it is deliberately not
+  duplicated here. The failure-cause labels named above remain unlabelled and are still open.
+  Per-**actor** stays refused on purpose: `/metrics` is unauthenticated.
+- **~~Two declared counters are never incremented~~ Fixed (D-139/D-143)** —
+  `chemclaw_jobs_started_total`, `chemclaw_notes_proposed_total` rendered a permanent `0` while the
+  gauge path explicitly refused to do exactly that ("a fabricated zero would be indistinguishable
+  from a genuinely idle service"). Both are now incremented at their real call sites, so a PR-gate
+  that fails every note write no longer looks identical to a quiet one.
 
 **Failure modes with no signal at all**, i.e. invisible indefinitely: audit-sink failures inside
 any Temporal worker (the metric exists but is front-door-only, and `agents/audit.py` wraps the

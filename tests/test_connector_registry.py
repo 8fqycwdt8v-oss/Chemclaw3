@@ -33,7 +33,6 @@ _JOB_BLOCK = """
 jobs:
   - name: run_thing
     workflow: ThingWorkflow
-    task_queue: connector-thing
     summary: Run the thing.
     params:
       - {name: subject, type: string, description: What to run it on.}

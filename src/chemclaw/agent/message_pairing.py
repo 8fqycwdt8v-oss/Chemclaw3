@@ -59,7 +59,7 @@ def unmatched_result_ids(messages: Sequence[Message]) -> set[str]:
     invisible to it — and the API rejects that thread exactly as hard as the converse. A stranded
     result is therefore a bricked session with *no* self-heal path.
 
-    Deliberately **not** wired into the read-time repair (D-146). Stripping a stranded result would
+    Deliberately **not** wired into the read-time repair (D-145). Stripping a stranded result would
     silently destroy evidence and, worse, would mask a bug in whatever produced it. Its job is to be
     the assertion: any code that deletes conversation rows must prove it never leaves one of these,
     rather than rely on something cleaning up afterwards.

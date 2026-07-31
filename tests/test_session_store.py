@@ -7,15 +7,17 @@ none, so it skips). The provider-selection test is a pure unit test with no data
 
 import asyncio
 
+import pytest
 from agent_framework import Content, InMemoryHistoryProvider, Message
 
 from chemclaw.agent.chemclaw_agent import history_provider
-from chemclaw.agent.message_pairing import unmatched_call_ids
+from chemclaw.agent.message_pairing import unmatched_call_ids, unmatched_result_ids
 from chemclaw.agent.session_store import (
     PostgresHistoryProvider,
     SessionOwnerStore,
     SessionTurnClaims,
 )
+from chemclaw.core import db
 from chemclaw.core.config import settings
 from tests.pg import migrated_db_or_skip
 
@@ -340,3 +342,113 @@ def test_a_crashed_workers_claim_ages_out_and_a_refresh_holds_it() -> None:
         await claims.release(session_id, "other")
 
     asyncio.run(_run())
+
+
+# --- D-151: the stored history stops growing without bound -------------------------------------
+
+
+# Long enough for the window to bind several times over, so the band is visible rather than a
+# single sample that could be a local peak.
+_TURNS = 60
+
+
+def _compaction_turn(index: int) -> list[Message]:
+    """One turn's worth of stored messages, with a payload big enough to matter."""
+    return [
+        Message(role="user", contents=[Content.from_text(f"question {index}")]),
+        Message(
+            role="assistant",
+            contents=[
+                Content.from_function_call(call_id=f"k{index}", name="predict_pka", arguments={})
+            ],
+        ),
+        Message(
+            role="tool",
+            contents=[
+                Content.from_function_result(call_id=f"k{index}", result="payload " + "z" * 800)
+            ],
+        ),
+        Message(role="assistant", contents=[Content.from_text(f"answer {index}")]),
+    ]
+
+
+def test_durable_compaction_bounds_a_long_session(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The defect: without this the row count grows by four per turn, forever.
+
+    Every turn re-reads and deserialises the whole history before the model call, so the cost of
+    turn N is O(all turns so far). Retention does not bound it — it prunes by age, is off by
+    default, and an age window does not cap one long-running session at all.
+
+    Asserted as *boundedness*, not as a monotone plateau. Measured over 60 turns the count sits in
+    a band (14 → 23 → 22 → 18) rather than settling on one number: the sliding window keeps a fixed
+    number of conversation groups, and a collapsed group leaves a summary row that is itself evicted
+    a few turns later, so the total breathes. A single before/after ratio would catch a local peak
+    and flake. What must be true is that the size is a function of the window and not of the number
+    of turns — so this compares the second half against the first and against the linear count.
+    """
+    monkeypatch.setattr(settings, "agent_durable_compaction_enabled", True)
+    monkeypatch.setattr(settings, "agent_durable_compaction_min_rows", 12)
+    monkeypatch.setattr(settings, "agent_context_token_budget", 2000)
+
+    async def _run() -> tuple[list[int], set[str], set[str]]:
+        await migrated_db_or_skip()
+        provider = PostgresHistoryProvider()
+        session_id = "d146-plateau"
+        async with db.connection(settings.postgres_dsn) as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(
+                    "DELETE FROM session_messages WHERE session_id = %s", (session_id,)
+                )
+            await conn.commit()
+
+        sizes: list[int] = []
+        for index in range(_TURNS):
+            await provider.save_messages(session_id, _compaction_turn(index))
+            if (index + 1) % 10 == 0:
+                sizes.append(len(await provider.get_messages(session_id)))
+
+        final_messages = await provider.get_messages(session_id)
+        return (
+            sizes,
+            unmatched_call_ids(final_messages),
+            unmatched_result_ids(final_messages),
+        )
+
+    sizes, orphan_calls, orphan_results = asyncio.run(_run())
+    linear = _TURNS * 4  # what the table would hold if nothing ever compacted
+    assert max(sizes) < linear // 2, (
+        f"the history never compacted: peaked at {max(sizes)} rows against {linear} uncompacted"
+    )
+    # The property that matters: size tracks the window, not the turn count. The second half must
+    # not be systematically larger than the first — a growing history fails here even though its
+    # absolute size might still be under the bound above.
+    half = len(sizes) // 2
+    assert max(sizes[half:]) <= max(sizes[:half]) + 12, (
+        f"the history is still growing with turn count: {sizes}"
+    )
+    # And every pass left a thread that can still be sent.
+    assert orphan_calls == set(), "compaction left a call without its result"
+    assert orphan_results == set(), "compaction stranded a result — the session is bricked"
+
+
+def test_durable_compaction_is_off_until_a_deployment_asks(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Deleting conversation history is a stated policy, never one inherited on upgrade."""
+    monkeypatch.setattr(settings, "agent_durable_compaction_enabled", False)
+    monkeypatch.setattr(settings, "agent_durable_compaction_min_rows", 4)
+    monkeypatch.setattr(settings, "agent_context_token_budget", 500)
+
+    async def _run() -> int:
+        await migrated_db_or_skip()
+        provider = PostgresHistoryProvider()
+        session_id = "d146-off"
+        async with db.connection(settings.postgres_dsn) as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(
+                    "DELETE FROM session_messages WHERE session_id = %s", (session_id,)
+                )
+            await conn.commit()
+        for index in range(6):
+            await provider.save_messages(session_id, _compaction_turn(index))
+        return len(await provider.get_messages(session_id))
+
+    assert asyncio.run(_run()) == 24, "rows went missing with compaction disabled"

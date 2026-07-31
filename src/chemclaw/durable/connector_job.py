@@ -50,8 +50,9 @@ from chemclaw.durable.registry import durable_workflow
 class ConnectorJobInput(BaseModel):
     """What core needs to run one connector job: where the work lives, and the turn it came from.
 
-    `workflow`/`task_queue` come straight from the manifest's `JobSpec` and are the *only* thing
-    binding this run to a connector — no import, no shared type. `payload` is the model-supplied
+    `workflow` comes straight from the manifest's `JobSpec` and `task_queue` is derived from
+    `connector` at dispatch (`bundle_queue`, D-150); together they are the *only* thing binding
+    this run to a connector — no import, no shared type. `payload` is the model-supplied
     arguments already validated against the job's generated params model, so the child receives a
     plain, replay-stable mapping rather than a type core would have to know.
     """

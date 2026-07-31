@@ -28,7 +28,6 @@ _SPEC = JobSpec.model_validate(
     {
         "name": "compute_dft_energy",
         "workflow": "QMJobWorkflow",
-        "task_queue": "connector-qm",
         "summary": "Run a durable DFT calculation.",
         "params_model": "chemclaw.connectors.qm.specs:QmJobSpec",
     }

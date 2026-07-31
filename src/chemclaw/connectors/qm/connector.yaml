@@ -14,7 +14,6 @@ description: >-
 jobs:
   - name: compute_dft_energy
     workflow: QMJobWorkflow
-    task_queue: connector-qm
     expensive: true
     publish_to_graph: true
     summary: Run a durable DFT calculation on one molecule; returns a job id immediately.

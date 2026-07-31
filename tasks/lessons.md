@@ -233,3 +233,35 @@ the PR body — the same class of gap — without drawing the general conclusion
 4. **Never report a suite as green without naming what skipped.** "1377 passed, 69 skipped" is
    only a claim about 1377 tests. Say which subsystems the skips cover and that CI is their only
    verification.
+
+---
+
+## A configuration only production sets is a configuration nothing tests (2026-07-30, D-152)
+
+`CHEMCLAW_HARNESS_ENABLED=true` ships in the Helm chart. The code default is `False`, and every
+test in the suite runs at the default. So the harness middleware stack had **2066 green tests and
+zero executions of the path production actually runs**. The first live turn under it crashed before
+reaching the model: `ToolApprovalMiddleware requires an AgentSession`. `make chat` and
+`uv run chemclaw` — the documented testing seam — could not take a single turn under the shipped
+configuration, and had not been able to for as long as the flag has been in the chart.
+
+This is the *third* instance of the same shape in this repo's record: LIVE-1 (`ScriptedChatClient`
+derived from the middleware-free base, so every harness test ran a pipeline with no chat
+middleware), the three original review Criticals (all in code paths gated behind a flag nothing
+enabled), and now this. Every time, the tests were green about a different program than the one
+that ships.
+
+What made it findable was not cleverness — it was running the real entrypoint under the real
+configuration, once. Ten minutes.
+
+**Rules:**
+
+1. **Diff the shipped configuration against the test configuration, and treat every difference as
+   untested.** Concretely: `grep` the Helm `values.yaml` for every `CHEMCLAW_*` it sets, and for
+   each one check whether any test sets it too. A flag production turns on and tests leave off is
+   not "covered by the default path"; it is a second program.
+2. **A feature flag's *on* state needs at least one test, even a construction-only one.** Building
+   the agent under `harness_enabled=true` and asserting it can take one stubbed turn would have
+   caught this without a credential and without a network call.
+3. **When a flag cannot be tested offline, say so where the flag is defined**, not in a backlog
+   entry — the next person to read the setting is who needs to know its *on* state is unverified.

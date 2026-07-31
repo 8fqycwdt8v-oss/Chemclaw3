@@ -17,9 +17,12 @@ from typing import Any
 import pytest
 from agent_framework import AgentSession
 
+from chemclaw.agent.job_results import await_job_results
+from chemclaw.agent.session_events import claim_unconsumed, record_session_event
 from chemclaw.agent.turn_signals import record_job_started
 from chemclaw.api.runner import run_turn
 from chemclaw.core.config import settings
+from tests.pg import migrated_db_or_skip
 
 
 class _JobLaunchingAgent:
@@ -205,3 +208,39 @@ def test_the_resume_is_not_recursive(monkeypatch: pytest.MonkeyPatch, enabled: N
     _events(agent)
     assert len(waits) == 1, "the resume waited more than once in a single turn"
     assert len(agent.messages) == 2
+
+
+# --- REV-7: the wait must not consume the mailbox rows it is not waiting for ------------------
+
+
+def test_the_wait_leaves_other_jobs_push_back_alone() -> None:
+    """The defect: waiting on job A used to consume — and discard — job B's push-back.
+
+    `await_job_results` tailed `session_events`, and that claim is *destructive*: it consumed every
+    unconsumed `job_completed` row for the session, kept only the ids it wanted, and dropped the
+    rest. The front door's `/sessions/{id}/events` stream, the consumer those rows belong to, never
+    saw them. The old docstring argued the front door "would already have claimed" them — a race,
+    not a guarantee, since both consumers poll the same rows.
+
+    Now the wait asks Temporal about the specific job ids and never touches the mailbox, so B's row
+    is still there afterwards. Temporal is unreachable in this sandbox, which is *fine and is the
+    point*: the wait degrades to "no result yet" while the mailbox stays intact. On the old code it
+    consumed B before failing, and this fails.
+    """
+
+    async def _run() -> list[str]:
+        await migrated_db_or_skip()
+        session_id = "rev7-bystander"
+        # Start clean, then leave one push-back for a job this turn did not launch.
+        await claim_unconsumed(session_id)
+        await record_session_event(session_id, "job_completed", {"job_id": "job-b"})
+
+        await await_job_results(session_id, ["job-a"], timeout_seconds=0.5)
+
+        # Whatever is still unconsumed belongs to the stream that owns it.
+        return [str(e.payload.get("job_id")) for e in await claim_unconsumed(session_id)]
+
+    assert asyncio.run(_run()) == ["job-b"], (
+        "the mid-turn wait consumed a push-back for a job it was not waiting on; the front door's "
+        "event stream will never deliver it"
+    )

@@ -50,12 +50,13 @@ def test_the_calc_connectors_worker_serves_every_expensive_xtb_task() -> None:
     queue = bundle_queue("calc")
     assert CalcJobWorkflow in registered_workflows(queue)
     assert registered_activities(queue)  # a workflow with no activity is a wiring bug
-    # The queue is derived from the bundle name, so manifest and worker cannot drift; what is
-    # still worth asserting is that every job routes to the one workflow this bundle serves.
+    # The queue is derived from the bundle name at dispatch and declared nowhere (D-150), so
+    # manifest and worker have nothing left to disagree about — `tests/test_connector_jobs.py`
+    # pins the derived value on the launch payload. What is still worth asserting here is that
+    # every job routes to the one workflow this bundle serves.
     _, manifest = discovered()["calc"]
     jobs = manifest.jobs
-    assert jobs and {job.task_queue for job in jobs} == {queue}
-    assert {job.workflow for job in jobs} == {"CalcJobWorkflow"}
+    assert jobs and {job.workflow for job in jobs} == {"CalcJobWorkflow"}
 
 
 def test_the_qm_connectors_worker_serves_the_hpc_job_and_all_four_activities() -> None:
@@ -78,11 +79,11 @@ def test_the_qm_connectors_worker_serves_the_hpc_job_and_all_four_activities() -
     )
     _, manifest = discovered()["qm"]
     jobs = manifest.jobs
-    assert jobs and {job.task_queue for job in jobs} == {queue}
-    # # The Temporal *type name* is what binds the manifest to the class, and renaming that class #
+    # The Temporal *type name* is what binds the manifest to the class, and renaming that class
     # would be a different command in any recorded history (`docs/guides/workflow-versioning.md`),
-    # so the # string is pinned here rather than derived.
-    assert {job.workflow for job in jobs} == {"QMJobWorkflow"}
+    # so the string is pinned here rather than derived. The queue is the opposite case: derived,
+    # never declared (D-150).
+    assert jobs and {job.workflow for job in jobs} == {"QMJobWorkflow"}
 
 
 def test_registration_lists_have_no_duplicates() -> None:

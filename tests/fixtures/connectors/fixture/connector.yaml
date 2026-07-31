@@ -13,7 +13,6 @@ description: >-
 jobs:
   - name: run_fixture_job
     workflow: FixtureJobWorkflow
-    task_queue: connector-fixture
     summary: Run the fixture job and return its job id.
     description: A test job that echoes its subject back through the result envelope.
     params:

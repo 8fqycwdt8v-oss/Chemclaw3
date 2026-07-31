@@ -18,29 +18,30 @@ the message history above, `SessionOwnerStore` (who owns a session id — the fa
 LRU loses on restart), and `SessionTurnClaims` (which process is running a turn on it right now —
 the fact the in-process 409 guard loses at the pod boundary, D-121).
 
-**After-run compaction does not apply to this provider, and cannot as MAF is built** (REV-4).
-`CompactionProvider.after_run` reads `session.state[history_source_id]["messages"]` — the place
-`InMemoryHistoryProvider` keeps its thread. This provider deliberately keeps nothing there, which is
-the entire point of it, so the lookup finds nothing and the strategy returns without doing anything.
-Under `session_store="postgres"` — the production default — the `after_strategy` half of
-`chemclaw.agent.chemclaw_agent._build_compaction` is a silent no-op, and the claim that it will
-"shrink the
-persisted history so the next turn starts smaller" is false here.
+**MAF's after-run compaction cannot reach this provider, so the provider does it itself** (REV-4,
+D-151). `CompactionProvider.after_run` reads `session.state[history_source_id]["messages"]` — the
+place `InMemoryHistoryProvider` keeps its thread. This provider deliberately keeps nothing there,
+which is the entire point of it, so that lookup finds nothing and the strategy returns having done
+nothing. Under `session_store="postgres"` — the production default — the `after_strategy` half of
+`chemclaw.agent.chemclaw_agent._build_compaction` is a silent no-op, and it always will be:
+nothing short of
+reintroducing the in-process thread would change it.
 
-What still works is the `before_run` half, which compacts what earlier providers loaded *into the
-context*. That is the half that guards the model's input, so a long session does not blow its
-context window. What is unbounded is this provider's own read: `_SELECT` has no `LIMIT`, so every
-turn loads the session's entire history, and the stored history grows for the session's whole life.
+The consequence was that the rows grew for the session's whole life and every turn re-read all of
+them before the model call — `_SELECT_WITH_ID` has no `LIMIT`. `save_messages` now applies the
+*same* strategy to the table after storing a turn (see `_compact`), which is the promise
+`_build_compaction`'s docstring was already making, kept in the one place that can keep it.
 
-**The obvious fix corrupts data, which is why this is documented rather than patched.** Adding a
-`LIMIT` to load only a recent window looks safe because `get_messages` already repairs unmatched
-tool-call pairings on read. It is not: that repair *writes back* — it deletes and rewrites the
-stored rows it judges orphaned. Over a windowed read, a `tool_result` whose `tool_use` merely fell
-outside the window looks exactly like a genuine orphan, so the repair would strip it and commit
-that, permanently destroying a pairing that was intact on disk. A correct bound needs the repair to
-run in memory only when the load is partial, or needs real durable compaction that prunes whole
-groups. Either is a design change to a durable path with a data-loss failure mode, so it wants its
-own ADR rather than a patch. Recorded in `BACKLOG.md` with that shape.
+**`get_messages` is untouched, and the `LIMIT` that looks like the obvious fix stays out.** Loading
+only a recent window looks safe because the read already repairs unmatched tool-call pairings — and
+it is not, because that repair *writes back*. Over a windowed read a `tool_result` whose `tool_use`
+merely fell outside the window is indistinguishable from a real orphan, so the repair would strip it
+and commit that, destroying a pairing that was intact on disk. Worse, the repair is one-directional
+(`chemclaw.agent.message_pairing`): it can heal an orphaned call and is blind to an orphaned
+*result*, which
+has no self-heal path at all. Compaction avoids the whole class by deleting only whole pairing
+components, via `droppable_rows` (D-145). `tests/test_durable_compaction_gap.py` pins both the
+absent `LIMIT` and the write-back that makes it unsafe.
 """
 
 import logging
@@ -54,19 +55,23 @@ from agent_framework import HistoryProvider, Message
 from psycopg.rows import TupleRow
 from psycopg.types.json import Jsonb
 
+from chemclaw.agent.history_compaction import plan_compaction
 from chemclaw.agent.message_pairing import strip_call_ids, unmatched_call_ids
 from chemclaw.core import db
 from chemclaw.core.config import settings
+from chemclaw.core.metrics_bridge import record_metric
 
 log = logging.getLogger(__name__)
 
 _INSERT = "INSERT INTO session_messages (session_id, message) VALUES (%s, %s)"
-_SELECT = "SELECT message FROM session_messages WHERE session_id = %s ORDER BY id"
-# Row ids come back too, so a repaired message can be written to the row it came from.
+# Row ids come back too, so a repaired message can be written to the row it came from. There is no
+# id-less variant: every reader needs the id, and the one that existed was dead code that D-143's
+# prose then cited as the statement the read path runs.
 _SELECT_WITH_ID = "SELECT id, message FROM session_messages WHERE session_id = %s ORDER BY id"
 _UPDATE_MESSAGE = "UPDATE session_messages SET message = %s WHERE id = %s"
 _DELETE_IDS = "DELETE FROM session_messages WHERE session_id = %s AND id = ANY(%s)"
 _MAX_ID = "SELECT MAX(id) FROM session_messages WHERE session_id = %s"
+_COUNT = "SELECT count(*) FROM session_messages WHERE session_id = %s"
 _DELETE_AFTER = "DELETE FROM session_messages WHERE session_id = %s AND id > %s"
 
 # The per-session turn claim (D-121). One statement, so the check and the take cannot be
@@ -258,14 +263,91 @@ class PostgresHistoryProvider(HistoryProvider):
         state: dict[str, Any] | None = None,
         **kwargs: Any,
     ) -> None:
-        """Append this turn's messages to the session's durable history (no-op if none to store)."""
+        """Append this turn's messages to the session's durable history (no-op if none to store).
+
+        Then compact, if the deployment has asked for it. The append commits on its own first, and
+        the compaction pass runs in a second transaction whose failure is logged and swallowed —
+        exactly the split `_persist_repair` makes, and for the same reason: storing the turn is the
+        critical path and disposing of old rows is not. This keeps the append's contract byte-for-
+        byte what it was.
+        """
         if not session_id or not messages:
             return
         rows = [(session_id, Jsonb(message.to_dict())) for message in messages]
         async with self._connection() as conn:
             async with conn.cursor() as cur:
+                # The watermark before the insert: everything above it is this turn's own work and
+                # must survive the pass regardless of what the strategy says (see `_compact`).
+                await cur.execute(_MAX_ID, (session_id,))
+                row = await cur.fetchone()
+                watermark = 0 if row is None or row[0] is None else int(row[0])
                 await cur.executemany(_INSERT, rows)
             await conn.commit()
+        if settings.agent_durable_compaction_enabled:
+            await self._compact(session_id, watermark)
+
+    async def _compact(self, session_id: str, watermark: int) -> None:
+        """Apply the context compaction policy to the *stored* history (D-151).
+
+        MAF's `CompactionProvider.after_run` cannot do this: it reads
+        `session.state[source_id]["messages"]`, the slot `InMemoryHistoryProvider` writes and this
+        provider deliberately does not. So the rows grew forever and every turn re-read all of them.
+        This runs the identical strategy — `chemclaw.agent.chemclaw_agent.compaction_strategy`,
+        the same one
+        that bounds the model's context — against the table.
+
+        `watermark` protects the turn just written. The composed strategy's fallback can exclude
+        *every* message when a single payload is oversized, and a turn that deleted the rows it had
+        just stored would lose the conversation it was recording.
+
+        Best-effort by construction: a failure here leaves a larger history, which is the state the
+        system was in before this existed. It must never cost the turn its messages.
+        """
+        # Imported at call time: `agents.chemclaw_agent` reaches the connector registry and the
+        # whole tool surface, and the storage layer must not pull that in at import (the workers
+        # import this module without ever building an agent).
+        from chemclaw.agent.chemclaw_agent import compaction_strategy
+
+        try:
+            async with self._connection() as conn:
+                async with conn.cursor() as cur:
+                    await cur.execute(_COUNT, (session_id,))
+                    counted = await cur.fetchone()
+                    if (
+                        counted is None
+                        or int(counted[0]) < settings.agent_durable_compaction_min_rows
+                    ):
+                        return
+                    await cur.execute(_SELECT_WITH_ID, (session_id,))
+                    stored = [
+                        (int(row[0]), Message.from_dict(row[1])) for row in await cur.fetchall()
+                    ]
+                strategy, _ = compaction_strategy()
+                plan = await plan_compaction(
+                    stored,
+                    strategy=strategy,
+                    protected={row_id for row_id, _ in stored if row_id > watermark},
+                )
+                if plan.is_empty():
+                    return
+                async with conn.cursor() as cur:
+                    for row_id, message in plan.rewrites:
+                        await cur.execute(_UPDATE_MESSAGE, (Jsonb(message.to_dict()), row_id))
+                    if plan.deletes:
+                        await cur.execute(_DELETE_IDS, (session_id, sorted(plan.deletes)))
+                await conn.commit()
+        except Exception:
+            log.warning("could not compact stored history for %s", session_id, exc_info=True)
+            return
+        record_metric(
+            lambda m: m.increment("chemclaw_history_rows_compacted_total", float(len(plan.deletes)))
+        )
+        log.info(
+            "compacted session %s: %d row(s) removed, %d collapsed to a summary",
+            session_id,
+            len(plan.deletes),
+            len(plan.rewrites),
+        )
 
 
 class SessionOwnerStore:

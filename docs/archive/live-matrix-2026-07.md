@@ -1,6 +1,6 @@
 # The live matrix, 2026-07-31 — every capability, with the flags on
 
-*Point-in-time record. Accurate as of its date; deliberately not updated. See `docs/decisions/D-150`
+*Point-in-time record. Accurate as of its date; deliberately not updated. See `docs/decisions/D-154`
 for the decision and `docs/planning/BACKLOG.md` (DARK-1…DARK-10) for what was left open.*
 
 ## Method
@@ -108,6 +108,15 @@ coverage**. The 26 skips are 19 Temporal (the test-server binary cannot be fetch
 - **A real cluster** — no `helm install`, no image push.
 
 These are the same four `DEFERRED.md` records as before: gated on external facts, not on effort.
+
+## One finding that main fixed underneath this pass
+
+The dark-code review found that `await_job_results` claimed the session's push-back mailbox
+destructively across *all* unconsumed `job_completed` rows and discarded the ones it was not waiting
+for — so a second turn waiting on job B silently destroyed job A's result. While this branch was
+running, D-153 landed on main and removed the mechanism entirely: each job is now awaited on its own
+Temporal handle, with no mailbox consumption. The finding was real against the tree it was made
+against, and is closed by work this pass did not do.
 
 ## The finding behind the findings, for the third time
 

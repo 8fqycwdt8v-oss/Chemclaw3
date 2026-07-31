@@ -34,7 +34,6 @@ _MANIFEST = {
 _JOB = {
     "name": "run_probe",
     "workflow": "ProbeWorkflow",
-    "task_queue": "connector-probe",
     "summary": "Run the probe.",
 }
 

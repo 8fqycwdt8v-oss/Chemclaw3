@@ -29,9 +29,23 @@ test had to derive turn latency from the client side because the server exposed 
 now two histograms, and the trace pipeline keeps the per-request detail they deliberately drop.
 """
 
+import logging
 import threading
 from bisect import bisect_left
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
+
+log = logging.getLogger(__name__)
+
+
+def _escape(value: str) -> str:
+    r"""Escape a label value for the exposition format.
+
+    Prometheus requires `\\`, `"` and newline escaped inside a label value. A profile name will
+    never contain one, which is exactly why it is done here rather than trusted: the escape is a
+    property of the format, and the next label to be declared may not be so well behaved.
+    """
+    return value.replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n")
+
 
 # Metric name -> help text. Declared up front so every metric is documented at its definition and
 # the exposition always carries HELP/TYPE lines (a scrape without them is much harder to read).
@@ -99,7 +113,15 @@ _COUNTERS: dict[str, str] = {
     ),
     "chemclaw_cache_write_tokens_total": (
         "Prompt tokens written to the provider's cache — priced above a fresh input token, so a "
-        "cache that is written and never read is a net loss this makes visible."
+        "cache that is written and never read is a net loss this makes visible. Structurally 0 on "
+        "the openai_compatible provider, which reports cache reads but has no cache-write concept: "
+        "an honest zero here is not a fault (REV-9)."
+    ),
+    # Durable history compaction (D-151). A count that stays flat while sessions are long means
+    # the pass is not running — the knob is off, or the row floor is never reached — which is
+    # the difference between "history is bounded" and "nothing is bounding it".
+    "chemclaw_history_rows_compacted_total": (
+        "Stored conversation rows removed by durable compaction after a turn."
     ),
 }
 
@@ -118,6 +140,34 @@ _HISTOGRAMS: dict[str, str] = {
 # timeout is 600 s, so the buckets have to span three orders of magnitude and still resolve the
 # sub-second tool calls that dominate the count.
 _BUCKETS: tuple[float, ...] = (0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0, 30.0, 60.0, 300.0)
+
+# Counters that carry labels, and the label names each accepts. A counter absent from this map is
+# unlabelled and behaves exactly as before — pre-seeded to zero and rendered as one bare line.
+#
+# **Declared, not free-form** (REV-10). An undeclared label name raises exactly as an undeclared
+# metric already does, because the failure mode of a label typo is not a crash but a second, silent
+# time series that no dashboard queries and nobody notices.
+#
+# **Only `profile`, and deliberately not `model`.** Per-model attribution is already emitted, with
+# richer labels than this registry could cheaply provide: MAF's `gen_ai.client.token.usage` carries
+# the request model, the response model, the provider and the token type, and the shipped chart
+# turns OTel on. What it has never heard of is a Chemclaw *profile* — so that is the gap worth
+# filling here, and duplicating the model axis would mean two systems to reconcile.
+_COUNTER_LABELS: dict[str, tuple[str, ...]] = {
+    "chemclaw_tokens_total": ("profile",),
+    "chemclaw_input_tokens_total": ("profile",),
+    "chemclaw_output_tokens_total": ("profile",),
+    "chemclaw_cache_read_tokens_total": ("profile",),
+    "chemclaw_cache_write_tokens_total": ("profile",),
+}
+
+# The most label-sets one counter may hold. A label *value* is not bounded by this module — it comes
+# from configuration, and a future label could come from a provider response — so an unbounded map
+# keyed on it is the same slow leak this codebase has already fixed three times (the budget
+# tracker's per-user counters, the front door's live sessions, the note index). Past the cap the new
+# series is refused and said so once, rather than being accepted quietly until the pod runs out of
+# memory. Generous: `profile` is a handful of names, so reaching this means something is wrong.
+_MAX_SERIES_PER_COUNTER = 64
 
 _GAUGES: dict[str, str] = {
     "chemclaw_turns_in_flight": "Turns currently streaming.",
@@ -156,13 +206,50 @@ class Metrics:
             name: [0.0] * (len(_BUCKETS) + 1) for name in _HISTOGRAMS
         }
         self._histogram_sums: dict[str, float] = dict.fromkeys(_HISTOGRAMS, 0.0)
+        # Labelled series, per counter, keyed by the sorted label pairs. Not pre-seeded: a series
+        # exists once it has been observed, which is the Prometheus convention and the same rule
+        # the gauge path states — an invented zero is indistinguishable from a real one.
+        self._series: dict[str, dict[tuple[tuple[str, str], ...], float]] = {}
+        self._capped: set[str] = set()
 
-    def increment(self, name: str, amount: float = 1.0) -> None:
-        """Add to a declared counter. An undeclared name is a programming error, so it raises."""
+    def increment(
+        self, name: str, amount: float = 1.0, labels: Mapping[str, str] | None = None
+    ) -> None:
+        """Add to a declared counter. An undeclared name or label is a programming error, so raises.
+
+        The declaration is binding **in both directions**: a counter in `_COUNTER_LABELS` must be
+        incremented *with* its labels, and one absent from it must be incremented *without* any.
+        One rule rather than two, and it removes the case that has no good answer — a bare sample
+        beside labelled ones, which a scraper reads as a further series rather than as their total,
+        so the counter would silently double-count under any `sum()`.
+        """
         if name not in _COUNTERS:
             raise KeyError(f"undeclared counter {name!r}")
+        given = dict(labels or {})
+        declared = _COUNTER_LABELS.get(name, ())
+        if set(given) != set(declared):
+            raise KeyError(
+                f"counter {name!r} takes label(s) {sorted(declared)}, got {sorted(given)}"
+            )
+        if not declared:
+            with self._lock:
+                self._counts[name] += amount
+            return
+        key = tuple(sorted((label, str(value)) for label, value in given.items()))
         with self._lock:
-            self._counts[name] += amount
+            series = self._series.setdefault(name, {})
+            if key not in series and len(series) >= _MAX_SERIES_PER_COUNTER:
+                if name not in self._capped:
+                    self._capped.add(name)
+                    log.warning(
+                        "counter %s reached %d label sets; further series are dropped. A label "
+                        "value here is meant to be low-cardinality (a profile name), so this "
+                        "means something is generating values it should not.",
+                        name,
+                        _MAX_SERIES_PER_COUNTER,
+                    )
+                return
+            series[key] = series.get(key, 0.0) + amount
 
     def bind_gauge(self, name: str, source: Callable[[], float]) -> None:
         """Bind a gauge to a live source; reading it always reflects current state."""
@@ -184,9 +271,14 @@ class Metrics:
             self._histogram_sums[name] += seconds
 
     def value(self, name: str) -> float:
-        """Current value of a counter (tests assert on this rather than parsing the text)."""
+        """A counter's total across every label set (tests assert on this, not on the text).
+
+        Summed rather than per-series on purpose: a caller asking for a counter's value wants the
+        number the unlabelled counter used to report, and Prometheus aggregates the same way
+        server-side. Reading one series is a query concern, not this registry's.
+        """
         with self._lock:
-            return self._counts[name]
+            return self._counts[name] + sum(self._series.get(name, {}).values())
 
     def observations(self, name: str) -> tuple[int, float]:
         """A histogram's `(count, sum)` — what tests assert on instead of parsing the text."""
@@ -200,13 +292,20 @@ class Metrics:
             gauges = dict(self._gauges)
             histograms = {name: list(values) for name, values in self._histograms.items()}
             histogram_sums = dict(self._histogram_sums)
+            series = {name: dict(values) for name, values in self._series.items()}
         lines: list[str] = []
         for name, help_text in _COUNTERS.items():
-            lines += [
-                f"# HELP {name} {help_text}",
-                f"# TYPE {name} counter",
-                f"{name} {counts[name]:g}",
-            ]
+            lines += [f"# HELP {name} {help_text}", f"# TYPE {name} counter"]
+            if name not in _COUNTER_LABELS:
+                lines.append(f"{name} {counts[name]:g}")
+                continue
+            # A labelled counter emits one line per observed series and never a bare one — the
+            # bare sample cannot exist, because `increment` requires the declared labels. A
+            # counter nothing has observed yet is therefore genuinely absent rather than zero,
+            # which is the Prometheus convention and this module's own rule for gauges.
+            for key, total in sorted(series.get(name, {}).items()):
+                rendered = ",".join(f'{label}="{_escape(value)}"' for label, value in key)
+                lines.append(f"{name}{{{rendered}}} {total:g}")
         for name, help_text in _GAUGES.items():
             source = gauges.get(name)
             if source is None:
