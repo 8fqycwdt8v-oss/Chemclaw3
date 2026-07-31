@@ -102,6 +102,13 @@ must match `CHEMCLAW_ECFP_BITS` / `CHEMCLAW_DRFP_BITS` (see `config.py`). Applie
 recorded in the `schema_migrations` ledger with a checksum (D-034), so re-running is safe and an
 edited already-applied file is flagged as drift rather than silently skipped.
 
+**`job_records` is the one table a chemist's answers now depend on** (023, D-155): every finished
+connector job writes what it ran, on what arguments, its whole result, and the reason it was
+started. It is what `get_durable_job_status` reads for a job Temporal has forgotten and what
+`find_past_jobs` searches, so a deployment that skips this migration — or that runs with
+`CHEMCLAW_SESSION_STORE=memory`, which selects the null sink — silently loses every finished run
+once its workflow history expires. Nothing prunes it (`durable/retention.py` says why).
+
 ## (iii) Add / switch a data source (an ELN, a warehouse, a retrieval index)
 
 A source is a folder with a `datasource.yaml`, exactly as a capability is a folder with a

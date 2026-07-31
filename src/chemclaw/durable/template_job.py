@@ -193,6 +193,13 @@ class TemplateWorkflow:
                     workflow=resolved.workflow,
                     task_queue=resolved.task_queue,
                     payload=resolve(step.arguments, scope),
+                    # A template already declares why each of its steps exists, so the run's
+                    # rationale (D-155) is that declaration rather than a second field an author
+                    # would have to write twice. A step with no stated purpose still gets a
+                    # non-blank, deterministic one — the reject-if-absent rule holds on every path
+                    # into `ConnectorJobInput`, and naming the step is more honest than inventing
+                    # a reason nobody gave.
+                    rationale=step.purpose or f"template step {step.id!r} (job {step.job})",
                     requested_by=identity.actor,
                     publish_to_graph=resolved.publish_to_graph,
                 ),

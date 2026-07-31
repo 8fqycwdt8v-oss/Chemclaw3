@@ -99,11 +99,11 @@ class BoCampaignWorkflow:
         # the GxP boundary and a connector must not be able to reach around it. Best-effort
         # publishing (a failed git write must never fail a completed campaign) is core's
         # discipline too, so this workflow no longer carries it.
-        note = (
-            note_from_campaign_result(spec.objective_name, result)
-            if spec.publish_to_graph
-            else None
-        )
+        # Always built, never conditional: whether it is *published* is the manifest's
+        # `publish_to_graph`, which core reads. The spec used to carry a second, model-authored
+        # switch that could suppress it, which meant a campaign could finish and leave nothing
+        # behind (D-155).
+        note = note_from_campaign_result(spec.objective_name, spec.problem, result)
         best = result.best
         return ConnectorJobResult(
             summary=(

@@ -3,6 +3,32 @@
 Prioritized open action items. Top = next. Keep in sync with `docs/planning/implementation-plan.md`
 (phase/step numbers) at session end.
 
+## Open — Left open by the durable job record (2026-07-31, D-155)
+
+The record closed "a finished run's data, and the reason for it, survive nowhere". Three things it
+deliberately did not close, each because it is a design rather than a line of code.
+
+- [ ] **A failed run leaves no record.** The child failure propagates out of `ConnectorJobWorkflow`
+      before the write, so `job_records` holds successes only — and "what have we already tried that
+      did not work" is exactly the retrospective question the table exists to answer. Needs three
+      decisions before code: which status a row carries (a run that failed *after* several rounds is
+      not the same as one that never started), where the write happens (the failure path is an
+      exception, not a return value, so it is a `try/finally` around the child or a
+      workflow-level handler), and whether a later successful re-run under the same id supersedes the
+      failed row or joins it. The attempt is already in `audit_events`, so nothing is lost today
+      beyond the campaign's partial history — [M].
+- [ ] **`request_development_report` writes no record.** It does not run through
+      `ConnectorJobWorkflow` (D-115 kept it in core), so it would need its own write site — either by
+      lifting the record write into a helper both call, or by moving the report onto the wrapper. Its
+      gap is the smaller one: a report's artifact is a PR-gated note whose headings state its
+      subject, where a campaign's artifact was a single best point. Same for anything else that ever
+      starts a durable workflow outside the seam — [S].
+- [ ] **Temporal namespace retention is still unset.** Nothing in the repo configures it, so a
+      deployment inherits the server's default. D-155 removed the *dependence* on that number (the
+      result no longer lives only in history) but not the ambiguity: an operator reading the runbook
+      still cannot say how long a running deployment keeps workflow history. It is one Helm value
+      plus a runbook line, and it wants a stated policy rather than a copied default — [S].
+
 ## Open — Surfaced by the deferral-register rewrite (2026-07-31, D-154)
 
 Rewriting `docs/planning/DEFERRED.md` into a register meant checking each row against the tree. Two

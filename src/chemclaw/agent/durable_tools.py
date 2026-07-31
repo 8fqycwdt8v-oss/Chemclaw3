@@ -43,6 +43,7 @@ from chemclaw.core.config import settings
 from chemclaw.core.ids import stable_hash
 from chemclaw.core.temporal_client import connect
 from chemclaw.durable.connector_job import ConnectorJobResult
+from chemclaw.durable.job_record import JobRecordSummary, lookup_job_record, search_job_records
 from chemclaw.durable.note_index import NoteReindexWorkflow
 from chemclaw.durable.report_workflow import DevelopmentReportWorkflow
 from chemclaw.retrieval.harness import ReportRequest, ReportSection
@@ -63,6 +64,11 @@ class DurableJobStatus(BaseModel):
     status: str
     summary: str | None = None
     result: dict[str, Any] = Field(default_factory=dict)
+    # Why the run was asked for, when the answer came from the durable record (D-155). Empty on the
+    # live-Temporal path, which reads the workflow's result rather than the record — the launching
+    # turn is right there in the conversation, so restating its own reason back to the model would
+    # be noise; months later, when only the record survives, it is the whole point.
+    rationale: str = ""
 
 
 # Terminal Temporal statuses map to one word the model can act on, so a tool result never leaks
@@ -149,6 +155,11 @@ async def get_durable_job_status(job_id: str) -> DurableJobStatus:
     until the status is no longer `running`; a completed connector job carries its result with it,
     so there is no second call to make.
 
+    It answers for **finished** jobs indefinitely, not only while Temporal remembers them: a
+    completed connector job's result is also stored durably (D-155), so an id from months ago —
+    found with `find_past_jobs`, or quoted from an old conversation — still returns its result
+    after the workflow history has been retained away.
+
     Args:
         job_id: The id returned by any durable launcher.
 
@@ -158,24 +169,76 @@ async def get_durable_job_status(job_id: str) -> DurableJobStatus:
         the status alone.
 
     Raises:
-        ValueError: When the id is unknown, or names a completed workflow whose result is not the
-            connector envelope. That second case used to degrade to a bare status, because the
-            HPC/DFT job returned its own typed result and had its own status tool
-            (`agents/job_status.py`). It is a `qm` connector job now (D-118), so every durable job
-            this system hands an id for returns the envelope — a result that is not one means the
-            id belongs to a workflow no tool advertises, and reporting "completed" with an empty
-            result would tell a chemist their calculation is done while silently withholding it.
+        ValueError: When the id is unknown to both Temporal and the durable record, or names a
+            completed workflow whose result is not the connector envelope. That second case used to
+            degrade to a bare status, because the HPC/DFT job returned its own typed result and had
+            its own status tool (`agents/job_status.py`). It is a `qm` connector job now (D-118), so
+            every durable job this system hands an id for returns the envelope — a result that is
+            not one means the id belongs to a workflow no tool advertises, and reporting
+            "completed" with an empty result would tell a chemist their calculation is done while
+            silently withholding it.
     """
     client = await connect()
     handle = client.get_workflow_handle(job_id)
     try:
         description = await handle.describe()
     except RPCError as exc:
-        raise ValueError(f"no durable job with id {job_id!r}") from exc
+        # Temporal has never heard of this id — which, for a job that genuinely ran, means its
+        # history has aged out rather than that it never existed. Ask the durable record before
+        # telling a chemist their campaign does not exist.
+        recorded = await _recorded_status(job_id)
+        if recorded is None:
+            raise ValueError(f"no durable job with id {job_id!r}") from exc
+        return recorded
     status = _TERMINAL.get(description.status, "running") if description.status else "running"
     if status != "completed":
         return DurableJobStatus(job_id=job_id, status=status)
     return completed_job_status(job_id, await handle.result())
+
+
+async def _recorded_status(job_id: str) -> DurableJobStatus | None:
+    """The stored record for `job_id` as a status, or None when nothing was recorded.
+
+    The record is only ever written for a run that *completed* (the workflow raises before
+    reaching the write otherwise), so a row here means "completed", never a status this has to
+    reconstruct.
+    """
+    record = await lookup_job_record(job_id)
+    if record is None:
+        return None
+    return DurableJobStatus(
+        job_id=job_id,
+        status="completed",
+        summary=record.summary,
+        result=record.result,
+        rationale=record.rationale,
+    )
+
+
+@tool
+async def find_past_jobs(text: str = "", connector: str = "") -> list[JobRecordSummary]:
+    """Find durable jobs this system has already run, and why each of them was run.
+
+    The retrospective view over every finished campaign, calculation and report job — including
+    ones from other people's conversations and from long before this one. Each hit carries the
+    **reason the run was started**, so "have we optimized this coupling before, and what were we
+    trying to find out?" is answerable without the original chat.
+
+    Use it before launching an expensive job (the answer may already exist: re-running an identical
+    job rejoins the stored result, but a *similar* one is a fresh bill), and when a chemist asks
+    what has been tried. Take the `job_id` of a promising hit to `get_durable_job_status` for that
+    run's full result — for a BO campaign, every candidate it evaluated, not only the winner.
+
+    Args:
+        text: Words to look for in the recorded reason, the result summary or the job name.
+            Empty returns the most recent runs.
+        connector: Restrict to one capability bundle (e.g. "bo", "qm"). Empty searches all.
+
+    Returns:
+        The matching runs, newest first: what ran, why, what came out in one line, and the note it
+        proposed (if any).
+    """
+    return await search_job_records(text, connector)
 
 
 def completed_job_status(job_id: str, raw: Any) -> DurableJobStatus:

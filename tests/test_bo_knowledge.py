@@ -14,12 +14,29 @@ from chemclaw.connectors.bo.knowledge import note_from_campaign_result
 from chemclaw.connectors.bo.workflows import BoCampaignWorkflow
 from chemclaw.core.config import settings
 from chemclaw.durable.connector_job import ConnectorJobInput, ConnectorJobWorkflow
+from chemclaw.durable.job_record import record_job
 from chemclaw.durable.memory_jobs import publish_memory_note_activity
-from chemclaw.science.bo.problem import CampaignResult, CampaignSpec, Observation
+from chemclaw.science.bo.problem import (
+    CampaignResult,
+    CampaignSpec,
+    CategoricalParameter,
+    ContinuousParameter,
+    Objective,
+    Observation,
+    OptimizationProblem,
+)
 from tests.conftest import FakeSubmitter
 from tests.temporal_env import pydantic_client, start_env_or_skip
 
 _BO_ACTIVITIES: Sequence[Callable[..., Any]] = [propose_initial, propose_next, evaluate_candidates]
+
+_PROBLEM = OptimizationProblem(
+    parameters=[
+        CategoricalParameter(name="catalyst", categories=["P1", "P2"]),
+        ContinuousParameter(name="temperature", lower=30.0, upper=110.0),
+    ],
+    objective=Objective(name="yield", direction="maximize"),
+)
 
 _RESULT = CampaignResult(
     best=Observation(
@@ -36,7 +53,7 @@ _RESULT = CampaignResult(
 
 def test_note_from_campaign_result_maps_fields() -> None:
     """The recommendation becomes an agent `bo-candidate` note with conditions + provenance."""
-    note = note_from_campaign_result("reizman_suzuki", _RESULT)
+    note = note_from_campaign_result("reizman_suzuki", _PROBLEM, _RESULT)
     assert note.type == "bo-candidate"
     assert note.created_by == "agent"
     assert note.source == "bo:reizman_suzuki"
@@ -48,10 +65,38 @@ def test_note_from_campaign_result_maps_fields() -> None:
     assert note.outgoing_links() == []
 
 
+def test_the_note_says_what_space_was_searched() -> None:
+    """A recommended value is uninterpretable without the range it was chosen from (D-155).
+
+    "1.2 mol% Pd" means one thing when the campaign could have gone to 5 and another when 1.2 was
+    the ceiling — and the person reading the merged markdown has no other copy of the spec: it
+    lives in the job record and in Temporal's history, neither of which is in front of a reviewer.
+    """
+    body = note_from_campaign_result("reizman_suzuki", _PROBLEM, _RESULT).body
+    # Categorical options in full, not counted: "one of 2 catalysts" would not tell a reviewer
+    # whether the catalyst they would have tried was even on the list.
+    assert "catalyst: one of P1, P2" in body
+    assert "temperature: 30 to 110" in body
+    # And which way "better" runs, which decides whether the best point is a max or a min.
+    assert "maximize `yield`" in body
+
+
+def test_a_campaign_cannot_suppress_its_own_record() -> None:
+    """`publish_to_graph` on the spec was a model-authored switch over a deployment's decision.
+
+    Default `False` and filled in by the LLM, it silently suppressed the only permanent artifact a
+    campaign produced — after which the result expired with Temporal's history and the run left no
+    trace at all. The decision is the manifest's alone now, and this pins that the field does not
+    come back: nothing in `CampaignSpec` may decide whether the campaign is remembered.
+    """
+    assert "publish_to_graph" not in CampaignSpec.model_fields
+
+
 def test_note_id_is_stable_for_the_same_recommendation() -> None:
     """The id is a hash of the recommended params, so re-proposing is idempotent."""
     assert (
-        note_from_campaign_result("obj", _RESULT).id == note_from_campaign_result("obj", _RESULT).id
+        note_from_campaign_result("obj", _PROBLEM, _RESULT).id
+        == note_from_campaign_result("obj", _PROBLEM, _RESULT).id
     )
 
 
@@ -82,7 +127,6 @@ def test_campaign_publishes_recommendation_to_graph(monkeypatch: pytest.MonkeyPa
             objective_name="reizman_suzuki",
             n_initial=3,
             n_rounds=1,
-            publish_to_graph=True,
         )
         async with await start_env_or_skip() as env:
             client: Client = pydantic_client(env)
@@ -100,7 +144,7 @@ def test_campaign_publishes_recommendation_to_graph(monkeypatch: pytest.MonkeyPa
                     client,
                     task_queue=settings.background_task_queue,
                     workflows=[ConnectorJobWorkflow],
-                    activities=[publish_memory_note_activity],
+                    activities=[publish_memory_note_activity, record_job],
                 ),
             ):
                 # The campaign now *builds* the note and core *publishes* it, so this drives the
@@ -115,6 +159,7 @@ def test_campaign_publishes_recommendation_to_graph(monkeypatch: pytest.MonkeyPa
                         task_queue="test-bo-pub",
                         payload=spec.model_dump(mode="json"),
                         requested_by="tester",
+                        rationale="find a higher-yielding condition set for the teaching example",
                         publish_to_graph=True,
                     ),
                     id="bo-publish-test",

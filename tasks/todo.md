@@ -68,27 +68,46 @@ tools and models").
 
 ## Review
 
-Implemented as planned. Four things the plan did not foresee, all recorded rather than papered over:
+Implemented as planned. Five things the plan did not foresee, all recorded rather than papered over:
 
 - **The launcher has three exits, and only one of them starts a workflow.** `inline_wait_seconds`
   returns a finished envelope inline, and a duplicate launch rejoins an existing run. Writing the
-  record from the *workflow* rather than from the launcher covers all three with no extra code —
-  verified with a test per path rather than assumed.
+  record from the *workflow* rather than from the launcher covers all three by construction — no
+  per-exit code and no per-exit test, because none of them is where the record is written.
 - **`ConnectorJobInput` has two construction sites**, not one: the generated tool and
   `TemplateWorkflow._run_job_step`. The template path passes the step's declared `purpose`, falling
-  back to a deterministic `template '<name>' step '<id>'` when a step declares none — so the
-  reject-if-absent rule holds on every path into the model, and no template breaks.
+  back to a deterministic `template step '<id>' (job <name>)` when a step declares none — so the
+  reject-if-absent rule holds on every path in, and no existing template breaks.
 - **The note footer must not contain a wikilink.** `note_from_campaign_result` already documented
   this trap (a dangling link fails `kg-validate` on the very PR the note opens); the shared footer
-  inherits it, and a test asserts the footer is link-free.
-- **`ConnectorJobResult` is frozen**, so the provenance footer builds a new `Note` via
-  `model_copy(update=...)` rather than mutating — which also keeps the connector's note object
-  unchanged for the return value the tool hands back.
+  inherits it for *every* connector at once, so it is pinned by its own test.
+- **`Note` is frozen**, so the footer builds a copy via `model_copy(update=...)` — which also leaves
+  the connector's own object intact for the envelope the tool returns.
+- **An activity nothing serves fails silently here.** The record write is best-effort, so an
+  unregistered `record_job` would retry to its bound, log, and lose every record — discovered only
+  when an id expired months later. `registered_activities("background")` is asserted directly, in a
+  test that runs offline.
 
 ## Verification
 
-`make lint`, `make type`, `make test` green: **2081 passed, 32 skipped** (Temporal test server and
-xtb/crest binaries, as before). Every new behaviour has a test verified to fail without its fix:
-blank rationale accepted, rationale entering the idempotency hash, a job record not written, the
-provenance footer missing, `get_durable_job_status` raising on an expired id, and a BO campaign
-building no note.
+`make lint`, `make type`, `make test` green: **2104 passed, 32 skipped**. The skips are the
+Temporal test server (`temporal.download` is blocked by this environment's network policy) and the
+xtb/crest binaries.
+
+**The Postgres skips were removed rather than accepted**: `postgresql-16` was already installed
+here, so a local cluster plus pgvector 0.8 (built from source — the packaged 0.6.0 predates
+`bit_jaccard_ops`, which migration 002 needs) turns the whole Postgres-backed suite, including this
+change's four new store tests, from skipped into run. Migration 023 is therefore applied and
+exercised, not hand-checked.
+
+Verified **by mutation** — break the line, run the suite, confirm the named test fails:
+
+- blank rationale accepted → `test_a_launch_must_say_why_it_is_being_started` fails;
+- the record fallback removed from `get_durable_job_status` →
+  `test_a_job_whose_history_expired_is_still_collected_from_the_record` fails.
+
+**Known gap, measured not assumed:** removing `note_with_run_provenance` from the wrapper leaves the
+offline suite green — core *applying* the footer is asserted only in `test_connector_job_workflow.py`,
+which needs a live Temporal server and therefore runs in CI alone. The footer function itself, and
+every other pure piece (`job_record_for`, the sink selection, the activity registration), is pinned
+offline. That is why `job_record_for` exists as a function at all.

@@ -189,4 +189,4 @@ this reason; the filenames make that ordering irrelevant now, and the numbers st
 | [D-152](D-152-metrics-carry-labels-caching-is-measured-not-built.md) | Metrics carry labels, caching is measured rather than built, and the CLI meets the harness |
 | [D-153](D-153-the-mid-turn-wait-asks-the-jobs-not-the-mailbox.md) | The mid-turn wait asks the jobs, not the mailbox |
 | [D-154](D-154-a-register-that-had-become-a-log-and-the-one.md) | A register that had become a log, and the one trigger it was hiding |
-| D-155 | RESERVED — a durable record of every connector job: what was run, with what data, and why |
+| [D-155](D-155-a-durable-record-of-every-connector-job-what-ran.md) | A durable record of every connector job: what ran, with what data, and why |
