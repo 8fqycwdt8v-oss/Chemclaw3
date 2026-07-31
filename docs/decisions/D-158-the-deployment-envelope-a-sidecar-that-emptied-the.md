@@ -98,8 +98,15 @@ Two tests pin the new surface in both directions: every alert must name a metric
 declares (a PromQL expression naming a deleted series is silently always-empty, which reads exactly
 like "the condition never occurred"), and every metric designed to alert must have an alert.
 
-`PrometheusRule` joins `Route` and `ServiceMonitor` in the chart's `_UNVALIDATED_KINDS` set — the
-same operator's CRDs share whatever catalog coverage that operator has, and assuming otherwise
-would be an assumption rather than a finding. `helm template | kubeconform` in CI is what confirms
-the render; neither `helm` nor `kubeconform` is reachable from the offline sandbox this was built
-in, so the offline structural tests are what was actually run here.
+Neither `helm` nor `kubeconform` is reachable from the offline sandbox this was built in, so the
+offline structural tests are what ran locally and `helm template | kubeconform` in CI is what
+confirmed the render: **29 resources, Valid: 28, Invalid: 0, Skipped: 1.**
+
+That number corrected something this ADR first claimed. `PrometheusRule` was initially added to the
+chart's `_UNVALIDATED_KINDS` beside `Route` and `ServiceMonitor`, reasoning that the two
+Prometheus-operator CRDs must share whatever catalog coverage that operator has. The reasoning was
+sound and the premise was wrong: exactly *one* kind in the whole chart lacks a schema, so both CRDs
+were being validated against the datreeio catalog all along — `ServiceMonitor`'s exemption had
+simply never been checked against what kubeconform actually did. The set is now split in two, and a
+pinned skip-count sits beside it, because a claim about someone else's tool should be stated in a
+form that can be compared against its output rather than believed.

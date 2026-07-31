@@ -399,17 +399,26 @@ def test_a_comment_never_swallows_the_line_after_it() -> None:
     assert not offenders, "comment closures that eat the next line: " + "; ".join(offenders)
 
 
-# Kinds kubeconform has no schema for, so `make helm-validate` runs with
-# `-ignore-missing-schemas` and *skips* them rather than failing. Keeping the set explicit is what
-# stops that flag from being a hole: a skipped kind is a deliberate entry here, not a silent pass.
+# CRDs kubeconform validates against the **datreeio catalog** rather than its bundled defaults.
+# These are checked as strictly as a core kind; they are listed apart only because the `Makefile`
+# has to supply the catalog `-schema-location` for them to resolve at all.
 #
-# `PrometheusRule` joins `ServiceMonitor` because they are the same operator's CRDs and therefore
-# share whatever catalog coverage that operator has — listing one as unvalidated and expecting the
-# other to be validated would be an assumption, not a finding. If `helm-validate` in CI turns out
-# to validate either of them against the datreeio catalog, drop it from this set: the second
-# assertion below already fails on an entry the chart no longer renders, and the same discipline
-# should apply to one that no longer needs the exemption.
-_UNVALIDATED_KINDS = frozenset({"Route", "ServiceMonitor", "PrometheusRule"})
+# `ServiceMonitor` sat in `_UNVALIDATED_KINDS` and did not belong there. The CI run that first
+# rendered a `PrometheusRule` reported `29 resources found — Valid: 28, Skipped: 1`: exactly one
+# kind in the whole chart lacks a schema, so both Prometheus-operator CRDs were being validated all
+# along. The exemption had never been checked against what kubeconform actually did.
+_CATALOG_VALIDATED_KINDS = frozenset({"ServiceMonitor", "PrometheusRule"})
+
+# The one kind kubeconform genuinely has no schema for, so `make helm-validate` runs with
+# `-ignore-missing-schemas` and *skips* it rather than failing. Keeping the set explicit is what
+# stops that flag from being a hole: a skipped kind is a deliberate entry here, not a silent pass.
+_UNVALIDATED_KINDS = frozenset({"Route"})
+
+# What the CI gate reports for the chart as it stands: every rendered resource validated except the
+# OpenShift `Route`. Pinned as a number because the two sets above are claims about kubeconform's
+# behaviour, and a claim about someone else's tool is worth stating in a form that can be compared
+# against its actual output rather than believed.
+_EXPECTED_SKIPPED_RESOURCES = 1
 
 
 def test_only_the_known_crd_is_unvalidated_by_kubeconform() -> None:
@@ -422,8 +431,8 @@ def test_only_the_known_crd_is_unvalidated_by_kubeconform() -> None:
     does not read (D-117).
 
     The cost of the flag is that an unknown kind is skipped instead of rejected. This test buys that
-    back offline: every kind the chart renders is either a core Kubernetes kind (which kubeconform
-    does validate) or is named here.
+    back offline: every kind the chart renders is a core Kubernetes kind, a CRD the catalog covers,
+    or the one genuinely unvalidated kind named above.
     """
     core_kinds = {
         "ConfigMap",
@@ -436,15 +445,18 @@ def test_only_the_known_crd_is_unvalidated_by_kubeconform() -> None:
         "ServiceAccount",
     }
     rendered = set(re.findall(r"^kind:\s*([A-Za-z]+)", _all_templates(), flags=re.MULTILINE))
-    unexpected = rendered - core_kinds - _UNVALIDATED_KINDS
+    unexpected = rendered - core_kinds - _CATALOG_VALIDATED_KINDS - _UNVALIDATED_KINDS
     assert not unexpected, (
         f"the chart renders kind(s) {sorted(unexpected)} that kubeconform may silently skip — "
         "add a schema location, or add them to _UNVALIDATED_KINDS with the reason"
     )
-    # And the exemption must stay earned: if Route ever gains a schema, drop it from the set.
-    assert _UNVALIDATED_KINDS <= rendered, (
-        f"_UNVALIDATED_KINDS names kind(s) the chart no longer renders: "
-        f"{sorted(_UNVALIDATED_KINDS - rendered)}"
+    # Both exemptions must stay earned: a kind the chart stopped rendering is stale bookkeeping,
+    # and — the failure this test itself had — an exemption nobody ever checked against the tool.
+    stale = (_UNVALIDATED_KINDS | _CATALOG_VALIDATED_KINDS) - rendered
+    assert not stale, f"exempted kind(s) the chart no longer renders: {sorted(stale)}"
+    assert len(_UNVALIDATED_KINDS) == _EXPECTED_SKIPPED_RESOURCES, (
+        "the count CI reports as `Skipped` must match what this file claims is unvalidated; "
+        "if they diverge, one of them is wrong about kubeconform rather than about the chart"
     )
 
 
