@@ -68,9 +68,8 @@ def compound_id(smiles: str) -> str:
     Lives here, beside the canonicalization it is built on, because the callers span layers
     that share nothing else: the ingest/kg side that *writes* the note
     (`chemclaw.ingest.eln.compound`) and the fingerprint connectors that *cite* it
-    (`chemclaw.science.fingerprints.molfp.search`, `chemclaw.connectors.qm.knowledge`). A
-    connector must not
-    import the knowledge graph (D-115), and the id is a pure function of the structure — no
+    (`chemclaw.science.fingerprints.molfp.search`, `chemclaw.connectors.qm.knowledge`). A connector
+    must not import the knowledge graph (D-115), and the id is a pure function of the structure — no
     graph needed to derive it, only to confirm the note has been merged.
     """
     return f"compound-{stable_hash(require_canonical_smiles(smiles), chars=12)}"
