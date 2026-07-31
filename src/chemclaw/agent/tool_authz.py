@@ -21,13 +21,26 @@ from collections.abc import Awaitable, Callable
 
 from agent_framework import FunctionInvocationContext, function_middleware
 
-from chemclaw.agent.authz import AuthorizationError, authorize_tool
+from chemclaw.agent.authz import AuthorizationError, authorize_tool, side_effecting_tools
+from chemclaw.agent.dialogue_tools import is_dry_run
 from chemclaw.agent.turn_signals import record_tool_failure
 from chemclaw.core.errors import ChemclawError
 
 # How much of a failure message reaches the trace. Long enough for a chemist to recognise the
 # problem, short enough that an unexpected exception's text cannot flood the stream.
 _FAILURE_CHARS = 300
+
+
+class DryRunRefusal(AuthorizationError):
+    """A side-effecting tool was called on a turn the caller marked `dry_run`.
+
+    An `AuthorizationError` subclass for the reason `PlanNotApprovedError` is one: the two
+    behaviours already built around that class are the two wanted here — the audit middleware
+    records the refusal, and `surface_authorization_denials` hands the model the message verbatim
+    rather than MAF's opaque "Function failed." A subclass rather than the base so a caller can
+    tell "you lack a role" apart from "you asked me not to actually do this", which are different
+    situations with different next steps.
+    """
 
 
 @function_middleware
@@ -42,6 +55,43 @@ async def enforce_tool_authz(
             never runs; an outer audit middleware records the denied attempt as an error outcome.
     """
     authorize_tool(context.function.name)
+    await call_next()
+
+
+@function_middleware
+async def refuse_writes_on_dry_run(
+    context: FunctionInvocationContext,
+    call_next: Callable[[], Awaitable[None]],
+) -> None:
+    """Refuse any side-effecting tool while the turn is a dry run.
+
+    `dry_run: true` promised "show me what you would do without doing it", and it was checked in
+    exactly three tools — the report launcher, the generated job launchers and the template
+    launcher. Every other write was untouched, so a dry-run turn still pushed a branch to the
+    knowledge repo (`propose_knowledge_note`, `record_confirmed_answer`) and still mutated the
+    preference store and the subscription table. Three tools remembering is not a control; it is
+    three tools that happened to.
+
+    So the check moves to the boundary every tool passes through, over the *same*
+    `side_effecting_tools()` set the plan gate uses — one set, two gates, no third list to keep in
+    sync. The three ad-hoc checks are gone with it, and with them their tailored wording: a uniform
+    refusal that cannot be forgotten beats a bespoke sentence that can.
+
+    Raised rather than short-circuited into a result, so it travels the path
+    `PlanNotApprovedError` already proves works — recorded by the audit middleware as an `error`
+    outcome, and relayed verbatim to the model by `surface_authorization_denials`, which is exactly
+    what a dry run needs the model to read.
+
+    Raises:
+        DryRunRefusal: When the turn is a dry run and the tool changes something. The body never
+            runs.
+    """
+    name = context.function.name
+    if is_dry_run() and name in side_effecting_tools():
+        raise DryRunRefusal(
+            f"DRY RUN — {name} changes stored data or starts work, so it was not called. "
+            "Nothing was started; re-ask without dry-run to do it."
+        )
     await call_next()
 
 

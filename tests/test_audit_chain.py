@@ -10,7 +10,7 @@ import asyncio
 
 from chemclaw.agent.audit import AuditEvent
 from chemclaw.agent.audit_store import PostgresAuditSink, chain_hash
-from chemclaw.cli.verify_audit_chain import ChainRow, check_chain, verify_chain
+from chemclaw.cli.verify_audit_chain import ChainCheck, ChainRow, check_chain, verify_chain
 from chemclaw.core.config import settings
 from chemclaw.core.db import connect
 from chemclaw.core.ids import stable_hash
@@ -221,3 +221,46 @@ def test_a_v1_row_rehashed_as_v2_does_not_verify() -> None:
     """
     event = _event("find_notes")
     assert chain_hash("", event, version=1) != chain_hash("", event)
+
+
+def test_paging_the_walk_does_not_change_the_verdict() -> None:
+    """The fold carries the chain link across pages, so page size cannot alter the answer.
+
+    `verify_chain` used to `fetchall()` the whole table — and `audit_events` is the one table
+    `durable/retention.py` refuses to prune, because deleting from a hash chain is
+    indistinguishable from the tampering the chain detects. So the one table with no upper bound
+    was read whole into the shared background worker (DARK-6). Paging fixes that only if the
+    invariant survives a boundary, which is what this pins: an intact chain stays clean at every
+    page size, and a tampered row is still caught when the tamper falls exactly on a boundary.
+    """
+    rows = _linked([_event(f"tool-{i}") for i in range(1, 8)])
+
+    for page_size in range(1, len(rows) + 2):
+        check = ChainCheck()
+        for start in range(0, len(rows), page_size):
+            check.feed(rows[start : start + page_size])
+        assert check.problems == [], f"an intact chain reported problems at page size {page_size}"
+
+    # The link between row 3 and row 4 is what a 3-row page boundary sits on; breaking row 4's
+    # `prev_hash` must be caught there and not silently start a fresh chain.
+    broken = [*rows[:3], rows[3]._replace(prev_hash="deadbeef"), *rows[4:]]
+    check = ChainCheck()
+    check.feed(broken[:3])
+    check.feed(broken[3:])
+    assert any("broken link" in problem for problem in check.problems)
+
+
+def test_a_page_boundary_cannot_manufacture_a_second_genesis() -> None:
+    """The sharpest paging failure: each page verifying itself and every page looking intact.
+
+    A fold that reset between pages would treat every page's first row as a genesis, so an
+    interior deletion falling on a boundary would vanish — the chain would report clean while
+    missing rows, which is precisely the outcome the chain exists to make impossible.
+    """
+    rows = _linked([_event(f"tool-{i}") for i in range(1, 7)])
+    with_gap = [*rows[:2], *rows[3:]]  # row 3 deleted, and the gap lands on the boundary below
+
+    check = ChainCheck()
+    check.feed(with_gap[:2])
+    check.feed(with_gap[2:])
+    assert any("broken link" in problem for problem in check.problems)

@@ -22,7 +22,7 @@ from chemclaw.ingest.eln.compound import compound_dependencies
 from chemclaw.kg.analytics import GraphGaps, analyze
 from chemclaw.kg.git_submitter import default_submitter
 from chemclaw.kg.graph import build_graph, load_notes, neighborhood
-from chemclaw.kg.note import Note
+from chemclaw.kg.note import Note, Relation
 from chemclaw.kg.pr_gate import propose_note
 
 log = logging.getLogger(__name__)
@@ -192,6 +192,12 @@ async def propose_knowledge_note(
     compound_smiles: str | None = None,
     tags: list[str] | None = None,
     source: str | None = None,
+    confidence: float | None = None,
+    calc_refs: list[str] | None = None,
+    artifact_refs: list[str] | None = None,
+    relations: list[Relation] | None = None,
+    valid_from: date | None = None,
+    valid_to: date | None = None,
 ) -> str:
     """Propose a new knowledge-graph note for human review via the PR-gate.
 
@@ -206,6 +212,20 @@ async def propose_knowledge_note(
         compound_smiles: The molecule this note is about, if any.
         tags: Optional tags.
         source: Where the content came from (experiment id, calculation, …).
+        confidence: How much this note should be trusted, 0–1. Set it when you have a
+            principled basis (a calculator's calibration, the completeness of a record).
+            **Leave it unset when you do not** — an absent confidence means "not stated",
+            which retrieval and conflict detection both read correctly; a guessed number
+            is read as evidence.
+        calc_refs: Calculation keys this note rests on, so a stale calculation can be traced
+            to the conclusions drawn from it. Get them from a job's result envelope.
+        artifact_refs: Stored artifacts this note cites, as `<calc key>#<name>`.
+        relations: Typed links to other notes — `contradicts`, `supersedes`, `follows` — each
+            with its own optional confidence and validity window. Use these rather than prose
+            when the relationship is the claim: a `contradicts` is what conflict detection reads.
+        valid_from: When this became true (an experiment's own date, not today's).
+        valid_to: When it stopped being true, if it has. Leave open otherwise — a result does
+            not expire on its own, it is superseded.
 
     Returns:
         The submitted PR reference.
@@ -217,6 +237,12 @@ async def propose_knowledge_note(
         compound_smiles=compound_smiles,
         tags=tags or [],
         source=source,
+        confidence=confidence,
+        calc_refs=calc_refs or [],
+        artifact_refs=artifact_refs or [],
+        relations=relations or [],
+        valid_from=valid_from,
+        valid_to=valid_to,
         created_by="agent",
     )
     # A compound note the agent linked is minted into the same PR (STO-7), so the agent can cite

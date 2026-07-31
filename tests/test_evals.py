@@ -302,3 +302,44 @@ def test_sub_epsilon_delta_is_no_effect(monkeypatch: pytest.MonkeyPatch) -> None
     assert summary.no_effect == ["t"]
     assert summary.helped == []
     assert summary.hurt == []
+
+
+def test_strict_mode_gates_on_a_regression_and_not_on_a_demonstration() -> None:
+    """`ci.yml` called `make eval` "the scientific quality gates" while it could not fail.
+
+    Not an oversight in the CLI: two shipped cases exist to *demonstrate* a gate firing — a
+    solvent-heavy step that must exceed the PMI limit, a query whose literal match must miss — so a
+    command treating every failure as a regression would have been red from the day they were
+    written, and the only way to keep them from failing it was for it never to fail at all. The
+    real gate was a pinned assertion in this file, which meant a reader trusted the wrong step.
+
+    `expect_pass` is what makes the name true: it separates "this failed" from "this was supposed
+    to fail", so `--strict` can gate on the difference.
+    """
+    from chemclaw.evals.harness import main
+
+    # The shipped case-set: three gated metrics fail, all of them by design.
+    report = run_eval(load_eval_cases(settings.eval_case_dir), "v1")
+    assert report.failed(), "the demonstration cases stopped failing; this test proves nothing"
+    assert report.regressions() == []
+    assert main(["--strict"]) == 0
+
+    # A demonstration case that starts passing its gate would be a silent loss of coverage, and a
+    # *new* case is gated unless someone deliberately says otherwise.
+    assert EvalCase(id="x", metrics=["pmi"]).expect_pass is True
+
+
+def test_a_real_regression_fails_strict_mode() -> None:
+    """The behaviour the CI step's name promises: a science regression is a non-zero exit."""
+    solvent_heavy = next(
+        case
+        for case in load_eval_cases(settings.eval_case_dir)
+        if case.id == "pharma-solvent-heavy"
+    )
+    # The same failing case, but no longer declared as a demonstration — which is exactly the shape
+    # of a real regression: a gated metric that was expected to pass and did not.
+    regressed = solvent_heavy.model_copy(update={"expect_pass": True})
+    report = run_eval([regressed], "v1")
+
+    assert report.failed()
+    assert report.regressions() == report.failed()

@@ -34,7 +34,6 @@ from temporalio.common import WorkflowIDReusePolicy
 from temporalio.exceptions import WorkflowAlreadyStartedError
 
 from chemclaw.agent.authz import authorize_trigger, require_actor
-from chemclaw.agent.dialogue_tools import dry_run_notice, is_dry_run
 from chemclaw.agent.harness_todo import mark_awaiting_job
 from chemclaw.agent.identity_context import get_current_correlation_id
 from chemclaw.agent.session_context import get_current_session, get_current_session_id
@@ -353,8 +352,6 @@ def build_job_tool(connector: str, job: JobSpec) -> CapabilityTool:
         # to live inline here, which is why the template path had none of it.
         payload = prepare_job_launch(connector, job, params)
         workflow_id = job_workflow_id(connector, job.name, payload)
-        if is_dry_run():
-            return dry_run_notice(f"start the {job.name} job", _detail(connector, payload))
         # `require_actor` is the core rule (F4-T3): under Entra, refuse durable work with no user.
         requested_by = require_actor()
         client = await connect()

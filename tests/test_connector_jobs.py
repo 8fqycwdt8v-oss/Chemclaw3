@@ -14,15 +14,17 @@ is under test here is what happens *before* the workflow starts, which is where 
 """
 
 import asyncio
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
 from pydantic import BaseModel, ValidationError
 from temporalio.exceptions import WorkflowAlreadyStartedError
 
-from chemclaw.agent.authz import AuthorizationError
+from chemclaw.agent.authz import AuthorizationError, side_effecting_tools
 from chemclaw.agent.dialogue_tools import reset_dry_run, set_dry_run
 from chemclaw.agent.identity_context import reset_current_identity, set_current_identity
+from chemclaw.agent.tool_authz import DryRunRefusal, refuse_writes_on_dry_run
 from chemclaw.agent.turn_signals import JobSignal, begin_turn, drain, end_turn
 from chemclaw.connectors.jobs import (
     ConnectorJobError,
@@ -31,6 +33,7 @@ from chemclaw.connectors.jobs import (
     resolve_params_model,
 )
 from chemclaw.connectors.manifest import JobSpec
+from chemclaw.connectors.registry import enabled
 from chemclaw.durable.connector_job import ConnectorJobInput
 
 _SPEC = JobSpec.model_validate(
@@ -96,6 +99,15 @@ def _params(tool: Any, **values: Any) -> BaseModel:
     """
     model: type[BaseModel] = tool.__annotations__["params"]
     return model(**values)
+
+
+class _DryRunContext:
+    """The slice of `FunctionInvocationContext` the dry-run gate touches."""
+
+    def __init__(self, tool: str) -> None:
+        self.function = SimpleNamespace(name=tool)
+        self.arguments: dict[str, Any] = {}
+        self.result: Any = None
 
 
 def _launch(tool: Any, rationale: str = "why the tests run it", **values: Any) -> str:
@@ -379,17 +391,35 @@ def test_a_launch_with_no_ambient_session_does_not_crash(
     )
 
 
-def test_dry_run_reports_what_it_would_do_and_starts_nothing(client: _FakeClient) -> None:
-    """The ambient dry-run gate the three hand-written launchers have, applied by the factory."""
-    tool = build_job_tool("calc", _SPEC)
+def test_a_generated_launcher_is_covered_by_the_dry_run_gate() -> None:
+    """A declared job is refused on a dry run without the factory checking for itself.
+
+    The launcher used to test `is_dry_run()` in its own body. That worked and did not scale: every
+    write the three hand-written checks did not cover ran on a `dry_run: true` turn, including the
+    two that push a branch to the knowledge repository. The check now lives at the tool-invocation
+    boundary over `side_effecting_tools()`, so what has to hold here is that a generated job's name
+    is *in* that set — which it is by construction, since every declared job is durable work.
+    """
+    declared = {job.name for manifest in enabled() for job in manifest.jobs}
+    assert declared, "no connector declares a job; this test would prove nothing"
+    assert declared <= side_effecting_tools()
+
+    ran = False
+
+    async def _body() -> None:
+        nonlocal ran
+        ran = True
+
     token = set_dry_run(True)
     try:
-        answer = _launch(tool, smiles="CCO")
+        for job_name in sorted(declared):
+            with pytest.raises(DryRunRefusal):
+                asyncio.run(
+                    refuse_writes_on_dry_run(_DryRunContext(job_name), _body)  # type: ignore[arg-type]
+                )
     finally:
         reset_dry_run(token)
-    assert answer.startswith("DRY RUN")
-    assert "smiles='CCO'" in answer
-    assert client.calls == []  # nothing durable was started
+    assert ran is False  # nothing durable was started
 
 
 def test_an_expensive_job_is_authorized_before_any_durable_work(

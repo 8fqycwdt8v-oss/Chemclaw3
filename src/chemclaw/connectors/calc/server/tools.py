@@ -125,13 +125,22 @@ async def report_measurement(property_name: str, smiles: str, measured_value: fl
     """
     canonical = canonical_smiles(smiles)
     matched = await record_observation(
-        property_name, stable_hash(canonical), measured_value, source="chemist-reported"
+        property_name,
+        stable_hash(canonical),
+        measured_value,
+        source="chemist-reported",
+        subject=canonical,
     )
     if matched:
         return f"Recorded; it reconciled {matched} prediction(s) for {canonical}."
+    # This branch used to say "Recorded" and be wrong: the write was a bare UPDATE against
+    # `predictions`, so a measurement nothing had predicted matched no row and was discarded
+    # (DARK-9). It is now stored on its own, and the next prediction of the same thing scores
+    # against it — which is worth saying, because it is the reason reporting it was not wasted.
     return (
-        f"Recorded for {canonical}, but nothing had predicted {property_name} for it yet, "
-        "so no prediction was scored."
+        f"Recorded for {canonical}. Nothing had predicted {property_name} for it yet, so no "
+        "prediction was scored — the measurement is kept and the next prediction of it will be "
+        "scored against this value."
     )
 
 

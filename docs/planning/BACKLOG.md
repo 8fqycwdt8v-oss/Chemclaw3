@@ -112,10 +112,22 @@ QM path. The rows below are what survives that merge, narrowed to say so.
       worst case and is now closed. `connectors/bo/knowledge.py` and the ELN reaction notes still set
       none, so `notes_for_calculation()` answers for DFT runs and for nothing else — a BO
       recommendation still cannot be traced to the evaluations behind it.
-- [ ] **`Note.confidence` is never set by any machine path** — [S], and it kills two shipped
-      features: `GraphRetriever` scores every machine note at the default so KM-5's truncation
-      ordering is a no-op, and `kg/conflicts.py` requires a confidence on *both* sides so conflict
-      detection can only fire between two hand-written seed notes.
+- [ ] **`Note.confidence` is never set by any machine path — and the obvious fix would make
+      things worse** — [M], re-diagnosed while implementing it. The consequences stand
+      (`GraphRetriever` scores every machine note at the default, so KM-5's truncation ordering is
+      a no-op; `kg/conflicts.py` needs a confidence on both sides). What is wrong is the implied
+      remedy. The two consumers want *different signals*: retrieval wants a trust score for
+      ordering, `_suspected` wants a disagreement signal — and it fires purely on a confidence gap
+      ≥ `conflict_confidence_gap` between same-`(type, compound_smiles)` notes. So populating
+      confidence from **record completeness**, the obvious machine source, would flag "one run is
+      better documented than another" as a suspected conflict: manufactured noise, in a module
+      whose own docstring says a wrong answer here is worse than none. And the one *principled*
+      source — a calculator's calibration — reports `n=0`, because nothing but `predict_pka`/
+      `predict_solubility` writes to the ledger (see the row above). So there is currently no
+      honest machine source at all. The unblocking work is the **value comparator** (two yields for
+      one transformation), not more producers.
+      `propose_knowledge_note` can now state a confidence, which is the right home for a judgement
+      call: a human reviews it at the gate.
 
 **The write-back paths are open loops.**
 
@@ -164,11 +176,11 @@ QM path. The rows below are what survives that merge, narrowed to say so.
       `agent/plan_gate.py::enforce_plan_approval` gates the *act*, and the approval is checked
       against the durable store rather than in-process state. D-168 extends the same to a template
       step, which now runs as its requester.
-- [ ] **Dry-run does not cover the write tools it advertises** — [S]. `is_dry_run()` is checked in
-      three places and not in `propose_knowledge_note` (which pushes a git branch),
-      `record_confirmed_answer`, `remember_preference`, or any connector call. A `dry_run: true`
-      turn mutates the knowledge repo and the preference store. Best fixed with the row above, as
-      one gate over one `side_effecting` set rather than three ad-hoc checks.
+- [x] **Dry-run does not cover the write tools it advertises** — closed by
+      D-2026-07-31-one-gate-over-one-side-effecting-set, as this row proposed: one middleware over
+      `authz.side_effecting_tools()` (the set D-167 had already assembled), and the three ad-hoc
+      checks deleted. The set moved out of `plan_gate` on the way, because dry-run applies whether
+      or not the harness is on.
 - [ ] **Every shipped connector is unauthenticated** — [M]. All seven manifests ship
       `auth: mode: none`; `connectors/server.py` correctly never trusts the `X-Chemclaw-*` headers,
       which leaves the ingress NetworkPolicy as the only control. The `bearer` mode exists and is
@@ -210,15 +222,18 @@ QM path. The rows below are what survives that merge, narrowed to say so.
       runaway/abort rate — all computable on a scripted transcript, which is what its own ticket
       says, so `DEFERRED`'s AG-13 ("needs a live endpoint") does not cover it. Today a prompt
       change, a skill edit or a model swap can regress behaviour arbitrarily and CI stays green.
-- [ ] **The retrieval eval scores the retriever nobody will run** — [S]. `evals/retrieval.py` builds
-      only `GraphRetriever`; `VectorRetriever`, `LexicalRetriever` and the RRF fusion have no
-      coverage, so switching `retrieval_mode` to `hybrid` — the point of F10-A — flips to an
-      unmeasured path with no baseline and no drift tripwire.
-- [ ] **The CI step named "the scientific quality gates" cannot fail on a science regression** —
-      [S]. `evals/harness.py::main` returns 0 whenever the case-set loads, which is deliberate and
-      documented (the real gate is a pinned assertion in `tests/test_evals.py`) — but `ci.yml`
-      labels `make eval` as the gate, so a reader trusts the wrong step. Rename it or add
-      `--strict`.
+- [ ] **The retrieval eval still scores only `GraphRetriever`** — [M], but it no longer *pretends*
+      otherwise: under `hybrid`, or with `vector`/`lexical` active, the metric raises rather than
+      report a graph-only recall under a name that promises the shipped path. Scoring the fused and
+      derived paths for real needs the note index built over the eval fixture corpus, which needs
+      Postgres — the same blocker as `DEFERRED.md`'s live-retriever-drift row, and the reason this
+      is [M] rather than the [S] it was first filed as.
+- [x] **The CI step named "the scientific quality gates" cannot fail on a science regression** —
+      closed. The blocker was not the CLI's exit code: two shipped cases exist to *demonstrate* a
+      gate firing, so a command that failed on any failure would have been red from the day they
+      were written. `EvalCase.expect_pass` separates a demonstration from a regression,
+      `EvalReport.regressions()` is the difference, and `make eval-strict` — what CI now runs —
+      exits non-zero on one.
 
 **Data correctness, in rough order of how expensive it gets to fix later.**
 
@@ -251,11 +266,13 @@ QM path. The rows below are what survives that merge, narrowed to say so.
       model and its docstring names this hazard. Separately, a note is one vector over its whole
       body and the returned excerpt is `body[:240]`, so a reaction note's matched procedure step is
       never what comes back.
-- [ ] **Hazard screening misses the notes that propose conditions** — [S]. The note-level gate fires
-      only on a literal `## Procedure` heading, which `bo-candidate`/`experiment-proposal` notes do not
-      have — so the one note type proposing conditions a human will physically run is never
-      screened. Pair rules also fire across components of one mixture SMILES with no notion of
-      sequence, screening a quench reagent against one consumed at step 1.
+- [x] **Hazard screening misses the notes that propose conditions** — the note-type half is
+      closed: the gate covers `experiment-proposal` and `bo-candidate` by type, not only by a
+      `## Procedure` heading a parameter table does not have.
+- [ ] **Pair rules have no notion of sequence** — [M], the other half of that row. They fire across
+      components of one mixture SMILES, so a quench reagent added at step 8 is screened against one
+      consumed at step 1. Needs a `same_step` scope on the rule table, which is a change to
+      `rules.yaml`'s schema rather than to the matcher.
 - [ ] **Reaction fingerprints are dominated by solvent choice** — [M]. `ord.py::reaction_smiles`
       puts solvent and catalyst on the reactant side, so the DRFP similarity driving campaign
       grouping and `similar_reactions` is weighted by the variable usually being optimized.
@@ -343,11 +360,18 @@ QM path. The rows below are what survives that merge, narrowed to say so.
 
 **Bookkeeping.**
 
-- [ ] **F8 and F9 have no backlog entries at all** — [S]. `implementation-tickets.md` defines F0–F9
-      and this file tracks F0–F7 per ticket. F8-T2 was absorbed into F10-A; **F8-T1, F9-T1 and
-      F9-T3 were never picked up**, so `CLAUDE.md` designates this file as the memory read at
-      session start and it is not a complete index of open work. Reconcile the two, or ADR that
-      F8/F9 are dropped and why.
+- [x] **F8 and F9 have no backlog entries at all** — reconciled. F8-T2 was absorbed into F10-A and
+      is done. Of the three never picked up, **F8-T1** (uncertainty + applicability domain) and
+      **F9-T3** (autonomy metrics) got rows under *Trust* above when this analysis was written;
+      **F9-T1** was still missing and is added below. All three are now in the file `CLAUDE.md`
+      designates as the memory read at session start — a ticket tracked only in
+      `implementation-tickets.md` is invisible to the session that would pick it up, which is how
+      these three stayed unstarted through seven phases.
+- [ ] **F9-T1 — `architektur.md` §6 still describes a stack this repo does not build** — [S], and
+      `CLAUDE.md` already warns readers off it in prose ("historical, not current"). The ticket asks
+      for §6 to name OpenShift, Nextflow-on-HPC and the internal LLM adapter instead of Azure AI
+      Foundry / Container Apps / raw SLURM, keeping §7/§8. The warning is a workaround for the
+      rewrite, not a substitute: the document is still the first thing a newcomer reads.
 - [ ] **Eight documents assert capabilities the code does not have** — [S]. `deploy/README.md` on
       federation and on tracing spans; `harness_mode.py`'s "waits for a human before executing";
       `plan_approval_store.py` on where the mode lives; `infra/sql/006` on append-only;
@@ -392,25 +416,45 @@ deliberately not fixed there, each because it needs a decision rather than a pat
   `WorkflowAlreadyStartedError`, rejoins the *completed* prior run, and returns numbers produced by
   the old method. `science/calc/store.py` takes the opposite and correct position for the same
   computations (`calc_version` is in the key). Fix needs to decide what "the version of a job" is.
-- [ ] **DARK-5 [Med] — retention is one transaction over an unindexed column.** The docstring claims
+- [x] ~~**DARK-5 [Med] — retention is one transaction over an unindexed column.**~~ The docstring claims
   each table is pruned "in its own statement so one failure cannot roll back the others"; there is a
   single commit after the loop. And `session_events` has no index on `created_at` — the gap
   migration 022 closed for `session_messages` — so under the 30 s statement timeout the sweep starts
   failing permanently once the table is big enough to need it. Wants a migration.
-- [ ] **DARK-6 [Med] — `verify_chain` loads the whole audit table into memory.** No LIMIT, no
+  **Fixed.** Migration 028 adds a partial index on `(created_at) WHERE consumed_at IS NOT NULL` —
+  009's index is that predicate's exact complement, which is why there was never one to use — and
+  each table now commits in its own statement, making the docstring's claim true rather than
+  merely written.
+- [x] ~~**DARK-6 [Med] — `verify_chain` loads the whole audit table into memory.**~~ No LIMIT, no
   watermark, `fetchall()`. This is the one table retention refuses to prune, so the scheduled check
   eventually times out or OOMs the shared background worker.
-- [ ] **DARK-7 [Low] — the digest re-reports every note at least twice.** `_is_new` compares a
+  **Fixed.** Paged by id, with the fold carrying the chain link across pages. Two tests pin that
+  paging cannot change the verdict — in particular an interior deletion falling exactly on a page
+  boundary, which a fold that reset per page would have read as a fresh genesis and reported clean.
+- [x] ~~**DARK-7 [Low] — the digest re-reports every note at least twice.**~~ `_is_new` compares a
   `date` against `last_seen_at.date()` with `>=`, so a note whose `valid_from` is the day of the
   last report re-qualifies; at an hourly cadence the same note is sent 24 times, against
   `subscriptions.py`'s promise that "asking twice does not double-notify".
-- [ ] **DARK-8 [Low] — `embedding_dim` is cross-validated only when the `vector` source is on**, but
+  **Fixed**, and both readings of the comparison are wrong: `>` would silently drop a note that
+  appeared later the same day, which is the failure the feature exists to prevent. Migration 029
+  lets the subscription remember which ids it sent *at the watermark's date*, which separates the
+  two cases instead of choosing between them, and resets when the date rolls over.
+- [x] ~~**DARK-8 [Low] — `embedding_dim` is cross-validated only when the `vector` source is on**~~, but
   `reindex_notes` writes the embedding column unconditionally, so a `lexical`-only deployment with a
   768-wide model passes config validation and fails every reindex on a pgvector dimension error.
-- [ ] **DARK-9 [Low] — a reported measurement with no matching prediction is silently discarded**
+  **Fixed.** The question the check asks is now "does anything here write `note_index`", which
+  covers a `lexical`-only deployment and `note_reindex_enabled` — the scheduled rebuild, which
+  needs no retrieve source at all. Still scoped rather than unconditional: the standalone embedder
+  must stay free to pick any width.
+- [x] ~~**DARK-9 [Low] — a reported measurement with no matching prediction is silently discarded**~~
   while the tool reports success. `_RECORD_OBSERVATION` is a bare `UPDATE` with no insert path;
   `record_observation`'s own docstring says the caller logs the zero-row case and the caller does
   not. This is the common case for new chemistry.
+  **Fixed, and it was not [Low].** `predictions.predicted_value` is `NOT NULL`, so there was no row
+  for an unpredicted molecule to attach to and the measurement was destroyed — while
+  `report_measurement` answered "Recorded". Migration 030 keeps the measurement on its own, and a
+  later prediction of the same thing reconciles against it on write, so measure-then-predict works
+  as well as the reverse.
 - [ ] **DARK-10 [Low] — the PR-gate's checkout window exposes unreviewed notes to readers.**
   `knowledge_path` is the same tree the submitter runs `checkout -B note/<id>` against, and
   `invalidate_cache()` is called *inside* that window, so a concurrent turn can retrieve an

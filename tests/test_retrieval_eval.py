@@ -15,9 +15,10 @@ from typing import Any
 import pytest
 
 import chemclaw.evals  # noqa: F401 — registers the retrieval metrics on import
-from chemclaw.core.config import EvalSettings, settings
+from chemclaw.core.config import NOTE_INDEX_SOURCES, EvalSettings, settings
 from chemclaw.evals.harness import load_eval_cases, run_eval
-from chemclaw.evals.metric import get_metric, registered_names
+from chemclaw.evals.metric import EvalCase, MetricError, get_metric, registered_names
+from chemclaw.evals.retrieval import retrieval_recall
 from chemclaw.retrieval.evidence import EvidenceChunk
 from chemclaw.retrieval.retrievers import GraphRetriever
 
@@ -127,3 +128,40 @@ def test_run_eval_scores_the_full_gold_set(_corpus: None) -> None:
     report = run_eval(retrieval_cases, "retrieval-gold-v1")
     failed_recall = {r.case_id for r in report.failed() if r.result_metric == "retrieval_recall"}
     assert failed_recall == {"retrieval-cross-coupling-literal-miss"}
+
+
+def test_the_metric_refuses_rather_than_mislabel_a_different_retrieval_path(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Switching to hybrid retrieval flips the product to a path this metric does not score.
+
+    That is the entire point of F10-A, and until now the gate kept reporting a graph-only recall
+    under the name `retrieval_recall` — a green number about a retriever nobody was running. A
+    figure that looks like coverage it does not have is worse than a missing figure, so the metric
+    raises and `run_eval` names the case and metric that triggered it.
+    """
+    case = EvalCase(
+        id="retrieval-x",
+        metrics=["retrieval_recall"],
+        output={"query": "suzuki"},
+        reference={"expected_note_ids": ["reaction-suzuki-1"]},
+    )
+
+    monkeypatch.setattr(settings, "retrieval_mode", "hybrid")
+    with pytest.raises(MetricError, match="retrieval_mode"):
+        retrieval_recall(case)
+
+    monkeypatch.setattr(settings, "retrieval_mode", "graph")
+    monkeypatch.setattr(settings, "data_sources", "graph,vector")
+    with pytest.raises(MetricError, match="active source"):
+        retrieval_recall(case)
+
+
+def test_the_shipped_default_is_still_scored() -> None:
+    """The refusal must not fire on the configuration the repository actually ships.
+
+    `graph` mode with no derived-index source is exactly what this metric scores, so the guard has
+    to be a divergence check and not a blanket disable.
+    """
+    assert settings.retrieval_mode == "graph"
+    assert not NOTE_INDEX_SOURCES & set(settings.data_source_list)

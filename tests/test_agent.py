@@ -142,20 +142,24 @@ def test_skills_load_and_read_without_an_unanswerable_approval() -> None:
 
 
 def test_agent_audits_and_authorizes_every_tool_call() -> None:
-    """Five middlewares attach: both surfacing layers, audit, per-tool authz, failure announcing."""
+    """Six middlewares attach: both surfacing layers, audit, authz, dry-run, failure announcing."""
     from chemclaw.agent.tool_authz import (
         announce_tool_failures,
         enforce_tool_authz,
+        refuse_writes_on_dry_run,
         surface_authorization_denials,
         surface_domain_errors,
     )
 
     agent = build_agent(chat_client=object())
     middleware = list(agent.middleware or [])
-    assert len(middleware) == 5
+    assert len(middleware) == 6
     assert middleware[0] is surface_authorization_denials  # outermost: sees audit's re-raise
     assert middleware[1] is surface_domain_errors
     assert enforce_tool_authz in middleware  # the authz gate is wired, not just audit
+    # The dry-run gate is unconditional, which is the point: it used to be three tools checking for
+    # themselves, and every write those three did not cover ran on a `dry_run: true` turn.
+    assert refuse_writes_on_dry_run in middleware
     # Innermost, closest to the tool body: it must see the raw exception from *every* failure,
     # including the two the layers above convert into results, or the chemist's trace would show
     # a gap where a step failed (D-138).

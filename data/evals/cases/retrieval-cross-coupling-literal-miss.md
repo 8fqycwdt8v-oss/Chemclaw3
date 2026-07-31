@@ -1,5 +1,8 @@
 ---
 id: retrieval-cross-coupling-literal-miss
+# This case exists to demonstrate the gate firing, so its failure is the expected
+# result rather than a regression — see `EvalReport.regressions`.
+expect_pass: false
 metrics: [retrieval_recall, retrieval_precision]
 output:
   query: cross-coupling

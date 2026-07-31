@@ -48,6 +48,34 @@ ON CONFLICT (calc_type, calc_version, input_hash) DO UPDATE SET
     predicted_at = now()
 """
 
+# The measurement itself, kept whether or not anything predicted it (DARK-9, `infra/sql/030`).
+# Written *before* the reconciliation below, so a measurement for a molecule nothing has predicted
+# survives instead of being discarded by an UPDATE that matches nothing.
+_UPSERT_MEASUREMENT = """
+INSERT INTO measurements (property, input_hash, subject, value, unit, source, observed_at)
+VALUES (%s, %s, %s, %s, %s, %s, now())
+ON CONFLICT (property, input_hash) DO UPDATE SET
+    value = EXCLUDED.value,
+    unit = EXCLUDED.unit,
+    source = EXCLUDED.source,
+    observed_at = now()
+"""
+
+# The reverse direction, and the reason the table is worth having rather than merely honest: a
+# prediction made *after* a measurement reconciles against it immediately. Without this, storing
+# the measurement would only stop the lie, and the ledger would still learn nothing from the
+# measure-then-predict order that new chemistry actually follows.
+_RECONCILE_FROM_MEASUREMENT = """
+UPDATE predictions p
+   SET observed_value = m.value, observed_at = m.observed_at, observed_source = m.source
+  FROM measurements m
+ WHERE p.calc_type = m.property
+   AND p.input_hash = m.input_hash
+   AND p.calc_type = %s
+   AND p.input_hash = %s
+   AND p.observed_value IS NULL
+"""
+
 # Deliberately *not* scoped by version: a measurement is a fact about the molecule, not about the
 # calculator that guessed at it. One reported value scores every version's prediction of that
 # molecule, which is what makes a version-over-version comparison possible at all.
@@ -156,6 +184,12 @@ async def record_prediction(record: PredictionRecord) -> None:
                         record.unit,
                     ),
                 )
+                # A measurement may already be on file — new chemistry is routinely measured before
+                # it is predicted — so scoring the prediction it was just written for happens here
+                # rather than waiting for a measurement that has already arrived.
+                await cur.execute(
+                    _RECONCILE_FROM_MEASUREMENT, (record.calc_type, record.input_hash)
+                )
             await conn.commit()
     except Exception:
         # A calibration ledger is advice *about* predictions; losing a row must never cost the
@@ -166,13 +200,26 @@ async def record_prediction(record: PredictionRecord) -> None:
 
 
 async def record_observation(
-    calc_type: str, input_hash: str, observed_value: float, source: str
+    calc_type: str,
+    input_hash: str,
+    observed_value: float,
+    source: str,
+    *,
+    subject: str = "",
+    unit: str = "",
 ) -> int:
-    """Attach a measured value to any matching prediction; return how many rows it reconciled.
+    """Store a measured value, reconcile any matching predictions, and return how many it scored.
 
-    Zero is a normal and informative answer: it means nothing predicted this yet, which is exactly
-    the case where a measurement is *most* worth having and least worth silently discarding — the
-    caller logs it rather than this pretending success.
+    **The measurement is kept either way**, which it was not before (DARK-9). This was a bare
+    `UPDATE` against `predictions`, so a value for a molecule nothing had predicted matched no row
+    and was discarded — while `report_measurement` told the chemist it had been "recorded". That is
+    the *common* case, not an edge one: new chemistry is measured before anyone thinks to predict
+    it, so the ledger could only ever learn from molecules the agent happened to guess at first.
+
+    Zero is still a normal and informative return, and still means "nothing had predicted this" —
+    it no longer means "and so it is gone". A later prediction of the same thing reconciles against
+    the stored measurement on write, so the measure-then-predict order works as well as the
+    reverse.
     """
     if not settings.calibration_enabled:
         return 0
@@ -181,6 +228,10 @@ async def record_observation(
             settings.postgres_dsn, statement_timeout_seconds=settings.pg_statement_timeout_seconds
         ) as conn:
             async with conn.cursor() as cur:
+                await cur.execute(
+                    _UPSERT_MEASUREMENT,
+                    (calc_type, input_hash, subject or input_hash, observed_value, unit, source),
+                )
                 await cur.execute(
                     _RECORD_OBSERVATION, (observed_value, source, calc_type, input_hash)
                 )

@@ -99,7 +99,7 @@ def test_require_actor_rejects_absent_user(monkeypatch: pytest.MonkeyPatch) -> N
 def test_every_advertised_tool_is_classified_write_or_read() -> None:
     """A new tool must be classified, or this fails — the gate cannot infer what a tool does.
 
-    `chemclaw.agent.plan_gate.gated_tools` is what the harness's plan gate refuses under an
+    `chemclaw.agent.authz.side_effecting_tools` is what the harness's plan gate refuses under an
     unapproved plan, and a name it does not know is silently treated as a read. That is the failure
     mode this test exists to make impossible: an ungated write ships looking exactly like a gated
     one, and nothing about the running system says otherwise.
@@ -114,13 +114,13 @@ def test_every_advertised_tool_is_classified_write_or_read() -> None:
     into the shared registry; without it the registry holds only the `@tool` functions and the test
     would silently check a third of what it claims to.
     """
+    from chemclaw.agent.authz import side_effecting_tools
     from chemclaw.agent.chemclaw_agent import build_agent
-    from chemclaw.agent.plan_gate import gated_tools
     from chemclaw.agent.tool_registry import registered_tool_names
 
     build_agent(chat_client=object())
     advertised = set(registered_tool_names())
-    classified = gated_tools() | READ_ONLY_TOOLS
+    classified = side_effecting_tools() | READ_ONLY_TOOLS
     assert advertised - classified == set(), (
         "these advertised tools are classified neither state-changing nor read-only, so the "
         "harness plan gate treats them as reads; add an in-process tool to one of the two sets in "

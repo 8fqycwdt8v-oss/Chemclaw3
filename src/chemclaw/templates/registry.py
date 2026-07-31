@@ -23,7 +23,6 @@ from temporalio.common import WorkflowIDReusePolicy
 from temporalio.exceptions import WorkflowAlreadyStartedError
 
 from chemclaw.agent.authz import require_actor
-from chemclaw.agent.dialogue_tools import dry_run_notice, is_dry_run
 from chemclaw.agent.identity_context import get_current_roles
 from chemclaw.agent.session_context import get_current_session_id
 from chemclaw.agent.tool_registry import CapabilityTool
@@ -180,11 +179,6 @@ def build_template_tool(template: Template) -> CapabilityTool:
         spec = params_model.model_validate(params)
         inputs: dict[str, Any] = spec.model_dump(mode="json", exclude_none=True)
         workflow_id = run_workflow_id(template, inputs)
-        if is_dry_run():
-            return dry_run_notice(
-                f"run the {template.name!r} template",
-                f"{len(template.steps)} step(s) with {sorted(inputs)}",
-            )
         requested_by = require_actor()
         client = await connect()
         try:

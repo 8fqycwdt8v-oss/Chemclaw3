@@ -58,6 +58,16 @@ class EvalCase(BaseModel):
     metrics: list[str] = Field(min_length=1)
     output: dict[str, Any] = Field(default_factory=dict)
     reference: dict[str, Any] | None = None
+    # Whether this case's gated metrics are *supposed* to pass. Two cases in the shipped set exist
+    # precisely to demonstrate a gate firing — a solvent-heavy step that must exceed the PMI limit,
+    # a query whose literal match must miss — and without this field their failure is
+    # indistinguishable from a regression. That is why `make eval` could never gate on a science
+    # regression despite `ci.yml` calling it "the scientific quality gates": the only way to keep a
+    # demonstration case from failing the command was for the command never to fail at all.
+    #
+    # Declared per case rather than inferred, and defaulting to True, so a *new* case is gated
+    # unless someone deliberately says otherwise.
+    expect_pass: bool = True
 
 
 class MetricError(ChemclawError):

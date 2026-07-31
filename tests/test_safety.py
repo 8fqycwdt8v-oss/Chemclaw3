@@ -292,3 +292,59 @@ def test_broken_rule_table_blocks_the_gate_instead_of_crashing_it(
     monkeypatch.setattr(settings, "safety_rules_path", "safety/does-not-exist.yaml")
     problems = hazard_problems(_procedure_note())
     assert len(problems) == 1 and "hazard screening failed" in problems[0]
+
+
+def _proposal_note(note_type: str) -> Note:
+    """A machine-minted proposal of conditions: a parameter table, with no `## Procedure` heading.
+
+    This is the real shape of a `bo-candidate` — `connectors/bo/knowledge.py` writes exactly this,
+    a list of `- name: value` conditions under a sentence — which is why a heading-only gate never
+    saw one.
+    """
+    body = (
+        "Best point found for objective `yield`.\n\n"
+        "- azide source: `CCCN=[N+]=[N-]`\n"
+        "- solvent: `CCO`\n"
+        "- temperature: 80\n"
+    )
+    return Note(id=f"{note_type}-x", type=note_type, created_by="agent", body=body)
+
+
+def test_a_proposal_of_conditions_is_screened_without_a_procedure_heading() -> None:
+    """The note class that proposes work nobody has run was the one class never screened.
+
+    A `bo-candidate` names conditions a surrogate wants a human to physically run, and it has no
+    `## Procedure` heading because it is a parameter table. Under the heading-only gate it passed
+    unscreened — the exact inversion of what the gate is for, since here there is no chemist who
+    has already stood at the bench and formed their own judgment about the mixture.
+    """
+    for note_type in ("bo-candidate", "experiment-proposal"):
+        problems = hazard_problems(_proposal_note(note_type))
+        assert len(problems) == 1, note_type
+        assert "organic-azide" in problems[0] and "## Hazards" in problems[0]
+
+
+def test_a_documented_proposal_passes_like_any_other_note() -> None:
+    """Widening which notes are screened must not change what the gate asks of them."""
+    documented = _proposal_note("bo-candidate").model_copy(
+        update={
+            "body": _proposal_note("bo-candidate").body
+            + "\n## Hazards\n\nOrganic azide: energetic; do not isolate neat.\n"
+        }
+    )
+    assert hazard_problems(documented) == []
+
+
+def test_an_ordinary_note_that_merely_names_a_structure_is_still_out_of_scope() -> None:
+    """The scoping that keeps the gate credible: it fires on instructions, not on mentions.
+
+    A gate that fired on every note naming a hazardous molecule would be switched off, which is
+    the failure mode the module's own docstring names.
+    """
+    mention = Note(
+        id="playbook-x",
+        type="playbook",
+        created_by="agent",
+        body="Azide couplings (`CCCN=[N+]=[N-]`) recur across two projects.",
+    )
+    assert hazard_problems(mention) == []
