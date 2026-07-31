@@ -117,12 +117,20 @@ class DigestWorkflow:
         delivered = 0
         for item in digests:
             # Best-effort per subscriber: one broken mailbox must not stop everyone else's digest.
-            await notify_session_best_effort(
+            sent = await notify_session_best_effort(
                 _digest_channel(item.owner),
                 "digest",
                 {"query": item.query, "note_ids": item.note_ids},
             )
-            # Only after delivery — see the module docstring on why this ordering matters.
+            # Only after delivery — see the module docstring on why this ordering matters. The
+            # acknowledgement used to run unconditionally, which made a swallowed delivery failure
+            # indistinguishable from a successful send and advanced the watermark past matches the
+            # subscriber never received. Those notes can never re-qualify, so the guarantee the
+            # ordering exists to provide ("a crash between 'found matches' and 'delivered' must
+            # cause a re-report, not a silent skip") held for a crash and not for the failure mode
+            # that actually happens.
+            if not sent:
+                continue
             await workflow.execute_activity(
                 acknowledge_digest,
                 item.subscription_id,

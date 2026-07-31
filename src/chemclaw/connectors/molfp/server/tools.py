@@ -17,12 +17,12 @@ Judgment stays out: the tools compute and search; when a similarity counts as pr
 from mcp.server.fastmcp import FastMCP
 
 from chemclaw.science.fingerprints.molfp.search import (
-    SubstructureHit,
+    MoleculeHit,
     find_similar_molecules,
     find_substructure_matches,
     record_for,
 )
-from chemclaw.science.fingerprints.store import FingerprintStore, Match, default_molecule_store
+from chemclaw.science.fingerprints.store import FingerprintStore, default_molecule_store
 
 server = FastMCP("mcp-molfp")
 _store: FingerprintStore = default_molecule_store()
@@ -31,17 +31,21 @@ _store: FingerprintStore = default_molecule_store()
 @server.tool()
 async def similar_molecules(
     smiles: str, top_k: int | None = None, threshold: float | None = None
-) -> list[Match]:
+) -> list[MoleculeHit]:
     """Find stored molecules structurally similar to `smiles`, most similar first.
 
+    Each hit carries `compound_note_id` — cite that note rather than searching for the SMILES.
     `top_k` and `threshold` (Tanimoto floor) default to the configured values.
     """
     return await find_similar_molecules(_store, smiles, top_k, threshold)
 
 
 @server.tool()
-async def substructure_matches(query: str) -> list[SubstructureHit]:
-    """Return stored molecules containing the `query` fragment (SMARTS or SMILES)."""
+async def substructure_matches(query: str) -> list[MoleculeHit]:
+    """Return stored molecules containing the `query` fragment (SMARTS or SMILES).
+
+    Each hit carries `compound_note_id` — cite that note rather than searching for the SMILES.
+    """
     return await find_substructure_matches(_store, query)
 
 

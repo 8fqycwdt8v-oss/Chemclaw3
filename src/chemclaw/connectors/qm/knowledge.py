@@ -12,7 +12,7 @@ connector must not be able to reach around the gate, and now it structurally can
 """
 
 from chemclaw.connectors.qm.specs import QMJobResult, QmJobSpec, qm_job_key
-from chemclaw.ingest.eln.compound import compound_id
+from chemclaw.core.chem import compound_id
 from chemclaw.kg.note import Note
 
 

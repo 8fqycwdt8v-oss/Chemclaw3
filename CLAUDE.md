@@ -155,6 +155,13 @@ after each cluster of steps before moving on.
 
 - `docs/planning/BACKLOG.md` — prioritized open action items.
 - `docs/planning/DEFERRED.md` — consciously postponed items **with the reason they are not now**.
+  It is a register of what is *pending*, never a log of what was decided. **When an ADR closes a
+  deferral, delete its row in the same commit** — do not strike it through, and do not append a
+  status note or a dated section saying an earlier row is now out of date. The ADR is the record and
+  `git log` is the history; a row that outlives its closure reads as live state. Appending instead
+  of deleting is exactly how the file grew nine sections describing each other, three of them false
+  and five rows describing shipped work (D-154). `tests/test_deferred_register.py` enforces what a
+  machine can see of this.
 - `docs/decisions/` — architecture decisions with rationale, one file per ADR (`D-NNN-<slug>.md`).
   Never edit a merged ADR; a decision that has changed gets a new ADR that supersedes it.
 - `docs/decisions/README.md` — the `D-NNN` allocation ledger, one row per number. **Every session that

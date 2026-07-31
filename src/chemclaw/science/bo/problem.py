@@ -210,6 +210,22 @@ def require_rounds_within_ceiling(n_rounds: int) -> None:
         )
 
 
+def require_campaign_within_ceiling(spec: CampaignSpec) -> None:
+    """The same ceiling, in the shape a declared `precondition` is called with.
+
+    `JobSpec.precondition` is documented as taking *the validated params object*, and
+    `connectors/jobs.py` calls it that way. `connectors/bo/connector.yaml` named the function above
+    instead, which takes an `int`, so `start_optimization_campaign` raised
+    `TypeError: '>' not supported between instances of 'CampaignSpec' and 'int'` on every call —
+    the reference connector's flagship job could not be started at all, while CI stayed green
+    because the only tests call the ceiling rule with a bare int.
+
+    Two entry points with two shapes, so this is an adapter rather than a widened signature: the
+    creation path in `bo.campaign` genuinely holds a round count and nothing else.
+    """
+    require_rounds_within_ceiling(spec.n_rounds)
+
+
 class CampaignResult(BaseModel):
     """The outcome of a campaign: the best point found and the full history."""
 

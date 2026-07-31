@@ -12,6 +12,7 @@ that decides "same molecule" exists in exactly one place (DRY).
 from rdkit import Chem
 
 from chemclaw.core.errors import ChemclawError
+from chemclaw.core.ids import stable_hash
 
 
 class InvalidSmilesError(ChemclawError):
@@ -55,3 +56,20 @@ def require_canonical_smiles(smiles: str) -> str:
     if mol is None or mol.GetNumAtoms() == 0:
         raise InvalidSmilesError(f"invalid SMILES: {smiles!r}")
     return str(Chem.MolToSmiles(mol))
+
+
+def compound_id(smiles: str) -> str:
+    """The stable knowledge-graph note id for a molecule, derived from its structure.
+
+    Structure-derived rather than name-derived, so two sources that spell the same molecule
+    differently still reach one note — the property that makes a citation from a fingerprint
+    hit meaningful at all.
+
+    Lives here, beside the canonicalization it is built on, because the callers span layers
+    that share nothing else: the ingest/kg side that *writes* the note
+    (`chemclaw.ingest.eln.compound`) and the fingerprint connectors that *cite* it
+    (`chemclaw.science.fingerprints.molfp.search`, `chemclaw.connectors.qm.knowledge`). A connector
+    must not import the knowledge graph (D-115), and the id is a pure function of the structure — no
+    graph needed to derive it, only to confirm the note has been merged.
+    """
+    return f"compound-{stable_hash(require_canonical_smiles(smiles), chars=12)}"

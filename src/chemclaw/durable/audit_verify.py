@@ -58,6 +58,15 @@ class AuditChainVerifyWorkflow:
             retry_policy=BAD_DATA_RETRY,
         )
         for problem in problems:
+            # Logged as well as notified, and deliberately not instead of. Both consumers of the
+            # push-back mailbox scope their claim to `kinds=("job_completed",)`, so an
+            # `audit_chain_break` row is not merely unread — it is never even eligible to be
+            # claimed. Without this line a detected tampering completed successfully and showed a
+            # green schedule, which is exactly the "silently un-delivered alert reads as an
+            # all-clear" outcome this workflow's docstring says it must never produce.
+            # `durable/eval_drift.py` reached the same conclusion for the same reason; this is that
+            # mitigation, which was not carried across with the notify pattern.
+            workflow.logger.error("audit chain integrity failure: %s", problem)
             await notify_session(
                 AUDIT_ALERT_CHANNEL,
                 "audit_chain_break",
