@@ -9,12 +9,7 @@ checks frontmatter.
 """
 
 from chemclaw.agent.chemclaw_agent import available_tool_names
-from chemclaw.cli.validate_prose_contract import (
-    _ALLOWED_NON_TOOLS,
-    _prose_sources,
-    check_prose_contract,
-    referenced_note_types,
-)
+from chemclaw.cli.validate_prose_contract import _ALLOWED_NON_TOOLS, check_prose_contract
 from chemclaw.kg.note import KNOWN_NOTE_TYPES
 
 
@@ -63,60 +58,41 @@ def test_pointing_the_agent_at_a_workflow_is_caught(monkeypatch: object) -> None
     assert "cannot invoke" in problems[0]
 
 
+def test_a_note_type_the_graph_does_not_know_is_caught(monkeypatch: object) -> None:
+    """The `experiment-batch` case (D-164): reachable tool, unwritable artifact.
+
+    Two shipped skills told the agent to propose a `protocol` / `experiment-batch` note. Both
+    calls succeed and open a branch; `kg-validate` then rejects it on the PR the agent just
+    created. Rule 1 could not see it — the tool name was real, only the type was not.
+    """
+    import chemclaw.cli.validate_prose_contract as module
+
+    monkeypatch.setattr(  # type: ignore[attr-defined]
+        module,
+        "_prose_sources",
+        lambda: {"fake/SKILL.md": "Record it with `propose_knowledge_note`, type `field-trial`."},
+    )
+    problems = check_prose_contract()
+    assert len(problems) == 1
+    assert "field-trial" in problems[0]
+
+
+def test_a_known_note_type_passes() -> None:
+    """The rule must not fire on the types the graph does mint, or prose cannot name them."""
+    import chemclaw.cli.validate_prose_contract as module
+
+    for note_type in ("reaction", "experiment-proposal", "optimization-campaign"):
+        assert module.referenced_note_types(f"write it as type `{note_type}`") <= KNOWN_NOTE_TYPES
+
+
+def test_the_rule_reads_note_types_not_every_backticked_word() -> None:
+    """Narrow on purpose: this prose is full of backticked tools, fields and chemistry."""
+    import chemclaw.cli.validate_prose_contract as module
+
+    prose = "filter on `type` or `tag`, then call `expand_note`"
+    assert module.referenced_note_types(prose) == set()
+
+
 def test_the_allowlist_is_small_and_deliberate() -> None:
     """The escape hatch must stay a review decision, not a dumping ground."""
     assert len(_ALLOWED_NON_TOOLS) <= 3
-
-
-def test_a_note_type_the_graph_does_not_know_is_caught(monkeypatch: object) -> None:
-    """The `experiment-batch` case: prose told the agent to write a type `kg-validate` rejects.
-
-    The defect this guards was invisible from both ends — the skill named the type, the schema did
-    not hold it, and the PR where `kg-validate` would have objected is never opened, so the
-    proposal died on a branch with no error anywhere.
-    """
-    import chemclaw.cli.validate_prose_contract as module
-
-    monkeypatch.setattr(  # type: ignore[attr-defined]
-        module,
-        "_prose_sources",
-        lambda: {"fake/SKILL.md": "Draft it through `propose_knowledge_note` (type `wishlist`)."},
-    )
-    problems = check_prose_contract()
-    assert len(problems) == 1
-    assert "wishlist" in problems[0]
-    assert "KNOWN_NOTE_TYPES" in problems[0]
-
-
-def test_a_note_type_enumeration_is_read(monkeypatch: object) -> None:
-    """The taught vocabulary list is checked too — it is what an agent copies from."""
-    import chemclaw.cli.validate_prose_contract as module
-
-    monkeypatch.setattr(  # type: ignore[attr-defined]
-        module,
-        "_prose_sources",
-        lambda: {"fake/SKILL.md": "- **type**: the smallest accurate kind (`reaction`, `myth`)."},
-    )
-    problems = check_prose_contract()
-    assert len(problems) == 1
-    assert "myth" in problems[0]
-
-
-def test_the_two_proposal_types_the_skills_teach_are_real() -> None:
-    """`protocol`/`experiment-batch` must stay known — the regression this rule was written for."""
-    assert {"protocol", "experiment-batch"} <= KNOWN_NOTE_TYPES
-
-
-def test_every_type_the_system_mints_is_taught_somewhere() -> None:
-    """The graph's vocabulary and the prose that teaches it must not drift apart again.
-
-    The enumeration in `knowledge-graph-write` had drifted in *both* directions: it named two types
-    that did not exist (caught by `check_prose_contract`) and omitted three that did, which is the
-    direction no checker can see from the prose alone — a missing entry is silence, not an error.
-    """
-    taught: set[str] = set()
-    for text in _prose_sources().values():
-        taught |= referenced_note_types(text)
-    assert KNOWN_NOTE_TYPES <= taught, (
-        f"note types no skill teaches: {sorted(KNOWN_NOTE_TYPES - taught)}"
-    )

@@ -1,4 +1,4 @@
-# D-166 — The audit chain is versioned, so widening the record does not invalidate the record
+# D-2026-07-31-the-audit-chain-is-versioned — The audit chain is versioned, so widening the record does not invalidate it
 
 **Status:** accepted · **Date:** 2026-07-31 · **Extends:** D-034 (durable trail), F10-G1 (hash chain)
 

@@ -1,4 +1,6 @@
-"""`chemclaw explain` answers "why was this run?" from the join D-166 added.
+"""`chemclaw explain` answers "why was this run?" from the join.
+
+The join is the two columns added by D-2026-07-31-the-audit-chain-is-versioned.
 
 The columns are the mechanism; this is the claim. A test that only asserted the columns exist would
 pass while the question stayed unanswerable, which is the failure mode this whole line of work is
@@ -30,7 +32,8 @@ def _report(
 def test_a_tool_call_is_printed_under_the_question_that_caused_it() -> None:
     """The whole point: the words and the tool calls appear together, keyed by the turn.
 
-    Before D-166 these lived in two tables with no key between them, so this report could not have
+    Before D-2026-07-31-the-audit-chain-is-versioned
+    these lived in two tables with no key between them, so this report could not have
     been written at all — the audit row knew its correlation id and nothing knew which conversation
     that id belonged to.
     """
@@ -60,7 +63,9 @@ def test_a_durable_job_prints_the_reason_its_launcher_had_to_state() -> None:
 
 
 def test_a_turn_whose_words_were_compacted_away_is_still_shown() -> None:
-    """The honest case, and the one that documents D-166's remaining limit.
+    """The honest case, documenting a remaining limit.
+
+    The limit belongs to D-2026-07-31-the-audit-chain-is-versioned.
 
     `session_store._compact` rewrites message rows, retention prunes them, and `rollback_to` deletes
     a turn's rows on disconnect — so the trail can outlive the conversation it points at. Dropping

@@ -252,7 +252,7 @@ def test_numbered_ids_sort_before_dated_ones_and_stay_numeric() -> None:
     """Record order is defined here, and the ledger is asserted to match it exactly.
 
     **`D-900` is the case that makes this test mean anything.** Sorting the stems as plain strings
-    gives the right answer for every id in the record today — `D-001` … `D-167` are zero-padded, so
+    gives the right answer for every id in the record today — `D-001` … `D-166` are zero-padded, so
     lexicographic order *is* numeric order, and they all begin `D-0`/`D-1`, which precedes
     `D-2025-…`. So a sort key that ignored the two shapes entirely would pass a test built from
     today's ids while being wrong.
@@ -284,5 +284,5 @@ def test_a_malformed_id_is_still_rejected() -> None:
     invalid before must still be invalid: an uppercase slug, a missing slug, a two-digit month, a
     bare date with no decision in it.
     """
-    for bad in ("D-2026-7-31-slug", "D-2026-07-31", "D-167", "D-2026-07-31-Slug", "D-1234-slug"):
+    for bad in ("D-2026-7-31-slug", "D-2026-07-31", "D-999", "D-2026-07-31-Slug", "D-1234-slug"):
         assert not _FILENAME.match(bad), f"{bad} should not be a valid ADR filename"

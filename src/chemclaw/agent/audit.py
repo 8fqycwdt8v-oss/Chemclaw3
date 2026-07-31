@@ -50,7 +50,9 @@ class AuditEvent(BaseModel):
     """One recorded tool invocation — the row an `AuditSink` persists."""
 
     correlation_id: str
-    # The conversation this call belongs to (D-166). `correlation_id` identifies the *turn* and was
+    # The conversation this call belongs to
+    # (D-2026-07-31-the-audit-chain-is-versioned).
+    # `correlation_id` identifies the *turn* and was
     # stamped on nothing holding the user's words, so a tool call could not be joined to the
     # question that caused it — the trail proved *that* a tool ran and never *why*. D-157 closed
     # this for durable jobs (`job_records` carries the session and a rationale); an ordinary tool

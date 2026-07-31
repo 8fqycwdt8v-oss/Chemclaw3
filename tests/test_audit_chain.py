@@ -123,10 +123,12 @@ def test_postgres_sink_writes_a_verifiable_chain() -> None:
     asyncio.run(_run())
 
 
-# --- the record grows without invalidating what is already in it (D-166) ---------------------
+# --- the record grows without invalidating what is already in it -------------------------
+# (D-2026-07-31-the-audit-chain-is-versioned)
 
 
-# The pre-D-166 hash, reimplemented from the old source rather than called through `chain_hash`.
+# The pre-versioning hash, reimplemented from the old source rather than called through
+# `chain_hash`.
 # That independence is the whole point: a helper that built v1 rows *with* the function under test
 # moves with it, so deleting the version switch leaves both sides agreeing and the tests green
 # while the mechanism does nothing. Verified rather than assumed — the first draft of this file did
@@ -161,7 +163,7 @@ def test_the_versioned_hash_reproduces_the_legacy_bytes_exactly() -> None:
 
 
 def _linked_v1(events: list[AuditEvent], *, start: int = 1) -> list[ChainRow]:
-    """Rows as the pre-D-166 writer produced them: hashed over the eight original fields."""
+    """Rows as the pre-versioning writer produced them: hashed over the eight original fields."""
     rows: list[ChainRow] = []
     prev = ""
     for i, event in enumerate(events, start=start):

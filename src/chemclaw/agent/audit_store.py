@@ -27,7 +27,8 @@ from chemclaw.core.ids import stable_hash
 # content-addressed cache key, so it uses the strongest width `stable_hash` offers.
 _CHAIN_HASH_CHARS = 64
 
-# Which field set a row's `row_hash` covers (`infra/sql/024_audit_provenance.sql`, D-166).
+# Which field set a row's `row_hash` covers (`infra/sql/024_audit_provenance.sql`,
+# D-2026-07-31-the-audit-chain-is-versioned).
 #
 # `chain_hash` hashes the whole `AuditEvent`, so **adding a field to that model changes what every
 # historical row should hash to**. Widening the event without this would fail verification across

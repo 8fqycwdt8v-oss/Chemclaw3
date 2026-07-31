@@ -12,6 +12,22 @@ from typing import Literal
 from pydantic import BaseModel
 
 
+class QueuedEvent(BaseModel):
+    """The turn was accepted but is waiting for a free admission permit (D-166).
+
+    Admission control sheds rather than queues *indefinitely*, but it does wait — up to
+    `service_turn_admission_timeout_seconds` — and that wait used to happen before the response
+    existed, so a busy front door was indistinguishable from a dead one for its whole duration.
+    This is the first event of a turn that had to wait, and only of such a turn: the common case
+    takes its permit without blocking and never emits it.
+
+    No fields. The client is already connected and has nothing to decide — the event's entire job
+    is to say "accepted, waiting", and the next event says which way it went.
+    """
+
+    type: Literal["queued"] = "queued"
+
+
 class PlanEvent(BaseModel):
     """The agent's current plan/todo list (harness mode) — rendered as a checklist."""
 
@@ -179,7 +195,8 @@ class ErrorEvent(BaseModel):
 # The closed set of events a turn can emit. New surfaces switch on `type`; adding an event is a new
 # class here plus one branch in the runner and the UI — never a bespoke per-surface stream.
 Event = (
-    PlanEvent
+    QueuedEvent
+    | PlanEvent
     | ToolCallEvent
     | TokenEvent
     | JobStartedEvent

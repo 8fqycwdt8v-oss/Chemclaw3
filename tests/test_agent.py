@@ -363,7 +363,9 @@ def _loop_predicate(agent: Any) -> Any:
 
 
 def test_plan_only_binds_the_loop_to_an_approved_plan(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Under the shipped posture the loop runs only the plan a human approved (D-164).
+    """Under the shipped posture the loop runs only the plan a human approved.
+
+    See D-2026-07-31-plan-approval-binds-to-the-plan.
 
     The discriminating case is the **rewrite**, not the unapproved session: an unapproved session
     is also still in plan mode, so `todos_remaining` alone already refuses it and a test that

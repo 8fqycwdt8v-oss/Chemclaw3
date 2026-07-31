@@ -65,7 +65,8 @@ from chemclaw.core.metrics_bridge import record_metric
 log = logging.getLogger(__name__)
 
 # The correlation id makes a stored message joinable to the audit rows of the turn that wrote it
-# (D-166). Without it the two halves of "what happened in this conversation" — the words and the
+# (D-2026-07-31-the-audit-chain-is-versioned).
+# Without it the two halves of "what happened in this conversation" — the words and the
 # tool calls — sat in tables with no key between them, so the GxP trail could show *that* a tool ran
 # and never *why*.
 _INSERT = "INSERT INTO session_messages (session_id, message, correlation_id) VALUES (%s, %s, %s)"

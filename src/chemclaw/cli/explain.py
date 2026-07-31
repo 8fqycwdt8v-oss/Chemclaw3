@@ -1,4 +1,6 @@
-"""Reconstruct why a session's tool calls happened — the join D-166 made possible, made usable.
+"""Reconstruct why a session's tool calls happened — the join made usable.
+
+The join is D-2026-07-31-the-audit-chain-is-versioned.
 
 `audit_events.session_id` and `session_messages.correlation_id` are two columns; on their own they
 are a schema change nobody would notice. This is what they are *for*: given a session, print the

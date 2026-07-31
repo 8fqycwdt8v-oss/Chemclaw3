@@ -197,8 +197,10 @@ and is kept only for reservations that were in flight when this changed.
 | D-161 | RESERVED — an ungated observations tier, with the human gate moved from every observation to the few worth promoting |
 | [D-162](D-162-a-series-of-experiments-is-a-sequence-not-a-set.md) | A series of experiments is a sequence, not a set |
 | [D-163](D-163-a-store-you-can-only-address-is-not-a-store-you.md) | A store you can only address is not a store you can ask |
-| [D-164](D-164-the-plan-approval-binds-to-the-plan-not-to-the.md) | The plan approval binds to the plan, not to the session |
-| [D-165](D-165-the-deployment-envelope-a-sidecar-that-emptied-the.md) | The deployment envelope: a sidecar that emptied the tree, and three assertions the chart never made |
-| [D-166](D-166-the-audit-chain-is-versioned-so-widening-the-record.md) | The audit chain is versioned, so widening the record does not invalidate the record |
-| [D-167](D-167-prose-named-two-note-types-the-schema-refused-and-a.md) | Prose named two note types the schema refused, and a lost note could not be counted |
+| [D-164](D-164-the-prose-gate-learns-note-types-and-the-two-dead.md) | The prose gate learns note types, and the two dead ones it finds |
+| [D-165](D-165-a-cited-artifact-the-agent-can-open-and-the-ones.md) | A cited artifact the agent can open, and the ones it should not try to read |
+| [D-166](D-166-the-queue-is-reported-on-the-stream-not-as-a.md) | The queue is reported on the stream, not as a refusal |
 | [D-2026-07-31-adr-ids-that-cannot-collide](D-2026-07-31-adr-ids-that-cannot-collide.md) | ADR ids that cannot collide |
+| [D-2026-07-31-plan-approval-binds-to-the-plan](D-2026-07-31-plan-approval-binds-to-the-plan.md) | The plan approval binds to the plan, not to the session |
+| [D-2026-07-31-the-audit-chain-is-versioned](D-2026-07-31-the-audit-chain-is-versioned.md) | The audit chain is versioned, so widening the record does not invalidate it |
+| [D-2026-07-31-the-deployment-envelope](D-2026-07-31-the-deployment-envelope.md) | The deployment envelope: a sidecar that emptied the tree, and three assertions the chart never made |

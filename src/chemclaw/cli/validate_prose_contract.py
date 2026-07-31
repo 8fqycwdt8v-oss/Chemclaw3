@@ -12,7 +12,7 @@ Both are cheap to catch mechanically, and this is the check that does it. It is 
 *deterministic half* of the deferred agent-behavior eval (AG-13): AG-13 waits on a live LLM to
 observe tool **selection**, but whether a named tool exists at all needs no model.
 
-Three rules, each deliberately narrow so the check stays true rather than noisy:
+Four rules, each deliberately narrow so the check stays true rather than noisy:
 
 1. Every `name(`-style call mentioned in a skill or in the agent instructions must be a registered
    agent tool, a tool an enabled connector advertises, a generated template launcher, or an
@@ -28,12 +28,13 @@ Three rules, each deliberately narrow so the check stays true rather than noisy:
    false positive — an argument name inside a call — which the pattern now excludes.
 3. A skill must not direct the agent at a `*Workflow` class. The agent cannot invoke a workflow;
    it can only call a tool. Naming one is always either a dangling pointer or a missing tool.
-4. Every knowledge-graph note *type* the prose names must be in `KNOWN_NOTE_TYPES`. Rules 1-3 cover
-   the capability the agent invokes; this covers the capability it *writes into*, which had the
-   same defect and no checker. Two skills told the agent to write `protocol` and `experiment-batch`
-   notes; neither type existed, so `kg-validate` would have failed the PR — except nothing opens
-   that PR, so the proposal died on a branch and the contradiction was visible from neither end.
-   A named type that does not exist is exactly rule 1's defect one layer down.
+4. Every note type the prose tells the agent to *write* must be in `KNOWN_NOTE_TYPES`. This is rule
+   1's shape applied to the other half of the write path, and it was missing: two skills instructed
+   `propose_knowledge_note(type="protocol")` and `type="experiment-batch"`, neither of which is a
+   known type, so an agent that followed either opened a PR that `kg-validate` then rejected — the
+   capability was reachable and the artifact was not (D-164). A note type is named in the gated
+   form **`type `x``** (the word, then the backticked slug); write it that way in prose so this
+   rule can see it.
 
 Run via `make prose-validate`; gated in CI beside `kg-validate` and `skill-validate`.
 """
@@ -64,23 +65,22 @@ _WORKFLOW = re.compile(r"`([A-Za-z][A-Za-z0-9]*Workflow)`")
 # parameter rather than a tool (`similar_reactions(reaction_smiles)`). The lookahead skips a
 # trailing `(`, which is rule 1's pattern, so the two rules never double-report one name.
 _BARE = re.compile(r"(?<![\w`/.,(-])([a-z][a-z0-9]*(?:_[a-z0-9]+)+)(?![\w(])")
+# `type `x`` / `types `x``: the one phrasing that means "write a note of this kind". Deliberately
+# anchored on the word rather than matching every backticked slug, which in this prose is mostly
+# tools, fields and chemistry — the narrowness is what keeps the rule true instead of noisy, at
+# the cost of a convention prose has to follow. It is stated in the module docstring and in
+# `skills/README.md`.
+_NOTE_TYPE = re.compile(r"\btypes?\s+`([a-z][a-z0-9-]*)`")
 
-# A note type named in prose, in the two forms the corpus actually uses: `type \`x\`` (how a skill
-# tells the agent what to pass) and `` `x` note `` (how it refers to one in passing). Deliberately
-# these two anchored forms rather than "every backticked kebab word" — a note type is a lowercase
-# slug, which is indistinguishable from a dozen other things a skill legitimately backticks, so an
-# unanchored pattern would be a false-positive generator. Narrow and true beats broad and noisy,
-# the same trade the `_BARE` underscore rule makes.
-_NOTE_TYPE = re.compile(r"`([a-z][a-z0-9-]*)`\s+notes?\b|\btypes?\s+`([a-z][a-z0-9-]*)`")
 
-# The third form, and the one that matters most: the parenthesised enumeration that follows a
-# `**type**` label. `knowledge-graph-write` is where the vocabulary is *taught*, so its list is the
-# one an agent copies from — and it is a hand-maintained duplicate of `KNOWN_NOTE_TYPES` that had
-# already drifted in both directions, naming two types that did not exist while omitting three that
-# did. The two forms above cannot see it because the types appear as a bare backticked list rather
-# than in a sentence. This matches the label, then the enumeration is mined for backticked slugs.
-_NOTE_TYPE_LIST = re.compile(r"\*\*types?\*\*[^(\n]{0,80}\(([^)]*)\)", re.DOTALL)
-_BACKTICKED_SLUG = re.compile(r"`([a-z][a-z0-9-]*)`")
+def referenced_note_types(text: str) -> set[str]:
+    """Every note type `text` tells the model to write, in the one gated phrasing.
+
+    Public for the same reason `referenced_tool_names` is: the test suite asserts the contract
+    from the other side, and a second extractor would let the two disagree about what the prose
+    says.
+    """
+    return set(_NOTE_TYPE.findall(text))
 
 
 def referenced_tool_names(text: str) -> set[str]:
@@ -93,19 +93,6 @@ def referenced_tool_names(text: str) -> set[str]:
     """
     names = set(_CALL.findall(text)) | set(_BARE.findall(text))
     return names - _ALLOWED_NON_TOOLS
-
-
-def referenced_note_types(text: str) -> set[str]:
-    """Every knowledge-graph note type `text` names, in either anchored form.
-
-    Both regex groups are collected because one alternation matches `` `x` note `` and the other
-    `` type `x` ``; a non-participating group yields `""`, which is dropped. The enumeration form
-    contributes every backticked slug inside the parenthesised list it labels.
-    """
-    named = {name for match in _NOTE_TYPE.findall(text) for name in match if name}
-    for enumeration in _NOTE_TYPE_LIST.findall(text):
-        named |= set(_BACKTICKED_SLUG.findall(enumeration))
-    return named
 
 
 def _prose_sources() -> dict[str, str]:
@@ -126,28 +113,28 @@ def check_prose_contract() -> list[str]:
     for origin, text in _prose_sources().items():
         for name in sorted(referenced_tool_names(text) - tools):
             problems.append(f"{origin}: names {name} but no such agent tool is registered")
+        for note_type in sorted(referenced_note_types(text) - KNOWN_NOTE_TYPES):
+            problems.append(
+                f"{origin}: tells the agent to write a `{note_type}` note, which is not a known "
+                "note type — the PR-gate would open a branch that `kg-validate` then rejects"
+            )
         for workflow_name in sorted(set(_WORKFLOW.findall(text))):
             problems.append(
                 f"{origin}: directs the agent at `{workflow_name}`, which it cannot invoke — "
                 "name the tool that starts it instead"
             )
-        for note_type in sorted(referenced_note_types(text) - KNOWN_NOTE_TYPES):
-            problems.append(
-                f"{origin}: tells the agent to write a {note_type!r} note, but that type is not in "
-                "chemclaw.kg.note.KNOWN_NOTE_TYPES — kg-validate would reject the PR it opens"
-            )
     return problems
 
 
 def main() -> int:
-    """CLI: report every prose/tool mismatch; non-zero exit fails the CI gate."""
+    """CLI: report every prose/capability mismatch; non-zero exit fails the CI gate."""
     problems = check_prose_contract()
     for problem in problems:
         print(problem, file=sys.stderr)
     if problems:
-        print(f"\n{len(problems)} prose/tool mismatch(es)", file=sys.stderr)
+        print(f"\n{len(problems)} prose/capability mismatch(es)", file=sys.stderr)
         return 1
-    print("prose contract OK: every named tool exists")
+    print("prose contract OK: every named tool and note type exists")
     return 0
 
 

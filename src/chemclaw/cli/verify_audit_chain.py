@@ -36,7 +36,8 @@ from chemclaw.core.db import connection
 class ChainRow(NamedTuple):
     """One `audit_events` row as the verifier reads it: its id, chain fields, and audited event.
 
-    `chain_version` is which field set this row's `row_hash` covers (D-166). It travels with the
+    `chain_version` is which field set this row's `row_hash` covers
+    (D-2026-07-31-the-audit-chain-is-versioned). It travels with the
     row rather than being assumed, because the audited record grows: hashing an old row under the
     current shape would report the whole trail as tampered with the day a field is added.
     """

@@ -1,4 +1,4 @@
-# D-164 — The plan approval binds to the plan, not to the session
+# D-2026-07-31-plan-approval-binds-to-the-plan — The plan approval binds to the plan, not to the session
 
 **Status:** accepted · **Date:** 2026-07-31 · **Extends:** D-137
 

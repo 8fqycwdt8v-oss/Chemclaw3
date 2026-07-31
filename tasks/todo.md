@@ -6,8 +6,8 @@ Renumbered from D-154–D-159 on merge: another branch landed its own D-154/D-15
 branch merging second renumbers (`CLAUDE.md`).
 
 The review is in the session's two artifacts (a dataflow atlas and a gaps/proposals companion).
-This file is the implementation plan for every proposal it made. **All of W1 is shipped except
-W1.4, which is held pending a decision, and W2.1 with it. W2.2 onward and all of W3 are still plan
+This file is the implementation plan for every proposal it made. **All of W1 is shipped (D-159,
+D-166), and W2.1–W2.3 with it (D-158, D-163, D-165). W2.4 onward and all of W3 are still plan
 only.**
 
 (The previous occupant of this file, the restructure-consistency pass, is merged; its record is
@@ -73,10 +73,14 @@ breaking window.
 - [x] **W1.3 Configure SSE `ping`** — shipped, D-159 (`service_sse_ping_seconds`, default 15). on both `EventSourceResponse` constructions (the turn stream and
       the job-event stream). Neither passes `ping=` today, so there is not even a transport-level
       keepalive during a long tool wait.
-- [ ] **W1.4 Open the stream before admission.** — HELD, still needs the requester's call: it turns a 503 under load into a 200 whose body reports the problem, which is an API contract change for any client retrying on 503. The durable turn claim and the semaphore both
-      complete before `EventSourceResponse` is constructed, so a queued turn waits up to
-      `service_turn_admission_timeout_seconds` (5 s) with no response and may then 503. Move
-      acquisition inside the generator and emit a `queued` event first.
+- [x] **W1.4 Open the stream before admission.** — shipped, D-166, once the contract change was
+      confirmed: the messages route no longer answers 503 for capacity. Only the *semaphore* moved
+      inside the generator; the durable claim stayed ahead of the response, because a 409 is a
+      refusal and needs a status code. `queued` is emitted only when `Semaphore.locked()` says the
+      acquire would actually suspend — an event on every turn would be rendered and un-rendered
+      instantly and would report an idle door as contended. New counter
+      `chemclaw_turns_queued_total` beside the shed one: with no HTTP status left for either,
+      absorbing a burst and declining one must still be distinguishable from outside.
       *Note*: keep the 409/429 pre-checks where they are — those are genuine refusals, not queueing.
 - [x] **W1.5 Bundled dev page** (`api/static/app.js`) — shipped. All three cases added and the
       push-back stream opened with the session. The drift itself was the finding: three events
@@ -152,10 +156,15 @@ computation, and that store is readable.* W2.1 and W2.2 are the two halves.
         `endpoint.tools:` + a `@server.tool()` in `connectors/calc/server/tools.py`). `find_` is not
         in `_MUTATING_PREFIXES`, so `connector-validate` accepts it. Filters: SMILES, calc type,
         method/version, date range, value range.
-- [ ] **W2.3 `fetch_artifact`** on the same connector, over `PostgresArtifactStore.open`/`list_for`.
-      Hessians and optimized geometries are stored, eviction-managed, and unreachable; a note can
-      cite an `artifact_ref` the agent cannot open. Note `_MEDIA_TYPES` already reserves
-      `density.restart` and `orbitals.molden` — "nothing writes these yet" becomes false with W2.1.
+- [x] **W2.3 `fetch_artifact`** — shipped, D-165, as a *pair*: `list_artifacts` too, because
+      `fetch_artifact` needs an exact name and nothing else could supply it. The chain is
+      `find_calculations` → `list_artifacts` → `fetch_artifact`, each step handing the next its
+      argument. Two refusals carry the design: a binary artifact (the `.npy` arrays, the reserved
+      `density.restart` / `orbitals.molden`) is refused rather than returned as noise, and
+      readability is decided by *decoding* rather than by `_MEDIA_TYPES` — the table falls back to
+      opaque bytes for an unlisted name, so a type-based rule would refuse readable output from any
+      tool added later. A Hessian is text and so cannot be refused on type; the
+      `calc_artifact_max_chars` ceiling with `truncated` + the full `byte_size` is what handles it.
 - [ ] **W2.4 Generalize `calculator_trust`.** It reduces the `predictions` ledger to six aggregates
       for two hardcoded property names. Make it accept any registered calculator and add an
       outlier/residual listing scoped by substructure or tag, so the agent can say "this predictor
@@ -264,5 +273,5 @@ Frontend: `npm run typecheck` plus `npm test`, which requires W1.6 first.
    job already uses ≥2 projects) and tune against the promotion rate, but it is a domain call.
 2. **W2.4 scope** — is generalizing `calculator_trust` worth it before more calculators are
    calibrated? Only `solubility` and `pka` are wired today.
-3. **W1.4** — moving admission inside the generator changes what a client sees under load (a stream
-   that says `queued` rather than a 503). Confirm that is the wanted behaviour.
+3. ~~**W1.4** — moving admission inside the generator changes what a client sees under load.~~
+   Confirmed and shipped (D-166).
