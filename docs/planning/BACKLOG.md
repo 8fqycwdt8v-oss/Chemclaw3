@@ -3,6 +3,32 @@
 Prioritized open action items. Top = next. Keep in sync with `docs/planning/implementation-plan.md`
 (phase/step numbers) at session end.
 
+## Open — Surfaced by the deferral-register rewrite (2026-07-31, D-154)
+
+Rewriting `docs/planning/DEFERRED.md` into a register meant checking each row against the tree. Two
+things fell out that are work rather than bookkeeping, and neither belonged in a docs cleanup.
+
+- [ ] **Two compound-id conventions in one graph.** The seeded corpus (D-135) names its nine compound
+      notes by slug — `knowledge/compound/compound-thf.md` — while the machine path mints
+      `compound-<hash>` from the canonical structure (`core.chem.compound_id`, applied at the gate by
+      `eln.compound.compound_dependencies`). **Not a dangling citation today:** a molecule hit exists
+      only for a row in the fingerprint index, which only ingestion writes, and ingestion mints the
+      hash-id note — so the two sets do not meet. It is a *duplicate-identity* hazard on the ingest
+      path: ingesting 4-bromoanisole mints `compound-24c67ba8f741` beside the seed corpus's
+      `compound-4-bromoanisole`, two notes for one molecule, and the reaction/job-result notes citing
+      the slug keep pointing at the older one. The structure-derived id is the one that can be
+      *derived from a hit*, so a hand-written slug cannot be the convention; renaming the nine notes
+      means editing the eight notes that cite them plus three test files, and it is a corpus-convention
+      change that wants its own argument. A `kg-validate` rule (a compound note's id equals
+      `compound_id(compound_smiles)`) is what would keep it from recurring — [M].
+- [ ] **Per-step species linking from free-text prose** — moved here from `DEFERRED.md`, where it was
+      listed as blocked on a name→SMILES tool. That tool exists (`core/reagents.py`, whose docstring
+      names this as the thing it unblocks), so this is unscheduled work, not a deferral: wire the
+      `eln-reaction-extraction` skill's per-field LLM to resolve named reagents per step, still
+      PR-gated. The deterministic floor stays what it is — a coarse `StepKind` plus per-step
+      temperature/time — because guessing a SMILES from a name mid-sentence fabricates structure,
+      which is the one failure mode worse than the gap — [M].
+
 ## Open — Fifty live expert questions (2026-07-28, D-138)
 
 Full record: `docs/archive/vibe-test-2026-07.md`. Fifty questions from a process/analytical development

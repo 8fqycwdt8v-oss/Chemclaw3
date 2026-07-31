@@ -24,7 +24,14 @@ from chemclaw.science.calc.xtb_spec import XtbSpec
 
 
 class XtbInput(BaseModel):
-    """A single-point xTB request: a molecule and its charge."""
+    """A single-point xTB request: a molecule and its charge.
+
+    `charge` is redundant with the SMILES — it is validated against the formal charge the
+    structure already carries, so it cannot disagree. It is kept anyway, deliberately: the LLM
+    tool signature stays loud, and a model that passes a charge contradicting the structure gets
+    an error instead of having its argument silently ignored. Revisit only if the tool schema is
+    ever versioned.
+    """
 
     smiles: str = Field(min_length=1)
     charge: int = 0
