@@ -12,10 +12,12 @@ import asyncio
 import logging
 import time
 from collections.abc import Awaitable, Callable
+from datetime import datetime
 from typing import Any, Protocol, TypeVar, runtime_checkable
 
-from pydantic import BaseModel
+from pydantic import BaseModel, model_validator
 
+from chemclaw.core.chem import require_canonical_smiles
 from chemclaw.core.ids import stable_hash
 from chemclaw.science.calc.artifacts import ArtifactStore, put_all
 
@@ -79,6 +81,69 @@ class StoredResult(BaseModel):
     # `durable/retention.py` says a cache needs and refuses to fake with an age cutoff: it is
     # what an artifact eviction orders by, and what tells an operator what the cache is worth.
     compute_seconds: float | None = None
+    # When the row was written, for a caller that is *browsing* the store rather than addressing
+    # one key. `get` leaves it None because a cache hit does not care; `find` fills it, since "what
+    # do we already have on this molecule" is unanswerable without knowing when each was computed.
+    created_at: datetime | None = None
+
+
+# Calculators whose `input_hash` is over a 3-D structure rather than a molecule: the xTB task
+# family keys on `(structure_id, charge, multiplicity)` and the geometry pointer on its whole
+# subject model. A molecule alone does not determine either hash, so `smiles` cannot address
+# them — and answering "nothing found" for a molecule that has an xTB result on file would be the
+# one failure this tool cannot afford. Matched as prefixes, since the types are `xtb.<task>`.
+STRUCTURE_KEYED_PREFIXES = ("xtb.", "geometry.")
+
+
+def molecule_hash(smiles: str) -> str:
+    """The `input_hash` a molecule-keyed calculator would produce for `smiles`.
+
+    One definition, used by the query filter in both backends: the hash is over the same
+    `{"smiles": <canonical>}` mapping the calculators build their keys from, so getting this
+    shape wrong in one place cannot make a molecule findable in one store and not the other.
+    """
+    return stable_hash({"smiles": require_canonical_smiles(smiles)})
+
+
+class CalculationQuery(BaseModel):
+    """A search over stored results — the browse half of a store built for exact lookup.
+
+    Every field is a filter and every one is optional, so an empty query is "the most recent
+    results" rather than an error. `smiles` is matched by hashing it the way a key is built:
+    `input_hash` is not reversible, so a molecule is found by computing its hash, never by
+    scanning rows and un-hashing them.
+
+    **A molecule filter reaches the molecule-keyed calculators only** — see
+    `STRUCTURE_KEYED_PREFIXES`. Combining it with a structure-keyed `calc_type` raises rather than
+    returning an empty list, because the empty list would read as "nothing has been computed" when
+    the truth is "that family cannot be looked up this way".
+
+    There is deliberately no filter on the result's *value*. The payload is an opaque
+    calculator-owned mapping (`ResultPayload`) — the store has been calculator-agnostic since
+    D-011, and a `total_energy_hartree > x` predicate would put one calculator's schema inside the
+    thing that persists all of them. A caller that wants that filters the returned rows.
+    """
+
+    # Matched by hashing, never by scanning — see above.
+    smiles: str | None = None
+    calc_type: str | None = None
+    calc_version: str | None = None
+    since: datetime | None = None
+    until: datetime | None = None
+    limit: int = 20
+
+    @model_validator(mode="after")
+    def _molecule_filter_addresses_the_type(self) -> "CalculationQuery":
+        """Refuse a molecule filter on a family a molecule cannot address."""
+        if self.smiles is None or self.calc_type is None:
+            return self
+        if self.calc_type.startswith(STRUCTURE_KEYED_PREFIXES):
+            raise ValueError(
+                f"{self.calc_type!r} is keyed by 3-D structure, not by molecule, so it cannot be "
+                "found by SMILES. Query it by type alone, or ask for a molecule-keyed "
+                "calculation (pka, solubility, descriptors, dft)."
+            )
+        return self
 
 
 @runtime_checkable
@@ -91,6 +156,10 @@ class ResultStore(Protocol):
 
     async def put(self, stored: StoredResult) -> None:
         """Persist `stored`, overwriting any existing result for its key."""
+        ...
+
+    async def find(self, query: CalculationQuery) -> list[StoredResult]:
+        """Return results matching `query`, newest first, capped at `query.limit`."""
         ...
 
 
@@ -112,6 +181,38 @@ class InMemoryStore:
     async def put(self, stored: StoredResult) -> None:
         """Persist `stored`, overwriting any existing result for its key."""
         self._data[stored.key.as_str()] = stored
+
+    async def find(self, query: CalculationQuery) -> list[StoredResult]:
+        """Return results matching `query`, newest first, capped at `query.limit`.
+
+        Insertion order stands in for time here: this store keeps no clock, and giving it one
+        would make a test's ordering depend on how fast it ran. A row with an explicit
+        `created_at` still sorts by it, so a fixture that sets one gets the ordering it asked for.
+        """
+        matched = [stored for stored in self._data.values() if _matches(stored, query)]
+        matched.reverse()  # newest first, since dict order is insertion order
+        matched.sort(key=lambda s: s.created_at or datetime.max, reverse=True)
+        return matched[: query.limit]
+
+
+def _matches(stored: StoredResult, query: CalculationQuery) -> bool:
+    """Whether one stored result satisfies every filter set on `query`.
+
+    Shared by the in-memory store and by the tests that pin the two backends agreeing; the
+    Postgres store expresses the same predicate as SQL because it must filter before it fetches.
+    """
+    key = stored.key
+    if query.calc_type is not None and key.calc_type != query.calc_type:
+        return False
+    if query.calc_version is not None and key.calc_version != query.calc_version:
+        return False
+    if query.smiles is not None and key.input_hash != molecule_hash(query.smiles):
+        return False
+    if query.since is not None and (stored.created_at is None or stored.created_at < query.since):
+        return False
+    if query.until is not None and (stored.created_at is None or stored.created_at > query.until):
+        return False
+    return True
 
 
 async def cached_compute(

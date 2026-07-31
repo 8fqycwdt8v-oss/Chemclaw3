@@ -6,7 +6,9 @@ Renumbered from D-154–D-159 on merge: another branch landed its own D-154/D-15
 branch merging second renumbers (`CLAUDE.md`).
 
 The review is in the session's two artifacts (a dataflow atlas and a gaps/proposals companion).
-This file is the implementation plan for every proposal it made. **W1.1, W1.2, W1.3, W1.6, W1.7, W1.8 and W2.1 are shipped. W1.4 is held pending a decision; everything else is still plan only.**
+This file is the implementation plan for every proposal it made. **All of W1 is shipped except
+W1.4, which is held pending a decision, and W2.1 with it. W2.2 onward and all of W3 are still plan
+only.**
 
 (The previous occupant of this file, the restructure-consistency pass, is merged; its record is
 D-156. The one before it, the agentic-system review, is D-145 and D-151…D-153.)
@@ -93,12 +95,18 @@ breaking window.
 - [x] **W1.7 Render the job feed.** — shipped (Chemclaw3_ui `claude/render-job-feed`). `jobFeed` is written by `useJobFeed` and read by nothing. Surface
       completed durable jobs in the conversation (a card in `TracePanel`, or a toast). This switches
       on an entire finished backend subsystem.
-- [x] **W1.8 Add `capability_degraded` and `tool_failed`** — shipped (Chemclaw3_ui #6; `tool_result` still waits on W1.2). to `shared/events.ts` (type union +
-      `EVENT_TYPES` + `normalizeEvent`) and render them — degradation must visibly qualify the
-      answer, not vanish. Add `tool_result` in the same pass once W1.2 lands.
-- [ ] **W1.9 Proxy and use the plan-approval routes.** Whitelist `GET /sessions/{id}/plan` and
-      `POST /sessions/{id}/plan/decision` in `server/routes.ts`, and replace `Prompts.tsx`'s
-      send-a-chat-message fallback with the real hash-bound decision call.
+- [x] **W1.8 Add `capability_degraded` and `tool_failed`** — shipped (Chemclaw3_ui #6), and
+      `tool_result` followed in Chemclaw3_ui #7 once W1.2 landed. That one also lifted
+      `TracePanel`'s "invocations only" caveat, which was the honesty constraint the missing event
+      had forced. A result completes the row of the call it answers rather than adding a second
+      row; a `tool_failed` closes its call's row too, or a failed call would read "running…" for
+      the rest of the conversation.
+- [x] **W1.9 Proxy and use the plan-approval routes.** — shipped (Chemclaw3_ui #8). Both routes
+      whitelisted; `Prompts.tsx`'s "Approved — go ahead." chat message replaced with the real
+      hash-bound call. The plan is read when the card appears, not when a button is pressed, so
+      the hash posted back is the hash of the plan the human read; a 409 re-reads and asks again
+      rather than retrying with the new hash. 409 also needed its own error kind — it means "a
+      turn is already running" on the message route and "the plan changed" on this one.
 
 ---
 
@@ -128,7 +136,13 @@ computation, and that store is readable.* W2.1 and W2.2 are the two halves.
       *Acceptance*: an end-to-end `QMJobWorkflow` test asserts a `calculation_results` row exists
       after the run and that the returned note's `calc_refs` resolves to it; a second identical run
       is served from the store.
-- [ ] **W2.2 Give the store a query surface, then a tool.**
+- [x] **W2.2 Give the store a query surface, then a tool.** — shipped, D-163. Migration **024**,
+      not 023: D-157's `job_records` took that number while this was still plan. The plan's
+      "filter by SMILES" turned out not to be uniform — the xTB task family and the geometry
+      pointer key on a 3-D structure, which a molecule does not determine — so that combination is
+      *refused* rather than answered with an empty list, which would read as "nothing has been
+      computed". Value-range filtering was dropped deliberately: the payload is calculator-owned
+      and the store has been calculator-agnostic since D-011.
       - `ResultStore` is `@runtime_checkable`, so a new query method must be added to **both**
         `PostgresStore` and `InMemoryStore`.
       - `input_hash` is `stable_hash(canonical_smiles)` and non-reversible — query *by molecule* by
