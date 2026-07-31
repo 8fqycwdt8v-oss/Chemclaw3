@@ -165,14 +165,30 @@ computation, and that store is readable.* W2.1 and W2.2 are the two halves.
       opaque bytes for an unlisted name, so a type-based rule would refuse readable output from any
       tool added later. A Hessian is text and so cannot be refused on type; the
       `calc_artifact_max_chars` ceiling with `truncated` + the full `byte_size` is what handles it.
-- [ ] **W2.4 Generalize `calculator_trust`.** It reduces the `predictions` ledger to six aggregates
-      for two hardcoded property names. Make it accept any registered calculator and add an
-      outlier/residual listing scoped by substructure or tag, so the agent can say "this predictor
-      is unreliable for *this kind* of molecule" — which is what trust means in practice.
-- [ ] **W2.5 Metadata-filtered similarity.** `similar_reactions` returns `(id, label, similarity)`,
-      so "similar reactions that used Pd and gave >80% yield" is unanswerable. Let
-      `FingerprintReactionRetriever` accept the same `type`/`tag` filters the note retrievers take
-      and resolve through `note_index`, so the filter applies **before** truncation.
+- [x] **W2.4 Generalize `calculator_trust`.** — shipped, D-169. The "two hardcoded names" was a
+      live defect, not just inflexibility: `if property_name == "solubility"` plus two ternaries
+      meant every *other* name got pKa's version and pKa's unit — a confident report about the
+      wrong calculator. A `_CALIBRATED` table replaces it and an unknown property now raises,
+      naming the known ones. `calculator_outliers` is the listing half: signed residuals, ranked,
+      optionally filtered by a SMARTS/SMILES class, with per-molecule uncertainty coverage.
+      `reconciled_for` is now the single read and `calibration_for` summarizes it, so the aggregate
+      and the listing cannot describe different rows. **No tag filter** — a prediction's subject is
+      a molecule and the row carries no tags, so that half of the plan would have shipped an
+      always-empty filter. `substructure_pattern` moved to `core.chem`; the fingerprint index's
+      identical copy now calls it.
+- [x] **W2.5 Metadata-filtered similarity.** — shipped, D-170. Two corrections to the plan.
+      *Not* through `note_index`: it stores a note id, its text and an embedding — no type, tags or
+      dates — so the shared `_eligible_notes` gate is the only thing that can answer, and reusing it
+      avoids a second definition of "eligible". And the **MCP `similar_reactions` tool cannot have
+      this at all**: it lives in the `rxnfp` bundle, and a connector must not import the knowledge
+      graph (D-115). The filter belongs on the retriever because the retriever is in core.
+      "Before truncation" is the load-bearing part and now has its own test: the search asks for
+      `top_k × retrieval_filter_overfetch` neighbours, narrows those, then truncates — filtering
+      the page instead would return *fewer* hits the better the index got at clustering
+      near-duplicates. An unfiltered call is byte-for-byte unchanged, D-018's pending-note citation
+      included; a filtered one drops an unreadable note, because it cannot be shown to match.
+      Yield and reagent filters remain impossible: they live in note prose, not frontmatter, and
+      tagging them at ingestion is the ELN adapter's job.
 
 ---
 
@@ -180,22 +196,26 @@ computation, and that store is readable.* W2.1 and W2.2 are the two halves.
 
 ### W3.1 Provenance-aware retrieval (D-160) — prerequisite, do first
 
-- [ ] `EvidenceChunk` carries `content`, `source_note_id`, `retriever`, `score`, `conflicts_with` —
+- [x] **Shipped, D-160.** `EvidenceChunk` carried `content`, `source_note_id`, `retriever`, `score`, `conflicts_with` —
       and **no provenance**. `created_by`, `confidence` and `source` are not in what the model sees,
       even though `NoteRef` already exposes all three. The graph read path does not distinguish
       `created_by` anywhere; `confidence` is a ranking signal for truncation order, never a filter.
       Today that is harmless because everything readable was human-merged. **It becomes a
       correctness bug the moment a second tier exists**, so it ships first and on its own.
-      - Add provenance fields to `EvidenceChunk`; populate from the note in `_chunks_from_hits`.
-      - **Layering constraint**: `tests/test_layering.py` forbids `chemclaw.retrieval` from importing
-        `chemclaw.agent` — including `agent.framing`. Framing stays at the `gather_evidence` call
-        site; only the data moves.
-      - Teach the answer contract to qualify a claim resting on a low-confidence or agent-authored
-        note.
+      - `created_by`, `source`, `confidence` on `EvidenceChunk`, populated through **one** builder
+        (`_chunk_for`) shared by the graph path and `_chunks_from_hits`. A partially-provenanced
+        list is the worst state: a sweep fuses both, so an agent-authored note would be qualified
+        or not depending on which retriever surfaced it.
+      - `created_by` defaults to `""`, **not** `"human"` — a structural hit's content is a Tanimoto
+        score the retriever composed, not a sentence anyone wrote. Defaulting to "human" would put
+        an unchecked claim in the one field whose whole purpose is to be trusted.
+      - Layering held: framing stayed at the `gather_evidence` call site, only data moved.
+      - The answer contract now qualifies rather than suppresses — a model told a source is weak
+        will otherwise omit it, turning "a weak indication" into "nothing".
 
 ### W3.2 Cap the memory jobs (rides D-161)
 
-- [ ] The three synthesis jobs run daily, rescan the whole corpus with no cursor, and have **no cap**
+- [x] **Shipped (rides D-161).** The three synthesis jobs run daily, rescan the whole corpus with no cursor, and had **no cap**
       on notes produced (worst case ≈1.5 notes per corpus reaction per day, plus one retirement note
       per superseded cluster, each its own branch and PR). In practice it stays quiet because of
       three good accidents — ids anchor on the cluster's smallest member so a grown cluster reuses
@@ -203,44 +223,63 @@ computation, and that store is readable.* W2.1 and W2.2 are the two halves.
       updates in place. But nothing *bounds* it, and a large corpus import would produce a PR flood
       on the first night. Add `max_notes_per_run` with the dropped count logged explicitly — the
       repo's own "no silent caps" rule, applied to the one place with no ceiling.
+      **A plain cap would have been the worse bug**, and that is the part worth recording: the
+      builders are deterministic over the corpus, so `notes[:cap]` proposes the same first N every
+      night and the tail is proposed *never* — a visible flood traded for silently lost knowledge.
+      So the window **rotates by the run's own date** (`workflow.now()`, replay-safe), covering the
+      whole corpus within one cycle. Default 25, `0` = unbounded.
 
 ### W3.3 The observations tier (D-161)
 
 The proposal in one line: **the human gate does not disappear, it moves from every observation to
 the few worth promoting.**
 
-- [ ] **Store in Postgres, not git** (migration **024**). Git's value is human review, diff and
+**Shipped, D-161.** Migration **025**, not 024 — D-163 took that. What the plan asked for, minus
+two things it turned out could not be built and plus one it did not anticipate; see the ADR.
+
+- [x] **Store in Postgres, not git** (migration **025**). Git's value is human review, diff and
       audit; with no review it buys PR noise and repo churn and returns nothing. A table gives cheap
       upsert-counters for accumulating support, TTL eviction (the `ArtifactEvictionWorkflow` is the
       precedent), and no branch-per-note explosion. This *preserves* "git is the source of truth"
       precisely because observations are explicitly **not** truth. Follow the
       `agent/subscriptions.py` idiom (module SQL constants, `db.connection`, explicit commit).
-- [ ] **Shape**: `statement`, `scope` (transformation class / chemotype / step), `evidence_note_ids`,
+- [x] **Shape**: (no `support_count` — support is `len(evidence_note_ids)`, derived, because a
+      counter can be incremented by something that is not a merged note; no `contradiction_count` —
+      see below.) Fields: `statement`, `scope` (transformation class / chemotype / step), `evidence_note_ids`,
       `projects_seen`, `support_count`, `contradiction_count`, `first_seen`, `last_seen`,
       `status ∈ {open, promoted, retired}`, `origin ∈ {interaction, corpus-mining}`.
-- [ ] **Generation**: a scheduled Temporal workflow on the core `background` queue, shaped exactly
+- [x] **Generation**: a scheduled Temporal workflow on the core `background` queue, shaped exactly
       like the existing memory jobs (`durable/memory_jobs.py`) — no new infrastructure, the same
       constraint D-019 imposed on the memory layers. Mines (a) merged-corpus clusters below the
       playbook bar and (b) **interaction history across sessions**, which is the thing that does not
       exist today. Register in `cli/schedules.py` (`OWNED_SCHEDULE_IDS` + `planned_schedules`),
       behind `observations_enabled: bool = False`.
-- [ ] **Retrieval discipline (load-bearing)**: observations return in a **separate, labelled bucket**
+- [x] **Retrieval discipline** — shipped as a *separate tool* (`recall_observations`), not a
+      labelled bucket inside `gather_evidence`: a label is the part a model skips, and a separate
+      call means an observation cannot arrive as an evidence chunk by any path. Original wording: observations return in a **separate, labelled bucket**
       — never fused into the same ranked list as notes. One added instruction, parallel to the
       episodic-vs-semantic separation the architecture already demands: *an observation may direct
       what you look for; it may never be the evidence for a claim.* An answer resting only on an
       observation must say so.
-- [ ] **Anti-feedback rule — the dangerous failure mode.** Support counts **distinct merged evidence
+- [x] **Anti-feedback rule** — a CHECK in `025` plus a validator on the model, *and* it turned
+      out to decide what may be mined at all: support counts merged notes, so a miner reading raw
+      session transcripts would produce observations that can never accumulate support and
+      therefore never promote. Both miners read merged notes only. Original wording — the dangerous failure mode.** Support counts **distinct merged evidence
       notes** only; observation-cites-observation is structurally forbidden (a schema constraint, not
       a guideline). Otherwise the agent writes an observation, later retrieves its own observation,
       counts it as corroboration, and inflates past the promotion threshold into a PR — a
       self-confirming loop wearing the costume of cross-project evidence.
-- [ ] **Promotion**: crossing ≥N distinct projects and ≥M distinct merged evidence notes with no open
+- [x] **Promotion**: crossing ≥N distinct projects and ≥M distinct merged evidence notes with no open
       contradictions auto-opens **one** PR proposing a `playbook` note, through the existing
       `propose_note`. No second write path (D-019/D-078's rule).
-- [ ] **Decay + instrumentation**: unsupported observations retire on a window; track the promotion
+- [x] **Decay + instrumentation**: unsupported observations retire on a window; track the promotion
       rate. If nothing ever promotes, the tier is a write-only log and should be deleted rather than
       defended.
-- [ ] **Contradiction detection comes nearly free**: `kg/conflicts.py` already flags same-compound,
+- [ ] ~~**Contradiction detection comes nearly free**~~ — **dropped, and the reason is in D-161**:
+      `kg/conflicts.py` compares two notes' claims about the same *compound* with a confidence gap;
+      an observation is a statement about a transformation class or a conversation, so that
+      detector cannot evaluate one. A `contradiction_count` column nothing can populate is the
+      "reserved for later" stub this repo deletes on sight. Original claim: `kg/conflicts.py` already flags same-compound,
       concurrently-valid notes with a confidence gap; "this observation contradicts merged knowledge"
       is exactly the signal a process chemist wants.
 

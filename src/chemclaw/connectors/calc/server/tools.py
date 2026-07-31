@@ -12,19 +12,23 @@ business, and this capability scales on its own.
 """
 
 import asyncio
+from collections.abc import Callable
 from datetime import datetime
 from typing import Any
 
 from mcp.server.fastmcp import FastMCP
 from pydantic import BaseModel
+from rdkit import Chem
 
-from chemclaw.core.chem import canonical_smiles
+from chemclaw.core.chem import canonical_smiles, substructure_pattern
 from chemclaw.core.config import settings
 from chemclaw.core.ids import stable_hash
 from chemclaw.science.calc.calibration import (
     Calibration,
     PredictionRecord,
+    Residual,
     calibration_for,
+    reconciled_for,
     record_observation,
     record_prediction,
 )
@@ -354,6 +358,37 @@ async def fetch_artifact(artifact_ref: str, max_chars: int = 0) -> ArtifactConte
     )
 
 
+# The calculators whose predictions are logged to the ledger, and how to read them back: the
+# version that is current *now* and the unit its values are in.
+#
+# A table rather than a conditional. `calculator_trust` used to be
+# `solubility = property_name == "solubility"` followed by two ternaries, so every name that was
+# not "solubility" was answered as though it were pKa — an unknown property got a confident report
+# about the wrong calculator, in the wrong unit, and the model had no way to tell. Adding a
+# calibrated calculator is now one row, and asking about an uncalibrated one is an error that
+# names what does exist.
+_CALIBRATED: dict[str, tuple[Callable[[], str], str]] = {
+    "solubility": (solubility_calc_version, "log S"),
+    "pka": (pka_calc_version, "pKa"),
+}
+
+
+def _calibrated(property_name: str) -> tuple[str, str]:
+    """The current version and unit for a calibrated property, or raise naming the alternatives."""
+    entry = _CALIBRATED.get(property_name)
+    if entry is None:
+        raise ValueError(
+            f"{property_name!r} is not a calibrated property (known: "
+            f"{', '.join(sorted(_CALIBRATED))}). Only calculators that log their predictions can "
+            "be scored against measurements."
+        )
+    version, unit = entry
+    # The *current* version, not a pooled figure: the chemist is asking how far to trust the
+    # calculator that is about to answer them, and a v1 that ran high averaged with a v2 that ran
+    # low reads as well-calibrated while neither is (REV-12).
+    return version(), unit
+
+
 @server.tool()
 async def calculator_trust(property_name: str) -> Calibration:
     """Report how far a calculator's predictions have actually been off, measured not asserted.
@@ -367,21 +402,110 @@ async def calculator_trust(property_name: str) -> Calibration:
     `uncertainty_coverage` is the subtle one: a low value means the stated error bars are too
     narrow, so the *uncertainty* is misleading even when the values look close.
 
+    These are averages over every molecule measured. When the answer matters, follow up with
+    `calculator_outliers`: a calculator can be well-behaved overall and badly wrong on one class of
+    molecule, and an average cannot show that.
+
     Args:
-        property_name: "solubility" or "pka".
+        property_name: A calibrated property — "solubility" or "pka". Anything else is an error
+            rather than a guess, and the message names what is available.
 
     Returns:
         Bias, mean absolute error, RMSE, and uncertainty coverage, with the observation count.
     """
-    # The *current* version's calibration, not a pooled figure: the chemist is asking how far to
-    # trust the calculator that is about to answer them, and a v1 that ran high averaged with a v2
-    # that ran low reads as well-calibrated while neither is (REV-12).
-    solubility = property_name == "solubility"
-    return await calibration_for(
-        property_name,
-        solubility_calc_version() if solubility else pka_calc_version(),
-        unit="log S" if solubility else "pKa",
-    )
+    version, unit = _calibrated(property_name)
+    return await calibration_for(property_name, version, unit=unit)
+
+
+class OutlierResidual(BaseModel):
+    """One molecule where a calculator's prediction and the measurement disagreed."""
+
+    smiles: str
+    predicted: float
+    observed: float
+    # Signed (predicted − observed), matching the reported bias: direction is half the information.
+    error: float
+    unit: str
+    # Whether the measurement fell inside the prediction's own stated ±1σ. `None` when the
+    # calculator claimed no uncertainty — deliberately not `False`, which would read as a miss.
+    within_uncertainty: bool | None = None
+
+
+@server.tool()
+async def calculator_outliers(
+    property_name: str, matching: str = "", limit: int = 10
+) -> list[OutlierResidual]:
+    """Show where a calculator was most wrong, molecule by molecule — optionally on one class.
+
+    `calculator_trust` answers "how far off is this calculator on average". This answers the
+    question a chemist actually acts on: *on what*. A model that is 0.3 log units off overall may
+    be fine on neutrals and two units low on every acid, and no aggregate can show that — the two
+    populations average into one reassuring number.
+
+    Read it in two passes. Call it with no filter to see the worst misses and look for what they
+    have in common; then call it again with `matching` set to that class to test the idea against
+    the whole ledger. If the filtered errors are much larger than the unfiltered ones, say so in
+    the answer and treat a prediction for that class as weak evidence.
+
+    Every row is a real measurement someone made, so a short list means few measurements, not a
+    well-behaved calculator. Check `calculator_trust`'s `n` before concluding anything.
+
+    Args:
+        property_name: A calibrated property — "solubility" or "pka".
+        matching: Optional SMARTS or SMILES fragment; only molecules containing it are considered.
+            Use it to test a hypothesis about a class ("C(=O)O" for carboxylic acids).
+        limit: How many to return, largest absolute error first.
+
+    Returns:
+        The worst misses, each with what was predicted, what was measured, the signed error, and
+        whether the calculator's own uncertainty covered it.
+    """
+    version, unit = _calibrated(property_name)
+    residuals = await reconciled_for(property_name, version)
+    if matching:
+        residuals = await _only_matching(residuals, matching)
+    worst = sorted(residuals, key=lambda r: abs(r.error), reverse=True)
+    return [
+        OutlierResidual(
+            smiles=r.subject,
+            predicted=r.predicted,
+            observed=r.observed,
+            error=r.error,
+            unit=unit,
+            within_uncertainty=r.within_uncertainty,
+        )
+        for r in worst[: max(1, min(limit, settings.calc_outliers_max_results))]
+    ]
+
+
+async def _only_matching(residuals: list[Residual], query: str) -> list[Residual]:
+    """Keep the residuals whose subject contains `query`, matched off the event loop.
+
+    Bounded by `substructure_match_timeout_seconds` for the same reason the fingerprint index's
+    scan is: the ledger is small, but a short adversarial recursive SMARTS matches for minutes
+    regardless of corpus size, and this coroutine shares its loop with every other request.
+    """
+    pattern = substructure_pattern(query)
+
+    def _scan() -> list[Residual]:
+        kept = []
+        for residual in residuals:
+            molecule = Chem.MolFromSmiles(residual.subject)
+            # A subject that no longer parses is skipped rather than failing the listing: one bad
+            # row must not hide every real outlier.
+            if molecule is not None and molecule.HasSubstructMatch(pattern):
+                kept.append(residual)
+        return kept
+
+    try:
+        return await asyncio.wait_for(
+            asyncio.to_thread(_scan), timeout=settings.substructure_match_timeout_seconds
+        )
+    except TimeoutError as exc:
+        raise ValueError(
+            f"substructure match for {query!r} exceeded "
+            f"{settings.substructure_match_timeout_seconds}s; use a simpler fragment"
+        ) from exc
 
 
 @server.tool()

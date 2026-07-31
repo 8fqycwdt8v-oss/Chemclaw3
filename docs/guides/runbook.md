@@ -109,6 +109,15 @@ started. It is what `get_durable_job_status` reads for a job Temporal has forgot
 `CHEMCLAW_SESSION_STORE=memory`, which selects the null sink — silently loses every finished run
 once its workflow history expires. Nothing prunes it (`durable/retention.py` says why).
 
+**`observations` is opt-in and stays empty until you say so** (025, D-161). It holds the ungated
+tier: cross-project patterns the agent noticed, in Postgres rather than the graph because they are
+explicitly not truth. `CHEMCLAW_OBSERVATIONS_ENABLED=true` is what registers its Schedule and what
+lets `recall_observations` return anything; without it the table is created and never written.
+Turning it on is a deliberate choice — it is the only knowledge surface the agent can read that no
+human signed off. Watch two numbers once it runs: the retirement rate (close to the mining rate
+means the miners are producing noise) and the promotion rate (zero over a quarter means the tier is
+a write-only log and should be removed, not defended).
+
 ## (iii) Add / switch a data source (an ELN, a warehouse, a retrieval index)
 
 A source is a folder with a `datasource.yaml`, exactly as a capability is a folder with a

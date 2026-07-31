@@ -62,7 +62,7 @@ UPDATE predictions
 # that ran low and report the cancellation as good calibration. A chemist asking "how far off is
 # this calculator" means the one that just answered them.
 _SELECT_RECONCILED = """
-SELECT predicted_value, predicted_uncertainty, observed_value
+SELECT subject, predicted_value, predicted_uncertainty, observed_value
   FROM predictions
  WHERE calc_type = %s AND calc_version = %s AND observed_value IS NOT NULL
 """
@@ -90,6 +90,32 @@ class Calibration(BaseModel):
     def is_meaningful(self) -> bool:
         """Whether enough observations exist for the figures to mean anything."""
         return self.n >= settings.calibration_min_observations
+
+
+class Residual(BaseModel):
+    """One reconciled prediction: what was predicted, what was measured, and the gap.
+
+    The aggregate is what a calculator does *on average*; this is where it went wrong. Trust in
+    practice is not a single number — "the solubility model runs 0.4 log units low" is useful, and
+    "and it is 2 log units low on every carboxylic acid we have measured" is a different and more
+    actionable statement about the same six aggregates.
+
+    `error` is signed (predicted − observed), matching `Calibration.bias`, because the direction is
+    half the information: consistently high is correctable, scattered is not.
+    """
+
+    subject: str
+    predicted: float
+    observed: float
+    error: float
+    uncertainty: float | None = None
+
+    @property
+    def within_uncertainty(self) -> bool | None:
+        """Whether the measurement fell inside the stated ±1σ. `None` when none was claimed."""
+        if self.uncertainty is None or self.uncertainty <= 0:
+            return None
+        return abs(self.error) <= self.uncertainty
 
 
 class PredictionRecord(BaseModel):
@@ -202,14 +228,19 @@ def summarize(
     )
 
 
-async def calibration_for(calc_type: str, calc_version: str, *, unit: str = "") -> Calibration:
-    """Read the reconciled rows for one calculator *version* and summarize them.
+async def reconciled_for(calc_type: str, calc_version: str) -> list[Residual]:
+    """Every prediction of this calculator version that a measurement has since answered.
 
-    `calc_version` is required rather than defaulted: a default would silently reproduce the pooled
-    reading this exists to remove, and every caller already knows which version answered.
+    The one read of the ledger, so the aggregate and the per-molecule listing can never disagree
+    about which rows they describe — they are the same rows, summarized or not.
+
+    Unbounded on purpose. The filter is `observed_value IS NOT NULL`, and an observation is a
+    measurement somebody made and typed in; the table's growth is bounded by bench work, not by
+    how often the calculator runs. A cap here would silently drop measurements from the
+    calibration, which is worse than the read it would protect.
     """
     if not settings.calibration_enabled:
-        return Calibration(calc_type=calc_type, n=0, unit=unit)
+        return []
     try:
         async with db.connection(
             settings.postgres_dsn, statement_timeout_seconds=settings.pg_statement_timeout_seconds
@@ -219,5 +250,26 @@ async def calibration_for(calc_type: str, calc_version: str, *, unit: str = "") 
                 rows = await cur.fetchall()
     except Exception:
         logger.warning("could not read calibration for %s", calc_type, exc_info=True)
-        return Calibration(calc_type=calc_type, n=0, unit=unit)
-    return summarize(calc_type, [(row[0], row[1], row[2]) for row in rows], unit=unit)
+        return []
+    return [
+        Residual(
+            subject=subject,
+            predicted=predicted,
+            observed=observed,
+            error=predicted - observed,
+            uncertainty=sigma,
+        )
+        for subject, predicted, sigma, observed in rows
+    ]
+
+
+async def calibration_for(calc_type: str, calc_version: str, *, unit: str = "") -> Calibration:
+    """Read the reconciled rows for one calculator *version* and summarize them.
+
+    `calc_version` is required rather than defaulted: a default would silently reproduce the pooled
+    reading this exists to remove, and every caller already knows which version answered.
+    """
+    residuals = await reconciled_for(calc_type, calc_version)
+    return summarize(
+        calc_type, [(r.predicted, r.uncertainty, r.observed) for r in residuals], unit=unit
+    )
