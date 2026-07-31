@@ -73,6 +73,12 @@ def test_the_actor_reaches_the_hpc_side_from_the_run_memo() -> None:
     that makes a run attributable (F4-T3). `ConnectorJobWorkflow` stamps it on the child's memo;
     this asserts the reading half against a real server, with the memo set the way the wrapper
     sets it. Losing it would silently anonymize every cluster submission.
+
+    Its own molecule, deliberately. Sharing one with the envelope test above made this pass through
+    the D-154 cache instead of the cluster path it is named for — and against a real Postgres it
+    then read back the *first* run's actor and failed. The re-attribution bug that exposed is fixed
+    in `lookup_qm_result` and pinned by `test_qm_persistence.py`; this stays on a miss so it keeps
+    testing the submit path rather than the cache.
     """
 
     async def _run() -> ConnectorJobResult:
@@ -86,7 +92,7 @@ def test_the_actor_reaches_the_hpc_side_from_the_run_memo() -> None:
             ):
                 result: ConnectorJobResult = await client.execute_workflow(
                     QMJobWorkflow.run,
-                    QmJobSpec(molecule_smiles="CCO", method="B3LYP", basis_set="def2-SVP"),
+                    QmJobSpec(molecule_smiles="CCN", method="B3LYP", basis_set="def2-SVP"),
                     id="qm-test-memo",
                     task_queue=_TASK_QUEUE,
                     memo={"requested_by": "oid-from-the-turn"},

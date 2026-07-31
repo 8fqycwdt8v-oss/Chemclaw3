@@ -180,14 +180,25 @@ async def lookup_qm_result(job: QMJobInput) -> QmCacheLookup:
     A miss and a disabled cache are the same shape — no result — because the caller's behaviour is
     identical either way; only the key differs, and an empty key is what disables the note's
     `calc_refs` downstream.
+
+    **A hit is re-attributed to whoever asked this time.** `requested_by` rides on `QMJobResult`
+    but is deliberately *not* part of the key: the energy of a molecule does not depend on who
+    wanted it, which is why identical science shares one entry across users (`qm_job_key` excludes
+    it for the same reason). Returning the stored value would therefore credit every future cache
+    hit to whoever happened to compute it first — and that string becomes the note's `source`, so
+    the audit trail would name the wrong chemist for a run they did not request. The science comes
+    from the store; the attribution comes from this request.
     """
     if not settings.qm_persist_to_calc_store:
         return QmCacheLookup()
     key = calculation_key(job)
     hit = await default_store().get(key)
+    if hit is None:
+        return QmCacheLookup(calc_key=key.as_str())
+    stored = QMJobResult.model_validate(hit.result)
     return QmCacheLookup(
         calc_key=key.as_str(),
-        result=QMJobResult.model_validate(hit.result) if hit is not None else None,
+        result=stored.model_copy(update={"requested_by": job.requested_by}),
     )
 
 

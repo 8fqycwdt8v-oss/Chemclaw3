@@ -132,6 +132,32 @@ def test_persist_then_lookup_returns_the_result(store: InMemoryStore) -> None:
     assert found.result.total_energy_hartree == pytest.approx(-154.5)
 
 
+def test_a_hit_is_attributed_to_whoever_asked_this_time(store: InMemoryStore) -> None:
+    """A cached result must not credit the chemist who happened to run it first.
+
+    `requested_by` is deliberately outside the key — the energy of a molecule does not depend on
+    who wanted it, so identical science shares one entry across users. That makes returning the
+    stored value an attribution bug rather than a caching detail: the string becomes the note's
+    `source`, so the audit trail would name someone who never asked for the run.
+
+    Found by CI, not locally: the workflow tests skip without the Temporal test server, and against
+    a real Postgres one test's persisted result was served to the next test's differently-attributed
+    request.
+    """
+    first = _result()
+    first = first.model_copy(update={"requested_by": "oid-first"})
+    asyncio.run(ActivityEnvironment().run(qm_activities.persist_qm_result, first))
+
+    job = QMJobInput(**_SPEC.model_dump(), requested_by="oid-second")
+    found = asyncio.run(ActivityEnvironment().run(qm_activities.lookup_qm_result, job))
+
+    assert found.result is not None
+    # The science is the first run's...
+    assert found.result.total_energy_hartree == pytest.approx(-154.5)
+    # ...the attribution is this one's.
+    assert found.result.requested_by == "oid-second"
+
+
 def test_lookup_misses_on_an_uncomputed_molecule(store: InMemoryStore) -> None:
     """A miss still carries the key, so the caller has one shape to handle."""
     found = _lookup(_SPEC)

@@ -72,6 +72,28 @@ A workflow that branched on config would decide differently on replay if an oper
 setting mid-run. One activity round-trip when the feature is disabled is the price, and it is
 nothing next to a DFT run.
 
+### A cache hit is re-attributed to the current requester
+
+`requested_by` rides on `QMJobResult` but is deliberately **not** part of the key — the energy of a
+molecule does not depend on who wanted it, which is exactly why `qm_job_key` excludes it and why
+identical science shares one entry across users. Returning the stored value on a hit therefore
+credits every future reuse to whoever computed it first, and because that string becomes the note's
+`source`, the GxP audit trail would name a chemist who never requested the run.
+
+So `lookup_qm_result` rebinds it: the science comes from the store, the attribution comes from this
+request.
+
+This was found by CI rather than locally, and the mechanism is worth recording. The workflow tests
+skip without the Temporal test server, which a network-restricted sandbox cannot download — so
+locally the cache path was only ever exercised against an in-memory store, one test at a time.
+Against CI's real Postgres, one test's persisted result was served to the next test's
+differently-attributed request and the pre-existing memo test failed. `test_qm_persistence.py` now
+pins the behaviour offline, where it can be caught without a server.
+
+The same run exposed a second, smaller problem: the memo test shared a molecule with the envelope
+test, so once the cache existed it passed through the cache instead of the cluster path it is named
+for. It now uses its own molecule and stays on a miss.
+
 ### Why both store steps are non-fatal
 
 Temporal has already retried each activity `activity_max_attempts` times before the workflow sees an
