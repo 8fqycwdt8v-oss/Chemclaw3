@@ -1,4 +1,4 @@
-# D-154 — What the dark half of the system does the first time it runs
+# D-155 — What the dark half of the system does the first time it runs
 
 **Status:** accepted · **Date:** 2026-07-31 · **Supersedes:** nothing
 

@@ -1,6 +1,6 @@
 # The live matrix, 2026-07-31 — every capability, with the flags on
 
-*Point-in-time record. Accurate as of its date; deliberately not updated. See `docs/decisions/D-154`
+*Point-in-time record. Accurate as of its date; deliberately not updated. See `docs/decisions/D-155`
 for the decision and `docs/planning/BACKLOG.md` (DARK-1…DARK-10) for what was left open.*
 
 ## Method

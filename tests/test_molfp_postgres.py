@@ -11,8 +11,12 @@ import asyncio
 import pytest
 
 from chemclaw.core.config import settings
-from chemclaw.mcp.fpstore import InMemoryFingerprintStore, PostgresFingerprintStore
-from chemclaw.mcp.molfp.fingerprint import molecule_definition
+from chemclaw.mcp.fpstore import (
+    InMemoryFingerprintStore,
+    PostgresFingerprintStore,
+    find_matches,
+)
+from chemclaw.mcp.molfp.fingerprint import ecfp_bitstring, molecule_definition
 from chemclaw.mcp.molfp.search import (
     find_similar_molecules,
     find_substructure_matches,
@@ -43,10 +47,13 @@ def test_similarity_ranking_in_sql() -> None:
             await store.add(record_for(cid, smiles))
 
         hits = await find_similar_molecules(store, "CCO", top_k=3, threshold=0.1)
-        assert hits[0].id == "pg-ethanol"
+        assert hits[0].smiles == "CCO"
         assert hits[0].similarity == pytest.approx(1.0)
-        assert "pg-benzene" not in {h.id for h in hits}  # disjoint, below threshold
-        assert all(hits[i].similarity >= hits[i + 1].similarity for i in range(len(hits) - 1))
+        assert "c1ccccc1" not in {h.smiles for h in hits}  # disjoint, below threshold
+        assert all(
+            (hits[i].similarity or 0.0) >= (hits[i + 1].similarity or 0.0)
+            for i in range(len(hits) - 1)
+        )
 
     asyncio.run(_run())
 
@@ -58,6 +65,10 @@ def test_tie_break_order_matches_the_in_memory_backend() -> None:
     order identically (`id COLLATE "C"`), or the database's locale collation (e.g.
     en_US.UTF-8 puts 'a1' before 'B1') silently breaks the documented cross-backend
     determinism for mixed-case ids.
+
+    Asserted at the *store* level (`find_matches`), which is where the collation lives and the
+    only level that can see it: two records sharing one structure differ solely by id, and the
+    molecule search presents a hit by its structure and the note it cites, not by its row id.
     """
 
     async def _run() -> None:
@@ -68,8 +79,9 @@ def test_tie_break_order_matches_the_in_memory_backend() -> None:
             await pg_store.add(record_for(cid, octanol))
             await mem_store.add(record_for(cid, octanol))
 
-        pg_hits = await find_similar_molecules(pg_store, octanol, threshold=0.99)
-        mem_hits = await find_similar_molecules(mem_store, octanol, threshold=0.99)
+        bits = ecfp_bitstring(octanol)
+        pg_hits = await find_matches(pg_store, bits, top_k=None, threshold=0.99)
+        mem_hits = await find_matches(mem_store, bits, top_k=None, threshold=0.99)
         pg_ids = [h.id for h in pg_hits if h.id.startswith("pg-collate-")]
         mem_ids = [h.id for h in mem_hits]
         assert pg_ids == mem_ids == ["pg-collate-B1", "pg-collate-a1"]  # code-point order
@@ -85,7 +97,7 @@ def test_upsert_and_substructure_over_postgres() -> None:
         await store.add(record_for("pg-mol", "CCO"))
         await store.add(record_for("pg-mol", "CC(=O)O"))  # replace ethanol with acetic acid
 
-        acids = {r.id for r in await find_substructure_matches(store, "C(=O)[OH]")}
-        assert "pg-mol" in acids  # the replaced record now matches the acid pattern
+        acids = {r.smiles for r in await find_substructure_matches(store, "C(=O)[OH]")}
+        assert "CC(=O)O" in acids  # the replaced record now matches the acid pattern
 
     asyncio.run(_run())

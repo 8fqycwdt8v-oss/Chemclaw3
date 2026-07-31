@@ -14,7 +14,8 @@ from pathlib import Path
 
 import pytest
 
-from chemclaw.ingest.eln.compound import compound_dependencies, compound_id, compound_note
+from chemclaw.core.chem import compound_id
+from chemclaw.ingest.eln.compound import compound_dependencies, compound_note
 from chemclaw.kg.crosslink import calc_ref_index, cited_calculations, notes_for_calculation
 from chemclaw.kg.graph import invalidate_cache
 from chemclaw.kg.note import Note

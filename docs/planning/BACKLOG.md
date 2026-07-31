@@ -3,11 +3,11 @@
 Prioritized open action items. Top = next. Keep in sync with `docs/planning/implementation-plan.md`
 (phase/step numbers) at session end.
 
-## Open — Every capability exercised live with the flags on (2026-07-31, D-154)
+## Open — Every capability exercised live with the flags on (2026-07-31, D-155)
 
 Full record: `docs/archive/live-matrix-2026-07.md`. The whole stack up natively with **every**
 off-by-default flag enabled, driven with real Anthropic traffic and one signed identity per probe,
-plus three parallel code reviews. Eight defects fixed under D-154; what follows is confirmed and
+plus three parallel code reviews. Eight defects fixed under D-155; what follows is confirmed and
 deliberately not fixed there, each because it needs a decision rather than a patch.
 
 - [ ] **DARK-1 [High] — the harness plan-approval gate authorizes a session, not a plan.**
@@ -19,7 +19,7 @@ deliberately not fixed there, each because it needs a decision rather than a pat
   `api/app.py`'s *display* route; no execution path consults it. The only thing gating the loop is
   MAF's session mode, and nothing ever returns a session to `plan`. A recorded rejection after an
   approval therefore does not revoke it either, contrary to migration 020's stated contract.
-  Two coupled decisions block the fix, which is why it is here and not in D-154:
+  Two coupled decisions block the fix, which is why it is here and not in D-155:
   **(a)** `current_plan_hash` hashes the *rendered* todo lines, so completion state is part of the
   identity and the hash changes on the first ticked box — execution cannot be bound to a hash that
   moves as it executes. Binding it means deciding that what a human approves is the set of work
@@ -66,6 +66,31 @@ deliberately not fixed there, each because it needs a decision rather than a pat
   `invalidate_cache()` is called *inside* that window, so a concurrent turn can retrieve an
   agent-proposed, unreviewed note as authoritative evidence. `_return_to_base` fixed the permanent
   version of this; the transient one spans a commit, a fetch and a push.
+## Open — Surfaced by the deferral-register rewrite (2026-07-31, D-154)
+
+Rewriting `docs/planning/DEFERRED.md` into a register meant checking each row against the tree. Two
+things fell out that are work rather than bookkeeping, and neither belonged in a docs cleanup.
+
+- [ ] **Two compound-id conventions in one graph.** The seeded corpus (D-135) names its nine compound
+      notes by slug — `knowledge/compound/compound-thf.md` — while the machine path mints
+      `compound-<hash>` from the canonical structure (`core.chem.compound_id`, applied at the gate by
+      `eln.compound.compound_dependencies`). **Not a dangling citation today:** a molecule hit exists
+      only for a row in the fingerprint index, which only ingestion writes, and ingestion mints the
+      hash-id note — so the two sets do not meet. It is a *duplicate-identity* hazard on the ingest
+      path: ingesting 4-bromoanisole mints `compound-24c67ba8f741` beside the seed corpus's
+      `compound-4-bromoanisole`, two notes for one molecule, and the reaction/job-result notes citing
+      the slug keep pointing at the older one. The structure-derived id is the one that can be
+      *derived from a hit*, so a hand-written slug cannot be the convention; renaming the nine notes
+      means editing the eight notes that cite them plus three test files, and it is a corpus-convention
+      change that wants its own argument. A `kg-validate` rule (a compound note's id equals
+      `compound_id(compound_smiles)`) is what would keep it from recurring — [M].
+- [ ] **Per-step species linking from free-text prose** — moved here from `DEFERRED.md`, where it was
+      listed as blocked on a name→SMILES tool. That tool exists (`core/reagents.py`, whose docstring
+      names this as the thing it unblocks), so this is unscheduled work, not a deferral: wire the
+      `eln-reaction-extraction` skill's per-field LLM to resolve named reagents per step, still
+      PR-gated. The deterministic floor stays what it is — a coarse `StepKind` plus per-step
+      temperature/time — because guessing a SMILES from a name mid-sentence fabricates structure,
+      which is the one failure mode worse than the gap — [M].
 
 ## Open — Fifty live expert questions (2026-07-28, D-138)
 
