@@ -14,12 +14,21 @@ suite (as the other scientific metrics are pinned) instead of going silent. The 
 deliberately small — a small corpus is the ideal time to build it — and includes one query whose
 relevant note the literal substring filter cannot reach, which documents (and measures) the KM-4
 literal-matching limitation rather than hiding it.
+
+**It scores `GraphRetriever`, and it now says so — loudly.** `VectorRetriever`, `LexicalRetriever`
+and the RRF fusion have no coverage here, because scoring them needs the derived index built over
+*this fixture corpus*, which needs Postgres; that is the "live-retriever drift" row in
+`DEFERRED.md`, not something to fake. The defect worth fixing today was narrower and worse than the
+gap itself: a deployment switching `retrieval_mode` to `hybrid` — the entire point of F10-A — flips
+the product to an unmeasured path while this kept reporting a graph-only number under the same
+metric name, so the number looked like coverage it was not. It now refuses to report rather than
+mislabel, and every provenance string names the retriever behind the figure.
 """
 
 import asyncio
 from pathlib import Path
 
-from chemclaw.core.config import settings
+from chemclaw.core.config import NOTE_INDEX_SOURCES, settings
 from chemclaw.evals.metric import EvalCase, MetricError, MetricResult, metric
 from chemclaw.retrieval.retrievers import GraphRetriever
 
@@ -64,6 +73,41 @@ def _corpus_signature(corpus_dir: str) -> tuple[int, int]:
     return count, newest
 
 
+# The retrieval path this module can actually score. Anything else is a *different* retriever, and
+# reporting its quality under this metric's name would be the failure the metric exists to prevent.
+_SCORED_RETRIEVER = "GraphRetriever"
+
+
+def _require_scoreable_retrieval() -> None:
+    """Refuse to score when the deployment's retrieval path is not the one this runs.
+
+    `gather_evidence` assembles its retrievers from the data-source registry and, under
+    `retrieval_mode="hybrid"`, fuses their rankings with RRF. This module runs one `GraphRetriever`
+    over a fixture corpus. While those coincide — the shipped default — the number means what its
+    name says. The moment a deployment turns on `vector`/`lexical` or `hybrid`, they diverge, and a
+    graph-only recall reported as "retrieval_recall" is worse than no number: it is a green gate on
+    a path nobody measured.
+
+    Raising is the right failure. `MetricError` names the case and metric that triggered it
+    (`run_eval`), so an operator who enabled hybrid retrieval learns their gate no longer covers
+    their retriever, instead of being reassured by a figure about something else.
+    """
+    extra = NOTE_INDEX_SOURCES & set(settings.data_source_list)
+    if settings.retrieval_mode == "graph" and not extra:
+        return
+    reason = (
+        f"retrieval_mode={settings.retrieval_mode!r}"
+        if settings.retrieval_mode != "graph"
+        else f"active source(s) {sorted(extra)}"
+    )
+    raise MetricError(
+        f"this metric scores {_SCORED_RETRIEVER} only, but {reason} means the deployment retrieves "
+        "differently — scoring the fused/derived path needs the note index built over the eval "
+        "corpus (see DEFERRED.md, live-retriever drift). Refusing rather than reporting a "
+        "graph-only figure under this name."
+    )
+
+
 def _retrieved_ids(case: EvalCase) -> list[str]:
     """Run `GraphRetriever` over the gold corpus for the case query; return the note ids.
 
@@ -79,6 +123,7 @@ def _retrieved_ids(case: EvalCase) -> list[str]:
     filters = case.output.get("filters") or {}
     if not isinstance(filters, dict):
         raise MetricError("output.filters must be a mapping if given")
+    _require_scoreable_retrieval()
     corpus_dir = settings.eval_retrieval_corpus_dir
     signature = _corpus_signature(corpus_dir)
     key = (corpus_dir, signature, query, frozenset((str(k), str(v)) for k, v in filters.items()))
@@ -108,8 +153,9 @@ def retrieval_recall(case: EvalCase) -> MetricResult:
         value=value,
         passed=value >= settings.retrieval_recall_min,
         provenance=(
-            f"recall = {len(hits)}/{len(expected)} expected sources retrieved for query "
-            f"{case.output['query']!r}; floor {settings.retrieval_recall_min}"
+            f"recall = {len(hits)}/{len(expected)} expected sources retrieved by "
+            f"{_SCORED_RETRIEVER} for query {case.output['query']!r}; "
+            f"floor {settings.retrieval_recall_min}"
         ),
     )
 

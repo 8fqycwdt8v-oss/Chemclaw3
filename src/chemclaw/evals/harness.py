@@ -9,7 +9,7 @@ than through `chemclaw.kg.note` deliberately: an eval case is a structured evalu
 nor lives under `knowledge_dir` (where `kg-validate` would reject it).
 """
 
-import sys
+import argparse
 from pathlib import Path
 from typing import Any
 
@@ -38,10 +38,24 @@ class EvalReport(BaseModel):
 
     case_set_version: str = Field(min_length=1)
     results: list[ScoredResult]
+    # Per case, whether its gates were declared expected-to-pass. Carried on the report so
+    # `regressions()` needs no second pass over the cases, and so a serialized report is still
+    # interpretable — a bare list of failures cannot say which were meant to happen.
+    expect_pass: dict[str, bool] = Field(default_factory=dict)
 
     def failed(self) -> list[ScoredResult]:
         """Gated results that did not pass (a regression, treated like a test failure)."""
         return [r for r in self.results if r.passed is False]
+
+    def regressions(self) -> list[ScoredResult]:
+        """Failures that were not supposed to happen — `failed()` minus the demonstration cases.
+
+        The distinction `--strict` needs, and the one whose absence is why `make eval` could not
+        gate: two shipped cases exist to *demonstrate* a gate firing, so a command that treated
+        every failure as a regression would have been red from the day they were written.
+        """
+        demonstrations = {case_id for case_id, expected in self.expect_pass.items() if not expected}
+        return [r for r in self.failed() if r.case_id not in demonstrations]
 
 
 class EvalCaseError(ChemclawError):
@@ -73,7 +87,11 @@ def run_eval(cases: list[EvalCase], case_set_version: str) -> EvalReport:
                     provenance=mr.provenance,
                 )
             )
-    return EvalReport(case_set_version=case_set_version, results=results)
+    return EvalReport(
+        case_set_version=case_set_version,
+        results=results,
+        expect_pass={case.id: case.expect_pass for case in cases},
+    )
 
 
 def load_eval_cases(directory: str) -> list[EvalCase]:
@@ -135,28 +153,51 @@ def render_report(report: EvalReport) -> str:
             f"| {_cell(r.provenance)} |"
         )
     failed = report.failed()
-    lines += ["", f"**{len(failed)} gated metric(s) failed** of {len(report.results)} scored."]
+    regressions = report.regressions()
+    demonstrated = len(failed) - len(regressions)
+    summary = f"**{len(failed)} gated metric(s) failed** of {len(report.results)} scored"
+    if demonstrated:
+        # Named rather than merely subtracted: a reader seeing "3 failed" in a green build needs to
+        # know which of them are the case-set demonstrating that a gate can fire at all.
+        summary += f" — {demonstrated} of them by design, {len(regressions)} regression(s)"
+    lines += ["", summary + "."]
     return "\n".join(lines) + "\n"
 
 
-def main() -> int:
+def main(argv: list[str] | None = None) -> int:
     """CLI: score the versioned case-set and print the citable report.
 
-    Run as `python -m chemclaw.evals.harness [case_dir] [version]`. This prints the report for
-    humans; regression gating (which case must pass/fail) is pinned by the test suite,
-    so a demonstration case that is expected to fail its gate does not fail the CLI.
-    Returns non-zero when the case-set cannot be loaded or scored (missing, empty, or
-    broken — G4), so a vacuous or unscorable run never exits green.
+    Run as `python -m chemclaw.evals.harness [case_dir] [version] [--strict]`.
+
+    **Two modes, because there are two audiences.** By default this reports for humans and returns
+    zero whenever the case-set loaded, so a demonstration case that is *expected* to fail its gate
+    does not fail the command. That is deliberate and stays the default. But `.github/workflows/`
+    labelled `make eval` "the scientific quality gates" while it could not fail on a science
+    regression — the real gate is a pinned assertion in `tests/test_evals.py` — so a reader trusted
+    the wrong step. `--strict` makes the labelled step gate what it claims to: a failed gated
+    metric is a non-zero exit.
+
+    Returns non-zero when the case-set cannot be loaded or scored (missing, empty, or broken — G4)
+    in either mode, so a vacuous or unscorable run never exits green.
     """
-    case_dir = sys.argv[1] if len(sys.argv) > 1 else settings.eval_case_dir
-    version = sys.argv[2] if len(sys.argv) > 2 else "unversioned"
+    parser = argparse.ArgumentParser(
+        prog="chemclaw.evals.harness", description="Score the versioned eval case-set."
+    )
+    parser.add_argument("case_dir", nargs="?", default=settings.eval_case_dir)
+    parser.add_argument("version", nargs="?", default="unversioned")
+    parser.add_argument(
+        "--strict",
+        action="store_true",
+        help="exit non-zero when a gated metric fails (what a CI quality gate needs)",
+    )
+    args = parser.parse_args(argv)
     try:
-        report = run_eval(load_eval_cases(case_dir), version)
+        report = run_eval(load_eval_cases(args.case_dir), args.version)
     except EvalCaseError as exc:
         print(exc)
         return 1
     print(render_report(report), end="")
-    return 0
+    return 1 if args.strict and report.regressions() else 0
 
 
 if __name__ == "__main__":

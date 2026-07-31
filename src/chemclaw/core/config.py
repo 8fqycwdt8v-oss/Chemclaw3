@@ -1733,7 +1733,11 @@ _NOTE_INDEX_VECTOR_DIM = 1536
 # The retrieve sources backed by `note_index`. Both of them, not just `vector`: `reindex_notes`
 # embeds and upserts every row it writes regardless of which half will read it, so a `lexical`-only
 # deployment reaches the `vector(N)` column exactly as a `vector` one does (DARK-8).
-_NOTE_INDEX_SOURCES = frozenset({"vector", "lexical"})
+#
+# Public because two things now need the same answer to "does this deployment use the derived
+# index": the startup width check below, and `chemclaw.evals.retrieval`, which refuses to report a
+# graph-only figure when the deployment retrieves through the index instead.
+NOTE_INDEX_SOURCES = frozenset({"vector", "lexical"})
 
 
 class Settings(
@@ -1828,7 +1832,7 @@ class Settings(
                 "one budget_max_* cap or disable budgets"
             )
         writes_note_index = self.note_reindex_enabled or bool(
-            _NOTE_INDEX_SOURCES & set(self.data_source_list)
+            NOTE_INDEX_SOURCES & set(self.data_source_list)
         )
         if writes_note_index and self.embedding_dim != _NOTE_INDEX_VECTOR_DIM:
             raise ValueError(

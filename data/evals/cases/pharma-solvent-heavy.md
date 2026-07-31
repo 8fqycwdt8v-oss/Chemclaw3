@@ -1,5 +1,8 @@
 ---
 id: pharma-solvent-heavy
+# This case exists to demonstrate the gate firing, so its failure is the expected
+# result rather than a regression — see `EvalReport.regressions`.
+expect_pass: false
 metrics: [e_factor, pmi]
 output:
   input_masses_kg: [10, 5, 500, 300, 2]

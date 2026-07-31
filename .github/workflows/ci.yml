@@ -72,9 +72,13 @@ jobs:
       - name: Validate knowledge graph
         run: make kg-validate
 
-      # The scientific quality gates: the versioned metric case-set and ELN export validation.
-      - name: Run the eval case-set
-        run: make eval
+      # The scientific quality gates, and they now gate: `--strict` exits non-zero on a science
+      # regression. It could not before, because two shipped cases exist to *demonstrate* a gate
+      # firing and the only way to keep them from failing the command was for the command never to
+      # fail — so this step carried the name of a gate while being a report. `EvalCase.expect_pass`
+      # separates a demonstration from a regression, which is what makes the name true.
+      - name: Score the eval case-set (fails on a science regression)
+        run: make eval-strict
 
       - name: Validate ELN exports
         run: make eln-validate
