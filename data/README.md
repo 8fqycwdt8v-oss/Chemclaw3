@@ -11,7 +11,7 @@ a `CHEMCLAW_*` setting, so a deployment can mount its own without rebuilding the
 | `vendored/` | build-time datasets, with their provenance | `CHEMCLAW_VENDORED_DATASET_DIR` |
 | `eln-exports/` | sample ELN drops for the JSON and ORD adapters | `CHEMCLAW_ELN_EXPORT_DIR` |
 
-`evals/`, `templates/` and `profiles/` moved here in D-154. The first two used to sit at the
+`evals/`, `templates/` and `profiles/` moved here in D-155. The first two used to sit at the
 repository root, where they shared a name with the code packages `chemclaw.evals` and
 `chemclaw.templates` — a collision that needed a paragraph of explanation, which is the definition
 of a structure problem.

@@ -6,7 +6,7 @@ Temporal, no MCP and no FastAPI, so it is importable and testable without an orc
 and `rxnfp` are the two domain halves that define what a bit-vector *means* for a molecule and for
 a reaction.
 
-Until D-154 this lived in `chemclaw.mcp`, one directory away from `connectors/molfp`, which made
+Until D-155 this lived in `chemclaw.mcp`, one directory away from `connectors/molfp`, which made
 the pair read as a duplication — the very thing `science/` vs `connectors/` exists to distinguish.
 The `FastMCP` instances that advertise these functions as tools are now in their bundles, at
 `connectors/{molfp,rxnfp}/server/tools.py`, where every other bundle keeps its tool surface.

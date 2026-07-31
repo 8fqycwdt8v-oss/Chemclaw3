@@ -268,7 +268,7 @@ configuration, once. Ten minutes.
 
 ---
 
-## Prose is not covered by any gate, and it makes claims that a test would refuse (D-154)
+## Prose is not covered by any gate, and it makes claims that a test would refuse (D-155)
 
 A consistency pass over the repository structure found three defects. None were in code, all three
 were the same shape, and every one of them had survived a full `make lint type test` plus eight
@@ -304,5 +304,5 @@ believed**, and the more carefully it is written the longer it is believed.
    into a context where it was false.
 4. **When a document asserts something structural, ask what would fail if it were wrong.** If the
    answer is "nothing", either add the check or write the claim as a pointer to the thing that is
-   checked. `ARCHITECTURE.md` promised for two restructures to stay in sync with the tree; D-154
+   checked. `ARCHITECTURE.md` promised for two restructures to stay in sync with the tree; D-155
    made `tests/test_repo_map.py` enforce it in both directions instead.

@@ -27,4 +27,4 @@ were `calc/` and `connectors/calc/`, where the distinction existed but was invis
 Not every bundle has an engine here (`chem` is thin enough to sit on `core.chem`; `qm` dispatches
 to HPC), and not every engine has exactly one bundle. The invariant is the other direction:
 **capability code lives in a bundle or in `science/`, nowhere else** — true without exception since
-D-154 moved `fingerprints` out of the old `chemclaw.mcp`.
+D-155 moved `fingerprints` out of the old `chemclaw.mcp`.

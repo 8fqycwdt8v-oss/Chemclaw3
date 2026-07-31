@@ -27,7 +27,7 @@ therefore testable without any of them. `connectors/calc/` and `science/calc/` a
 duplicate: merging them would put orchestration imports inside the physics, which is the layering
 rule `tests/test_layering.py` guards.
 
-Since D-154 this holds without exception — `molfp` and `rxnfp` were the last bundles whose code
+Since D-155 this holds without exception — `molfp` and `rxnfp` were the last bundles whose code
 lived somewhere else (`chemclaw.mcp`), and their engines are now `science/fingerprints/`.
 
 `chemclaw.mcp` could not simply be called `mcp` at the top level: that name belongs to the
@@ -48,7 +48,7 @@ README asserted the deletion across four ADRs while the file was still tracked, 
 the image by `deploy/Containerfile`, and still dispatchable as `CHEMCLAW_COMPONENT=mcp-calc`.
 
 **A README is not a gate.** `tests/test_deploy_chart.py` now asserts the chart↔entrypoint
-correspondence in both directions, which is what would have caught it. D-154 found the same shape
+correspondence in both directions, which is what would have caught it. D-155 found the same shape
 once more, in `deploy/README.md`, which was still listing an `mcp-molfp`/`mcp-rxnfp` component that
 neither the entrypoint nor the chart has known about for months.
 

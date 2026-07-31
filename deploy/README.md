@@ -17,7 +17,7 @@ OpenShift SCC), no secret baked in. `deploy/entrypoint.sh` dispatches on `CHEMCL
 
 The last two are *patterns*, not a fixed list — that is the connector seam (D-109) working: adding a
 bundle adds pods, not entrypoint cases. There is deliberately no `mcp-molfp`/`mcp-rxnfp` row here.
-This table carried one until D-154, naming a component `entrypoint.sh` had no case for and the chart
+This table carried one until D-155, naming a component `entrypoint.sh` had no case for and the chart
 never declared, which is the D-117 failure in miniature: prose asserting a deployable that does not
 exist. `tests/test_deploy_chart.py` checks the chart against the entrypoint in both directions; it
 does not read this file, so the row survived. Fingerprints deploy as `connector-molfp` and

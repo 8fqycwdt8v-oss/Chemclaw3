@@ -12,7 +12,7 @@ Which of these are true today, and which are not, is the point of the layout.
 
 **Why `archive/plans/` exists.** A completed plan reads exactly like a current one — same
 imperative voice, same ticket numbers — so leaving five of them in `planning/` beside the two
-documents a session actually maintains made the directory a guess rather than a place. D-154 moved
+documents a session actually maintains made the directory a guess rather than a place. D-155 moved
 `backlog-plan`, `connector-plan`, `foundation-plan`, `gap-closure-plan` and `parity-plan` here. They
 are still cited from code, as the rationale for a seam; the ADRs remain the durable record of *why*,
 and these are how it was built.
