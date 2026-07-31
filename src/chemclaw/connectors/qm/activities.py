@@ -166,7 +166,7 @@ async def parse_qm_output(job: QMJobInput, raw_output: str) -> QMJobResult:
 @durable_activity(bundle_queue("qm"))
 @activity.defn
 async def lookup_qm_result(job: QMJobInput) -> QmCacheLookup:
-    """Return this calculation's store key, and its result if it has already been computed (D-157).
+    """Return this calculation's store key, and its result if it has already been computed (D-158).
 
     The read half of compute-once for QM. Without it, persistence alone would make an expensive
     result *durable* but never *reused*: the only thing stopping a repeat run was the deterministic
@@ -205,7 +205,7 @@ async def lookup_qm_result(job: QMJobInput) -> QmCacheLookup:
 @durable_activity(bundle_queue("qm"))
 @activity.defn
 async def persist_qm_result(result: QMJobResult) -> str:
-    """Persist the finished calculation in the shared calculation store; return its key (D-157).
+    """Persist the finished calculation in the shared calculation store; return its key (D-158).
 
     The write that makes an hours-long cluster run durable independently of two conditional
     things: whether a human merges the note's PR, and how long Temporal retains the execution.

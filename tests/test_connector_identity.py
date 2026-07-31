@@ -160,6 +160,7 @@ def test_a_durable_job_carries_the_turn_it_was_launched_from() -> None:
         job="compute_reaction_energy",
         workflow="CalcJobWorkflow",
         task_queue="background-jobs",
+        rationale="check the barrier the reviewer asked about",
         requested_by="user-1",
         correlation_id="turn-7f3a",
     )
@@ -172,6 +173,7 @@ def test_a_durable_job_carries_the_turn_it_was_launched_from() -> None:
             job="compute_reaction_energy",
             workflow="CalcJobWorkflow",
             task_queue="background-jobs",
+            rationale="check the barrier the reviewer asked about",
             requested_by="user-1",
         ).correlation_id
         == ""

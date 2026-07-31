@@ -75,7 +75,7 @@ def test_the_actor_reaches_the_hpc_side_from_the_run_memo() -> None:
     sets it. Losing it would silently anonymize every cluster submission.
 
     Its own molecule, deliberately. Sharing one with the envelope test above made this pass through
-    the D-157 cache instead of the cluster path it is named for — and against a real Postgres it
+    the D-158 cache instead of the cluster path it is named for — and against a real Postgres it
     then read back the *first* run's actor and failed. The re-attribution bug that exposed is fixed
     in `lookup_qm_result` and pinned by `test_qm_persistence.py`; this stays on a miss so it keeps
     testing the submit path rather than the cache.
@@ -296,7 +296,7 @@ def test_a_success_resets_the_consecutive_error_count(
 def test_the_finished_result_is_persisted_and_cited(monkeypatch: pytest.MonkeyPatch) -> None:
     """A completed run leaves the number in the calculation store and the note pointing at it.
 
-    The durability half of D-157. Before it, the only homes for an hours-long cluster result were
+    The durability half of D-158. Before it, the only homes for an hours-long cluster result were
     Temporal's event history and a note that exists *only if* a human merges its PR — so an
     unmerged PR plus an aged-out execution lost the result outright.
     """
@@ -331,7 +331,7 @@ def test_the_finished_result_is_persisted_and_cited(monkeypatch: pytest.MonkeyPa
 def test_an_identical_second_run_is_served_from_the_store(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The reuse half of D-157 — the part that actually stops paying twice for cluster time.
+    """The reuse half of D-158 — the part that actually stops paying twice for cluster time.
 
     Seeded with a sentinel energy no mock run can produce (the mock's is bounded by -99.9), so the
     assertion can only pass if the workflow read the store and skipped submit/poll entirely. The

@@ -1,4 +1,4 @@
-"""The QM result reaches the calculation store, and comes back out of it (D-157).
+"""The QM result reaches the calculation store, and comes back out of it (D-158).
 
 Two halves, and the second is the one that matters: persisting an expensive result makes it
 *durable*, but only the lookup makes it *reused*. Before this, the sole thing preventing a repeat

@@ -66,7 +66,7 @@ def test_the_qm_connectors_worker_serves_the_hpc_job_and_all_its_activities() ->
     `_WORKFLOWS`/`_ACTIVITIES` list to fall out of step with what the modules define. A workflow
     registered without all of its activities would poll forever on the first one it reached — which
     is why this is an exact set and not a subset check. The two cache activities joined the spine
-    with D-157; `tests/temporal_env.py::QM_ACTIVITIES` is the same list for the test workers and
+    with D-158; `tests/temporal_env.py::QM_ACTIVITIES` is the same list for the test workers and
     has to move with it.
     """
     import chemclaw.connectors.qm.worker  # noqa: F401 — importing it is what registers the bundle

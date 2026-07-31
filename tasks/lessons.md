@@ -334,3 +334,38 @@ reports success.
    the scan asserts a spelling. Fix the scan and keep both.
 3. **After `git checkout --ours <file>` on a rename/rename conflict, read the file.** `--ours` there
    resolves *which path* wins, not which content — the result can still contain markers.
+
+## A test that skips is not a test that passes — and an infrastructure skip can often be removed (2026-07-31, D-157)
+
+The Temporal-backed and Postgres-backed suites here skip in the sandbox, which is documented and
+accepted. Working on D-157 I first wrote the write-path assertions into the Temporal e2e test and
+moved on, and the honest state of that work was: *the property is unasserted anywhere I can run*.
+Two different corrections came out of it.
+
+**The Postgres half did not have to skip at all.** `postgresql-16` was installed in the sandbox the
+whole time; the only thing missing was pgvector (an `apt-get install`, then a source build when the
+packaged 0.6.0 predated `bit_jaccard_ops`). Twenty minutes turned four skipped store tests into four
+that ran — and they ran against the real migration, which is the thing a hand-checked `INSERT`
+cannot verify. "The offline sandbox has none" was true of the *default* environment, not of the
+environment I was allowed to build.
+
+**The Temporal half genuinely cannot run** (`temporal.download` is blocked by the network policy),
+so the fix was structural: pull the pure part out — `job_record_for`, a plain function from a run to
+its record — and pin it offline, leaving only the orchestration to CI. That is the same move
+`completed_job_status` made for D-153, and the test it makes possible is the one that would actually
+catch a wrong field.
+
+What is left unasserted offline is now *known*: core applying the provenance footer is only
+exercised in the CI-only e2e run. I checked that by mutating the source and watching the offline
+suite stay green, rather than by assuming.
+
+**Rules:**
+
+1. **Before accepting an environment skip, try to remove it.** Check what is actually installed
+   (`which`, the package manager) rather than trusting the skip message; a skip reason written when
+   the sandbox was different is not a current fact.
+2. **When a path truly cannot run locally, extract the pure part and test that.** "It needs a
+   server" is usually true of the orchestration and false of the mapping the orchestration performs.
+3. **Verify a coverage claim by mutation, not by reading.** Break the line, run the suite, and see
+   which test fails. Every "verified to fail without the fix" claim in a review section must be one
+   you actually ran — I wrote one in `tasks/todo.md` before running it, and it was wrong.
