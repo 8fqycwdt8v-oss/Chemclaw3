@@ -3,6 +3,32 @@
 Prioritized open action items. Top = next. Keep in sync with `docs/planning/implementation-plan.md`
 (phase/step numbers) at session end.
 
+## Open — Left open by the durable job record (2026-07-31, D-157)
+
+The record closed "a finished run's data, and the reason for it, survive nowhere". Three things it
+deliberately did not close, each because it is a design rather than a line of code.
+
+- [ ] **A failed run leaves no record.** The child failure propagates out of `ConnectorJobWorkflow`
+      before the write, so `job_records` holds successes only — and "what have we already tried that
+      did not work" is exactly the retrospective question the table exists to answer. Needs three
+      decisions before code: which status a row carries (a run that failed *after* several rounds is
+      not the same as one that never started), where the write happens (the failure path is an
+      exception, not a return value, so it is a `try/finally` around the child or a
+      workflow-level handler), and whether a later successful re-run under the same id supersedes the
+      failed row or joins it. The attempt is already in `audit_events`, so nothing is lost today
+      beyond the campaign's partial history — [M].
+- [ ] **`request_development_report` writes no record.** It does not run through
+      `ConnectorJobWorkflow` (D-115 kept it in core), so it would need its own write site — either by
+      lifting the record write into a helper both call, or by moving the report onto the wrapper. Its
+      gap is the smaller one: a report's artifact is a PR-gated note whose headings state its
+      subject, where a campaign's artifact was a single best point. Same for anything else that ever
+      starts a durable workflow outside the seam — [S].
+- [ ] **Temporal namespace retention is still unset.** Nothing in the repo configures it, so a
+      deployment inherits the server's default. D-157 removed the *dependence* on that number (the
+      result no longer lives only in history) but not the ambiguity: an operator reading the runbook
+      still cannot say how long a running deployment keeps workflow history. It is one Helm value
+      plus a runbook line, and it wants a stated policy rather than a copied default — [S].
+
 ## Open — Every capability exercised live with the flags on (2026-07-31, D-155)
 
 Full record: `docs/archive/live-matrix-2026-07.md`. The whole stack up natively with **every**
@@ -11,7 +37,7 @@ plus three parallel code reviews. Eight defects fixed under D-155; what follows 
 deliberately not fixed there, each because it needs a decision rather than a patch.
 
 - [x] ~~**DARK-1 [High] — the harness plan-approval gate authorizes a session, not a plan.**~~ —
-  **fixed (D-157).** Both blocking decisions taken: an approval binds to the plan's *work items*
+  **fixed (D-164).** Both blocking decisions taken: an approval binds to the plan's *work items*
   (reversing D-137, whose rendered-lines hash moved on the first ticked box and so could never be
   checked against the plan being executed), and the store follows the session store — which
   dissolves the fail-open/fail-closed question rather than answering it, since the approval and the
@@ -20,10 +46,10 @@ deliberately not fixed there, each because it needs a decision rather than a pat
   built. Running it live then found the fix incomplete: the model answered a *different* question
   without touching its todo list, so the plan identity never changed and the approval never lapsed.
   An approval is therefore also spent by the turn it authorizes. One residual limit, stated in
-  D-157: the system cannot tell "proceed" from "a new question" in the single turn that follows an
+  D-164: the system cannot tell "proceed" from "a new question" in the single turn that follows an
   approval — bounded, audited, and immediately preceded by a human decision, but not zero.
 - [x] ~~**DARK-2 [High] — a template step is a route around `authorize_trigger` and the audit
-  trail.**~~ — **fixed (D-158).** A template step runs with the requester's entitlements, which is
+  trail.**~~ — **fixed (D-165).** A template step runs with the requester's entitlements, which is
   what the module's own docstring already claimed. The connector branch goes through the same
   audited, authorized path as the in-process one; the job step's pre-flight became one shared
   function (`prepare_job_launch`) called by both the chat launcher and the new `authorize_job_step`,
@@ -63,6 +89,27 @@ deliberately not fixed there, each because it needs a decision rather than a pat
   `invalidate_cache()` is called *inside* that window, so a concurrent turn can retrieve an
   agent-proposed, unreviewed note as authoritative evidence. `_return_to_base` fixed the permanent
   version of this; the transient one spans a commit, a fetch and a push.
+## Done — The daily experiment progression (2026-07-31, D-162)
+
+Asked whether the system could read a technician's week-by-week series on one step and propose the
+next run without BO. Most of it was already there; three data gaps were not, and are closed:
+
+- [x] **PROG-1** Chronology. `memory/progression.py` orders a series by `performed_at` and names
+      what changed between consecutive runs; the `optimization-campaign` note gains **Performed**
+      and **Changed vs previous** columns and states in words when its row order is *not* a
+      timeline. `performed_at` existed and reached no artifact the agent reads.
+- [x] **PROG-2** Intent. `OrdReaction.hypothesis` (mapped by the JSON ELN adapter, rendered first
+      in the reaction note) and the `follows` relation — minted by whoever can read the intent,
+      never derived from two dates.
+- [x] **PROG-3** The reasoned path. `experiment-progression` skill + the `experiment-proposal` note
+      type through the existing PR-gate; `deep-research` §6 and `experiment-design` now name the
+      fork between reasoning and BoFire and require the answer to say which it took.
+- [x] **PROG-4** `since`/`until` on `gather_evidence` and `_eligible_notes`, so "what have I tried
+      in the last two weeks" reaches the dates already on the notes.
+
+Not addressed, and worth stating: nothing here reads an instrument trace or correlates impurity
+profiles across runs beyond what the notes say in prose.
+
 ## Open — Surfaced by the deferral-register rewrite (2026-07-31, D-154)
 
 Rewriting `docs/planning/DEFERRED.md` into a register meant checking each row against the tree. Two

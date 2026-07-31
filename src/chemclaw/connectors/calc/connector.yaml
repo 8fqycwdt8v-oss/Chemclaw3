@@ -29,8 +29,9 @@ endpoint:
     - predict_logd
     - predict_developability_profile
     - calculator_trust
+    - find_calculations
     - report_measurement
-  # Every tool is classified, and the manifest refuses to load if one is not (D-157): the harness's
+  # Every tool is classified, and the manifest refuses to load if one is not (D-164): the harness's
   # plan gate refuses the state-changing ones under an unapproved plan, and getting that wrong by
   # omission would fail open.
   #
@@ -51,6 +52,9 @@ endpoint:
   # prediction before deciding whether to authorize the work that depends on it.
   read_only:
     - calculator_trust
+    # A search over the job record (D-163) — it answers "has this already been run", which is
+    # exactly the lookup a chemist makes *before* deciding whether to authorize an expensive run.
+    - find_calculations
 
 skills:
   - calculation-selection

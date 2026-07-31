@@ -523,7 +523,7 @@ def create_app(
     # state.
     # Through the factory, not by construction, so this route and the enforcement gate
     # (`chemclaw.agent.plan_gate`) hold the *same* store: a decision recorded here has to be a
-    # decision the gate can see, which under the in-memory backend means the same object (D-157).
+    # decision the gate can see, which under the in-memory backend means the same object (D-164).
     app.state.plan_approvals = plan_approval_store()
     app.state.history = history_provider()
     # One agent — and therefore one chat client — per concurrent turn (D-123). The cached
@@ -943,7 +943,7 @@ def create_app(
                 ) from exc
             acquired = True
             METRICS.increment("chemclaw_turns_started_total")
-            response = EventSourceResponse(_turn_events())
+            response = EventSourceResponse(_turn_events(), ping=settings.service_sse_ping_seconds)
             handed_off = True
             return response
         finally:
@@ -1016,7 +1016,7 @@ def create_app(
 
         handed_off = False
         try:
-            response = EventSourceResponse(_events())
+            response = EventSourceResponse(_events(), ping=settings.service_sse_ping_seconds)
             handed_off = True
             return response
         finally:
@@ -1223,7 +1223,7 @@ def create_app(
             )
         await _plan_approvals().record(session_id, plan_hash, principal.oid or "", body.approved)
         # A decision re-arms the plan: an approval authorizes one turn and is spent when that turn
-        # ends (D-157), so re-approving an unchanged plan is how a person says "yes, again" rather
+        # ends (D-164), so re-approving an unchanged plan is how a person says "yes, again" rather
         # than a no-op that silently leaves the session unable to act.
         rearm_plan(live.session, plan_hash)
         if body.approved:

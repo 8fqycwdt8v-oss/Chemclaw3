@@ -17,6 +17,7 @@ evidenced fact from transferred analogy, and drafting new protocols — lives in
 
 import asyncio
 from collections.abc import Coroutine
+from datetime import date
 from typing import Any
 
 from chemclaw.agent.framing import frame_untrusted
@@ -59,12 +60,27 @@ def _flat_dedup(ranked_lists: list[list[EvidenceChunk]]) -> list[EvidenceChunk]:
     return unique
 
 
+def _as_date(value: str, field: str) -> date:
+    """Parse an ISO date argument, or fail with a message the model can act on.
+
+    A tool argument comes from the model, so a malformed one is a prompt-level mistake, not a
+    bug: naming the field and the expected format is what lets the next attempt be correct,
+    where a bare `ValueError` from the stdlib would not.
+    """
+    try:
+        return date.fromisoformat(value)
+    except ValueError as exc:
+        raise ValueError(f"{field} must be an ISO date (YYYY-MM-DD), got {value!r}") from exc
+
+
 @tool
 async def gather_evidence(
     query: str,
     reaction_smiles: str | None = None,
     note_type: str | None = None,
     tag: str | None = None,
+    since: str | None = None,
+    until: str | None = None,
 ) -> list[EvidenceChunk]:
     """Gather cited evidence for a research question from every internal source at once.
 
@@ -78,18 +94,26 @@ async def gather_evidence(
         reaction_smiles: Optional `reactants>>products` anchor to also pull similar reactions.
         note_type: Optional graph filter, e.g. "reaction", "optimization-campaign", "playbook".
         tag: Optional graph tag filter (e.g. a project name).
+        since: Optional ISO date (YYYY-MM-DD); keep only notes dated on or after it — for a
+            reaction note, the day the experiment was run. Use it for "what have we tried
+            recently"; note that a note with no date is excluded, not assumed to be in range.
+        until: Optional ISO date (YYYY-MM-DD); keep only notes dated on or before it.
 
     Returns:
         Evidence chunks, each with its content, the `source_note_id` to cite/expand, and which
         retriever found it. Capped at the configured budget so a broad sweep does not flood the
-        context; if you hit the cap, narrow the query (a `note_type`/`tag` filter) rather than
-        assume you have seen everything.
+        context; if you hit the cap, narrow the query (a `note_type`/`tag`/date filter) rather
+        than assume you have seen everything.
     """
-    filters: dict[str, str] = {}
+    filters: dict[str, Any] = {}
     if note_type is not None:
         filters["type"] = note_type
     if tag is not None:
         filters["tag"] = tag
+    if since is not None:
+        filters["since"] = _as_date(since, "since")
+    if until is not None:
+        filters["until"] = _as_date(until, "until")
 
     # One ordered hit-list per source; each retriever ranks its own hits (best first).
     #

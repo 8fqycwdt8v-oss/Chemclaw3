@@ -68,7 +68,7 @@ async def todo_plan_items(
     now", which must include completion state. An authorization asks "which plan is this", which
     must **not**: an approval bound to a hash that moves the moment a box is ticked cannot survive
     the execution it authorizes, and re-approving after every step is not a control anyone would
-    operate (D-157 reverses D-137 on exactly this point).
+    operate (D-164 reverses D-137 on exactly this point).
 
     Two exclusions, both load-bearing:
 

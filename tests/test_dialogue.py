@@ -157,7 +157,10 @@ def test_a_dry_run_does_not_submit_a_qm_job(monkeypatch: pytest.MonkeyPatch) -> 
     token = set_dry_run(True)
     try:
         result = asyncio.run(
-            tool(params(molecule_smiles="CCO", method="B3LYP", basis_set="def2-SVP"))
+            tool(
+                params(molecule_smiles="CCO", method="B3LYP", basis_set="def2-SVP"),
+                "the reviewer questioned the reported barrier",
+            )
         )
     finally:
         reset_dry_run(token)

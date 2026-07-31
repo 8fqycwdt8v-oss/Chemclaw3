@@ -1,4 +1,4 @@
-# D-158 — A template step runs as its requester, and four steps that had never run
+# D-165 — A template step runs as its requester, and four steps that had never run
 
 **Status:** accepted · **Closes:** DARK-2
 
@@ -71,7 +71,7 @@ that had never executed:
    Middleware requires an AgentSession"), the same wall D-152 hit for the CLI.
 4. …and the fix for (3) is to run the step **without the harness**, not to invent a session. A
    template exists to fix the sequence; a planning loop inside one of its steps would give the step
-   back the discretion the template was written to remove, and under D-157's gate would refuse every
+   back the discretion the template was written to remove, and under D-164's gate would refuse every
    write inside it for want of a plan nobody can approve. `_classic` resolves the step's profile and
    switches only that dimension off, so every other narrowing survives.
 

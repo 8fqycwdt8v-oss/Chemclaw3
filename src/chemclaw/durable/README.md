@@ -40,6 +40,14 @@ The xTB tasks went the same way earlier, as `CalcJobWorkflow` on `connector-calc
 image holds none of it (D-118). D-006's heavy/light split is intact: one core
 queue plus one per bundle, each sized for its own work.
 
+**Event history is not an archive** (`job_record.py`, D-157). A closed workflow's
+history — and with it the result it returned — expires on the namespace's retention
+clock, which no deployment here sets. So `connector_job.py` writes every finished
+run to `job_records`: the launch arguments, the whole result envelope, and the
+**reason it was asked for**, which is the one thing neither a note nor the audit
+trail ever recorded. That row is what `get_durable_job_status` falls back to for an
+old id, and what `find_past_jobs` searches.
+
 Restarting a worker mid-job is the durability spike at CHECKMATE 1: the workflow
 must resume from event history without re-running completed activities. For the
 xTB jobs specifically, resumption is nearly free for a second reason — every

@@ -35,6 +35,12 @@ KNOWN_RELATIONS: frozenset[str] = frozenset(
         "computed-from",  # this claim was derived from that calculation or note
         "evidence-for",  # this note supports that claim
         # --- disagreement and time ---
+        # This experiment was run in response to that one — the edge that turns a pile of runs
+        # into a line of enquiry (D-162). Deliberately stronger than "was performed later": it is
+        # minted by whoever can read the intent (the agent proposing the next run, a chemist
+        # confirming a series), never derived from two dates, because a date proves sequence and
+        # not response.
+        "follows",
         "contradicts",  # this note asserts something incompatible with that one
         "supersedes",  # this note replaces that one as the current answer
         "superseded-by",  # the inverse, so the older note can point forward

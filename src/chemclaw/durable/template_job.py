@@ -179,7 +179,7 @@ class TemplateWorkflow:
         # a network call; the point is recording the answer, not offloading the work.
         #
         # It also *authorizes* the step, as the run's requester, and returns the validated payload
-        # (D-158). The arguments are handed to it rather than substituted into the child start
+        # (D-165). The arguments are handed to it rather than substituted into the child start
         # below, because a payload that has not been through `prepare_job_launch` is precisely what
         # this step used to start an HPC job with.
         resolved = await workflow.execute_local_activity(
@@ -203,7 +203,16 @@ class TemplateWorkflow:
                     job=resolved.job,
                     workflow=resolved.workflow,
                     task_queue=resolved.task_queue,
+                    # The *validated* payload the authorizing activity returned, never the raw
+                    # arguments — see `authorize_job_step` (D-165).
                     payload=resolved.payload,
+                    # A template already declares why each of its steps exists, so the run's
+                    # rationale (D-157) is that declaration rather than a second field an author
+                    # would have to write twice. A step with no stated purpose still gets a
+                    # non-blank, deterministic one — the reject-if-absent rule holds on every path
+                    # into `ConnectorJobInput`, and naming the step is more honest than inventing
+                    # a reason nobody gave.
+                    rationale=step.purpose or f"template step {step.id!r} (job {step.job})",
                     requested_by=identity.actor,
                     publish_to_graph=resolved.publish_to_graph,
                 ),

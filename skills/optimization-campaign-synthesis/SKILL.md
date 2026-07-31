@@ -12,6 +12,16 @@ Holds the judgment for reading an `optimization-campaign` note — a set of same
 runs the memory layer grouped by structural similarity (`memory.optimization`). The comparative
 table (conditions × outcomes per run) is deterministic; the *analysis* is here.
 
+## Read the rows in order, and check that the order is real
+
+- The table is laid out **chronologically**, with each row naming what it changed relative to the
+  run before it. Use that: a series walked in one direction says something a set of the same runs
+  does not, and the "changed vs previous" column is where an untouched variable becomes visible.
+- The note states at the top whether the ordering is a genuine timeline. When it says no run
+  carries a date, the rows are an id listing — read them as a set and do not narrate a
+  progression. When the question is specifically "what should I run next", hand off to
+  `experiment-progression`.
+
 ## Read every output, not just yield
 
 - The campaign is output-neutral: yield is one column, but the procedure prose behind each run

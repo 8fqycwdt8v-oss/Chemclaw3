@@ -298,6 +298,17 @@ class HpcSettings(BaseSettings):
     # the artifact fetch is unauthenticated — unless the store shares the launcher's origin, in
     # which case the launcher token still applies.
     hpc_artifact_store_token: str = ""
+    # Persist a finished QM result in the shared calculation store (D-158). On by default, which
+    # is the *un*usual choice for a new flag here and deliberate: D-011 already says every result
+    # is persisted once and never recomputed, and `qm` was the one capability not doing it — so
+    # this is the bundle complying with an existing rule, not a new opt-in behaviour. The write is
+    # an idempotent upsert keyed by content, so re-running a job cannot corrupt anything.
+    #
+    # The switch exists for the deployment that runs the `qm` worker without a reachable Postgres:
+    # there, every job would log a failed persist. Turning it off restores exactly the old
+    # behaviour — the result still reaches the session and the PR-gated note, just without the
+    # durable cache entry or the note's `calc_refs`.
+    qm_persist_to_calc_store: bool = True
     # The HPC/Nextflow identity bridge (plan F4-T6, §7.2): the other non-Entra bridge. HPC is
     # not an Entra relying party, so user jobs run under one service identity while the
     # requesting Entra `oid` is carried in the payload (F4-T3) and *every* oid→HPC-identity
@@ -920,6 +931,14 @@ class ServiceSettings(BaseSettings):
     # this bounds a *resource*, and paying a durable write plus a heartbeat per stream to make an
     # approximate ceiling exact would cost more than the thing it protects.
     service_max_event_streams_per_user: int = Field(default=5, gt=0)
+    # How often an idle SSE stream sends a keepalive comment frame (D-159). Neither stream set
+    # one, so a long tool wait had no signal of any kind on the wire: the turn stream can be
+    # silent for the length of an inline calc job or an MCP `request_timeout`, and the push-back
+    # stream is silent by nature until a job lands. Anything between the browser and the pod that
+    # reaps idle connections — a proxy, a load balancer, a phone's radio — was free to drop it,
+    # and the client could not tell that from a slow answer. Comfortably under the 60s such
+    # intermediaries typically use.
+    service_sse_ping_seconds: int = Field(default=15, gt=0)
     # The same cap across *all* users on this process. The per-user cap alone bounds one client;
     # it does not bound the pod, so 50 concurrent chemists at the per-user cap is 250 forever-
     # polling streams on one event loop — each a task and a periodic pooled query. This is the
@@ -1424,6 +1443,14 @@ class ConnectorSettings(BaseSettings):
     # to grant itself unlimited runtime — that is a deployment's call.
     connector_job_timeout_seconds: float = Field(default=86_400.0, gt=0)
 
+    # Bound on the record write every finished connector job performs (D-157). Small: it is one
+    # upsert of a row the job has already earned, and a database that cannot take it in this long
+    # is down — in which case the retries, and then the log line, are the right outcome.
+    job_record_timeout_seconds: float = Field(default=30.0, gt=0)
+    # How many past runs `find_past_jobs` returns by default. Bounded because the results land in
+    # the model's context: enough to recognise the campaign being looked for, not a table dump.
+    job_record_search_limit: int = Field(default=20, ge=1)
+
     @property
     def connectors_dirs(self) -> list[str]:
         """The connector bundle directories, split on the OS path separator (like `PATH`)."""
@@ -1464,8 +1491,8 @@ class MemorySettings(BaseSettings):
     # so every durable table grew for the deployment's lifetime. 0 disables pruning for that
     # table, which is the default: a retention period is a *policy* decision (GxP: keep for N
     # years, then dispose, provably), so a deployment must state it rather than inherit a number
-    # from code. `audit_events` and `calculation_results` are deliberately absent — see
-    # workflows/retention.py for why each needs its own design rather than an age cutoff.
+    # from code. `audit_events`, `calculation_results` and `job_records` are deliberately absent —
+    # see durable/retention.py for why each needs its own design rather than an age cutoff.
     retention_enabled: bool = False
     retention_schedule_minutes: float = Field(default=1440.0, gt=0)
     retention_timeout_seconds: float = Field(default=600.0, gt=0)
@@ -1490,6 +1517,11 @@ class MemorySettings(BaseSettings):
     # reported as not-yet-meaningful — a bias from three points is not a bias.
     calibration_enabled: bool = False
     calibration_min_observations: int = Field(default=8, ge=1)
+    # Ceiling on what one `find_calculations` call can return. The calculation store is never
+    # evicted (D-011), so it is the one table that only grows — a browse query with no cap is a
+    # full scan of it, and every returned row spends the model's context. The tool clamps its own
+    # `limit` to this rather than trusting the argument.
+    calc_find_max_results: int = Field(default=50, ge=1)
     # Standing-query digests (gap IDEA-1). Off by default: it needs the `subscriptions` table
     # (migration 017), and a deployment nobody has subscribed on would just run an empty sweep.
     digest_enabled: bool = False

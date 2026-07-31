@@ -1,4 +1,4 @@
-"""The harness's plan approval gates an action, and stops latching a session (DARK-1, D-157).
+"""The harness's plan approval gates an action, and stops latching a session (DARK-1, D-164).
 
 The defect these tests exist for was reproduced live, not hypothesised. With `harness_enabled` and
 `harness_autonomy="plan_only"`: approve a four-item plan, then ask a *completely different*

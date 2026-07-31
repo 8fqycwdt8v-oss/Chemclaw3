@@ -16,6 +16,12 @@ Holds the *judgment* for the next-experiment question; the mechanics are in
 `suggest_next_experiment` (BoFire's ask step). A good suggestion is only as good as the problem
 you hand it, so most of the work is framing, not the call.
 
+**First decide the question is this one.** A surrogate needs a scalar objective over bounded
+variables and enough runs to fit. When the chemist is instead walking one step day by day, and
+what they want is a reading of where the series got to and one diagnostic to run next, that is
+the `experiment-progression` skill — reasoned from the record, not from a model. Do not force a
+line of enquiry into a design space just because a design space is what this tool takes.
+
 ## Frame the problem from evidence
 
 1. **Fix the objective.** One scalar, and its direction — maximize yield, minimize an impurity,
@@ -82,8 +88,15 @@ run next?" inline, from observations you already have.
 A fully automated loop that proposes, evaluates its own objective, and iterates over many rounds is
 `start_optimization_campaign` — reach for that only when the objective can be computed without a
 human in each round. It is durable and long-running, so it returns a job id immediately; poll it
-with `get_durable_job_status`. Set `publish_to_graph` when the recommendation should be proposed as
-a PR-gated note rather than only reported in chat.
+with `get_durable_job_status`. Its recommendation is always proposed as a PR-gated note, so a human
+reviews it; you do not decide whether the campaign is recorded.
+
+State the campaign's `rationale` in the chemist's terms — the question this campaign should answer
+and what prompted it — not a restatement of the parameter ranges. It is stored with the run and
+printed on the note a reviewer signs, and it is what a session six months from now will read when
+it asks `find_past_jobs` whether this optimization has already been done. Before starting a
+campaign, run that search: a near-identical campaign that already ran is evidence to build on
+(seed the new one with its observations), and only an *identical* one rejoins its result for free.
 
 ## The other DoE question: a categorical screen, not an adaptive suggestion
 

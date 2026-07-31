@@ -67,6 +67,7 @@ from chemclaw.api.events import (
     TokenEvent,
     ToolCallEvent,
     ToolFailedEvent,
+    ToolResultEvent,
 )
 from chemclaw.api.metrics import METRICS
 from chemclaw.connectors.registry import open_reachable
@@ -351,7 +352,7 @@ async def run_turn(
         )
     finally:
         # Spend the plan approval this turn ran under, so the *next* user message is a new request
-        # needing its own decision (D-157). At the end, not the start: the harness loop executes an
+        # needing its own decision (D-164). At the end, not the start: the harness loop executes an
         # approved plan across several iterations of one `agent.run`, and consuming on entry would
         # refuse the plan's own second iteration. On every path, including a failure — a turn that
         # spent the authorization and then broke has still spent it, and re-running under the same
@@ -582,6 +583,24 @@ class _ToolCallTrace:
     the arguments rather than after the name. That is the more truthful order anyway, because a
     tool cannot run before its arguments are complete.
 
+    **That flush condition was still one step too late** (D-159). For a streamed call the next
+    update to arrive is the one carrying the call's *result* — the provider finishes the argument
+    stream, the framework runs the tool, and only then does anything else come down the wire. So
+    "an update went by without adding to it" fired after execution, and the trace announced
+    `predict_pka(...)` once the twenty seconds were already spent. From the chemist's side a
+    working calculation and a hung server were the same thing.
+
+    So a call now completes the moment its accumulated arguments **parse as JSON**, which is
+    exactly when the provider has finished sending them and before the tool is invoked. No new
+    provider signal is needed and D-138's promise is kept: the event still carries the whole
+    argument preview, it just no longer waits for the result to prove the arguments ended. The
+    update-went-by rule stays as the fallback for arguments that never parse (a provider that
+    streams something other than JSON) so nothing can be stranded.
+
+    Results are matched back by `call_id` and emitted as `ToolResultEvent`, which is why
+    `_names` outlives the flush: the name is what the result event reports, and it is not on the
+    result content.
+
     Still duck-typed: MAF's function-call content class is not a stable top-level export and its
     shape varies by version, so this matches on structure (a `call_id`/`arguments` pair) rather
     than importing a concrete type.
@@ -590,11 +609,15 @@ class _ToolCallTrace:
     def __init__(self) -> None:
         self._names: dict[str, str] = {}
         self._fragments: dict[str, list[str]] = {}
+        # The name of every call already announced, kept so its result can be reported under the
+        # same name. Bounded by the calls in one turn, which the loop cap already bounds.
+        self._issued: dict[str, str] = {}
 
-    def feed(self, update: Any) -> list[ToolCallEvent]:
-        """Take one streamed update; return the calls it completed, in order."""
+    def feed(self, update: Any) -> list[Event]:
+        """Take one streamed update; return the calls it issued and the results it returned."""
         growing: set[str] = set()
         done: set[str] = set()
+        results: list[Event] = []
         for content in getattr(update, "contents", None) or []:
             if not (hasattr(content, "arguments") or hasattr(content, "call_id")):
                 continue
@@ -604,7 +627,7 @@ class _ToolCallTrace:
                 continue
             if name:
                 self._names.setdefault(key, name)
-            if key not in self._names:
+            if key not in self._names and key not in self._issued:
                 continue  # a fragment for a call whose opening content we never saw
             arguments = getattr(content, "arguments", None)
             if arguments is None:
@@ -613,6 +636,9 @@ class _ToolCallTrace:
                 # None` and not falsiness — an empty string is a real fragment of the argument
                 # stream, and treating it as the end flushed the call before its arguments had
                 # arrived, which is how this reached a second live run still empty.
+                result = _result_event(content, self._issued.get(key) or self._names.get(key, key))
+                if result is not None:
+                    results.append(result)
                 continue
             if name and arguments:
                 # The name and the complete arguments in one content: the call arrived whole
@@ -630,18 +656,71 @@ class _ToolCallTrace:
                 elif isinstance(arguments, Mapping) and arguments:
                     fragments[:] = [json.dumps(arguments)]
             growing.add(key)
-        return self._take((set(self._fragments) - growing) | done)
+            if _arguments_complete(self._fragments.get(key)):
+                # The provider has finished sending this call's arguments, so the tool is about
+                # to run. Announcing now is the whole point of D-159: waiting for the next update
+                # means waiting for the result, and the wait between them is the part worth
+                # showing.
+                done.add(key)
+        return [*self._take((set(self._fragments) - growing) | done), *results]
 
-    def flush(self) -> list[ToolCallEvent]:
+    def flush(self) -> list[Event]:
         """Emit whatever is still open — the stream ended before an untouched update arrived."""
         return self._take(set(self._fragments))
 
-    def _take(self, keys: set[str]) -> list[ToolCallEvent]:
-        events = []
+    def _take(self, keys: set[str]) -> list[Event]:
+        events: list[Event] = []
         for key in [k for k in self._fragments if k in keys]:
             arguments = "".join(self._fragments.pop(key))[:_ARG_PREVIEW_CHARS]
-            events.append(ToolCallEvent(tool=self._names.pop(key, key), arguments=arguments))
+            name = self._names.pop(key, key)
+            # Remembered rather than discarded: the result content carries no name, so this is
+            # what lets `ToolResultEvent` report which tool answered.
+            self._issued[key] = name
+            events.append(ToolCallEvent(tool=name, arguments=arguments))
         return events
+
+
+def _arguments_complete(fragments: list[str] | None) -> bool:
+    """Whether the accumulated argument fragments are a finished JSON value.
+
+    This is the signal that replaces "wait for the next update" as the moment a call is announced
+    (D-159). It works because the provider streams a tool call's arguments as one JSON document
+    and does not invoke the tool until that document is closed — so a successful parse is exactly
+    the boundary between "still arriving" and "about to run", and it is knowable from the bytes
+    already in hand rather than from something that follows.
+
+    False for anything that does not parse, which keeps the old update-went-by rule as the
+    fallback: a provider streaming a non-JSON argument format still gets its call announced, just
+    at the previous, later moment. Nothing is stranded, and nothing regresses.
+    """
+    if not fragments:
+        return False
+    try:
+        json.loads("".join(fragments))
+    except (ValueError, TypeError):
+        return False
+    return True
+
+
+def _result_event(content: Any, tool: str) -> ToolResultEvent | None:
+    """Render a function-result content as a `ToolResultEvent`, or None when it carries nothing.
+
+    Duck-typed over the attribute the framework version happens to use, for the same reason the
+    call side is: the concrete content class is not a stable export. A result that is empty or
+    unreadable yields None rather than an event announcing nothing — the trace should not claim a
+    value it does not have.
+
+    Failures are deliberately not reported here. A raised call already surfaces as
+    `ToolFailedEvent` through the tool middleware, which has the exception and its message; a
+    second event for the same outcome would leave a consumer choosing which to believe.
+    """
+    for attribute in ("result", "output", "value", "text"):
+        value = getattr(content, attribute, None)
+        if value is None or value == "":
+            continue
+        preview = value if isinstance(value, str) else str(value)
+        return ToolResultEvent(tool=tool, preview=preview[:_ARG_PREVIEW_CHARS])
+    return None
 
 
 def _approval_prompt(request: Any) -> str:

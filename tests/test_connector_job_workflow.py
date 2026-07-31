@@ -35,6 +35,7 @@ from chemclaw.agent.session_events import record_session_event
 from chemclaw.connectors.jobs import build_job_tool, job_workflow_id
 from chemclaw.connectors.registry import discovered, enabled
 from chemclaw.durable.connector_job import ConnectorJobResult, ConnectorJobWorkflow
+from chemclaw.durable.job_record import JobRecord, record_job
 from chemclaw.durable.memory_jobs import publish_memory_note_activity
 from chemclaw.durable.notify import record_session_event_activity
 from chemclaw.kg.note import Note
@@ -144,6 +145,7 @@ def test_a_connector_job_runs_its_own_workflow_and_core_does_the_rest(
     """The whole contract in one run: child on its own queue, note PR-gated, session woken."""
     published: list[Any] = []
     notified: list[tuple[str, str, dict[str, Any]]] = []
+    recorded: list[JobRecord] = []
 
     async def _fake_propose(*args: Any, **kwargs: Any) -> str:
         """Capture the PR-gate proposal instead of pushing a git branch.
@@ -177,7 +179,14 @@ def test_a_connector_job_runs_its_own_workflow_and_core_does_the_rest(
             )
         )
 
+    class _CapturingSink:
+        """Keeps the durable job record instead of writing it to Postgres (D-157)."""
+
+        async def record(self, record: JobRecord) -> None:
+            recorded.append(record)
+
     # Stub what the activities *do*, not the activities themselves — see the module docstring.
+    monkeypatch.setattr("chemclaw.durable.job_record.default_job_record_sink", _CapturingSink)
     monkeypatch.setattr("chemclaw.durable.memory_jobs.propose_note", _fake_propose)
     monkeypatch.setattr("chemclaw.durable.memory_jobs.default_submitter", lambda: object())
     monkeypatch.setattr("chemclaw.durable.notify.record_session_event", _fake_record)
@@ -196,7 +205,11 @@ def test_a_connector_job_runs_its_own_workflow_and_core_does_the_rest(
                 client,
                 task_queue=_CORE_QUEUE,
                 workflows=[ConnectorJobWorkflow],
-                activities=[publish_memory_note_activity, record_session_event_activity],
+                activities=[
+                    publish_memory_note_activity,
+                    record_session_event_activity,
+                    record_job,
+                ],
             )
             # Hosts ONLY the bundle's own workflow: were core's wrapper to need anything from
             # the connector beyond its type name, this worker could not serve the child at all.
@@ -216,7 +229,10 @@ def test_a_connector_job_runs_its_own_workflow_and_core_does_the_rest(
                 token = set_current_session_id(_SESSION)
                 identity = set_current_identity(_ACTOR, frozenset())
                 try:
-                    job_id = await tool(tool.__annotations__["params"](subject="benzene"))
+                    job_id = await tool(
+                        tool.__annotations__["params"](subject="benzene"),
+                        "the reviewer asked whether benzene behaves the same way",
+                    )
                 finally:
                     reset_current_identity(identity)
                     reset_current_session_id(token)
@@ -258,3 +274,19 @@ def test_a_connector_job_runs_its_own_workflow_and_core_does_the_rest(
     assert kind == "job_completed"
     assert payload["connector"] == "fixture" and payload["job"] == "run_fixture_job"
     assert payload["summary"] == "fixture job ran on benzene"
+    # And core wrote the run's durable record (D-157) — the copy that outlives Temporal's own
+    # history retention, carrying the arguments, the whole result envelope, and the reason.
+    assert len(recorded) == 1
+    record = recorded[0]
+    assert record.job_id == _EXPECTED_ID
+    assert record.connector == "fixture" and record.job == "run_fixture_job"
+    assert record.rationale == "the reviewer asked whether benzene behaves the same way"
+    assert record.requested_by == _ACTOR and record.session_id == _SESSION
+    assert record.payload == {"subject": "benzene"}
+    assert record.result == result.data  # the full envelope, not a summary of it
+    assert record.note_id == "fixture-benzene"
+    # The note a human is asked to sign says *why* the run happened, stamped by core rather than
+    # by the connector — which is what makes it true of every connector, including ones that
+    # know nothing about the record.
+    assert "the reviewer asked whether benzene behaves the same way" in published[0][0].body
+    assert _EXPECTED_ID in published[0][0].body

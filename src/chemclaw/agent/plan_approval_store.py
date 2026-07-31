@@ -10,7 +10,7 @@ would survive it (the mode lives in the session's own persisted state). A contro
 disappears while its effect persists is worse than no control — the audit would show a session
 running in execute mode with nothing recording who allowed it.
 
-**Two backends, chosen the way `default_audit_sink` chooses one** (D-157). Enforcing the approval
+**Two backends, chosen the way `default_audit_sink` chooses one** (D-164). Enforcing the approval
 raised a question recording it never had to answer: what does a deployment with no Postgres do —
 fail open, and the GxP gate is decorative, or fail closed, and `make chat --admin` cannot run a
 single state-changing tool? Both answers are bad, and the question is malformed. The paragraph

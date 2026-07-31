@@ -17,7 +17,13 @@ from psycopg.types.json import Jsonb
 
 from chemclaw.core import db
 from chemclaw.core.config import settings
-from chemclaw.science.calc.store import CalculationKey, ResultStore, StoredResult
+from chemclaw.science.calc.store import (
+    CalculationKey,
+    CalculationQuery,
+    ResultStore,
+    StoredResult,
+    molecule_hash,
+)
 
 _UPSERT = """
     INSERT INTO calculation_results
@@ -33,6 +39,23 @@ _UPSERT = """
 """
 
 _SELECT = "SELECT result, provenance, compute_seconds FROM calculation_results WHERE key = %s"
+
+# The browse query (`find`). Every filter is `%s IS NULL OR <column> = %s`-shaped so one prepared
+# statement serves every combination — the alternative is assembling SQL from whichever filters
+# were set, which is how a query builder starts. Ordered newest-first and capped by the caller,
+# because an unbounded scan of the one table that is never evicted (D-011) is not a query.
+_FIND = """
+    SELECT key, calc_type, calc_version, input_hash, params_hash,
+           result, provenance, compute_seconds, created_at
+      FROM calculation_results
+     WHERE (%(calc_type)s::text IS NULL OR calc_type = %(calc_type)s)
+       AND (%(calc_version)s::text IS NULL OR calc_version = %(calc_version)s)
+       AND (%(input_hash)s::text IS NULL OR input_hash = %(input_hash)s)
+       AND (%(since)s::timestamptz IS NULL OR created_at >= %(since)s)
+       AND (%(until)s::timestamptz IS NULL OR created_at <= %(until)s)
+     ORDER BY created_at DESC
+     LIMIT %(limit)s
+"""
 
 
 class PostgresStore:
@@ -96,6 +119,52 @@ class PostgresStore:
                     ),
                 )
             await conn.commit()
+
+    async def find(self, query: CalculationQuery) -> list[StoredResult]:
+        """Return results matching `query`, newest first, capped at `query.limit`.
+
+        A molecule filter is applied as an `input_hash` equality, never a scan: the hash is
+        `stable_hash(canonical_smiles)` and is not reversible, so the query molecule is hashed the
+        same way a key is built and compared. Canonicalisation happens here rather than at the
+        caller so `CCO` and `OCC` find the same rows.
+        """
+        params = {
+            "calc_type": query.calc_type,
+            "calc_version": query.calc_version,
+            "input_hash": None if query.smiles is None else molecule_hash(query.smiles),
+            "since": query.since,
+            "until": query.until,
+            "limit": query.limit,
+        }
+        async with self._connection() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(_FIND, params)
+                rows = await cur.fetchall()
+        return [_stored_from_row(row) for row in rows]
+
+
+def _stored_from_row(row: TupleRow) -> StoredResult:
+    """Rebuild a `StoredResult` from a `find` row, key components included.
+
+    `find` returns the key columns rather than parsing `key`, so a calculator version containing
+    the separators the flat form uses cannot be split back wrongly — the flat string is an index
+    key, not a serialization format.
+    """
+    _, calc_type, calc_version, input_hash, params_hash = row[:5]
+    result, provenance, compute_seconds, created_at = row[5:]
+    return StoredResult(
+        key=CalculationKey(
+            calc_type=calc_type,
+            calc_version=calc_version,
+            input_hash=input_hash,
+            params_hash=params_hash,
+        ),
+        # JSONB comes back already parsed by psycopg; str only if the driver differs.
+        result=result if isinstance(result, dict) else json.loads(result),
+        provenance=provenance,
+        compute_seconds=compute_seconds,
+        created_at=created_at,
+    )
 
 
 def default_store() -> ResultStore:

@@ -191,5 +191,12 @@ this reason; the filenames make that ordering irrelevant now, and the numbers st
 | [D-154](D-154-a-register-that-had-become-a-log-and-the-one.md) | A register that had become a log, and the one trigger it was hiding |
 | [D-155](D-155-what-the-dark-half-of-the-system-does-the-first-time.md) | What the dark half of the system does the first time it runs |
 | [D-156](D-156-the-last-false-duplicate-and-a-map-that-is-enforced.md) | The last false duplicate, the corpora in one place, and a map that is enforced |
-| [D-157](D-157-an-approval-authorizes-a-request-not-a-session.md) | An approval authorizes a request, not a session |
-| [D-158](D-158-a-template-step-runs-as-its-requester.md) | A template step runs as its requester, and four steps that had never run |
+| [D-157](D-157-a-durable-record-of-every-connector-job-what-ran.md) | A durable record of every connector job: what ran, with what data, and why |
+| [D-158](D-158-the-expensive-calculation-is-the-one-that-was-not.md) | The expensive calculation is the one that was not cached |
+| [D-159](D-159-the-turn-stream-reports-a-tool-s-lifecycle-not.md) | The turn stream reports a tool's lifecycle, not just that a call happened |
+| D-160 | RESERVED — retrieval carries provenance, so a claim can be qualified by who authored its evidence |
+| D-161 | RESERVED — an ungated observations tier, with the human gate moved from every observation to the few worth promoting |
+| [D-162](D-162-a-series-of-experiments-is-a-sequence-not-a-set.md) | A series of experiments is a sequence, not a set |
+| [D-163](D-163-a-store-you-can-only-address-is-not-a-store-you.md) | A store you can only address is not a store you can ask |
+| [D-164](D-164-an-approval-authorizes-a-request-not-a-session.md) | An approval authorizes a request, not a session |
+| [D-165](D-165-a-template-step-runs-as-its-requester.md) | A template step runs as its requester, and four steps that had never run |

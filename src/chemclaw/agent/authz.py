@@ -44,7 +44,7 @@ DEFAULT_WRITE_TOOL_GATES: frozenset[str] = frozenset(
 )
 
 # Every in-process tool that changes stored state or starts durable work — the set the harness's
-# plan gate refuses under an unapproved plan (`chemclaw.agent.plan_gate`, D-157).
+# plan gate refuses under an unapproved plan (`chemclaw.agent.plan_gate`, D-164).
 #
 # **This is a superset of `DEFAULT_WRITE_TOOL_GATES`, and the two are deliberately not merged.**
 # That set is the RBAC *fallback*: membership makes a tool require a privileged role under
@@ -90,6 +90,9 @@ READ_ONLY_TOOLS: frozenset[str] = frozenset(
         "expand_note",
         "find_knowledge_gaps",
         "find_notes",
+        # A search over the durable job record (D-157). Emphatically a read, and one an agent
+        # should make *before* asking for an expensive run to be authorized.
+        "find_past_jobs",
         "gather_evidence",
         "get_durable_job_status",
         "list_attachments",
