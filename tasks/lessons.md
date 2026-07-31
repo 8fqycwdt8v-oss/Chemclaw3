@@ -306,3 +306,31 @@ believed**, and the more carefully it is written the longer it is believed.
    answer is "nothing", either add the check or write the claim as a pointer to the thing that is
    checked. `ARCHITECTURE.md` promised for two restructures to stay in sync with the tree; D-156
    made `tests/test_repo_map.py` enforce it in both directions instead.
+
+---
+
+## A conflict-marker scan that matched an exact width exempted the conflicts it most needed to catch
+
+Resolving a rename-heavy merge, the sweep for leftover markers was
+`grep '^<<<<<<< \|^>>>>>>> '` — seven characters and a space. Git writes **eight** for a
+rename/rename conflict, because the marker carries the two paths (`<<<<<<<< HEAD:old/path.md`). So
+the one file that was still full of conflict markers reported clean, and it was the ADR — the single
+file where a corrupted heading breaks the identity the whole `docs/decisions/` mechanism rests on.
+
+`tests/test_decision_log.py::test_every_filename_matches_its_heading` caught it, by noticing the
+file carried two `# D-NNN` headings. That is the check doing exactly its job, and it should not have
+had to.
+
+The shape is familiar enough to be worth naming: **a validator written against one example of a
+pattern silently exempts the variants**. Same family as a `glob` over a moved directory returning
+empty and a discovery loop iterating a set that is now empty — the check runs, finds nothing, and
+reports success.
+
+**Rules:**
+
+1. **Match conflict markers by class, not by width**: `^(<{4,8}|>{4,8})[ <>]|^={4,8}$`. Rename and
+   submodule conflicts do not use the seven-character form.
+2. **When a hand-rolled scan and a test disagree, the scan is wrong.** The test asserts a property;
+   the scan asserts a spelling. Fix the scan and keep both.
+3. **After `git checkout --ours <file>` on a rename/rename conflict, read the file.** `--ours` there
+   resolves *which path* wins, not which content — the result can still contain markers.

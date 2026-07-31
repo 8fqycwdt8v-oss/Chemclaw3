@@ -113,6 +113,19 @@ trusted: a missing subpackage README, a missing root README, an unmapped directo
 vanished directory, and a `.py` file beside `src/`. This is not ceremony — two tests in this
 repository have already gone green by iterating an empty set.
 
+### The third reconciliation, and a parallel session
+
+`main` took seven more commits (including **D-154 and D-155**), so this branch's ADR became
+**D-156**. The renumber was done *before* merging main in — verified safe because the merge base
+carried no D-154 at all, so every occurrence on the branch was provably the branch's own. That is
+the structural fix for the defect D-148 caused by renumbering after its merge.
+
+A **second session reconciled the same branch concurrently** and pushed first. Its work was merged
+rather than overwritten. 22 of the 25 conflicting files were identical once the ADR number and
+whitespace were normalised — two independent reconciliations agreeing is a stronger signal than
+either alone. It had renumbered to D-155, which collided with main's own D-155 landing after its
+merge base; D-156 stands.
+
 ### For next time
 
 - A mechanical substitution cannot tell a claim about the present from a quotation of the past.
