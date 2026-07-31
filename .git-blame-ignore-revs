@@ -16,7 +16,7 @@ cddf56dcba675c8b28396ada494967d2786479d7
 # D-148 — the eighteen packages regrouped under src/chemclaw/.
 15be829553dba12c598bfa3c7c2ee4452522e6e1
 
-# Nothing from D-155 is listed here, deliberately. That pass moved `chemclaw.mcp` into `science/`
+# Nothing from D-156 is listed here, deliberately. That pass moved `chemclaw.mcp` into `science/`
 # and `connectors/`, and `evals/`/`templates/`/`profiles/` into `data/` — but each commit also
 # rewrote the docstrings and config defaults that named the old paths, which is the "moved *and*
 # edited" case the note above excludes. Splitting a rename from the rewrite that makes it import

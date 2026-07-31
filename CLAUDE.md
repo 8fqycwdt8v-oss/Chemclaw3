@@ -61,7 +61,7 @@ ask first if the required change is destructive, ambiguous, or outside what was 
 `ARCHITECTURE.md` maps every directory to its layer and explains the two name pairs that look
 like duplicates and are not (`science/calc/` vs `connectors/calc/`; `skills/` vs
 `connectors/*/skills/`). Adding a top-level directory or a subpackage means **adding a row there
-and giving the directory a `README.md`** — `tests/test_repo_map.py` fails otherwise (D-155).
+and giving the directory a `README.md`** — `tests/test_repo_map.py` fails otherwise (D-156).
 
 Three rules the tree is arranged around, each enforced by a test rather than asked for:
 

@@ -54,7 +54,7 @@ COPY pyproject.toml uv.lock README.md ./
 # how `connectors/` and `templates/` came to be absent from the wheel and coverage lists too.
 # One package means there is nothing left to forget.
 COPY src ./src
-# The data the application reads from disk at start-up, none of which is code. Since D-155 the
+# The data the application reads from disk at start-up, none of which is code. Since D-156 the
 # corpora are one tree: `data/` holds the agent profiles and step templates (both discovered from
 # disk, so an image missing them silently advertises fewer capabilities rather than failing), the
 # committed eval case-set and baseline the drift job scores against, the vendored dataset and the

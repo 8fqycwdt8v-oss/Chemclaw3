@@ -22,7 +22,7 @@ from chemclaw.retrieval.evidence import EvidenceChunk
 from chemclaw.retrieval.retrievers import GraphRetriever
 
 _REPO = Path(__file__).resolve().parent.parent
-# Derived from the setting's own default rather than spelled out, so moving the corpus (D-155 put it
+# Derived from the setting's own default rather than spelled out, so moving the corpus (D-156 put it
 # under `data/`) cannot leave this pointing at nothing. It did exactly that once: the stale literal
 # made every gold case score `0/2 expected sources retrieved`, which reads as a retrieval regression
 # rather than as a missing directory. `_corpus` below asserts the directory exists for the same

@@ -69,7 +69,7 @@ from the names.
 
 The pairing is now the **only** arrangement: capability code lives in a connector bundle or in
 `science/`, nowhere else. `chemclaw.mcp` was the last exception, holding the fingerprint code one
-directory away from `connectors/molfp` while looking exactly like a duplicate of it; D-155 split it
+directory away from `connectors/molfp` while looking exactly like a duplicate of it; D-156 split it
 along this same line and deleted the package.
 
 **`skills/` vs `connectors/*/skills/`.** A bundled skill ships and deploys with its connector; a
@@ -83,7 +83,7 @@ bundle's directory — so the split is about ownership, not lookup.
 deliberately *not* under it: they are architecture layers 4 and 3 — what the system knows and how it
 judges — authored by people rather than configured by an operator. Their position at the root is
 what says so. Folding them in would buy an exceptionless sentence at the cost of a real distinction
-(D-155).
+(D-156).
 
 ## Where declarations live
 
