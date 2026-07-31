@@ -152,7 +152,7 @@ def _check_classification(
 
     **A partition, not two optional hints, and the strictness is the whole point.** Whether a tool
     spends real resources or merely looks something up decides whether the harness's plan gate
-    refuses it under an unapproved plan (D-164), and every way of getting that wrong fails *open* —
+    refuses it under an unapproved plan (D-165), and every way of getting that wrong fails *open* —
     a typo matches nothing, an omission reads as "harmless", and either ships a write that looks
     exactly like a gated one. Defaulting an undeclared tool to "read" would put the whole burden on
     a bundle author remembering; defaulting it to "write" would gate a connector's lookups and make
@@ -187,7 +187,7 @@ def _check_classification(
 # instead of something a validator has to catch.
 #
 # `state_changing` names the subset of `tools` that spends real resources or writes data a person
-# would care about — the ones the harness's plan gate refuses under an unapproved plan (D-164).
+# would care about — the ones the harness's plan gate refuses under an unapproved plan (D-165).
 # It is declared **here, by the bundle**, and not as a list in core, for the same reason the queue
 # and the params model are: whether `predict_pka` is a lookup or a calculation is the capability's
 # own fact, and a copy of it in core is a second source of truth that goes stale the first time a

@@ -20,12 +20,7 @@ from chemclaw.core.config import settings
 from chemclaw.core.reagents import resolve_compound_name
 from chemclaw.ingest.eln.ord import OrdReaction
 from chemclaw.kg.note import Note
-from chemclaw.memory.progression import (
-    Progression,
-    ProgressionStep,
-    order_chronologically,
-    progression,
-)
+from chemclaw.memory.progression import Progression, ProgressionStep, progression
 from chemclaw.memory.similarity import cluster_by_similarity, reaction_fingerprints
 
 
@@ -88,18 +83,21 @@ def optimization_campaign_note(
     The note stays output-neutral: it surfaces the recorded conditions, outcomes and changes and
     leaves *what mattered* to the skill's analysis and the human reviewer (D-005).
     """
-    members = order_chronologically([reactions[rid] for rid in campaign.reaction_ids])
-    series = progression(members)
-    representative = members[0].reaction_smiles()
+    # The series *is* the ordering: every row is read off a step, and the run behind it is looked
+    # up by id. Zipping two independently-sorted lists would have paired them positionally, which
+    # is right only for as long as two functions agree on a sort — and being the same length, a
+    # disagreement would have mispaired every row silently rather than raising.
+    series = progression([reactions[rid] for rid in campaign.reaction_ids])
+    members = [reactions[step.reaction_id] for step in series.steps]
     rows = "\n".join(
-        f"| [[reaction-{r.reaction_id}]] | {_date_cell(r.performed_at)} "
-        f"| {_cell(r.temperature_c)} | {_cell(r.time_h)} | {_cell(r.yield_percent)} "
+        f"| [[reaction-{step.reaction_id}]] | {_date_cell(step.performed_at)} "
+        f"| {_cell(run.temperature_c)} | {_cell(run.time_h)} | {_cell(run.yield_percent)} "
         f"| {_changes_cell(step, first=index == 0)} |"
-        for index, (r, step) in enumerate(zip(members, series.steps, strict=True))
+        for index, (step, run) in enumerate(zip(series.steps, members, strict=True))
     )
     body = (
         f"Optimization campaign: {len(members)} runs of the same transformation "
-        f"(DRFP-similar), representative `{representative}`.\n\n"
+        f"(DRFP-similar), representative `{members[0].reaction_smiles()}`.\n\n"
         f"{_ordering_caveat(series)}\n\n"
         "| Run | Performed | Temp (°C) | Time (h) | Yield (%) | Changed vs previous |\n"
         "|-----|-----------|-----------|----------|-----------|---------------------|\n"

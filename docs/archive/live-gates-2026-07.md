@@ -1,7 +1,7 @@
-# The two authorization gates, run live (2026-07-31, D-164 / D-165)
+# The two authorization gates, run live (2026-07-31, D-165 / D-166)
 
 *Closes DARK-1 and DARK-2 from `docs/planning/BACKLOG.md`. DARK-3 was already closed by D-153; see
-the last section. The decisions are in `docs/decisions/D-164-…` and `D-165-…`; this is the record of
+the last section. The decisions are in `docs/decisions/D-165-…` and `D-166-…`; this is the record of
 what was actually run.*
 
 ## The stack
@@ -26,10 +26,10 @@ commit.
 ## What the live run changed about the fix
 
 The offline suite went green on both fixes before any of this ran. The live stack then found **five**
-further defects — one in the D-164 fix itself, four in the path D-165 governs. This is the record
+further defects — one in the D-165 fix itself, four in the path D-166 governs. This is the record
 that matters, because each was invisible to a suite that had just passed.
 
-### D-164: the approval outlived the request
+### D-165: the approval outlived the request
 
 Reproduced the DARK-1 sequence: plan → approve → execute → *a completely different question*. The
 plan hash did not move, because **the model never rewrote its todo list**. Binding the approval to
@@ -42,7 +42,7 @@ one: `GET /sessions/{id}/plan` still reported a spent approval as `approved` —
 display-disagrees-with-enforcement defect the whole ADR is about, reintroduced one layer up by the
 fix for it.
 
-### D-165: the template path had never executed
+### D-166: the template path had never executed
 
 Four consecutive failures, each on something different, running the *shipped* `hazard-briefing`
 template against a real server:

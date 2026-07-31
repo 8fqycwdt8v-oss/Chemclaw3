@@ -179,7 +179,7 @@ class TemplateWorkflow:
         # a network call; the point is recording the answer, not offloading the work.
         #
         # It also *authorizes* the step, as the run's requester, and returns the validated payload
-        # (D-165). The arguments are handed to it rather than substituted into the child start
+        # (D-166). The arguments are handed to it rather than substituted into the child start
         # below, because a payload that has not been through `prepare_job_launch` is precisely what
         # this step used to start an HPC job with.
         resolved = await workflow.execute_local_activity(
@@ -204,7 +204,7 @@ class TemplateWorkflow:
                     workflow=resolved.workflow,
                     task_queue=resolved.task_queue,
                     # The *validated* payload the authorizing activity returned, never the raw
-                    # arguments — see `authorize_job_step` (D-165).
+                    # arguments — see `authorize_job_step` (D-166).
                     payload=resolved.payload,
                     # A template already declares why each of its steps exists, so the run's
                     # rationale (D-157) is that declaration rather than a second field an author

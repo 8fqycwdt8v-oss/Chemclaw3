@@ -352,7 +352,7 @@ async def run_turn(
         )
     finally:
         # Spend the plan approval this turn ran under, so the *next* user message is a new request
-        # needing its own decision (D-164). At the end, not the start: the harness loop executes an
+        # needing its own decision (D-165). At the end, not the start: the harness loop executes an
         # approved plan across several iterations of one `agent.run`, and consuming on entry would
         # refuse the plan's own second iteration. On every path, including a failure — a turn that
         # spent the authorization and then broke has still spent it, and re-running under the same

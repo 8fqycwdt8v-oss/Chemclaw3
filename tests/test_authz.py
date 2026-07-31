@@ -93,7 +93,7 @@ def test_require_actor_rejects_absent_user(monkeypatch: pytest.MonkeyPatch) -> N
         require_actor()
 
 
-# --- the write/read classification, held to the registry it describes (D-164) ------------------
+# --- the write/read classification, held to the registry it describes (D-165) ------------------
 
 
 def test_every_advertised_tool_is_classified_write_or_read() -> None:

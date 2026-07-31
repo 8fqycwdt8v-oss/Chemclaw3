@@ -32,6 +32,15 @@ system reads them and a field the validator ignores is a field that silently rot
 | `tools` | no | The capabilities this skill's judgment is written about, **by tool name** — in-process tools, generated connector job launchers, and tools an enabled connector serves, all in one list. Validated against the live surface, so a renamed or deleted tool fails CI instead of leaving stale prose. Omit it for pure process guidance. |
 | `tags` | no | Free-form grouping ("retrieval", "optimization"). Human-facing only — nothing dispatches on a tag. |
 
+### Naming a note type in the body
+
+When a skill tells the agent to write a knowledge note, name the kind as **``type `x` ``** — the
+word `type`, then the backticked slug. `make prose-validate` checks exactly that phrasing against
+`KNOWN_NOTE_TYPES`, and anything written another way is unchecked. This is not a style
+preference: two skills shipped instructing a `protocol` and an `experiment-batch` note, neither of
+which is a known type, so the agent's proposal opened a branch that `kg-validate` then rejected —
+a reachable tool writing an unwritable artifact (D-164).
+
 ### Template
 
 ```markdown

@@ -31,7 +31,7 @@ endpoint:
     - calculator_trust
     - find_calculations
     - report_measurement
-  # Every tool is classified, and the manifest refuses to load if one is not (D-164): the harness's
+  # Every tool is classified, and the manifest refuses to load if one is not (D-165): the harness's
   # plan gate refuses the state-changing ones under an unapproved plan, and getting that wrong by
   # omission would fail open.
   #

@@ -44,7 +44,7 @@ DEFAULT_WRITE_TOOL_GATES: frozenset[str] = frozenset(
 )
 
 # Every in-process tool that changes stored state or starts durable work — the set the harness's
-# plan gate refuses under an unapproved plan (`chemclaw.agent.plan_gate`, D-164).
+# plan gate refuses under an unapproved plan (`chemclaw.agent.plan_gate`, D-165).
 #
 # **This is a superset of `DEFAULT_WRITE_TOOL_GATES`, and the two are deliberately not merged.**
 # That set is the RBAC *fallback*: membership makes a tool require a privileged role under
