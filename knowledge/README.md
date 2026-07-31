@@ -10,9 +10,9 @@ validate, and every retrieval, crosslink and conflict property was measured agai
 `evals/retrieval_corpus/` — correct for pinned eval numbers, and no substitute for a corpus with
 real shape (STO-10).
 
-These 37 notes are that corpus. They are **seed content, not a record of real experiments**: the
+These 38 notes are that corpus. They are **seed content, not a record of real experiments**: the
 chemistry is textbook-ordinary and the numbers are illustrative. What is real is the *structure* —
-every one of the ten `KNOWN_NOTE_TYPES` appears, every one of the fourteen `KNOWN_RELATIONS` is
+every one of the eleven `KNOWN_NOTE_TYPES` appears, every one of the fifteen `KNOWN_RELATIONS` is
 used at least once, and the awkward cases have instances rather than descriptions:
 
 - a **superseded pair** with a closed `valid_to` and a `superseded-by`/`supersedes` edge between

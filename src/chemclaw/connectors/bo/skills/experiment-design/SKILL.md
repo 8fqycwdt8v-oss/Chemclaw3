@@ -16,6 +16,12 @@ Holds the *judgment* for the next-experiment question; the mechanics are in
 `suggest_next_experiment` (BoFire's ask step). A good suggestion is only as good as the problem
 you hand it, so most of the work is framing, not the call.
 
+**First decide the question is this one.** A surrogate needs a scalar objective over bounded
+variables and enough runs to fit. When the chemist is instead walking one step day by day, and
+what they want is a reading of where the series got to and one diagnostic to run next, that is
+the `experiment-progression` skill — reasoned from the record, not from a model. Do not force a
+line of enquiry into a design space just because a design space is what this tool takes.
+
 ## Frame the problem from evidence
 
 1. **Fix the objective.** One scalar, and its direction — maximize yield, minimize an impurity,

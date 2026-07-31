@@ -170,6 +170,13 @@ class OrdReaction(BaseModel):
     # The project/campaign this experiment belongs to — the grouping key for the semantic
     # memory layer (a playbook distils patterns that recur across >=2 projects, plan 5.4).
     project: str | None = None
+    # What this run was set up to test, in the chemist's own words (D-162). Process development is
+    # a sequence of hypotheses, not a screen: "does dropping to 60 °C keep the yield and kill the
+    # des-bromo impurity" is the *reason* a run exists, and without it the record shows only that
+    # a condition moved, leaving the agent to invent a motive or ignore the question. Optional and
+    # never inferred — a source that does not capture intent leaves this empty, which reads as
+    # "not recorded", not as "no hypothesis".
+    hypothesis: str | None = None
     # The detailed procedure, when the source records one. `steps` is the ordered recipe
     # (empty for sources that give only headline conditions); `procedure_text` is the raw
     # prose, kept verbatim so nothing a chemist wrote is dropped on ingest.
