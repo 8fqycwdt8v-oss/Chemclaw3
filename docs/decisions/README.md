@@ -1,40 +1,39 @@
 # ADR index
 
-One file per architecture decision, `D-NNN-<slug>.md`, alongside this index. `docs/decisions/`
-holds the *reasoning*; this file is the allocation ledger, so "which numbers are taken?" is one
-listing rather than a scan of a 421 KB document.
+One file per architecture decision — `D-YYYY-MM-DD-<slug>.md`, and `D-NNN-<slug>.md` for the frozen
+numbered sequence — alongside this index. `docs/decisions/` holds the *reasoning*; this file is the
+index of what exists, in record order.
 
 **Why one file per ADR.** Until D-147 every decision was appended to the end of a single
 `DECISIONS.md`. ADR numbers collided three times, and the cause was structural rather than
 careless: concurrent branches all append to the same last line of the same file, and each picks
 "the highest number I can see, plus one" against its own branch, which cannot see the others.
-`CLAUDE.md` named the escape hatch itself and asked for it to be taken deliberately. This is it.
-The `D-NNN` sequence is unchanged — every existing citation still resolves — but the shared append
-point is gone: two branches adding different ADRs no longer touch the same lines, and two branches
-claiming the *same* number now collide on a **filename**, which git reports loudly instead of
-burying inside ninety lines of prose.
+D-147 removed the shared append point: two branches adding different ADRs no longer touch the same
+lines, and two branches claiming the *same* number collide on a **filename**, which git reports
+loudly instead of burying it inside ninety lines of prose. That fixed the *detection* and left the
+*allocation* alone, which is why the collisions continued — see below.
 
-**Allocating a number.** Enumerate against `origin/main`, never against your own branch:
+**Allocating an id.** Write the file as `D-YYYY-MM-DD-<slug>.md`, using today's date and a slug
+that names the decision. That is the whole procedure — nothing to look up, nothing to reserve,
+nothing to coordinate.
 
-```sh
-git fetch origin main
-git ls-tree --name-only origin/main docs/decisions/ | grep -oE 'D-[0-9]+' | sort -V | tail -1
-```
+The id is the **whole stem**, not the date: two ADRs on one day is routine here, and an id naming
+two decisions is exactly what this ledger exists to prevent. Collision therefore needs the same date
+*and* the same slug, and even that arrives as an add/add conflict on a filename.
 
-Your number is that one **+ 1**. Reserve it here in your **first** commit on the branch, not at the
-end — an unreserved number is one another session will take. Because that necessarily happens
-before the ADR file exists, write the row as:
+**Why the numbers stopped.** D-147 split one `DECISIONS.md` into one file per ADR so a collision
+would be loud instead of buried, and that worked. What it could not fix is the allocation itself:
+"highest on `origin/main`, plus one" is a read that goes stale the instant another session pushes,
+and this repository runs many sessions at once. In one day, one branch renumbered three ADRs twice
+and another renumbered three times — five collisions, every one of them on a number nobody had
+merged yet. `CLAUDE.md` named this escape hatch and asked for it to be taken deliberately rather
+than drifted into; D-2026-07-31 takes it.
 
-```
-| D-NNN | RESERVED — one line on what the decision will be about |
-```
-
-and replace the marker with the real title in the commit that adds the file. `RESERVED` rows are
-exempt from the index-matches-files check and *not* exempt from the duplicate check, which is
-exactly the point: the number is claimed the moment it is pushed. A reservation that is never
-written up leaves a gap, and a gap is harmless — never renumber a merged ADR to close one, because
-a moved number breaks every citation to it. (`D-008` sits after `D-009` in the original log for
-this reason; the filenames make that ordering irrelevant now, and the numbers stay put.)
+**The `D-NNN` sequence is frozen, not migrated.** All 167 numbered ADRs keep their names and their
+~971 citations across ~475 files, because a *merged* ADR has never collided — only unallocated
+numbers were ever contended, and there are no more of those. Both forms live in the one table below,
+numbered first, then dated by date. A `RESERVED` row is legacy: it belongs to the numbered scheme
+and is kept only for reservations that were in flight when this changed.
 
 `tests/test_decision_log.py` enforces all of the above.
 
@@ -193,11 +192,13 @@ this reason; the filenames make that ordering irrelevant now, and the numbers st
 | [D-156](D-156-the-last-false-duplicate-and-a-map-that-is-enforced.md) | The last false duplicate, the corpora in one place, and a map that is enforced |
 | [D-157](D-157-a-durable-record-of-every-connector-job-what-ran.md) | A durable record of every connector job: what ran, with what data, and why |
 | [D-158](D-158-the-expensive-calculation-is-the-one-that-was-not.md) | The expensive calculation is the one that was not cached |
-| D-159 | RESERVED — the turn stream reports a tool's lifecycle and its result, not just that a call happened |
+| [D-159](D-159-the-turn-stream-reports-a-tool-s-lifecycle-not.md) | The turn stream reports a tool's lifecycle, not just that a call happened |
 | D-160 | RESERVED — retrieval carries provenance, so a claim can be qualified by who authored its evidence |
 | D-161 | RESERVED — an ungated observations tier, with the human gate moved from every observation to the few worth promoting |
 | [D-162](D-162-a-series-of-experiments-is-a-sequence-not-a-set.md) | A series of experiments is a sequence, not a set |
-| [D-163](D-163-prose-named-two-note-types-the-schema-refused-and-a.md) | Prose named two note types the schema refused, and a lost note could not be counted |
+| [D-163](D-163-a-store-you-can-only-address-is-not-a-store-you.md) | A store you can only address is not a store you can ask |
 | [D-164](D-164-the-plan-approval-binds-to-the-plan-not-to-the.md) | The plan approval binds to the plan, not to the session |
 | [D-165](D-165-the-deployment-envelope-a-sidecar-that-emptied-the.md) | The deployment envelope: a sidecar that emptied the tree, and three assertions the chart never made |
 | [D-166](D-166-the-audit-chain-is-versioned-so-widening-the-record.md) | The audit chain is versioned, so widening the record does not invalidate the record |
+| [D-167](D-167-prose-named-two-note-types-the-schema-refused-and-a.md) | Prose named two note types the schema refused, and a lost note could not be counted |
+| [D-2026-07-31-adr-ids-that-cannot-collide](D-2026-07-31-adr-ids-that-cannot-collide.md) | ADR ids that cannot collide |

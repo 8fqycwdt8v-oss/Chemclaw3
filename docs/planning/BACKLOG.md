@@ -29,12 +29,12 @@ deliberately did not close, each because it is a design rather than a line of co
       still cannot say how long a running deployment keeps workflow history. It is one Helm value
       plus a runbook line, and it wants a stated policy rather than a copied default — [S].
 
-## Open — v1.0 readiness analysis (2026-07-31, D-163/D-164/D-165)
+## Open — v1.0 readiness analysis (2026-07-31, D-167/D-164/D-165)
 
 A whole-repo sweep for what is missing before v1.0, prompted by two observations: an inline BO
 suggestion is never persisted, and nothing anywhere records *why* a tool was called. Both turned
 out to be instances of wider patterns. Closed in this pass: the two note types the skills taught
-but the schema refused (D-163), a lost knowledge note that could not be counted (D-163), the
+but the schema refused (D-167), a lost knowledge note that could not be counted (D-167), the
 sidecar that emptied the tree it published and three assertions the chart never made (D-165), and
 the plan approval that authorized a session rather than a plan (D-164).
 

@@ -931,6 +931,14 @@ class ServiceSettings(BaseSettings):
     # this bounds a *resource*, and paying a durable write plus a heartbeat per stream to make an
     # approximate ceiling exact would cost more than the thing it protects.
     service_max_event_streams_per_user: int = Field(default=5, gt=0)
+    # How often an idle SSE stream sends a keepalive comment frame (D-159). Neither stream set
+    # one, so a long tool wait had no signal of any kind on the wire: the turn stream can be
+    # silent for the length of an inline calc job or an MCP `request_timeout`, and the push-back
+    # stream is silent by nature until a job lands. Anything between the browser and the pod that
+    # reaps idle connections — a proxy, a load balancer, a phone's radio — was free to drop it,
+    # and the client could not tell that from a slow answer. Comfortably under the 60s such
+    # intermediaries typically use.
+    service_sse_ping_seconds: int = Field(default=15, gt=0)
     # The same cap across *all* users on this process. The per-user cap alone bounds one client;
     # it does not bound the pod, so 50 concurrent chemists at the per-user cap is 250 forever-
     # polling streams on one event loop — each a task and a periodic pooled query. This is the
@@ -1509,6 +1517,11 @@ class MemorySettings(BaseSettings):
     # reported as not-yet-meaningful — a bias from three points is not a bias.
     calibration_enabled: bool = False
     calibration_min_observations: int = Field(default=8, ge=1)
+    # Ceiling on what one `find_calculations` call can return. The calculation store is never
+    # evicted (D-011), so it is the one table that only grows — a browse query with no cap is a
+    # full scan of it, and every returned row spends the model's context. The tool clamps its own
+    # `limit` to this rather than trusting the argument.
+    calc_find_max_results: int = Field(default=50, ge=1)
     # Standing-query digests (gap IDEA-1). Off by default: it needs the `subscriptions` table
     # (migration 017), and a deployment nobody has subscribed on would just run an empty sweep.
     digest_enabled: bool = False

@@ -1,4 +1,4 @@
-# D-163 — Prose named two note types the schema refused, and a lost note could not be counted
+# D-167 — Prose named two note types the schema refused, and a lost note could not be counted
 
 **Status:** accepted · **Date:** 2026-07-31
 

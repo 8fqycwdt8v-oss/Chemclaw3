@@ -8,9 +8,15 @@ version.
 
 import asyncio
 
+from chemclaw.core.chem import require_canonical_smiles
 from chemclaw.science.calc.migrate import migrate
 from chemclaw.science.calc.postgres_store import PostgresStore
-from chemclaw.science.calc.store import CalculationKey, StoredResult
+from chemclaw.science.calc.store import (
+    CalculationKey,
+    CalculationQuery,
+    InMemoryStore,
+    StoredResult,
+)
 from tests.pg import migrated_db_or_skip
 
 
@@ -82,5 +88,57 @@ def test_get_miss_returns_none() -> None:
         # Ensure absence regardless of prior runs by using a version that won't collide.
         missing = key.model_copy(update={"calc_version": "never-written"})
         assert await store.get(missing) is None
+
+    asyncio.run(_run())
+
+
+def test_find_matches_the_in_memory_backend() -> None:
+    """The browse query answers the same questions in Postgres as in memory (W2.2).
+
+    `ResultStore` is `@runtime_checkable`, so a method added to one backend and not the other
+    still satisfies the Protocol at runtime and fails only where it is called. The two are
+    exercised against the same fixtures here for that reason — the SQL expresses the same
+    predicate as `_matches`, and nothing but a test makes them stay equal.
+    """
+
+    async def _run() -> None:
+        store = await _store_or_skip()
+        memory = InMemoryStore()
+        # `find` reads `created_at`, which Postgres sets itself, so the two stores can only be
+        # compared on filters that do not depend on it.
+        rows = [
+            StoredResult(
+                key=CalculationKey.build(
+                    "pgfind", "v1", inputs={"smiles": require_canonical_smiles(smiles)}
+                ),
+                result={"value": value},
+            )
+            for smiles, value in (("CCO", 1.0), ("CCN", 2.0))
+        ]
+        rows.append(
+            StoredResult(
+                key=CalculationKey.build(
+                    "pgfind", "v2", inputs={"smiles": require_canonical_smiles("CCO")}
+                ),
+                result={"value": 3.0},
+            )
+        )
+        for row in rows:
+            await store.put(row)
+            await memory.put(row)
+
+        for query in (
+            CalculationQuery(calc_type="pgfind"),
+            CalculationQuery(calc_type="pgfind", smiles="CCO"),
+            CalculationQuery(calc_type="pgfind", smiles="OCC"),  # same molecule, other spelling
+            CalculationQuery(calc_type="pgfind", calc_version="v2"),
+            CalculationQuery(calc_type="pgfind", smiles="CCO", limit=1),
+        ):
+            durable = await store.find(query)
+            in_memory = await memory.find(query)
+            assert {r.key.as_str() for r in durable} == {r.key.as_str() for r in in_memory}, query
+            # The durable backend is the only one with a real clock, so this is where the
+            # timestamp is proven to survive the round trip at all.
+            assert all(r.created_at is not None for r in durable)
 
     asyncio.run(_run())

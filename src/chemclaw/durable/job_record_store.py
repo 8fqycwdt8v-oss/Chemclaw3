@@ -27,11 +27,20 @@ _COLUMNS = (
     "payload, summary, result, note_id"
 )
 
+# Every mutable column is refreshed, **including the attribution**. Updating the reason and the
+# result while keeping the first run's `requested_by` was a row that contradicted itself: a second
+# execution under this id is a different person asking a differently-worded question (the id is
+# reused when Temporal has expired the first execution, which is exactly the horizon this table
+# exists for), and half-updating left run 2's reason beside run 1's name — the worst possible
+# answer for the field an audit joins on. The row describes the latest run, whole.
 _UPSERT = f"""
     INSERT INTO job_records ({_COLUMNS})
     VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
     ON CONFLICT (job_id) DO UPDATE SET
         rationale = EXCLUDED.rationale,
+        requested_by = EXCLUDED.requested_by,
+        session_id = EXCLUDED.session_id,
+        correlation_id = EXCLUDED.correlation_id,
         payload = EXCLUDED.payload,
         summary = EXCLUDED.summary,
         result = EXCLUDED.result,

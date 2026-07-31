@@ -34,8 +34,12 @@ _DECISIONS = _ROOT / "docs" / "decisions"
 
 # A table row: leading pipe, then the cells. Header and separator rows are filtered by shape.
 _ROW = re.compile(r"^\|(?![\s:-]+\|$).*\|\s*$", re.MULTILINE)
-_ADR = re.compile(r"\bD-(\d{3})\b")
+# Both id shapes: the frozen `D-NNN` sequence and the dated form new ADRs use. A register row that
+# cited a dated ADR would otherwise read as citing nothing, and the check below would pass by
+# failing to see the citation at all — the quietest way for a guard to stop guarding.
+_ADR = re.compile(r"\bD-(?:\d{4}-\d{2}-\d{2}-[a-z0-9-]+|\d{3})\b")
 # A ledger row claiming a number whose ADR file is not written yet (see `test_decision_log.py`).
+# Legacy: a dated id cannot be taken by another session, so it is never reserved.
 _ADR_RESERVED = re.compile(r"^\| (D-\d{3}) \| RESERVED", re.MULTILINE)
 
 
@@ -83,8 +87,11 @@ def test_every_cited_adr_exists() -> None:
     `test_decision_log.py` exempts those rows: `CLAUDE.md` has an author claim the number in
     their first commit, so a branch legitimately cites its own ADR before the file exists.
     """
-    known = {path.stem[:5] for path in _DECISIONS.glob("D-*.md")}
+    known = {
+        path.stem[:5] if re.fullmatch(r"D-\d{3}-.*", path.stem) else path.stem
+        for path in _DECISIONS.glob("D-*.md")
+    }
     known |= set(_ADR_RESERVED.findall((_DECISIONS / "README.md").read_text("utf-8")))
-    cited = {f"D-{number}" for number in _ADR.findall(_REGISTER.read_text("utf-8"))}
+    cited = set(_ADR.findall(_REGISTER.read_text("utf-8")))
     assert cited, "the register cites no ADR at all — suspicious"
     assert cited <= known, f"cited but not in docs/decisions/: {sorted(cited - known)}"

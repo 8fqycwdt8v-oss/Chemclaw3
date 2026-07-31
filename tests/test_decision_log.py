@@ -22,22 +22,62 @@ from pathlib import Path
 
 _DECISIONS = Path(__file__).resolve().parents[1] / "docs" / "decisions"
 _INDEX = _DECISIONS / "README.md"
-_FILENAME = re.compile(r"^(D-\d+)-[a-z0-9-]+$")
-_HEADING = re.compile(r"^# (D-\d+) — ", re.MULTILINE)
-# The id cell tolerates a bare `D-NNN` (a reservation) and a `[D-NNN](file.md)` link (written up).
-_INDEX_ROW = re.compile(r"^\| \[?(D-\d+)\]?(?:\([^)]*\))? \| ([^|]*)\|", re.MULTILINE)
+# Two id shapes, and the second is the one new ADRs use.
+#
+# `D-NNN` is the original sequence. It is **frozen**: 167 ADRs and ~971 citations across ~475 files
+# carry those numbers, and a merged ADR can never collide, so nothing is gained by renaming them.
+#
+# `D-YYYY-MM-DD-<slug>` is what an author writes now. The whole stem is the id — not the date —
+# because two ADRs on one day is routine here, and an id that identifies two decisions is the exact
+# thing this file exists to prevent. Collision then requires the same date *and* the same slug, and
+# even that surfaces as an add/add conflict on a filename rather than as a silent duplicate.
+#
+# The change is not a preference. `D-147` split one `DECISIONS.md` into one file per ADR to make a
+# collision loud, and it worked — but "highest on origin/main, plus one" is a read that is stale the
+# instant another session pushes, and this repository runs many sessions at once. In a single day
+# one branch renumbered three ADRs twice and another renumbered three times; five collisions, all
+# on unallocated numbers. A date and a slug are knowable without consulting anything.
+_NUMBERED = r"D-\d{3}"
+_DATED = r"D-\d{4}-\d{2}-\d{2}-[a-z0-9-]+"
+_FILENAME = re.compile(rf"^(?:{_NUMBERED}-[a-z0-9-]+|{_DATED})$")
+_HEADING = re.compile(rf"^# ({_NUMBERED}|{_DATED}) — ", re.MULTILINE)
+# The id cell tolerates a bare id (a legacy reservation) and a `[id](file.md)` link (written up).
+_INDEX_ROW = re.compile(
+    rf"^\| \[?({_NUMBERED}|{_DATED})\]?(?:\([^)]*\))? \| ([^|]*)\|", re.MULTILINE
+)
 
-# A ledger row for a number claimed but not yet written up. `CLAUDE.md` tells an author to reserve
-# in the *first* commit on a branch — "a number you have not yet pushed is a number another session
-# will take" — which necessarily means the row exists before the ADR does. Without a marker for
-# that state this test rejected the very convention the repo documents: `1f1f233` reserved
-# D-124…D-129 as instructed and `8f6a319` had to delete five of them to get CI green.
+# A ledger row for a number claimed but not yet written up. **Legacy**, kept because sessions had
+# reservations in flight when the dated form landed and a convention change must not strand them.
+# A dated id needs no reservation: it cannot be taken by anyone else, so there is nothing to claim.
+#
+# It mattered while it lasted: `CLAUDE.md` told an author to reserve in their *first* commit, which
+# necessarily means the row exists before the ADR does, and without a marker for that state this
+# test rejected the very convention the repo documented — `1f1f233` reserved D-124…D-129 as
+# instructed and `8f6a319` had to delete five of them to get CI green.
 _RESERVED = "RESERVED"
 
 
+def _adr_id(path: Path) -> str:
+    """The id a file carries: `D-NNN` for the numbered form, the whole stem for the dated one."""
+    return path.stem[:5] if re.fullmatch(rf"{_NUMBERED}-.*", path.stem) else path.stem
+
+
+def _sort_key(path: Path) -> tuple[int, int, str]:
+    """Numbered ADRs first in numeric order, then dated ones chronologically.
+
+    Two orderings in one sequence, because `int(stem[2:5])` cannot read a date and lexicographic
+    order cannot read `D-9` against `D-10`. The ledger is asserted to match this exactly, so the
+    key is the definition of "the record's order" rather than a display preference.
+    """
+    stem = path.stem
+    if re.fullmatch(rf"{_NUMBERED}-.*", stem):
+        return (0, int(stem[2:5]), "")
+    return (1, 0, stem)
+
+
 def _adr_files() -> list[Path]:
-    """Every ADR file, ascending by number — the record itself."""
-    return sorted(_DECISIONS.glob("D-*.md"), key=lambda path: int(path.stem[2:5]))
+    """Every ADR file in record order — the record itself."""
+    return sorted(_DECISIONS.glob("D-*.md"), key=_sort_key)
 
 
 def _index_rows() -> list[tuple[str, str]]:
@@ -46,8 +86,8 @@ def _index_rows() -> list[tuple[str, str]]:
 
 
 def _adr_ids() -> list[str]:
-    """Every ADR id that has a file, ascending."""
-    return [path.stem[:5] for path in _adr_files()]
+    """Every ADR id that has a file, in record order."""
+    return [_adr_id(path) for path in _adr_files()]
 
 
 def _index_ids() -> list[str]:
@@ -90,7 +130,7 @@ def test_every_filename_matches_its_heading() -> None:
         headings = _HEADING.findall(path.read_text("utf-8"))
         assert headings, f"{path.name} has no `# D-NNN — Title` heading"
         assert len(headings) == 1, f"{path.name} carries more than one ADR heading: {headings}"
-        assert headings[0] == path.stem[:5], (
+        assert headings[0] == _adr_id(path), (
             f"{path.name} is titled {headings[0]}; filename and heading must name one decision"
         )
 
@@ -125,7 +165,7 @@ def test_the_index_lists_exactly_the_decisions_on_disk() -> None:
 def test_every_written_row_links_to_its_file() -> None:
     """A ledger row is only useful if it reaches the ADR — the index is how a reader navigates."""
     index = _INDEX.read_text("utf-8")
-    names = {path.stem[:5]: path.name for path in _adr_files()}
+    names = {_adr_id(path): path.name for path in _adr_files()}
     unlinked = [
         adr for adr in _written_ids() if adr in names and f"[{adr}]({names[adr]})" not in index
     ]
@@ -173,3 +213,76 @@ def test_nothing_in_the_record_carries_an_unresolved_conflict_marker() -> None:
             if line.startswith(("<<<<<<< ", ">>>>>>> ")) or line == "======="
         ]
         assert not offenders, f"unresolved merge conflict markers: {offenders}"
+
+
+def test_two_adrs_on_one_day_are_distinct_ids() -> None:
+    """The property the dated form exists for, asserted rather than described.
+
+    Two sessions writing an ADR on the same day is routine here — it is what produced five
+    collisions in a single day under the numbered scheme. If the id were the *date*, the dated form
+    would reproduce exactly the failure it replaces; because the id is the whole stem, same-day ADRs
+    are distinct and only an identical slug collides — as an add/add conflict on a filename, which
+    git reports loudly.
+    """
+    first = Path("D-2026-07-31-adr-ids-that-cannot-collide.md")
+    second = Path("D-2026-07-31-a-different-decision-entirely.md")
+    assert _adr_id(first) != _adr_id(second)
+    assert _FILENAME.match(first.stem) and _FILENAME.match(second.stem)
+
+
+def test_a_dated_id_round_trips_filename_heading_and_ledger() -> None:
+    """The three places an id appears must agree for the dated form exactly as for the numbered one.
+
+    `_adr_id`, `_HEADING` and `_INDEX_ROW` are three independent parsers; a scheme change that
+    taught one of them the new shape and not the others would leave the drift checks passing
+    vacuously on dated ADRs while still policing numbered ones.
+    """
+    stem = "D-2026-07-31-adr-ids-that-cannot-collide"
+    assert _adr_id(Path(f"{stem}.md")) == stem
+    assert _HEADING.findall(f"# {stem} — ADR ids that cannot collide\n") == [stem]
+    row = f"| [{stem}]({stem}.md) | ADR ids that cannot collide |\n"
+    # Compared the way `_index_rows` consumes it — the title cell is stripped there, so asserting
+    # its exact whitespace would pin a detail no caller depends on.
+    assert [(adr, title.strip()) for adr, title in _INDEX_ROW.findall(row)] == [
+        (stem, "ADR ids that cannot collide")
+    ]
+
+
+def test_numbered_ids_sort_before_dated_ones_and_stay_numeric() -> None:
+    """Record order is defined here, and the ledger is asserted to match it exactly.
+
+    **`D-900` is the case that makes this test mean anything.** Sorting the stems as plain strings
+    gives the right answer for every id in the record today — `D-001` … `D-167` are zero-padded, so
+    lexicographic order *is* numeric order, and they all begin `D-0`/`D-1`, which precedes
+    `D-2025-…`. So a sort key that ignored the two shapes entirely would pass a test built from
+    today's ids while being wrong.
+
+    It is wrong from `D-300` onward: `"D-900-…" > "D-2025-…"` as strings, because `'9' > '2'`. A
+    numbered ADR would then sort after the dated ones and the ledger-order assertion would start
+    failing years from now, for a reason nobody would connect to this function. The first version of
+    this test used `D-009`/`D-010` and did not catch that — it survived flattening the key to a
+    single lexicographic tuple.
+    """
+    paths = [
+        Path("D-2026-01-02-later.md"),
+        Path("D-900-nine-hundred.md"),
+        Path("D-2025-12-31-earlier.md"),
+        Path("D-009-nine.md"),
+    ]
+    assert [p.stem for p in sorted(paths, key=_sort_key)] == [
+        "D-009-nine",
+        "D-900-nine-hundred",
+        "D-2025-12-31-earlier",
+        "D-2026-01-02-later",
+    ]
+
+
+def test_a_malformed_id_is_still_rejected() -> None:
+    """Widening the shape must not widen it to anything — the filename check is a real gate.
+
+    A scheme change is exactly when a validator quietly becomes permissive, so the shapes that were
+    invalid before must still be invalid: an uppercase slug, a missing slug, a two-digit month, a
+    bare date with no decision in it.
+    """
+    for bad in ("D-2026-7-31-slug", "D-2026-07-31", "D-167", "D-2026-07-31-Slug", "D-1234-slug"):
+        assert not _FILENAME.match(bad), f"{bad} should not be a valid ADR filename"

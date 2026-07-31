@@ -12,8 +12,11 @@ business, and this capability scales on its own.
 """
 
 import asyncio
+from datetime import datetime
+from typing import Any
 
 from mcp.server.fastmcp import FastMCP
+from pydantic import BaseModel
 
 from chemclaw.core.chem import canonical_smiles
 from chemclaw.core.config import settings
@@ -41,7 +44,7 @@ from chemclaw.science.calc.solubility import (
     run_cached_solubility,
 )
 from chemclaw.science.calc.solubility import calc_version as solubility_calc_version
-from chemclaw.science.calc.store import ResultStore
+from chemclaw.science.calc.store import CalculationQuery, ResultStore, StoredResult
 from chemclaw.science.calc.structure import structure_from_smiles
 from chemclaw.science.calc.xtb import XtbInput, XtbResult, run_cached_xtb
 from chemclaw.science.calc.xtb_opt import OptimizationSummary, OptSpec, run_cached_optimization
@@ -124,6 +127,102 @@ async def report_measurement(property_name: str, smiles: str, measured_value: fl
     return (
         f"Recorded for {canonical}, but nothing had predicted {property_name} for it yet, "
         "so no prediction was scored."
+    )
+
+
+class CalculationRecord(BaseModel):
+    """One stored calculation, flattened to what an agent can reason about.
+
+    Not `StoredResult` itself: that carries a `CalculationKey` whose two hashes mean nothing to a
+    reader and would spend the model's attention on them. `calc_ref` is the same key in the flat
+    form a knowledge note cites (`type@version:hash:hash`), so a result found here can be quoted
+    as evidence by the reference that resolves back to it.
+    """
+
+    calc_ref: str
+    calc_type: str
+    calc_version: str
+    result: dict[str, Any]
+    provenance: str
+    computed_at: datetime | None = None
+    compute_seconds: float | None = None
+
+
+@server.tool()
+async def find_calculations(
+    smiles: str = "",
+    calc_type: str = "",
+    calc_version: str = "",
+    since: str = "",
+    until: str = "",
+    limit: int = 20,
+) -> list[CalculationRecord]:
+    """Look up calculations this system has already run, instead of running them again.
+
+    Every calculation ever computed is kept forever and keyed by (calculator, version, input,
+    parameters) — including the expensive DFT jobs — but until now the only way to reach one was
+    to ask for the exact same calculation and get a cache hit. This is the other question: *what
+    do we already know about this molecule*, which is what a chemist actually asks before
+    committing hours of compute.
+
+    Use it before submitting anything expensive, and to answer "have we looked at this before?".
+    An empty result is a real answer — say the store has nothing rather than implying the
+    calculation was tried and failed.
+
+    A returned `calc_ref` can be cited directly in a knowledge note, so an answer built on a
+    stored value stays traceable to the run that produced it.
+
+    Args:
+        smiles: Restrict to one molecule (any valid SMILES for it — matching is on the canonical
+            form, so "CCO" and "OCC" find the same rows). Empty means every molecule. This reaches
+            the molecule-keyed calculators — pka, solubility, descriptors, dft. The xTB task
+            results and geometry pointers are keyed by a 3-D structure, which a molecule alone
+            does not determine, so ask for those by `calc_type` with no molecule filter; asking
+            for both together is refused rather than answered with a misleading empty list.
+        calc_type: Restrict to one kind of calculation, e.g. "xtb", "pka", "dft". Empty means all.
+        calc_version: Restrict to one calculator version. Empty means every version — useful
+            precisely when asking whether an older version's number is still what is on file.
+        since: ISO-8601 date or timestamp; only results computed at or after it.
+        until: ISO-8601 date or timestamp; only results computed at or before it.
+        limit: How many to return, newest first.
+
+    Returns:
+        The matching calculations, newest first. Each carries the result payload the calculator
+        produced, so no second call is needed to read a value.
+    """
+    query = CalculationQuery(
+        smiles=smiles or None,
+        calc_type=calc_type or None,
+        calc_version=calc_version or None,
+        since=_timestamp(since),
+        until=_timestamp(until),
+        limit=max(1, min(limit, settings.calc_find_max_results)),
+    )
+    return [_record(stored) for stored in await default_store().find(query)]
+
+
+def _timestamp(value: str) -> datetime | None:
+    """Parse an ISO-8601 date or timestamp, or None for an empty string.
+
+    A malformed date raises rather than being dropped: silently ignoring "last Tuesday" would
+    answer a question about a window with results from outside it, which reads as an authoritative
+    "nothing else exists" — the failure mode this tool is least able to afford.
+    """
+    if not value:
+        return None
+    return datetime.fromisoformat(value)
+
+
+def _record(stored: StoredResult) -> CalculationRecord:
+    """Flatten one stored result into the agent-facing record."""
+    return CalculationRecord(
+        calc_ref=stored.key.as_str(),
+        calc_type=stored.key.calc_type,
+        calc_version=stored.key.calc_version,
+        result=stored.result,
+        provenance=stored.provenance,
+        computed_at=stored.created_at,
+        compute_seconds=stored.compute_seconds,
     )
 
 
