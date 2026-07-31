@@ -88,8 +88,15 @@ run next?" inline, from observations you already have.
 A fully automated loop that proposes, evaluates its own objective, and iterates over many rounds is
 `start_optimization_campaign` — reach for that only when the objective can be computed without a
 human in each round. It is durable and long-running, so it returns a job id immediately; poll it
-with `get_durable_job_status`. Set `publish_to_graph` when the recommendation should be proposed as
-a PR-gated note rather than only reported in chat.
+with `get_durable_job_status`. Its recommendation is always proposed as a PR-gated note, so a human
+reviews it; you do not decide whether the campaign is recorded.
+
+State the campaign's `rationale` in the chemist's terms — the question this campaign should answer
+and what prompted it — not a restatement of the parameter ranges. It is stored with the run and
+printed on the note a reviewer signs, and it is what a session six months from now will read when
+it asks `find_past_jobs` whether this optimization has already been done. Before starting a
+campaign, run that search: a near-identical campaign that already ran is evidence to build on
+(seed the new one with its observations), and only an *identical* one rejoins its result for free.
 
 ## The other DoE question: a categorical screen, not an adaptive suggestion
 

@@ -115,7 +115,7 @@ KNOWN_NOTE_TYPES: frozenset[str] = frozenset(
         "job-result",  # a durable calculation's result (connectors/qm/knowledge.py)
         "bo-candidate",  # a BO campaign's recommendation (connectors/bo/knowledge.py)
         # The agent's reasoned proposal for the next run in a series, argued from the record
-        # rather than from a surrogate model (D-157) — the non-BO sibling of `bo-candidate`.
+        # rather than from a surrogate model (D-158) — the non-BO sibling of `bo-candidate`.
         "experiment-proposal",
         "failure-mode",  # a negative result worth not repeating (gap KNW-3)
     }

@@ -205,7 +205,7 @@ def test_zero_celsius_structured_field_is_preserved() -> None:
 
 
 def test_the_entrys_hypothesis_is_carried_onto_the_record() -> None:
-    """The question the run's conditions answer must survive ingestion (D-157)."""
+    """The question the run's conditions answer must survive ingestion (D-158)."""
     raw = RawEntry(
         entry_id="e-hyp",
         created_at=_EPOCH,

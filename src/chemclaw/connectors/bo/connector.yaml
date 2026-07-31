@@ -28,8 +28,8 @@ jobs:
       Use this when the optimization needs *many* rounds of propose→evaluate against a computable
       objective and must survive restarts. For a single "what should I run next?" answer over
       observations you already have, use `suggest_next_experiment` instead — it answers inline.
-      The campaign proposes candidates, evaluates them through the named objective, and (when
-      `publish_to_graph` is set) opens its recommendation as a PR-gated note for human review.
+      The campaign proposes candidates, evaluates them through the named objective, and opens its
+      recommendation as a PR-gated note for human review.
     # The decision space nests discriminated feature kinds, which no inline parameter list can
     # express without losing exactly the structure the model needs — so the existing validated model
     # is referenced instead of re-declared.

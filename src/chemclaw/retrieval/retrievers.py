@@ -78,7 +78,7 @@ async def _eligible_notes(directory: Path, filters: dict[str, Any]) -> dict[str,
     thread — `load_notes` is a synchronous full parse. Empty when the directory is absent.
 
     `since`/`until` window the notes by `valid_from` — for a reaction note, the day the
-    experiment was run (D-157). "What have I tried on this step in the last two weeks" was
+    experiment was run (D-158). "What have I tried on this step in the last two weeks" was
     unanswerable without it: the dates were on the notes and no filter could reach them.
     """
     if not directory.exists():

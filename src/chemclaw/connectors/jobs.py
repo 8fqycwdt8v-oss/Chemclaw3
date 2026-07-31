@@ -73,11 +73,15 @@ _DETAIL_MAX_CHARS = 200
 
 
 class ConnectorJobError(ValueError):
-    """A declared job cannot be built — a bad `params_model` reference.
+    """A declared job cannot be built (a bad `params_model` reference) or launched as asked.
 
-    A `ValueError` subclass for the same reason `ConnectorError` is: this is a "this deployment
-    is misconfigured" failure, and one `except ValueError` at an entry point should catch all of
-    them.
+    A `ValueError` subclass for the same reason `ConnectorError` is: one `except ValueError` at an
+    entry point should catch all of them.
+
+    It covers both a misconfigured deployment and a caller that asked for something this seam
+    refuses — today, a launch with no stated reason (D-157). Both are "this job is not going to
+    run, and here is the sentence explaining why", and the audience differs only in who reads it:
+    an operator for the first, the model itself for the second.
     """
 
 
@@ -169,6 +173,18 @@ def _params_model(connector: str, job: JobSpec) -> type[BaseModel]:
     )
 
 
+# The `rationale` argument, documented once for every generated job tool (D-157). Written at the
+# model rather than at the developer, because this is the text that decides whether the stored
+# reason is a usable sentence or a restatement of the arguments.
+_RATIONALE_DOC = [
+    "    rationale: Why this run is worth doing, in a sentence or two a chemist would recognise:",
+    "        the question it should answer and what prompted it (whose request, which earlier",
+    "        result). It is stored with the run and stamped onto any note the run proposes, so a",
+    "        later session — or the human reviewing that note — can tell why it was done. Say what",
+    "        the run is *for*; do not restate the arguments.",
+]
+
+
 def _docstring(job: JobSpec) -> str:
     """Assemble the tool docstring the model reads: summary, description, then the arguments.
 
@@ -181,14 +197,18 @@ def _docstring(job: JobSpec) -> str:
     lines = [job.summary]
     if job.description:
         lines.extend(["", job.description.strip()])
+    lines.extend(["", "Args:"])
     if job.params:
-        lines.extend(["", "Args:", "    params: The job's launch arguments."])
+        lines.append("    params: The job's launch arguments.")
         lines.extend(f"        {param.name}: {param.description}" for param in job.params)
     elif job.params_model is not None:
         # A referenced model documents its own fields (their descriptions travel in the JSON
         # schema MAF derives from it), so repeating them here would be a second, drift-prone
         # copy.
-        lines.extend(["", "Args:", "    params: The job's launch arguments; see the field docs."])
+        lines.append("    params: The job's launch arguments; see the field docs.")
+    else:
+        lines.append("    params: This job takes no arguments; pass an empty object.")
+    lines.extend(_RATIONALE_DOC)
     lines.extend(["", "Returns:"])
     if job.inline_wait_seconds is not None:
         lines.extend(
@@ -239,7 +259,10 @@ def build_job_tool(connector: str, job: JobSpec) -> CapabilityTool:
     params_model = _params_model(connector, job)
     precondition = resolve_precondition(job.precondition) if job.precondition else None
 
-    async def launch(params: params_model) -> str | ConnectorJobResult:  # type: ignore[valid-type]
+    async def launch(
+        params: params_model,  # type: ignore[valid-type]
+        rationale: str,
+    ) -> str | ConnectorJobResult:
         # **Validate here, because nothing upstream does** (D-138). The annotation above is a
         # pydantic model and MAF publishes its JSON schema, but MAF hands the body the decoded
         # JSON *object* — a plain `dict` — rather than constructing the model from it. Until this
@@ -249,6 +272,15 @@ def build_job_tool(connector: str, job: JobSpec) -> CapabilityTool:
         # holds one (a test, a template step) is not wrong, and `model_validate` is the one entry
         # point that takes either.
         spec = params_model.model_validate(params)
+        # Reject-if-absent, the polarity `require_actor` established (F4-T3): a durable run with no
+        # recorded reason is the gap D-157 exists to close, and a blank string accepted here would
+        # reopen it silently for every job in the system. Raised as a `ValueError` the model reads
+        # and can correct in the same turn, before any durable work is started.
+        if not rationale.strip():
+            raise ConnectorJobError(
+                f"{job.name}: rationale must say why this run is being started — it is stored with "
+                "the run and is the only record of what question it was meant to answer"
+            )
         # Authorize the expensive trigger against the turn's user *before* any durable work
         # (F4-T5), so an autonomously-planned todo cannot start a costly run outside the user's
         # entitlements.
@@ -275,6 +307,10 @@ def build_job_tool(connector: str, job: JobSpec) -> CapabilityTool:
                     workflow=job.workflow,
                     task_queue=bundle_queue(connector),
                     payload=payload,
+                    # Deliberately outside `payload`, and therefore outside `workflow_id`: two
+                    # chemists asking for the identical campaign with differently-worded reasons
+                    # must still rejoin one run rather than each paying for it (D-011).
+                    rationale=rationale.strip(),
                     requested_by=requested_by,
                     session_id=get_current_session_id() or "",
                     correlation_id=get_current_correlation_id() or "",

@@ -1,14 +1,16 @@
 # Task: the daily experiment progression — chronology, intent, and a non-BO next-experiment path
 
-Requested 2026-07-31. Branch: `claude/chemclaw-experiment-progression-056btx`. ADR: **D-157**.
+Requested 2026-07-31. Branch: `claude/chemclaw-experiment-progression-056btx`. ADR: **D-158**.
 
 (The previous occupant of this file, the repo-consistency pass, is merged as D-156; its record is
 that ADR and git history.)
 
-**On the number.** This branch reserved D-156 in its first commit; two other branches merged into
-`main` while it was open and one of them took the same number. Merging second, this branch
-renumbered to **D-157**, per the rule in `CLAUDE.md` — the reservation protects a number only
-against sessions that can see it.
+**On the number.** This branch reserved D-156 in its first commit and ended up at **D-158**:
+three other branches merged into `main` while it was open, and two of them took the number this
+one held. Each time, the rule in `CLAUDE.md` decided it without a judgement call — whoever merges
+second renumbers. Worth recording as evidence for that file's own closing paragraph: a reservation
+protects a number only against sessions that can see it, and with this many concurrent branches
+the global sequence is now colliding routinely rather than exceptionally.
 
 ## The question behind it
 
@@ -31,7 +33,7 @@ evidence-based (non-BO) proposal path. Three things were structurally missing:
 
 ## Plan
 
-- [x] **§0** Reserve D-157 in `docs/decisions/README.md` (first commit).
+- [x] **§0** Reserve D-158 in `docs/decisions/README.md` (first commit).
 - [x] **§1 Chronology.** New `memory/progression.py`: order a series by `performed_at`, and name
       what changed between consecutive runs (temperature, time, and the species set per role).
       `optimization_campaign_note` renders Date + "Changed vs previous" columns, in time order, and
@@ -44,7 +46,7 @@ evidence-based (non-BO) proposal path. Three things were structurally missing:
       `deep-research` §6 rewritten to route the two questions to their own paths.
 - [x] **§4 Time-scoped retrieval.** `since`/`until` on `_eligible_notes` and on `gather_evidence`.
 - [x] **§5 Corpus + docs.** Seed notes for the new type and the new relation; `knowledge/README.md`
-      counts; ADR D-157.
+      counts; ADR D-158.
 - [x] **§6 Verify.** New `tests/test_progression.py`; `make lint type test` green.
 
 ## Review

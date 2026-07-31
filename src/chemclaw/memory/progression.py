@@ -1,4 +1,4 @@
-"""Read an optimization series as a *sequence* rather than a set (D-157).
+"""Read an optimization series as a *sequence* rather than a set (D-158).
 
 `memory.optimization` answers "which runs are the same transformation"; it says nothing about
 order, because DRFP similarity has no time axis and `cluster_by_similarity` returns ids sorted

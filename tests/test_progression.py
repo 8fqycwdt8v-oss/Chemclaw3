@@ -1,4 +1,4 @@
-"""Tests for reading an optimization series as a sequence (D-157).
+"""Tests for reading an optimization series as a sequence (D-158).
 
 The behaviour under test is what a technician working one step for weeks needs the system to
 see: the runs in the order they were performed, what changed at each step, what the record does
