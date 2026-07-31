@@ -1517,6 +1517,11 @@ class MemorySettings(BaseSettings):
     # reported as not-yet-meaningful — a bias from three points is not a bias.
     calibration_enabled: bool = False
     calibration_min_observations: int = Field(default=8, ge=1)
+    # Ceiling on what one `find_calculations` call can return. The calculation store is never
+    # evicted (D-011), so it is the one table that only grows — a browse query with no cap is a
+    # full scan of it, and every returned row spends the model's context. The tool clamps its own
+    # `limit` to this rather than trusting the argument.
+    calc_find_max_results: int = Field(default=50, ge=1)
     # Standing-query digests (gap IDEA-1). Off by default: it needs the `subscriptions` table
     # (migration 017), and a deployment nobody has subscribed on would just run an empty sweep.
     digest_enabled: bool = False
