@@ -122,6 +122,25 @@ settings`, so the seam does not move.
 
 ## Two smaller corrections, both of the same kind
 
+D-149 added `tests/test_docstring_paths.py` for exactly this class of rot, after the same
+restructure left 78 dangling module pointers. It passes here — 418 checks green — and it did not
+catch any of the three below, which is not a gap in it but a statement of where its edge is. It
+checks backticked paths ending in `.py`, deliberately, because a backtick plus a file extension is
+the repository's own unambiguous marker for "this is a name, not English". What escapes:
+
+| | Example | Why the guard cannot see it |
+| --- | --- | --- |
+| directory paths | `` `mcp_servers/` `` | no `.py`, so no unambiguous marker |
+| deployable names | `mcp-molfp` | names a component, not a file |
+| quoted history | `python -m mcp_servers.calc.server` | a dotted module inside a quotation, not a path |
+| claims about naming | "cannot be named `mcp`" | an assertion, not a pointer |
+
+Widening the rule to bare directory names would make it a heuristic over English and it would be
+turned off within a month. The right response is not a bigger regex but the habit in
+`tasks/lessons.md`: when moving a thing, grep its name in prose as a separate step from the import
+rewrite, because the tooling does the second and nothing does the first.
+
+
 **`deploy/README.md` listed an `mcp-molfp`/`mcp-rxnfp` component** that `entrypoint.sh` has no case
 for and the chart has never declared. This is the D-117 failure exactly — prose asserting a
 deployable that does not exist — found in a file that the chart↔entrypoint test does not read. The
