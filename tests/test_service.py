@@ -272,7 +272,7 @@ def test_a_waiting_turn_says_so_and_is_shed_on_the_stream(monkeypatch) -> None: 
 
     The admission wait used to happen before the response existed, so a client saw nothing at all
     for up to `service_turn_admission_timeout_seconds` and then a bare 503: a busy front door and
-    a dead one were indistinguishable for the whole of that window (D-164). Now the stream opens
+    a dead one were indistinguishable for the whole of that window (D-166). Now the stream opens
     first and the wait is on it.
     """
     import asyncio

@@ -7,7 +7,7 @@ branch merging second renumbers (`CLAUDE.md`).
 
 The review is in the session's two artifacts (a dataflow atlas and a gaps/proposals companion).
 This file is the implementation plan for every proposal it made. **All of W1 is shipped (D-159,
-D-164), and W2.1–W2.3 with it (D-158, D-163, D-165). W2.4 onward and all of W3 are still plan
+D-166), and W2.1–W2.3 with it (D-158, D-163, D-165). W2.4 onward and all of W3 are still plan
 only.**
 
 (The previous occupant of this file, the restructure-consistency pass, is merged; its record is
@@ -73,7 +73,7 @@ breaking window.
 - [x] **W1.3 Configure SSE `ping`** — shipped, D-159 (`service_sse_ping_seconds`, default 15). on both `EventSourceResponse` constructions (the turn stream and
       the job-event stream). Neither passes `ping=` today, so there is not even a transport-level
       keepalive during a long tool wait.
-- [x] **W1.4 Open the stream before admission.** — shipped, D-164, once the contract change was
+- [x] **W1.4 Open the stream before admission.** — shipped, D-166, once the contract change was
       confirmed: the messages route no longer answers 503 for capacity. Only the *semaphore* moved
       inside the generator; the durable claim stayed ahead of the response, because a 409 is a
       refusal and needs a status code. `queued` is emitted only when `Semaphore.locked()` says the
@@ -274,4 +274,4 @@ Frontend: `npm run typecheck` plus `npm test`, which requires W1.6 first.
 2. **W2.4 scope** — is generalizing `calculator_trust` worth it before more calculators are
    calibrated? Only `solubility` and `pka` are wired today.
 3. ~~**W1.4** — moving admission inside the generator changes what a client sees under load.~~
-   Confirmed and shipped (D-164).
+   Confirmed and shipped (D-166).

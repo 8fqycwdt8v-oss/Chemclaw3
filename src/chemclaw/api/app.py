@@ -194,7 +194,7 @@ _WORKER_ID = uuid.uuid4().hex
 _CLAIM_REFRESHES_PER_LEASE = 3
 
 # What a client is told when the process cannot take the work right now. One literal because it is
-# said in two shapes — an error *event* on an already-open turn stream (D-164) and a 503 body from
+# said in two shapes — an error *event* on an already-open turn stream (D-166) and a 503 body from
 # `_database_unavailable` — and the client behaviour it asks for is the same either way: back off
 # and retry. A browser has no business learning which piece of infrastructure was full.
 _AT_CAPACITY = "server at capacity; retry shortly"
@@ -809,7 +809,7 @@ def create_app(
 
         Admission-controlled (AG-15): the turn takes one of the process's turn permits for its
         whole streamed run, so a burst of concurrent turns cannot pile onto the shared internal
-        LLM endpoint. That permit is taken **inside the stream** (D-164): a turn that has to wait
+        LLM endpoint. That permit is taken **inside the stream** (D-166): a turn that has to wait
         reports the wait as a `queued` event and, if no permit frees within the admission timeout,
         ends with an error event on an open stream rather than an HTTP 503. The wait was
         previously invisible — up to `service_turn_admission_timeout_seconds` with no response at
@@ -850,7 +850,7 @@ def create_app(
             )
             permit = False
             try:
-                # Admission, inside the stream (D-164). `locked()` is the whole reason the common
+                # Admission, inside the stream (D-166). `locked()` is the whole reason the common
                 # case costs nothing: it is false exactly when `acquire()` will return without
                 # suspending, and there is no await between the test and the acquire for another
                 # turn to slip through, so an uncontended turn takes its permit and emits no

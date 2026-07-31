@@ -114,9 +114,9 @@ def _in_window(note: Note, since: date | None, until: date | None) -> bool:
         return True
     if note.valid_from is None:
         return False
-    return not (since is not None and note.valid_from < since) and not (
-        until is not None and note.valid_from > until
-    )
+    if since is not None and note.valid_from < since:
+        return False
+    return not (until is not None and note.valid_from > until)
 
 
 async def _conflict_index(directory: Path) -> dict[str, list[str]]:

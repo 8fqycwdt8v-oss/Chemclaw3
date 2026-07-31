@@ -13,7 +13,7 @@ from pydantic import BaseModel
 
 
 class QueuedEvent(BaseModel):
-    """The turn was accepted but is waiting for a free admission permit (D-164).
+    """The turn was accepted but is waiting for a free admission permit (D-166).
 
     Admission control sheds rather than queues *indefinitely*, but it does wait — up to
     `service_turn_admission_timeout_seconds` — and that wait used to happen before the response

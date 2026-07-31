@@ -1,4 +1,4 @@
-# D-164 — The queue is reported on the stream, not as a refusal
+# D-166 — The queue is reported on the stream, not as a refusal
 
 ## Status
 

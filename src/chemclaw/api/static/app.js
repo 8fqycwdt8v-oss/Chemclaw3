@@ -94,7 +94,7 @@ function addApproval(evt) {
 function applyEvent(evt, answerEl) {
   switch (evt.type) {
     case "queued":
-      // Only a turn that had to wait emits this, and it is the first thing it emits (D-164).
+      // Only a turn that had to wait emits this, and it is the first thing it emits (D-166).
       // Before it existed the same wait was a blank page followed by a 503.
       add("trace", "⏸ waiting for a free turn slot…");
       return answerEl;
