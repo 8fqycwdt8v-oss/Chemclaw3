@@ -170,3 +170,61 @@ def test_an_expired_pair_is_removed_whole() -> None:
             monkeypatch.undo()
 
     assert asyncio.run(_run()) == 0
+
+
+def test_an_undelivered_push_back_event_survives_the_window() -> None:
+    """Age alone does not make a mailbox row disposable — only *delivery* does.
+
+    The module docstring justifies pruning `session_events` with "a **consumed** push-back mailbox
+    row is spent", and the sweep was a bare age cutoff with no `consumed_at` predicate. So a
+    `job_completed` that outlived the window was destroyed before anyone read it: a QM or HPC run
+    longer than the retention window — exactly the jobs this channel exists for — lost its
+    completion, the session waited on it forever, and the harness "awaiting job" todo never
+    flipped. It also deleted the `system-audit-integrity` and `system-eval-drift` alerts, which are
+    never consumed by construction, so retention quietly removed the tamper evidence.
+    """
+
+    async def _run() -> tuple[int, int]:
+        await migrated_db_or_skip()
+        monkeypatch = pytest.MonkeyPatch()
+        monkeypatch.setattr(settings, "retention_session_events_days", 7)
+        monkeypatch.setattr(settings, "retention_session_messages_days", 0)
+        try:
+            unread, read = "retention-unread", "retention-read"
+            async with db.connection(settings.postgres_dsn) as conn:
+                async with conn.cursor() as cur:
+                    await cur.execute(
+                        "DELETE FROM session_events WHERE session_id = ANY(%s)", ([unread, read],)
+                    )
+                    # Both far older than the window; one was delivered, the other never was.
+                    await cur.execute(
+                        "INSERT INTO session_events (session_id, kind, payload, created_at) "
+                        "VALUES (%s, 'job_completed', %s, now() - make_interval(days => 90))",
+                        (unread, Jsonb({"job_id": "qm-long-run"})),
+                    )
+                    await cur.execute(
+                        "INSERT INTO session_events "
+                        "(session_id, kind, payload, created_at, consumed_at) VALUES "
+                        "(%s, 'job_completed', %s, now() - make_interval(days => 90), now())",
+                        (read, Jsonb({"job_id": "already-delivered"})),
+                    )
+                await conn.commit()
+
+            await prune_expired_rows()
+
+            async with db.connection(settings.postgres_dsn) as conn, conn.cursor() as cur:
+                await cur.execute(
+                    "SELECT count(*) FROM session_events WHERE session_id = %s", (unread,)
+                )
+                kept = await cur.fetchone()
+                await cur.execute(
+                    "SELECT count(*) FROM session_events WHERE session_id = %s", (read,)
+                )
+                gone = await cur.fetchone()
+            return (int(kept[0]) if kept else -1, int(gone[0]) if gone else -1)
+        finally:
+            monkeypatch.undo()
+
+    surviving_unread, surviving_read = asyncio.run(_run())
+    assert surviving_unread == 1, "an undelivered push-back event was deleted by age alone"
+    assert surviving_read == 0, "a delivered event past the window should still be pruned"

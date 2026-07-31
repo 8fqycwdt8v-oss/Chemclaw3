@@ -35,6 +35,7 @@ from chemclaw.core.config import settings
 from chemclaw.core.ids import stable_hash
 from chemclaw.core.logging import configure_logging
 from chemclaw.core.temporal_client import connect
+from chemclaw.durable.artifact_eviction import ArtifactEvictionWorkflow
 from chemclaw.durable.audit_verify import AuditChainVerifyWorkflow
 from chemclaw.durable.digest import DigestWorkflow
 from chemclaw.durable.eln_sync import ElnSyncWorkflow
@@ -74,6 +75,7 @@ OWNED_SCHEDULE_IDS = frozenset(
         "retention",
         "audit-verify",
         "digest",
+        "artifact-eviction",
     }
 )
 
@@ -117,6 +119,16 @@ def planned_schedules() -> list[PlannedSchedule]:
     if settings.retention_enabled:
         retention_every = timedelta(minutes=settings.retention_schedule_minutes)
         schedules.append(PlannedSchedule("retention", RetentionWorkflow, retention_every))
+    # Artifact eviction earns a Schedule as soon as either of its two bounds is set — those two
+    # settings *are* the documented way to turn eviction on, and until this entry existed they
+    # turned on nothing: the workflow was decorated, imported by the background worker and
+    # advertised on the queue, with no schedule, no route and no caller anywhere. Written,
+    # registered, never fired — the failure `durable/registry.py` exists to prevent, one level up.
+    if settings.artifact_store_max_bytes or settings.artifact_evict_idle_days:
+        eviction_every = timedelta(minutes=settings.artifact_eviction_schedule_minutes)
+        schedules.append(
+            PlannedSchedule("artifact-eviction", ArtifactEvictionWorkflow, eviction_every)
+        )
     return schedules
 
 

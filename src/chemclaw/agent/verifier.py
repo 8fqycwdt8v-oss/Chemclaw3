@@ -59,7 +59,9 @@ class VerificationResult(BaseModel):
         return [claim for claim in self.claims if not claim.supported]
 
 
-def _deterministic_result(answer: str, evidence: list[EvidenceChunk]) -> VerificationResult:
+def _deterministic_result(
+    answer: str, evidence: list[EvidenceChunk], *, degraded: bool = False
+) -> VerificationResult:
     """Score `answer` by the report citation gate: every `[[wikilink]]` must be retrieved evidence.
 
     Reuses `verify_claims` (DRY — one citation check for report and chat): the answer is treated as
@@ -67,6 +69,9 @@ def _deterministic_result(answer: str, evidence: list[EvidenceChunk]) -> Verific
     retrieved (a fabricated citation) is unsupported. An answer with no text or no citations is
     trivially clean — the deterministic path only catches *fabricated* citations; the LLM path
     catches unfaithful prose. Confidence is 1.0 when supported, 0.0 otherwise (one binary claim).
+
+    `degraded` says the LLM judge was enabled and could not be reached. It changes only the
+    nothing-to-check case, where "clean" would otherwise be a claim this gate has no basis for.
     """
     citations = cited_ids(answer)
     body = answer.strip()
@@ -76,6 +81,16 @@ def _deterministic_result(answer: str, evidence: list[EvidenceChunk]) -> Verific
         # No citation to check: the deterministic gate cannot judge faithfulness, so it does not
         # flag — this path exists to catch fabricated citations, not to demand them (that is the
         # LLM verifier's job). Treated as supported so the default path never regresses today.
+        #
+        # Unless the judge was *meant* to run and could not. Then "nothing to check" is not a clean
+        # bill of health, and returning 1.0 made a broken verifier produce a stronger signal than a
+        # working one: with the endpoint down, every answer in the deployment came back
+        # `confidence=1.0, review_required=False` — the most confident possible assertion — while
+        # nothing had been verified at all. Say so instead, which is what routes it to a human.
+        if degraded:
+            return VerificationResult(
+                claims=[ClaimCheck(text=body, supported=False)], confidence=0.0
+            )
         return VerificationResult(claims=[ClaimCheck(text=body, supported=True)], confidence=1.0)
     supported, _discarded = verify_claims([Claim(text=body, citations=citations)], evidence)
     is_ok = bool(supported)
@@ -152,13 +167,13 @@ async def verify_answer(
         # gate: degrade to the deterministic citation check (which needs no network) instead of
         # letting the exception bubble up and leave the answer entirely unscored.
         logger.exception("LLM verifier failed; degrading to the deterministic citation gate")
-        return _deterministic_result(answer, evidence)
+        return _deterministic_result(answer, evidence, degraded=True)
     value = getattr(response, "value", None)
     if isinstance(value, VerificationResult):
         return value
     # The model returned nothing parseable: fall back to the deterministic gate so a flaky verifier
     # degrades to the citation check rather than dropping verification entirely.
-    return _deterministic_result(answer, evidence)
+    return _deterministic_result(answer, evidence, degraded=True)
 
 
 async def gather_cited_evidence(

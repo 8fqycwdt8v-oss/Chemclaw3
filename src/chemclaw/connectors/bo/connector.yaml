@@ -38,7 +38,7 @@ jobs:
     # round, so history grows quadratically with rounds: past the ceiling the server terminates the
     # run mid-flight and every already-paid evaluation is lost. Checked at launch because that is the
     # only replay-safe place (see `JobSpec.precondition`).
-    precondition: chemclaw.science.bo.problem:require_rounds_within_ceiling
+    precondition: chemclaw.science.bo.problem:require_campaign_within_ceiling
     expensive: true
     publish_to_graph: true
 
