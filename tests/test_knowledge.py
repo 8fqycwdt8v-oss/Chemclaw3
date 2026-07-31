@@ -17,9 +17,10 @@ from temporalio.worker import Worker
 from chemclaw.connectors.qm.knowledge import note_from_qm_result
 from chemclaw.connectors.qm.specs import QMJobResult, QmJobSpec
 from chemclaw.connectors.qm.workflows import QMJobWorkflow
+from chemclaw.core.chem import compound_id
 from chemclaw.core.config import settings
 from chemclaw.durable.connector_job import ConnectorJobResult
-from chemclaw.ingest.eln.compound import compound_dependencies, compound_id
+from chemclaw.ingest.eln.compound import compound_dependencies
 from chemclaw.kg.git_submitter import GitNoteSubmitter, GitSubmitError
 from chemclaw.kg.note import Note
 from chemclaw.kg.pr_gate import NoteFile, NoteSubmission

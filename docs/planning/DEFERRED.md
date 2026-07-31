@@ -3,202 +3,91 @@
 Consciously postponed items — each with the reason it is *not now* and the trigger that would
 revisit it. Default is "off-the-shelf, defer until measured".
 
-| Item | Why not now | Trigger to revisit |
-|---|---|---|
-| **HPC/DFT real integration** (SLURM, `submit_to_hpc`) | User deferred it; the mock spine proves the durable pattern and the early compute (xTB/GFN2 + ML predictors, Phase 1c) covers near-term needs locally | Heavy QM/DFT accuracy is genuinely required **and** HPC access is provisioned |
-| Postgres RLS mirror of the graph | Broad internal read access is fine for cross-project learning; a mirror adds a sync pipeline + a second source of truth | Real, combinatorial project-level confidentiality requirements |
-| `knowledge/` as its own Git repo | A subfolder is enough for v1 | Governance/confidentiality boundary requires repo split |
-| Second queue system (pg-boss) | Temporal already runs; a second task queue covers small jobs | — (decided against, see D-006) |
-| MAF Durable Extension for jobs | Temporal owns durability; Azure-Functions-native and job-inappropriate | Only very long *conversation* pauses (days awaiting human input) |
-| Universal ELN abstraction | Individuality of each ELN can't be abstracted away up front | At the third real ELN source, generalize shared adapter bits |
-| ~~External literature/patent retrievers~~ | **Rejected (D-089), see the TOOL-6 row below** — no external sources at all, not "later" | — |
-| Tabular Foundation Model (TabPFN/TabICL) tool | The "which experiment next" question is now answered by BoFire inline (`suggest_next_experiment`, D-024); a tabular FM is a *different*, non-critical capability (few-shot numeric prediction from a table) and needs a model download + license check | When few-shot numeric-trend prediction over historic tables is a real need; check the model version's license first |
-| ML interatomic potentials as a fast-ab-initio surrogate (ANI-2x/TorchANI, MACE-OFF/MACE-MP) | **Researched under D-092** (2026-07-26): `torchani` was installed and inspected directly — current releases fetch pretrained weights from the Hugging Face Hub at first use (`torchani.models.ANI2x()`) rather than bundling them in the wheel, a runtime external-data dependency D-089 rejects. `calc.conformers`' CREST/GFN2-xTB ensemble covers the near-term "cheaper-than-DFT, more realistic than one rigid conformer" need without it | A deployment vendors the weight files into the container image at build time as an explicit, reviewed infrastructure decision — not a quiet runtime fetch |
-| ~~Conversation-history trimming in the agent~~ | **Done (D-025):** MAF `CompactionProvider` — token-budget-triggered tool-result collapse + sliding window, LLM-free | — |
-| LLM *summarization* of compacted history (`SummarizationStrategy`) | The deterministic collapse+window (D-025) reclaims context without an LLM call, and MAF flags an untrusted summarizer as an indirect-prompt-injection risk that persists in history | Token-frugal collapse proves insufficient (essential older context lost) **and** a trusted summarization client is available — then add it as the first strategy in the composed budget |
-| ~~xTB semiempirical~~ | **Pulled forward → Phase 1c** (now a primary early calculator, GFN2), not a DFT pre-filter | — (decided in, D-010) |
-| Retrosynthesis + reaction prediction | **Re-examined under D-092** (2026-07-26): the original trigger ("after the spine + graph + fingerprint layers exist") is now met — ECFP4/DRFP fingerprint search shipped in F11. Still not built: the concrete candidate (AiZynthFinder) fetches its pretrained USPTO models and stock file from a public host via a `download_public_data` step, the same runtime/deploy-time external-data problem D-089 rejects, not a missing prerequisite | A deployment vendors the model/stock files into the container image at build time as an explicit, reviewed infrastructure decision (D-089's escalation path) — not a quiet runtime fetch — and route planning is a real user need |
-| ~~DoE / Bayesian optimization~~ | **Pulled forward → Phase 1d** (BoFire as BO engine), drives which calculations are worth running | — (decided in, D-012) |
-| Lab automation / SiLA2 closed-loop | Requires real instrument integration; out of v1 scope | When physical/robotic execution enters scope |
-| Process flowsheet synthesis/simulation | Separate capability area (e.g. Aspen HYSYS) | When process-design (not just reaction) is in scope |
-| Multimodal analytical data (spectra/images) | Adds modality-specific ingestion complexity | When analytical raw data beyond structured fields is needed |
-| Domain foundation models | Heavy; general LLM + tools suffices for v1 | When task accuracy plateaus and a domain model is justified |
-| Sub-quadratic playbook clustering | `memory/playbook.py` pairwise Tanimoto is O(n²) — fine for the current corpus, and simple/exact | ~10⁴ reactions (~10⁸ comparisons per run); switch to per-reaction Postgres HNSW k-NN |
-| Per-key in-flight dedup in the calc store | Two *concurrent* misses on one key both compute (benign last-writer-wins upsert); serializing needs cross-process locking | Duplicate expensive runs (real HPC/DFT) become measurable cost |
-| Wire the ORD adapter into the durable `ElnSyncWorkflow` | The workflow runs the one real source (`JsonExportAdapter`); `OrdJsonAdapter` satisfies the same `ElnAdapter` contract and is proven through `sync_entries`, but no ORD-exporting source is connected yet | A real ORD feed exists — then run both adapters (or a composite) on the background queue, each with its own cursor |
-| Per-step species linking from free-text prose | Prose steps carry no `components` — guessing a SMILES from a name mid-sentence would fabricate structure; the coarse `StepKind` label and per-step temp/time are the deterministic floor | Wire the `eln-reaction-extraction` skill's per-field LLM to resolve named reagents per step (name→SMILES tool), still PR-gated |
-| Durable multi-step "deep research" as a Temporal workflow | Research is interactive Q&A (MAF's job); `gather_evidence` + tools + the `deep-research` skill cover it conversationally without a durable job | A single research question needs many expensive fan-out steps (broad literature sweeps, batch computations) that must survive a restart |
-| Compound notes so molecule/substructure hits cite a note directly | Molecules are indexed by SMILES, not yet as graph notes; `find_substructure_matches` returns SMILES and the agent bridges to reactions via `find_notes` | Compound notes exist (a later ELN step) — then a molecule retriever can cite `compound-<id>` and join gather_evidence directly |
+**This is a register of what is still pending, not a log of what was decided.** A closed item is
+**deleted** from it in the commit that closes it; its ADR is the record, and `git log` is the
+history. Recording closure by appending a status note below a stale row is what turned this file
+into nine chronological sections describing each other, three of which had gone false (D-154).
 
-> Source for the last six rows: `docs/archive/research-review.md` (external 2025/2026 gap analysis).
-> Two items were instead promoted to `docs/planning/BACKLOG.md` for a *now* decision — the evaluation/metrics
-> layer and the chemical/bio safety layer — because they are cross-cutting, not deferrable modules.
+Rows are grouped by **what would have to change** — the only axis that makes a trigger checkable.
+Each names an anchor in the tree, so any row can be verified with one `grep`.
 
-## Foundation-review (F4–F7) accepted deferrals
+## Gated on infrastructure this environment does not have
 
-Post-implementation adversarial review of F4–F7 confirmed the core paths are correct; the fixed
-findings are recorded in D-051. These residuals were **consciously not fixed now**:
-
-| Deferred | Why not now | Trigger |
-|---|---|---|
-| ~~Per-source pipeline cursor in the ELN sync~~ | **Done (D-054, 2026-07-22):** the sync now keys one high-water cursor per active ingest source (registry name), iterating every source; the interim fail-fast guard is removed and multi-ingest is safe. Both existing adapters are datetime-cursored (`ElnAdapter` contract), so this is a faithful generalization, not a guess. `eln_sync_adapter` config field deleted (was the dead single-cursor label — audit DUP-2). | — (a future non-datetime cursor source generalizes the `ElnAdapter` contract itself) |
-| ~~Thundering-herd lock in `WorkloadTokenProvider`~~ | **Done (D-054, 2026-07-22):** a per-scope `asyncio.Lock` with a double-checked cache re-read collapses N concurrent cold/stale callers onto one exchange; different scopes never block. | — |
-| Generic ingest half still shaped like `ElnAdapter` | `IngestHalf = ElnAdapter` (verbatim re-host) means a future non-ELN ingest source must expose `fetch_new_entries`/`map_to_ord`. Acceptable while every ingest source is reaction-shaped (maps to the canonical ORD reaction) | A non-reaction ingest source appears — then generalize the ingest half's mapped type |
-
-## Critical re-review (2026-07-22)
-
-Every deferred item above was re-examined against current reality, asking "does the trigger hold
-*now*?" rather than assuming the deferral still stands. Verdict: **all remain correctly deferred
-except one**, which got an interim guard.
-
-**Implemented (D-054, superseding the interim guard).** A follow-up "close all found gaps" pass then
-did the *full* fixes for the two items that turned out to be closable offline against the existing
-contracts:
-
-- **Per-source ELN cursor.** First shipped as an interim fail-fast guard, then replaced by real
-  per-source cursors: the sync iterates every active ingest source and keys one cursor per source
-  (the `sync_cursors` table already keyed by name). Both current adapters are datetime-cursored
-  (that *is* the `ElnAdapter` contract), so this is the faithful generalization of today's contract,
-  not a guess about the not-yet-existing Snowflake source. The `eln_sync_adapter` dead field is gone
-  (audit DUP-2). Multi-ingest is now first-class.
-- **`WorkloadTokenProvider` thundering-herd lock.** A per-scope `asyncio.Lock` + double-checked cache
-  now collapses concurrent cold-cache callers onto one exchange — cheap, correct, offline-testable.
-
-**Confirmed still-deferred (trigger genuinely unmet).** Nothing else crossed its threshold:
-
-- *Need real infrastructure we don't have:* HPC/DFT real integration, Postgres RLS graph mirror,
-  `knowledge/` as its own repo, the Snowflake ELN connector — all gated on a real cluster / tenant /
-  confidentiality boundary that does not exist in this environment.
-- *Need a scale we haven't reached:* sub-quadratic playbook clustering (O(n²) is fine below ~10⁴
-  reactions), per-key in-flight calc-store dedup (only worth it when duplicate *expensive* HPC runs
-  are a measured cost — still mock). (The `WorkloadTokenProvider` thundering-herd lock was in this
-  bucket but is now implemented — the lock is cheap enough to add before the scale arrives — D-054.)
-- *Need a capability/source that isn't in scope for v1:* universal ELN abstraction (only a 3rd real
-  ELN triggers it — we have 2 adapters), external literature/patent retrievers (Phase 5b core is
-  done, but this is a net-new source needing an API decision, not a latent gap), the tabular
-  foundation model, retrosynthesis/reaction prediction, lab automation/SiLA2, process flowsheet
-  synthesis, multimodal analytical data, domain foundation models, per-step species linking, durable
-  deep-research workflow, compound notes — each waits on a concrete user need, not on us.
-- *Deliberately declined / superseded:* LLM summarization of compacted history (the deterministic
-  collapse D-025 suffices and an untrusted summarizer is an injection risk), MAF Durable Extension for
-  jobs (Temporal owns durability), the second queue system (decided against, D-006), the generic
-  ingest-half reshape (every ingest source is still reaction-shaped).
-
-No other item warranted implementing now. The deferrals are conscious and their triggers are the
-right ones; this review changed one thing (the cursor guard) and left the rest as designed.
-
-## F10 review-cycle accepted deferrals (2026-07-22)
-
-The post-F10 adversarial review (five agent teams over the new features + the whole codebase) fixed
-the confirmed defects in-branch (recorded in D-065); these three residuals were **consciously not
-built now**, each because it needs a live edge this offline environment does not have:
-
-| Deferred | Why not now | Trigger to revisit |
-|---|---|---|
-| **F10-B3 — LLM faithfulness check of drafted report sections** | The conversational verifier (B2) scores a chat turn's cited prose. The *durable* report path assembles evidence per section and renders it via a template — there is no free-form synthesized prose in the workflow to LLM-judge, only citations (already gated by `verify_claims`). Wiring an LLM judge in would require the report skill's prose-drafting step to run inside the durable workflow, which it does not. | The report workflow gains an in-workflow LLM prose-synthesis step — then route that prose through `verify_answer` exactly as the chat runner does |
-| **Live-retriever drift over the deployment's *own* graph** | The KM-13 retrieval gold-set (D-056) already scores `GraphRetriever` over a committed fixture corpus (`evals/retrieval_corpus/`), and the scheduled F10-F2 drift job re-runs that deterministic case-set — a *deployment-consistency tripwire* (documented in `workflows/eval_drift.py`). What stays deferred is drift over the *deployment's live, changing* knowledge graph (genuine runtime quality drift), whose labelled cases are deployment-local (the shipped graph is empty), not a committed fixture. | A deployment with a populated graph + local labelled retrieval cases exists — then score the live retriever over that graph on the drift cadence, alongside the fixture tripwire |
-| **Audit-chain tip-truncation anchor** | The hash chain now catches modification, reordering, interior deletion, and prefix (genesis) truncation. Detecting *trailing* deletion (tip truncation) needs an external append-count/max-id anchor recorded out-of-band (a second store), since the remaining rows still link cleanly. | A regulator/GxP audit requires provable completeness of the tail — then add an out-of-band monotonic append-count anchor (e.g. a signed high-water row-count) and verify it |
-
-## Engine gap-doc follow-ups (2026-07-22)
-
-The two engine gap analyses (`docs/archive/audit/08-agentic-engine-gaps.md`,
-`09-knowledge-management-gaps.md`) surfaced a cluster of non-`None`, non-deferred gaps. The
-closable ones were implemented across three passes: KM-6/KM-7 provenance+freshness (D-055), the
-KM-13 retrieval gold-set (D-056), and then **KM-5, AG-14, AG-15, and the retrieval half of KM-14
-(D-057)**. Each of those four made a defensible default decision (documented in D-057) rather than
-staying blocked. **One remains deferred**, and it is genuinely infra-gated:
+Real cluster, real Entra tenant, real HPC, real registry. Nothing here is closable offline.
 
 | Item | Why not now | Trigger to revisit |
 |---|---|---|
-| **AG-13** — agent-behavior / prompt / skill regression eval | A faithful agent-behavior eval must run the agent against a real LLM to observe tool-selection and citation; the target internal OpenAI-compatible endpoint is not reachable offline, and a mock LLM would only test the mock, not behavior. **Genuinely infra-gated** (unlike KM-13, which scores the deterministic retrieval path and *was* done in D-056). | The live internal LLM endpoint is reachable from CI or a test harness — then add a behavior suite (tool-selection + citation assertions over representative prompts), reusing the `evals/` case-set + `@metric` seam |
+| **HPC/DFT real integration** (SLURM, `submit_to_hpc`) | User deferred it (D-010); the mock spine proves the durable pattern and the early compute (xTB/GFN2 + ML predictors) covers near-term needs locally. The real Nextflow launcher (F5) sits behind the QM activities awaiting a cluster | Heavy QM/DFT accuracy is genuinely required **and** HPC access is provisioned |
+| **No converged electronic structure kept** (STO-5) | Deferred with DFT itself. D-124/D-132 already define the media types (`density.restart`, `orbitals.molden`) and the link role in `science/calc/artifacts.py`; nothing writes them, because the cheap GFN2 path has nothing worth restarting from. Published measurement for when it matters: reusing a converged density cuts mean SCF iterations from ~33 to ~2 | DFT lands (the row above) |
+| **Postgres RLS mirror of the graph** (KM-9) | Broad internal read access is fine for cross-project learning; a mirror adds a sync pipeline and a second source of truth against D-004 | Real, combinatorial project-level confidentiality requirements |
+| **`knowledge/` as its own Git repo** | A subfolder is enough for v1 | A governance/confidentiality boundary requires the repo split |
+| **The Snowflake ELN connector** | D-120 made this a folder: one `ingest/sources/<name>/datasource.yaml` plus an adapter class, with zero core edits. What is missing is the tenant, not the seam | A real Snowflake tenant is reachable |
+| **Push-to-registry + `helm upgrade` rollout in CI** | D-117 deleted the stub job whose body was an `echo`, keeping the two root gates that do real work (image build + non-root smoke; chart render against the Kubernetes schemas). Writing the real rollout now would mean guessing a registry, a namespace and a credential shape — assertions about someone else's cluster | A real cluster, its registry and the credentials to reach both. Then a `deploy` workflow gated on the default branch with an `environment:` guard, `helm upgrade --install` (which runs the pre-deploy migrate Job first), and a dry-run to a dev namespace ahead of it |
+| **AG-13 — agent-behavior / prompt / skill regression eval** | A faithful behavior eval must run the agent against a real LLM to observe tool-selection and citation; the internal OpenAI-compatible endpoint is not reachable offline, and a mock LLM tests only the mock. (Unlike KM-13, which scores the *deterministic* retrieval path and was therefore built — D-056) | The live endpoint is reachable from CI or a test harness — then add a behavior suite over representative prompts, reusing the `evals/` case-set and the `@metric` seam |
+| **Live-retriever drift over the deployment's own graph** | The KM-13 gold-set (D-056) scores `GraphRetriever` over the committed fixture corpus and the F10-F2 drift job re-runs it — a deployment-consistency tripwire (`durable/eval_drift.py`). Drift over a *live, changing* graph needs labelled cases that are deployment-local; the shipped graph has none | A deployment with a populated graph and local labelled cases exists — then score the live retriever on the drift cadence alongside the fixture tripwire |
 
-Two narrower sub-gaps also remain, each with its own existing deferral: the **O(n²) playbook
-clustering** half of KM-14 (see the row in the main table above — sub-quadratic clustering at ~10⁴
-reactions) and the **durable** half of per-user turn/token budgeting (see below — the in-process
-guard is now in via D-066; a rolling-window quota surviving restart/multi-pod waits on a real
-multi-tenant need). Neither is a latent bug.
+## Gated on an upstream fix
 
-## Resilience-hardening deferrals (2026-07-23, D-066)
-
-Three residual failure-mode gaps were closed on the feature branch (DB-query clamps, front-door
-session reattach, in-process turn/token budgets). Two narrower pieces were consciously left out:
-
-| Item | Why not now | Trigger to revisit |
-|---|---|---|
-| **Durable / rolling-window budget quota** | `service.budget.BudgetTracker` bounds a *running process's* runaway (the "$400 in twenty minutes" failure), which is what the per-turn loop cap left open. A quota that survives a restart or is shared across pods needs a durable store (Postgres) and a time-window policy (per-day/per-month reset) — a bigger piece whose value is real only under multi-tenant billing/fairness pressure, not the single-process runaway this guards. | A real multi-tenant deployment needs per-user spend fairness *across* restarts/pods — then back the counters with a Postgres table + a windowed reset, reusing the same `check`/`record` seam |
-| **Substructure pattern-fingerprint prefilter** | `find_substructure_matches` now bounds its scan to `substructure_scan_max_records` (5000) and warns on truncation, so the full-table-load footgun is closed. Screening candidates with a pattern fingerprint before the RDKit match (to raise the effective ceiling without loading every row) is a genuine optimization, but ECFP bits cannot screen substructures soundly — it needs a dedicated pattern-fingerprint column + index. | The molecule corpus grows past the scan cap in real use (the truncation warning fires) — then add a pattern-fingerprint prefilter column so substructure search scales past ~10⁴ molecules |
-
-## Review-campaign deferrals (2026-07-24, D-072)
-
-- **`within=` id-array scaling** — retrieval eligibility ships the full eligible-id list as a SQL
-  array parameter; fine at the current corpus scale (10^3–10^4 notes). Revisit with indexed
-  type/tag/currency columns when the corpus approaches ~10^5 notes.
-- **`XtbInput.charge` redundancy** — with charge now validated against the SMILES formal charge,
-  the field is fully determined by the SMILES; kept so the LLM tool signature stays loud on
-  mismatch rather than silently ignoring the argument. Revisit if the tool schema is ever versioned.
-- **Even-electron open-shell species** (e.g. triplet O2) — undetectable from SMILES, which carries
-  no spin multiplicity; documented input-format limit of `require_closed_shell`. Revisit only if a
-  spin-aware input format is adopted.
-- **JS test infra** — `service/static/app.js` error surfacing is covered by `node --check` only;
-  no JS test runner exists in the repo. Revisit if the web client grows beyond a demo shell.
-
-## Backlog-assessment outcomes (2026-07-25, waves A–C)
-
-The full per-item assessment lives in `docs/archive/plans/backlog-plan.md`; the implemented items are marked done
-in `docs/planning/BACKLOG.md`. Three entries here changed state, and one deferral is newly recorded:
-
-- **Substructure pattern-fingerprint prefilter** — still deferred, but the *event-loop* half of the
-  concern is closed: matching now runs in a worker thread under `substructure_match_timeout_seconds`
-  (D-080 sibling work). The prefilter's own trigger is unchanged — the truncation warning firing in
-  real use, past ~10⁴ molecules. Honest residual: the wall-clock bound frees the caller and the loop,
-  not the CPU (RDKit exposes no interruption hook); killing the work outright needs a subprocess,
-  which stays deferred until a measured abuse case exists.
-- **Durable / rolling-window budget quota** — unchanged, trigger unmet (multi-tenant spend fairness).
-- **Per-bundle `log.md` changelog (OKF, D-074)** — **dropped as designed, redeferred as a redesign**:
-  every note lands on its own PR-gate branch, so N concurrent proposals appending to one file
-  manufacture merge conflicts to duplicate what git history already holds. The sound form is a
-  *generated* view (`git log` → rendered changelog). Trigger: a reviewer or auditor asks for a
-  changelog view that does not require `git log`.
-
-| Newly deferred | Why not now | Trigger to revisit |
-|---|---|---|
-| **Hazard screening beyond structural alerts** (D-080) — GHS/SDS data, toxicity/ADMET prediction, thermal-stability data, regulatory/transport classification, route-level safety verdicts | The shipped screen is deliberately a *structural alert* layer: deterministic, offline, citable, and honest about being advisory. Each excluded capability needs either a licensed data source, a predictive model with its own validation burden, or a claim the system must not make (a route-level "safe" verdict). Bolting any of them onto an advisory screen would blur the one invariant that makes it usable — the system flags, it never certifies. | A named, licensed hazard data source is procured (GHS/SDS), or a regulated deliverable requires a documented hazard assessment — then design it as its own layer with its own review, not as more rules in `safety/rules.yaml` |
-## F11 gap-closure outcomes (2026-07-25, D-083/D-084)
-
-Implementing `docs/archive/audit/12-capability-gap-analysis.md` resolved several long-standing deferrals and
-changed the status of others. Recorded here so the table above is not read as still current:
-
-**No longer deferred — implemented.** Compound notes (the trigger was self-referential; TOOL-2's
-identity table satisfied it), per-step species linking's blocker (a name→SMILES tool now exists),
-and the conditions-vocabulary half of the ranking problem.
-
-**Still deferred, with the reason sharpened by implementation:**
+Each has a local workaround that costs something, and each ends with deleting code rather than
+writing it. Re-check these whenever `agent-framework-*` is bumped in `pyproject.toml`.
 
 | Item | Why not now | Trigger to revisit |
 |---|---|---|
-| ~~**External literature/patent retriever** (TOOL-6)~~ | **Rejected on scope, not deferred (D-089): this system takes no external sources.** It was built against PubChem, reviewed, and removed. The old wording here — "blocked on choosing a source" — is what invited the build, so it is corrected rather than left: there is no source to choose. `tests/test_no_egress.py` enforces it, because prose in this file demonstrably did not. | Nothing. A future need for external data is a new architectural decision, not a resumption of this one |
-| ~~**File/attachment ingress** (AGT-3)~~ | **Done.** Text/CSV/TSV, then PDF/PPTX/DOCX/XLSX (D-089), each read through the format's own document model. What remains deferred is narrower and unchanged: **spectra and images**, which need OCR/vision — the gated item in `docs/archive/plans/parity-plan.md`. A scanned PDF is refused by name for the same reason. | OCR/vision is adopted |
-| **Predicted-vs-actual calibration** (IDEA-2) | The most valuable remaining item, and genuinely sizeable: a predictions table plus a reconciliation job matching a stored prediction to the ELN result that later lands. Warrants its own design note rather than being wedged into a wave. | Taken as its own phase |
-| **Standing queries / digest** (IDEA-1) | Needs a subscription store plus a Schedule. The push-back channel it would ride already exists, so this is bounded work — just not started. | A user asks to be notified rather than to poll |
-| **Corpus backfill** (IDEA-6) | Depends on AGT-3: a backfill driver over a document parser that does not exist would be a stub. | AGT-3 lands |
-| **Audit-trail retention (archive-then-reseal)** | `workflows/retention.py` deliberately refuses to prune `audit_events`: deleting from a hash chain is indistinguishable from the tampering it detects. Safe disposal needs an out-of-band genesis anchor the verifier accepts — a GxP design decision with QA consequences, not a cleanup job. | A regulated deployment needs provable disposal; then ADR it |
-| **PMI/E-factor as a BO objective** (IDEA-3, second half) | The *tool* half shipped (`green_metrics`). An objective would need a real formulation/solvent dataset this repo does not have; inventing a problem space to host it would be a one-caller abstraction over fabricated chemistry. | A real formulation case with mass data |
+| **Anthropic streaming tool-call state** | `agent_framework_anthropic/_chat_client.py` keeps the tool call it is parsing on the *client instance* (`self._last_call_id_name`); an `input_json_delta` carries `name=""` and recovers its identity from that attribute. Two turns streaming through one client interleave and one turn's arguments are filed under the other's call id — a `tool_use` block with an empty name, Anthropic 400, 20 % of turns in a live 50-user run. Worked around by leasing one client per concurrent turn (D-123, `agent/agent_pool.py`), which costs a small pool of clients per pod | Upstream scopes that state to the response. Then delete `agent/agent_pool.py` and `tests/test_agent_pool.py`, and restore the single cached agent per profile in `api/app.py` |
+| **Harness streaming 400** | `create_harness_agent` enables per-service-call history persistence *and* installs `MessageInjectionMiddleware`; while streaming the latter rebuilds the response via `ChatResponse.from_updates()`, dropping the sentinel `conversation_id` the former uses to tell the function-invocation loop to stop resending the transcript. The loop re-sent everything while history was independently re-injected, putting a `user` block between a `tool_use` and its `tool_result` — Anthropic 400 on 100 % of tool calls. Worked around by disabling per-service-call persistence (`agent/chemclaw_agent.py`) | `agent-framework-core` preserves `conversation_id` across that finalizer. Then drop the local override — `tests/test_harness_execution.py` fails if it is removed early |
+| **Per-model-call history durability under the harness** | Follows from the row above: with the override in place a harness turn persists history per *run*, so a crash mid-turn loses that turn rather than resuming from the last model call. Acceptable because it is exactly what the non-harness path has always done | The upstream fix lands, restoring the option |
+| **Prompt-cache control on the production provider** (REV-9) | `agent_framework_openai` contains zero occurrences of `cache_control`, so the mechanism is unreachable from the `openai_compatible` path the chart ships; MAF also exposes no hook for `tools`, which is the larger half of the prefix. Both fixes are upstream, not knobs here. Meanwhile the prefix is not byte-stable (`tools/list` is re-fetched per turn), so one flapping connector would invalidate it anyway | Upstream exposes cache control on the OpenAI-compatible client. Before building anything, read `chemclaw_cache_read_tokens_total` against `chemclaw_input_tokens_total` — the provider may already be caching unasked (`docs/guides/runbook.md` §(viii)) |
 
-**Closed as not-gaps after assessment** (do not re-open blindly): **TOOL-7** units — carried in
-field names throughout, including every model added in F11; a `Quantity` type would be an
-abstraction with no second caller. **AGT-6** structured outputs — the W1 tools take typed pydantic
-arguments, so MAF already forces a validated payload at the machine-consumed call site whose absence
-was the original reason to defer. **AGT-1** turn cancellation — verified correct as of `4bc9b04`
-and now measured by `tests/test_turn_cancellation.py`.
+## Gated on a scale not yet reached
 
-## Live-testing follow-ups (2026-07-27, D-109)
-
-From the nine-stage live e2e pass. The fixes themselves shipped; what is recorded here is the
-part that cannot be closed from inside this repo.
+Each is a real optimization whose cost is currently zero. The measured current value is stated so
+the trigger is checkable rather than a feeling.
 
 | Item | Why not now | Trigger to revisit |
 |---|---|---|
-| **Upstream fix for the Anthropic streaming tool-call state** | `agent_framework_anthropic/_chat_client.py` keeps the tool call it is currently parsing on the *client instance* (`self._last_call_id_name`), and an `input_json_delta` carries `name=""` and recovers its identity from that attribute. Two turns streaming through one client interleave and one turn's arguments are filed under the other's call id, emitting a `tool_use` block with an empty name — Anthropic 400, 20% of turns in a live 50-user run. Chemclaw works around it by leasing one client per concurrent turn (D-123, `agents/agent_pool.py`), which costs a small pool of clients per pod. The real fix is for the parser to hold that state per stream, not per client. | `agent-framework-anthropic` scopes the streaming tool-call state to the response; then delete `agents/agent_pool.py`, restore the single cached agent per profile in `service/app.py`, and drop this row. `tests/test_agent_pool.py` is what to delete with it |
-| **Upstream fix for the harness streaming 400** | `create_harness_agent` enables per-service-call history persistence *and* installs `MessageInjectionMiddleware`. The latter, while streaming, rebuilds the response via `ChatResponse.from_updates()`, which drops the sentinel `conversation_id` the former uses to tell the function-invocation loop "stop resending the transcript". The loop then re-sent everything while history was independently re-injected, putting a `user` block between a `tool_use` and its `tool_result` → Anthropic 400 on 100% of tool calls, both autonomy modes. Chemclaw disables per-service-call persistence to break the chain (`agents/chemclaw_agent.py`), which costs mid-turn history durability — the classic path's behaviour, and `harness_enabled` is off by default. The real fix is upstream: preserve `conversation_id` across that finalizer. | `agent-framework-core` ships a fix; then drop the local override and delete this row. `tests/test_harness_execution.py` fails if the override is removed early |
-| **Per-model-call history durability under the harness** | Follows from the row above: with the override in place a harness turn persists history per *run*, so a crash mid-turn loses that turn rather than resuming from the last model call. Acceptable because it is exactly what the non-harness path has always done, and because the alternative today is a feature that cannot make a single tool call. | The upstream fix lands, restoring the option |
-| **Push-to-registry + `helm upgrade` rollout in CI** | The workflow that nominally carried it was stranded under `services/chemclaw/.github/`, where GitHub Actions never reads, and its `rollout` job's entire body was `echo "docker push + helm upgrade ..."`. D-117 moved the two gates that do real work to the repository root (build + non-root entrypoint smoke; chart render against the Kubernetes schemas) and deleted the stub rather than carrying a job that has never pushed anything. Writing the real rollout now would mean guessing a registry, a namespace and a credential shape — assertions about someone else's cluster, not a pipeline. | A real cluster, its registry, and the credentials to reach both. Then: a `deploy` workflow gated on the default branch with an `environment:` guard, `helm upgrade --install` (which runs the pre-deploy migrate Job to completion first), and a dry-run to a dev namespace ahead of it |
+| **Sub-quadratic playbook clustering** (KM-14, half) | `memory/playbook.py` pairwise Tanimoto is O(n²) — simple and exact. The corpus is **37 notes** | ~10⁴ reactions (~10⁸ comparisons per run); switch to per-reaction Postgres HNSW k-NN |
+| **Substructure pattern-fingerprint prefilter** | `find_substructure_matches` bounds its scan to `substructure_scan_max_records` (5000) and warns on truncation, and matching runs in a worker thread under `substructure_match_timeout_seconds` (D-080), so both footguns are closed. Screening with a pattern fingerprint first would raise the ceiling, but ECFP bits cannot screen substructures soundly — it needs a dedicated pattern-fingerprint column and index. Honest residual: the wall-clock bound frees the caller and the event loop, not the CPU (RDKit exposes no interruption hook); killing the work outright needs a subprocess | The truncation warning fires in real use, past ~10⁴ molecules |
+| **`within=` id-array scaling** | Retrieval eligibility ships the full eligible-id list as one SQL array parameter; fine at 10³–10⁴ notes | The corpus approaches ~10⁵ notes — then index type/tag/currency columns instead |
+| **Per-key in-flight dedup in the calculation store** | Two *concurrent* misses on one key both compute (benign last-writer-wins upsert); serializing needs cross-process locking | Duplicate expensive runs (real HPC/DFT) become a measured cost |
+| **Durable / rolling-window budget quota** | `api/budget.py` bounds a *running process's* runaway (the "$400 in twenty minutes" failure), which is what the per-turn loop cap left open. A quota surviving a restart or shared across pods needs a durable store and a window policy (per-day/per-month reset) — real value only under multi-tenant billing pressure | A deployment needs per-user spend fairness *across* restarts and pods — then back the counters with a Postgres table and a windowed reset, reusing the same `check`/`record` seam |
+
+## Gated on a capability, source or licence not in scope
+
+Each waits on a concrete need or an external artifact, not on us.
+
+**Three capabilities share one blocker: model weights fetched at runtime.** D-089 rejects runtime
+external data, and D-135 shipped the amendment — a dataset *may* be vendored into the image at build
+time, checksummed and licence-labelled (`data/vendored/`, `ingest/sources/vendored/`). So the trigger
+for all three has moved from "no mechanism exists" to "pick a licence-clean artifact and add the
+build step", which is the same residual as BACKLOG's open *vendor a real third-party corpus*.
+
+| Item | Why not now | Trigger to revisit |
+|---|---|---|
+| **ML interatomic potentials** (ANI-2x/TorchANI, MACE-OFF/MACE-MP) | Researched under D-092: current `torchani` releases fetch pretrained weights from the Hugging Face Hub at first use rather than bundling them. `science/calc/conformers.py`'s CREST/GFN2 ensemble covers the near-term "cheaper than DFT, more realistic than one rigid conformer" need | The weights are vendored at build time as a reviewed infrastructure decision — never a quiet runtime fetch |
+| **Retrosynthesis + reaction prediction** | Re-examined under D-092: the original prerequisite (spine + graph + fingerprint layers) is met, so what remains is only the data problem — AiZynthFinder fetches its USPTO models and stock file from a public host via `download_public_data` | Same vendoring escalation, **and** route planning is a real user need |
+| **Tabular foundation model** (TabPFN/TabICL) | "Which experiment next" is answered by BoFire inline (`suggest_next_experiment`, D-024); a tabular FM is a different, non-critical capability (few-shot numeric prediction from a table) needing a model download and a licence check | Few-shot numeric-trend prediction over historic tables is a real need; check the model version's licence first |
+| **Spectra and images** (multimodal analytical data) | Text/CSV/TSV and PDF/PPTX/DOCX/XLSX ingress all landed (AGT-3, D-089), each read through the format's own document model. What is left needs OCR/vision — which is why a *scanned* PDF is refused by name rather than guessed at. The gated item in `docs/archive/plans/parity-plan.md` | OCR/vision is adopted |
+| **Universal ingest abstraction** | Two shapes of the same question. `IngestHalf = ElnAdapter`, so a future non-ELN source must expose `fetch_new_entries`/`map_to_ord`, and both current adapters are datetime-cursored — acceptable while every ingest source is reaction-shaped (it maps to the canonical ORD reaction). D-120 also lowered the price of *not* generalizing: a new source is a manifest folder, so the duplication a shared adapter would remove is small | A third real ELN source, or the first non-reaction-shaped one — then generalize the ingest half's mapped type and the cursor contract together |
+| **Durable multi-step "deep research" as a Temporal workflow** | Research is interactive Q&A (MAF's job); `gather_evidence` plus the `deep-research` skill cover it conversationally without a durable job | A single research question needs many expensive fan-out steps that must survive a restart |
+| **F10-B3 — LLM faithfulness check of drafted report sections** | The conversational verifier scores a chat turn's cited prose. The *durable* report path assembles evidence per section and renders a template — there is no free-form synthesized prose in the workflow to judge, only citations, which `verify_claims` already gates | The report workflow gains an in-workflow prose-synthesis step — then route that prose through `verify_answer` exactly as the chat runner does |
+| **Audit chain: provable tail completeness and disposal** (F10 residual + STO-13) | One GxP question with two faces. The hash chain catches modification, reordering, interior deletion and prefix truncation; detecting *trailing* deletion needs an out-of-band append-count anchor, since the remaining rows still link cleanly. For the same reason `durable/retention.py` refuses to prune `audit_events` at all: deleting from a hash chain is indistinguishable from the tampering it detects | A regulated deployment requires provable completeness of the tail or provable disposal — then ADR both together (a signed high-water row-count anchor the verifier accepts, plus archive-then-reseal), with QA sign-off |
+| **Hazard screening beyond structural alerts** (D-080) | The shipped screen is deliberately a *structural alert* layer: deterministic, offline, citable, advisory. GHS/SDS data, ADMET prediction, thermal-stability data and route-level verdicts each need a licensed source, a model with its own validation burden, or a claim the system must not make. Bolting any on would blur the one invariant that makes it usable — the system flags, it never certifies | A named, licensed hazard data source is procured, or a regulated deliverable requires a documented hazard assessment — then design it as its own layer with its own review, not as more rules in `science/safety/rules.yaml` |
+| **PMI/E-factor as a BO objective** (IDEA-3, second half) | The *tool* half shipped (`green_metrics`). An objective needs a real formulation/solvent dataset this repo does not have; inventing a problem space to host it would be a one-caller abstraction over fabricated chemistry | A real formulation case with mass data |
+| **Blocking a low-confidence answer on the durable hold** | The verifier stamps `review_required` when confidence falls below the threshold (`api/runner.py`), and the durable hold it would route into already exists (`durable/interaction_approval.py`, D-032) — but nothing connects them, so a weakly-grounded answer is *marked*, not withheld. Deliberate for now: blocking a chat answer on a human click is a UX and a GxP decision, and the surface that renders the button is the frontend repo's, not this one's. (`agent/verifier.py` claimed this row existed before D-154; it did not, and it also called the hold itself deferred, which it has not been since D-032) | A surface renders the hold, **and** a deployment decides an unverifiable answer must be withheld rather than flagged — then route `review_required` into `InteractionApprovalWorkflow` and ADR the UX contract |
+| **Lab automation / SiLA2 closed loop** | Requires real instrument integration; out of v1 scope | Physical/robotic execution enters scope |
+| **Process flowsheet synthesis/simulation** | A separate capability area (e.g. Aspen HYSYS) | Process design, not just reaction design, is in scope |
+| **Domain foundation models** | Heavy; a general LLM plus tools suffices for v1 | Task accuracy plateaus and a domain model is justified |
+| **Per-bundle `log.md` changelog** (OKF, D-074) | Dropped as designed and redeferred as a redesign: every note lands on its own PR-gate branch, so N concurrent proposals appending to one file manufacture merge conflicts to duplicate what git history already holds. The sound form is a *generated* view (`git log` → rendered changelog) | A reviewer or auditor asks for a changelog view that does not require `git log` |
+| **JS test infrastructure** | `api/static/app.js` is covered by `node --check` only; no JS test runner exists in the repo, and the client is a demo shell | The web client grows beyond a demo shell |
+
+## Deliberately declined
+
+Not pending. Listed so each is not re-proposed as an oversight — the trigger column says what, if
+anything, would reopen the question.
+
+| Item | Why declined | Would reopen it |
+|---|---|---|
+| **External literature/patent retrievers** (TOOL-6) | **This system takes no external sources** (D-089). It was built against PubChem, reviewed and removed. The earlier wording here — "blocked on choosing a source" — is what invited the build, so `tests/test_no_egress.py` now enforces the decision, because prose in this file demonstrably did not | Nothing. A future need for external data is a new architectural decision, not a resumption of this one |
+| **Second queue system** (pg-boss) | Temporal already runs, and its `background-jobs` queue covers small jobs (D-006) | Nothing |
+| **LLM summarization of compacted history** | The deterministic collapse-plus-window (D-025) reclaims context with no LLM call, and MAF flags an untrusted summarizer as an indirect-prompt-injection risk that then *persists* in history | Token-frugal collapse proves insufficient (essential older context lost) **and** a trusted summarization client exists — then add it as the first strategy in the composed budget |
+| **MAF Durable Extension for jobs** | Temporal owns durability (D-011); the extension is Azure-Functions-native and job-inappropriate | Only very long *conversation* pauses — days awaiting human input — which is a different problem from job durability |
