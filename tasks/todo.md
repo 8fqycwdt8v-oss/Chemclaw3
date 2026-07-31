@@ -196,18 +196,22 @@ computation, and that store is readable.* W2.1 and W2.2 are the two halves.
 
 ### W3.1 Provenance-aware retrieval (D-160) — prerequisite, do first
 
-- [ ] `EvidenceChunk` carries `content`, `source_note_id`, `retriever`, `score`, `conflicts_with` —
+- [x] **Shipped, D-160.** `EvidenceChunk` carried `content`, `source_note_id`, `retriever`, `score`, `conflicts_with` —
       and **no provenance**. `created_by`, `confidence` and `source` are not in what the model sees,
       even though `NoteRef` already exposes all three. The graph read path does not distinguish
       `created_by` anywhere; `confidence` is a ranking signal for truncation order, never a filter.
       Today that is harmless because everything readable was human-merged. **It becomes a
       correctness bug the moment a second tier exists**, so it ships first and on its own.
-      - Add provenance fields to `EvidenceChunk`; populate from the note in `_chunks_from_hits`.
-      - **Layering constraint**: `tests/test_layering.py` forbids `chemclaw.retrieval` from importing
-        `chemclaw.agent` — including `agent.framing`. Framing stays at the `gather_evidence` call
-        site; only the data moves.
-      - Teach the answer contract to qualify a claim resting on a low-confidence or agent-authored
-        note.
+      - `created_by`, `source`, `confidence` on `EvidenceChunk`, populated through **one** builder
+        (`_chunk_for`) shared by the graph path and `_chunks_from_hits`. A partially-provenanced
+        list is the worst state: a sweep fuses both, so an agent-authored note would be qualified
+        or not depending on which retriever surfaced it.
+      - `created_by` defaults to `""`, **not** `"human"` — a structural hit's content is a Tanimoto
+        score the retriever composed, not a sentence anyone wrote. Defaulting to "human" would put
+        an unchecked claim in the one field whose whole purpose is to be trusted.
+      - Layering held: framing stayed at the `gather_evidence` call site, only data moved.
+      - The answer contract now qualifies rather than suppresses — a model told a source is weak
+        will otherwise omit it, turning "a weak indication" into "nothing".
 
 ### W3.2 Cap the memory jobs (rides D-161)
 

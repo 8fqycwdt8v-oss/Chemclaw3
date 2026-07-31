@@ -193,16 +193,7 @@ class GraphRetriever:
                 else settings.retrieval_default_confidence
             )
             scored.append(
-                (
-                    coverage,
-                    EvidenceChunk(
-                        content=_excerpt(note.body) or note.id,
-                        source_note_id=note.id,
-                        retriever=self.name,
-                        score=score,
-                        conflicts_with=conflicts.get(note.id, []),
-                    ),
-                )
+                (coverage, _chunk_for(note, self.name, score, conflicts.get(note.id, [])))
             )
         complete = [pair for pair in scored if pair[0] == len(terms)]
         # RRF reads each source's list as ranked best-first, so the list must be ordered by this
@@ -317,6 +308,27 @@ class FingerprintReactionRetriever:
         return kept[:page]
 
 
+def _chunk_for(
+    note: Note, retriever_name: str, score: float, conflicts: list[str]
+) -> EvidenceChunk:
+    """Build one evidence chunk from a note, carrying its provenance (D-160).
+
+    One builder for every note-backed retriever, so provenance cannot be attached on the graph
+    path and forgotten on the index path — which is precisely the drift that would produce a
+    partially-provenanced evidence list, the worst of the three possible states.
+    """
+    return EvidenceChunk(
+        content=_excerpt(note.body) or note.id,
+        source_note_id=note.id,
+        retriever=retriever_name,
+        score=score,
+        conflicts_with=conflicts,
+        created_by=note.created_by,
+        source=note.source or "",
+        confidence=note.confidence,
+    )
+
+
 def _chunks_from_hits(
     hits: list[IndexHit],
     notes: dict[str, Note],
@@ -337,12 +349,11 @@ def _chunks_from_hits(
         if note is None:
             continue
         chunks.append(
-            EvidenceChunk(
-                content=_excerpt(note.body) or note.id,
-                source_note_id=note.id,
-                retriever=retriever_name,
-                score=min(max(hit.score, 0.0), 1.0),
-                conflicts_with=(conflicts or {}).get(note.id, []),
+            _chunk_for(
+                note,
+                retriever_name,
+                min(max(hit.score, 0.0), 1.0),
+                (conflicts or {}).get(note.id, []),
             )
         )
     return chunks
