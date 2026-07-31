@@ -30,6 +30,8 @@ endpoint:
     - predict_developability_profile
     - calculator_trust
     - find_calculations
+    - list_artifacts
+    - fetch_artifact
     - report_measurement
 
 skills:
