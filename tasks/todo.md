@@ -1,14 +1,12 @@
 # Task: close the gaps found by the dataflow review — persistence, reachability, visibility, knowledge tiers
 
 Requested 2026-07-31. Branch: `claude/chemclaw-dataflows-architecture-gi467d`.
-ADRs: **D-158** (written), **D-159**, **D-160**, **D-161** (reserved in `docs/decisions/README.md`).
-Renumbered from D-154–D-159 on merge: another branch landed its own D-154/D-155 first, and the
-branch merging second renumbers (`CLAUDE.md`).
+ADRs: **D-158**, **D-159**, **D-160**, **D-161**, **D-163**, **D-165**, **D-166**, **D-169**,
+**D-170**. Renumbered three times on merge — the branch merging second renumbers (`CLAUDE.md`),
+and this branch was second every time. See the review at the bottom.
 
 The review is in the session's two artifacts (a dataflow atlas and a gaps/proposals companion).
-This file is the implementation plan for every proposal it made. **All of W1 is shipped (D-159,
-D-166), and W2.1–W2.3 with it (D-158, D-163, D-165). W2.4 onward and all of W3 are still plan
-only.**
+This file is the implementation plan for every proposal it made. **Everything in it is shipped.**
 
 (The previous occupant of this file, the restructure-consistency pass, is merged; its record is
 D-156. The one before it, the agentic-system review, is D-145 and D-151…D-153.)
@@ -308,9 +306,46 @@ Frontend: `npm run typecheck` plus `npm test`, which requires W1.6 first.
 
 ## Open questions for the requester
 
-1. **W3.3 thresholds** — N projects and M evidence notes. I would start at N=2, M=3 (the playbook
-   job already uses ≥2 projects) and tune against the promotion rate, but it is a domain call.
-2. **W2.4 scope** — is generalizing `calculator_trust` worth it before more calculators are
-   calibrated? Only `solubility` and `pka` are wired today.
+1. **W3.3 thresholds** — shipped at N=2 projects, M=3 evidence notes, both configurable
+   (`CHEMCLAW_OBSERVATION_PROMOTE_MIN_*`). Still a domain call: tune them against the promotion
+   rate once the tier has run, and if nothing promotes over a quarter the tier is a write-only log
+   and should be deleted rather than defended (D-161 says so explicitly).
+2. ~~**W2.4 scope** — is generalizing `calculator_trust` worth it before more calculators are
+   calibrated?~~ Answered by the code: the two-name conditional was a *live defect*, not merely
+   inflexible — every third name got pKa's version and pKa's unit. Generalizing was a bug fix.
 3. ~~**W1.4** — moving admission inside the generator changes what a client sees under load.~~
    Confirmed and shipped (D-166).
+4. **The ADR sequence.** Six collisions across this branch's life, three of them renumbers it had
+   to perform. D-147's one-file-per-ADR fix did what it promised — a loud filename conflict instead
+   of a silent prose merge — and did not reduce the *rate*, because the cause is concurrency, not
+   file layout. `CLAUDE.md` names the remaining fix itself (date-plus-slug ids, which cannot
+   collide) and says to raise it rather than drift into it. Raised. It costs every existing
+   citation, so it is a deliberate convention change and not one to make in passing.
+
+## Review
+
+Every W item is shipped and merged. What is worth carrying forward is the set of places where the
+plan turned out to be wrong, because each was found by building it and none would have been found
+by reading it again:
+
+- **W2.2** — the plan assumed `input_hash` was uniform. The xTB task family and the geometry
+  pointer key on a 3-D structure, so a molecule filter cannot reach them; asking for both is now
+  *refused* rather than answered with an empty list that reads as "nothing has been computed".
+- **W2.4** — "generalize the two hardcoded names" was a bug report in disguise. And **no tag
+  filter**: a prediction's subject is a molecule and the row carries no tags.
+- **W2.5** — `note_index` cannot serve a metadata filter (it stores an id, text and an embedding),
+  and the MCP `similar_reactions` tool cannot have one *at all*, because a connector must not
+  import the knowledge graph (D-115).
+- **W3.2** — the plain cap the plan asked for would have been the worse bug: deterministic builders
+  mean `notes[:cap]` proposes the same first N every night and the tail never.
+- **W3.3** — the anti-feedback rule turned out to decide *what may be mined*, which is the reverse
+  of the plan's framing: a miner over raw session transcripts produces observations that can never
+  accumulate support and therefore never promote. And `contradiction_count` was dropped —
+  `kg/conflicts.py` compares two notes' claims about the same *compound*, so it cannot evaluate a
+  statement about a transformation class.
+
+One process note. Three of the five workstream items had a "obvious" implementation that was
+worse than the shipped one in the same way: it would have produced a **silently wrong or silently
+empty answer** rather than a visible failure — an empty result set, a truncated corpus, a
+mislabelled calculator. That is the failure mode this codebase is most exposed to, and it is worth
+looking for deliberately on the next plan.
