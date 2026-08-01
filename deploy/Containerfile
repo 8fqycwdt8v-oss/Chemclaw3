@@ -149,9 +149,12 @@ RUN uv sync --frozen --no-dev \
 # silence, and the scan came back with the identical two findings. A list of guesses that fails
 # quietly is the same shape of bug as a probe that always passes.
 #
-# The trailing `find` is the diagnostic half and stays in the build: it prints every remaining
-# `dist-info` for the two packages, so a future finding names its path in the build log instead of
-# costing a round trip through CI to locate.
+# The trailing `find` is the diagnostic half and stays in the build. It matched `*.dist-info` at
+# first, which was too narrow to answer the question it was added for: the scan kept reporting a
+# `setuptools` 70.3.0 that the listing did not contain, because that copy carries no `dist-info`.
+# Widened to any versioned artifact, so a bundled seed wheel or an `egg-info` shows up too — the
+# whole point is that the build names what it left rather than a scanner naming a version with no
+# address.
 RUN set -eux; \
     interpreters="$(find /usr/bin /usr/local/bin /opt -maxdepth 4 -name 'python3*' -type f \
       -perm -u+x -print 2>/dev/null | sort -u)"; \
@@ -165,9 +168,9 @@ RUN set -eux; \
         "${py}" -m pip install --no-cache-dir --upgrade 'msgpack>=1.2.1' >/dev/null; \
       fi; \
     done; \
-    echo "remaining dist-info for the two packages:"; \
-    find / -xdev \( -name 'setuptools-*.dist-info' -o -name 'msgpack-*.dist-info' \) \
-      -print 2>/dev/null || true
+    echo "every versioned setuptools/msgpack artifact left in the image:"; \
+    find / -xdev \( -name 'setuptools-[0-9]*' -o -name 'msgpack-[0-9]*' \) -print 2>/dev/null \
+      || true
 
 # The revision this image was built from, stamped onto every audit record (AG-14 / REV-17). The
 # config docstring has always said "the F6 image build injects the digest" and no build ever did —
