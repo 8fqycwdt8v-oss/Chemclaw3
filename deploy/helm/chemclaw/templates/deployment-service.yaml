@@ -21,6 +21,14 @@ spec:
         azure.workload.identity/use: "true"
     spec:
       serviceAccountName: {{ .Values.serviceAccount.name }}
+      {{- include "chemclaw.spreadAcrossNodes" (dict "Release" .Release "component" "service") | nindent 6 }}
+      {{- /* A turn runs up to `CHEMCLAW_SERVICE_TURN_TIMEOUT_SECONDS`, and the default grace period
+             is 30 s — so every rolling update, node drain and scale-down SIGKILLed whatever turns
+             were in flight, at a point where the conversation state that made them resumable lives
+             in the pod's memory (D-121). Derived from the turn budget plus the router drain rather
+             than written as a number, so raising one raises the other; `tests/test_deploy_chart.py`
+             pins both the derivation and that the ConfigMap key it reads exists. */}}
+      terminationGracePeriodSeconds: {{ add (int .Values.config.CHEMCLAW_SERVICE_TURN_TIMEOUT_SECONDS) (int .Values.service.drainSeconds) }}
       securityContext:
         {{- include "chemclaw.podSecurityContext" . | nindent 8 }}
       containers:
@@ -49,6 +57,16 @@ spec:
               port: {{ .Values.service.port }}
             initialDelaySeconds: 10
             periodSeconds: 20
+          {{- /* Kubernetes removes the Endpoint and sends SIGTERM concurrently, so a pod that shut
+                 down promptly would refuse requests the router was still sending it. The sleep is
+                 the whole hook: it does not drain anything itself, it buys the router time to stop
+                 choosing this pod, and uvicorn's own SIGTERM handling finishes the turns already
+                 in flight. `exec sleep` rather than `httpGet` because there is no endpoint whose
+                 meaning is "wait". */}}
+          lifecycle:
+            preStop:
+              exec:
+                command: ["sleep", {{ .Values.service.drainSeconds | quote }}]
           resources:
             {{- toYaml .Values.resources.service | nindent 12 }}
           volumeMounts:

@@ -167,13 +167,17 @@ def test_a_connector_serves_metrics_and_still_serves_mcp() -> None:
     assert "chemclaw_jobs_started_total" in scrape.text
 
 
-def test_both_temporal_workers_serve_the_surface() -> None:
+def test_both_temporal_workers_go_through_the_one_runtime() -> None:
     """Every worker entrypoint, not just the one that was easy to reach.
 
     Core runs one worker and each bundle runs its own, and the second is the process doing the
     expensive science — so a fix that reached only `background_worker` would leave the most
-    interesting fleet exactly as invisible as it was. Asserted on the source because starting a real
-    Temporal worker needs a broker; what can go wrong offline is one entrypoint being forgotten.
+    interesting fleet exactly as invisible, and exactly as un-drainable, as it was.
+
+    The probe surface, the Postgres pool and the graceful shutdown are one call rather than three
+    lines precisely because of this: a third worker wiring two of the three would be a pod that
+    looks healthy and does the wrong thing on termination. Asserted on the source because starting
+    a real Temporal worker needs a broker; what can go wrong offline is one forgotten entrypoint.
     """
     import inspect
 
@@ -182,10 +186,13 @@ def test_both_temporal_workers_serve_the_surface() -> None:
 
     for module in (background_worker, bundle_worker):
         source = inspect.getsource(module)
-        assert "worker_http(" in source, f"{module.__name__} runs unobservable"
-        assert "worker.is_running" in source, (
-            f"{module.__name__} reports readiness from something other than the worker's own "
-            "state, which is how 'liveness is the Temporal poll' became an unchecked claim"
+        assert "serve_worker(" in source, (
+            f"{module.__name__} runs its worker directly, so it is unobservable on the way up and "
+            "SIGKILLed mid-activity on the way down"
+        )
+        assert "graceful_shutdown_timeout=" in source, (
+            f"{module.__name__} builds a worker that cancels in-flight activities the instant it "
+            "is asked to stop, which is a hard kill with extra steps"
         )
 
 

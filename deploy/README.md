@@ -77,6 +77,35 @@ does not read this file, so the row survived. Fingerprints deploy as `connector-
   (D-2026-08-01-every-process-carries-its-own-witness).
 - HPA scales the stateless front door on CPU; workers scale by hand (queue depth), not HPA.
 
+## Draining a pod (D-2026-08-01-a-drain-is-not-a-kill-with-extra-steps)
+
+Nothing distinguished "this pod is going away" from "this pod died", so every rolling update, node
+drain and scale-down behaved like a crash. Both grace periods are now **derived** from the budget
+they have to outlast, so tuning one moves the other:
+
+| Pod | `terminationGracePeriodSeconds` | Derived from |
+| --- | --- | --- |
+| front door | turn timeout + `service.drainSeconds` | `CHEMCLAW_SERVICE_TURN_TIMEOUT_SECONDS` (600) |
+| every worker | drain budget + 30 s | `CHEMCLAW_WORKER_GRACEFUL_SHUTDOWN_SECONDS` (120) |
+
+**What this costs.** A rolling update of the front door can take up to 615 s per pod, because a
+turn may run that long and the state that would make it resumable lives in the pod's memory by
+design (D-121). Deploying faster means ending conversations; that is the trade, taken deliberately.
+A `preStop` sleep of `service.drainSeconds` runs first, so the router stops choosing the pod before
+the pod stops accepting — Kubernetes removes the Endpoint and sends SIGTERM concurrently, and
+without the sleep those race.
+
+**Workers get the shorter budget on purpose.** An activity that does not finish in 120 s is
+cancelled and re-run by Temporal, which is a mechanism that already exists and works; holding a node
+drain open for ten minutes to avoid using it is the wrong trade. The front door is the opposite
+case — there is no retry for a chemist's turn — which is why it gets the whole turn budget.
+
+`policy/v1` PodDisruptionBudget covers the front door only (`maxUnavailable: 1`, its own toggle in
+case a PDB ever wedges a cluster upgrade). The workers get none: `workers.background.replicas: 1` is
+a singleton (the PR-gate checkout lock is host-local, D-069), and over a singleton `minAvailable: 1`
+makes the pod un-evictable and blocks every drain in the cluster forever, while `maxUnavailable: 1`
+permits exactly what no PDB permits.
+
 ## Before a deploy that touches workflow code
 
 Temporal replays workflow **code** against recorded **history**, so a control-flow change deployed

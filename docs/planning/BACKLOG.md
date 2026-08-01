@@ -324,12 +324,23 @@ QM path. The rows below are what survives that merge, narrowed to say so.
       PodMonitor collects the worker pods, which have no Service by design. The row's diagnosis was
       right and understated: the false sentence was in three places, one of them a *test assertion*
       pinning the narrow selector, which is how it stayed true-looking.
-- [ ] **No PDB, no topology spread, no graceful shutdown** — [S]+[M]. The front door runs
-      `minReplicas: 2` that can land on one node, and the Route pins a browser to one pod *because*
-      that pod holds attachments and harness todos in memory — so a node drain loses conversation
-      state, not just capacity. No `terminationGracePeriodSeconds`/`preStop` against a 600 s turn
-      timeout. `workers.background.replicas: 1` is a hard singleton owning ELN sync, memory
-      synthesis, retention, eval drift and audit-chain verification.
+- [x] **No PDB, no topology spread, no graceful shutdown** — closed by
+      D-2026-08-01-a-drain-is-not-a-kill-with-extra-steps, except the singleton, which is split out
+      below. Both grace periods are now *derived* from the budget they must outlast (the turn
+      timeout; the worker drain budget) rather than written as numbers, plus a `preStop` sleep,
+      `topologySpreadConstraints` and a `maxUnavailable: 1` PDB on the front door. The row named the
+      chart gaps and missed the deeper one: `asyncio.run` around `worker.run()` installed **no
+      SIGTERM handler at all**, so a worker did not merely have too little grace — it had no
+      shutdown path, and every drain killed it mid-activity. `durable/serve.py` is that path.
+      **No PDB on the workers, deliberately**: over a `replicas: 1` singleton, `minAvailable: 1`
+      blocks every node drain in the cluster forever and `maxUnavailable: 1` permits what no PDB
+      permits. The ADR argues it; the fix is the row below, not a policy object.
+- [ ] **The background worker is a hard singleton** — [M]. `workers.background.replicas: 1` owns ELN
+      sync, memory synthesis, retention, eval drift and audit-chain verification, and cannot be
+      scaled because the PR-gate checkout lock is host-local (D-069). Split from the row above,
+      which closed everything *except* this: it is the actual availability gap, it needs the
+      distributed lock (its own row), and it is the one thing a PDB would make worse rather than
+      better.
 - [x] **Workers and connectors have no probes** — closed by
       D-2026-08-01-every-process-carries-its-own-witness (see the row above; one HTTP surface
       answers both). `/readyz` is the worker's own `is_running` and `/healthz` is served on its

@@ -95,6 +95,7 @@ spec:
         app.kubernetes.io/component: connector-worker-{{ $name }}
     spec:
       serviceAccountName: {{ $.Values.serviceAccount.name }}
+      {{- include "chemclaw.workerGracePeriod" $ | nindent 6 }}
       securityContext:
         {{- include "chemclaw.podSecurityContext" $ | nindent 8 }}
       containers:

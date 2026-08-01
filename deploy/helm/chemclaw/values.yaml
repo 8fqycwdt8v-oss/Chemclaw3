@@ -18,6 +18,20 @@ route:
 service:
   port: 8080
   replicas: 2
+  # How long the Route's router is given to stop sending new requests to a pod that is going away,
+  # before the pod is told to stop. Kubernetes removes the Endpoint and sends SIGTERM *concurrently*,
+  # so without a `preStop` sleep a pod stops accepting while the router is still routing to it, and
+  # a chemist mid-conversation gets a connection error. Seconds, and the only job of the sleep.
+  drainSeconds: 15
+  # How many front-door pods one voluntary disruption (node drain, cluster upgrade, descheduler)
+  # may take at once. `maxUnavailable` rather than `minAvailable` because the HPA scales this
+  # Deployment: `minAvailable: 1` would permit five of six pods to go together, and each pod holds
+  # session state no sibling can see (D-121), so what needs bounding is how many conversations one
+  # drain can end. Its own toggle because a PDB an operator cannot switch off can wedge a cluster
+  # upgrade, and that must not require disabling something else to fix.
+  disruptionBudget:
+    enabled: true
+    maxUnavailable: 1
   # Horizontal autoscaling for the stateless front door only (workers scale by queue, not HPA).
   # NOTE (gap DEP-4): CPU is a poor proxy here — a pod blocked on the model uses almost no CPU
   # while being completely full. The service now exposes `chemclaw_turns_in_flight` and
@@ -199,6 +213,15 @@ config:
   # else. A chain nobody checks detects tampering only after someone thinks to look, which in a
   # GxP setting is the one failure mode the chain exists to remove.
   CHEMCLAW_AUDIT_VERIFY_ENABLED: "true"
+  # Stated here rather than left to the code default, because the chart *derives* the front door's
+  # `terminationGracePeriodSeconds` from it: a turn is bounded by this, so a drain that outlasts it
+  # cannot cut one short. Left implicit, an operator raising the turn budget would silently start
+  # having turns SIGKILLed at the old grace period. `tests/test_deploy_chart.py` pins that this key
+  # exists for exactly that reason.
+  CHEMCLAW_SERVICE_TURN_TIMEOUT_SECONDS: "600"
+  # The worker half of the same rule (`durable/serve.py`): an in-flight activity gets this long to
+  # finish after SIGTERM, and the worker Deployments' grace period is derived from it.
+  CHEMCLAW_WORKER_GRACEFUL_SHUTDOWN_SECONDS: "120"
 
 # Secret refs (F6-T6): the THREE documented plain secrets only — the generic LLM key, Temporal mTLS,
 # and the HPC-bridge credential. Everything else is federation (no client secret at rest). Populate

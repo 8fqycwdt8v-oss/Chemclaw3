@@ -76,6 +76,47 @@ livenessProbe:
   failureThreshold: 6
 {{- end -}}
 
+{{- /* A worker's shutdown budget: long enough that the drain `durable/serve.py` performs can
+       actually finish.
+
+       Python installs no SIGTERM handler, so before that module existed a worker died mid-activity
+       on every drain and Temporal re-ran the work only after its start-to-close timeout elapsed. A
+       graceful shutdown fixes that in the process; this fixes it in the pod, because the default
+       30 s grace period would SIGKILL through a 120 s drain and leave the code change buying
+       nothing.
+
+       Derived from the same ConfigMap key the worker reads, plus a margin for cancellation to
+       propagate and the Postgres pool to close, so the two cannot disagree — the failure being
+       avoided is a setting that looks configured and is overridden by a kubelet timer nobody
+       thought to move. */ -}}
+{{- define "chemclaw.workerGracePeriod" -}}
+terminationGracePeriodSeconds: {{ add (int .Values.config.CHEMCLAW_WORKER_GRACEFUL_SHUTDOWN_SECONDS) 30 }}
+{{- end -}}
+
+{{- /* Spread a multi-replica workload across nodes.
+
+       `minReplicas: 2` says nothing about *where* those two land: the default scheduler is free to
+       put both on one node, and then the second replica buys nothing against the failure it exists
+       for. That matters more here than for a stateless service, because the Route pins a browser to
+       one pod on purpose (D-121) — uploaded attachments, the harness todo list and the live
+       `AgentSession` are in that pod's memory — so losing a node loses conversation state, not just
+       capacity.
+
+       `ScheduleAnyway`, not `DoNotSchedule`: a single-node dev or CI cluster must still be able to
+       run the chart. The constraint is a preference the scheduler honours where it can, which is
+       the honest strength of the claim — spreading is not something this chart can guarantee on
+       infrastructure it does not own. */ -}}
+{{- define "chemclaw.spreadAcrossNodes" -}}
+topologySpreadConstraints:
+  - maxSkew: 1
+    topologyKey: kubernetes.io/hostname
+    whenUnsatisfiable: ScheduleAnyway
+    labelSelector:
+      matchLabels:
+        {{- include "chemclaw.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: {{ .component }}
+{{- end -}}
+
 {{- /* The common envFrom (the whole non-secret ConfigMap) + the mTLS volume mount. */ -}}
 {{- define "chemclaw.envFrom" -}}
 - configMapRef:
