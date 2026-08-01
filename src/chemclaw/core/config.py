@@ -922,6 +922,53 @@ class ServiceSettings(BaseSettings):
     # are not gated (they are not LLM-bound).
     service_max_concurrent_turns: int = Field(default=8, gt=0)
     service_turn_admission_timeout_seconds: float = Field(default=5.0, gt=0)
+    # Per-principal request budget (`api/rate_limit.py`), spent inside `require_principal` so it
+    # covers every authenticated route and none of the probes. The two guards above are scoped to
+    # *turns*, so a caller holding them at zero could still drive `/proposals`, `/jobs`,
+    # `/schedules` and `/sessions` as fast as the network allowed — every one of which does real
+    # work against Temporal or Postgres. A loop with no LLM call in it was free.
+    #
+    # A token bucket: `per_minute` is the sustained refill and `burst` the ceiling a caller may
+    # spend at once. A fixed window would let someone spend a whole allowance at its last
+    # millisecond and the next at its first, so the observed peak is twice the configured rate at
+    # the moment the system can least absorb it.
+    #
+    # 0 disables, and that is the code default for the same reason `budget_enabled` is off in code
+    # and on in the chart (REV-16): a CLI, a test and a single-user dev run have no reason to be
+    # throttled, and a limiter that fires there is one people switch off everywhere.
+    #
+    # Per process, like `service_max_concurrent_turns`, and with the same caveat: `maxReplicas`
+    # multiplies the real ceiling, and a fleet-wide limit belongs at the ingress.
+    service_rate_limit_per_minute: float = Field(default=0.0, ge=0)
+    service_rate_limit_burst: float = Field(default=30.0, gt=0)
+    # How many principals the limiter remembers before evicting the least recently seen. A map
+    # keyed by caller identity is the classic unbounded-growth bug (fixed three times in this
+    # codebase, most recently for metric label series, D-152), and here the key is
+    # attacker-influenced — minting tokens for many `oid`s is exactly the way around a per-principal
+    # limit. Eviction costs that caller one free burst and costs the process nothing.
+    service_rate_limit_max_principals: int = Field(default=10_000, gt=0)
+    # Hard ceiling on a request body, refused with 413 *before* anything reads it
+    # (`api/app._BodySizeLimit`). `attachment_max_bytes` was the only size check and it runs inside
+    # `parse_attachment` — by then Starlette's multipart parser has already written the whole body
+    # to a spooled temp file (RAM to 1 MB, then the pod's ephemeral disk), so a 5 GB upload was
+    # ingested in full and then refused. Above `attachment_max_bytes` because a multipart envelope
+    # carries boundaries and headers around the file; 0 disables.
+    service_max_request_bytes: int = Field(default=4_000_000, ge=0)
+    # The three uvicorn transport bounds, read by `deploy/entrypoint.sh`. Settings rather than
+    # literals in the script for the usual reason — every threshold is one config value — and here
+    # for a second one: they are the only knobs in the system an operator must tune *against the
+    # connection count*, and burying them in a shell script is where they would never be found.
+    #
+    # None of these can be imposed by the application: by the time a request reaches an ASGI app,
+    # uvicorn has accepted the socket and parsed the headers. `max_connections` bounds sockets, not
+    # turns — deliberately far above `service_max_concurrent_turns`, since a connection waiting for
+    # an admission permit or holding an SSE stream is doing nothing expensive; it is the backstop,
+    # not the policy. `keepalive_seconds` reclaims an idle connection's slot. `max_header_bytes`
+    # bounds the request line plus headers, without which a client can dribble an unbounded header
+    # block for as long as it likes.
+    service_max_connections: int = Field(default=256, gt=0)
+    service_keepalive_seconds: int = Field(default=15, gt=0)
+    service_max_header_bytes: int = Field(default=32_768, gt=0)
     # Wall-clock bound on one streamed turn — how long a turn may hold its admission permit. The
     # admission timeout only bounds the *wait* for a permit; without this, a hung model stream
     # or a deliberately slow-reading SSE client pins a permit indefinitely, and a handful of

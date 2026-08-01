@@ -1,0 +1,292 @@
+"""What one authenticated caller could do to the front door, and what one upload could.
+
+**Nothing bounded requests.** Two admission controls existed and both were scoped to the expensive
+path: the concurrency cap bounds turns in flight, the budget guard (D-144) meters tokens. So a
+caller holding both at zero could still drive `GET /proposals`, `GET /jobs`, `GET /schedules` and
+`POST /sessions` as fast as the network allowed — every one of which does real work against Temporal
+or Postgres. A loop with no LLM call in it was free.
+
+**The upload cap was in the wrong place**, and the mistake is easy to make because the check did
+exist.
+`parse_attachment` refuses anything over `attachment_max_bytes`. But it runs in the route handler,
+and by then Starlette's multipart parser has already consumed the whole body into a spooled temp
+file — RAM to 1 MB, then the pod's ephemeral disk. A 5 GB upload was ingested in full and *then*
+refused. The cap described what the parser would accept, never what the process would ingest.
+"""
+
+import asyncio
+
+import pytest
+from agent_framework import AgentSession
+from fastapi.testclient import TestClient
+
+from chemclaw.api.app import create_app
+from chemclaw.api.rate_limit import RateLimited, RequestLimiter, reset_limiter
+
+
+class _SessionOnlyAgent:
+    """Just enough agent for `POST /sessions` to succeed, which is all the body tests need."""
+
+    def __init__(self) -> None:
+        """No tools: the middleware under test never reaches one."""
+        self.mcp_tools: list[object] = []
+
+    def create_session(self, *, session_id: str) -> AgentSession:
+        """Hand back a session, so a 413 is the middleware's doing and not a missing method."""
+        return AgentSession(session_id=session_id)
+
+
+def _app_with_sessions() -> TestClient:
+    """A client whose `POST /sessions` really works, so a 413 is the middleware's doing."""
+    return TestClient(create_app(agent_factory=lambda _profile: _SessionOnlyAgent()))
+
+
+@pytest.fixture(autouse=True)
+def _fresh_limiter() -> None:
+    """The limiter is process-wide, so a test must not inherit another's buckets."""
+    reset_limiter()
+
+
+def _limiter(
+    *, per_minute: float = 60.0, burst: float = 2.0, principals: int = 8
+) -> RequestLimiter:
+    """A limiter with small numbers, so the boundary is where the assertions can see it."""
+    return RequestLimiter(per_minute=per_minute, burst=burst, max_principals=principals)
+
+
+def test_a_caller_may_burst_and_then_must_wait() -> None:
+    """The finding: an authenticated caller had no request budget at all.
+
+    Driven with an injected clock rather than `sleep`, because a rate limiter tested by sleeping is
+    a rate limiter tested at exactly one rate — and the slow assertions are the ones that get
+    deleted later.
+    """
+    limiter = _limiter(burst=2.0)
+    limiter.check("chemist", now=100.0)
+    limiter.check("chemist", now=100.0)
+    with pytest.raises(RateLimited):
+        limiter.check("chemist", now=100.0)
+
+
+def test_the_bucket_refills_continuously_rather_than_at_a_window_edge() -> None:
+    """Why a bucket and not a fixed window.
+
+    A fixed window lets a caller spend a whole allowance in its last millisecond and the next in its
+    first, so the observed peak is twice the configured rate at the moment a system can least absorb
+    it. A bucket has no edge to align to: at 60/min one token is back one second later, and not two.
+    """
+    limiter = _limiter(per_minute=60.0, burst=2.0)
+    limiter.check("chemist", now=0.0)
+    limiter.check("chemist", now=0.0)
+    with pytest.raises(RateLimited):
+        limiter.check("chemist", now=0.0)
+
+    limiter.check("chemist", now=1.0)  # exactly one token has refilled
+    with pytest.raises(RateLimited):
+        limiter.check("chemist", now=1.0)
+
+
+def test_the_refill_never_exceeds_the_burst() -> None:
+    """An idle caller returns to `burst`, not to an unbounded credit.
+
+    Without the clamp, a caller who waited an hour would accumulate an hour's tokens and could spend
+    them all at once — which is precisely the spike the limiter exists to prevent, arrived at from
+    the other direction.
+    """
+    limiter = _limiter(per_minute=60.0, burst=2.0)
+    limiter.check("chemist", now=0.0)
+    for spent in range(2):
+        limiter.check("chemist", now=3600.0 + spent)
+    with pytest.raises(RateLimited):
+        limiter.check("chemist", now=3600.0)
+
+
+def test_one_callers_budget_is_not_anothers() -> None:
+    """Per principal.
+
+    A shared bucket would be a global limit with extra steps: one busy script would refuse everyone
+    else, which is the outage the limiter is supposed to prevent.
+    """
+    limiter = _limiter(burst=1.0)
+    limiter.check("first", now=0.0)
+    limiter.check("second", now=0.0)
+    with pytest.raises(RateLimited):
+        limiter.check("first", now=0.0)
+
+
+def test_the_bucket_map_cannot_grow_without_bound() -> None:
+    """A map keyed by caller identity, with an attacker-influenced key.
+
+    Minting tokens for many `oid`s is exactly the way around a per-principal limit, so the limiter
+    would be the thing that fails first — this codebase has fixed unbounded identity-keyed maps
+    three times, most recently for metric label series (D-152). Eviction costs the evicted caller
+    one free burst and costs the process nothing.
+    """
+    limiter = _limiter(principals=3)
+    for index in range(50):
+        limiter.check(f"principal-{index}", now=float(index))
+    assert len(limiter._buckets) == 3
+
+
+def test_eviction_drops_the_least_recently_seen_not_the_busiest() -> None:
+    """LRU order, so a steady caller is not evicted by a flood and handed a fresh burst."""
+    limiter = _limiter(principals=2, burst=1.0)
+    limiter.check("steady", now=0.0)
+    limiter.check("other", now=1.0)
+    limiter.check("steady", now=2.0)  # refreshes `steady`, making `other` the oldest
+    limiter.check("newcomer", now=3.0)
+    assert "steady" in limiter._buckets and "other" not in limiter._buckets
+
+
+def test_a_limited_request_is_a_429_carrying_how_long_to_wait(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """End to end through the real dependency, because the wiring is the claim.
+
+    The limit is spent inside `require_principal` so it covers every authenticated route and cannot
+    be forgotten by a new one; that is only true if the dependency really calls it. `Retry-After` so
+    a client backs off by the right amount instead of guessing.
+    """
+    monkeypatch.setattr("chemclaw.core.config.settings.service_rate_limit_per_minute", 60.0)
+    monkeypatch.setattr("chemclaw.core.config.settings.service_rate_limit_burst", 1.0)
+    reset_limiter()
+
+    with TestClient(create_app(agent_factory=lambda _profile: object())) as client:
+        assert client.get("/profiles").status_code == 200
+        refused = client.get("/profiles")
+
+    assert refused.status_code == 429
+    assert int(refused.headers["Retry-After"]) >= 1
+
+
+def test_the_probes_are_never_limited(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A throttled probe reads as a down pod, and a throttled scrape as a down target.
+
+    `/healthz`, `/readyz` and `/metrics` do not depend on `require_principal`, which is what keeps
+    them out — asserted rather than assumed, because moving the gate to a middleware or an app-level
+    dependency (both tempting) would silently catch them.
+    """
+    monkeypatch.setattr("chemclaw.core.config.settings.service_rate_limit_per_minute", 60.0)
+    monkeypatch.setattr("chemclaw.core.config.settings.service_rate_limit_burst", 1.0)
+    reset_limiter()
+
+    with TestClient(create_app(agent_factory=lambda _profile: object())) as client:
+        for _ in range(10):
+            assert client.get("/healthz").status_code == 200
+            assert client.get("/metrics").status_code == 200
+
+
+def test_the_limiter_is_off_by_default(monkeypatch: pytest.MonkeyPatch) -> None:
+    """0 in code, on in the chart — the shape `budget_enabled` already uses (REV-16).
+
+    A CLI, a test and a single-user dev run have no reason to be throttled, and a limiter that fires
+    there is one people switch off everywhere.
+    """
+    from chemclaw.core.config import settings
+
+    assert settings.service_rate_limit_per_minute == 0.0
+    with TestClient(create_app(agent_factory=lambda _profile: object())) as client:
+        assert all(client.get("/profiles").status_code == 200 for _ in range(50))
+
+
+# --- the request body ceiling -----------------------------------------------------------------
+
+
+def test_an_oversized_body_is_refused_before_anything_reads_it(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """413 from the declared `Content-Length`, without the body being consumed.
+
+    This is the layer `parse_attachment` could not be: by the time a route handler runs, the
+    multipart parser has already written the whole upload to a spooled temp file. The refusal has
+    to happen above the app or it happens after the cost.
+    """
+    monkeypatch.setattr("chemclaw.core.config.settings.service_max_request_bytes", 1024)
+
+    with _app_with_sessions() as client:
+        response = client.post("/sessions", content=b"x" * 4096)
+
+    assert response.status_code == 413
+    assert "limit" in response.json()["detail"]
+
+
+def test_an_undeclared_body_is_still_bounded(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A client that simply omits `Content-Length` must not walk past the ceiling.
+
+    Checking only the header would be a bound on honest clients, which is not a bound. The chunked
+    path counts bytes as they arrive and stops the moment it crosses.
+    """
+    monkeypatch.setattr("chemclaw.core.config.settings.service_max_request_bytes", 1024)
+
+    def _chunks() -> object:
+        for _ in range(10):
+            yield b"x" * 512
+
+    with _app_with_sessions() as client:
+        response = client.post("/sessions", content=_chunks())
+
+    assert response.status_code == 413
+
+
+def test_an_ordinary_request_passes_through_untouched(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The bound must be invisible below it.
+
+    A middleware that mangles ordinary traffic is worse than no middleware, so the passing case is
+    asserted as explicitly as the refusing one.
+    """
+    monkeypatch.setattr("chemclaw.core.config.settings.service_max_request_bytes", 1_000_000)
+
+    with _app_with_sessions() as client:
+        response = client.post("/sessions", json={"profile": None})
+
+    assert response.status_code == 200
+
+
+def test_the_ceiling_leaves_room_for_the_envelope_around_an_attachment() -> None:
+    """The body limit bounds the whole multipart, not the file inside it.
+
+    Set equal to `attachment_max_bytes` it would refuse a file *at* the documented attachment size,
+    because the boundaries and part headers push the body over — a limit that makes the neighbouring
+    documented limit unreachable.
+    """
+    from chemclaw.core.config import settings
+
+    assert settings.service_max_request_bytes > settings.attachment_max_bytes
+
+
+def test_a_declared_oversize_body_is_refused_without_reading_a_byte() -> None:
+    """The `Content-Length` check is not a duplicate of the counting path — it is the cheap one.
+
+    The counting path alone already refuses the request, so this looked redundant and a mutation
+    that deleted it passed every other test here. What it buys is that a client announcing a 5 GB
+    upload is turned away *before* the transfer, rather than after `service_max_request_bytes` of it
+    has crossed the network and been parsed. Asserted by driving the middleware directly with a
+    sentinel app, because in-process test transport cannot show the difference at the HTTP level.
+    """
+    from chemclaw.api.app import _BodySizeLimit
+
+    reached = False
+
+    async def _app(_scope: object, _receive: object, _send: object) -> None:
+        nonlocal reached
+        reached = True
+
+    sent: list[dict[str, object]] = []
+
+    async def _send(message: dict[str, object]) -> None:
+        sent.append(message)
+
+    async def _receive() -> dict[str, object]:  # pragma: no cover - must never be awaited
+        raise AssertionError("the body was read despite a declared size over the limit")
+
+    async def _exercise() -> None:
+        scope = {
+            "type": "http",
+            "headers": [(b"content-length", b"999999999")],
+        }
+        await _BodySizeLimit(_app, max_bytes=1024)(scope, _receive, _send)  # type: ignore[arg-type]
+
+    asyncio.run(_exercise())
+
+    assert not reached, "the app ran for a request already known to be too large"
+    assert sent[0]["status"] == 413

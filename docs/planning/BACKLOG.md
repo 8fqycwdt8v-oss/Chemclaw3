@@ -364,10 +364,17 @@ QM path. The rows below are what survives that merge, narrowed to say so.
       Containerfile builds `FROM …/python-311:latest`; no `imagePullSecrets` field exists. No
       dependency scanning, SBOM, image scan, secret scanning or signing — and the Containerfile
       explicitly flags xtb (LGPL-3.0) / crest (GPL-3.0) redistribution as an **unmade decision**.
-- [ ] **No rate limiting; attachments buffer before they are checked** — [M]. No per-principal
-      request limit anywhere; `app.py` does `await file.read()` before `parse_attachment` enforces
-      the 2 MB cap, so a 5 GB multipart is read into memory then rejected; uvicorn runs with no
-      `--limit-concurrency`/`--timeout-keep-alive`/header-size flags.
+- [x] **No rate limiting; attachments buffer before they are checked** — closed by
+      D-2026-08-01-a-cheap-request-is-still-a-request. Three layers, each at the only level that can
+      enforce it: uvicorn flags for connections/keep-alive/header size (the app never sees these),
+      an ASGI `_BodySizeLimit` above body parsing, and a per-principal token bucket spent inside
+      `require_principal` so it covers every authenticated route and none of the probes.
+      Two corrections to the row. The buffering is to a **spooled temp file** (RAM to 1 MB, then the
+      pod's disk), not to memory — worse in a different way, and `await file.read()` was the second
+      problem rather than the first: the body is already fully ingested before any handler runs, so
+      no fix inside the handler could have worked. And `parse_attachment`'s check is **not** the one
+      in the wrong place to be deleted — it is a different check (data-shaped, 422, with a second
+      caller in the backfill CLI) that stays beside the transport-shaped 413.
 - [ ] **Tracing is shallow and the docs overstate it** — [M]. One call to MAF's
       `configure_otel_providers` is the whole story; zero first-party spans, no FastAPI/httpx/
       Temporal instrumentation, no `traceparent` propagation (the tell is that `connectors/identity`

@@ -524,3 +524,43 @@ loud. Add a new numbered file that makes the change forward.
 **`applied migrations: (none — already up to date)` on a fresh database.** The migration directory
 resolved to nothing. `CHEMCLAW_SQL_MIGRATIONS_DIR` is workdir-relative (`/app/infra/sql` in the
 image); an empty glob applies zero files and reports success (D-148).
+
+## (xii) A caller is being refused (429 / 413), or should be and is not
+
+Three bounds sit in front of the app, at three levels, because none of them can be enforced from
+inside it (D-2026-08-01-a-cheap-request-is-still-a-request).
+
+**429, `Retry-After: N`.** The per-principal request budget. It is a token bucket:
+`CHEMCLAW_SERVICE_RATE_LIMIT_PER_MINUTE` is the sustained refill and `..._BURST` is what one caller
+may spend at once. Watch `chemclaw_requests_rate_limited_total` — a steady non-zero rate is usually
+a script someone wrote against the API rather than an attack, and the fix is to raise the burst for
+that deployment, not to switch the limiter off.
+
+Two properties worth knowing before you tune it:
+
+- **It is per process.** With `service.autoscaling.maxReplicas: 6` the fleet ceiling is six times
+  what you configured, and a caller pinned to one pod by the Route's affinity cookie (D-121) sees
+  the per-process number. A genuine fleet-wide limit belongs at the ingress.
+- **The probes are exempt by construction.** `/healthz`, `/readyz` and `/metrics` do not depend on
+  `require_principal`, which is the only place the budget is spent. If a probe ever starts getting
+  429s, the gate has been moved somewhere it should not be.
+
+**413.** The request body exceeded `CHEMCLAW_SERVICE_MAX_REQUEST_BYTES`, refused before anything
+read it. If a chemist reports that an attachment *at* the documented size is rejected, check that
+this value still sits above `CHEMCLAW_ATTACHMENT_MAX_BYTES` — the body limit covers the whole
+multipart envelope, boundaries and part headers included, so setting the two equal makes the
+documented attachment size unreachable. `chemclaw_requests_too_large_total` counts these.
+
+**503 with no request in the log at all.** Not the app: uvicorn refused at
+`--limit-concurrency` (`CHEMCLAW_SERVICE_MAX_CONNECTIONS`). It bounds *connections*, not turns, and
+sits far above `CHEMCLAW_SERVICE_MAX_CONCURRENT_TURNS` on purpose — a connection waiting for an
+admission permit or holding an SSE stream costs almost nothing, so this is the backstop and the turn
+cap is the policy. Raise it if long SSE streams plus browser keep-alives genuinely exceed it;
+lowering it to shed load turns the transport into the admission control and sheds the wrong things.
+
+**A slow client that never finishes its headers.** Bounded by
+`CHEMCLAW_SERVICE_MAX_HEADER_BYTES`, and an idle connection is reclaimed after
+`CHEMCLAW_SERVICE_KEEPALIVE_SECONDS`. Neither has a metric: they are transport-level and the
+connection never becomes a request the app can count. `chemclaw_turns_in_flight` against
+`chemclaw_turn_capacity` is the signal to read if the front door feels full and nothing is being
+refused.
