@@ -225,5 +225,6 @@ and is kept only for reservations that were in flight when this changed.
 | [D-2026-08-01-a-turn-you-can-follow-across-a-process](D-2026-08-01-a-turn-you-can-follow-across-a-process.md) | A turn you can follow across a process |
 | [D-2026-08-01-every-process-carries-its-own-witness](D-2026-08-01-every-process-carries-its-own-witness.md) | Every process carries its own witness, and the sentence that stopped two of them |
 | [D-2026-08-01-spend-is-a-ledger-not-a-label](D-2026-08-01-spend-is-a-ledger-not-a-label.md) | Spend is a ledger, not a label |
+| [D-2026-08-01-the-count-lives-in-the-test-not-in-the-prose](D-2026-08-01-the-count-lives-in-the-test-not-in-the-prose.md) | The count lives in the test, not in the prose |
 | [D-2026-08-01-trust-travels-on-the-value-line](D-2026-08-01-trust-travels-on-the-value-line.md) | Trust travels on the value line |
 | [D-2026-08-01-unknown-is-not-fine](D-2026-08-01-unknown-is-not-fine.md) | "Unknown" is not "fine": one shape for how much to trust a number |

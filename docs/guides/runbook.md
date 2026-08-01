@@ -209,10 +209,14 @@ costs its tools for that turn, not the turn itself; set `CHEMCLAW_CONNECTORS_REQ
 startup instead. Verify a bundle standalone with `uvicorn chemclaw.connectors.<name>.server.app:app` and check
 `/healthz`; tool *discovery* needs no database, but *invoking* a search does.
 
-**What ships today.** Six bundles: `molfp` and `rxnfp` (fingerprint search), `safety` (the hazard
-screen), `chem` (bench chemistry over RDKit), `calc` (the fast calculators and the calibration
-ledger), and `bo` (Bayesian optimization — the one that also owns durable work, so it runs a second
-Deployment for its own Temporal worker; set `worker: true` on a bundle in the chart to get one). 
+**What ships today.** The bundles are `molfp` and `rxnfp` (fingerprint search), `safety` (the
+hazard screen), `chem` (bench chemistry over RDKit), `calc` (the fast calculators and the
+calibration ledger), `bo` (Bayesian optimization) and `qm` (the durable QM/DFT run behind the
+Nextflow launcher). `calc`, `bo` and `qm` each declare `jobs:` and therefore own durable work, so
+each runs a second Deployment for its own Temporal worker; set `worker: true` on a bundle in the
+chart to get one. `tests/test_repo_map.py` derives both sets from the `connector.yaml` files on
+disk, so this paragraph is checked rather than remembered.
+
 **What stays in core is a rule, not an omission** (D-115), and `tests/test_tool_registry.py` pins the
 set so adding to it is a reviewed edit:
 
@@ -418,7 +422,7 @@ browse `note/*` refs in the git host, and a rejection left no trace at all. Both
   everyone else sees their own. With `CHEMCLAW_ENTRA_REQUIRED=false` (dev) everything is visible.
 - **What it says**: `GET /proposals/{id}` returns the rendered note exactly as it would land in the
   tree, plus the `session_id` and `correlation_id` of the turn that produced it — so
-  `chemclaw explain <session-id>` reaches the conversation behind a proposal.
+  `make explain SESSION=<session-id>` reaches the conversation behind a proposal (D-166).
 - **Decide**: `POST /proposals/{id}/decision` with `{"approved": true}` or
   `{"approved": false, "reason": "…"}`. A rejection **must** state why; that is the record's whole
   purpose. Deciding twice is a `409`, not a silent overwrite — the first decision stands.
@@ -459,7 +463,7 @@ curl -s localhost:9000/metrics   # this pod's counters, gauges and histograms
 - **`/healthz` stops answering.** The event loop is wedged, almost always by a blocking call inside
   an activity, and the kubelet restarts the pod after `failureThreshold` (2 minutes by default —
   generous, because a false restart mid-job costs more than a slow true one). The metric to read
-  after the restart is `chemclaw_tool_latency_seconds` on the pod that replaced it.
+  after the restart is `chemclaw_tool_duration_seconds` on the pod that replaced it.
 - **The counters read zero on a busy worker.** They are per-process, so you are scraping the wrong
   pod: a durable job launched from the front door increments the front door's registry, and the
   same job's *activity* increments the worker's. Scrape both before concluding a number is missing.

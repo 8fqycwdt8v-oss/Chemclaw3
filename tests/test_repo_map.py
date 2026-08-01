@@ -131,3 +131,58 @@ def test_no_import_package_sits_beside_data() -> None:
         f"directories beside src/ containing Python: {code_outside_src}. `src/` is all the code; "
         "everything beside it is data, configuration or documents."
     )
+
+
+def _bundles() -> set[str]:
+    """Every connector bundle on disk, named by its directory."""
+    return {path.parent.name for path in (_PACKAGE / "connectors").glob("*/connector.yaml")}
+
+
+def _bundles_owning_durable_work() -> set[str]:
+    """The bundles that declare `jobs:` and therefore run their own Temporal worker."""
+    return {
+        name
+        for name in _bundles()
+        if any(
+            line.startswith("jobs:")
+            for line in (_PACKAGE / "connectors" / name / "connector.yaml")
+            .read_text(encoding="utf-8")
+            .splitlines()
+        )
+    }
+
+
+def test_the_runbook_names_the_bundles_that_actually_ship() -> None:
+    """The runbook describes the bundle set, so the set has to be checked rather than remembered.
+
+    It said "Six bundles" and listed six, omitting `qm` entirely — while the same document, twenty
+    lines later, explained that the QM run lives in `connectors/qm/` now. A count in prose goes
+    stale silently; this is the same claim in a form that fails loudly
+    (D-2026-08-01-the-count-lives-in-the-test-not-in-the-prose).
+    """
+    runbook = (_ROOT / "docs" / "guides" / "runbook.md").read_text(encoding="utf-8")
+    marker = "**What ships today.**"
+    assert marker in runbook, "the paragraph that enumerates the bundles has been renamed"
+    # Scoped to that one paragraph, not the whole document. Searching the file finds `qm` in half a
+    # dozen unrelated sentences, so a paragraph that had dropped a bundle still passed — which is
+    # exactly the miss this test exists to prevent, and it survived the first mutation round.
+    paragraph = runbook.split(marker, 1)[1].split("\n\n", 1)[0]
+    bundles = _bundles()
+    assert bundles, "no connector bundles found; the glob or the layout moved"
+    missing = sorted(name for name in bundles if f"`{name}`" not in paragraph)
+    assert not missing, f"the runbook's bundle paragraph does not name {missing}"
+
+
+def test_the_runbook_names_every_bundle_that_owns_durable_work() -> None:
+    """Calling `bo` "the one that also owns durable work" was wrong, in a way one grep settles.
+
+    `calc`, `bo` and `qm` each declare `jobs:`, so each runs a second Deployment for its own
+    Temporal worker. The runbook said only `bo`, nine lines after calling `calc` "the worked
+    example (five jobs, one workflow, one queue, its own worker)" — a document disagreeing with
+    itself, which is what an unchecked claim looks like once someone edits half of it.
+    """
+    durable = _bundles_owning_durable_work()
+    assert durable == {"bo", "calc", "qm"}, (
+        f"the set of bundles owning durable work changed to {sorted(durable)}; update the runbook "
+        "paragraph that names them, which is the claim this test exists to keep honest"
+    )

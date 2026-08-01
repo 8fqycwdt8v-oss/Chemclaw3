@@ -6,9 +6,10 @@
 -- the outcome and a short effect summary (e.g. the PR ref a propose_* tool returned),
 -- and the latency. The stdlib log is the floor; this is the durable, queryable record.
 --
--- Append-only by contract: the writer (agents.audit_store.PostgresAuditSink) only
--- inserts. `actor` is a Phase-6 seam — 'unknown' until Entra identity (oid/upn) is wired,
--- a value change then, not a schema change. The tamper-evident hash chain over rows
+-- Append-only by contract: the writer (chemclaw.agent.audit_store.PostgresAuditSink) only
+-- inserts. `actor` carries the turn's Entra object id, read from chemclaw.agent.identity_context
+-- by chemclaw.agent.audit (F4, D-043..D-047). It was a Phase-6 seam holding 'unknown' when this
+-- table was written; that was true then and stopped being true at F4. The tamper-evident hash chain over rows
 -- (prev_hash/row_hash) is added by 011_audit_hash_chain.sql (F10-G1).
 CREATE TABLE IF NOT EXISTS audit_events (
     id             BIGSERIAL PRIMARY KEY,

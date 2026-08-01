@@ -609,33 +609,28 @@ QM path. The rows below are what survives that merge, narrowed to say so.
       surviving module would falsify the build record the tickets exist to be. `BACKLOG.md` and
       `implementation-tickets.md` carry all 175. Add the glob to `_OPERATOR_DOC_GLOBS` when they are
       clean; a test currently pins the exclusion so it cannot lapse silently.
-- [ ] **Nine counts in prose are wrong, and a regex cannot check a count** — [S]. `README.md` "the
-      three plain secrets" and "the two Temporal workers" (six env keys plus mTLS; four worker
-      Deployments); `CLAUDE.md` "three-secret model" and "167 numbered ADRs" (165);
-      `deploy/README.md` "Five exist" — in a paragraph that then says the count is no longer
-      restated in prose "because a number in prose is exactly what went stale"; `values.yaml` "a
-      seventh cannot arrive unnoticed" and `test_helm_chart.py` "no sixth crept in", off by one in
-      opposite directions beside an assertion that is correct; `architektur.md` "nur drei
-      Klartext-Secrets"; `runbook.md` "Six bundles" (seven — `qm` is missing) and "`bo` is the one
-      that also owns durable work" (`calc`, `bo` and `qm` do); `ARCHITECTURE.md` "the eight
-      validators" (six live in `cli/`, `make` runs nine). The fix this repo has already found twice:
-      delete the number, let a test assert it.
-- [ ] **Six retired concepts are still asserted as current** — [S]. `architektur.md` §6 names two
-      core task queues (there is one, plus a derived `connector-<name>` per bundle — D-118/D-150)
-      and an "MCP-Server" deployment role that `deploy/README.md` already deleted under D-156 as
-      "prose asserting a deployable that does not exist"; `CLAUDE.md` repeats the two-queue claim and
-      says "MCP servers hold capability" where `ARCHITECTURE.md` correctly says connectors do, and
-      calls HPC/DFT deferred 58 lines after saying F5 shipped the Nextflow launcher;
-      `infra/sql/006` still calls `actor` a Phase-6 seam that is `'unknown'` until Entra is wired,
-      which it has been since F4. **`architektur.md` §8 is wrong in the opposite direction** from
-      what the old row claimed: it says role-aware skill filtering "must be added", and
-      `agent/skill_access.py::RoleScopedSkillsSource` has done it since D-052.
-      `servicemonitor.yaml`'s claim about out-of-process metrics is **corrected**
-      (D-2026-08-01-every-process-carries-its-own-witness) — and it is the strongest argument for
-      the systemic guard this row asks for. It was not one wrong sentence in one comment: the same
-      claim sat in `metrics_bridge.py`'s docstring and in a *test assertion* that pinned the
-      deployment to match it, so the three corroborated each other and the deployment stayed wrong
-      for as long as the sentence did. Cost: every metric from seven worker processes, uncollected.
+- [x] **The counts in prose, and the retired concepts** — closed by
+      D-2026-08-01-the-count-lives-in-the-test-not-in-the-prose. **Eight** counts corrected, not the
+      nine reported: `values.yaml`'s "so a seventh cannot arrive unnoticed" is **right** — six
+      secrets exist — and fixing it would have introduced the error. The rest went: `README.md`
+      "three plain secrets"/"two Temporal workers"; `CLAUDE.md` "three-secret model"/"167 numbered
+      ADRs" (165); `deploy/README.md` "Five exist" (six), in the paragraph that then says the count
+      is no longer restated in prose; `architektur.md` "Nur drei Klartext-Secrets"; `runbook.md`
+      "Six bundles" (seven) and "`bo` — the one that also owns durable work" (`calc`, `bo`, `qm`);
+      `ARCHITECTURE.md` "the eight validators"; `test_helm_chart.py`'s "no sixth crept in".
+      The remedy is the one this repo had already found twice and not applied everywhere: **prose
+      names the set and where it is pinned, never how many.** Where a count aids a reader it became
+      an assertion first — `tests/test_repo_map.py` now derives the bundle set and the
+      durable-work set from `connector.yaml` on disk.
+      Six retired concepts corrected too: two core task queues (one, plus a derived
+      `connector-<name>` per bundle); an "MCP-Server" deployment role `deploy/entrypoint.sh` has
+      never had; "MCP servers hold capability" where connectors do; "HPC/DFT is deferred" 58 lines
+      after the same file says F5 shipped the launcher; `infra/sql/006` calling `actor` an unwired
+      Phase-6 seam it stopped being at F4. Plus `runbook.md`'s wrong metric name
+      (`chemclaw_tool_duration_seconds`) and wrong CLI invocation (`make explain SESSION=<id>`).
+      **`architektur.md` §8 was wrong in the opposite direction** from the row that reported it: it
+      says role-aware skill filtering must still be built, and `RoleScopedSkillsSource` has done it
+      since D-052.
 
 ## Open — Every capability exercised live with the flags on (2026-07-31, D-155)
 
