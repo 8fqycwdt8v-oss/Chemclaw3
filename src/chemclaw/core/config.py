@@ -122,6 +122,15 @@ class ObservabilitySettings(BaseSettings):
     # test pins that it does.
     worker_metrics_host: str = "0.0.0.0"
     worker_metrics_port: int = Field(default=9000, ge=0)
+    # How long an in-flight Temporal activity gets to finish after a stop signal before the worker
+    # cancels it (`durable/serve.py`). Bounded on both sides and neither bound is arbitrary: below
+    # it, a drain that cancels everything is a hard kill with extra steps; above it, a node drain is
+    # held open by work Temporal would happily retry. 120 s finishes a short activity — a note
+    # re-index, a digest, an ELN page — and abandons a long one to the retry that already exists
+    # for it. The chart's `terminationGracePeriodSeconds` must sit above this, or the kubelet
+    # SIGKILLs through the drain and the setting buys nothing; `tests/test_deploy_chart.py` pins
+    # that ordering.
+    worker_graceful_shutdown_seconds: float = Field(default=120.0, gt=0)
 
 
 class TemporalSettings(BaseSettings):

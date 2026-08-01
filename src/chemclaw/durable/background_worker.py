@@ -15,15 +15,14 @@ this worker never imports a capability's dependency closure.
 import asyncio
 import logging
 from collections.abc import Callable, Sequence
+from datetime import timedelta
 from typing import Any
 
 from temporalio.worker import Worker
 
-from chemclaw.core import db
 from chemclaw.core.config import settings
 from chemclaw.core.logging import configure_logging, configure_telemetry
 from chemclaw.core.temporal_client import connect
-from chemclaw.core.worker_http import worker_http
 
 # Importing the modules is what registers their workflows and activities (the same
 # side-effect pattern `agents.chemclaw_agent` uses for tools). With the registry
@@ -46,6 +45,7 @@ from chemclaw.durable import retention as _retention  # noqa: F401
 from chemclaw.durable import template_activities as _template_activities  # noqa: F401
 from chemclaw.durable import template_job as _template_job  # noqa: F401
 from chemclaw.durable.registry import describe, registered_activities, registered_workflows
+from chemclaw.durable.serve import serve_worker
 
 logger = logging.getLogger(__name__)
 
@@ -64,6 +64,12 @@ async def main() -> None:
         task_queue=settings.background_task_queue,
         workflows=BACKGROUND_WORKFLOWS,
         activities=BACKGROUND_ACTIVITIES,
+        # How long an in-flight activity gets to finish after a stop signal before it is cancelled.
+        # Here at the constructor rather than inside `serve_worker` because it is the one shutdown
+        # knob a reader would look for beside the work being served, and because the chart's
+        # `terminationGracePeriodSeconds` has to sit above it — a drain the kubelet SIGKILLs
+        # through is not a drain.
+        graceful_shutdown_timeout=timedelta(seconds=settings.worker_graceful_shutdown_seconds),
     )
     logger.info(
         "background worker connected: address=%s namespace=%s queue=%s %s",
@@ -72,18 +78,7 @@ async def main() -> None:
         settings.background_task_queue,
         describe("background"),
     )
-    # Every activity here is a coroutine on this process's one event loop, so a per-call Postgres
-    # handshake is loop time stolen from task polling and heartbeats. Pooled for the worker's
-    # whole life and closed on shutdown.
-    #
-    # `worker_http` is what makes this process observable and probeable at all: readiness is the
-    # worker's own `is_running` rather than the comment that used to stand in for it, and the
-    # counters this worker has always incremented finally have a reader.
-    async with (
-        db.pooling(),
-        worker_http(component="background-worker", ready=lambda: worker.is_running),
-    ):
-        await worker.run()
+    await serve_worker(worker, component="background-worker")
 
 
 if __name__ == "__main__":

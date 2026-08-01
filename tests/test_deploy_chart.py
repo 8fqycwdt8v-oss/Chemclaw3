@@ -449,6 +449,7 @@ def test_only_the_known_crd_is_unvalidated_by_kubeconform() -> None:
         "HorizontalPodAutoscaler",
         "Job",
         "NetworkPolicy",
+        "PodDisruptionBudget",
         "Secret",
         "Service",
         "ServiceAccount",
@@ -699,6 +700,103 @@ def test_a_new_listening_port_came_with_the_rule_that_bounds_it() -> None:
     assert _values()["networkPolicy"]["monitoringNamespaces"], (
         "no namespace may scrape anything but the front door, so every metric this change "
         "exposed is collected by nobody — the exact failure it set out to fix"
+    )
+
+
+def test_a_drain_outlasts_the_work_it_interrupts() -> None:
+    """The default 30 s grace period against a 600 s turn and a 120 s activity drain.
+
+    Every rolling update, node drain and scale-down SIGKILLed whatever was in flight — and for the
+    front door that is worse than lost capacity, because the conversation state that would make a
+    turn resumable (attachments, harness todos, the live `AgentSession`) lives in the pod's memory
+    by design (D-121). For a worker it means Temporal re-runs the activity only after its
+    start-to-close timeout elapses, so the deploy stalls a job for no reason but how it was killed.
+
+    Both grace periods are *derived* from the budget they must outlast, so raising one raises the
+    other. A hand-written number is the failure being avoided: a setting that looks configured and
+    is silently overridden by a kubelet timer nobody thought to move.
+    """
+    service = (CHART / "templates" / "deployment-service.yaml").read_text()
+    assert "CHEMCLAW_SERVICE_TURN_TIMEOUT_SECONDS" in service, (
+        "the front door's grace period is a literal, so raising the turn budget starts SIGKILLing "
+        "turns at the old number"
+    )
+    assert "preStop" in service and ".Values.service.drainSeconds" in service, (
+        "no preStop hook: the Endpoint is removed and SIGTERM sent concurrently, so the router "
+        "keeps routing to a pod that has stopped accepting"
+    )
+    helpers = (CHART / "templates" / "_helpers.tpl").read_text()
+    assert "CHEMCLAW_WORKER_GRACEFUL_SHUTDOWN_SECONDS" in helpers, (
+        "the workers' grace period does not follow the drain budget the worker itself honours"
+    )
+    for path in ("deployment-workers.yaml", "deployment-connectors.yaml"):
+        text = (CHART / "templates" / path).read_text()
+        assert re.search(r'^\s*\{\{-\s*include "chemclaw.workerGracePeriod"', text, re.MULTILINE), (
+            f"{path}'s worker keeps the 30 s default, which SIGKILLs through its own drain"
+        )
+
+    # The two keys the derivations read must exist, or `int nil` renders 0 and the grace period
+    # silently collapses to the margin alone.
+    config = _values()["config"]
+    assert int(config["CHEMCLAW_SERVICE_TURN_TIMEOUT_SECONDS"]) > 0
+    assert int(config["CHEMCLAW_WORKER_GRACEFUL_SHUTDOWN_SECONDS"]) > 0
+
+
+def test_the_drain_budget_the_chart_grants_covers_the_one_the_code_takes() -> None:
+    """The two halves have to agree, and only one of them is in the chart.
+
+    `durable/serve.py` waits `worker_graceful_shutdown_seconds` for in-flight activities; the
+    kubelet SIGKILLs at `terminationGracePeriodSeconds`. If the second is not strictly larger the
+    code change buys nothing — the drain is interrupted at exactly the point it was added to avoid.
+    Executed against the real default rather than asserted about the YAML, because the number that
+    matters is the one the worker process actually reads.
+    """
+    from chemclaw.core.config import settings
+
+    granted = int(_values()["config"]["CHEMCLAW_WORKER_GRACEFUL_SHUTDOWN_SECONDS"])
+    assert granted == int(settings.worker_graceful_shutdown_seconds), (
+        "the chart's worker drain budget and the code default disagree, so a deployment reading "
+        "one and a developer reading the other are looking at different systems"
+    )
+    helpers = (CHART / "templates" / "_helpers.tpl").read_text()
+    margin = re.search(r"CHEMCLAW_WORKER_GRACEFUL_SHUTDOWN_SECONDS\)\s*(\d+)", helpers)
+    assert margin is not None and int(margin.group(1)) > 0, (
+        "the pod's grace period equals the drain budget exactly, leaving no time for cancellation "
+        "to propagate or the Postgres pool to close"
+    )
+
+
+def test_two_replicas_may_not_be_one_node_or_one_eviction() -> None:
+    """`minReplicas: 2` bounds what the HPA runs and nothing about where it lands or what may go.
+
+    Both replicas could be scheduled onto one node, and a drain could evict both at once — so the
+    second replica bought nothing against either failure it exists for. That matters more here than
+    for a stateless service: the Route pins a browser to one pod on purpose (D-121), so losing a
+    node loses conversation state and not merely capacity.
+
+    Deliberately front-door only. A PDB over the singleton background worker would be worse than
+    none — `minAvailable: 1` makes it un-evictable and blocks every node drain forever — and the
+    singleton is a separate open row needing a distributed checkout lock, not a policy object.
+    """
+    service = (CHART / "templates" / "deployment-service.yaml").read_text()
+    assert "chemclaw.spreadAcrossNodes" in service, "both front-door replicas may land on one node"
+
+    budget = (CHART / "templates" / "poddisruptionbudget.yaml").read_text()
+    # As YAML keys, not as text: this template *discusses* `minAvailable` in the comment explaining
+    # why it is not used, and a substring check reads that explanation as the thing it warns
+    # against. The same trap as the worker-probes assertion above, hit twice on one branch.
+    keys = set(re.findall(r"^\s*(minAvailable|maxUnavailable):", budget, flags=re.MULTILINE))
+    assert keys == {"maxUnavailable"}, (
+        "minAvailable would permit five of six pods to be evicted together once the HPA scales up; "
+        "what needs bounding is how many conversations one drain can end"
+    )
+    assert "component: service" in budget, "the disruption budget does not select the front door"
+    assert _values()["service"]["disruptionBudget"]["enabled"] is True
+
+    workers = (CHART / "templates" / "deployment-workers.yaml").read_text()
+    assert "PodDisruptionBudget" not in workers and "-background-worker" not in budget, (
+        "a PDB over a replicas:1 worker either blocks every node drain in the cluster or permits "
+        "exactly what no PDB permits — neither is worth rendering"
     )
 
 

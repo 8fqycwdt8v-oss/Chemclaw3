@@ -1,0 +1,33 @@
+{{- if .Values.service.disruptionBudget.enabled }}
+{{- /* Keep a front door alive through a *voluntary* disruption — a node drain, a cluster upgrade,
+       a descheduler rebalance. Nothing did: `minReplicas: 2` bounds what the HPA runs, and bounds
+       nothing about what a drain may evict at once, so both replicas could go together and the
+       Route would have nowhere to send a conversation.
+
+       `maxUnavailable: 1` rather than `minAvailable`, and the difference is not cosmetic once the
+       HPA scales up: `minAvailable: 1` would permit five of six pods to be evicted simultaneously.
+       Every front-door pod holds session state a sibling cannot see (D-121 — attachments, harness
+       todos, the live `AgentSession`), so the number that matters is how many conversations one
+       drain can end, and that is what `maxUnavailable` bounds.
+
+       **Deliberately not the workers.** `workers.background.replicas: 1` is a hard singleton — the
+       PR-gate checkout lock is host-local (D-069) — and a PDB over a singleton is the classic
+       footgun: `minAvailable: 1` makes it un-evictable and blocks every node drain in the cluster
+       forever, while `maxUnavailable: 1` permits exactly what no PDB permits. Neither is worth
+       rendering. The singleton itself is the real availability gap, it needs the distributed lock,
+       and it stays an open backlog row rather than being papered over with a policy object that
+       would make things worse. Connector servers run `replicas: 1` for the same reason. */ -}}
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "chemclaw.name" . }}-service
+  labels:
+    {{- include "chemclaw.labels" . | nindent 4 }}
+    app.kubernetes.io/component: service
+spec:
+  maxUnavailable: {{ .Values.service.disruptionBudget.maxUnavailable }}
+  selector:
+    matchLabels:
+      {{- include "chemclaw.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: service
+{{- end }}

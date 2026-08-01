@@ -15,15 +15,16 @@ and no list that can silently disagree with what the module actually defines (D-
 
 import asyncio
 import logging
+from datetime import timedelta
 
 from temporalio.worker import Worker
 
 from chemclaw.connectors.queues import bundle_queue
-from chemclaw.core import db
+from chemclaw.core.config import settings
 from chemclaw.core.logging import configure_logging, configure_telemetry
 from chemclaw.core.temporal_client import connect
-from chemclaw.core.worker_http import worker_http
 from chemclaw.durable.registry import describe, registered_activities, registered_workflows
+from chemclaw.durable.serve import serve_worker
 
 logger = logging.getLogger(__name__)
 
@@ -45,19 +46,13 @@ async def run_bundle_worker(connector: str) -> None:
         task_queue=queue,
         workflows=registered_workflows(queue),
         activities=registered_activities(queue),
+        # The same drain budget core's worker gets, and the one that matters more: a bundle's
+        # activity is the expensive science, so re-running it because the pod was killed rather
+        # than drained is the costliest version of this failure.
+        graceful_shutdown_timeout=timedelta(seconds=settings.worker_graceful_shutdown_seconds),
     )
     logger.info("%s connector worker connected: queue=%s %s", connector, queue, describe(queue))
-    # Every activity here is a coroutine on this process's one event loop, so a per-call Postgres
-    # handshake is loop time stolen from task polling and heartbeats. Pooled for the worker's
-    # whole life and closed on shutdown.
-    #
-    # The probe and scrape surface, on the same terms as core's worker: a bundle's worker is the
-    # process running the expensive science, so it is the last one that should be unobservable.
-    async with (
-        db.pooling(),
-        worker_http(component=f"connector-worker-{connector}", ready=lambda: worker.is_running),
-    ):
-        await worker.run()
+    await serve_worker(worker, component=f"connector-worker-{connector}")
 
 
 def main(connector: str) -> None:

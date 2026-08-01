@@ -536,3 +536,32 @@ commit.
 
 **Rule.** After any scripted edit-and-revert loop, `git diff --stat HEAD` before moving on. A
 silent revert of real work looks exactly like a clean tree.
+
+## A test that a comment can satisfy is a test of the comment (2026-08-01)
+
+Twice on one branch, and both times the *reasoning* I was proudest of is what broke the test.
+
+- `test_every_worker_is_probed_and_scraped` asserted `"chemclaw.workerProbes" in text`. Deleting the
+  connector worker's probes left it green, because the template's explanatory comment names the
+  helper it is explaining.
+- `test_two_replicas_may_not_be_one_node_or_one_eviction` asserted `"minAvailable:" not in budget`.
+  It failed on a *correct* template, because the PDB's comment explains at length why
+  `minAvailable` is the wrong choice there.
+
+Both were caught — the first by a mutation, the second by the assertion failing on code I had just
+written and knew to be right. Neither was caught by reading the test.
+
+This repo's house style is long, argued comments in every template and module. That style and
+substring assertions over source text are actively incompatible: the better the comment, the more
+likely it contains the exact string the test is scanning for, in either direction. A false pass and
+a false fail are the same bug.
+
+**Rule.** Never assert a substring against a file this repo writes comments in. Assert the
+*construct*: a template action anchored to its line
+(`^\s*\{\{-\s*include "name"`), a YAML key anchored to its line
+(`^\s*(minAvailable|maxUnavailable):`), a parsed value, or an executed route. If the assertion
+cannot tell code from prose, it is not asserting about the code.
+
+**Rule.** When a substring assertion is genuinely the only option, mutate *both* directions before
+believing it: delete the thing and watch it fail, and add the string to a comment and watch it still
+fail.
