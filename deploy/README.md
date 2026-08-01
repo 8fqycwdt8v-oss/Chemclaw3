@@ -62,7 +62,7 @@ does not read this file, so the row survived. Fingerprints deploy as `connector-
   autoscaling shape outruns its declaration, so that decision cannot reach a cluster by accident.
   `0` disables the check, which is the code default: a CLI or a single-pod dev run has no fleet.
 
-## Stateful dependencies (F6-T3, ADR **D-A6a**)
+## Stateful dependencies (F6-T3, ADR **D-049**, Teilentscheidung D-A6a)
 
 - **Temporal: self-hosted in-cluster** (not Temporal Cloud). Rationale: keeps the durable core inside
   the same cluster + OIDC trust boundary as everything else, and avoids egress of workflow payloads
@@ -143,7 +143,7 @@ this becomes binding at the first production deploy.
 ## Observability (F6-T5)
 
 `CHEMCLAW_OTEL_ENABLED=true` + `CHEMCLAW_OTEL_ENDPOINT` wire OTLP to the in-cluster collector
-(`chemclaw/logging.py` bridges the one config value to `OTEL_EXPORTER_OTLP_ENDPOINT`).
+(`src/chemclaw/core/logging.py` bridges the one config value to `OTEL_EXPORTER_OTLP_ENDPOINT`).
 
 **Two first-party spans, and the propagation that joins them up.** A `chemclaw.turn` span wraps a
 turn and a `chemclaw.tool` span wraps each tool call, so "the question took 40 seconds and 31 of

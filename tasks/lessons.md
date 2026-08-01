@@ -660,3 +660,36 @@ place, `git checkout -- .` between rounds is exact and cheap; without one it is 
 **Rule.** Treat `git checkout`, `git restore` and `git stash` as destructive against uncommitted
 work — the same class as `rm`. Before running one, ask what is in the working tree that is not in a
 commit. "It only reverts the file I just edited" is true and irrelevant: I had also edited that file.
+
+## An ADR that names a counter-example can license it
+
+**Context.** Widening `prose-validate` to check ADR citations. Sub-decision labels like `D-A5a` are
+real but live *inside* another ADR, so I derived the valid set by scanning the decision files. Then
+I wrote the ADR for the change, and it said: "An invented `D-A77b` is still caught." The scan read
+my ADR's body, found `D-A77b`, and licensed it — the test asserting it must fail started failing.
+
+The rule was "a label some ADR mentions", and what I meant was "a label some ADR **defines**". Those
+diverge the moment a document discusses the rule itself. Fixed by scanning only each ADR's title
+line, which is where a defining ADR actually names its sub-decisions.
+
+**Rule.** When deriving an allowlist by scanning documents, ask what makes an occurrence
+*definitional* rather than incidental, and match that position — a heading, a declaration, a
+specific field. "Appears anywhere in the corpus" is not a derivation, it is a wildcard, and the
+first document to write *about* the rule will exploit it.
+
+**Rule.** Writing the ADR is part of testing the change, not paperwork after it. This bug existed
+for an hour and was invisible until the document describing it was added to the corpus it governs.
+
+## Two checks over one corpus will collide on the fixture
+
+**Context.** My new prose test needed a backticked path that does not resolve. `tests/
+test_docstring_paths.py` already asserts that *every* backticked path in every source file resolves
+— including test files — so the literal fixture failed a pre-existing gate. I changed the fake path
+twice before understanding it was the fixture's *form*, not its value, that was wrong.
+
+Fixed by building the string from parts (`"/".join((...))`) so no backticked path literal appears in
+the source at all.
+
+**Rule.** Before writing a test whose fixture is a deliberately-invalid instance of something the
+repo validates, check whether an existing gate scans the test file itself. When one does, construct
+the invalid value at runtime rather than writing it literally.

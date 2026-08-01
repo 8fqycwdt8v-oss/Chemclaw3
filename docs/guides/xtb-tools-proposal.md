@@ -38,13 +38,13 @@ the agent should see.
 
 | Piece | File | What it does |
 |---|---|---|
-| Engine primitives | `calc/xtb_engine.py` | RDKit ETKDG embed (seeded), optional MMFF pre-opt, `tblite` single point, optional ALPB |
-| Energy calculator | `calc/xtb.py` | `XtbInput{smiles, charge}` → `XtbResult{total_energy_hartree}`, cached |
-| pKa calculator | `calc/pka.py` | Enumerate O-H/S-H sites → ALPB-solvated ΔE(deprotonation) → linear calibration |
-| Cache | `calc/store.py` | `CalculationKey(calc_type, calc_version, input_hash, params_hash)` + `run_cached` |
-| Agent tools | `agents/calc_tools.py` | `compute_xtb_energy`, `predict_pka`, `predict_solubility` |
-| Judgment | `skills/calculation-selection/SKILL.md` | Which calculator, and how far to trust it |
-| Durable path | `workflows/qm_job.py`, `agents/qm_tools.py` | Temporal QM job (DFT, mock/Nextflow), job id + poll |
+| Engine primitives | `src/chemclaw/science/calc/xtb_engine.py` | RDKit ETKDG embed (seeded), optional MMFF pre-opt, `tblite` single point, optional ALPB |
+| Energy calculator | `src/chemclaw/science/calc/xtb.py` | `XtbInput{smiles, charge}` → `XtbResult{total_energy_hartree}`, cached |
+| pKa calculator | `src/chemclaw/science/calc/pka.py` | Enumerate O-H/S-H sites → ALPB-solvated ΔE(deprotonation) → linear calibration |
+| Cache | `src/chemclaw/science/calc/store.py` | `CalculationKey(calc_type, calc_version, input_hash, params_hash)` + `run_cached` |
+| Agent tools | `src/chemclaw/connectors/calc/server/tools.py` | `compute_xtb_energy`, `predict_pka`, `predict_solubility` |
+| Judgment | `src/chemclaw/connectors/calc/skills/calculation-selection/SKILL.md` | Which calculator, and how far to trust it |
+| Durable path | `src/chemclaw/connectors/qm/workflows.py`,  `src/chemclaw/agent/durable_tools.py` | Temporal QM job (DFT, mock/Nextflow), job id + poll |
 
 This is a good foundation. The cache key already versions on `tblite`+`rdkit` builds
 (`engine_version()`), the honesty guards already exist (charge-vs-formal-charge, closed-shell
@@ -139,7 +139,7 @@ Everything above plus what only the programs have:
 | **Metadynamics** | `--metadyn` | Conformer/rare-event sampling |
 | **ONIOM** | `--oniom` | QM/QM′ embedding for a reactive site in a large scaffold |
 | **CREST ensembles** | `crest <in> --gfn2 --alpb <solv>` | iMTD-GC conformer/rotamer ensembles + Boltzmann populations |
-| **CREST protomers/tautomers** | `--protonate`, `--deprotonate`, `--tautomerize` | Tautomer ranking, microstate enumeration — a direct upgrade path for `calc/pka.py` |
+| **CREST protomers/tautomers** | `--protonate`, `--deprotonate`, `--tautomerize` | Tautomer ranking, microstate enumeration — a direct upgrade path for `src/chemclaw/science/calc/pka.py` |
 | **CREST entropy mode** | `--entropy` | Conformational entropy, which single-structure RRHO systematically misses |
 
 Machine-readable output: `--json` writes `xtbout.json`; CREST writes `crest_conformers.xyz` +
@@ -247,7 +247,7 @@ Three properties fall out, and they are the reason this seam is worth building f
   which is precisely the provenance story `StoredResult.provenance` was designed for.
 
 **Storage.** Reuse `ResultStore` with `calc_type="structure"` and `calc_version="1"`; no new
-backend, no new migration beyond what `calc/migrate.py` already does. Coordinates are rounded before
+backend, no new migration beyond what `src/chemclaw/science/calc/migrate.py` already does. Coordinates are rounded before
 hashing (default 1e-4 Å) so bit-level float noise from a re-run does not fork the cache.
 
 ### 4.2 Seam B — `XtbSpec`: one request model for every task
@@ -294,7 +294,7 @@ class XtbSpec(BaseModel):
 
 Note what this buys: `cache_key` is written **once**. Adding a task or a knob cannot silently break
 cache correctness, because any new field lands in `params` automatically. The existing per-calculator
-`_calc_version()` functions in `calc/xtb.py` and `calc/pka.py` stay valid and unchanged — this is
+`_calc_version()` functions in `src/chemclaw/science/calc/xtb.py` and `src/chemclaw/science/calc/pka.py` stay valid and unchanged — this is
 additive.
 
 ### 4.3 Seam C — `XtbEngine`: capability-declaring backends
@@ -685,7 +685,7 @@ the acceptance check is the definition of done, per `CLAUDE.md`.
 ### X1 — Foundations: `Structure`, `StructureRef`, `XtbSpec`, one cache key
 
 *No new dependency, no new science, no new tool.* Build the four seams and port
-`calc/xtb.py` onto them behind its existing public API.
+`src/chemclaw/science/calc/xtb.py` onto them behind its existing public API.
 
 **Acceptance:** `compute_xtb_energy` behaves identically (existing tests unchanged and green);
 optimizing nothing, a SMILES and its `structure_id` produce the same cache key; a structure

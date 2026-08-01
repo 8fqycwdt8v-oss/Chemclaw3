@@ -96,7 +96,7 @@ Redis/Postgres reicht meist"). Er sickert **nicht** in Temporal-Workflows, Skill
 Wissensgraphen. Umgekehrt bleibt jeder teure/lange Schritt ein normaler Fire-and-Forget-Aufruf
 an Temporal — der Harness ändert daran nichts, er *sequenziert* nur, wann der Aufruf passiert.
 
-**Blast-Radius im Code:** minimal. Betroffen ist im Kern `agents/chemclaw_agent.py`
+**Blast-Radius im Code:** minimal. Betroffen ist im Kern `src/chemclaw/agent/chemclaw_agent.py`
 (`build_agent` konstruiert künftig optional einen `HarnessAgent` statt eines nackten `Agent`);
 die Tools (`agents/*.py`) und Skills bleiben unverändert, weil der Harness dieselbe Tool-/Skill-
 Registrierung nutzt.
@@ -198,7 +198,7 @@ PR-Gate, das *nach* der Wissensproduktion greift (siehe §6).
 
 ## 8. Config & Leitplanken (keine Magic Numbers, G3)
 
-Alles über **eine** `pydantic-settings`-Quelle (`chemclaw/config.py`), ENV-überschreibbar.
+Alles über **eine** `pydantic-settings`-Quelle (`src/chemclaw/core/config.py`), ENV-überschreibbar.
 **Implementiert** sind bewusst nur die *tatsächlich konsumierten* Felder (config.py-Disziplin:
 keine „für später"-Settings):
 
