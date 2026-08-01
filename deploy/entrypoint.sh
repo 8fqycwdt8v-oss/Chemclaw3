@@ -22,6 +22,23 @@ case "${component}" in
     if [[ "${CHEMCLAW_SERVICE_UVICORN_WORKERS:-1}" -gt 1 ]]; then
       args+=(--workers "${CHEMCLAW_SERVICE_UVICORN_WORKERS}")
     fi
+    # Transport-level bounds, none of which the application can impose on itself: by the time a
+    # request reaches an ASGI app, uvicorn has already accepted the connection and parsed the
+    # headers. Every one is a way to exhaust the process without ever sending a valid request.
+    #
+    #   --limit-concurrency        Connections, not turns. `service_max_concurrent_turns` bounds
+    #                              what may hit the LLM; nothing bounded how many sockets could be
+    #                              open waiting for a permit or holding an SSE stream. Well above
+    #                              the turn cap on purpose — this is the backstop, not the policy.
+    #   --timeout-keep-alive       An idle keep-alive connection held a slot indefinitely.
+    #   --h11-max-incomplete-event-size  The header/request-line ceiling. Without it a client can
+    #                              dribble an unbounded header block and grow the parse buffer for
+    #                              as long as it likes (the classic slowloris shape).
+    #
+    # `_BodySizeLimit` covers the request *body*; these cover everything before it.
+    args+=(--limit-concurrency "${CHEMCLAW_SERVICE_MAX_CONNECTIONS:-256}")
+    args+=(--timeout-keep-alive "${CHEMCLAW_SERVICE_KEEPALIVE_SECONDS:-15}")
+    args+=(--h11-max-incomplete-event-size "${CHEMCLAW_SERVICE_MAX_HEADER_BYTES:-32768}")
     exec uvicorn chemclaw.api.app:create_app --factory "${args[@]}"
     ;;
   background-worker)

@@ -110,6 +110,16 @@ _COUNTERS: dict[str, str] = {
     "chemclaw_db_unavailable_total": (
         "Requests shed with 503 because a pooled Postgres connection could not be obtained."
     ),
+    # The two refusals that happen *before* a turn exists, and so were invisible to every counter
+    # above: they are per-request, not per-turn. Unlabelled deliberately — a per-principal series
+    # would key a metric on user identity, which `/metrics` is unauthenticated and must not carry
+    # (D-152's allowlist). The rate is what an operator alerts on; who hit it is in the log.
+    "chemclaw_requests_rate_limited_total": (
+        "Requests refused with 429 by the per-principal request budget."
+    ),
+    "chemclaw_requests_too_large_total": (
+        "Requests refused with 413 because the body exceeded service_max_request_bytes."
+    ),
     # Same principle as the watermark counter above: the cross-process turn guard (D-121) is a
     # lease, so it holds only while its holder keeps refreshing. A refresh that fails is the guard
     # narrowing, and it must not be something only a log line knows.

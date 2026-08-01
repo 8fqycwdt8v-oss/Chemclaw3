@@ -23,6 +23,7 @@ from fastapi import HTTPException, Request
 from jwt import PyJWKClient
 from pydantic import BaseModel, Field
 
+from chemclaw.api.rate_limit import RateLimited, enforce_request_budget
 from chemclaw.core.config import settings
 
 logger = logging.getLogger(__name__)
@@ -111,14 +112,43 @@ async def require_principal(request: Request) -> Principal:
     them all.
     """
     if not settings.entra_required:
-        return Principal(oid=_DEV_PRINCIPAL_OID, upn="dev@localhost")
+        return _within_budget(Principal(oid=_DEV_PRINCIPAL_OID, upn="dev@localhost"))
     header = request.headers.get("Authorization", "")
     if not header.startswith("Bearer "):
         raise HTTPException(status_code=401, detail="missing bearer token")
     try:
-        return await asyncio.to_thread(validate_token, header[len("Bearer ") :])
+        principal = await asyncio.to_thread(validate_token, header[len("Bearer ") :])
     except AuthError as exc:
         # The specific failure reason (audience/issuer/expiry mismatch) is useful to an operator
         # but is not disclosed to the caller — log it server-side, return a generic 401 (SEC-7).
         logger.info("token validation failed: %s", exc)
         raise HTTPException(status_code=401, detail="invalid or expired token") from exc
+    return _within_budget(principal)
+
+
+def _within_budget(principal: Principal) -> Principal:
+    """Spend one request against this principal's rate budget, or 429.
+
+    The one thing in this module that is not authentication, and it is here for the reason the
+    PR-gate's proposal record is inside `propose_note` (D-2026-07-31): every authenticated route
+    already funnels through `require_principal`, so one call here is a gate a new route cannot
+    forget, while a decorator on twenty routes is a gate the twenty-first silently skips. The
+    policy itself lives in `api/rate_limit.py`; this is only where the funnel is.
+
+    *After* validation, never before. Limiting on the raw bearer token would also throttle the
+    JWKS-backed validation path, which sounds like a bonus and is not: two tokens for one user are
+    two buckets, so the limit would be per-credential rather than per-person, and rotating a token
+    would reset it. `/healthz`, `/readyz` and `/metrics` do not depend on this function and are
+    therefore never limited — a throttled probe reads as a down pod.
+    """
+    try:
+        enforce_request_budget(principal.oid)
+    except RateLimited as exc:
+        raise HTTPException(
+            status_code=429,
+            detail="too many requests",
+            # Seconds until one token refills, so a client backs off by the right amount rather
+            # than guessing — the same courtesy the budget guard's 429 already extends.
+            headers={"Retry-After": str(max(1, int(exc.retry_after_seconds + 0.999)))},
+        ) from exc
+    return principal

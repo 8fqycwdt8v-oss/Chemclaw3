@@ -82,6 +82,12 @@ does not read this file, so the row survived. Fingerprints deploy as `connector-
   intent nothing enforced: a dead poll loop kept the process open and Kubernetes reported `Running`
   (D-2026-08-01-every-process-carries-its-own-witness).
 - HPA scales the stateless front door on CPU; workers scale by hand (queue depth), not HPA.
+- **Request bounds** (D-2026-08-01-a-cheap-request-is-still-a-request): uvicorn is launched with
+  `--limit-concurrency`, `--timeout-keep-alive` and `--h11-max-incomplete-event-size` (all from
+  `CHEMCLAW_SERVICE_*` settings, none of which the app can impose on itself); an ASGI middleware
+  refuses a body over `CHEMCLAW_SERVICE_MAX_REQUEST_BYTES` with 413 before it is read; and a
+  per-principal token bucket refuses with 429, on in the chart and off in code. Tuning and
+  symptoms: `docs/guides/runbook.md` §(xii).
 
 ## Draining a pod (D-2026-08-01-a-drain-is-not-a-kill-with-extra-steps)
 

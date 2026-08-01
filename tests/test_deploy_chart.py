@@ -823,6 +823,35 @@ def test_the_migration_hook_cannot_hold_a_release_open_forever() -> None:
     )
 
 
+def test_the_front_door_is_launched_with_transport_bounds() -> None:
+    """Three limits the application cannot impose on itself, so they have to be uvicorn flags.
+
+    By the time a request reaches an ASGI app, the socket is accepted and the headers are parsed —
+    so a connection flood, a hoard of idle keep-alives and a dribbled unbounded header block are all
+    ways to exhaust the process without ever sending a request the app could refuse.
+    `_BodySizeLimit` covers the request body; these cover everything before it.
+
+    Every value comes from a setting rather than a literal in the script, for the usual reason and
+    for a second one: these are the only knobs an operator must tune against the *connection* count,
+    and buried in a shell script is where they would never be found.
+    """
+    entrypoint = (DEPLOY / "entrypoint.sh").read_text()
+    for flag, setting in (
+        ("--limit-concurrency", "CHEMCLAW_SERVICE_MAX_CONNECTIONS"),
+        ("--timeout-keep-alive", "CHEMCLAW_SERVICE_KEEPALIVE_SECONDS"),
+        ("--h11-max-incomplete-event-size", "CHEMCLAW_SERVICE_MAX_HEADER_BYTES"),
+    ):
+        assert flag in entrypoint, f"uvicorn is launched without {flag}"
+        assert setting in entrypoint, f"{flag} is a literal rather than reading {setting}"
+
+    from chemclaw.core.config import settings
+
+    assert settings.service_max_connections > settings.service_max_concurrent_turns, (
+        "the connection ceiling is at or below the turn cap, so a connection merely *waiting* for "
+        "an admission permit would be refused at the transport — the backstop has become the policy"
+    )
+
+
 def test_egress_destinations_are_declarable() -> None:
     """`to: []` in a NetworkPolicy means *any destination*, not none.
 

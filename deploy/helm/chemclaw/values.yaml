@@ -226,6 +226,17 @@ config:
   # else. A chain nobody checks detects tampering only after someone thinks to look, which in a
   # GxP setting is the one failure mode the chain exists to remove.
   CHEMCLAW_AUDIT_VERIFY_ENABLED: "true"
+  # On in production, off in code, for the same reason `BUDGET_ENABLED` is (REV-16): a CLI, a test
+  # and a single-user dev run have no reason to be throttled, and a deployment serving real users
+  # over a shared endpoint has no reason not to be. The turn guards above bound what reaches the
+  # LLM; this bounds everything else — `/proposals`, `/jobs`, `/schedules`, `/sessions` — which was
+  # entirely unmetered, so a loop with no LLM call in it cost nothing to run.
+  # 120/min sustained with a burst of 30: far above a chemist clicking through a UI, far below what
+  # a script can do. Per process, so `service.autoscaling.maxReplicas` multiplies the real ceiling —
+  # the same caveat the admission cap carries, and the reason a fleet-wide limit belongs at the
+  # ingress rather than here.
+  CHEMCLAW_SERVICE_RATE_LIMIT_PER_MINUTE: "120"
+  CHEMCLAW_SERVICE_RATE_LIMIT_BURST: "30"
   # Stated here rather than left to the code default, because the chart *derives* the front door's
   # `terminationGracePeriodSeconds` from it: a turn is bounded by this, so a drain that outlasts it
   # cannot cut one short. Left implicit, an operator raising the turn budget would silently start
