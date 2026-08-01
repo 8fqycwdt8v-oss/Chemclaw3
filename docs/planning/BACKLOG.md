@@ -304,14 +304,23 @@ QM path. The rows below are what survives that merge, narrowed to say so.
 
 **Operations.**
 
-- [ ] **No backup, restore or DR anywhere** — [L]. Zero occurrences of backup/`pg_dump`/PITR/RPO
-      across `deploy/`, `infra/` and `docs/`. Four unowned stores: Postgres (audit chain, sessions,
-      calculation cache, note index), Temporal's own store, the knowledge git repo, and the external
-      HPC artifact store. **The GxP trap:** `retention.py` refuses to prune `audit_events` because
-      deleting from a hash chain is indistinguishable from tampering, and `DEFERRED` records that
-      *trailing* deletion is undetectable — and a point-in-time restore is exactly a trailing
-      deletion. Any restore silently truncates the compliance chain in the one way it cannot detect.
-      Wants an ADR pairing the backup story with a signed high-water anchor the verifier accepts.
+- [x] **No backup, restore or DR anywhere** — the GxP trap is closed by
+      D-2026-08-01-a-restore-is-a-truncation-nobody-can-see; the tooling is deliberately not, and
+      the row is split rather than half-ticked. The trap was the whole reason this was [L]: a
+      restore is a *trailing* deletion, the one alteration the chain cannot see, so writing the
+      recovery procedure without an anchor would have documented how to silently shorten the
+      compliance trail. A signed high-water anchor now closes it — published to the log as well as
+      the database, because a PITR rolls the database copy back into agreement with the truncated
+      trail it exists to catch. `runbook.md` §(xiii) is the restore procedure and states what the
+      system requires of each of the four stores.
+- [ ] **No backup *tooling*, and three stores whose recovery is someone else's** — [M]. The anchor
+      made a restore safe to perform; nothing here performs one. Deliberately: this chart deploys
+      neither Postgres nor Temporal (the row below), so a `pg_dump` CronJob would claim ownership of
+      stores it does not own and be wrong for the expected case of a managed instance with its own
+      snapshot policy. Wants: whatever the Postgres/Temporal ownership row settles, plus an
+      RPO/RTO an operator can hold their provider to. Only the audit trail needs a point-in-time
+      story — the calculation cache is regenerable by definition (D-011), the note index is rebuilt
+      by `make reindex`, and the knowledge repo is git, so every clone is already a backup.
 - [ ] **Postgres and Temporal are neither deployed nor owned** — [L]. The chart dials
       `chemclaw-temporal-frontend.temporal.svc:7233` and namespace `chemclaw`; there is no subchart,
       no operator manifest, no `register_namespace` call, no retention/archival config, no HA or

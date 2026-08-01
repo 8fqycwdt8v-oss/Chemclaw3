@@ -1630,6 +1630,16 @@ class MemorySettings(BaseSettings):
     # indistinguishable from tampering, so it is the one table with no upper bound. A whole-table
     # read in the shared background worker was on a path to OOM it (DARK-6). The fold carries the
     # chain link across pages, so this bounds memory without weakening the check.
+    # The HMAC key the audit anchors are signed with (`agent/audit_anchor.py`). Empty disables
+    # anchoring, and that is the honest default rather than a generated key: an anchor is only
+    # evidence if its secret lives somewhere a database compromise does not reach, and a value this
+    # process invents for itself would not.
+    #
+    # What it buys: the chain catches modification, reordering, interior deletion and prefix
+    # truncation, and cannot see a *trailing* deletion — the survivors link cleanly. A point-in-time
+    # restore is a trailing deletion, so without this a documented recovery procedure silently
+    # shortens the compliance trail every time it is used.
+    audit_anchor_secret: str = ""
     audit_verify_page_rows: int = Field(default=5000, ge=1)
     # Mid-turn durable-job resume (gap AGT-2): when a turn launches a durable job, wait this
     # long for its result and continue the *same* turn with it, so "compute this, then reason
