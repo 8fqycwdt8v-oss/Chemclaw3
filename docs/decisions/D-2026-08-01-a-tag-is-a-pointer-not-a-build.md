@@ -81,20 +81,33 @@ any other control in this repo:
   was — so no lockfile change could have reached it. It is precisely the half a dependency scan
   cannot see, which is why the row asked for both.
 
-The second run, with the errata applied, was clean on the OS side and surfaced the more
-interesting half: **`setuptools` 70.3.0 and `msgpack` 1.1.2, neither of which is ours.** `uv.lock`
-pins setuptools 83.0.0 and does not contain msgpack at all — they live in the base image's *other*
-Python environments, since the UBI9 layer ships more than one interpreter, each with its own
-`site-packages`. That is precisely the class of finding a lockfile audit is structurally blind to,
-and the clearest argument in this change for why the row asked for both scans rather than either.
+With the errata applied the OS scan came back clean, and what remained took three rounds to
+understand — which is itself the record worth keeping, because the wrong diagnosis was the
+plausible one.
 
-They are upgraded rather than removed, and only where already installed. `--upgrade` on an absent
-package would *add* it — growing the closure to fix a vulnerability that was not there — and
-uninstalling one the base's own tooling depends on would trade a reported problem for an unreported
-one.
+The scan reported **`setuptools` 70.3.0 and `msgpack` 1.1.2**. Neither is ours: `uv.lock` pins
+setuptools 83.0.0 and contains no msgpack at all. The obvious reading was that they lived in the
+base image's other Python environments — UBI9 ships more than one interpreter, each with its own
+`site-packages` — so the fix was to upgrade them wherever installed. It changed nothing, twice,
+and correctly: **they were not installed anywhere.**
 
-None of this was found by the offline suite, by `mypy`, by the lockfile audit, or by review, and all
-of it had been in every image this repo has ever built.
+They were extracted wheels in **uv's package cache**, which `uv sync` writes to
+`$HOME/.cache/uv/archive-v0/` and which was being shipped inside the runtime image. Build-time
+scratch in a production artifact, carrying `dist-info` for build dependencies the application never
+imports. `uv cache clean` is the fix, and it is strictly better than upgrading anything: the
+vulnerable copies are not made safe, they are made absent, along with the rest of a cache that had
+no business in the image.
+
+Three things follow from that, and they are the argument for the gate rather than footnotes to it:
+
+- A lockfile audit is structurally blind to this. `make deps-audit` is clean and always was,
+  because the offending files were never in the lockfile.
+- So is the offline suite, `mypy`, and review. This had been in every image this repo has ever
+  built.
+- The diagnosis only became cheap once the *build* was made to name the paths it had left. Two
+  rounds were spent guessing at filesystem layout from a scanner's summary; the build now prints
+  every remaining `setuptools`/`msgpack` `dist-info` it can find, and that line is what located the
+  cache.
 
 ## Consequences
 

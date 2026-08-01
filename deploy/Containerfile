@@ -116,7 +116,16 @@ COPY deploy/entrypoint.sh /usr/local/bin/chemclaw-entrypoint
 COPY deploy/knowledge-sync.sh /usr/local/bin/chemclaw-knowledge-sync
 
 # Install into a project venv; --frozen fails if the lockfile drifted (reproducible builds).
+#
+# `uv cache clean` is not housekeeping. uv extracts every wheel it downloads into
+# `$HOME/.cache/uv/archive-v0/`, each with its own `dist-info`, and that cache was shipping inside
+# the runtime image — build-time scratch in a production artifact. The image scan is what found it,
+# and found it the hard way: it reported `setuptools` 70.3.0 and `msgpack` 1.1.2, neither of which
+# is *installed* anywhere (uv.lock pins setuptools 83.0.0 and has no msgpack at all), so two rounds
+# of "upgrade it wherever it lives" correctly did nothing — there was nothing to upgrade. They were
+# cached copies of build dependencies, and the fix is to not ship the cache.
 RUN uv sync --frozen --no-dev \
+    && uv cache clean \
     && chmod +x /usr/local/bin/chemclaw-entrypoint /usr/local/bin/chemclaw-knowledge-sync \
     && chown -R 1001:0 /app \
     && chmod -R g=u /app
