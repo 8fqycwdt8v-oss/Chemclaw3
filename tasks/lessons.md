@@ -639,3 +639,24 @@ serves, and taxes them in CI.
 **Rule.** Parse, don't substring, when asserting about source. `"workflow.now" in source` is
 satisfied by the comment above the line — the same trap already recorded twice above. `ast.parse` +
 `ast.unparse` of the specific node is exact and costs three extra lines.
+
+## `git checkout -- <file>` reverts my own uncommitted work, not just the mutation
+
+**Context.** Mutation-testing the "uncertainty reaches the note" change. I applied a mutation with
+`sed`, ran the test, then "undid" it with `git checkout src/.../knowledge.py` — while the whole
+feature was still uncommitted. The checkout restored the file from HEAD, deleting the mutation *and*
+the ~40 lines of new code it was mutating. The next two mutation rounds then failed at collection
+with an ImportError, which read like a broken test and was really a self-inflicted revert. I had to
+re-write both files from context.
+
+The tell was in the output and I nearly missed it: `Updated 0 paths from the index` on one round —
+git reporting that there was nothing to restore, because the previous checkout had already flattened
+it.
+
+**Rule.** Commit before mutation testing. A mutation is a deliberate temporary edit on top of work
+that must survive it, and `git checkout`/`git stash` cannot tell the two apart. With a commit in
+place, `git checkout -- .` between rounds is exact and cheap; without one it is a delete.
+
+**Rule.** Treat `git checkout`, `git restore` and `git stash` as destructive against uncommitted
+work — the same class as `rm`. Before running one, ask what is in the working tree that is not in a
+commit. "It only reverts the file I just edited" is true and irrelevant: I had also edited that file.

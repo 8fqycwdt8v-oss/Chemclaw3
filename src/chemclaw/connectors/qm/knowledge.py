@@ -14,6 +14,43 @@ connector must not be able to reach around the gate, and now it structurally can
 from chemclaw.connectors.qm.specs import QMJobResult, QmJobSpec, qm_job_key
 from chemclaw.core.chem import compound_id
 from chemclaw.kg.note import Note
+from chemclaw.science.calc.uncertainty import Estimate
+
+
+def qm_energy_estimate(result: QMJobResult) -> Estimate:
+    """A finished energy in the uniform trust shape (F8-T1) — what a note or a summary renders.
+
+    **Here rather than on `QMJobResult`**, which would read more naturally and is exactly the
+    mistake `tests/test_connector_isolation.py` exists to catch: `specs.py` is the leaf module
+    `connector.yaml` names as `params_model`, so the chat service imports whatever it imports, and
+    reaching into `chemclaw.science` from there is how `connectors/calc/specs.py` once dragged four
+    science modules into every `build_agent` (D-118). This module is already past that boundary.
+
+    **`uncertainty` is `None`, and that is the answer rather than a gap awaiting a number.** An
+    absolute total energy has no meaningful error bar — as this repo already says where it
+    differences them (`chemclaw.science.calc.reaction`): the method and basis-set error is enormous
+    in absolute terms and cancels almost entirely in a difference. Inventing a figure here would be
+    a fabricated uncertainty, refused for the reason D-2026-08-01 refused fabricated domain bounds —
+    a number in a validated record is expected to have a provenance, and a check that exists gets
+    trusted.
+
+    **Convergence is the domain question.** `in_domain` asks whether the model could speak about
+    this case at all, and an SCF that did not converge never produced an answer it can stand behind.
+    Carrying that as the uniform flag is what lets a consumer which has never heard of an SCF — a
+    skill, a note writer, a retrieval excerpt — decline the number.
+    """
+    return Estimate(
+        value=result.total_energy_hartree,
+        unit="Hartree",
+        method="none",
+        in_domain=result.converged,
+        domain_reasons=()
+        if result.converged
+        else (
+            "the SCF did not converge, so this is where the optimizer stopped rather than a "
+            "stationary point of the method",
+        ),
+    )
 
 
 def note_from_qm_result(result: QMJobResult, calc_key: str = "") -> Note:
@@ -43,6 +80,13 @@ def note_from_qm_result(result: QMJobResult, calc_key: str = "") -> Note:
     `compound_id` is derived from the canonical structure, the target here is the same id that
     helper will produce — one derivation, used twice.
 
+    **The energy line carries its own trust** (F8-T1). It used to be a bare
+    `total energy: {x:.6f} Hartree`, which is the shape a retrieval excerpt quotes back with
+    nothing attached — a confident number, indistinguishable from one the SCF never converged to.
+    It now renders through `Estimate`, which keeps the statement *on* the value line, where the
+    excerpt's blind character prefix cannot separate them. `converged` stays as its own line: it is
+    the primitive fact, and the estimate is the reading derived from it, not a replacement.
+
     The note id is the calculation key, so re-writing the same calculation is idempotent.
     """
     spec = QmJobSpec(
@@ -53,7 +97,7 @@ def note_from_qm_result(result: QMJobResult, calc_key: str = "") -> Note:
     body = (
         f"Calculation for [[{compound_id(result.molecule_smiles)}]] "
         f"(`{result.molecule_smiles}`), method {result.method}/{result.basis_set}.\n\n"
-        f"- total energy: {result.total_energy_hartree:.6f} Hartree\n"
+        f"- total energy: {qm_energy_estimate(result).render(fmt='.6f')}\n"
         f"- converged: {result.converged}\n"
     )
     return Note(
