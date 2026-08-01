@@ -216,13 +216,26 @@ QM path. The rows below are what survives that merge, narrowed to say so.
 
 **Trust: the system predicts without saying when not to be trusted.**
 
-- [ ] **F8-T1 — no applicability domain and no uniform uncertainty contract** — [M], **and it is in
-      no other backlog item**. `implementation-tickets.md:639` specifies `calc/uncertainty.py` with
-      `value + uncertainty + in_domain + method` and conformal prediction where feasible. Verified
-      absent: no such module, zero occurrences of `in_domain`/`applicability`/`conformal`. So
-      `predict_solubility` on a molecule far outside its four-descriptor regression returns a
-      confident number with a training-set RMSE attached, and the `calculation-selection` skill has
-      nothing machine-readable to consult.
+- [x] **F8-T1 — no applicability domain and no uniform uncertainty contract** — closed by
+      D-2026-08-01-unknown-is-not-fine, with the domain half deliberately scoped. `Estimate`
+      (`science/calc/uncertainty.py`) carries `value + unit + uncertainty + method + in_domain +
+      domain_reasons` beside each calculator's own result, `in_domain` is three-valued so "unknown"
+      can never read as "fine" (`trustworthy` requires an affirmative `True`), and `method`
+      distinguishes a constant from a paper's test set from a split-conformal interval over this
+      deployment's own reconciled residuals — which the calibration ledger has been recording since
+      REV-12 and nothing consumed.
+      **The domain that shipped is structural, not statistical, and the difference is the point.**
+      That a salt, an ion or an organometallic is out of domain follows from what the ESOL equation
+      *is* — one molecule, neutral, organic contributions to sum — and is citable without its
+      training data. A descriptor-range or leverage cutoff would need that training set, which this
+      repository does not ship; inventing bounds and calling them "the training ranges" would put a
+      fabricated threshold into a GxP record, which is worse than no check because a check that
+      exists gets trusted.
+- [ ] **F8-T1b — the statistical applicability domain still needs training data** — [S], blocked on
+      a labelled solubility corpus (ESOL's own set, or any other) to derive descriptor bounds or a
+      leverage cutoff from. Structural checks catch a salt and an organometallic; they do not catch
+      a perfectly ordinary neutral organic that is simply far from anything the model was fitted on.
+      This is a data-acquisition decision, not a coding one.
 - [ ] **Uncertainty stops at the calculator and never reaches a note** — [S]. The calculator layer
       carries it well; `qm/knowledge.py` then writes `total energy: {x:.6f} Hartree` with no error
       bar and `bo/knowledge.py` writes a bare objective value. Units are prose in a Markdown body,
