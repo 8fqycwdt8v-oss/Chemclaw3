@@ -2,7 +2,9 @@
 
 Results are addressed by a **versioned** `CalculationKey`: the calculator's
 version is part of the key, so bumping a model or method does not silently return
-a stale result — it is a cache miss and recomputes. `ResultStore` is one
+a stale result — it is a cache miss and recomputes. `CALCULATION_EPOCH` is the
+other half of that guarantee, covering the changes a calculator version cannot
+see because they are ours rather than the underlying program's. `ResultStore` is one
 interface with swappable backends (in-memory for tests, Postgres for real), and
 `cached_compute` is the single lookup-before-compute path every calculator shares
 (DRY) — the one place that decides hit vs. miss and persists new results.
@@ -27,13 +29,63 @@ logger = logging.getLogger(__name__)
 # models; the store persists the plain dict so it stays calculator-agnostic.
 ResultPayload = dict[str, Any]
 
+# The version of **ChemClaw's own** contribution to a stored result — the half no `calc_version`
+# covers, folded into every key by `CalculationKey.build`.
+#
+# Every calculator's `calc_version` answers one question: *would the program we shell out to
+# produce a different number now?* It is built from a tblite build, an xtb/crest binary version, an
+# RDKit version, an HPC pipeline tag. Two things change what a stored row *means* that no such
+# version can see, and they turned out to be the same defect reached from two directions:
+#
+# - **Our own arithmetic was wrong and then fixed.** `xtb_thermo._rotational` divided a linear
+#   rotor's partition function by `2 * symmetry` instead of `symmetry`, so every N2/CO/CO2/HCN/
+#   alkyne entropy and free energy already on disk is wrong. Nothing in an `xtb.hess` key would
+#   ever move for that fix, so those rows would have kept serving the wrong S and G until tblite
+#   happened to be upgraded for unrelated reasons.
+# - **The payload's shape changed under a stable version.** `SolubilityResult` gained `estimate`,
+#   which carries the applicability-domain flag, and nothing was bumped. The field is optional, so
+#   a pre-change row validates back with `estimate=None` — an "OUT OF DOMAIN" salt silently
+#   degrades to "not assessed". `durable/retention.py` deliberately never prunes
+#   `calculation_results`, so such rows never self-heal.
+#
+# One component rather than two, because both are the single fact *what a stored result means
+# changed on our side*, and a mechanism per symptom is how the second one is the one nobody
+# remembers. It rides in `params_hash`, not in `calc_version`: the version string is also the
+# REV-12 calibration ledger's key (`calc.calibration`), and a measured residual stays valid across
+# a ChemClaw fix that a cached prediction does not.
+#
+# **Bump it whenever a ChemClaw-side change makes an already-written row wrong or incomplete**, and
+# add a line to the log below. `tests/test_calc_payload_schemas.py` catches the shape half for you —
+# it fails on any change to a persisted payload model. The arithmetic half is a judgement only the
+# author of the fix can make, so the rule is written here rather than inferred.
+#
+#   1 — introduced. Invalidates every row written before it, deliberately: a pre-epoch cache cannot
+#       be separated into "still correct" and "wrong linear-rotor thermochemistry / missing
+#       applicability-domain flag", and serving the wrong half is the failure this exists to stop.
+CALCULATION_EPOCH = "1"
+
 
 class CalculationKey(BaseModel):
     """Content-addressed identity of a calculation, versioned by the calculator.
 
     Two calculations share a key iff they are the same calculator *version* run on
-    the same input with the same parameters. `calc_version` in the key is what
-    prevents a model/method update from returning a pre-update cached result.
+    the same input with the same parameters, under the same `CALCULATION_EPOCH`.
+    `calc_version` is what prevents a model/method update from returning a pre-update
+    cached result; the epoch is what prevents a *ChemClaw*-side fix or payload change
+    from doing the same, and it is why `build` is the only honest way to make a key.
+
+    **`calc_version` names every program whose output survives into the payload, and no program
+    that does not run** (D-2026-08-01-a-key-names-what-ran) — a calculation that composes two
+    programs names both, because either one moving changes the number.
+
+    That is a *different* axis from `CALCULATION_EPOCH`, and the two are deliberately not
+    merged. The epoch is a source constant: it moves once per release and invalidates every
+    deployment at the same moment. A backend is configuration — two deployments running the
+    identical release resolve different ones, which is why `xtb_spec.resolve_backend` refuses to
+    let `auto` reach a key. Folding a backend into the epoch would make switching one a code
+    change; folding the epoch into a version string would make a ChemClaw-side fix invisible
+    wherever the underlying programs did not also move, which is the failure the epoch exists
+    for.
     """
 
     calc_type: str
@@ -49,12 +101,16 @@ class CalculationKey(BaseModel):
         inputs: Any,
         params: Any = None,
     ) -> "CalculationKey":
-        """Construct a key by hashing the inputs and parameters."""
+        """Construct a key by hashing the inputs and parameters.
+
+        The single place a key is assembled, which is why `CALCULATION_EPOCH` is folded in here:
+        no calculator can be keyed without it, and none has to remember to ask.
+        """
         return cls(
             calc_type=calc_type,
             calc_version=calc_version,
             input_hash=stable_hash(inputs),
-            params_hash=stable_hash(params),
+            params_hash=stable_hash({"epoch": CALCULATION_EPOCH, "params": params}),
         )
 
     def as_str(self) -> str:

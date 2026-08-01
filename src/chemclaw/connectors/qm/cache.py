@@ -20,8 +20,8 @@ digest — it is not a `calc_refs`-valid reference (`chemclaw.kg.note._CALC_REF`
 `type@version:hash:hash` form), and it folds molecule, method, basis and pipeline version into one
 opaque hash. The store's own convention splits them, so this follows `calc`: the **molecule** is the
 input, the **method and basis set** are parameters (as `run_cached_pka` treats its embedding seed),
-and the **pipeline version** is the calculator version, because that is the thing whose change makes
-a stored number stale.
+and the **backend plus pipeline version** is the calculator version, because those are the things
+whose change makes a stored number stale — see `calc_version` for why the backend belongs there.
 
 The pipeline version is also carried in the parameters, which is what makes the readable
 `calc_version` slug safe: `method`/`basis_set` are free-text fields the model authors and
@@ -45,6 +45,10 @@ CALC_TYPE = "dft"
 # What a deployment that has not pinned a pipeline version records instead. `qm_job_key` already
 # omits the version when it is unset, so this preserves that behaviour rather than inventing a
 # second rule: without a configured pipeline there is nothing to invalidate a result against.
+#
+# Reachable under `mock` only: `Settings._hpc_launch_config` refuses an empty `hpc_pipeline_version`
+# once the interface is `nextflow`, precisely so two real pipelines cannot both land here and share
+# each other's energies.
 UNVERSIONED = "unversioned"
 
 # `chemclaw.kg.note._CALC_REF` forbids whitespace and `:` inside a version, because both are
@@ -62,6 +66,25 @@ def version_slug(raw: str) -> str:
     return slug or UNVERSIONED
 
 
+def calc_version() -> str:
+    """What actually computed a QM row — the backend that ran it, and the pipeline it ran.
+
+    **The backend is part of the version, not merely a parameter, for the reason
+    `XtbSpec.calc_version` states: a key that named the wrong program is a key that survives an
+    upgrade to the right one (D-011).** `mock` and `nextflow` are not two configurations of one
+    calculator. `nextflow` runs DFT on a cluster; `mock` synthesizes an energy from the hex digits
+    of a job id (`activities.poll_hpc_status`). With only the pipeline version in the key, a
+    deployment that ran the mock and then pointed at a real cluster served that fabricated number
+    as a cache hit — carrying a `calc_refs` provenance stamp that says a DFT calculation produced
+    it. Naming the backend is what makes the two families of rows unable to reach each other.
+
+    Unlike the free-text pipeline version, `hpc_launch_interface` is a two-value `Literal`, so it
+    can contain nothing the reference form forbids and no two values can collide under
+    `version_slug`. It therefore needs no second, raw copy in `params`.
+    """
+    return f"{settings.hpc_launch_interface}-{version_slug(settings.hpc_pipeline_version)}"
+
+
 def calculation_key(spec: QmJobSpec) -> CalculationKey:
     """The calculation-store identity of one QM job.
 
@@ -72,7 +95,7 @@ def calculation_key(spec: QmJobSpec) -> CalculationKey:
     """
     return CalculationKey.build(
         calc_type=CALC_TYPE,
-        calc_version=version_slug(settings.hpc_pipeline_version),
+        calc_version=calc_version(),
         inputs={"smiles": require_canonical_smiles(spec.molecule_smiles)},
         params={
             "method": spec.method,

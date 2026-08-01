@@ -106,12 +106,24 @@ class XtbSpec(BaseModel):
         return self
 
     def calc_version(self) -> str:
-        """What actually computes this spec, versioned — the cache's staleness guard.
+        """What actually computes this spec, versioned — half the cache's staleness guard.
 
-        Its own method so a task whose work is done by a *different program* can say so.
-        `XtbSpec` runs on `engine`; the CREST-backed specs do not run on it at all, and a
-        key that named the wrong program is a key that survives an upgrade to the right
-        one (D-011). See `CrestSpec`.
+        **The rule, which every override obeys: name every program whose output survives into
+        the stored payload, and no program that does not run**
+        (D-2026-08-01-a-key-names-what-ran). A key that named the wrong program is a key that
+        survives an upgrade to the right one, and a key that omitted the right one is a key that
+        serves one program's number as another's — the same defect from either side (D-011).
+
+        Its own method so a task whose work is done by a *different* program can say so.
+        `XtbSpec` runs on `engine` and names it; `CrestSpec` runs on crest and names that
+        instead; `chemclaw.science.calc.complexes.ComplexSpec` runs both and names both.
+
+        **Only half**, because every name in this string belongs to somebody else's program.
+        Nothing here moves when *our* code changes — which is how a fix to the linear-rotor
+        term in `xtb_thermo` left every N2/CO2/alkyne `xtb.hess` row on disk serving the
+        entropy and free energy it computed wrongly. `calc.store.CALCULATION_EPOCH` is the
+        other half and covers exactly that; it is folded into the key by
+        `CalculationKey.build`, so it is not something a spec has to remember to name.
         """
         return f"{self.method}+{self.engine}+{backend_version(self.engine)}"
 
@@ -169,12 +181,20 @@ class CrestSpec(XtbSpec):
     as `tblite` while crest did the work — which `for_structure` made routine rather than
     hypothetical, because it rewrites `engine` to `tblite` for any open-shell input.
 
-    So `engine` is dropped from this key entirely and `for_structure` is a no-op. Note
-    what the second one means and does not mean: an open-shell CREST search is **not**
-    protected by the D-098 spin-polarization fallback, because there is nowhere to fall
-    back to — crest has no in-process equivalent. That is a real limitation of radical
-    conformer searches, and it is now stated instead of hidden behind a key that claimed
-    tblite had run.
+    So `engine` is dropped from this key and `for_structure` is a no-op. Note what the second
+    one means and does not mean: an open-shell CREST search is **not** protected by the D-098
+    spin-polarization fallback, because there is nowhere to fall back to — crest has no
+    in-process equivalent. That is a real limitation of radical conformer searches, and it is
+    now stated instead of hidden behind a key that claimed tblite had run.
+
+    **What the drop is not: a claim that backends do not belong in keys.** It is the same rule
+    `XtbSpec.calc_version` states, applied to a spec whose numbers all come from crest — name
+    what ran. A subclass that *does* run `engine` therefore has to put it back, and
+    `chemclaw.science.calc.complexes.ComplexSpec` is one: crest picks its binding mode, but
+    `engine` relaxes the three species whose energies are the interaction energy. D-106 dropped
+    `engine` one class too high, and made its own premise false for `ComplexSpec` in the same
+    edit by routing `engine` into that spec's `OptSpec`
+    (D-2026-08-01-a-key-names-what-ran supersedes it on this point).
     """
 
     def for_structure(self, structure: Structure) -> Self:

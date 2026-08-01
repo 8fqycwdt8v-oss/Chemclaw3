@@ -11,6 +11,7 @@ import logging
 import pytest
 from pydantic import BaseModel
 
+from chemclaw.science.calc import store as store_module
 from chemclaw.science.calc.store import (
     CalculationKey,
     InMemoryStore,
@@ -18,6 +19,8 @@ from chemclaw.science.calc.store import (
     cached_compute,
     run_cached,
 )
+from chemclaw.science.calc.structure import Structure
+from chemclaw.science.calc.xtb_spec import XtbSpec
 
 
 def test_identical_calculation_computed_once() -> None:
@@ -71,6 +74,45 @@ def test_version_bump_invalidates_key() -> None:
         assert calls == 2
 
     asyncio.run(_run())
+
+
+def test_an_earlier_epoch_cannot_be_served_to_a_later_one() -> None:
+    """A ChemClaw-side fix must strand the rows it made wrong, not silently keep serving them.
+
+    `calc_version` names the *other* programs — a tblite build, an RDKit build, a pipeline tag —
+    so it does not move when our own code changes. Two changes that left rows on disk misleading:
+    a corrected linear-rotor term in `xtb_thermo` (every stored N2/CO2/alkyne entropy wrong) and
+    `SolubilityResult` gaining its applicability-domain flag (every stored row validating back with
+    `estimate=None`). `CALCULATION_EPOCH` is what makes both a miss.
+    """
+    inputs = {"smiles": "CCO"}
+    before = CalculationKey.build("solub", "esol@2004", inputs=inputs)
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(store_module, "CALCULATION_EPOCH", "next")
+        after = CalculationKey.build("solub", "esol@2004", inputs=inputs)
+
+    # The readable half is untouched, so the REV-12 calibration ledger — which keys on
+    # `(calc_type, calc_version, input_hash)` — still finds its residuals.
+    assert after.calc_version == before.calc_version
+    assert after.input_hash == before.input_hash
+    assert after.params_hash != before.params_hash
+
+
+def test_the_epoch_reaches_every_calculator_not_just_the_one_that_needed_it() -> None:
+    """Folded in by `build`, so no calculator has to remember to name it (D-011).
+
+    The xTB family is the case that proves it: `XtbSpec.calc_version` is entirely other people's
+    version numbers, and an `xtb.hess` row would otherwise outlive any fix of ours.
+    """
+    spec = XtbSpec(task="hess", engine="tblite")
+    structure = Structure(
+        elements=[1, 1], positions=[[0.0, 0.0, 0.0], [0.0, 0.0, 0.74]], smiles="[H][H]"
+    )
+    before = spec.cache_key(structure)
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(store_module, "CALCULATION_EPOCH", "next")
+        after = spec.cache_key(structure)
+    assert after != before
 
 
 def test_params_change_is_a_distinct_key() -> None:

@@ -98,8 +98,27 @@ def test_versions_that_slug_alike_still_key_apart(monkeypatch: pytest.MonkeyPatc
     spaced = calculation_key(_SPEC)
     monkeypatch.setattr(settings, "hpc_pipeline_version", "pipe:1")
     coloned = calculation_key(_SPEC)
-    assert spaced.calc_version == coloned.calc_version == "pipe-1"
+    assert spaced.calc_version == coloned.calc_version == "mock-pipe-1"
     assert spaced != coloned
+
+
+def test_a_mock_energy_is_never_served_to_a_real_cluster(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The backend is in the key, so a fabricated energy cannot be read back as DFT.
+
+    `poll_hpc_status` under `mock` returns `-1.0 * (int(job_id[-4:], 16) % 1000) / 10.0`. Before
+    this, `hpc_launch_interface` was in no key at all: a deployment that ran the mock and later
+    pointed at a real cluster hit the mock's row and served that number as a DFT result, with a
+    `calc_refs` provenance stamp saying so. The pipeline version did not save it — the mock wrote
+    under the `unversioned` slug, which is exactly what an unset `hpc_pipeline_version` produces.
+    """
+    monkeypatch.setattr(settings, "hpc_launch_interface", "mock")
+    mocked = calculation_key(_SPEC)
+    monkeypatch.setattr(settings, "hpc_launch_interface", "nextflow")
+    real = calculation_key(_SPEC)
+
+    assert mocked.calc_version == f"mock-{UNVERSIONED}"
+    assert real.calc_version == f"nextflow-{UNVERSIONED}"
+    assert mocked != real
 
 
 def test_version_slug_falls_back_when_unset() -> None:
@@ -130,6 +149,23 @@ def test_persist_then_lookup_returns_the_result(store: InMemoryStore) -> None:
     assert found.calc_key == key
     assert found.result is not None
     assert found.result.total_energy_hartree == pytest.approx(-154.5)
+
+
+def test_a_mock_row_is_a_miss_for_a_nextflow_deployment(
+    store: InMemoryStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The backend split, through the activities — where the fabricated number would have surfaced.
+
+    Both halves of the defence are exercised at once: `hpc_pipeline_version` is unset, which is the
+    configuration `Settings` now refuses for `nextflow`, and the key still keeps the two apart
+    because the backend itself is in `calc_version`.
+    """
+    monkeypatch.setattr(settings, "hpc_launch_interface", "mock")
+    _persist(_result(energy=-0.4))  # the shape of a mock "energy": a tenth of a hex remainder
+    assert _lookup(_SPEC).result is not None
+
+    monkeypatch.setattr(settings, "hpc_launch_interface", "nextflow")
+    assert _lookup(_SPEC).result is None
 
 
 def test_a_hit_is_attributed_to_whoever_asked_this_time(store: InMemoryStore) -> None:
