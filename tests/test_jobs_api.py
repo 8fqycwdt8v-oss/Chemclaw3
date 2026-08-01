@@ -182,3 +182,115 @@ def test_the_error_carries_the_key_the_audit_trail_is_keyed_on() -> None:
 def _run(awaitable: Any) -> Any:
     """Drive a coroutine from a sync test."""
     return asyncio.run(awaitable)
+
+
+# --- the transcript contract ------------------------------------------------------------------
+
+
+def test_a_reload_recovers_what_the_agent_did_not_only_what_it_said() -> None:
+    """The live stream carries fourteen event types; a reload got `role` and `text`.
+
+    So everything the agent *did* vanished on refresh and a UI could not render history at parity
+    with the live view — the largest single blocker for the frontend repo. The tool calls were
+    never missing from storage: a MAF message already holds `function_call`/`function_result`
+    contents, and the route was flattening them away.
+    """
+    from agent_framework import Message
+
+    from chemclaw.api.app import _transcript
+
+    stored = [
+        Message.from_dict(
+            {"role": "user", "contents": [{"type": "text", "text": "pKa of ethanol?"}]}
+        ),
+        Message.from_dict(
+            {
+                "role": "assistant",
+                "contents": [
+                    {"type": "text", "text": "Let me compute it."},
+                    {
+                        "type": "function_call",
+                        "call_id": "c1",
+                        "name": "predict_pka",
+                        "arguments": {"smiles": "CCO"},
+                    },
+                ],
+            }
+        ),
+        Message.from_dict(
+            {
+                "role": "tool",
+                "contents": [{"type": "function_result", "call_id": "c1", "result": "pKa 15.9"}],
+            }
+        ),
+        Message.from_dict({"role": "assistant", "contents": [{"type": "text", "text": "15.9."}]}),
+    ]
+
+    transcript = _transcript(stored)
+
+    # The bare `tool` message is folded into the call it answers rather than rendered as its own
+    # bubble, which would show every tool twice.
+    assert [entry.role for entry in transcript] == ["user", "assistant", "assistant"]
+    [call] = transcript[1].tool_calls
+    assert call.tool == "predict_pka"
+    assert "CCO" in call.arguments
+    assert call.result == "pKa 15.9"
+
+
+def test_an_unanswered_tool_call_is_rendered_as_unanswered() -> None:
+    """A turn that failed mid-call is a real state, and `None` is the honest rendering.
+
+    An empty-string result would read as "it ran and returned nothing", which is a different and
+    more reassuring claim than "it ran and we do not know how it ended".
+    """
+    from agent_framework import Message
+
+    from chemclaw.api.app import _transcript
+
+    stored = [
+        Message.from_dict(
+            {
+                "role": "assistant",
+                "contents": [
+                    {
+                        "type": "function_call",
+                        "call_id": "orphan",
+                        "name": "predict_pka",
+                        "arguments": {},
+                    }
+                ],
+            }
+        )
+    ]
+
+    [entry] = _transcript(stored)
+    assert entry.tool_calls[0].result is None
+
+
+def test_a_transcript_bounds_what_one_call_can_carry() -> None:
+    """A tool argument can be a whole optimization problem; a reload must not ship one per call.
+
+    The same bound the audit trail applies, for the same reason.
+    """
+    from agent_framework import Message
+
+    from chemclaw.api.app import _TRANSCRIPT_ARG_CHARS, _transcript
+
+    stored = [
+        Message.from_dict(
+            {
+                "role": "assistant",
+                "contents": [
+                    {
+                        "type": "function_call",
+                        "call_id": "big",
+                        "name": "suggest_next_experiment",
+                        "arguments": {"problem": "x" * 5000},
+                    }
+                ],
+            }
+        )
+    ]
+
+    [entry] = _transcript(stored)
+    assert len(entry.tool_calls[0].arguments) <= _TRANSCRIPT_ARG_CHARS + 1
