@@ -26,6 +26,14 @@ data:
          value block created. Only the enabled connectors appear, so a disabled bundle is simply
          unreachable rather than pointing at a Service with no pods. */}}
   CHEMCLAW_CONNECTOR_URLS: {{ include "chemclaw.connectorUrls" . | quote }}
+  {{- /* Derived from the autoscaling block rather than hand-written in `config`, and for the
+         sharpest version of the same reason: the admission cap is per-process, so the load the
+         shared LLM endpoint really sees is `this × uvicorn workers × the cap`. Written by hand it
+         would be a second copy of `maxReplicas` that goes stale the first time someone scales the
+         front door — which is exactly the silent multiplication
+         `CHEMCLAW_SERVICE_FLEET_MAX_CONCURRENT_TURNS` exists to catch. Derived, it is the same
+         number the HPA obeys. When the HPA is off, the fixed replica count is that number. */}}
+  CHEMCLAW_SERVICE_FLEET_REPLICAS: {{ if .Values.service.autoscaling.enabled }}{{ .Values.service.autoscaling.maxReplicas | quote }}{{ else }}{{ .Values.service.replicas | quote }}{{ end }}
 ---
 apiVersion: v1
 kind: ServiceAccount

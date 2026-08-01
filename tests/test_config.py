@@ -374,6 +374,24 @@ def _clear_prefixed_env() -> Iterator[None]:
             {"session_store": "memory", "service_uvicorn_workers": 4},
         ),
         (
+            "a fleet cannot admit more turns than its declared ceiling",
+            {
+                "service_fleet_replicas": 6,
+                "service_max_concurrent_turns": 16,
+                "service_fleet_max_concurrent_turns": 48,
+            },
+        ),
+        (
+            "uvicorn workers multiply the fleet the same way replicas do",
+            {
+                "session_store": "postgres",
+                "service_fleet_replicas": 6,
+                "service_uvicorn_workers": 2,
+                "service_max_concurrent_turns": 8,
+                "service_fleet_max_concurrent_turns": 48,
+            },
+        ),
+        (
             "a mid-turn resume cannot outlive its turn",
             {
                 "mid_turn_resume_enabled": True,
@@ -418,6 +436,56 @@ def test_configurations_the_comments_forbid_are_rejected(name: str, overrides: d
 def test_the_shipped_defaults_still_construct() -> None:
     """The new guards must not reject the configuration the repository actually ships."""
     assert Settings(_env_file=None) is not None  # type: ignore[call-arg]
+
+
+def test_an_undeclared_fleet_ceiling_checks_nothing() -> None:
+    """0 must mean "no opinion", not "a ceiling of zero".
+
+    The code default, because a CLI, a test and a single-pod dev run have no fleet to bound — the
+    same split `budget_enabled` and the rate limiter already take. A guard that fired there is one
+    people switch off everywhere, and the failure mode would be spectacular: every process refusing
+    to start because it can admit eight turns and was allowed none.
+    """
+    settings = Settings(  # type: ignore[call-arg]
+        _env_file=None, service_fleet_replicas=99, service_max_concurrent_turns=64
+    )
+    assert settings.service_fleet_max_concurrent_turns == 0
+
+
+def test_a_fleet_exactly_at_its_ceiling_is_allowed() -> None:
+    """The check is `>`, not `>=` — the shipped chart sits exactly on its own number.
+
+    `values.yaml` declares 48 against 6 replicas × 1 worker × 8 turns, deliberately, so the ceiling
+    ships as a statement of the current shape rather than as slack. Off by one here and the chart
+    the repository ships would fail to boot.
+    """
+    settings = Settings(  # type: ignore[call-arg]
+        _env_file=None,
+        service_fleet_replicas=6,
+        service_max_concurrent_turns=8,
+        service_fleet_max_concurrent_turns=48,
+    )
+    assert settings.service_fleet_max_concurrent_turns == 48
+
+
+def test_the_fleet_ceiling_error_names_both_sides_and_every_factor() -> None:
+    """An operator has to be told which of three numbers to change, and what the product was.
+
+    "Invalid configuration" would send them to the one setting whose name contains `concurrent`,
+    which is exactly the per-process cap that is *not* the whole story — the point of the guard is
+    that the ceiling is a product nobody had computed.
+    """
+    with pytest.raises(ValueError) as excinfo:
+        Settings(  # type: ignore[call-arg]
+            _env_file=None,
+            service_fleet_replicas=6,
+            service_max_concurrent_turns=16,
+            service_fleet_max_concurrent_turns=48,
+        )
+    message = str(excinfo.value)
+    assert "96" in message and "48" in message
+    assert "6 replicas" in message and "16 per process" in message
+    assert "service_fleet_max_concurrent_turns" in message
 
 
 def test_the_embedding_width_check_still_leaves_the_standalone_embedder_alone() -> None:

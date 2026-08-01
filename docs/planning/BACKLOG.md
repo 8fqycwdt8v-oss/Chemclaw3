@@ -450,9 +450,21 @@ QM path. The rows below are what survives that merge, narrowed to say so.
       matches the secret *values* this process holds rather than guessing at token-shaped strings,
       and the deployment's retention/PII policy over the audit trail remains a policy question, not
       a code one.
-- [ ] **Autoscaling defeats the admission guard's purpose** — [M]. The guard is per-process by
-      design to protect a shared LLM endpoint; `maxReplicas: 6` silently multiplies the real ceiling
-      to `6 × service_max_concurrent_turns`. No deployment-wide ceiling, no metric expressing one.
+- [x] **Autoscaling defeats the admission guard's purpose** — closed by
+      D-2026-08-01-a-per-process-cap-multiplied-by-a-number-nobody-wrote-down. The guard stays
+      per-process (SCALE-1's trade is unchanged); what was missing was the *arithmetic*.
+      `service_fleet_replicas` is derived by the chart from `autoscaling.maxReplicas`, so it cannot
+      drift from the number the HPA obeys, and `service_fleet_max_concurrent_turns` is the ceiling
+      the LLM endpoint's throughput budget permits — a configuration whose
+      `replicas × workers × cap` exceeds it refuses to start, naming the product and every factor.
+      The chart declares 48, exactly `6 × 1 × 8`, so it ships as a statement of today's shape rather
+      than slack, and a test rejects a chart whose autoscaling outruns its own declaration.
+      The metric half is `chemclaw_fleet_turn_ceiling` against `sum(chemclaw_turn_capacity)`, which
+      catches what startup validation structurally cannot: a hand-scaled Deployment, an HPA edited
+      in-cluster, or a rollout with both generations up — each of which passes the fleet ceiling
+      while every pod's own config stays valid.
+      **Not closed by this:** the 49th turn is still admitted. This bounds the configuration, not
+      the request; fleet-wide *admission* remains rejected under SCALE-1.
 - [ ] **No cost attribution** — [M]. Token metrics carry `profile` only, so "what did team X cost"
       is unanswerable, and HPC/compute spend is entirely unmetered — no counter for jobs launched or
       node-hours, on the most expensive thing the system does.
@@ -1058,7 +1070,10 @@ The load test's fixes landed (see D-119). What it surfaced and did **not** close
       **Admission control is deliberately still per-process**: it bounds load on the shared LLM
       endpoint, and the deployment's real ceiling is `service_max_concurrent_turns × workers ×
       replicas`. Making it exact would cost a durable write and a heartbeat per turn to bound a
-      *resource*, which is a worse trade than tuning the per-process number (SCALE-3).
+      *resource*, which is a worse trade than tuning the per-process number (SCALE-3). That product
+      is now declared, checked at startup and exported as a gauge
+      (D-2026-08-01-a-per-process-cap-multiplied-by-a-number-nobody-wrote-down) — the trade above is
+      unchanged, but the number it produces is no longer written down nowhere.
 - [ ] **SCALE-1b Attachments and harness todos are still per-process, and always were.**
       `agents.attachments.STORE` and the harness `TodoProvider` state live on the live
       `AgentSession` in one process's memory, so a chemist who uploads a CSV and then asks about it
