@@ -95,15 +95,20 @@ def test_seed_metrics_are_registered() -> None:
 def test_harness_runs_over_versioned_case_set_and_gates() -> None:
     """The harness scores the real chemistry case-set reproducibly and flags the failing case."""
     cases = load_eval_cases(settings.eval_case_dir)
-    # The chemistry seed cases (the retrieval-* gold cases are exercised in test_retrieval_eval.py,
-    # which controls their corpus fixture; scope this test to the chemistry set it is about).
-    assert {
+    # Named positively rather than filtered as "everything that is not retrieval-*". The negative
+    # form made this a catch-all: the retrieval gold cases have their own corpus fixture in
+    # test_retrieval_eval.py, and the autonomy cases have their own transcripts, so each new family
+    # had to remember to exclude itself from a test about chemistry or break its exact-equality
+    # assertion below. One list, used for both the membership check and the filter.
+    chemistry = {
         "bo-regret-reizman",
         "green-esterification",
+        "hazard-rule-recall",
         "pharma-solvent-heavy",
         "solubility-benzene",
-    } <= {c.id for c in cases}
-    chem_cases = [c for c in cases if not c.id.startswith("retrieval-")]
+    }
+    assert chemistry <= {c.id for c in cases}
+    chem_cases = [c for c in cases if c.id in chemistry]
     report = run_eval(chem_cases, case_set_version="v1")
     failed_ids = {r.case_id for r in report.failed()}
     assert failed_ids == {"pharma-solvent-heavy"}  # only the solvent-heavy case fails the gate

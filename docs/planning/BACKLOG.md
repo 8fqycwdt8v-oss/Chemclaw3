@@ -259,11 +259,29 @@ QM path. The rows below are what survives that merge, narrowed to say so.
       ledger's reconciled residuals, so it belongs on the cached path rather than the inline one;
       until that is wired, `calibration_conformal_coverage` and `calibration_conformal_min_samples`
       are configured and unread, and every `method` in the system is `reported` or `none`.
-- [ ] **F9-T3 — zero evaluation of agent behaviour** — [M], **also in no other backlog item**.
-      `implementation-tickets.md:682` specifies plan quality, plan-vs-single-shot A/B, and
-      runaway/abort rate — all computable on a scripted transcript, which is what its own ticket
-      says, so `DEFERRED`'s AG-13 ("needs a live endpoint") does not cover it. Today a prompt
-      change, a skill edit or a model swap can regress behaviour arbitrarily and CI stays green.
+- [x] **F9-T3 — zero evaluation of agent behaviour** — closed by
+      D-2026-08-01-a-scripted-transcript-gates-the-harness-not-the-judgment. `evals/autonomy.py`
+      registers `plan_quality`, `runaway_rate` and `plan_execute_utility`; four cases join the
+      versioned set and three numbers join `baseline.json`, so `make eval-strict` and the drift
+      check now cover them.
+      **"Zero evaluation" was overstated**: `tests/test_harness_execution.py` already drove real MAF
+      machinery and pinned the loop cap. What was missing was its absence from the *eval layer*.
+      Two of the three measures already existed in pieces — `evals/ab.py::compare_tool_utility` is
+      the A/B and was simply never registered, and `precision_recall_f1` already defines "did it
+      name the right things".
+      **`runaway_rate` infers the cap from its residue** (an answer sent with todos still open),
+      because `AgentLoopMiddleware` stops and returns normally without emitting anything. A metric
+      written against a `runaway` event would score 0.0 forever.
+      **AG-13 is not closed by this and the ADR says so explicitly**: a scripted transcript pins the
+      model's replies, so these gate the harness's plumbing, never the model's judgment.
+- [ ] **The loop cap is silent, so nothing can alert on a runaway in production** — [S]. The eval
+      metric infers it from residue, which is all a transcript allows; a deployment watching live
+      turns has no signal at all. Needs a new `Event` member plus a runner branch plus a UI branch —
+      the three-part change `api/events.py` documents — which is a front-door decision rather than
+      an eval one.
+- [ ] **The plan-vs-single-shot A/B has no real task set** — [M], blocked on AG-13.
+      `plan_execute_utility` scores the pairs a case hands it, and the shipped case is illustrative.
+      Genuine baseline-vs-augmented numbers mean running the same tasks twice against a live model.
 - [ ] **The retrieval eval still scores only `GraphRetriever`** — [M], but it no longer *pretends*
       otherwise: under `hybrid`, or with `vector`/`lexical` active, the metric raises rather than
       report a graph-only recall under a name that promises the shipped path. Scoring the fused and

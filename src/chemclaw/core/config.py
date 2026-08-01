@@ -1359,6 +1359,15 @@ class EvalSettings(BaseSettings):
     # catches a substring-filter or evidence-cap change quietly dropping recall.
     eval_retrieval_corpus_dir: str = "data/evals/retrieval_corpus"
     retrieval_recall_min: float = Field(default=0.75, ge=0.0, le=1.0)
+    # Autonomy gates (F9-T3). These score a *scripted* transcript, so they measure the harness's
+    # plumbing — that a plan is produced, that work is closed before answering, that the A/B
+    # arithmetic holds — and never the model's judgment, which needs the live endpoint AG-13 is
+    # waiting on. `eval_plan_quality_min` is deliberately below 1.0: a plan that names an extra
+    # reasonable step is not a regression, while dropping a required one is. `eval_runaway_max` is
+    # 0.0 because the pinned turns are scripted to finish; any runaway among them is a plumbing
+    # break, not a hard case.
+    eval_plan_quality_min: float = Field(default=0.8, ge=0.0, le=1.0)
+    eval_runaway_max: float = Field(default=0.0, ge=0.0, le=1.0)
 
 
 class FingerprintSettings(BaseSettings):
