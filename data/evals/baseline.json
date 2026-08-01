@@ -1,6 +1,9 @@
 {
-  "case_set_version": "safety-2026-07-25",
+  "case_set_version": "autonomy-2026-08-01",
   "metrics": {
+    "plan_execute_utility": 0.5,
+    "plan_quality": 0.75,
+    "runaway_rate": 0.0,
     "bo_regret": 3.4000000000000057,
     "e_factor": 35.37689393939394,
     "pmi": 36.37689393939394,
