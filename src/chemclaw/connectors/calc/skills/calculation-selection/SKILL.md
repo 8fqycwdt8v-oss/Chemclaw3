@@ -49,7 +49,11 @@ calculation; this skill assumes that decision is already made.
   used: **O-H/S-H acids** (carboxylic acids, phenols, alcohols, thiols; ~1.6-unit
   uncertainty) and the **conjugate-acid pKa of aromatic or aryl nitrogen** (pyridines,
   azoles, anilines; ±1.0, and the more accurate half). It **refuses aliphatic amines**
-  and errors on a molecule with neither site; N-H/C-H acids are out of scope. Load
+  and errors on a molecule with neither site; N-H/C-H acids are out of scope. "Has a
+  nitrogen" is not "has a base": amide, carbamate, urea and sulfonamide nitrogen (lone pair
+  in the C=O/S=O), nitrile nitrogen, and pyrrole-type ring nitrogen (lone pair in the
+  aromatic sextet) are **not** basic sites, so acetamide or pyrrole errors rather than
+  returning a pKa. Load
   `ionization-and-partitioning` before using the value for anything — an acid site wins
   silently over a basic one, and individual predictions miss by up to two units.
 - **Which atom reacts (regioselectivity)** → `predict_site_reactivity` (condensed
@@ -72,6 +76,19 @@ calculation; this skill assumes that decision is already made.
 - **Rotational barrier, torsion profile, ring strain** → `scan_coordinate`
   (`conformational-analysis`, and `atropisomer-assessment` for the regulatory case).
 
+**Any ΔG needs a rotational symmetry number, per species.** Entropy depends on sigma, so a
+defaulted 1 puts a symmetric molecule's free energy too low by R·ln(sigma) — 0.41 kcal/mol for
+H2, N2, O2, CO2 or water, 1.47 for benzene. Supply it: `compute_thermochemistry` takes
+`symmetry_number` for the one molecule; `compute_reaction_energy` and `compare_solvents` take
+`symmetry_numbers`, a map keyed by each species' **exact** SMILES string. The values are
+1 for no rotational symmetry, 2 for H2/N2/O2/CO2/water, 3 for ammonia, 6 for ethane, 12 for
+benzene. Do not assume it cancels across a balanced equation — it cancels only when both sides
+carry the same symmetry, and any hydrogenation consumes H2. The two reaction tools enforce this:
+a species left out of the map gets sigma=1 and the result reports **no ΔG**, naming that species,
+while ΔE and ΔH — which sigma does not touch — stand as reported. Stating 1 explicitly is a real
+statement and does yield a ΔG, so state it for the unsymmetric species too rather than omitting
+them.
+
 ## The cost ladder, and when a tool hands back a job id
 
 Roughly: a single point is milliseconds; an optimization is under a second for a small
@@ -80,11 +97,30 @@ that per solvent. The expensive tools estimate their own cost and, above a thres
 return a **job id instead of a result** — report it and poll with `get_durable_job_status`
 rather than treating it as a failure. Prefer `level="quick"` when only an ordering of
 electronic energies is needed; it skips every Hessian.
-- **pH-dependent lipophilicity (logD)** → `predict_logd` (built on `predict_pka`, and it
-  inherits that tool's domain exactly: O-H/S-H acids and aryl-nitrogen bases, with
-  aliphatic amines refused). It applies the Henderson-Hasselbalch correction in the
-  direction the site calls for, so say which site the number belongs to. Use for HPLC mobile-phase pH selection, extraction, or
-  formulation questions where the pH-independent LogP alone is not the number that matters.
+- **pH-dependent lipophilicity (logD)** → `predict_logd`. It applies the Henderson-Hasselbalch
+  correction in the direction the site calls for, so say which site the number belongs to. Use
+  for HPLC mobile-phase pH selection, extraction, or formulation questions where the
+  pH-independent LogP alone is not the number that matters.
+
+  Its domain is **strictly narrower than `predict_pka`'s**, not the same — do not promise a
+  logD on the strength of a pKa having worked. It is built on `predict_pka`, so it inherits
+  every refusal that tool makes (aliphatic amines, no ionisable site, charged inputs), and then
+  adds one of its own: `predict_pka` reports **one** pKa and one Henderson-Hasselbalch term can
+  consume exactly one, so a molecule that ionises at two sites in the working pH window is
+  refused rather than corrected once.
+
+  **Served:** a single ionisable centre — one O-H/S-H acid (carboxylic acid, phenol, alcohol,
+  thiol) or one aromatic/aryl nitrogen base. Extra sites are fine when they stay un-ionised at
+  the pH asked for, so a diol, a sugar or a polyol (O-H, pKa ~15) is served at any ordinary pH,
+  and a diacid is served well below its pKa.
+
+  **Refused:** anything **amphoteric** (an acid site and a base site — amino acids, aminophenols,
+  nicotinic acid), because `predict_pka` always answers with the acid and never evaluates the
+  base; and any **polyprotic** molecule whose reported site is substantially ionised at that pH
+  (succinic acid at 7.4). Both refusals exist because the second pKa is not computable from this
+  predictor at all — the alternative was a number wrong by 2-5 log units carrying a +/-1.6
+  uncertainty. Report the refusal and what it says; do not substitute logP for logD and do not
+  retry at a pH you picked to get past the gate.
 - **Developability triage (Ro5/Veber, MW, LogP, TPSA, H-bond counts)** →
   `predict_developability_profile`. Report the flags as heuristics to weigh, never a pass/fail
   verdict on their own.

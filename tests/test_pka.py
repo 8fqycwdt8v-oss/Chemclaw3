@@ -17,7 +17,14 @@ from importlib.metadata import version
 import pytest
 
 from chemclaw.core.config import settings
-from chemclaw.science.calc.pka import PkaInput, calc_version, predict_pka, run_cached_pka
+from chemclaw.science.calc.pka import (
+    IonisableSites,
+    PkaInput,
+    calc_version,
+    ionisable_sites,
+    predict_pka,
+    run_cached_pka,
+)
 from chemclaw.science.calc.store import InMemoryStore
 
 
@@ -202,6 +209,72 @@ def test_aliphatic_amines_are_refused_rather_than_guessed() -> None:
     for smiles in ("CN(C)C", "C1CCNCC1", "CCN"):  # trimethylamine, piperidine, ethylamine
         with pytest.raises(ValueError, match="aliphatic nitrogen"):
             predict_pka(PkaInput(smiles=smiles))
+
+
+def test_a_nitrogen_with_no_available_lone_pair_is_not_a_base() -> None:
+    """Amide, sulfonamide, nitrile and pyrrole-type nitrogen must not reach the base branch.
+
+    Free valence is not availability, and the gap was reported as a number. `_basic_nitrogens`
+    counted any neutral nitrogen with room for a proton, so acetamide — whose only nitrogen is
+    an amide, lone pair conjugated into the carbonyl, pKaH ~ -0.5 **on the oxygen** — took the
+    base branch and `_predict_base_pka` returned a conjugate-acid pKa for a compound that has no
+    basic centre at all. Five orders of magnitude below the weakest base the calibration was
+    fitted on, reported with the same +/-1.0 as pyridine.
+
+    The right answer is the one `predict_pka` already gives a molecule with neither site: it
+    raises. Each of these is a distinct reason the lone pair is unavailable, so each is asserted
+    rather than one standing in for the rest.
+    """
+    for smiles in (
+        "CC(=O)N",  # acetamide: amide
+        "COC(=O)N",  # methyl carbamate
+        "NC(=O)N",  # urea
+        "CS(=O)(=O)N",  # methanesulfonamide
+        "N#Cc1ccccc1",  # benzonitrile: sp nitrogen, pKaH ~ -10
+        "c1cc[nH]c1",  # pyrrole: lone pair is the aromatic sextet, pKaH ~ -4
+        "c1ccc2[nH]ccc2c1",  # indole, the same
+    ):
+        with pytest.raises(ValueError, match="no acidic .* and no basic nitrogen"):
+            predict_pka(PkaInput(smiles=smiles))
+
+
+@pytest.mark.parametrize(
+    ("smiles", "expected", "why"),
+    [
+        ("CC(=O)Nc1ccc(O)cc1", (1, 0), "paracetamol: a phenol; the anilide N is not a base"),
+        ("c1cnc[nH]1", (0, 1), "imidazole: pyridine-type N basic, pyrrole-type N not"),
+        ("Cn1cnc2c1c(=O)n(C)c(=O)n2C", (0, 1), "caffeine: one basic N among four"),
+        ("N#Cc1ccc(O)cc1", (1, 0), "4-cyanophenol: sp nitrogen is not a site"),
+        ("Nc1ccc(C(=O)O)cc1", (1, 1), "4-aminobenzoic acid: genuinely amphoteric"),
+        ("Nc1ccccc1", (0, 1), "aniline: weakly basic, pKaH 4.6, and kept"),
+        ("OC(=O)CCC(=O)O", (2, 0), "succinic acid: two carboxyls"),
+        ("OC(=O)c1ccccc1", (1, 0), "benzoic acid: the plain monoprotic case"),
+    ],
+)
+def test_ionisable_sites_counts_only_sites_that_are_really_sites(
+    smiles: str, expected: tuple[int, int], why: str
+) -> None:
+    """The site count `calc.logd`'s domain gate reads, pinned directly and without xTB.
+
+    Cheap where the behavioural tests are expensive, and closer to the defect: the gate refuses
+    on this count, so an enumeration that over-counts spends a wrong refusal and one that
+    under-counts spends a wrong number. Both directions are represented — paracetamol and
+    caffeine must come down, 4-aminobenzoic acid and succinic acid must not.
+    """
+    assert ionisable_sites(smiles) == IonisableSites(*expected), why
+
+
+def test_a_pyridine_type_nitrogen_beside_a_pyrrole_type_one_is_still_found() -> None:
+    """Imidazole has two ring nitrogens and exactly one of them is basic.
+
+    The counterweight to the exclusions above: an over-eager rule that dropped both would turn
+    imidazole (pKaH 6.95, in this calibration's own reference set) into "nothing to protonate".
+    Two sigma bonds and an in-plane lone pair is a base; three sigma bonds and a lone pair in
+    the ring's pi system is not, and the two sit in the same aromatic ring.
+    """
+    result = predict_pka(PkaInput(smiles="c1cnc[nH]1"))
+    assert result.site == "base"
+    assert result.pka == pytest.approx(6.95, abs=settings.pka_base_uncertainty)
 
 
 def test_predicted_pkah_ranks_aromatic_bases_correctly() -> None:

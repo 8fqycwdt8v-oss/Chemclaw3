@@ -24,6 +24,13 @@ two so sharply that only one half ships:
   them imprecisely, it has no ranking ability at all, and a number would be worse than a
   refusal because it would look like an answer.
 
+Before either calibration is reached, a nitrogen has to be a base at all. Free valence was
+once the whole test, and it let acetamide — no basic centre anywhere, pKaH ~ -0.5 and on the
+oxygen at that — take the base branch and come back with a number. `_lone_pair_is_available`
+is the test that belongs there: amide/carbamate/urea/sulfonamide, nitrile and pyrrole-type
+aromatic nitrogen all have a lone pair that is delocalized or sp-held rather than free, and
+none of them is protonated at any pH this system serves.
+
 The failure is diagnosed rather than assumed, and the diagnosis is why no amount of
 recalibration fixes it. In the **gas phase** GFN2 reproduces the experimental proton
 affinities exactly (NH3 < MeNH2 < Me2NH < Me3N), so the Hamiltonian is fine. Switching on
@@ -38,7 +45,7 @@ amines not at all. Explicit-solvent or cluster-continuum treatment is what would
 it, and neither is in this system.
 """
 
-from typing import Literal
+from typing import Literal, NamedTuple
 
 from pydantic import BaseModel, Field
 from rdkit import Chem
@@ -62,6 +69,14 @@ _HARTREE_TO_KCAL = 627.509
 _ACIDIC_HEAVY = (8, 16)  # O, S
 # Nitrogen valence at which there is no lone pair left to protonate.
 _SATURATED_NITROGEN = 4
+# Sigma bonds at which an *aromatic* nitrogen's lone pair has gone into the ring's pi system
+# instead of staying in an in-plane orbital: pyrrole-type rather than pyridine-type.
+_PYRROLE_TYPE_SIGMA_BONDS = 3
+# Atoms that drain an adjacent nitrogen's lone pair when they carry a double bond to a
+# chalcogen: carbon (amide, carbamate, urea) and sulfur (sulfonamide, sulfinamide).
+_ELECTRON_WITHDRAWING = (6, 16)  # C, S
+# The chalcogen on the far end of that double bond.
+_CHALCOGEN = (8, 16)  # O, S
 
 
 class PkaInput(BaseModel):
@@ -90,6 +105,22 @@ class PkaResult(BaseModel):
     site: Literal["acid", "base"] = "acid"
 
 
+def _acidic_protons(mol: Chem.Mol) -> list[tuple[int, int]]:
+    """`(hydrogen index, heavy-atom index)` for every O-H/S-H proton, explicit-H molecule.
+
+    The module's one definition of "acidic site": `_conjugate_bases` deprotonates exactly
+    these and `ionisable_sites` counts exactly these, so a caller asking *how many* sites a
+    molecule has cannot disagree with the enumeration that produced the pKa.
+    """
+    return [
+        (atom.GetIdx(), atom.GetNeighbors()[0].GetIdx())
+        for atom in mol.GetAtoms()
+        if atom.GetAtomicNum() == 1
+        and atom.GetDegree() == 1
+        and atom.GetNeighbors()[0].GetAtomicNum() in _ACIDIC_HEAVY
+    ]
+
+
 def _conjugate_bases(mol: Chem.Mol) -> list[Chem.Mol]:
     """Enumerate deprotonated anions at each acidic O-H/S-H site.
 
@@ -97,15 +128,8 @@ def _conjugate_bases(mol: Chem.Mol) -> list[Chem.Mol]:
     heavy atom (with implicit H disabled so the anion is not silently re-protonated
     on sanitize). Returns one sanitized anion molecule per candidate site.
     """
-    sites = [
-        (atom.GetIdx(), atom.GetNeighbors()[0].GetIdx())
-        for atom in mol.GetAtoms()
-        if atom.GetAtomicNum() == 1
-        and atom.GetDegree() == 1
-        and atom.GetNeighbors()[0].GetAtomicNum() in _ACIDIC_HEAVY
-    ]
     anions: list[Chem.Mol] = []
-    for h_idx, heavy_idx in sites:
+    for h_idx, heavy_idx in _acidic_protons(mol):
         editable = Chem.RWMol(mol)
         heavy = editable.GetAtomWithIdx(heavy_idx)
         heavy.SetFormalCharge(-1)
@@ -117,15 +141,114 @@ def _conjugate_bases(mol: Chem.Mol) -> list[Chem.Mol]:
     return anions
 
 
+def _lone_pair_is_available(atom: Chem.Atom) -> bool:
+    """Whether this nitrogen's lone pair can actually accept a proton in water.
+
+    Free valence says a lone pair *exists*; it does not say the pair is available, and three
+    common classes have one that is not. They are excluded here rather than left for a
+    downstream caller to second-guess, because `_predict_base_pka` will otherwise compute
+    and report a conjugate-acid pKa for a molecule that has no basic centre at all — a
+    confident number on exactly the class where it is most wrong. Each exclusion is a
+    delocalized or unavailable lone pair, never a convenience.
+
+    - **Amide, carbamate, urea, sulfonamide** — a nitrogen single-bonded to a carbon or
+      sulfur that carries a double bond to O or S. The lone pair is conjugated into that
+      C=O/S=O, and the consequence is not a shifted pKa but a different molecule: protonated
+      acetamide has pKaH ~ -0.5 **and protonates on the oxygen**, so the nitrogen this
+      enumeration would offer is not the site even in the strongest acid. Five orders of
+      magnitude below 4-nitroaniline, the weakest base the calibration was fitted on.
+    - **Nitrile** — an sp nitrogen (a triple bond). pKaH ~ -10; there is no aqueous pH at
+      which any of it is protonated.
+    - **Pyrrole-type aromatic nitrogen** — an aromatic nitrogen with three sigma bonds, so its
+      lone pair is the ring's aromatic sextet rather than an in-plane orbital. Pyrrole's pKaH
+      is ~ -4, and protonating it costs the ring its aromaticity. The **pyridine-type**
+      nitrogen beside it in the same ring has two sigma bonds and an in-plane lone pair, and
+      *is* basic — imidazole's two nitrogens are one of each, which is why counting both put
+      imidazole (pKaH 6.95, in this calibration's own reference set) outside `calc.logd`'s
+      single-equilibrium domain when it has exactly one basic centre.
+
+    Only a **single** bond from the nitrogen counts for the amide rule, which is what keeps
+    aniline out of it: aniline's bond to the ring is aromatic, not the C=O single bond this
+    looks for, and aniline is genuinely a weak base (pKaH 4.6) the calibration covers.
+
+    **Known limit.** An amide-like nitrogen *inside* an aromatic ring — caffeine's N1/N3 — is
+    caught by the pyrrole-type rule (three sigma bonds) rather than the amide one, because
+    RDKit gives its bonds aromatic rather than single order. Same answer by a different route
+    here; a ring amide nitrogen with only two sigma bonds would still be counted.
+    """
+    if any(bond.GetBondType() == Chem.BondType.TRIPLE for bond in atom.GetBonds()):
+        return False
+    if (
+        atom.GetIsAromatic()
+        and atom.GetDegree() + atom.GetTotalNumHs() >= _PYRROLE_TYPE_SIGMA_BONDS
+    ):
+        return False
+    for bond in atom.GetBonds():
+        if bond.GetBondType() != Chem.BondType.SINGLE:
+            continue
+        neighbor = bond.GetOtherAtom(atom)
+        if neighbor.GetAtomicNum() not in _ELECTRON_WITHDRAWING:
+            continue
+        if any(
+            other.GetBondType() == Chem.BondType.DOUBLE
+            and other.GetOtherAtom(neighbor).GetAtomicNum() in _CHALCOGEN
+            for other in neighbor.GetBonds()
+        ):
+            return False
+    return True
+
+
 def _basic_nitrogens(mol: Chem.Mol) -> list[int]:
-    """Indices of nitrogens with a lone pair available to accept a proton."""
+    """Indices of nitrogens that can be protonated: free valence *and* an available lone pair.
+
+    The valence test alone was the whole rule until it was measured against what the base
+    branch then did with the result. It counts an amide nitrogen — paracetamol's, acetamide's
+    — and `predict_pka` would go on to report a basic pKa for a molecule whose only nitrogen
+    is not basic. `_lone_pair_is_available` is the second half, and it carries the chemistry.
+    """
     return [
         atom.GetIdx()
         for atom in mol.GetAtoms()
         if atom.GetAtomicNum() == 7
         and atom.GetFormalCharge() == 0
         and atom.GetTotalNumHs() + atom.GetDegree() < _SATURATED_NITROGEN
+        and _lone_pair_is_available(atom)
     ]
+
+
+class IonisableSites(NamedTuple):
+    """How many acid and base sites this predictor's own enumeration finds in a molecule.
+
+    `predict_pka` reports **one** pKa — the most acidic proton, or the most stable protomer —
+    because that is the number a chemist means by "the pKa". Downstream arithmetic that assumes
+    a single acid/base equilibrium (`chemclaw.science.calc.logd`'s Henderson-Hasselbalch term is
+    the case in hand) needs to know when that assumption is false, and it cannot read that off a
+    `PkaResult`: a diprotic acid and a monoprotic one return the same shape. Counting is exposed
+    here rather than re-derived by the caller so there is one answer to "what counts as a site",
+    the same one the pKa itself came from.
+    """
+
+    acidic: int
+    basic: int
+
+    @property
+    def total(self) -> int:
+        """Sites of either kind — the number a single-equilibrium model needs to be 1."""
+        return self.acidic + self.basic
+
+
+def ionisable_sites(smiles: str) -> IonisableSites:
+    """Count the acidic O-H/S-H protons and the protonatable nitrogens of a neutral molecule.
+
+    Structural, not energetic: it reports what `predict_pka` would *enumerate*, before any xTB
+    runs, so it is free to call. It is therefore exactly as good as that enumeration and no
+    better — `_basic_nitrogens` excludes amide and nitrile nitrogen because they are not basic
+    in water, but it does not rank the sites it keeps, so "two sites" here means two the
+    predictor would evaluate, not two that ionise in any particular pH window. Deciding that is
+    the caller's, and needs the pKa this function deliberately does not compute.
+    """
+    mol = parse_molecule(smiles)
+    return IonisableSites(acidic=len(_acidic_protons(mol)), basic=len(_basic_nitrogens(mol)))
 
 
 def _is_aryl_nitrogen(atom: Chem.Atom) -> bool:

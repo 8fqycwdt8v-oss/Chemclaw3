@@ -97,6 +97,14 @@ jobs:
       about rate, since there are no transition states here. Quote the reported uncertainty: a
       semiempirical reaction free energy is for comparing related reactions, not for a number in a
       report.
+
+      A ΔG additionally needs `symmetry_numbers`: every species' rotational symmetry number, keyed
+      by its exact SMILES — 1 for a molecule with no rotational symmetry, 2 for H2/N2/O2/CO2/water,
+      3 for ammonia, 6 for ethane, 12 for benzene. A species left out of it has its entropy
+      computed at sigma=1, and the job then reports no ΔG at all — naming that species — rather
+      than one too high by R·ln(sigma). ΔE and ΔH do not depend on it and stand either way. It
+      does not cancel across the arrow (any hydrogenation consumes H2, sigma=2), so state it
+      whenever a free energy is what the question needs.
     params_model: chemclaw.connectors.calc.specs:ReactionJobSpec
 
   - name: compare_solvents
@@ -108,6 +116,12 @@ jobs:
       rather than a set of absolute numbers that would each carry the method's full error. Use it to
       narrow a solvent screen before bench time. The differences between solvents are more
       trustworthy than any single value; say so when reporting.
+
+      Ranking by ΔG needs `symmetry_numbers` — the same species appear in every solvent, so one
+      map covers the whole screen: every species' rotational symmetry number keyed by its exact
+      SMILES, 1 for no rotational symmetry, 2 for H2/N2/O2/CO2/water, 3 for ammonia, 6 for ethane,
+      12 for benzene. Omit it and no reaction reports a ΔG, so the screen falls back to ranking by
+      electronic energy — which ignores solvation entropy, the part a solvent screen is about.
     params_model: chemclaw.connectors.calc.specs:SolventScreenJobSpec
 
   - name: scan_coordinate
@@ -133,10 +147,13 @@ jobs:
       wall-clock for coverage; a search is never cheap, so expect a job id.
     params_model: chemclaw.connectors.calc.specs:EnsembleJobSpec
     # A CREST search is the one genuinely costly thing in this bundle — minutes of saturated
-    # CPU, and unlike the xTB tasks its cost is not bounded by the input's size. It inherits
-    # the role gate that used to sit on `run_xtb_task`, the expert escape hatch these five
-    # typed jobs replaced: that gate existed for exactly this, an unbounded calculation, and
-    # dropping it with the tool would have been a silent loosening.
+    # CPU, and unlike the xTB tasks its cost is not bounded by the input's size. So it carries
+    # the role gate that used to sit on `run_xtb_task`, the expert escape hatch these five typed
+    # jobs replaced: that gate existed for exactly this, an unbounded calculation, and dropping
+    # it with the tool would have been a silent loosening. It did not in fact inherit anything —
+    # `run_xtb_task`'s gate was `DEFAULT_WRITE_TOOL_GATES` membership, which went with the tool,
+    # and `expensive: true` authorized nothing at all until `authz.expensive_actions` derived the
+    # gate's set from these declarations.
     expensive: true
 
   - name: compute_interaction_energy
@@ -150,8 +167,11 @@ jobs:
       solvent, so treat it as a ranking between candidate partners, not an absolute binding energy.
     params_model: chemclaw.connectors.calc.specs:ComplexJobSpec
     # A CREST search is the one genuinely costly thing in this bundle — minutes of saturated
-    # CPU, and unlike the xTB tasks its cost is not bounded by the input's size. It inherits
-    # the role gate that used to sit on `run_xtb_task`, the expert escape hatch these five
-    # typed jobs replaced: that gate existed for exactly this, an unbounded calculation, and
-    # dropping it with the tool would have been a silent loosening.
+    # CPU, and unlike the xTB tasks its cost is not bounded by the input's size. So it carries
+    # the role gate that used to sit on `run_xtb_task`, the expert escape hatch these five typed
+    # jobs replaced: that gate existed for exactly this, an unbounded calculation, and dropping
+    # it with the tool would have been a silent loosening. It did not in fact inherit anything —
+    # `run_xtb_task`'s gate was `DEFAULT_WRITE_TOOL_GATES` membership, which went with the tool,
+    # and `expensive: true` authorized nothing at all until `authz.expensive_actions` derived the
+    # gate's set from these declarations.
     expensive: true

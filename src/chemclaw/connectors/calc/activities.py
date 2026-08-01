@@ -108,6 +108,7 @@ async def run_xtb_calculation(job: XtbJobInput) -> XtbJobResult:
             spec.solvent,
             spec.temperature_k,
             spec.level,
+            spec.symmetry_numbers,
             progress=activity.heartbeat,
         )
         delta = (
@@ -130,6 +131,7 @@ async def run_xtb_calculation(job: XtbJobInput) -> XtbJobResult:
             spec.solvents,
             spec.temperature_k,
             spec.level,
+            spec.symmetry_numbers,
             progress=activity.heartbeat,
         )
         best = comparison.best_solvent or "gas phase"
