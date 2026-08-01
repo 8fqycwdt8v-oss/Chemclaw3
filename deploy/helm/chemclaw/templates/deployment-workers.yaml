@@ -19,6 +19,8 @@ spec:
       app.kubernetes.io/component: background-worker
   template:
     metadata:
+      annotations:
+        {{- include "chemclaw.configChecksum" . | nindent 8 }}
       labels:
         {{- include "chemclaw.selectorLabels" . | nindent 8 }}
         app.kubernetes.io/component: background-worker
@@ -48,11 +50,11 @@ spec:
           volumeMounts:
             {{- include "chemclaw.tlsMount" . | nindent 12 }}
             {{- include "chemclaw.knowledgeMounts" . | nindent 12 }}
-            {{- include "chemclaw.noteRepoMount" . | nindent 12 }}
         {{- include "chemclaw.knowledgeSidecar" . | nindent 8 }}
+      {{- /* The clone before the publish — see `deployment-service.yaml`. */}}
       initContainers:
-        {{- include "chemclaw.knowledgeInit" . | nindent 8 }}
         {{- include "chemclaw.noteRepoInit" . | nindent 8 }}
+        {{- include "chemclaw.knowledgeInit" . | nindent 8 }}
       volumes:
         {{- include "chemclaw.volumes" . | nindent 8 }}
         {{- include "chemclaw.noteRepoVolume" . | nindent 8 }}

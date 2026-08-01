@@ -59,10 +59,24 @@ spec:
         - protocol: TCP
           port: {{ .Values.connectorPort }}
 ---
-{{- /* The front door's own ingress, which did not exist. `policyTypes` listed only `Egress`, so
-       any pod in any namespace could reach `chemclaw-service:8080` — including `/metrics`, which
-       `api/app.py` leaves unauthenticated on the stated grounds that "the NetworkPolicy is what
-       keeps it inside the cluster". That rule was never written. This is it.
+{{- /* The front door's own ingress, which did not exist. `policyTypes` listed only `Egress`, so any
+       pod in any namespace could open a connection to `chemclaw-service:8080`. This is the rule
+       that bounds that.
+
+       **What it does not do is contain `/metrics`.** This rule shipped asserting that it did, and
+       `api/app.py` justified serving `/metrics` unauthenticated on the same grounds. Both were
+       wrong in the same way: a NetworkPolicy selects *peers*, not paths, and one of the peers it
+       must allow is the router — which fronts a Route that declares no `spec.path` and therefore
+       publishes every path the front door serves, `/metrics` among them, on the external host. A
+       rule that has to permit the router cannot also hide a route behind it.
+
+       What bounds the exposition is D-152's declared-label allowlist (counts, capacity and an
+       operator-chosen `profile` — never a session id, an actor, or turn content), enforced in
+       `tests/test_metrics.py` where it can be. The residual exposure is operational
+       reconnaissance, and `route.ipWhitelist` is the control for a deployment that will not take
+       it. This comment names that split rather than claiming a containment this object cannot
+       provide — the failure being repaired is not the missing rule, it is three places asserting a
+       compensating control and none of them holding.
 
        Ingress is allowed from the router (so the Route works), from the monitoring namespace (so
        the ServiceMonitor can scrape), and from Chemclaw's own pods. Both namespace selectors are

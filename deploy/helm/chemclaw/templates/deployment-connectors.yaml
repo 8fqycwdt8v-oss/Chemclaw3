@@ -30,6 +30,8 @@ spec:
       app.kubernetes.io/component: connector-{{ $name }}
   template:
     metadata:
+      annotations:
+        {{- include "chemclaw.configChecksum" $ | nindent 8 }}
       labels:
         {{- include "chemclaw.selectorLabels" $ | nindent 8 }}
         app.kubernetes.io/component: connector-{{ $name }}
@@ -91,6 +93,8 @@ spec:
       app.kubernetes.io/component: connector-worker-{{ $name }}
   template:
     metadata:
+      annotations:
+        {{- include "chemclaw.configChecksum" $ | nindent 8 }}
       labels:
         {{- include "chemclaw.selectorLabels" $ | nindent 8 }}
         app.kubernetes.io/component: connector-worker-{{ $name }}
@@ -120,8 +124,13 @@ spec:
                    holds an open HPC poll per in-flight job) says so in its own entry rather than
                    adding a key to the global `resources:` block. */}}
             {{- toYaml (default $.Values.resources.worker $cfg.resources) | nindent 12 }}
+          {{- /* The mTLS mount is this container's only one, so the key itself is conditional:
+                 `volumeMounts:` with an empty body renders `null`, which is a different manifest
+                 from one without the key. */}}
+          {{- if $.Values.secrets.temporalTls.enabled }}
           volumeMounts:
             {{- include "chemclaw.tlsMount" $ | nindent 12 }}
+          {{- end }}
       volumes:
         {{- include "chemclaw.volumes" $ | nindent 8 }}
 ---

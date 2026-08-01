@@ -18,8 +18,10 @@ data:
   {{- end }}
   {{- /* Derived from the knowledge volume layout rather than hand-written in `config`, so the
          path the PR-gate submitter writes to can never drift from the volume it is mounted on
-         (gap DEP-2). `CHEMCLAW_KNOWLEDGE_DIR` stays at its relative default: it resolves against
-         the image WORKDIR (/app), which is exactly `knowledge.publishPath`. */}}
+         (gap DEP-2). Together with `CHEMCLAW_KNOWLEDGE_DIR` above it is also what every *reader*
+         resolves — `Settings.knowledge_path` is the two joined — which is why the knowledge-sync
+         containers take their publish target from the same pair (`chemclaw.knowledgePublishPath`)
+         instead of a `publishPath` value of their own. */}}
   CHEMCLAW_NOTE_REPO_DIR: {{ .Values.knowledge.noteRepoPath | quote }}
   {{- /* Derived from `.Values.connectors` rather than hand-written in `config`, for the same reason
          the note-repo dir is: the address the front door dials must be the Service that the same

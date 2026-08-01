@@ -657,12 +657,17 @@ def test_the_restricted_profile_itself_is_not_a_toggle() -> None:
 
 
 def test_the_front_door_has_an_ingress_policy_at_all() -> None:
-    """`/metrics` is unauthenticated *because* a NetworkPolicy is said to contain it.
+    """Something must bound who may open a connection to the front door.
 
-    `api/app.py` justifies serving `/metrics` without auth on the grounds that the NetworkPolicy
-    keeps it inside the cluster. The chart's only policy declared `policyTypes: [Egress]`, so no
-    ingress rule existed and any pod in any namespace could read live session counts, token totals
-    and pool state. The justification named a control that was never written.
+    The chart's only policy declared `policyTypes: [Egress]`, so no ingress rule existed and any pod
+    in any namespace could reach `chemclaw-service:8080`. This is the rule that closes that.
+
+    It is *not* what makes `/metrics` safe, and this docstring used to say it was — the fourth of
+    four places asserting a control that does not hold. A NetworkPolicy selects peers, not paths;
+    the peer it must allow is the router; and the Route declares no `spec.path`, so every path the
+    front door serves is published on the external host. What bounds the exposition is D-152's
+    declared-label allowlist, asserted in `tests/test_metrics.py`, and `route.ipWhitelist` is the
+    only control at this layer (`tests/test_helm_chart.py`).
     """
     policy = (CHART / "templates" / "networkpolicy.yaml").read_text()
     assert "-service-ingress" in policy, "the front door has no ingress NetworkPolicy"

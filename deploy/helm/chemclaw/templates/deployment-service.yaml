@@ -15,6 +15,8 @@ spec:
       app.kubernetes.io/component: service
   template:
     metadata:
+      annotations:
+        {{- include "chemclaw.configChecksum" . | nindent 8 }}
       labels:
         {{- include "chemclaw.selectorLabels" . | nindent 8 }}
         app.kubernetes.io/component: service
@@ -73,11 +75,13 @@ spec:
           volumeMounts:
             {{- include "chemclaw.tlsMount" . | nindent 12 }}
             {{- include "chemclaw.knowledgeMounts" . | nindent 12 }}
-            {{- include "chemclaw.noteRepoMount" . | nindent 12 }}
         {{- include "chemclaw.knowledgeSidecar" . | nindent 8 }}
+      {{- /* The clone before the publish: `git clone` refuses a non-empty destination and the
+             published tree lives inside the clone (`chemclaw.knowledgePublishPath`). Init
+             containers run in declaration order, so this order is the dependency. */}}
       initContainers:
-        {{- include "chemclaw.knowledgeInit" . | nindent 8 }}
         {{- include "chemclaw.noteRepoInit" . | nindent 8 }}
+        {{- include "chemclaw.knowledgeInit" . | nindent 8 }}
       volumes:
         {{- include "chemclaw.volumes" . | nindent 8 }}
         {{- include "chemclaw.noteRepoVolume" . | nindent 8 }}

@@ -13,14 +13,31 @@ app.kubernetes.io/name: chemclaw
 app.kubernetes.io/instance: {{ .Release.Name }}
 {{- end -}}
 
-{{- /* Env shared by every component: the ConfigMap (non-secret) + every declared secret key. */ -}}
+{{- /* Env shared by every component: the ConfigMap (non-secret) + every declared secret key.
+
+       The three mTLS paths are gated on `secrets.temporalTls.enabled`, and that gate is the whole
+       point of the value. `core/temporal_client._tls_config()` short-circuits only when all three
+       settings are empty; set, it `read_bytes()` each one. Exported unconditionally against a
+       Secret the chart never creates, the failure was `FileNotFoundError: /etc/temporal/tls/tls.crt`
+       — from the post-install Schedules hook, which names neither Temporal nor a Secret, and from
+       every worker as a crash loop, while the front door passed both probes because `/readyz` never
+       touches Temporal. The plaintext connect path `connect_options()` documents was unreachable
+       from the chart at any value.
+
+       `enabled: true` is the default because in-cluster Temporal with mTLS is the deployment this
+       chart describes (D-049); the Secret is correspondingly mounted **non-optionally**, so a
+       missing one fails at pod creation with an event naming it rather than at the first
+       `read_bytes()`. `enabled: false` is the deliberate plaintext choice, and it removes the env,
+       the volume and the mount together — there is no state where one exists without the others. */ -}}
 {{- define "chemclaw.env" -}}
+{{- if .Values.secrets.temporalTls.enabled }}
 - name: CHEMCLAW_TEMPORAL_TLS_CERT
   value: "{{ .Values.secrets.temporalTls.mountPath }}/tls.crt"
 - name: CHEMCLAW_TEMPORAL_TLS_KEY
   value: "{{ .Values.secrets.temporalTls.mountPath }}/tls.key"
 - name: CHEMCLAW_TEMPORAL_TLS_CA
   value: "{{ .Values.secrets.temporalTls.mountPath }}/ca.crt"
+{{- end }}
 {{- range $configKey, $secretEnv := .Values.secrets.keys }}
 - name: {{ $secretEnv }}
   valueFrom:
@@ -152,6 +169,49 @@ topologySpreadConstraints:
     name: {{ include "chemclaw.name" . }}-config
 {{- end -}}
 
+{{- /* The pod annotation that makes a ConfigMap change actually reach the pods.
+
+       Non-secret config arrives only through `envFrom: configMapRef`, and environment is read once
+       at process start. A `helm upgrade` that changes `.Values.config` therefore updated the
+       ConfigMap and changed nothing running: `CHEMCLAW_LLM_BASE_URL`, `CHEMCLAW_ENTRA_REQUIRED`,
+       `CHEMCLAW_BUDGET_ENABLED` and the rate limit all applied to *no* pod until something
+       unrelated caused a restart. With the HPA on by default, the next scale-up then brought up
+       pods that did read the new values — a fleet split across two configurations, with the
+       operator's `helm upgrade` reporting success. (Two keys did force a rollout, by accident: the
+       two the grace periods are derived from, which change the pod spec itself.)
+
+       Hashing the rendered ConfigMap template makes the pod spec a function of the configuration,
+       so the Deployment controller does the rollout for the same reason it does any other. The hash
+       covers the whole file — the ServiceAccount and the optional placeholder Secret with it —
+       which is deliberately wider than `.Values.config`: a change to either is also a change every
+       pod should be restarted for.
+
+       `$.Template.BasePath` and the root context are required: called from inside a `range`, `.` is
+       the loop variable and the include would render nothing. */ -}}
+{{- define "chemclaw.configChecksum" -}}
+checksum/config: {{ include (print $.Template.BasePath "/config.yaml") . | sha256sum }}
+{{- end -}}
+
+{{- /* Where the synced graph is published — which is, and must be, exactly where the application
+       reads it.
+
+       `Settings.knowledge_path` is `note_repo_dir / knowledge_dir` and there is no second
+       resolution: every reader (`kg.graph.load_notes`, the report retrievers, the note-index
+       rebuild, `kg.validate`, the ELN sync, the memory synthesizers, the digest job) goes through
+       that one property. So this is that expression, in the chart, over the same two values the
+       ConfigMap hands the pods.
+
+       It used to be an independent `knowledge.publishPath: /app/knowledge`, and the consequence was
+       not a crash: the sync filled a directory nothing read while `knowledge_path` pointed at an
+       empty (default install) or never-refreshed (configured install) tree, `rglob` over it yielded
+       nothing and raised nothing, and the agent answered with zero knowledge-graph evidence. A path
+       that only has to *agree* with another path eventually does not, so this one is derived rather
+       than declared, and `tests/test_helm_chart.py` asserts the render equals what `Settings`
+       resolves. */ -}}
+{{- define "chemclaw.knowledgePublishPath" -}}
+{{ .Values.knowledge.noteRepoPath }}/{{ .Values.config.CHEMCLAW_KNOWLEDGE_DIR }}
+{{- end -}}
+
 {{- /* Env the knowledge-sync init container and sidecar both need (DRY — they must agree). */ -}}
 {{- define "chemclaw.knowledgeSyncEnv" -}}
 - name: CHEMCLAW_KNOWLEDGE_REPO_URL
@@ -159,7 +219,7 @@ topologySpreadConstraints:
 - name: CHEMCLAW_KNOWLEDGE_SYNC_DIR
   value: {{ .Values.knowledge.sync.checkoutPath | quote }}
 - name: CHEMCLAW_KNOWLEDGE_PUBLISH_DIR
-  value: {{ .Values.knowledge.publishPath | quote }}
+  value: {{ include "chemclaw.knowledgePublishPath" . | quote }}
 - name: CHEMCLAW_KNOWLEDGE_SYNC_INTERVAL_SECONDS
   value: {{ .Values.knowledge.sync.intervalSeconds | quote }}
 {{- end -}}
@@ -239,32 +299,53 @@ readOnlyRootFilesystem: {{ .Values.securityContext.readOnlyRootFilesystem }}
 {{- end }}
 {{- end -}}
 
-{{- /* The knowledge volume mounts every component shares (published tree + the sync checkout). */ -}}
+{{- /* The volumes a knowledge reader and the sync containers share.
+
+       Two volumes, not three. The published tree is a directory *inside* the note-repo volume
+       (`chemclaw.knowledgePublishPath`), because that is where `Settings.knowledge_path` resolves —
+       so the separate `knowledge` emptyDir that used to be mounted at `/app/knowledge` is gone
+       rather than repointed. It was also masking the corpus the image ships at that exact path,
+       which is why `values.yaml`'s claim that an empty `repoUrl` "runs against whatever corpus the
+       image shipped" was false; `knowledge-sync.sh` now seeds the publish directory from that
+       corpus instead. */ -}}
 {{- define "chemclaw.knowledgeMounts" -}}
-- name: knowledge
-  mountPath: {{ .Values.knowledge.publishPath }}
+{{ include "chemclaw.noteRepoMount" . }}
 - name: knowledge-checkout
   mountPath: {{ .Values.knowledge.sync.checkoutPath }}
 {{- end -}}
 
 {{- /* Volumes + the mTLS secret, in one place so every pod spec stays identical. */ -}}
 {{- define "chemclaw.volumes" -}}
+{{- if .Values.secrets.temporalTls.enabled }}
+{{- /* Required, not optional. Marked optional, an absent Secret surfaced as `FileNotFoundError`
+       deep inside a Temporal connect — a message naming neither Temporal nor a Secret — from a
+       post-install hook and every worker at once. Required, the kubelet reports
+       `MountVolume.SetUp failed … secret "chemclaw-temporal-tls" not found` on the pod before a
+       process starts. A deployment with no such Secret sets `secrets.temporalTls.enabled: false`
+       and connects plaintext. */}}
 - name: temporal-tls
   secret:
     secretName: {{ .Values.secrets.temporalTls.secretName }}
-    optional: true
-- name: knowledge
-  emptyDir: {}
+{{- end }}
 - name: knowledge-checkout
   emptyDir: {}
 {{- end -}}
 
-{{- /* The PR-gate submitter's own writable clone (gap DEP-2). Every component that can call
-       `propose_note` needs one — that is the front door (the `propose_knowledge_note` agent tool)
-       and the background worker (job-result / BO / memory publishes), but NOT a connector's own
-       worker: a bundle returns its note in the job envelope and core publishes it, so no
-       connector process ever touches the note repo. Deliberately a different directory
-       from the read replica: `git checkout -B note/<id>` switches a whole working tree. */ -}}
+{{- /* The PR-gate submitter's writable clone (gap DEP-2) — and, inside it at `knowledge_dir`, the
+       tree every reader resolves. Every component that can call `propose_note` needs one: the front
+       door (the `propose_knowledge_note` agent tool) and the background worker (job-result / BO /
+       memory publishes), but NOT a connector's own worker — a bundle returns its note in the job
+       envelope and core publishes it, so no connector process touches the note repo.
+
+       One clone rather than a clone plus a published copy, because `Settings` offers one path for
+       both: `knowledge_path` is `note_repo_dir / knowledge_dir`, and `kg/git_submitter.py` returns
+       the checkout to the base branch after every submission *because* readers share it. The
+       shallow replica at `sync.checkoutPath` survives as what the publish copies **from**, which is
+       its stated reason for existing: a failed fetch must not be able to leave the directory the
+       app reads half-written.
+
+       This init container runs first — `git clone` refuses a non-empty destination and the publish
+       directory is inside this one. */ -}}
 {{- define "chemclaw.noteRepoInit" -}}
 {{- if .Values.knowledge.sync.enabled }}
 - name: note-repo-init
@@ -296,9 +377,11 @@ readOnlyRootFilesystem: {{ .Values.securityContext.readOnlyRootFilesystem }}
 {{- end -}}
 
 {{- define "chemclaw.tlsMount" -}}
+{{- if .Values.secrets.temporalTls.enabled }}
 - name: temporal-tls
   mountPath: {{ .Values.secrets.temporalTls.mountPath }}
   readOnly: true
+{{- end }}
 {{- end -}}
 
 {{- /* CHEMCLAW_CONNECTOR_URLS, computed from the SAME enabled set the connector Deployments come
