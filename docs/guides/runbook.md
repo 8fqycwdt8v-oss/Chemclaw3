@@ -564,3 +564,69 @@ lowering it to shed load turns the transport into the admission control and shed
 connection never becomes a request the app can count. `chemclaw_turns_in_flight` against
 `chemclaw_turn_capacity` is the signal to read if the front door feels full and nothing is being
 refused.
+
+## (xiii) Restore a store — and what a restore does to the audit trail
+
+**Read this before running a restore, not after.** A point-in-time restore of Postgres is a
+*trailing deletion* of `audit_events`, and the hash chain cannot see one: the surviving rows link
+cleanly, so a shortened GxP trail verifies as intact
+(D-2026-08-01-a-restore-is-a-truncation-nobody-can-see).
+
+### What this system needs from the stores it does not own
+
+The chart deploys none of these. It states what it requires of whoever does.
+
+| Store | Holds | If it is lost |
+| --- | --- | --- |
+| **Postgres** | the audit chain, sessions, the calculation cache, the note index, job records | the audit chain is the only part with a compliance obligation; the cache is regenerable by definition (D-011) and the note index is rebuilt by `make reindex` |
+| **Temporal** | in-flight workflow history | running jobs die; finished results survive in `job_records` (D-157) and the calculation store |
+| **Knowledge git repo** | every merged note | the corpus. It is a git repo, so any clone is a backup — including each pod's sidecar checkout |
+| **HPC artifact store** | job outputs | regenerable at the cost of re-running the cluster job |
+
+Only one of the four needs a *point-in-time* story rather than a recent-snapshot one, and it is the
+audit trail — because it is the only store where "we lost the last hour" is a compliance statement
+rather than an inconvenience.
+
+### Restoring Postgres
+
+1. **Before restoring, capture the current anchor.** From the log store, take the most recent line
+   containing `audit_chain_anchor=` and keep the whole line. This is the *only* copy that survives
+   the restore — the `audit_anchors` table is rolled back with everything else, and will come back
+   agreeing with the truncated trail.
+2. Restore, by whatever mechanism the Postgres owner provides.
+3. Run the migrator (`make db-migrate` / the Helm hook) — it applies nothing if the restore was
+   already current, and the advisory lock makes running it twice safe (§(xi)).
+4. **Verify against the anchor you kept:**
+
+   ```
+   uv run python -m chemclaw.cli.verify_audit_chain --anchor '<the whole log line>'
+   ```
+
+   A clean chain plus `audit trail is short: N rows against an anchor of M` is the expected and
+   correct outcome of a restore that lost records. It is telling you precisely what a GxP process
+   needs to know and what nothing could tell you before: how many audited actions are gone.
+5. **Record the gap, then re-seal.** The trail may be shortened by a legitimate recovery; it may
+   never pretend it was not.
+
+   ```
+   uv run python -m chemclaw.cli.verify_audit_chain \
+     --anchor '<the log line>' --reseal "PITR to 2026-08-01T09:00Z after storage failure INC-123" \
+     --reseal-by "qa@example.com"
+   ```
+
+   `--reseal` refuses on a broken chain, deliberately: re-sealing over a break would sign the damage
+   and the trail would verify clean forever afterwards.
+
+### When the verifier reports a gap and there was no restore
+
+Treat it as tampering until shown otherwise, and do **not** re-seal. The anchor is signed, so a gap
+means either records were removed or the anchor was forged — and forging one needs
+`CHEMCLAW_AUDIT_ANCHOR_SECRET`, which is not in the database. Preserve the trail, preserve the log
+store, and escalate.
+
+### If `CHEMCLAW_AUDIT_ANCHOR_SECRET` is unset
+
+None of the above applies, because there are no anchors. The chain still catches modification,
+reordering, interior deletion and prefix truncation — and a restore stays what it was before this
+existed: an undetectable shortening of the compliance trail. Set the secret before writing a
+recovery procedure, not after.

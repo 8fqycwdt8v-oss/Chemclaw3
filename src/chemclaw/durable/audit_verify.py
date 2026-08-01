@@ -20,6 +20,7 @@ from datetime import timedelta
 from temporalio import activity, workflow
 
 with workflow.unsafe.imports_passed_through():
+    from chemclaw.agent.audit_anchor import take_anchor
     from chemclaw.cli.verify_audit_chain import verify_chain
     from chemclaw.core.config import settings
     from chemclaw.durable.registry import durable_activity, durable_workflow
@@ -37,6 +38,20 @@ AUDIT_ALERT_CHANNEL = "system-audit-integrity"
 async def check_audit_chain() -> list[str]:
     """Verify the audit hash chain; return one problem string per break (empty means intact)."""
     return await verify_chain()
+
+
+@durable_activity("background")
+@activity.defn
+async def anchor_audit_chain() -> str:
+    """Record and publish a signed high-water anchor over the trail; return its `taken_at`.
+
+    Only reached after a clean verification, and that ordering is the whole design: anchoring an
+    unverified trail signs whatever damage is already in it and makes that the new baseline. Empty
+    when no `audit_anchor_secret` is configured, which is the honest "this control is off" rather
+    than a failure — the chain still catches everything it caught before.
+    """
+    anchor = await take_anchor()
+    return anchor.taken_at if anchor is not None else ""
 
 
 @durable_workflow("background")
@@ -71,5 +86,15 @@ class AuditChainVerifyWorkflow:
                 AUDIT_ALERT_CHANNEL,
                 "audit_chain_break",
                 {"detail": problem},
+            )
+        if not problems:
+            # A fresh high-water mark, and only on a clean run. The anchor is what makes a *later*
+            # truncation visible — including the one a point-in-time restore performs — so the
+            # cadence of this job is also the resolution of that detection: a trail can only be
+            # shown to have lost rows since the last anchor, never since the last event.
+            await workflow.execute_activity(
+                anchor_audit_chain,
+                start_to_close_timeout=timedelta(seconds=settings.audit_verify_timeout_seconds),
+                retry_policy=BAD_DATA_RETRY,
             )
         return len(problems)

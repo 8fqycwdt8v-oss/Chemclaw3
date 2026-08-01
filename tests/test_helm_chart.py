@@ -181,6 +181,14 @@ def test_chart_declares_only_the_documented_secrets() -> None:
     Without it every reviewed note stays in the queue forever, which is a review surface nobody
     works. Note the polarity: an *absent* secret is safe here (the route refuses to decide
     anything), unlike the four above, where absent means the capability fails.
+
+    The audit-anchor key is the sixth (D-2026-08-01-a-restore-is-a-truncation-nobody-can-see), and
+    it is a secret for the reason that makes the anchor evidence rather than a note-to-self: an
+    actor able to delete audit rows is able to insert a lower anchor too, so the seal only means
+    something if its key lives somewhere a database compromise does not reach. It shares the
+    webhook secret's polarity — absent is *safe* rather than broken. The chain keeps catching
+    modification, reordering, interior deletion and prefix truncation, and a point-in-time restore
+    stays what it has always been: a trailing deletion nothing can see.
     """
     assert set(_VALUES["secrets"]["keys"].values()) == {
         "CHEMCLAW_LLM_API_KEY",
@@ -188,6 +196,7 @@ def test_chart_declares_only_the_documented_secrets() -> None:
         "CHEMCLAW_POSTGRES_DSN",
         "CHEMCLAW_KNOWLEDGE_REPO_TOKEN",
         "CHEMCLAW_NOTE_WEBHOOK_SECRET",
+        "CHEMCLAW_AUDIT_ANCHOR_SECRET",
     }
 
 

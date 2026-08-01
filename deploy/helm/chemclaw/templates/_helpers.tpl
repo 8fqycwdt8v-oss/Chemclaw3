@@ -13,7 +13,7 @@ app.kubernetes.io/name: chemclaw
 app.kubernetes.io/instance: {{ .Release.Name }}
 {{- end -}}
 
-{{- /* Env shared by every component: the ConfigMap (non-secret) + the three plain secret keys. */ -}}
+{{- /* Env shared by every component: the ConfigMap (non-secret) + every declared secret key. */ -}}
 {{- define "chemclaw.env" -}}
 - name: CHEMCLAW_TEMPORAL_TLS_CERT
   value: "{{ .Values.secrets.temporalTls.mountPath }}/tls.crt"

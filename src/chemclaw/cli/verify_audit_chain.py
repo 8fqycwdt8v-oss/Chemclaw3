@@ -12,22 +12,33 @@ Any failure means the append-only trail was altered after the fact. Run as
 `python -m chemclaw.cli.verify_audit_chain` (`make audit-verify`); it prints each problem and exits
 non-zero if the chain is broken, so it can gate a compliance check in CI or an audit.
 
-Known limit: deleting a *trailing* run of rows (tip truncation) cannot be detected from the chain
-alone — the remaining rows still link cleanly and nothing records how many rows there should be.
-Catching that needs an external append-count/max-id anchor recorded out-of-band; it is deferred (see
-docs/planning/DEFERRED.md). The chain detects modification, reordering, interior deletion, and
-prefix truncation.
+4. the trail is no shorter than the newest signed anchor says it was
+   (`agent/audit_anchor.py`) — the one alteration the chain itself cannot see.
+
+That fourth check closes what this docstring described for a long time as a known limit: deleting a
+*trailing* run of rows leaves the survivors linking cleanly, and nothing recorded how many rows
+there should have been. It was deferred pending a regulated deployment asking for provable tail
+completeness, and the readiness review made it operational instead — **a point-in-time restore is a
+trailing deletion**, so writing a recovery procedure without an anchor means every recovery silently
+shortens the compliance trail in the one way the chain was built not to notice.
+
+The anchor is optional. Without `CHEMCLAW_AUDIT_ANCHOR_SECRET` the first three checks run exactly as
+before and the fourth is skipped, which is stated rather than defaulted around: a trail with no
+anchor is chained and silent about its own tail. An anchor recovered from the logs after a restore
+is passed with `--anchor`, because the copy in the database was restored along with everything else.
 
 The pure `check_chain` is separated from the database fetch so the invariants are unit-testable
 offline over synthetic rows. Rows written before the chain migration (empty `row_hash`) are treated
 as pre-chain and skipped until the first chained row (see `infra/sql/011_audit_hash_chain.sql`).
 """
 
+import argparse
 import asyncio
-from collections.abc import Iterable
+from collections.abc import Iterable, Sequence
 from typing import NamedTuple
 
 from chemclaw.agent.audit import AuditEvent
+from chemclaw.agent.audit_anchor import Anchor, compare, latest_anchor, parse_anchor, take_anchor
 from chemclaw.agent.audit_store import CHAIN_VERSION, chain_hash
 from chemclaw.core.config import settings
 from chemclaw.core.db import connection
@@ -64,6 +75,13 @@ class ChainCheck:
     def __init__(self) -> None:
         """Start before the genesis row, with nothing found."""
         self.problems: list[str] = []
+        # What the anchor check needs, accumulated by the same single pass rather than by a second
+        # query: a `count(*)` taken after the walk would describe a different moment than the walk
+        # did, and on the one table that is always being appended to, "a different moment" is the
+        # difference between a real gap and a row that arrived mid-verification.
+        self.rows_seen = 0
+        self.last_id = 0
+        self.tip_hash = ""
         # None means "no chained row seen yet", which is what makes the genesis check work: the
         # first row with a `row_hash` must carry an empty `prev_hash`. Carried across `feed` calls,
         # so paging is invisible to the invariant.
@@ -95,6 +113,9 @@ class ChainCheck:
                     "fields"
                 )
             self._expected_prev = row.row_hash
+            self.rows_seen += 1
+            self.last_id = row.id
+            self.tip_hash = row.row_hash
 
 
 def check_chain(rows: Iterable[ChainRow]) -> list[str]:
@@ -147,12 +168,19 @@ def _chain_row(record: tuple[object, ...]) -> ChainRow:
     )
 
 
-async def verify_chain(dsn: str | None = None) -> list[str]:
-    """Walk the audit trail in pages and check its hash chain; return the problems found.
+async def verify_chain(dsn: str | None = None, *, anchor: Anchor | None = None) -> list[str]:
+    """Walk the audit trail in pages, check its hash chain, and compare it against an anchor.
 
     One connection for the whole walk, one page in memory at a time. The page size is
     `audit_verify_page_rows`; the fold carries the link across pages, so paging is invisible to the
     invariant and a trail of any length verifies in bounded memory.
+
+    `anchor` is the high-water mark to hold the trail against. Passed explicitly when an operator
+    recovered one from the logs after a restore — which is the case that matters, because the copy
+    in `audit_anchors` was restored along with everything else and now agrees with the truncated
+    trail. Left None, the newest signed anchor in the database is used, which still catches
+    tampering that did not think to rewrite the anchors. No anchor at all (no secret configured, or
+    none taken yet) means the first three checks run and the fourth is skipped.
     """
     target = dsn if dsn is not None else settings.postgres_dsn
     check = ChainCheck()
@@ -170,19 +198,78 @@ async def verify_chain(dsn: str | None = None) -> list[str]:
             after = int(str(records[-1][0]))
             if len(records) < page_size:
                 break
+    held_to = anchor if anchor is not None else await latest_anchor(target)
+    if held_to is not None:
+        check.problems.extend(
+            compare(
+                held_to,
+                row_count=check.rows_seen,
+                max_event_id=check.last_id,
+                tip_hash=check.tip_hash,
+            )
+        )
     return check.problems
 
 
-def main() -> int:
-    """CLI entry point: verify the audit chain; print problems; return the exit code."""
-    problems = asyncio.run(verify_chain())
+def _parser() -> argparse.ArgumentParser:
+    """The CLI surface: verify, optionally against a recovered anchor, optionally re-anchoring."""
+    parser = argparse.ArgumentParser(description=__doc__ and __doc__.splitlines()[0])
+    parser.add_argument(
+        "--anchor",
+        default="",
+        help=(
+            "an anchor recovered from the logs (the JSON after `audit_chain_anchor=`, or the whole "
+            "log line) to hold the trail against, instead of the one in the database. This is the "
+            "form to use after a restore, which rolled the stored anchors back too."
+        ),
+    )
+    parser.add_argument(
+        "--reseal",
+        default="",
+        help=(
+            "record a NEW anchor over the trail as it stands now, with this reason. Only after a "
+            "verified-clean chain, and only as a deliberate act: it accepts the current trail as "
+            "the baseline, so re-sealing over a gap makes that gap permanent and unremarked. The "
+            "reason is stored with the anchor — a trail may be shortened by a legitimate recovery "
+            "and may never pretend it was not."
+        ),
+    )
+    parser.add_argument(
+        "--reseal-by",
+        default=settings.cli_admin_actor,
+        help="who accepted the re-seal (stored beside the reason).",
+    )
+    return parser
+
+
+async def _run(argv: Sequence[str] | None) -> int:
+    """Verify, print, optionally re-seal; return the exit code."""
+    args = _parser().parse_args(argv)
+    supplied = parse_anchor(args.anchor) if args.anchor else None
+    problems = await verify_chain(anchor=supplied)
     for problem in problems:
         print(problem)
     if problems:
         print(f"\n{len(problems)} problem(s) — the audit trail hash chain is BROKEN")
+        if args.reseal:
+            # Refusing here is the point of the flag existing at all. Re-sealing over a break would
+            # sign the damage and make it the new baseline, which is worse than never having
+            # anchored: the trail would then verify clean forever.
+            print("refusing to re-seal a broken chain — resolve the problems above first")
         return 1
     print("OK: the audit trail hash chain is intact")
+    if args.reseal:
+        anchor = await take_anchor(reseal_reason=args.reseal, reseal_by=args.reseal_by)
+        if anchor is None:
+            print("no CHEMCLAW_AUDIT_ANCHOR_SECRET configured — nothing to re-seal with")
+            return 1
+        print(f"re-sealed at {anchor.row_count} rows (id {anchor.max_event_id}): {args.reseal}")
     return 0
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    """CLI entry point: verify the audit chain; print problems; return the exit code."""
+    return asyncio.run(_run(argv))
 
 
 if __name__ == "__main__":
