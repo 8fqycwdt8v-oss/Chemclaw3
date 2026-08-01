@@ -4,7 +4,7 @@ Requested 2026-08-01. Branch: `claude/v1-readiness-analysis-wd5jq1`.
 
 Source: an adversarially-verified review across all four layers and every phase — 32 findings
 verified, 28 survived refutation, 22 distinct defects after merging duplicates, plus four
-refutations re-opened as questions. Shipped as **one** PR of nine commits, not the four planned: the fixes turned out to be
+refutations re-opened as questions. Shipped as **one** PR of eleven commits (#98, merged), not the four planned: the fixes turned out to be
 entangled — the entropy correction is inert without the cache epoch, the epoch's own motivation is
 that correction, and the authz change falsified a runbook sentence that the chart's test then
 enforced. Splitting them would have meant merging a fix that was provably incomplete.
