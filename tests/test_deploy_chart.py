@@ -911,8 +911,8 @@ def test_the_supply_chain_has_a_gate_that_can_fail() -> None:
     image_workflow = (DEPLOY.parent / ".github" / "workflows" / "image.yml").read_text()
     assert "pip-audit" in image_workflow, "no dependency scan"
     assert "syft" in image_workflow and "upload-artifact" in image_workflow, "no retained SBOM"
-    assert "trivy-action" in image_workflow, "no image scan"
-    assert 'exit-code: "1"' in image_workflow, (
+    assert "trivy image" in image_workflow, "no image scan"
+    assert "--exit-code 1" in image_workflow, (
         "the image scan reports and never fails, which is a badge rather than a gate"
     )
     assert "deps-audit:" in (DEPLOY.parent / "Makefile").read_text(), (

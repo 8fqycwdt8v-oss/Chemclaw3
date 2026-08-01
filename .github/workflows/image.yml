@@ -136,16 +136,22 @@ jobs:
       - name: Scan the built image for known vulnerabilities
         # The dependency audit above covers the Python closure; this covers everything the base
         # image and the two binary layers bring with them, which is the half a lockfile cannot see.
-        # `--exit-code 1` on HIGH and CRITICAL only: a blocking gate that fires on every LOW in a
-        # distro base is one an operator disables within a week, and a disabled gate is the state
-        # this row exists to end.
-        uses: aquasecurity/trivy-action@0.28.0
-        with:
-          image-ref: chemclaw:ci
-          format: table
-          exit-code: "1"
-          ignore-unfixed: true
-          severity: HIGH,CRITICAL
+        #
+        # `--exit-code 1` on HIGH and CRITICAL only, with `--ignore-unfixed`: a blocking gate that
+        # fires on every LOW in a distro base is one an operator disables within a week, and a
+        # disabled gate is the state this row exists to end. What is dropped is said out loud here
+        # rather than left to be inferred from the flags.
+        #
+        # The binary via its own installer rather than `aquasecurity/trivy-action`, for the reason
+        # the first attempt failed: pinning a third-party action means pinning a tag, and the tag
+        # picked did not exist. The installer is the same mechanism the syft step above already
+        # uses, so there is one pattern here rather than two.
+        run: |
+          set -euo pipefail
+          curl -sSfL https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/install.sh \
+            | sh -s -- -b /usr/local/bin
+          trivy image --exit-code 1 --ignore-unfixed --severity HIGH,CRITICAL \
+            --format table chemclaw:ci
 
       - name: An unknown component must fail loudly, not silently start something
         run: |
