@@ -106,7 +106,6 @@ _SECRET_SETTINGS = (
     "session_store_dsn",
     "note_webhook_secret",
     "audit_anchor_secret",
-    "knowledge_repo_token",
 )
 
 # Below this length a "secret" is more likely to be a placeholder, an empty default, or a string
