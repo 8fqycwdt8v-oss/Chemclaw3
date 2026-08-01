@@ -379,10 +379,20 @@ QM path. The rows below are what survives that merge, narrowed to say so.
       unimplementable, and `audit_events` is deliberately unprunable); `SessionSummary` is
       `session_id + created_at` with a `LIMIT` and no cursor, so past 100 sessions the older ones
       are unreachable.
-- [ ] **`GET /sessions/{id}/messages` loses the whole trace on reload** — [M]. It returns
-      `role + text`: no message id, timestamp, tool calls, job ids, plan, attachments, confidence or
-      pagination, while the live SSE stream carries 12 event types. A real UI cannot render history
-      at parity with the live view — the largest single item for the `Chemclaw3_ui` repo.
+- [x] **`GET /sessions/{id}/messages` loses the whole trace on reload** — the half that was
+      recoverable is closed. Tool calls and their results were **never missing from storage**: a MAF
+      message already holds `function_call`/`function_result` contents and the route was flattening
+      them away, so `TranscriptMessage.tool_calls` reads what was always there. A `tool` message is
+      folded into the call it answers rather than rendered twice, an unanswered call reports
+      `result=None` (a real state: "it ran and we do not know how it ended"), and arguments are
+      bounded like the audit trail's.
+- [ ] **A plan snapshot, an attachment reference and an answer's confidence are not persisted at
+      all** — [M], the other half, and it is a different problem from the row above. Those are
+      turn-time events computed and streamed; nothing writes them to `session_messages`. Recovering
+      them is a change to what a turn *stores*, not to how it is read, so it wants its own decision
+      — including whether a plan snapshot per turn is worth the rows. Pagination belongs with it:
+      the read goes through the history provider, which has no cursor, and giving it one is the
+      same change.
 - [x] **Every turn failure collapses to one opaque string** — closed. `ErrorEvent` carries a
       `code` from a short closed taxonomy, a `retryable` flag, and the `correlation_id` the audit
       trail is keyed on (the old message named the *session*, which the user already has). An

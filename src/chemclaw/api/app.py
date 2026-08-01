@@ -21,7 +21,7 @@ import logging
 import time
 import uuid
 from collections import OrderedDict
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncIterator, Callable, Sequence
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import datetime
@@ -98,6 +98,58 @@ _STATIC_DIR = Path(__file__).parent / "static"
 # Where a git host puts the body signature. `sha256=<hex>` is the shape GitHub, GitLab and Azure
 # DevOps webhooks all produce, so an operator wires this without a translation step.
 _WEBHOOK_SIGNATURE_HEADER = "X-Chemclaw-Signature"
+
+
+# How much of a tool's arguments or result the transcript carries. The same bound the audit trail
+# applies for the same reason: a tool argument can be a whole optimization problem or an evidence
+# sweep, and a reload must not ship one per call.
+_TRANSCRIPT_ARG_CHARS = 400
+
+
+def _transcript(stored: "Sequence[Any]") -> list["TranscriptMessage"]:
+    """Flatten stored MAF messages into the transcript contract, pairing calls with their results.
+
+    Results arrive in a *later* message than the call they answer — MAF emits the assistant's
+    `function_call` and then a `tool` message carrying the `function_result` — so pairing needs one
+    pass over the whole transcript before any message can be rendered. `call_id` is the join.
+
+    **What this recovers, and what it cannot.** Tool calls and their outcomes were always in
+    storage and merely discarded by the route, so they come back for free. Plan snapshots,
+    attachment references and the answer's `confidence`/`review_required` were **never persisted**
+    — they are turn-time events computed and streamed, and nothing writes them to
+    `session_messages`. Recovering those is a change to what a turn *stores*, not to how it is
+    read, so it is a separate decision rather than something this can quietly approximate.
+    """
+    results: dict[str, str] = {}
+    for message in stored:
+        for content in getattr(message, "contents", []):
+            if content.type == "function_result" and content.call_id is not None:
+                results[content.call_id] = _truncate_for_transcript(getattr(content, "result", ""))
+    transcript: list[TranscriptMessage] = []
+    for index, message in enumerate(stored):
+        calls = [
+            TranscriptToolCall(
+                tool=content.name or "",
+                arguments=_truncate_for_transcript(getattr(content, "arguments", "")),
+                result=results.get(content.call_id or ""),
+            )
+            for content in getattr(message, "contents", [])
+            if content.type == "function_call"
+        ]
+        # A `tool` message is the carrier for a result that has already been attached to its call,
+        # so surfacing it as its own bubble would render every tool twice.
+        if message.role == "tool" and not calls:
+            continue
+        transcript.append(
+            TranscriptMessage(index=index, role=message.role, text=message.text, tool_calls=calls)
+        )
+    return transcript
+
+
+def _truncate_for_transcript(value: object) -> str:
+    """Render a tool argument or result as one bounded string (see `_TRANSCRIPT_ARG_CHARS`)."""
+    text = value if isinstance(value, str) else repr(value)
+    return text if len(text) <= _TRANSCRIPT_ARG_CHARS else text[:_TRANSCRIPT_ARG_CHARS] + "…"
 
 
 def _webhook_signature_ok(body: bytes, header: str) -> bool:
@@ -400,15 +452,41 @@ class SessionSummary(BaseModel):
     created_at: datetime
 
 
-class TranscriptMessage(BaseModel):
-    """One stored message of a session's transcript, flattened to what a chat surface renders.
+class TranscriptToolCall(BaseModel):
+    """One tool the agent invoked during a turn, as the transcript remembers it.
 
-    Role plus text rather than the MAF `Message` shape: the durable row is a MAF serialization,
-    and exposing it would make a MAF version bump a breaking change to the HTTP contract.
+    The same pair the live stream reports as `ToolCallEvent` + `ToolResultEvent`, recovered from
+    storage. `result` is `None` while the pairing is incomplete — a turn that failed mid-call, or a
+    call whose result row was pruned — which is a real state a surface should render as "this ran
+    and we do not know how it ended", not as a success with an empty answer.
     """
 
+    tool: str
+    arguments: str = ""
+    result: str | None = None
+
+
+class TranscriptMessage(BaseModel):
+    """One stored message of a session's transcript, as a chat surface renders it.
+
+    Role plus text rather than the MAF `Message` shape: the durable row is a MAF serialization, and
+    exposing it would make a MAF version bump a breaking change to the HTTP contract.
+
+    **`tool_calls` is the part that was missing, and it was never missing from storage.** The live
+    SSE stream carries fourteen event types; a reload got `role` and `text`, so everything the
+    agent *did* vanished and a UI could not render history at parity with the live view — the
+    largest single blocker for the frontend repo. But a MAF message already holds
+    `function_call`/`function_result` contents; the route was flattening them away. Nothing new is
+    persisted here: this reads what was always there.
+
+    `index` is the message's position in the transcript, so a client has a stable key without the
+    HTTP contract having to expose a database row id.
+    """
+
+    index: int = 0
     role: str
     text: str
+    tool_calls: list[TranscriptToolCall] = []
 
 
 class ApprovalDecisionIn(BaseModel):
@@ -898,10 +976,14 @@ def create_app(
         one reader means the write path and the read path cannot drift, and the route works
         unchanged under either store — the in-memory provider keeps its messages in
         `session.state`, which is exactly what `_resolve_session` just returned.
+
+        Each message carries the tools invoked alongside it, so a reload renders what the agent
+        *did* and not only what it said. See `TranscriptMessage` for what that recovers and
+        `_transcript` for what it cannot.
         """
         live = await _resolve_session(session_id, principal)
         stored = await app.state.history.get_messages(session_id, state=live.session.state)
-        return [TranscriptMessage(role=message.role, text=message.text) for message in stored]
+        return _transcript(stored)
 
     @app.post("/sessions/{session_id}/messages")
     async def post_message(
