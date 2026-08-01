@@ -155,9 +155,9 @@ def test_the_trust_rides_on_the_value_line_because_the_excerpt_truncates() -> No
     and kept in the short ones that needed it least — so the rendering has to be inline, and a
     newline in it would silently reintroduce the separation.
     """
-    rendered = Estimate(
-        value=-154.75, unit="Hartree", method="none", in_domain=True
-    ).render(fmt=".6f")
+    rendered = Estimate(value=-154.75, unit="Hartree", method="none", in_domain=True).render(
+        fmt=".6f"
+    )
     assert "\n" not in rendered
     assert rendered == "-154.750000 Hartree (no uncertainty established)"
 
@@ -179,7 +179,7 @@ def test_an_unassessed_domain_says_so_rather_than_reading_as_a_pass() -> None:
 
 
 def test_an_out_of_domain_estimate_shouts_and_gives_its_reasons() -> None:
-    """The loudest state, and the reasons travel with it — a flag with no reason is not actionable."""
+    """The loudest state, reasons included: a flag with no reason is not actionable."""
     rendered = Estimate(
         value=0.5,
         unit="log10(mol/L)",
@@ -200,9 +200,9 @@ def test_the_rendering_distinguishes_where_the_uncertainty_came_from() -> None:
     weaker claim and the stronger one in the same words — which is the distinction the field was
     added to preserve.
     """
-    base = {"value": 1.0, "unit": "log10(mol/L)", "uncertainty": 0.5, "in_domain": True}
-    reported = Estimate(**base, method="reported").render(fmt=".3g")
-    conformal = Estimate(**base, method="conformal").render(fmt=".3g")
+    base = Estimate(value=1.0, unit="log10(mol/L)", uncertainty=0.5, in_domain=True)
+    reported = base.model_copy(update={"method": "reported"}).render(fmt=".3g")
+    conformal = base.model_copy(update={"method": "conformal"}).render(fmt=".3g")
     assert reported != conformal
     assert "reported" in reported
     assert "conformal" in conformal

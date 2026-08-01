@@ -236,10 +236,29 @@ QM path. The rows below are what survives that merge, narrowed to say so.
       leverage cutoff from. Structural checks catch a salt and an organometallic; they do not catch
       a perfectly ordinary neutral organic that is simply far from anything the model was fitted on.
       This is a data-acquisition decision, not a coding one.
-- [ ] **Uncertainty stops at the calculator and never reaches a note** — [S]. The calculator layer
-      carries it well; `qm/knowledge.py` then writes `total energy: {x:.6f} Hartree` with no error
-      bar and `bo/knowledge.py` writes a bare objective value. Units are prose in a Markdown body,
-      never a structured field, so retrieval quotes the bare number.
+- [x] **Uncertainty stops at the calculator and never reaches a note** — closed by
+      D-2026-08-01-trust-travels-on-the-value-line, with two of its three claims corrected on the
+      way. `Estimate.render()` puts value, unit, uncertainty, its provenance and any domain failure
+      on the value line — inline, because `_excerpt` is a blind 240-character prefix and a trust
+      stanza below the value is cut from exactly the notes carrying the most prose.
+      **"The calculator layer carries it well" was false where it mattered.** QM has no error bar
+      and cannot acquire one (an absolute total energy has none — `science/calc/reaction.py` already
+      says so), so its honest gain is the unit plus convergence restated as the domain flag. BO's
+      uncertainty *was* computed on every model-guided ask and dropped by
+      `engine._frame_to_candidates` one function before anything could record it; recovered onto
+      `Candidate`, carried through `Observation`, written into the note.
+      **A structured front-matter field was deliberately not added**: `_excerpt` reads the body, so
+      the prose line is what retrieval quotes, and a field would need threading through `NoteRef`
+      and `EvidenceChunk` for zero readers. Additive later if a machine consumer appears.
+- [ ] **`Estimate` is a three-writer contract, and four calculators are still outside it** — [S].
+      `pka`, `logd`, `reaction` and `xtb_thermo` each carry an uncertainty under their own field
+      name (`uncertainty`, `uncertainty_kcal`) with no `method` and no domain answer. None of them
+      writes a note today, which is why the row above did not force the conversion — but a skill
+      consulting "how far do I trust this" still gets four shapes and one.
+- [ ] **`conformal_uncertainty` has no caller** — [S]. It needs a database read of the calibration
+      ledger's reconciled residuals, so it belongs on the cached path rather than the inline one;
+      until that is wired, `calibration_conformal_coverage` and `calibration_conformal_min_samples`
+      are configured and unread, and every `method` in the system is `reported` or `none`.
 - [ ] **F9-T3 — zero evaluation of agent behaviour** — [M], **also in no other backlog item**.
       `implementation-tickets.md:682` specifies plan quality, plan-vs-single-shot A/B, and
       runaway/abort rate — all computable on a scripted transcript, which is what its own ticket

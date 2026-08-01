@@ -524,14 +524,10 @@ def test_the_job_summary_and_the_note_agree_about_the_energy() -> None:
     from chemclaw.connectors.qm.workflows import _envelope
 
     for converged in (True, False):
-        result = _RESULT.model_copy(update={"converged": converged})
-        summary = _envelope(result, "").summary
-        energy_line = next(
-            ln
-            for ln in _envelope(result, "").note.body.splitlines()
-            if ln.startswith("- total energy:")
-        )
-        assert summary is not None
+        envelope = _envelope(_RESULT.model_copy(update={"converged": converged}), "")
+        summary, note = envelope.summary, envelope.note
+        assert summary is not None and note is not None
+        energy_line = next(ln for ln in note.body.splitlines() if ln.startswith("- total energy:"))
         # The summary ends with exactly the rendering the note's energy line carries.
         assert summary.endswith(energy_line.removeprefix("- total energy: "))
         assert ("OUT OF DOMAIN" in summary) is (not converged)

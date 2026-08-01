@@ -66,9 +66,7 @@ def test_a_completed_job_hands_over_its_result_in_one_call(
             # Kept in step with what `qm.workflows._envelope` actually renders (F8-T1) — this is
             # fixture data rather than a pin on that format, and a stale sample here is how a
             # reader learns the wrong shape.
-            "summary": (
-                "B3LYP/def2-SVP on CCO: -154.750000 Hartree (no uncertainty established)"
-            ),
+            "summary": ("B3LYP/def2-SVP on CCO: -154.750000 Hartree (no uncertainty established)"),
             "data": {"total_energy_hartree": -154.75, "converged": True},
         },
     )
