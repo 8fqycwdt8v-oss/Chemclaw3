@@ -39,6 +39,7 @@ from chemclaw.connectors.identity import (
     HEADER_SESSION,
 )
 from chemclaw.core import db
+from chemclaw.core.tracing import continue_trace
 
 logger = logging.getLogger(__name__)
 
@@ -77,7 +78,14 @@ class CallerLogMiddleware(BaseHTTPMiddleware):
         )
         tokens = bind_caller(actor, session, request.headers.get(HEADER_CORRELATION, ""))
         try:
-            return await call_next(request)
+            # Adopt the caller's trace, so this connector's spans are children of the turn that
+            # called it rather than the root of an unrelated one. Note the asymmetry with the two
+            # lines above: the `X-Chemclaw-*` identity headers are advisory and must never reach an
+            # access decision, while trace context is safe to take from outside precisely because
+            # it grants nothing — the worst a forged `traceparent` achieves is attaching spans to
+            # someone else's trace.
+            with continue_trace(request.headers):
+                return await call_next(request)
         finally:
             # Defensive rather than load-bearing, and worth being honest about: each request runs
             # in its own task context, so a `ContextVar` set here is already invisible to the next

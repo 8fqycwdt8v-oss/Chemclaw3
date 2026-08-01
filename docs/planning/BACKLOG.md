@@ -421,11 +421,21 @@ QM path. The rows below are what survives that merge, narrowed to say so.
       no fix inside the handler could have worked. And `parse_attachment`'s check is **not** the one
       in the wrong place to be deleted — it is a different check (data-shaped, 422, with a second
       caller in the backfill CLI) that stays beside the transport-shaped 413.
-- [ ] **Tracing is shallow and the docs overstate it** — [M]. One call to MAF's
-      `configure_otel_providers` is the whole story; zero first-party spans, no FastAPI/httpx/
-      Temporal instrumentation, no `traceparent` propagation (the tell is that `connectors/identity`
-      propagates a *custom* correlation header). `deploy/README.md` claims spans cover a turn and a
-      job and that dashboards track loop iterations — none exists.
+- [x] **Tracing is shallow and the docs overstate it** — closed by
+      D-2026-08-01-a-turn-you-can-follow-across-a-process, with what is still absent named rather
+      than implied. Two first-party spans (`chemclaw.turn`, `chemclaw.tool`) and W3C `traceparent`
+      on connector calls, adopted server-side — so a calculation's spans are children of the turn
+      that asked for it instead of an orphan trace. The row's parenthesis was the whole finding: the
+      custom correlation header exists *because* the standard one was not being sent. Both stay and
+      they answer different questions — the correlation id is what `audit_events` is keyed on and
+      works with no collector; `traceparent` is what makes a trace a tree. `deploy/README.md`'s
+      claims about job spans and dashboards are deleted rather than softened.
+- [ ] **No span around a durable job, and no auto-instrumentation** — [M]. The two boundaries above
+      are in one process; a job spans two and a Temporal boundary, so the workflow has to carry the
+      trace context in its payload — a real design question (payloads are replayed, and a stale
+      `traceparent` would attach a replay to the original trace) rather than another `start_span`.
+      Separately: no FastAPI/httpx/Temporal auto-instrumentation packages, which would give HTTP and
+      database spans under the two first-party ones for the cost of three dependencies.
 - [ ] **Logs are unstructured and unredacted** — [M]. A `%`-format string, no JSON option, no filter
       injecting the correlation/actor/session contextvars that already exist — so an ordinary
       WARNING has nothing to join on. `SECURITY.md` states the audit trail holds PII and that a
