@@ -43,6 +43,7 @@ from chemclaw.agent.session_context import (
     set_current_session,
     set_current_session_id,
 )
+from chemclaw.agent.turn_cost import TurnCost, record_turn_cost
 from chemclaw.agent.turn_signals import (
     ApprovalSignal,
     JobSignal,
@@ -159,6 +160,10 @@ async def run_turn(
     # attach the gate — one predicate, so the two cannot disagree about a profile that overrides
     # the deployment's autonomy.
     plan_gated = gate_applies(get_profile(profile))
+    # Set only once an `AnswerEvent` has actually been yielded, so the cost ledger can separate a
+    # turn that finished from one a disconnect or the wall-clock deadline cut short. Both are
+    # billed; only one of them got anything for the money.
+    answered = False
     answer_parts: list[str] = []
     # Metered across the turn's updates and booked once on teardown (even on failure — a failed
     # turn still spent tokens up to the point it broke, so its cost must count toward the next
@@ -315,6 +320,7 @@ async def run_turn(
                     last_plan = current_plan
                     yield PlanEvent(todos=last_plan)
         yield await _answer_event("".join(answer_parts))
+        answered = True
         # The turn used its authorization, so the authorization is spent (D-167). Here rather than
         # in `finally`, which also runs on the disconnect path where an `await` would re-raise the
         # cancellation and skip every teardown step after it — see `consume_turn_approval`.
@@ -424,6 +430,27 @@ async def run_turn(
         # `default` rather than an absent label for a session on no profile, so every series carries
         # the same label set and the sum over the family is the deployment's whole spend.
         spend_labels = {"profile": profile or "default"}
+        # The same numbers, booked a second time against the identity the metric cannot carry. Not a
+        # duplicate: `api/metrics` refuses a counter past 64 label series (D-152) because a label
+        # value is attacker-influenced, and an Entra oid is exactly such a key — so per-actor spend
+        # needs a table, and the fleet-wide rate needs a counter. Booked here rather than on the
+        # success path so a turn torn down by a disconnect is billed too: that is the runaway this
+        # ledger exists to find, not an edge case to drop. `record_turn_cost` does not await — see
+        # the block comment above and its own docstring.
+        record_turn_cost(
+            TurnCost(
+                correlation_id=correlation_id,
+                session_id=session.session_id,
+                actor=actor or "",
+                profile=profile or "default",
+                input_tokens=turn_usage.input,
+                output_tokens=turn_usage.output,
+                cache_read_tokens=turn_usage.cache_read,
+                cache_write_tokens=turn_usage.cache_write,
+                duration_seconds=time.perf_counter() - turn_started,
+                completed=answered,
+            )
+        )
         if turn_usage.total:
             METRICS.increment("chemclaw_tokens_total", float(turn_usage.total), spend_labels)
         # Published separately from the total because they are priced separately (REV-10). Each is

@@ -40,7 +40,10 @@ from chemclaw.durable.memory_jobs import publish_memory_note_activity
 from chemclaw.durable.notify import record_session_event_activity
 from chemclaw.kg.note import Note
 from chemclaw.kg.pr_gate import propose_note
-from tests.fixtures.connectors.fixture.workflows import FixtureJobWorkflow
+from tests.fixtures.connectors.fixture.workflows import (
+    _FIXTURE_RUNTIME_SECONDS,
+    FixtureJobWorkflow,
+)
 from tests.temporal_env import pydantic_client, start_env_or_skip
 
 _FIXTURE_DIR = Path(__file__).parent / "fixtures" / "connectors"
@@ -107,13 +110,20 @@ def test_a_connector_workflow_returns_a_well_formed_envelope(
     already passed the graph's slug/schema validators — which is what stops a malformed proposal
     from reaching the PR-gate and failing later at branch creation.
 
-    `memo_value` is stubbed because there is no run outside a workflow to carry a memo; the real
-    read is exercised end to end below, where core stamps it.
+    `memo_value` and `sleep` are stubbed for the same reason: outside a workflow there is no run to
+    carry a memo and no workflow clock to skip. Both are exercised for real end to end below — the
+    memo where core stamps it, and the sleep where it gives the run's measured duration a lower
+    bound that a hardcoded zero cannot meet.
     """
     monkeypatch.setattr(
         "tests.fixtures.connectors.fixture.workflows.workflow.memo_value",
         lambda key, default="": default,
     )
+
+    async def _no_sleep(_seconds: float) -> None:
+        return None
+
+    monkeypatch.setattr("tests.fixtures.connectors.fixture.workflows.workflow.sleep", _no_sleep)
     result = asyncio.run(FixtureJobWorkflow().run({"subject": "benzene"}))
     assert isinstance(result, ConnectorJobResult)
     assert result.summary == "fixture job ran on benzene"
@@ -285,6 +295,16 @@ def test_a_connector_job_runs_its_own_workflow_and_core_does_the_rest(
     assert record.payload == {"subject": "benzene"}
     assert record.result == result.data  # the full envelope, not a summary of it
     assert record.note_id == "fixture-benzene"
+    # And what the run consumed. `job_record_for` is pure and testable offline, but nothing there
+    # can tell a *measured* runtime from a hardcoded 0.0 — the measurement happens in the workflow,
+    # which needs a server, so the assertion belongs here even though this file is skipped in the
+    # offline sandbox. The fixture child sleeps a known minute on the workflow clock for exactly
+    # this: under the time-skipping server it costs no wall clock, and it gives the measurement a
+    # lower bound a hardcoded zero cannot meet. Measured with `workflow.now()` rather than a
+    # monotonic clock, so a replay measures the run and not the replay.
+    assert record.runtime_seconds >= _FIXTURE_RUNTIME_SECONDS, (
+        "the durable record did not carry the run's measured duration"
+    )
     # The note a human is asked to sign says *why* the run happened, stamped by core rather than
     # by the connector — which is what makes it true of every connector, including ones that
     # know nothing about the record.

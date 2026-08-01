@@ -465,9 +465,27 @@ QM path. The rows below are what survives that merge, narrowed to say so.
       while every pod's own config stays valid.
       **Not closed by this:** the 49th turn is still admitted. This bounds the configuration, not
       the request; fleet-wide *admission* remains rejected under SCALE-1.
-- [ ] **No cost attribution** — [M]. Token metrics carry `profile` only, so "what did team X cost"
-      is unanswerable, and HPC/compute spend is entirely unmetered — no counter for jobs launched or
-      node-hours, on the most expensive thing the system does.
+- [x] **No cost attribution** — closed by D-2026-08-01-spend-is-a-ledger-not-a-label, with one of
+      the row's two claims corrected. `turn_costs` books one row per turn — actor, session, profile,
+      the four token counts, duration, and whether it answered — keyed on `correlation_id`, so
+      "what did team X cost" is a `GROUP BY` that joins to the audit trail. A turn torn down by a
+      disconnect is billed and marked `completed=false`, because that is the runaway the ledger
+      exists to find. An `actor` **label** was the obvious fix and is unavailable by design: the
+      registry refuses a counter past 64 label series (D-152) because the value is
+      attacker-influenced, so per-actor attribution needs unbounded cardinality and quarters of
+      history — a database's job, not Prometheus's.
+      **The compute claim was half false.** `chemclaw_jobs_started_total` has existed since D-118
+      (`connectors/jobs.py`). What was missing is a *magnitude*: a two-second xTB call and a
+      six-hour DFT run incremented it identically. `job_records.runtime_seconds` (measured across
+      the child with `workflow.now()`) and `chemclaw_job_runtime_seconds_total{connector}` fix that.
+      **Still open, and named rather than implied:** node-hours. Parallelism belongs to the
+      launcher and none reports it back yet — see the row below. Pricing is deliberately absent: the
+      ledger records quantities, and a rate card is a deployment's own fact.
+- [ ] **Node-hours are still unmeasured** — [S], the half of cost attribution that needs a live
+      cluster. `runtime_seconds` is wall clock across the child workflow; what an HPC run actually
+      costs is that times its allocation, which only the launcher knows. Seqera/Tower reports task
+      resource usage on a completed run; plumbing it back through `NextflowLauncher` into
+      `job_records` is the fix, and it cannot be verified without a real Tower endpoint.
 
 **Product floor.**
 

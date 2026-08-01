@@ -22,6 +22,11 @@ with workflow.unsafe.imports_passed_through():
     from chemclaw.kg.note import Note
 
 
+# How long the fixture "computes", on the workflow clock. Named so the assertion in
+# `tests/test_connector_job_workflow.py` and the sleep below cannot drift apart.
+_FIXTURE_RUNTIME_SECONDS = 60
+
+
 @workflow.defn(name="FixtureJobWorkflow")
 class FixtureJobWorkflow:
     """Echo the job's subject back through the result envelope, with a note to PR-gate."""
@@ -37,6 +42,13 @@ class FixtureJobWorkflow:
         attributable (`connectors/qm/workflows.py` is the real case).
         """
         subject = str(payload["subject"])
+        # Stands in for the chemistry a real connector does here, and it is load-bearing rather
+        # than decorative: core measures a run's duration across this child (`runtime_seconds` on
+        # the durable record), and a fixture that returns instantly cannot tell a real measurement
+        # from a hardcoded zero. Under the time-skipping test server this costs no wall clock — the
+        # workflow's own clock jumps — which is exactly what makes a minute of "compute" free to
+        # assert on.
+        await workflow.sleep(_FIXTURE_RUNTIME_SECONDS)
         return ConnectorJobResult(
             summary=f"fixture job ran on {subject}",
             data={

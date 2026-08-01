@@ -112,7 +112,12 @@ class ConnectorJobResult(BaseModel):
     note: Note | None = None
 
 
-def job_record_for(job_id: str, job: ConnectorJobInput, result: ConnectorJobResult) -> JobRecord:
+def job_record_for(
+    job_id: str,
+    job: ConnectorJobInput,
+    result: ConnectorJobResult,
+    runtime_seconds: float = 0.0,
+) -> JobRecord:
     """Assemble the durable record of one finished run from its input and its result (D-157).
 
     A module-level function rather than a block inside the workflow because it is pure, and
@@ -134,6 +139,7 @@ def job_record_for(job_id: str, job: ConnectorJobInput, result: ConnectorJobResu
         # is the part Temporal's expiring history was the only copy of.
         result=result.data,
         note_id=result.note.id if result.note is not None else "",
+        runtime_seconds=runtime_seconds,
     )
 
 
@@ -155,6 +161,9 @@ class ConnectorJobWorkflow:
         note publish and the push-back below, which are best-effort because the scientific result is
         already durable by the time they run.
         """
+        # `workflow.now()` and not `time.monotonic()`: a workflow's clock must come from the one
+        # Temporal records in history, or a replay would measure the replay rather than the run.
+        started_at = workflow.now()
         result: ConnectorJobResult = await workflow.execute_child_workflow(
             job.workflow,
             job.payload,
@@ -178,7 +187,12 @@ class ConnectorJobWorkflow:
             retry_policy=BAD_DATA_RETRY,
             execution_timeout=timedelta(seconds=settings.connector_job_timeout_seconds),
         )
-        record = job_record_for(workflow.info().workflow_id, job, result)
+        record = job_record_for(
+            workflow.info().workflow_id,
+            job,
+            result,
+            runtime_seconds=(workflow.now() - started_at).total_seconds(),
+        )
         # Written *before* the note publish, because this is the durable copy: the graph write is a
         # proposal a human may never merge, while this row is what makes the result survive
         # Temporal's own history retention. Best-effort for the same reason the publish is — the

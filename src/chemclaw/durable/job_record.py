@@ -28,6 +28,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from temporalio import activity
 
 from chemclaw.core.config import settings
+from chemclaw.core.metrics_bridge import record_metric
 from chemclaw.durable.registry import durable_activity
 from chemclaw.kg.note import Note
 
@@ -63,6 +64,13 @@ class JobRecord(BaseModel):
     result: dict[str, Any] = Field(default_factory=dict)
     # The note this run proposed, or "" — a join to the graph, not proof of a merge.
     note_id: str = ""
+    # Wall-clock seconds the run took, measured by the wrapper across the child workflow. The row
+    # said what ran and why and nothing about what it cost, so a two-second xTB call and a six-hour
+    # DFT run were one row shape and one increment of `chemclaw_jobs_started_total` — on the most
+    # expensive thing this system does, "how many" was the only number anyone had. Not node-hours:
+    # parallelism belongs to the launcher and none reports it back yet. Runtime is the factor
+    # node-hours multiplies, and it is measurable today.
+    runtime_seconds: float = Field(default=0.0, ge=0)
     completed_at: datetime | None = None
 
 
@@ -156,11 +164,26 @@ async def search_job_records(
 @durable_activity("background")
 @activity.defn
 async def record_job(record: JobRecord) -> None:
-    """Persist one finished job's record through the configured sink.
+    """Persist one finished job's record through the configured sink, and publish what it consumed.
 
     On the light background queue with core's other bookkeeping: it is one small write, and the
     heavy work it describes is already done by the time it runs.
+
+    The metric is booked here, in the activity, rather than in the workflow: a workflow body may be
+    replayed, and a replayed increment would count one expensive run several times — the arithmetic
+    error a consumption counter must not make. An activity's side effects happen once per successful
+    execution, which is exactly the guarantee this needs. It is booked *before* the write for the
+    same reason `chemclaw_notes_proposed_total` is: a database that is down must not also cost the
+    operator the signal that work is happening.
     """
+    if record.runtime_seconds:
+        record_metric(
+            lambda m: m.increment(
+                "chemclaw_job_runtime_seconds_total",
+                record.runtime_seconds,
+                {"connector": record.connector},
+            )
+        )
     await default_job_record_sink().record(record)
 
 

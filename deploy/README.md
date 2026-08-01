@@ -182,6 +182,15 @@ attributable "who did what to which inputs" record. A deployment's retention, ac
 PII policy must cover the trail; that remains a policy obligation and not something this code
 silently satisfies by deleting the evidence.
 
+**Spend is recorded twice, on purpose.** `chemclaw_tokens_total{profile}` and
+`chemclaw_job_runtime_seconds_total{connector}` are the fleet-wide rates; `turn_costs` and
+`job_records.runtime_seconds` are the per-actor, per-run ledger that answers "what did this team
+cost last quarter" (D-2026-08-01-spend-is-a-ledger-not-a-label). They are not redundant: the metric
+registry refuses a counter past 64 label series because a label value is attacker-influenced, so an
+Entra `oid` cannot be a label — attribution needs a database. Neither records **money**: a rate card
+is a deployment's own fact, so the ledger holds tokens and seconds and leaves the multiplication to
+whoever knows the numbers. Both are written only under `CHEMCLAW_SESSION_STORE=postgres`.
+
 **One alert exists because config validation can only see the shape it was handed.** The fleet's
 turn ceiling is checked at startup, but a `kubectl scale`, an HPA edited in the cluster, or a
 rollout leaving both generations up all push the live fleet past it while every pod's own
