@@ -471,3 +471,56 @@ and `podMonitorSelector` match — the default is empty, so a fresh install coll
 operator says where. If a target is `down` rather than absent, check
 `networkPolicy.monitoringNamespaces`: that is the list granting the scraper ingress to the connector
 port and the worker probe port.
+
+## (xi) A migration that will not apply, and a release stuck in `pending-upgrade`
+
+Migrations run as a Helm `pre-install,pre-upgrade` hook Job that completes before any app container
+starts (D-034), so a failure here blocks the release rather than half-applying it. Three things were
+missing until D-2026-08-01-a-migration-waits-in-front-of-live-traffic, and each has its own symptom.
+
+**The Job failed after ~5 s with `canceling statement due to lock timeout`.** Working as intended:
+an `ALTER TABLE` needs `ACCESS EXCLUSIVE` and could not get it, because something else holds a lock
+on that table. Find it and decide whether to wait or to end it:
+
+```sql
+SELECT pid, state, wait_event_type, now() - query_start AS age, left(query, 120)
+FROM pg_stat_activity
+WHERE datname = current_database() AND state <> 'idle'
+ORDER BY query_start;
+```
+
+A long-running report or an abandoned `idle in transaction` session is the usual answer. **Do not
+raise `CHEMCLAW_PG_MIGRATION_LOCK_TIMEOUT_SECONDS` to get past it** — the timeout is what keeps the
+migration from queueing in front of live traffic. Postgres's lock queue is FIFO, so a pending
+`ACCESS EXCLUSIVE` request blocks *every later query on that table behind it*: raising the bound
+converts a failed deploy into an outage lasting as long as the slowest open query.
+
+**The Job failed after ~5 minutes waiting on `pg_advisory_xact_lock`.** Another migrator is running,
+or one died holding the lock. Check:
+
+```sql
+SELECT pid, granted, now() - state_change AS age FROM pg_locks
+JOIN pg_stat_activity USING (pid) WHERE locktype = 'advisory';
+```
+
+A live peer: wait and re-run, which applies nothing because it finds every file already recorded. A
+dead one: the lock is transaction-scoped, so it is released the moment that backend disconnects —
+there is nothing to clean up by hand.
+
+**The release is stuck in `pending-upgrade`.** Helm waits for the hook, so before
+`activeDeadlineSeconds` existed a retrying Job could hold a release there indefinitely and block
+every later `helm upgrade`. The Job now fails at `migrateJob.activeDeadlineSeconds` (15 min) and the
+recovery is:
+
+```
+kubectl logs job/chemclaw-migrate            # the hook is kept on failure, so the logs are there
+helm rollback chemclaw                       # or `helm upgrade --install` again once the cause is fixed
+```
+
+**The Job says a migration was edited after being applied.** `MigrationError`, and the fix is never
+to edit the file back: `schema_migrations` records a checksum precisely so an in-place change is
+loud. Add a new numbered file that makes the change forward.
+
+**`applied migrations: (none — already up to date)` on a fresh database.** The migration directory
+resolved to nothing. `CHEMCLAW_SQL_MIGRATIONS_DIR` is workdir-relative (`/app/infra/sql` in the
+image); an empty glob applies zero files and reports success (D-148).

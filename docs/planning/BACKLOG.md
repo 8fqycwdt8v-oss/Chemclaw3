@@ -350,12 +350,16 @@ QM path. The rows below are what survives that merge, narrowed to say so.
       Connector *servers* keep one route for both, and honestly so — uvicorn accepts only after the
       lifespan that starts the MCP session manager has completed, so `/healthz` answering **is** the
       readiness evidence and a second route could only restate it.
-- [ ] **Migrations take no advisory lock and have no lock timeout** — [M] (the forward-only half is
-      already tracked below). `infra/sql/011` documents that the *audit writer* takes a transaction
-      advisory lock; the migrator, which does DDL, does not, and opens its connection with no
-      statement timeout. The Job is a `pre-upgrade` hook with no `activeDeadlineSeconds`, so one
-      `ALTER TABLE` waiting on a long query takes `ACCESS EXCLUSIVE` and stalls live traffic
-      indefinitely, leaving the release `pending-upgrade` with no documented recovery.
+- [x] **Migrations take no advisory lock and have no lock timeout** — closed by
+      D-2026-08-01-a-migration-waits-in-front-of-live-traffic (the forward-only half is still
+      tracked below). A transaction-scoped `pg_advisory_xact_lock` serializes migrators, and
+      `lock_timeout` — *not* `statement_timeout`, which would bound an index build rather than the
+      wait — caps how long DDL may queue for a table lock. Two budgets, deliberately far apart:
+      waiting for a peer migrator is a legitimate event (300 s), waiting in front of live traffic is
+      not (5 s). `activeDeadlineSeconds` on the hook Job, with the `pending-upgrade` recovery now in
+      `runbook.md` §(xi). One correction: the row (following the module's own docstring) implied
+      services migrate at startup; nothing has ever done that, `migrate()` has one caller and it is
+      its own `__main__`.
 - [ ] **Image not pinned, supply chain ungated** — [S]+[M]. `values.yaml` deploys tag `0.1.0`; the
       Containerfile builds `FROM …/python-311:latest`; no `imagePullSecrets` field exists. No
       dependency scanning, SBOM, image scan, secret scanning or signing — and the Containerfile

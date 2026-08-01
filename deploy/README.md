@@ -61,7 +61,13 @@ does not read this file, so the row survived. Fingerprints deploy as `connector-
 - **Postgres/pgvector**: an operator- or managed-instance with mTLS and the existing
   `pg_statement_timeout_seconds`. Migrations run as a **pre-deploy Helm hook** Job
   (`templates/migrate-job.yaml` → `python -m chemclaw.science.calc.migrate`, i.e. `make db-migrate`, D-034) that
-  completes before any app container starts — no container ever races the DDL.
+  completes before any app container starts — no container ever races the DDL. The migrator takes a
+  transaction advisory lock (so two overlapping deploys serialize) and a `lock_timeout` (so an
+  `ALTER TABLE` that cannot get `ACCESS EXCLUSIVE` fails in seconds instead of queueing in front of
+  every later query on that table — Postgres's lock queue is FIFO, so an unbounded wait is an
+  outage, not a delay). The Job has an `activeDeadlineSeconds`, because Helm waits for a hook and a
+  retrying Job would otherwise hold the release in `pending-upgrade`. Recovery for all three is
+  `docs/guides/runbook.md` §(xi).
 
 ## Network & probes
 

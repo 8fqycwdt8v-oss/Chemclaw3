@@ -11,7 +11,19 @@ metadata:
     "helm.sh/hook-weight": "-5"
     "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
 spec:
-  backoffLimit: 3
+  backoffLimit: {{ .Values.migrateJob.backoffLimit }}
+  {{- /* A `pre-upgrade` hook with no deadline is a release that can hang forever. Helm waits for
+         the hook, so a Job that keeps retrying leaves the release `pending-upgrade` — a state that
+         blocks the next `helm upgrade` and that an operator has to know to clear (see the runbook).
+         With a deadline the Job fails, Helm reports it, and the recovery is the documented one.
+
+         Written as a value rather than derived from the migrator's own lock budgets, unlike the
+         drain grace periods in the Deployments. The honest reason is that there is nothing sound to
+         derive it from: this bounds the Job *including* every `backoffLimit` retry, and the term it
+         would need — how long this deployment's slowest `CREATE INDEX` takes on its own data — is
+         not a number this chart can know. So it is a stated default an operator raises for a large
+         database, not a formula pretending to compute one. */}}
+  activeDeadlineSeconds: {{ .Values.migrateJob.activeDeadlineSeconds }}
   template:
     metadata:
       labels:

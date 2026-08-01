@@ -10,6 +10,35 @@ Each file is sent whole (psycopg's simple-query protocol executes all of a file'
 semicolon-separated statements in one round trip when there are no placeholders), so
 a statement containing a `;` inside a string literal or a `DO $$ … $$` block applies
 intact — no fragile client-side splitting.
+
+**Two locks, for two different reasons**, both added after a readiness review found this module
+doing DDL against a live database with neither.
+
+`pg_advisory_xact_lock` serializes migrators. The whole run is one transaction (Postgres DDL is
+transactional, and there is a single commit at the end), so a transaction-scoped lock covers
+exactly the right span and is released by the commit, the rollback, or the connection dropping —
+there is no path that leaks it. The second migrator then waits, and finds every file already
+recorded in `schema_migrations`. This is the same mechanism `agent/audit_store.py` uses to keep two
+appends from forking the hash chain (`infra/sql/011`), which is what made its absence here
+conspicuous: the audit writer serialized its *inserts* and the migrator did not serialize its *DDL*.
+
+`lock_timeout` bounds how long a statement waits for a table lock. It is not a nicety and it is not
+`statement_timeout`: an `ALTER TABLE` needs `ACCESS EXCLUSIVE`, Postgres's lock queue is FIFO, and a
+lock request queued behind one long-running read **blocks every subsequent query on that table
+behind it**. So a migration against a live system does not just wait — it takes the table down while
+waiting, for as long as the slowest open query lasts. Bounding the wait and leaving the work
+unbounded is the correct shape: a `CREATE INDEX` may legitimately build for minutes *after* it has
+its lock, which is why this module still connects with no `statement_timeout` at all.
+
+The two budgets are deliberately far apart (5 s for a table lock, 300 s for another migrator),
+because waiting for a peer is a normal event and queueing in front of live traffic is not.
+
+**This module has no caller but its own `__main__`.** The docstring used to say migrations "run at
+service startup (the front door and each worker migrate before serving)", and nothing has ever done
+that — the front door's lifespan does not call `migrate`, and neither does any worker. The claim
+mattered here: it made concurrent migration sound routine, when the real concurrency is two deploys
+overlapping or an operator running `make db-migrate` during one. The chart runs this as a
+`pre-install,pre-upgrade` hook Job that completes before any app container starts (D-034).
 """
 
 import asyncio
@@ -21,6 +50,15 @@ from chemclaw.core.db import connect
 
 # The ledger's own DDL. Applied first and not itself tracked — it is the tracker.
 _LEDGER_FILE = "000_schema_migrations.sql"
+
+# The advisory-lock key that serializes migrators. Arbitrary but stable, and distinct from the
+# audit chain's (`agent/audit_store.py`) — advisory locks share one namespace per database, so two
+# subsystems picking the same number would block each other for no reason either could diagnose.
+_MIGRATION_LOCK_KEY = 0x43484D4157_00_02  # "CHMAW" + a discriminator for this path
+
+# `SET` takes no parameters in Postgres, so the timeouts go through `set_config`, whose third
+# argument (`is_local`) scopes them to this transaction exactly as `SET LOCAL` would.
+_SET_LOCAL_TIMEOUT = "SELECT set_config('lock_timeout', %s, true)"
 
 
 class MigrationError(RuntimeError):
@@ -45,6 +83,11 @@ def _checksum(text: str) -> str:
     return hashlib.sha256(text.encode()).hexdigest()
 
 
+def _ms(seconds: float) -> str:
+    """Render a seconds budget as the millisecond string `lock_timeout` expects."""
+    return f"{int(seconds * 1000)}ms"
+
+
 async def migrate(dsn: str | None = None) -> list[str]:
     """Apply every not-yet-applied `infra/sql/*.sql` file in order; return the names applied.
 
@@ -55,13 +98,20 @@ async def migrate(dsn: str | None = None) -> list[str]:
     """
     target = dsn if dsn is not None else settings.postgres_dsn
     applied: list[str] = []
-    # Every file read up front, in one worker thread. Migrations run at service startup (the
-    # front door and each worker migrate before serving), so a per-file blocking read is loop
-    # time nothing else can use — and there are ~20 files. `connect`, not `connection`: a
-    # migration wants its own connection with no statement timeout (an index build may run
-    # long), which is precisely what the pool must not hand out to a request path.
+    # Every file read up front, in one worker thread rather than ~30 hops. `connect`, not
+    # `connection`: a migration wants its own connection with no statement timeout (an index build
+    # may run long), which is precisely what the pool must not hand out to a request path — and it
+    # must be a connection nobody else can be handed, because the advisory lock below is scoped to
+    # it.
     sources = await asyncio.to_thread(_read_sql_files)
     async with await connect(target) as conn:
+        # Wait generously for a peer migrator, then tightly for every table lock after it. The
+        # order matters: taking the advisory lock under the 5 s DDL budget would make an ordinary
+        # concurrent deploy fail, and doing the DDL under the 300 s budget would let one ALTER
+        # TABLE queue in front of live traffic for five minutes.
+        await conn.execute(_SET_LOCAL_TIMEOUT, (_ms(settings.pg_migration_lock_wait_seconds),))
+        await conn.execute("SELECT pg_advisory_xact_lock(%s)", (_MIGRATION_LOCK_KEY,))
+        await conn.execute(_SET_LOCAL_TIMEOUT, (_ms(settings.pg_migration_lock_timeout_seconds),))
         # Bootstrap the ledger before anything can be tracked against it.
         await conn.execute(sources[_LEDGER_FILE])
         for name in sorted(sources):

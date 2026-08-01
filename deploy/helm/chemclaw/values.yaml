@@ -148,6 +148,19 @@ connectorPort: 8080
 # port to deconflict, and one number keeps the monitor and the probes consistent by construction.
 workerMetricsPort: 9000
 
+# The pre-install/pre-upgrade migration hook (D-034).
+migrateJob:
+  # Four attempts. A migration failure is usually a lock it could not get within
+  # CHEMCLAW_PG_MIGRATION_LOCK_TIMEOUT_SECONDS — transient by nature, and retrying is the intended
+  # response. A schema error is deterministic and simply fails four times instead of one.
+  backoffLimit: 3
+  # A ceiling on the whole Job, retries included. Without one, Helm waits on the hook indefinitely
+  # and the release sits in `pending-upgrade`, which blocks the next upgrade and needs a recovery an
+  # operator has to already know (`docs/guides/runbook.md` §(xi) documents it). 15 minutes covers a
+  # migration run plus its retries on a database of the size this chart is written for; raise it
+  # before a release that adds an index to a large table.
+  activeDeadlineSeconds: 900
+
 resources:
   service:
     # Raised from 1 CPU. The front door does real CPU work off its event loop now (RDKit, cache-key
