@@ -38,10 +38,13 @@ def reaction_definition() -> str:
     Recorded per row so the store never ranks DRFP bits folded to a different width against
     each other — changing `drfp_bits` and re-indexing can't silently mix incomparable rows.
 
-    `agents` marks reaction SMILES built in the three-part form, with solvent and catalyst in the
-    agent slot rather than among the reactants (`OrdReaction.reaction_smiles`). A row indexed under
-    the old two-part form encoded the solvent as part of the transformation, so its bits are not
-    comparable with a row that does not — ranking across them would compare a solvent-dominated
-    fingerprint against a solvent-neutral one and report the difference as chemistry.
+    `agents-excluded` marks rows built from `OrdReaction.transformation_smiles` — the solvent and
+    the catalyst left *out* of the string rather than moved into the agent slot. A row carrying
+    either earlier token encoded the solvent as part of the transformation, whichever slot it was
+    written in: `DrfpEncoder.internal_encode` folds the agent slot back onto the reactants
+    (`sides[0] += "." + sides[1]`), so the `agents` token named a change that produced
+    byte-identical bits. Ranking across the two would compare a solvent-dominated fingerprint
+    against a solvent-neutral one and report the difference as chemistry, so the token moves and
+    the old rows fall out of search until a re-index rebuilds them.
     """
-    return f"drfp:b{settings.drfp_bits}:agents:{STANDARDIZATION_VERSION}"
+    return f"drfp:b{settings.drfp_bits}:agents-excluded:{STANDARDIZATION_VERSION}"

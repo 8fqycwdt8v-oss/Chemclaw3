@@ -112,6 +112,34 @@ class ConnectorJobResult(BaseModel):
     note: Note | None = None
 
 
+def child_workflow_id(suffix: str) -> str:
+    """The id for a child of the *current* execution: parent id, parent run id, then `suffix`.
+
+    **The run id is what makes a retry possible.** Both parents that start children — this wrapper
+    and `TemplateWorkflow` — are launched under a deterministic, payload-derived workflow id with
+    `ALLOW_DUPLICATE_FAILED_ONLY`, precisely so a *failed* run may re-execute under the same id
+    (D-011). A child named from the parent's workflow id alone is therefore named identically on
+    the second execution, and `REJECT_DUPLICATE` refuses a closed id regardless of how it closed —
+    so the re-execution the parent's policy exists to permit died immediately with
+    `WorkflowAlreadyStartedError`, having done no work, and stayed dead until the closed child
+    aged out of namespace retention. On the template path it was worse: every step that had
+    *succeeded* in the first execution held its id too, so a retry could not even reach the step
+    that failed.
+
+    `REJECT_DUPLICATE` stays, and that is the point of fixing this here rather than by widening the
+    policy to `ALLOW_DUPLICATE`. What the original policy wanted is a real invariant — one child
+    per parent execution, so a second start of the same id is a bug and not a silent re-run — and
+    it is scoped to an execution, which is exactly what the run id names. Widening the policy would
+    have bought the retry by giving that invariant up.
+
+    Replay-safe: `run_id` identifies the execution and is read from the same history a replay
+    replays, so it is stable within a run and different across runs — the two properties this
+    needs, and neither of them available from anything else the workflow can see.
+    """
+    info = workflow.info()
+    return f"{info.workflow_id}-{info.run_id}-{suffix}"
+
+
 def job_record_for(
     job_id: str,
     job: ConnectorJobInput,
@@ -167,7 +195,7 @@ class ConnectorJobWorkflow:
         result: ConnectorJobResult = await workflow.execute_child_workflow(
             job.workflow,
             job.payload,
-            id=f"{workflow.info().workflow_id}-run",
+            id=child_workflow_id("run"),
             task_queue=job.task_queue,
             result_type=ConnectorJobResult,
             # The actor, carried as per-execution metadata rather than in the argument. A bundle
@@ -181,8 +209,10 @@ class ConnectorJobWorkflow:
             # arguments the LLM filled in. A memo keeps both readable (`workflow.memo_value`)
             # without letting either become something the model can write.
             memo={"requested_by": job.requested_by, "correlation_id": job.correlation_id},
-            # A child is started once per parent run; a retried parent activity never re-launches
-            # it, so rejecting duplicates is the honest policy (a duplicate id here is a bug).
+            # A child is started once per parent *execution* — which is what `child_workflow_id`
+            # names, and why rejecting duplicates is still the honest policy here: within one
+            # execution a duplicate id is a bug, and across executions the id differs so a failed
+            # parent can genuinely re-run. See `child_workflow_id` for the retry this used to block.
             id_reuse_policy=WorkflowIDReusePolicy.REJECT_DUPLICATE,
             retry_policy=BAD_DATA_RETRY,
             execution_timeout=timedelta(seconds=settings.connector_job_timeout_seconds),

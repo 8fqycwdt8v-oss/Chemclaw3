@@ -21,8 +21,6 @@ from pydantic import BaseModel
 from temporalio import activity, workflow
 
 with workflow.unsafe.imports_passed_through():
-    from pathlib import Path
-
     from chemclaw.agent.subscriptions import Subscription, all_subscriptions, mark_reported
     from chemclaw.core.config import settings
     from chemclaw.durable.registry import durable_activity, durable_workflow
@@ -52,8 +50,14 @@ async def collect_digests() -> list[DigestItem]:
     same way as the search they would otherwise re-run by hand. Freshness is judged on the note's
     own `valid_from` (populated from the experiment date, gap KNW-1) — the honest "when did this
     become knowledge" signal, rather than a file mtime that a git sync would reset on every pull.
+
+    Notes are read through `settings.knowledge_path`, like every other reader. This was
+    `Path(settings.knowledge_dir)` raw, which resolves against the process CWD (`/app` in the image)
+    rather than the note repo — so in any deployment that points `note_repo_dir` at a dedicated
+    clone, the digest scanned a different tree from the one the graph is published to and reported
+    nothing, silently: an empty scan is not an error, it is just no new matches.
     """
-    notes = load_notes(Path(settings.knowledge_dir))
+    notes = load_notes(settings.knowledge_path)
     digests: list[DigestItem] = []
     for subscription in await all_subscriptions():
         matches = [

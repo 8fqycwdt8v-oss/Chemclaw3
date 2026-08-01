@@ -952,16 +952,16 @@ def test_a_multi_product_reaction_names_no_principal_compound() -> None:
 
 
 def test_solvent_and_catalyst_go_in_the_agent_slot() -> None:
-    """DRFP hashes the whole string, so a solvent on the left dominated the similarity.
+    """The **record** form shows the solvent and the catalyst in the slot that says what they are.
 
-    A solvent is often the largest fragment present and is present in every run, so it contributed
-    a large, nearly constant share of the set bits — and in process development the solvent is
-    usually the variable *being optimized*. Two runs of one coupling in THF and in 2-MeTHF looked
-    less alike than two unrelated reactions sharing a solvent, which is backwards for the two
-    things that similarity drives: campaign grouping and `similar_reactions`.
+    A notation claim and only that. This docstring used to say the three-part form was what stopped
+    the solvent dominating DRFP similarity; it never did — `DrfpEncoder.internal_encode` folds the
+    agent slot back onto the reactants, so the two forms encode identically. What changes the bits
+    is `transformation_smiles`, which leaves those species out; the measurements are in
+    `tests/test_rxnfp.py`.
 
-    A *reagent* stays on the left: a base or an oxidant participates stoichiometrically and is part
-    of what the transformation is.
+    A *reagent* stays on the left in both forms: a base or an oxidant participates
+    stoichiometrically and is part of what the transformation is.
     """
     reaction = OrdReaction(
         reaction_id="rxn-agents",
@@ -984,6 +984,31 @@ def test_solvent_and_catalyst_go_in_the_agent_slot() -> None:
 def test_a_reaction_with_no_agents_still_renders_the_three_part_form() -> None:
     """An empty agent slot is the convention's own shape, not a special case to branch on."""
     assert _ester().reaction_smiles() == "CCO.CC(=O)O>>CCOC(C)=O"
+
+
+def test_the_record_form_keeps_the_solvent_the_fingerprint_form_drops_it() -> None:
+    """The two forms are two questions, and a note must keep answering the first one.
+
+    `reaction_smiles` is what a reaction note, a campaign step list and a playbook's representative
+    reaction render — and the solvent is a headline condition of a process-development run, so a
+    note that no longer named it would be a real loss in the graph's largest note class. That is
+    the whole reason the exclusion is a second method rather than an edit to this one.
+    """
+    reaction = OrdReaction(
+        reaction_id="rxn-two-forms",
+        inputs=[
+            Component(smiles="Brc1ccccc1", role=Role.REACTANT),
+            Component(smiles="OB(O)c1ccccc1", role=Role.REACTANT),
+            Component(smiles="C1CCOC1", role=Role.SOLVENT),
+        ],
+        outcomes=[Component(smiles="c1ccc(-c2ccccc2)cc1", role=Role.PRODUCT)],
+        provenance="eln:chemist-a",
+    )
+
+    assert "C1CCOC1" in reaction.reaction_smiles()
+    assert "C1CCOC1" not in reaction.transformation_smiles()
+    # And the note a human reviews still shows it, which is what the split is protecting.
+    assert "C1CCOC1" in note_from_ord_reaction(reaction).body
 
 
 def test_an_amended_entry_is_re_proposed_rather_than_dropped(

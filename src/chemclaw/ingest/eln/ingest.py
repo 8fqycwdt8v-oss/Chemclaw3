@@ -39,7 +39,11 @@ async def ingest_reaction(
     if problems:
         raise IngestError(f"reaction {reaction.reaction_id!r} invalid: {'; '.join(problems)}")
 
-    await reaction_store.add(record_for_reaction(reaction.reaction_id, reaction.reaction_smiles()))
+    # `transformation_smiles`, never `reaction_smiles`: the row is a fingerprint, and the agent
+    # slot only changes the bits by being *left out* (DRFP folds it back onto the reactants).
+    await reaction_store.add(
+        record_for_reaction(reaction.reaction_id, reaction.transformation_smiles())
+    )
     for smiles in {standard_smiles(c.smiles) for c in reaction.compounds()}:
         await molecule_store.add(record_for(smiles, smiles))
 
