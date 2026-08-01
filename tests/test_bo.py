@@ -142,3 +142,51 @@ def test_problem_validation() -> None:
             ],
             objective=Objective(name="y"),
         )
+
+
+def test_a_model_guided_proposal_carries_the_surrogate_belief_a_seed_cannot() -> None:
+    """F8-T1: BoFire returns `<objective>_pred`/`_sd` from ask() and the adapter dropped both.
+
+    Run against real BoFire rather than a stubbed frame, because the whole claim is about what
+    BoFire actually puts in that dataframe — a stub would pin our guess at its column names and
+    keep passing if they changed. The contrast is the assertion: a `RandomStrategy` seed has no
+    model behind it and must report `None` rather than a fabricated zero, while a SOBO proposal
+    must carry a real, positive spread.
+    """
+    problem = OptimizationProblem(
+        parameters=_PARAMS, objective=Objective(name="y", direction="minimize")
+    )
+    seeds = initial_candidates(problem, 4, seed=3)
+    assert [c.predicted_sd for c in seeds] == [None] * 4
+    assert [c.predicted_value for c in seeds] == [None] * 4
+
+    observed = [
+        Observation(params=c.params, value=float(c.params["x1"]) ** 2, provenance="predicted")
+        for c in seeds
+    ]
+    proposed = propose_candidates(problem, observed, 2, seed=3)
+    assert all(c.predicted_sd is not None and c.predicted_sd > 0 for c in proposed), (
+        "a fitted surrogate always has a posterior spread at the point it proposes"
+    )
+    assert all(c.predicted_value is not None for c in proposed)
+
+
+def test_the_surrogate_belief_survives_evaluation_into_the_history() -> None:
+    """The sd is recorded against the point it justified, or it never reaches a note.
+
+    Recovering it in the adapter is only half the fix: `_evaluate` builds the `Observation` that
+    outlives the `Candidate`, so dropping it there loses it just as completely. Seed points keep
+    `None` — they had no surrogate — which is what lets the note tell a model recommendation from
+    a lucky first guess.
+    """
+    problem = OptimizationProblem(
+        parameters=_PARAMS, objective=Objective(name="y", direction="minimize")
+    )
+
+    async def evaluate(params: dict[str, ParamValue]) -> float:
+        return (float(params["x1"]) - 1.0) ** 2 + (float(params["x2"]) + 0.5) ** 2
+
+    result = asyncio.run(optimize(problem, evaluate, n_initial=3, n_rounds=3))
+    seeded, guided = result.history[:3], result.history[3:]
+    assert [o.surrogate_sd for o in seeded] == [None] * 3
+    assert all(o.surrogate_sd is not None and o.surrogate_sd > 0 for o in guided)

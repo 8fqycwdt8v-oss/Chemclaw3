@@ -470,3 +470,68 @@ def test_qm_workflow_hands_its_note_to_core_in_the_envelope() -> None:
     assert result.note is not None
     assert result.note.type == "job-result"
     assert result.note.created_by == "agent"  # so the PR-gate is the only way in
+
+
+def test_the_energy_line_carries_its_own_trust_and_not_a_bare_number() -> None:
+    """F8-T1: a retrieval excerpt used to quote a confident figure with nothing attached.
+
+    The bare `total energy: {x:.6f} Hartree` is what made this a defect — the number is
+    indistinguishable from one the SCF never converged to, and the excerpt that quotes it back is
+    a blind character prefix that cannot pick up a qualifier placed anywhere else.
+    """
+    body = note_from_qm_result(_RESULT).body
+    line = next(ln for ln in body.splitlines() if ln.startswith("- total energy:"))
+    # The unit is on the value line, and so is the statement about its uncertainty.
+    assert "Hartree" in line
+    assert "no uncertainty established" in line, (
+        "the energy line states no uncertainty, which is the honest answer for an absolute "
+        "energy — but it must say so rather than stay silent"
+    )
+
+
+def test_a_diverged_scf_is_flagged_on_the_number_itself() -> None:
+    """Convergence is the QM domain question, and it has to reach the value a reader quotes.
+
+    `- converged: False` on its own line is a fact a *human* can join up; a skill or a retrieval
+    excerpt quoting the energy cannot. This is the mutation that matters: hard-code `in_domain`
+    to True and a non-converged energy renders exactly like a converged one.
+    """
+    diverged = _RESULT.model_copy(update={"converged": False})
+    line = next(
+        ln
+        for ln in note_from_qm_result(diverged).body.splitlines()
+        if ln.startswith("- total energy:")
+    )
+    assert "OUT OF DOMAIN" in line
+    assert "did not converge" in line
+
+    converged = next(
+        ln
+        for ln in note_from_qm_result(_RESULT).body.splitlines()
+        if ln.startswith("- total energy:")
+    )
+    assert "OUT OF DOMAIN" not in converged
+
+
+def test_the_job_summary_and_the_note_agree_about_the_energy() -> None:
+    """Two renderings of one number, and the summary is the line the chemist reads first.
+
+    `_envelope`'s summary is what `get_durable_job_status` hands back on completion. It had its own
+    hand-rolled `(converged)` / `(NOT converged)` parenthetical, so fixing only the note would have
+    left the more-read surface saying less — and nothing in the suite rendered it at all, since the
+    one test naming that string builds it as fixture data rather than calling `_envelope`.
+    """
+    from chemclaw.connectors.qm.workflows import _envelope
+
+    for converged in (True, False):
+        result = _RESULT.model_copy(update={"converged": converged})
+        summary = _envelope(result, "").summary
+        energy_line = next(
+            ln
+            for ln in _envelope(result, "").note.body.splitlines()
+            if ln.startswith("- total energy:")
+        )
+        assert summary is not None
+        # The summary ends with exactly the rendering the note's energy line carries.
+        assert summary.endswith(energy_line.removeprefix("- total energy: "))
+        assert ("OUT OF DOMAIN" in summary) is (not converged)

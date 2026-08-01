@@ -146,12 +146,36 @@ class Observation(BaseModel):
     params: dict[str, ParamValue]
     value: float = Field(allow_inf_nan=False)
     provenance: str = "measured"
+    # The surrogate's posterior sd at this point **when it was proposed** — carried over from the
+    # `Candidate`, and deliberately not named `uncertainty`. It does not qualify `value`: `value`
+    # came from the evaluator (a calculator, or a real measurement), while this is what the model
+    # believed *before* seeing it. Labelling a model's prior spread as the measurement's error
+    # would be precisely the overclaim F8-T1 exists to prevent. `None` for a seed point, which had
+    # no surrogate behind it.
+    surrogate_sd: float | None = Field(default=None, ge=0.0)
 
 
 class Candidate(BaseModel):
-    """A proposed point to evaluate next."""
+    """A proposed point to evaluate next, and what the surrogate believed about it.
+
+    `predicted_value`/`predicted_sd` are the surrogate's posterior mean and standard deviation at
+    this point. BoFire returns both from `ask()` — as `<objective>_pred` and `<objective>_sd` — and
+    the adapter used to read the parameter columns and drop them, so the optimizer's own statement
+    about *why* it proposed this point died one function short of anything that could record it
+    (F8-T1 follow-up).
+
+    That statement is the question a chemist asks before spending a week of lab time on a
+    recommendation: a small sd is an exploit of a region the model has learned, a large one is an
+    excursion into a region it has not, and the recommended value reads identically either way.
+
+    Both are `None` for a design with no surrogate behind it — a space-filling random seed, a
+    factorial screen — which is not a missing value but the accurate statement that no model had
+    an opinion yet.
+    """
 
     params: dict[str, ParamValue]
+    predicted_value: float | None = None
+    predicted_sd: float | None = Field(default=None, ge=0.0)
 
 
 class ScreeningDesign(BaseModel):

@@ -37,7 +37,7 @@ with workflow.unsafe.imports_passed_through():
         prepare_input,
         submit_to_hpc,
     )
-    from chemclaw.connectors.qm.knowledge import note_from_qm_result
+    from chemclaw.connectors.qm.knowledge import note_from_qm_result, qm_energy_estimate
     from chemclaw.connectors.qm.specs import QmCacheLookup, QMJobInput, QMJobResult, QmJobSpec
     from chemclaw.core.config import settings
     from chemclaw.durable.connector_job import ConnectorJobResult
@@ -170,8 +170,7 @@ def _envelope(result: QMJobResult, calc_key: str) -> ConnectorJobResult:
     return ConnectorJobResult(
         summary=(
             f"{result.method}/{result.basis_set} on {result.molecule_smiles}: "
-            f"{result.total_energy_hartree:.6f} Hartree "
-            f"({'converged' if result.converged else 'NOT converged'})"
+            f"{qm_energy_estimate(result).render(fmt='.6f')}"
         ),
         data=result.model_dump(mode="json"),
         note=note_from_qm_result(result, calc_key),

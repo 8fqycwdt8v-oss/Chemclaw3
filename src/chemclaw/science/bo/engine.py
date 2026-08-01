@@ -114,9 +114,27 @@ def _observations_to_frame(
 
 
 def _frame_to_candidates(problem: OptimizationProblem, frame: pd.DataFrame) -> list[Candidate]:
-    """Extract the parameter columns of an ask() result into our `Candidate` type."""
+    """Extract an ask() result into our `Candidate` type, the surrogate's belief included.
+
+    BoFire returns `<objective>_pred`, `<objective>_sd` and `<objective>_des` beside the parameter
+    columns whenever a model backs the proposal; a `RandomStrategy` returns the parameters alone.
+    Reading them conditionally is what lets one adapter serve both, and recovering the sd is the
+    point: it is computed on every model-guided ask and was dropped here, one function before it
+    could reach the `bo-candidate` note a human signs off on (F8-T1 follow-up).
+
+    `_des` is deliberately left behind. It is the acquisition/desirability score — a ranking
+    quantity in the strategy's own units, not a statement about the chemistry — and carrying it
+    would invite reading it as a confidence.
+    """
+    predicted, sd = f"{problem.objective.name}_pred", f"{problem.objective.name}_sd"
     return [
-        Candidate(params={p.name: _cast(p, row[p.name]) for p in problem.parameters})
+        Candidate(
+            params={p.name: _cast(p, row[p.name]) for p in problem.parameters},
+            predicted_value=float(row[predicted]) if predicted in frame.columns else None,
+            # abs(): a posterior sd is non-negative by definition, and the field enforces it, but
+            # a float round-trip through the surrogate can land a hair below zero.
+            predicted_sd=abs(float(row[sd])) if sd in frame.columns else None,
+        )
         for _, row in frame.iterrows()
     ]
 

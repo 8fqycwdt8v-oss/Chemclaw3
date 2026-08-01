@@ -35,7 +35,12 @@ async def _evaluate(
     for candidate in candidates:
         value = await evaluate(candidate.params)
         observations.append(
-            Observation(params=candidate.params, value=value, provenance=provenance)
+            Observation(
+                params=candidate.params,
+                value=value,
+                provenance=provenance,
+                surrogate_sd=candidate.predicted_sd,
+            )
         )
     return observations
 

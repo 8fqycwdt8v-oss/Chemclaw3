@@ -22,6 +22,7 @@ from chemclaw.kg.note import Note
 from chemclaw.science.bo.problem import (
     CampaignResult,
     CategoricalParameter,
+    Observation,
     OptimizationProblem,
     Parameter,
 )
@@ -49,6 +50,14 @@ def note_from_campaign_result(
     reasons) and one a reviewer should see. The identical campaign never gets that far: it rejoins
     the first run's id and never re-executes.
 
+    **The value comes before the conditions, and carries the surrogate's opinion of it** (F8-T1).
+    Both are the same fix. A retrieval excerpt is a blind character prefix of the body
+    (`retrieval.retrievers._excerpt`, 240 characters by default), and the objective value used to
+    sit *after* the full conditions list — so a campaign over five or six parameters produced an
+    excerpt quoting the recommended conditions with no number attached at all, which is the worst
+    of the possible truncations. Leading with the number puts it, its provenance and the model's
+    own uncertainty about it inside the prefix that actually gets quoted back.
+
     The note carries no `[[wikilink]]` (a dangling link would fail `chemclaw.kg.validate` on the
     very PR this opens).
     """
@@ -58,9 +67,9 @@ def note_from_campaign_result(
     body = (
         f"Bayesian-optimization recommendation for objective `{objective_name}`, "
         f"from {len(result.history)} evaluation(s).\n\n"
-        f"Recommended conditions:\n{conditions}\n\n"
-        f"- objective value: {best.value:.6g} ({best.provenance})\n"
+        f"- objective value: {best.value:.6g} ({best.provenance}; {_surrogate_belief(best)})\n"
         f"- direction: {problem.objective.direction} `{problem.objective.name}`\n\n"
+        f"Recommended conditions:\n{conditions}\n\n"
         f"Searched over:\n{space}\n"
     )
     return Note(
@@ -70,6 +79,23 @@ def note_from_campaign_result(
         source=f"bo:{objective_name}",
         body=body,
     )
+
+
+def _surrogate_belief(best: Observation) -> str:
+    """What the model thought of this point before it was evaluated, in one clause (F8-T1).
+
+    Two honest readings, and the distinction is the one a reviewer needs. A recorded sd means the
+    surrogate proposed this point and says how sure it was of the region: small is an exploit of
+    chemistry it has learned, large an excursion into chemistry it has not. No sd means no model
+    was involved — the point came from the space-filling seed design — which is a different claim
+    entirely and reads as an endorsement if left unsaid.
+
+    Never phrased as the uncertainty *of* the reported value: that value came from the evaluator,
+    not from the surrogate, and the sd is what the model believed beforehand.
+    """
+    if best.surrogate_sd is None:
+        return "a space-filling seed point, proposed before any surrogate had an opinion"
+    return f"surrogate posterior sd ±{best.surrogate_sd:.3g} at the time it was proposed"
 
 
 def _parameter_range(parameter: Parameter) -> str:

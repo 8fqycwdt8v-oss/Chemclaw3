@@ -208,3 +208,70 @@ def test_a_library_campaigns_note_stays_readable(monkeypatch: pytest.MonkeyPatch
     # A small space is still listed in full, with no truncation tail invented for it.
     small = note_from_campaign_result("reizman_suzuki", _PROBLEM, _RESULT).body
     assert "catalyst: one of P1, P2" in small and "more" not in small
+
+
+def test_the_note_says_how_sure_the_surrogate_was_of_what_it_recommends() -> None:
+    """F8-T1: BoFire computes a posterior sd on every model-guided ask and it was discarded.
+
+    The recommended value reads identically whether the surrogate was exploiting chemistry it has
+    learned or extrapolating into chemistry it has not, and that is the question a chemist asks
+    before committing lab time. Deleting `predicted_sd` from the adapter, or `surrogate_sd` from
+    the observation, puts the note back to a bare number.
+    """
+    proposed = _RESULT.model_copy(
+        update={
+            "best": _RESULT.best.model_copy(
+                update={"provenance": "predicted", "surrogate_sd": 4.25}
+            )
+        }
+    )
+    body = note_from_campaign_result("reizman_suzuki", _PROBLEM, proposed).body
+    line = next(ln for ln in body.splitlines() if ln.startswith("- objective value:"))
+    assert "4.25" in line
+    assert "surrogate posterior sd" in line
+
+
+def test_a_seed_point_says_no_model_proposed_it_rather_than_staying_quiet() -> None:
+    """Absence of a sd is a claim, not a gap: nothing had an opinion yet.
+
+    A space-filling seed can win a campaign outright, and a note that simply omits the surrogate
+    line there would read as an endorsement by the model of a point the model never saw.
+    """
+    body = note_from_campaign_result("reizman_suzuki", _PROBLEM, _RESULT).body
+    line = next(ln for ln in body.splitlines() if ln.startswith("- objective value:"))
+    assert _RESULT.best.surrogate_sd is None
+    assert "space-filling seed" in line
+    assert "surrogate posterior sd" not in line
+
+
+def test_the_recommended_value_survives_the_excerpt_a_reader_actually_sees() -> None:
+    """The ordering fix, held against the real truncation rather than a guess at it.
+
+    `_excerpt` is a blind prefix of the body at `note_excerpt_chars`. The objective value used to
+    sit *after* the full conditions list, so a campaign over enough parameters produced an excerpt
+    quoting the conditions with no number attached at all — the worst of the possible cuts. Move
+    the value line back below the conditions and this fails.
+    """
+    from chemclaw.retrieval.retrievers import _excerpt
+
+    wide = OptimizationProblem(
+        parameters=[
+            ContinuousParameter(name=f"reagent_equivalents_{i}", lower=0.5, upper=5.0)
+            for i in range(8)
+        ],
+        objective=Objective(name="yield", direction="maximize"),
+    )
+    best = Observation(
+        params={f"reagent_equivalents_{i}": 1.0 + i for i in range(8)},
+        value=98.7,
+        provenance="predicted",
+        surrogate_sd=4.25,
+    )
+    body = note_from_campaign_result(
+        "wide_screen", wide, CampaignResult(best=best, history=[best])
+    ).body
+    # The conditions block alone overruns the excerpt budget, which is the situation being fixed.
+    assert len(body) > settings.note_excerpt_chars
+    excerpt = _excerpt(body)
+    assert "98.7" in excerpt, "the excerpt quotes conditions without the value they achieved"
+    assert "surrogate posterior sd" in excerpt

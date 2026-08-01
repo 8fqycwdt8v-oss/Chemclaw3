@@ -53,6 +53,16 @@ Method = Literal["reported", "conformal", "propagated", "none"]
 # molecule outside this set is one the equation has no terms for.
 _ORGANIC_ELEMENTS = frozenset({"H", "B", "C", "N", "O", "F", "Si", "P", "S", "Cl", "Br", "I"})
 
+# How an uncertainty was obtained, in the words someone reviewing a merged note reads. Kept beside
+# `Method` so the two cannot drift: a method with no prose here would render as an empty
+# parenthetical, which is the silence this module exists to break.
+_METHOD_PROSE: dict[Method, str] = {
+    "reported": "the model's own reported error",
+    "conformal": "conformal, over this deployment's recorded residuals",
+    "propagated": "propagated from the inputs",
+    "none": "no uncertainty established",
+}
+
 
 class Estimate(BaseModel):
     """A number, its uncertainty, where that uncertainty came from, and whether to trust it at all.
@@ -88,6 +98,36 @@ class Estimate(BaseModel):
         means nobody checked, and "nobody checked" must not read as "fine".
         """
         return self.in_domain is True
+
+    def render(self, *, fmt: str = ".6g") -> str:
+        """This number and how far to trust it, as one inline fragment of a note body.
+
+        **Inline, and never a footer.** A retrieval excerpt is a blind character prefix of the
+        note body — `chemclaw.retrieval.retrievers._excerpt` truncates at `note_excerpt_chars`,
+        240 by default — so a trust stanza appended below the value is cut from precisely the
+        notes carrying the most prose, and survives only in the short ones that needed it least.
+        The trust travels *on* the value line or it does not travel.
+
+        **Silence is meaningful, in one direction only.** An in-domain estimate adds no domain
+        remark, so a line without one says the check ran and passed. Both abnormal states are
+        spelled out instead — including "not assessed", because a reader who cannot tell an
+        unasked question from an answered one will read it as answered, which is the whole reason
+        `in_domain` has a third value.
+
+        Args:
+            fmt: Format spec for the value and its uncertainty. The caller owns precision because
+                significance is the calculator's own fact: six decimals is right for a Hartree and
+                absurd for a percent yield.
+        """
+        number = f"{self.value:{fmt}}"
+        if self.uncertainty is not None:
+            number += f" ± {self.uncertainty:{fmt}}"
+        text = f"{number} {self.unit} ({_METHOD_PROSE[self.method]})"
+        if self.in_domain is None:
+            return f"{text}; applicability not assessed"
+        if not self.in_domain:
+            return f"{text}; OUT OF DOMAIN — {'; '.join(self.domain_reasons)}"
+        return text
 
 
 def structural_domain(mol: Chem.Mol) -> tuple[bool, tuple[str, ...]]:
