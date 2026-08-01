@@ -134,14 +134,31 @@ RUN uv sync --frozen --no-dev \
 # base may depend on either, and breaking the base's own tooling to satisfy a scanner trades a
 # reported problem for an unreported one — the smoke step that imports every component under a
 # non-root UID is what would catch that, and it should not have to.
+#
+# The interpreters are *discovered*, not listed. A hardcoded list of four plausible paths missed
+# whichever environment actually holds these — `[ -x ... ] || continue` skipped every guess in
+# silence, and the scan came back with the identical two findings. A list of guesses that fails
+# quietly is the same shape of bug as a probe that always passes.
+#
+# The trailing `find` is the diagnostic half and stays in the build: it prints every remaining
+# `dist-info` for the two packages, so a future finding names its path in the build log instead of
+# costing a round trip through CI to locate.
 RUN set -eux; \
-    for py in /usr/bin/python3 /usr/bin/python3.9 /usr/bin/python3.11 /opt/app-root/bin/python3; do \
-      [ -x "${py}" ] || continue; \
-      "${py}" -m pip show setuptools >/dev/null 2>&1 \
-        && "${py}" -m pip install --no-cache-dir --upgrade 'setuptools>=78.1.1' || true; \
-      "${py}" -m pip show msgpack >/dev/null 2>&1 \
-        && "${py}" -m pip install --no-cache-dir --upgrade 'msgpack>=1.2.1' || true; \
-    done
+    interpreters="$(find /usr/bin /usr/local/bin /opt -maxdepth 4 -name 'python3*' -type f \
+      -perm -u+x -print 2>/dev/null | sort -u)"; \
+    echo "interpreters found:"; echo "${interpreters}"; \
+    for py in ${interpreters}; do \
+      "${py}" -m pip --version >/dev/null 2>&1 || continue; \
+      if "${py}" -m pip show setuptools >/dev/null 2>&1; then \
+        "${py}" -m pip install --no-cache-dir --upgrade 'setuptools>=78.1.1' >/dev/null; \
+      fi; \
+      if "${py}" -m pip show msgpack >/dev/null 2>&1; then \
+        "${py}" -m pip install --no-cache-dir --upgrade 'msgpack>=1.2.1' >/dev/null; \
+      fi; \
+    done; \
+    echo "remaining dist-info for the two packages:"; \
+    find / -xdev \( -name 'setuptools-*.dist-info' -o -name 'msgpack-*.dist-info' \) \
+      -print 2>/dev/null || true
 
 # The revision this image was built from, stamped onto every audit record (AG-14 / REV-17). The
 # config docstring has always said "the F6 image build injects the digest" and no build ever did —
