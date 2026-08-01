@@ -565,3 +565,23 @@ cannot tell code from prose, it is not asserting about the code.
 **Rule.** When a substring assertion is genuinely the only option, mutate *both* directions before
 believing it: delete the thing and watch it fail, and add the string to a comment and watch it still
 fail.
+
+## `| head` under `pipefail` fails a step that succeeded (2026-08-01)
+
+A CI step ran `syft <image> -o table | head -40` under `set -euo pipefail`. `head` closes the pipe
+after 40 lines, the producer takes SIGPIPE, and pipefail propagates it: **exit 141 from a command
+that did exactly what it was asked to do.** The step had already written a complete SBOM; the only
+thing that failed was the human-readable preview of it.
+
+The shape generalises past `head`: any short-circuiting consumer (`head`, `grep -m`, `sed q`) kills
+a long-running producer, and `pipefail` reports that kill as the pipeline's result. It is
+particularly nasty in CI, where the producer is often the expensive part and the consumer is a
+convenience.
+
+**Rule.** Never pipe a long-running producer into a short-circuiting consumer inside a `pipefail`
+script. Write to a file and read the file — `cmd -o out.txt && head -40 out.txt`. It also removes
+the second problem the same line had here: the "preview" re-ran a three-minute image scan to
+produce a second copy of an answer already on disk.
+
+**Rule.** When a CI step exits 141 (or 128+N generally), read it as a *signal*, not a failure of
+the command's own logic, and look at what closed underneath it.
