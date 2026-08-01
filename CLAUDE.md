@@ -89,7 +89,8 @@ everywhere (job results, reports, distilled playbooks). See `docs/reference/arch
 
 ## Commands
 
-The toolchain is scaffolded and `make help` (the default goal) lists all 23 targets. Use them rather than raw
+The toolchain is scaffolded and `make help` (the default goal) lists every target — a count is not
+written here, because the one that was said 23 while the file held 28. Use them rather than raw
 invocations — CI runs exactly these, so a green `make` locally means a green CI.
 
 - **The gate**: `make lint` (ruff lint + format) · `make type` (`mypy --strict`, every first-party

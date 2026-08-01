@@ -21,6 +21,7 @@ spec:
         azure.workload.identity/use: "true"
     spec:
       serviceAccountName: {{ .Values.serviceAccount.name }}
+      {{- include "chemclaw.imagePullSecrets" . | nindent 6 }}
       {{- include "chemclaw.spreadAcrossNodes" (dict "Release" .Release "component" "service") | nindent 6 }}
       {{- /* A turn runs up to `CHEMCLAW_SERVICE_TURN_TIMEOUT_SECONDS`, and the default grace period
              is 30 s — so every rolling update, node drain and scale-down SIGKILLed whatever turns
@@ -33,7 +34,7 @@ spec:
         {{- include "chemclaw.podSecurityContext" . | nindent 8 }}
       containers:
         - name: service
-          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          image: "{{ include "chemclaw.image" . }}"
           imagePullPolicy: {{ .Values.image.pullPolicy }}
           securityContext:
             {{- include "chemclaw.containerSecurityContext" . | nindent 12 }}

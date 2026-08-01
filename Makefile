@@ -97,6 +97,15 @@ helm-validate:  ## Render the Helm chart and validate it against the Kubernetes 
 audit-verify:  ## Verify the tamper-evident hash chain over the GxP audit trail (F10-G1).
 	uv run python -m chemclaw.cli.verify_audit_chain
 
+deps-audit:  ## Check the locked dependency closure for known vulnerabilities (supply chain).
+	@# Against the *lockfile* rather than the environment: the exact versions the image installs,
+	@# not whatever happens to be resolved in a developer's venv. `--no-deps` because the export is
+	@# already the fully-resolved set — re-resolving would audit a different closure than ships.
+	@# `.github/workflows/image.yml` runs exactly this, blocking, so a finding is a red build
+	@# rather than a report nobody opens.
+	uv export --no-hashes --no-dev --format requirements-txt > /tmp/chemclaw-requirements.txt
+	uvx pip-audit --no-deps --disable-pip -r /tmp/chemclaw-requirements.txt
+
 explain:  ## Reconstruct why a session's tools ran: SESSION=<id> (D-166).
 	@test -n "$(SESSION)" || { echo "usage: make explain SESSION=<session-id>"; exit 64; }
 	uv run python -m chemclaw.cli.explain $(SESSION)

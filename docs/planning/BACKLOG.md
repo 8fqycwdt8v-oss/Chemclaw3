@@ -369,10 +369,28 @@ QM path. The rows below are what survives that merge, narrowed to say so.
       `runbook.md` §(xi). One correction: the row (following the module's own docstring) implied
       services migrate at startup; nothing has ever done that, `migrate()` has one caller and it is
       its own `__main__`.
-- [ ] **Image not pinned, supply chain ungated** — [S]+[M]. `values.yaml` deploys tag `0.1.0`; the
-      Containerfile builds `FROM …/python-311:latest`; no `imagePullSecrets` field exists. No
-      dependency scanning, SBOM, image scan, secret scanning or signing — and the Containerfile
-      explicitly flags xtb (LGPL-3.0) / crest (GPL-3.0) redistribution as an **unmade decision**.
+- [x] **Image not pinned, supply chain ungated** — closed by
+      D-2026-08-01-a-tag-is-a-pointer-not-a-build, except signing (below) and the licence decision
+      itself (below), neither of which is this repo's to make. `image.digest` through one helper
+      every pod uses, `image.pullSecrets` on every pod spec, `ARG BASE_IMAGE` so a release pins the
+      base, and three **blocking** CI gates: `pip-audit` over the exported lockfile, a retained SPDX
+      SBOM with the built digest, and a `trivy` image scan on fixable HIGH/CRITICAL. The base image
+      is deliberately *not* digest-pinned in the file: a pinned digest goes stale in weeks and every
+      developer build then pulls a base months behind on CVE fixes, so the dev default floats, a
+      release pins, and the SBOM records what a build actually contained.
+- [ ] **No image signing or admission policy** — [M]. Pinning by digest is the property a signature
+      would enforce; adding one nothing verifies would be a fourth control reporting to nobody.
+      Needs a key, a policy admission controller, and a registry to push to — all three belong to
+      the cluster-ownership row below.
+- [ ] **Shipping crest (GPL-3.0) is an unmade decision, and now a takeable one** — [S], and not an
+      engineering task: whether to redistribute a GPL-3.0 binary inside a product image is the
+      product owner's call. What was wrong was that taking it required editing a `RUN` block, so it
+      looked like writing a patch and was therefore never taken. `--build-arg INCLUDE_CREST=false`
+      builds without it; `calc.crest_cli` already reports unavailable rather than failing, so the
+      image loses conformer sampling and nothing else. **Owner: whoever owns the product's
+      licensing.** xtb (LGPL-3.0) is not in question — it is invoked as a separate process over
+      files and never linked, which is the same analysis crest gets and the reason this is a
+      distribution question rather than a licence-compatibility one.
 - [x] **No rate limiting; attachments buffer before they are checked** — closed by
       D-2026-08-01-a-cheap-request-is-still-a-request. Three layers, each at the only level that can
       enforce it: uvicorn flags for connections/keep-alive/header size (the app never sees these),

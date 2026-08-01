@@ -4,7 +4,19 @@
 # (see deploy/entrypoint.sh), so the service, the two Temporal workers, and the MCP servers all ship
 # the same bits and differ only by entrypoint. UBI9 + a non-root UID keeps it OpenShift-SCC-friendly
 # (arbitrary high UID at runtime); no secret is ever baked in — all config arrives via env/mounts.
-FROM registry.access.redhat.com/ubi9/python-311:latest
+# The base is an ARG so a release can pin it by digest without editing this file. It defaults to a
+# floating tag, and that default is a deliberate, stated compromise rather than an oversight: a
+# digest written here would be stale within weeks and every developer build would then pull a base
+# missing months of CVE fixes. So the *dev* default floats and a *release* pins, which is the same
+# split `image.digest` makes in the chart. `docs/guides/runbook.md` §(xiv) is the procedure:
+#
+#   docker build --build-arg BASE_IMAGE=registry.access.redhat.com/ubi9/python-311@sha256:<...>
+#
+# A floating base is exactly why the dependency audit and the SBOM in `.github/workflows/image.yml`
+# record what a build actually contained: if the bytes cannot be pinned in advance, they must at
+# least be *named* afterwards.
+ARG BASE_IMAGE=registry.access.redhat.com/ubi9/python-311:latest
+FROM ${BASE_IMAGE}
 
 # uv drives the install to match local/CI exactly (same lockfile). Copy metadata first for layer reuse.
 # `git` is a hard runtime dependency, not a convenience: the PR-gate submitter shells out to it
@@ -32,7 +44,13 @@ WORKDIR /app
 # Licensing: xtb is LGPL-3.0, crest is GPL-3.0. Both are invoked as separate processes
 # over files and never linked, so the usual analysis is that neither affects this
 # codebase's licence — but *distributing* them inside an image is a decision for whoever
-# owns the product. Drop the crest layer to ship without it.
+# owns the product, and this file cannot make it.
+#
+# What it can do is stop the decision from requiring a code change. `INCLUDE_CREST=false` builds
+# without the GPL-3.0 binary: `calc.crest_cli` already reports unavailable rather than failing, so
+# the image loses conformer sampling and nothing else. The instruction used to be "drop the crest
+# layer", which meant editing a RUN block, which meant the decision was never taken because taking
+# it looked like a patch. It is now a build argument and a row in the backlog naming the owner.
 #
 # The xtb link is resolved by *finding* the extracted binary rather than guessing its directory.
 # The previous form tried `/opt/xtb-dist/bin/xtb` and fell back to `/opt/xtb-${XTB_VERSION}/bin/xtb`
@@ -43,6 +61,7 @@ WORKDIR /app
 # `services/chemclaw/.github/`, where GitHub Actions never reads (both fixed in D-117).
 ARG XTB_VERSION=6.6.1
 ARG CREST_VERSION=3.0.2
+ARG INCLUDE_CREST=true
 RUN set -eux; \
     curl -fsSL -o /tmp/xtb.tar.xz \
       "https://github.com/grimme-lab/xtb/releases/download/v${XTB_VERSION}/xtb-${XTB_VERSION}-linux-x86_64.tar.xz"; \
@@ -50,12 +69,16 @@ RUN set -eux; \
     xtb_bin="$(find /opt -maxdepth 4 -type f -name xtb -perm -u+x -print -quit)"; \
     test -n "${xtb_bin}" || { echo "no xtb binary under /opt after extraction" >&2; exit 1; }; \
     ln -sfn "${xtb_bin}" /usr/local/bin/xtb; \
-    curl -fsSL -o /tmp/crest.tar.xz \
-      "https://github.com/crest-lab/crest/releases/download/v${CREST_VERSION}/crest-gnu-12-ubuntu-latest.tar.xz"; \
-    mkdir -p /opt/crest && tar -xJf /tmp/crest.tar.xz -C /opt/crest --strip-components=1; \
-    install -m 0755 /opt/crest/crest /usr/local/bin/crest; \
-    rm -f /tmp/xtb.tar.xz /tmp/crest.tar.xz; \
-    xtb --version >/dev/null && crest --version >/dev/null
+    if [ "${INCLUDE_CREST}" = "true" ]; then \
+      curl -fsSL -o /tmp/crest.tar.xz \
+        "https://github.com/crest-lab/crest/releases/download/v${CREST_VERSION}/crest-gnu-12-ubuntu-latest.tar.xz"; \
+      mkdir -p /opt/crest && tar -xJf /tmp/crest.tar.xz -C /opt/crest --strip-components=1; \
+      install -m 0755 /opt/crest/crest /usr/local/bin/crest; \
+      rm -f /tmp/crest.tar.xz; \
+      crest --version >/dev/null; \
+    fi; \
+    rm -f /tmp/xtb.tar.xz; \
+    xtb --version >/dev/null
 
 COPY pyproject.toml uv.lock README.md ./
 # All first-party code, in one COPY. Before D-141 this was eighteen lines, one per top-level

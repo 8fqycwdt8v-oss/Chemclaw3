@@ -630,3 +630,57 @@ None of the above applies, because there are no anchors. The chain still catches
 reordering, interior deletion and prefix truncation — and a restore stays what it was before this
 existed: an undetectable shortening of the compliance trail. Set the secret before writing a
 recovery procedure, not after.
+
+## (xiv) Cut a release: pin the image to bytes
+
+`values.yaml` ships `tag: "0.1.0"` so `helm install .` works in dev without a registry round trip.
+**A release must not deploy that tag.** A tag is a pointer: `helm rollback` to a release naming
+`0.1.0` fetches whatever `0.1.0` means now, which is the one thing a rollback must not do — and this
+system stamps a build revision onto every audit record (AG-14), so "which bytes produced this
+result" stops being answerable the moment a tag is re-pushed
+(D-2026-08-01-a-tag-is-a-pointer-not-a-build).
+
+```
+# 1. Build with the base pinned by digest (the file's default floats on purpose — see the ADR).
+docker build -f deploy/Containerfile \
+  --build-arg BASE_IMAGE=registry.access.redhat.com/ubi9/python-311@sha256:<base-digest> \
+  --build-arg CHEMCLAW_REVISION="$(git rev-parse HEAD)" \
+  -t "${REGISTRY}/chemclaw:${VERSION}" .
+
+# 2. Push, then read back the digest the registry assigned.
+docker push "${REGISTRY}/chemclaw:${VERSION}"
+docker image inspect "${REGISTRY}/chemclaw:${VERSION}" --format '{{ index .RepoDigests 0 }}'
+
+# 3. Deploy by digest. The tag is ignored entirely when this is set.
+helm upgrade --install chemclaw deploy/helm/chemclaw \
+  --set image.digest="sha256:<the digest from step 2>"
+```
+
+**Building without crest.** Redistributing a GPL-3.0 binary inside a product image is a licensing
+decision, not an engineering one. `--build-arg INCLUDE_CREST=false` builds without it;
+`calc.crest_cli` reports unavailable rather than failing, so the image loses conformer sampling and
+nothing else. xtb (LGPL-3.0) is not affected by the same question — both are invoked as separate
+processes over files and never linked, so this is about distribution, not licence compatibility.
+
+**A private registry.** `image.pullSecrets` is a list of `{name: <secret>}` applied to every pod
+spec. Before it existed, an operator whose registry needed authentication had no field to set and
+the pods simply failed to pull, which reads as a broken image rather than a missing credential.
+
+### When a supply-chain gate goes red
+
+Three blocking gates run in `.github/workflows/image.yml`, and each fails differently:
+
+| Gate | What it read | First move |
+| --- | --- | --- |
+| `pip-audit` | the exported lockfile — the exact versions the image installs | `uv lock --upgrade-package <name>`; reproduce locally with `make deps-audit` |
+| `trivy` | the built image: base OS packages plus the xtb/crest layers | usually a stale base — rebuild picks up the current UBI9 |
+| SBOM step | nothing; it records | it only fails if `syft` cannot run |
+
+`trivy` runs with `ignore-unfixed: true` on HIGH and CRITICAL. That is a deliberate narrowing, not
+an oversight: a gate that fires on every LOW in a distro base is one an operator disables within a
+week. A finding that genuinely cannot be fixed gets an explicit `--ignore-vuln` **with its reason in
+the diff** — never a downgrade of the whole gate, which is how a control becomes a badge.
+
+The SBOM (SPDX) and the built image's digest are retained on the run for 90 days. That is what makes
+"what was in the image that produced this audit record" answerable at all, and it is the reason the
+floating base default is defensible: the bytes cannot be pinned in advance, so they are named after.
