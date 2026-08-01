@@ -362,9 +362,18 @@ QM path. The rows below are what survives that merge, narrowed to say so.
 
 **Product floor.**
 
-- [ ] **No durable-job surface for a user** — [M]. No `GET /jobs`, no cancel, no result retrieval
-      after the session is gone; status is reachable only as an agent tool inside a turn, and
-      `ConnectorJobResult.data` exists only in Temporal history until it ages out.
+- [x] **No durable-job surface for a user** — closed by D-2026-08-01-a-running-job-has-no-owner,
+      with the row's own premise corrected. `GET /jobs`, `GET /jobs/{id}` and `DELETE /jobs/{id}`
+      exist; the result already outlived Temporal history (D-157's `job_records`) and simply had no
+      route. What could **not** be built is the row's *owner-scoped* cancel: `job_workflow_id`
+      deliberately excludes the requester so two chemists asking for one campaign rejoin one run
+      (D-011), so a running job has several requesters and cancelling it cancels it for all of
+      them. It is an operator action, and the ADR says so rather than shipping a scope check that
+      would read as ownership and not be it.
+- [ ] **A chemist cannot stop their own runaway run** — [M], the cost the row above accepted. The
+      fix is not a scope check on the cancel route; it is a *per-requester* job id, which trades a
+      recompute of every shared expensive job for it — a change to D-011's idempotency contract
+      with a measurable cost, so it wants its own decision.
 - [ ] **No session delete, export, or pagination** — [M]. Only `POST`/`GET /sessions`; no per-user
       erasure across the seven tables that hold a conversation (a data-subject request is currently
       unimplementable, and `audit_events` is deliberately unprunable); `SessionSummary` is
@@ -374,10 +383,11 @@ QM path. The rows below are what survives that merge, narrowed to say so.
       `role + text`: no message id, timestamp, tool calls, job ids, plan, attachments, confidence or
       pagination, while the live SSE stream carries 12 event types. A real UI cannot render history
       at parity with the live view — the largest single item for the `Chemclaw3_ui` repo.
-- [ ] **Every turn failure collapses to one opaque string** — [S]. `runner.py` catches `Exception`
-      and returns "an internal error", with no code, no retryable flag, and not even the correlation
-      id — which is the only key the audit trail has. A UI cannot distinguish connector-down,
-      LLM-timeout, DB-down and bad-tool-arguments.
+- [x] **Every turn failure collapses to one opaque string** — closed. `ErrorEvent` carries a
+      `code` from a short closed taxonomy, a `retryable` flag, and the `correlation_id` the audit
+      trail is keyed on (the old message named the *session*, which the user already has). An
+      unrecognised failure stays `internal` rather than guessing: a wrong `retryable=True` sends
+      someone to burn another turn on a failure that cannot succeed.
 - [ ] **No project as a first-class concept** — [M]. `project` is free text on a reaction and a note
       *tag*; no registry, no project-scoped retrieval, no project-scoped access. Broad internal read
       is a conscious call (`DEFERRED`, KM-9), but "which programme is this work part of" is how

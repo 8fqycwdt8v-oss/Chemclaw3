@@ -185,11 +185,46 @@ class ToolResultEvent(BaseModel):
     preview: str = ""
 
 
+# The closed taxonomy. Each member is a *different thing for the user to do* — retry, wait, fix the
+# input, ask an operator — not a different place the traceback came from, which is why it is this
+# short. Named here beside the event rather than in the runner, because a surface switching on it
+# needs the type as much as the producer does.
+ErrorCode = Literal[
+    "internal",
+    "storage_unavailable",
+    "llm_timeout",
+    "turn_timeout",
+    "budget_exhausted",
+    "bad_tool_arguments",
+]
+
+
 class ErrorEvent(BaseModel):
-    """The turn failed; the message is safe to show the user (no stack traces)."""
+    """The turn failed; the message is safe to show the user (no stack traces).
+
+    `code` and `retryable` exist because the message alone made every failure the same failure. A
+    surface could not tell a connector being down from an LLM timeout from a database outage from
+    a bad tool argument — so it could offer no useful next step, and "try again" was as likely to
+    be wrong as right. The set is deliberately small and closed: each member is a *different thing
+    for the user to do*, not a different place the traceback came from.
+
+    `correlation_id` is the other half. The generic message named the session, which is the id the
+    user already has; the correlation id is the one the **audit trail** is keyed on
+    (D-2026-07-31-the-audit-chain-is-versioned), so quoting it in a bug report is what lets an
+    operator find the turn. It is not sensitive — a random per-turn hex string.
+    """
 
     type: Literal["error"] = "error"
     message: str
+    # `internal` is the honest default: an unclassified failure is one nobody has decided the
+    # user-facing meaning of yet, and guessing a friendlier code would be a worse answer than
+    # admitting the classification is missing.
+    code: ErrorCode = "internal"
+    # Whether asking again, unchanged, could plausibly succeed. A transient outage is retryable; a
+    # malformed tool argument is not, and telling a user to retry it wastes their time and the
+    # deployment's tokens.
+    retryable: bool = False
+    correlation_id: str = ""
 
 
 # The closed set of events a turn can emit. New surfaces switch on `type`; adding an event is a new
