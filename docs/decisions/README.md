@@ -214,6 +214,7 @@ and is kept only for reservations that were in flight when this changed.
 | [D-2026-07-31-two-spellings-of-one-molecule](D-2026-07-31-two-spellings-of-one-molecule.md) | Two spellings of one molecule, and two questions about them |
 | [D-2026-08-01-a-cheap-request-is-still-a-request](D-2026-08-01-a-cheap-request-is-still-a-request.md) | A cheap request is still a request, and a checked upload is still an ingested one |
 | [D-2026-08-01-a-drain-is-not-a-kill-with-extra-steps](D-2026-08-01-a-drain-is-not-a-kill-with-extra-steps.md) | A drain is not a kill with extra steps |
+| [D-2026-08-01-a-log-line-that-joins-and-a-secret-that-does-not](D-2026-08-01-a-log-line-that-joins-and-a-secret-that-does-not.md) | A log line that joins, and a secret that does not |
 | [D-2026-08-01-a-migration-waits-in-front-of-live-traffic](D-2026-08-01-a-migration-waits-in-front-of-live-traffic.md) | A migration that waits, waits in front of live traffic |
 | [D-2026-08-01-a-restore-is-a-truncation-nobody-can-see](D-2026-08-01-a-restore-is-a-truncation-nobody-can-see.md) | A restore is a truncation nobody can see |
 | [D-2026-08-01-a-running-job-has-no-owner](D-2026-08-01-a-running-job-has-no-owner.md) | A running job has no owner, so cancelling one is an operator action |

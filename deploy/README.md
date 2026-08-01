@@ -159,6 +159,19 @@ their failures, lost audit records) was recorded in each worker's own registry a
 Set `monitoring.additionalLabels` to whatever your Prometheus's `serviceMonitorSelector` and
 `podMonitorSelector` match; the defaults match nothing, which is the safe direction.
 
+**Logs are JSON in-cluster** (`CHEMCLAW_LOG_JSON`, on in the chart) and every line carries
+`correlation_id`, `actor` and `session_id` from the turn's ContextVars — so an ordinary WARNING
+joins to the audit row that recorded the same call and, through the same correlation id, to the
+trace that spans it. A filter also replaces any configured secret's value with `***` before a
+record reaches a stream, including one passed as a `%s` argument
+(D-2026-08-01-a-log-line-that-joins-and-a-secret-that-does-not).
+
+**What is deliberately not redacted:** the audit trail's tool-call arguments. `SECURITY.md` states
+that they are user free text, may contain PII, and are recorded *intentionally* — GxP requires an
+attributable "who did what to which inputs" record. A deployment's retention, access control and
+PII policy must cover the trail; that remains a policy obligation and not something this code
+silently satisfies by deleting the evidence.
+
 ## CI/CD (F6-T4)
 
 Two workflows, both at the **repository root** — the only place GitHub Actions reads them from.

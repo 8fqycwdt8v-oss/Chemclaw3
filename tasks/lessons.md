@@ -585,3 +585,29 @@ produce a second copy of an answer already on disk.
 
 **Rule.** When a CI step exits 141 (or 128+N generally), read it as a *signal*, not a failure of
 the command's own logic, and look at what closed underneath it.
+
+## An import inside a logging filter, and the tests my sandbox cannot run (2026-08-01)
+
+`ContextFilter.filter` imported the ambient-identity getters lazily, which reads as the careful
+choice: `core.*` must not depend on `agent.*` at module scope, so the import goes inside the
+function. It shipped green through the full local suite and wedged CI.
+
+A logging filter runs at moments its author does not choose. Temporal's workflow sandbox hooks
+`__import__` and **logs a warning** when sandboxed code touches something restricted — so the
+import tripped a restriction, the restriction logged, the log re-entered the filter, and the filter
+imported again into a now half-initialised module. The workflow worker never recovered; the run
+died on the global pytest timeout, pointing at an unrelated orchestrator test.
+
+The second half is the one worth keeping. The offline sandbox **skips 98 tests** — 64 Postgres, 21
+Temporal, 13 for missing binaries. "The full suite is green locally" therefore says nothing about
+the workflow sandbox, the migration path, or the real DB constraints. I read a green summary line
+that had `98 skipped` in it and treated it as coverage.
+
+**Rule.** Code that runs on the logging path must not import, take a lock, or log. Resolve every
+dependency at construction, at a known-safe moment (an entrypoint), and let `filter` do nothing but
+read. The same rule covers `__repr__`, signal handlers and `atexit` hooks — anything callable from
+inside an import.
+
+**Rule.** Before calling a local run green, read the skip count and name what it excludes. If the
+change touches a layer whose tests are all skipped offline (Temporal, Postgres, the container
+build), say so in the PR body and expect CI to be the first real run — do not report it as verified.

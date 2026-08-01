@@ -436,10 +436,20 @@ QM path. The rows below are what survives that merge, narrowed to say so.
       `traceparent` would attach a replay to the original trace) rather than another `start_span`.
       Separately: no FastAPI/httpx/Temporal auto-instrumentation packages, which would give HTTP and
       database spans under the two first-party ones for the cost of three dependencies.
-- [ ] **Logs are unstructured and unredacted** — [M]. A `%`-format string, no JSON option, no filter
-      injecting the correlation/actor/session contextvars that already exist — so an ordinary
-      WARNING has nothing to join on. `SECURITY.md` states the audit trail holds PII and that a
-      deployment's retention and PII policy must cover it; nothing implements redaction.
+- [x] **Logs are unstructured and unredacted** — closed by
+      D-2026-08-01-a-log-line-that-joins-and-a-secret-that-does-not, with the redaction half
+      re-scoped. Every record now carries `correlation_id`/`actor`/`session_id` from the
+      ContextVars that already existed, and `CHEMCLAW_LOG_JSON` (on in the chart) emits one JSON
+      object per line.
+      **The re-scope:** the row reads as "redact the PII `SECURITY.md` says the audit trail holds",
+      and doing that would break the requirement the trail exists to meet — `SECURITY.md` says in
+      the same breath that recording tool-call arguments is *intentional*, because GxP needs an
+      attributable "who did what to which inputs" record. What has no such justification is a
+      **credential** in an ordinary log line, and `core/db.py::_redact` (a DSN password stripped in
+      exactly one place) was the tell that the concern was real and unsystematised. So the filter
+      matches the secret *values* this process holds rather than guessing at token-shaped strings,
+      and the deployment's retention/PII policy over the audit trail remains a policy question, not
+      a code one.
 - [ ] **Autoscaling defeats the admission guard's purpose** — [M]. The guard is per-process by
       design to protect a shared LLM endpoint; `maxReplicas: 6` silently multiplies the real ceiling
       to `6 × service_max_concurrent_turns`. No deployment-wide ceiling, no metric expressing one.
