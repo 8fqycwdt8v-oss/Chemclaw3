@@ -141,6 +141,39 @@ def _advertised_name(tool: Any) -> str:
     return str(getattr(tool, "name", None) or getattr(tool, "__name__", ""))
 
 
+# What `stable_hash` returns for a session with no work items. A constant, identical in every
+# session of every deployment for all time — which is exactly why it must never be an approvable
+# identity (see `approvable_plan_hash`). Computed rather than written out, so it cannot drift from
+# the hashing rule it describes.
+EMPTY_PLAN_HASH = stable_hash([])
+
+
+async def approvable_plan_hash(session: AgentSession) -> str | None:
+    """The plan identity a human decision may be recorded against, or None when there is no plan.
+
+    **"Nothing" is not a plan, and it used to be an approvable one.** `current_plan_hash` over an
+    empty todo list is `EMPTY_PLAN_HASH` — a constant, not a fact about this session — so a
+    decision recorded against it says "someone approved the empty plan", which every other session
+    also proposes whenever it holds no todos. `POST /sessions/{id}/plan/decision` recorded exactly
+    that with no emptiness check (the CLI's `/approve` already refused).
+
+    Worse, it did not stay spent, because the consumed marker used to live in `session.state` —
+    which an LRU eviction or a pod roll drops (`chemclaw.api.app._rehydrate_session` rebuilds the
+    handle over the durable history alone) — while the `plan_approvals` row was durable. A
+    rehydrated session had lost its todo state too, so it proposed the empty plan again, hashed to
+    the same global constant, and found a live approval waiting. Consumption is durable now
+    (`plan_approvals.consumed_at`), which closes that composition from the other side as well; this
+    check stands on its own reason regardless, and it is the first one: an identity every session in
+    every deployment shares is not something a person can meaningfully decide about.
+
+    So emptiness is answered before hashing, at the one boundary that matters: this is what the
+    gate asks and what the decision route records against, and `current_plan_hash` stays a
+    total function for the *display* route, which has to show something either way.
+    """
+    items = await todo_plan_items(session)
+    return stable_hash(items) if items else None
+
+
 async def current_plan_hash(session: AgentSession) -> str:
     """The hash of the plan this session is currently proposing — the approval key.
 
@@ -161,8 +194,12 @@ async def current_plan_hash(session: AgentSession) -> str:
     the plan proceeding; adding, removing or rewording one is a different plan, and a different
     plan is unapproved. The displayed rendering keeps its checkboxes (`todo_titles` is untouched),
     so nothing a chemist reads changes.
+
+    Total, unlike `approvable_plan_hash`: `GET /sessions/{id}/plan` reports an identity for whatever
+    the session currently proposes, including nothing at all (`EMPTY_PLAN_HASH`). Posting that
+    identity back is refused — deciding is the operation emptiness invalidates, not displaying.
     """
-    return stable_hash(await todo_plan_items(session))
+    return await approvable_plan_hash(session) or EMPTY_PLAN_HASH
 
 
 def session_mode(session: AgentSession, *, default_mode: str = PLAN_MODE) -> str:
@@ -181,48 +218,13 @@ def grant_execute(session: AgentSession) -> str:
     return set_agent_mode(session, EXECUTE_MODE)
 
 
-# Where a session records which approved plans have already had their turn. Session state, not the
-# database, because it is scoped to exactly one conversation's progress and shares the lifetime of
-# the mode it qualifies — the same reasoning `plan_approval_store` uses for its backend choice.
-_CONSUMED_STATE_KEY = "chemclaw_plans_consumed"
-
-
-def consume_plan(session: AgentSession, plan_hash: str) -> None:
-    """Record that an approved plan has now had the turn it was approved for.
-
-    **This is what makes an approval authorize a request rather than a session** (D-167), and it
-    exists because the first version of that fix did not close the finding. Binding the approval to
-    the plan's *work items* — rather than to its rendered lines, whose hash moved on the first
-    ticked box — made the approval checkable at last. It also made it durable in a way nobody
-    approved: a live run showed the model answering a completely different question without
-    touching its todo list at all, so the plan identity never changed, the approval never lapsed,
-    and `compute_xtb_energy` ran under an authorization given for a hazard-screening plan.
-
-    The unit a person actually approves is *this plan, for this ask*. The harness loop runs a plan
-    to completion inside one `agent.run`, so one turn is exactly the scope of "execute the approved
-    plan" — and the next user message is a new request, which needs its own approval even if the
-    todo list happens to look the same.
-    """
-    consumed = session.state.setdefault(_CONSUMED_STATE_KEY, [])
-    if isinstance(consumed, list) and plan_hash not in consumed:
-        consumed.append(plan_hash)
-
-
-def plan_consumed(session: AgentSession, plan_hash: str) -> bool:
-    """Whether this plan's approval has already been spent on a turn."""
-    consumed = session.state.get(_CONSUMED_STATE_KEY)
-    return isinstance(consumed, list) and plan_hash in consumed
-
-
-def rearm_plan(session: AgentSession, plan_hash: str) -> None:
-    """Forget that a plan was consumed, so a fresh human decision authorizes a fresh turn.
-
-    Called when a decision is recorded. Re-approving the same unchanged plan is a person saying
-    "yes, again" — a deliberate act, and the only thing that revives a spent authorization.
-    """
-    consumed = session.state.get(_CONSUMED_STATE_KEY)
-    if isinstance(consumed, list) and plan_hash in consumed:
-        consumed.remove(plan_hash)
+# **Whether an approval has been spent is not kept here.** It was — a `chemclaw_plans_consumed`
+# list in `session.state`, with `consume_plan` / `plan_consumed` / `rearm_plan` around it — and that
+# put the two halves of one control on different lifetimes: the `plan_approvals` row survives a pod
+# roll and an LRU eviction, the marker did not, so a session that reconstructed a byte-identical
+# todo list met its own already-spent approval looking fresh. It now lives on the decision itself
+# (`plan_approvals.consumed_at`, `infra/sql/034`), which is why this module has no third function
+# about it and why re-arming needs none either: recording a fresh decision *is* the re-arm.
 
 
 def revoke_execute(session: AgentSession) -> str:

@@ -13,10 +13,22 @@ outcome and a short effect summary (e.g. the PR ref a `propose_*` tool returned)
 Records go to the stdlib log always, and additionally to a durable `AuditSink` when one is
 supplied (the Postgres append-only trail) — the log is the floor, the sink is the GxP record.
 
+**Three outcomes, not two, because a turn can end without the tool ending.** A client disconnect
+and the front door's turn deadline both arrive as `asyncio.CancelledError` (D-130), which is a
+`BaseException` and so slipped past the `except Exception` that records a failure: a tool call
+interrupted mid-flight left no row at all, and `audit_events` under-reported *attempted* calls
+whenever a turn was torn down. The gap was bounded rather than total — the side effect itself stays
+traced by `job_records` for a durable job, the `ToolCallEvent` already streamed to the client, the
+teardown warning in `chemclaw.api.runner`, and a `turn_costs` row with `completed=false` — but none
+of those is the GxP trail, and "who attempted what" is exactly what the trail is for. A cancelled
+attempt is now its own `cancelled` outcome, distinguishable from both a success and a failure,
+written on a shielded task so the write outlives the cancellation that caused it.
+
 Note: tool arguments and confirmed-answer payloads are user free text, so audit records may
 contain PII. `agent_audit_max_arg_chars` bounds what is stored; treat the trail accordingly.
 """
 
+import asyncio
 import logging
 import time
 from collections.abc import Awaitable, Callable
@@ -70,8 +82,13 @@ class AuditEvent(BaseModel):
     actor: str
     tool: str
     arguments: str
-    outcome: str  # "ok" | "error"
-    detail: str = ""  # result summary on success, exception text on failure
+    # "ok" | "error" | "cancelled". Deliberately a plain string with no CHECK behind it: the column
+    # has none (`infra/sql/006`), and adding one to a hash-chained append-only table to police three
+    # literals would cost a migration on every future outcome. The producer is this module alone.
+    outcome: str
+    # Result summary on success, exception text on failure, why the attempt was cut short on a
+    # cancellation.
+    detail: str = ""
     latency_ms: float
     # The deployment revision (Git SHA / image digest) in effect for this call (AG-14): ties a past
     # result to the exact prompt/skill/config version that produced it. "unknown" until a deployment
@@ -180,6 +197,21 @@ def make_audit_middleware(
         # build time would be shared by every user on the pod. Empty off the request path.
         event_session = get_current_session_id() or ""
         start = time.perf_counter()
+
+        def event_for(outcome: str, detail: str, elapsed_ms: float) -> AuditEvent:
+            """This call's record under `outcome` — the identity fields resolved once, above."""
+            return AuditEvent(
+                correlation_id=event_cid,
+                session_id=event_session,
+                actor=event_actor,
+                tool=name,
+                arguments=args,
+                outcome=outcome,
+                detail=detail,
+                latency_ms=elapsed_ms,
+                revision=revision,
+            )
+
         try:
             # One span per tool call, which with the turn span above it is the whole first-party
             # trace: "this question took 40 seconds and 31 of them were one xTB call" is the
@@ -188,6 +220,31 @@ def make_audit_middleware(
             # the tracing, and answering that with more unread spans is the same mistake mirrored.
             with start_span("chemclaw.tool", **{"tool.name": name}):
                 await call_next()
+        except asyncio.CancelledError:
+            # The turn was torn down while this tool was still running — a client disconnect or the
+            # front door's wall-clock deadline, which both deliver exactly this (D-130). Its own
+            # clause because `CancelledError` derives from `BaseException`, so the handler below
+            # never saw it and an interrupted attempt left no row in the trail at all.
+            elapsed_ms = (time.perf_counter() - start) * 1000.0
+            _observe_tool_latency(elapsed_ms)
+            logger.warning(
+                "tool %s was cancelled after %.0f ms [cid=%s actor=%s] (args=%s)",
+                name,
+                elapsed_ms,
+                event_cid,
+                event_actor,
+                args,
+            )
+            await _emit_shielded(
+                audit_sink,
+                event_for(
+                    "cancelled",
+                    "the turn was torn down while this tool was running (client disconnect or "
+                    "turn deadline); whether its side effect completed is not known here",
+                    elapsed_ms,
+                ),
+            )
+            raise
         except Exception as exc:
             elapsed_ms = (time.perf_counter() - start) * 1000.0
             _observe_tool_latency(elapsed_ms)
@@ -200,20 +257,7 @@ def make_audit_middleware(
                 exc,
                 args,
             )
-            await _emit(
-                audit_sink,
-                AuditEvent(
-                    correlation_id=event_cid,
-                    session_id=event_session,
-                    actor=event_actor,
-                    tool=name,
-                    arguments=args,
-                    outcome="error",
-                    detail=_truncate(exc),
-                    latency_ms=elapsed_ms,
-                    revision=revision,
-                ),
-            )
+            await _emit(audit_sink, event_for("error", _truncate(exc), elapsed_ms))
             raise
         elapsed_ms = (time.perf_counter() - start) * 1000.0
         _observe_tool_latency(elapsed_ms)
@@ -226,22 +270,34 @@ def make_audit_middleware(
             event_actor,
             args,
         )
-        await _emit(
-            audit_sink,
-            AuditEvent(
-                correlation_id=event_cid,
-                session_id=event_session,
-                actor=event_actor,
-                tool=name,
-                arguments=args,
-                outcome="ok",
-                detail=detail,
-                latency_ms=elapsed_ms,
-                revision=revision,
-            ),
-        )
+        await _emit(audit_sink, event_for("ok", detail, elapsed_ms))
 
     return audit_tool_calls
+
+
+async def _emit_shielded(sink: AuditSink, event: AuditEvent) -> None:
+    """Persist an event from inside a cancellation, on a task that outlives it.
+
+    The reason the cancelled-attempt row needs its own writer: this runs while the task is already
+    being cancelled, so a plain `await _emit(...)` is cancelled at its first suspension point — it
+    would reach the sink's first `await` and write nothing, which is the same missing row it was
+    added to fix. `asyncio.shield` puts the write on its own task, exactly as
+    `chemclaw.api.runner`'s durable-history rollback does for the identical reason.
+
+    The `CancelledError` that comes straight back out of the shield is the caller's teardown
+    resuming, not a failure of the write, so it is swallowed here: letting it out would replace the
+    cancellation the middleware is re-raising. The write itself carries on and reports its own
+    failure — `_emit` already swallows and logs, which is what a shielded task must do, since once
+    the awaiting task is cancelled nothing collects its result and an escaping error would surface
+    only as an unattributed `Task exception was never retrieved`.
+    """
+    try:
+        await asyncio.shield(_emit(sink, event))
+    except asyncio.CancelledError:
+        logger.debug(
+            "the audit write for tool %s outlived its cancelled turn; it completes on its own task",
+            event.tool,
+        )
 
 
 async def _emit(sink: AuditSink, event: AuditEvent) -> None:

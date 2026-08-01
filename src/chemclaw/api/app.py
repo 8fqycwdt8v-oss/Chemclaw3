@@ -50,10 +50,9 @@ from chemclaw.agent.durable_tools import (
     request_note_reindex,
 )
 from chemclaw.agent.harness_mode import (
-    current_plan_hash,
+    EMPTY_PLAN_HASH,
+    approvable_plan_hash,
     grant_execute,
-    plan_consumed,
-    rearm_plan,
     session_mode,
 )
 from chemclaw.agent.harness_todo import complete_awaiting_job, todo_titles
@@ -1340,9 +1339,14 @@ def create_app(
         """Prometheus exposition for this pod (gap DEP-4).
 
         Unauthenticated on purpose, like `/healthz` and `/readyz`: a scrape happens before and
-        independently of user identity, and the NetworkPolicy is what keeps it inside the
-        cluster. It exposes counts and capacity only — never a session id, a user, or any turn
-        content.
+        independently of user identity. What makes that safe is the exposition itself — counts,
+        capacity and an operator-chosen `profile` label, never a session id, a user, or any turn
+        content, enforced by D-152's declared-label allowlist.
+
+        It is *not* the NetworkPolicy, which this docstring used to name. A NetworkPolicy selects
+        peers, not paths, and the front door's Route declares no `spec.path` — so this endpoint is
+        reachable on the external host wherever the Route is enabled. `deploy/values.yaml`
+        (`route.ipWhitelist`) carries the control for a deployment that will not accept that.
         """
         return Response(content=METRICS.render(), media_type=CONTENT_TYPE)
 
@@ -1615,21 +1619,29 @@ def create_app(
         """The plan awaiting a decision, with the hash a client must post back to approve it.
 
         `approved` is the **effective** state, not merely the recorded one: a decision exists, it
-        was a yes, and it has not already been spent by the turn it authorized
-        (`chemclaw.agent.plan_gate.plan_is_approved`). Reporting the stored row alone would tell a
-        surface a plan is approved while every state-changing call under it is refused — the same
-        disagreement between what a surface displays and what the system enforces that let DARK-1
-        sit unnoticed, reintroduced one layer up. `decided_by` still names whoever decided, because
-        "approved earlier, already used" is a different thing to show than "nobody has decided".
+        was a yes, and it has not already been spent by the turn it authorized. Reporting the stored
+        row alone would tell a surface a plan is approved while every state-changing call under it
+        is refused — the same disagreement between what a surface displays and what the system
+        enforces that let DARK-1 sit unnoticed, reintroduced one layer up. That is now one question
+        rather than two: `ApprovalStore.decision` folds `plan_approvals.consumed_at` into the
+        verdict, so a route cannot forget the second half. `decided_by` still names whoever decided,
+        because "approved earlier, already used" is a different thing to show than "nobody has
+        decided".
+
+        A session proposing no work items is asked nothing: its identity is the global
+        `EMPTY_PLAN_HASH`, which the gate refuses outright, so a stored row against it — one
+        written before the decision route refused to — must not come back as `approved=true` here
+        either. The hash is still reported, because a client needs *an* identity to display.
         """
         live = await _resolve_session(session_id, principal)
         plan = await todo_titles(live.session)
-        plan_hash = await current_plan_hash(live.session)
-        decision = await _plan_approvals().decision(session_id, plan_hash)
-        # One read, then two questions of it. Calling `plan_is_approved` here as well would issue a
-        # second query whose answer could differ from this one — a route reporting `approved=false`
-        # beside the name of whoever approved it is a worse surface than either fact alone.
-        approved = bool(decision and decision[0]) and not plan_consumed(live.session, plan_hash)
+        approvable = await approvable_plan_hash(live.session)
+        plan_hash = approvable or EMPTY_PLAN_HASH
+        decision = await _plan_approvals().decision(session_id, plan_hash) if approvable else None
+        # One read, one question. Calling `plan_is_approved` here as well would issue a second query
+        # whose answer could differ from this one — a route reporting `approved=false` beside the
+        # name of whoever approved it is a worse surface than either fact alone.
+        approved = bool(decision and decision[0])
         return PlanStatusOut(
             session_id=session_id,
             plan_hash=plan_hash,
@@ -1656,19 +1668,33 @@ def create_app(
         The posted `plan_hash` must match the plan the session is proposing *now*. A mismatch is a
         409, not a silent approval of the current plan: it means the plan changed between being
         shown and being approved, and the human agreed to something else.
+
+        A session proposing **no** work items has nothing to decide on, and this refused nothing:
+        the empty todo list hashes to a global constant, so a decision could be recorded against
+        "the empty plan" — an identity every session shares and comes back to whenever it loses its
+        todo state. The CLI's `/approve` already refused; this is the same refusal at the route that
+        matters, and `harness_mode.approvable_plan_hash` is where the two now get their answer.
         """
         live = await _resolve_session(session_id, principal)
-        plan_hash = await current_plan_hash(live.session)
+        plan_hash = await approvable_plan_hash(live.session)
+        if plan_hash is None:
+            raise HTTPException(
+                status_code=409,
+                detail="this session is not proposing a plan; ask it something first, then decide "
+                "on the plan it comes back with",
+            )
         if body.plan_hash != plan_hash:
             raise HTTPException(
                 status_code=409,
                 detail="the plan changed since it was shown; re-read it and decide again",
             )
+        # Recording *is* the re-arm. An approval authorizes one turn and is spent when that turn
+        # ends (D-167), so re-approving an unchanged plan has to mean "yes, again" rather than a
+        # no-op that silently leaves the session unable to act — and since the store is append-only
+        # and reads the latest row, a second decision is a fresh, unspent one by construction. It
+        # used to need a separate `rearm_plan` call against session state, which is one more thing a
+        # future route could forget to do.
         await _plan_approvals().record(session_id, plan_hash, principal.oid or "", body.approved)
-        # A decision re-arms the plan: an approval authorizes one turn and is spent when that turn
-        # ends (D-167), so re-approving an unchanged plan is how a person says "yes, again" rather
-        # than a no-op that silently leaves the session unable to act.
-        rearm_plan(live.session, plan_hash)
         if body.approved:
             grant_execute(live.session)
         return Response(status_code=204)

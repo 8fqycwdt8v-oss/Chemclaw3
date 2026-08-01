@@ -5,7 +5,9 @@ Two gates, one home, so authorization is never scattered across tools and layers
 - `authorize_trigger` — the coarse gate for **expensive triggers** (a costly HPC/BO job): a
   job-launching tool calls it with the action name before starting the durable work, so an
   autonomously-planned todo cannot start an expensive path outside the requesting user's
-  entitlements. Config: `entra_expensive_actions` × `entra_privileged_roles`.
+  entitlements. What it protects is `expensive_actions()` — every job a manifest declares
+  `expensive: true`, plus whatever `entra_expensive_actions` adds — against
+  `entra_privileged_roles`.
 - `authorize_tool` — the fine-grained gate applied to **every tool invocation** by one middleware
   (`chemclaw.agent.tool_authz`), generalizing the coarse gate so per-tool RBAC does not have to be
   hand-
@@ -145,6 +147,35 @@ def side_effecting_tools() -> frozenset[str]:
     )
 
 
+def expensive_actions() -> frozenset[str]:
+    """Every action the coarse trigger gate protects — the declarations plus the operator's list.
+
+    **`expensive: true` in a `connector.yaml` had authorized nothing.** `JobSpec.expensive` is
+    documented as marking a job for this gate, `connectors.jobs.prepare_job_launch` dutifully calls
+    `authorize_trigger(job.name)` for it, and `authorize_trigger` then returned immediately unless
+    an operator had *separately* named that job in `entra_expensive_actions`. So the manifest flag
+    was decoration: under `entra_required=True` with a role-less actor, `sample_conformers`,
+    `compute_interaction_energy` and `start_optimization_campaign` all ran, and only
+    `compute_dft_energy` was refused — by `DEFAULT_WRITE_TOOL_GATES` membership, a different gate
+    that happens to name it. The shipped chart is precisely that shape: `entra_required=true` with
+    both role settings left empty.
+
+    Deriving the set instead is the same move `side_effecting_tools()` makes, for the same reason:
+    the bundle owns the fact, so a capability added next year is gated the day it is enabled rather
+    than the day someone remembers to extend a list in core. `entra_expensive_actions` remains, and
+    remains a union — it is how an operator gates something the manifests do not call expensive.
+
+    Imported lazily because the connector registry reaches the agent builder, which reaches this
+    module.
+    """
+    from chemclaw.connectors.registry import enabled
+
+    declared = frozenset(
+        job.name for manifest in enabled() for job in manifest.jobs if job.expensive
+    )
+    return settings.entra_expensive_action_set | declared
+
+
 def _actor() -> str:
     """Name the turn's user for a refusal message, or say plainly that there isn't one."""
     return get_current_actor() or "an unauthenticated user"
@@ -229,20 +260,29 @@ def authorize_trigger(action: str) -> None:
 
     Args:
         action: The trigger's name (e.g. `"compute_dft_energy"`). If it is not in
-            `entra_expensive_actions`, the call is always allowed.
+            `expensive_actions()`, the call is always allowed.
 
     Raises:
         AuthorizationError: When enforcement is on, the action is expensive, and the user holds none
-            of the `entra_privileged_roles` (or there is no authenticated user at all).
+            of the `entra_privileged_roles` (or there is no authenticated user at all, or the
+            deployment declared no privileged role for an expensive action to require).
     """
     if not settings.entra_required:
         return  # dev: no tenant, open gate
-    if action not in settings.entra_expensive_action_set:
+    if action not in expensive_actions():
         return  # not a gated action
     actor = get_current_actor()
     if actor is None:
         raise AuthorizationError(f"{action} requires an authenticated user")
-    if not _has_required_role(settings.entra_privileged_role_set):
+    privileged = settings.entra_privileged_role_set
+    # An empty privileged set means fail closed, not open — the same rule the built-in write gate
+    # in `authorize_tool` states, and now reachable for the same reason: `_has_required_role` treats
+    # "no roles required" as satisfied, which is right for an operator's own gate and would void
+    # this one entirely on the shipped chart, where `entra_required` is on and neither role setting
+    # is filled in. Config validation cannot catch it — it requires `entra_privileged_roles`
+    # whenever `entra_expensive_actions` names anything, and a *declared* expensive job needs no
+    # entry in either, so the shipped shape passes validation with both empty.
+    if not privileged or not _has_required_role(privileged):
         raise AuthorizationError(f"user {actor} lacks a privileged role for {action}")
 
 

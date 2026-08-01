@@ -45,9 +45,7 @@ from agent_framework._harness._loop import ShouldContinueCallable, ShouldContinu
 from chemclaw.agent.authz import AuthorizationError, side_effecting_tools
 from chemclaw.agent.harness_mode import (
     EXECUTE_MODE,
-    consume_plan,
-    current_plan_hash,
-    plan_consumed,
+    approvable_plan_hash,
     revoke_execute,
     session_mode,
 )
@@ -73,17 +71,22 @@ class PlanNotApprovedError(AuthorizationError):
 async def plan_is_approved(session: AgentSession) -> bool:
     """Whether a human has approved the plan this session is proposing *right now*, for this turn.
 
-    Two conditions, and the second is the one a live run had to teach:
+    Two conditions, and only the first is obvious:
 
-    1. a decision exists for the current plan identity and it is a yes;
-    2. that approval has not already been spent (`harness_mode.plan_consumed`).
+    0. there *is* a plan — a session proposing no work items has an identity nobody can approve
+       (`harness_mode.approvable_plan_hash`);
+    1. the store's *effective* verdict for that identity is a yes — which folds in "and it has not
+       already been spent", because consumption is recorded on the decision itself
+       (`plan_approvals.consumed_at`) rather than in session state. That fold is what makes this
+       function two lines instead of three, and it is the point of D-167's last fix: the spent-ness
+       of an approval used to live where a pod roll could drop it while the approval survived.
 
     Deliberately re-read per call rather than cached on the session: the question is about the plan
     as it stands at this instant, and the whole defect being fixed is an authorization that outlived
     the thing it authorized.
     """
-    plan_hash = await current_plan_hash(session)
-    if plan_consumed(session, plan_hash):
+    plan_hash = await approvable_plan_hash(session)
+    if plan_hash is None:
         return False
     decision = await plan_approval_store().decision(session.session_id, plan_hash)
     return bool(decision and decision[0])
@@ -215,22 +218,33 @@ async def consume_turn_approval(session: AgentSession) -> None:
     immediately and *everything after it in the block is skipped*: the budget booking, the turn
     metrics, `end_turn`, and all five context-var resets. Leaking the ambient identity of a
     disconnected turn into the next turn on that worker is a worse defect than the one this
-    function exists to fix. So it is called on the two paths where awaiting is safe, and the
-    disconnect path deliberately does not spend the approval — that path rolls `session.state` back
-    to its pre-turn snapshot, which is where the consumed marker lives, so a turn that was undone
-    has not used its authorization.
+    function exists to fix. So it is called on the two paths where awaiting is safe, and a turn torn
+    down *before* it answered deliberately does not spend the approval — that path rolls
+    `session.state` back to its pre-turn snapshot, which is where the consumed marker lives, so a
+    turn that was undone has not used its authorization.
+
+    A turn torn down *after* it answered is not rolled back at all — its answer is committed
+    history, and deleting that was a real defect (`chemclaw.api.runner`) — so the cancellation can
+    land inside this call, before the consumption is written. The approval then survives into the
+    next request: the same one-turn residual D-167 already accepts on the disconnect path, and now
+    the *only* one, since the write itself is durable (`plan_approvals.consumed_at`) rather than a
+    session-state marker an eviction could drop long afterwards.
+
+    Idempotent, because it is called on two paths that can both run for one turn and because the
+    store spends only a live approval: asking twice costs a no-op UPDATE, not a second plan's worth
+    of authorization.
 
     Never raises. A store that cannot be reached must not turn a completed turn into a failed one;
     the gate itself fails closed on the next call regardless, because an unreadable decision is not
     an approval.
     """
     try:
-        plan_hash = await current_plan_hash(session)
-        if plan_consumed(session, plan_hash):
+        plan_hash = await approvable_plan_hash(session)
+        if plan_hash is None:
             return
         decision = await plan_approval_store().decision(session.session_id, plan_hash)
         if decision and decision[0]:
-            consume_plan(session, plan_hash)
+            await plan_approval_store().consume(session.session_id, plan_hash)
             # The mode represented the authorization, so it ends with it. Without this the surface
             # keeps reporting `execute` for a session whose every state-changing call would now be
             # refused — the same disagreement between the displayed mode and the enforced one that

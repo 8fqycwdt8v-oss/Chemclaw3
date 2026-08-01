@@ -144,8 +144,9 @@ async def run_turn(
             admission check reads those counters before the *next* turn). `None` disables
             metering (test/CLI).
         history: The session's history provider, when it stores durably. Only used to roll the
-            turn's committed rows back on a client disconnect — under the in-memory provider the
-            state snapshot below is the whole story, but a durable one has already written them.
+            turn's committed rows back on a client disconnect that lands *before* the turn
+            answered — under the in-memory provider the state snapshot below is the whole story,
+            but a durable one has already written them.
         profile: The session's agent profile, used only to label this turn's token spend
             (REV-10) — the surface it selects is chosen by the caller, which passes the matching
             agent and connectors. `None` labels the spend `default`, so every series carries the
@@ -160,9 +161,9 @@ async def run_turn(
     # attach the gate — one predicate, so the two cannot disagree about a profile that overrides
     # the deployment's autonomy.
     plan_gated = gate_applies(get_profile(profile))
-    # Set only once an `AnswerEvent` has actually been yielded, so the cost ledger can separate a
-    # turn that finished from one a disconnect or the wall-clock deadline cut short. Both are
-    # billed; only one of them got anything for the money.
+    # Whether this turn produced its answer, which is the line between a turn that finished and one
+    # a disconnect or the wall-clock deadline cut short. Both are billed (the cost ledger reads it);
+    # only one of them got anything for the money, and only the other one has anything to roll back.
     answered = False
     answer_parts: list[str] = []
     # Metered across the turn's updates and booked once on teardown (even on failure — a failed
@@ -319,8 +320,14 @@ async def run_turn(
                 if current_plan is not None and current_plan != last_plan:
                     last_plan = current_plan
                     yield PlanEvent(todos=last_plan)
-        yield await _answer_event("".join(answer_parts))
+        answer = await _answer_event("".join(answer_parts))
+        # **Before the yield, not after it.** `agent.run` has ended by now, so the history provider
+        # has already committed this turn's rows and they are a complete, paired exchange — there is
+        # nothing half-written left to undo. The cancellation that reaches a finished turn is
+        # delivered *while suspended in the yield below*, as sse-starlette sends the answer, so a
+        # flag set after it is still false exactly when the teardown clause needs it to be true.
         answered = True
+        yield answer
         # The turn used its authorization, so the authorization is spent (D-167). Here rather than
         # in `finally`, which also runs on the disconnect path where an `await` would re-raise the
         # cancellation and skip every teardown step after it — see `consume_turn_approval`.
@@ -342,6 +349,25 @@ async def run_turn(
         # never `GeneratorExit`. The read-time repair in `agents.session_store` is why this was a
         # silent weakness rather than an outage; it strips the unmatched tool call on the next
         # read, but only the rollback discards the rest of the abandoned turn.
+        #
+        # **Only an *unanswered* turn is rolled back.** A turn torn down after its answer has
+        # nothing half-written about it: `agent.run` returned, the history provider committed a
+        # complete user+assistant pair, and no `tool_use` is left without its result — the sole
+        # failure the rollback exists to prevent. Undoing it anyway deleted a finished exchange
+        # from the conversation because the client dropped during the send of its answer, a window
+        # of one send plus one round trip that the cost ledger simultaneously billed as
+        # `completed`. In a GxP system a silently vanished answer is worse than a lost turn. (The
+        # spent-plan marker used to ride along in that snapshot, so reverting an answered turn's
+        # state re-armed the approval it had just used as well; consumption is a durable column now
+        # — `plan_approvals.consumed_at` — so the answer alone is the reason, which is the reason
+        # that was always sufficient.)
+        if answered:
+            logger.warning(
+                "turn for session %s was torn down after it answered (client disconnect or the "
+                "front door's turn deadline); the completed turn is kept",
+                session.session_id,
+            )
+            raise
         logger.warning(
             "turn for session %s was torn down before it answered (client disconnect or the "
             "front door's turn deadline); rolling session state back",

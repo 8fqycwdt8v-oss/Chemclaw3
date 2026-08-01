@@ -6,9 +6,15 @@ resolution, single-turn text extraction), not model behavior.
 """
 
 import asyncio
+from collections.abc import Iterator
 
 import pytest
+from agent_framework import DEFAULT_TODO_SOURCE_ID, AgentSession, TodoItem, TodoSessionStore
 
+from chemclaw.agent import plan_approval_store as store_module
+from chemclaw.agent.harness_mode import EMPTY_PLAN_HASH, current_plan_hash
+from chemclaw.agent.harness_todo import mark_awaiting_job, todo_titles
+from chemclaw.agent.plan_approval_store import InMemoryPlanApprovalStore
 from chemclaw.cli import chat as cli
 from chemclaw.core.config import settings
 
@@ -88,3 +94,100 @@ def test_a_turn_runs_on_a_session_because_the_harness_requires_one() -> None:
     sentinel = object()
     asyncio.run(cli.converse(agent, "hi", (), sentinel))
     assert agent.seen is sentinel
+
+
+# --- `/approve` decides on a plan, or refuses — the same question the HTTP route asks -----------
+
+
+@pytest.fixture
+def cli_approvals(monkeypatch: pytest.MonkeyPatch) -> Iterator[InMemoryPlanApprovalStore]:
+    """The CLI's real approval store, obtained the way `_plan_command` obtains it.
+
+    `session_store="memory"` is what a terminal is, so this is the production backend for this
+    front door rather than a double. The `@cache`d factory is cleared on both sides so the store is
+    neither inherited nor left behind.
+    """
+    monkeypatch.setattr(settings, "session_store", "memory")
+    factory = store_module.plan_approval_store
+    factory.cache_clear()
+    store = factory()
+    assert isinstance(store, InMemoryPlanApprovalStore)
+    yield store
+    factory.cache_clear()
+
+
+async def _set_plan(session: AgentSession, titles: list[str]) -> None:
+    """Write `titles` as the session's plan, the way the model's own todo tool does."""
+    items = [TodoItem(id=index + 1, title=title) for index, title in enumerate(titles)]
+    await TodoSessionStore().save_state(
+        session, items, next_id=len(items) + 1, source_id=DEFAULT_TODO_SOURCE_ID
+    )
+
+
+def test_approve_refuses_a_session_whose_todos_are_only_bookkeeping(
+    cli_approvals: InMemoryPlanApprovalStore,
+) -> None:
+    """`/approve` must decide on a *plan*, not on the launcher's `awaiting-job:` rows.
+
+    The guard used to be `todo_titles`, which is the *display* list and counts those rows, while
+    the hash recorded was `current_plan_hash`, which strips them and falls back to the global
+    `EMPTY_PLAN_HASH`. Two different questions, so a session holding nothing but bookkeeping passed
+    the guard and recorded an approval against a constant every session in every deployment shares.
+    The gate refuses that identity, so nothing unsafe followed — but the terminal answered
+    "approved …; the session may now execute" when nothing had been approved and the session could
+    not execute, which is the one thing an approval prompt must never say.
+    """
+
+    async def _run() -> tuple[str, tuple[bool, str] | None]:
+        session = AgentSession(session_id="cli-bookkeeping")
+        await mark_awaiting_job(session, "job-1", title="waiting on the DFT run")
+        assert await todo_titles(session), "the precondition is that the display is non-empty"
+        reply = await cli._plan_command("/approve", session)
+        return reply, await cli_approvals.decision(session.session_id, EMPTY_PLAN_HASH)
+
+    reply, recorded = asyncio.run(_run())
+    assert "no plan to approve" in reply, (
+        f"a bookkeeping-only session was told it approved: {reply}"
+    )
+    assert recorded is None, "an approval was recorded against the empty-plan constant"
+
+
+def test_approve_records_and_arms_a_real_plan(cli_approvals: InMemoryPlanApprovalStore) -> None:
+    """The counterweight: a session proposing real work items is approvable and says so.
+
+    A refusal that refused everything would be a broken command rather than a fixed one.
+    """
+
+    async def _run() -> tuple[str, str, tuple[bool, str] | None]:
+        session = AgentSession(session_id="cli-real-plan")
+        await _set_plan(session, ["screen the species", "compute the barrier"])
+        reply = await cli._plan_command("/approve", session)
+        plan_hash = await current_plan_hash(session)
+        return reply, plan_hash, await cli_approvals.decision(session.session_id, plan_hash)
+
+    reply, plan_hash, recorded = asyncio.run(_run())
+    assert plan_hash != EMPTY_PLAN_HASH, "the precondition is a plan with real work items"
+    assert plan_hash in reply, f"the terminal did not name the plan it approved: {reply}"
+    assert recorded == (True, settings.cli_admin_actor)
+
+
+def test_plan_shows_no_approvable_identity_rather_than_the_empty_constant(
+    cli_approvals: InMemoryPlanApprovalStore,
+) -> None:
+    """`/plan` displays what the chemist sees, and reports the identity only when there is one.
+
+    Printing `EMPTY_PLAN_HASH` beside a verdict invited exactly the confusion `/approve` acted on:
+    it looks like a plan identity, and it is a global constant. The todo lines are still shown in
+    full — the bookkeeping rows are what the session is genuinely doing — because emptiness
+    invalidates *deciding*, not displaying.
+    """
+
+    async def _run() -> str:
+        session = AgentSession(session_id="cli-display")
+        await mark_awaiting_job(session, "job-1", title="waiting on the DFT run")
+        return await cli._plan_command("/plan", session)
+
+    reply = asyncio.run(_run())
+    assert "waiting on the DFT run" in reply, f"the display lost the session's todos: {reply}"
+    assert "no approvable plan" in reply, f"the empty constant was shown as a plan: {reply}"
+    assert EMPTY_PLAN_HASH not in reply

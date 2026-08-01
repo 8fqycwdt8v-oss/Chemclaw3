@@ -1133,6 +1133,45 @@ def test_events_route_claims_only_job_completed(monkeypatch) -> None:  # type: i
     assert captured["kinds"] == ("job_completed",)
 
 
+def test_a_session_with_no_plan_has_nothing_to_decide_on() -> None:
+    """`POST /plan/decision` must refuse a session that is proposing nothing.
+
+    The empty todo list hashes to a constant — the same string for every session in every
+    deployment — so a decision recorded against it is not a fact about this session's plan, and it
+    is one a rehydrated session (which has lost its todo state) proposes again for free. The route
+    recorded it anyway, with no emptiness check. (The CLI's `/approve` looked like it had one, and
+    did not: it guarded on `todo_titles` — the *display* list, which counts the launcher's
+    `awaiting-job:` rows — while recording against a hash that strips them, so a bookkeeping-only
+    session recorded the same useless approval there too. Both now ask `approvable_plan_hash`.)
+
+    409 rather than 422: the request is well-formed, it conflicts with the session's current state,
+    which is exactly what the sibling "the plan changed since it was shown" refusal means. The hash
+    posted here is the real one `GET /plan` reports, so this cannot pass by mismatching.
+    """
+    with _client(_FakeAgent()) as client:
+        session_id = client.post("/sessions").json()["session_id"]
+        plan = client.get(f"/sessions/{session_id}/plan").json()
+        assert plan["plan"] == [], "the precondition is a session with no plan"
+        res = client.post(
+            f"/sessions/{session_id}/plan/decision",
+            json={"approved": True, "plan_hash": plan["plan_hash"]},
+        )
+        assert res.status_code == 409, f"the empty plan was decided on: {res.status_code}"
+        assert client.get(f"/sessions/{session_id}/plan").json()["decided_by"] is None, (
+            "a decision was recorded against the empty plan"
+        )
+        # And a row that exists anyway — written before this refused, and durable — must not come
+        # back as an approval either, or the display disagrees with the gate that refuses it.
+        asyncio.run(
+            client.app.state.plan_approvals.record(  # type: ignore[attr-defined]
+                session_id, plan["plan_hash"], "someone", True
+            )
+        )
+        assert client.get(f"/sessions/{session_id}/plan").json()["approved"] is False, (
+            "the front door reported the empty plan as approved"
+        )
+
+
 def test_every_session_scoped_route_is_ownership_gated() -> None:
     """Every route carrying a session id resolves ownership — a non-owner gets 404 on all of them.
 

@@ -242,3 +242,99 @@ def test_an_omitted_sink_no_longer_silently_means_log_only(
     asyncio.run(_run())
 
     assert recorded == ["compute_xtb_energy"], "the default sink was not consulted"
+
+
+# --- a cancelled attempt is still an attempt -------------------------------------------------
+
+
+class _SlowSink:
+    """A sink whose write suspends before it records, and signals when it has.
+
+    The suspension is the point: it is the moment a plain `await _emit(...)` inside the
+    cancellation handler would be cancelled and write nothing, so a sink that records
+    synchronously could not tell the shielded writer from the broken one.
+    """
+
+    def __init__(self) -> None:
+        self.events: list[AuditEvent] = []
+        self.written = asyncio.Event()
+
+    async def record(self, event: AuditEvent) -> None:
+        await asyncio.sleep(0)
+        self.events.append(event)
+        self.written.set()
+
+
+def _hangs_until(started: asyncio.Event) -> Callable[[], Awaitable[None]]:
+    """A tool body that announces it is running and then never returns."""
+
+    async def _call() -> None:
+        started.set()
+        await asyncio.sleep(3600)
+
+    return _call
+
+
+def test_a_cancelled_tool_call_still_records_the_attempt() -> None:
+    """A disconnect or turn deadline mid-tool leaves a `cancelled` row, not silence (D-130).
+
+    `CancelledError` is a `BaseException`, so the `except Exception` that records a failure never
+    saw it: every tool call interrupted by a client disconnect or the front door's turn deadline
+    left no row at all, and the GxP trail under-reported *attempted* calls exactly when a turn went
+    wrong. The attempt is what the trail is for, so it is recorded under its own outcome — a
+    cancellation is neither a success nor a tool failure.
+    """
+    sink = _RecordingSink()
+    middleware = make_audit_middleware(correlation_id="conv-cancel", actor="carol", sink=sink)
+
+    async def _run() -> None:
+        started = asyncio.Event()
+        task = asyncio.ensure_future(
+            middleware(_ctx("compute_xtb_energy", {"smiles": "CCO"}), _hangs_until(started))
+        )
+        await started.wait()
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    asyncio.run(_run())
+
+    assert [event.outcome for event in sink.events] == ["cancelled"]
+    event = sink.events[0]
+    assert (event.tool, event.actor, event.correlation_id) == (
+        "compute_xtb_energy",
+        "carol",
+        "conv-cancel",
+    )
+    assert "CCO" in event.arguments  # the attempted inputs, which is half of what was attempted
+    assert event.latency_ms > 0.0
+
+
+def test_the_cancelled_row_survives_a_second_cancellation() -> None:
+    """The write is shielded, so the teardown that caused it cannot also erase it.
+
+    A structured-concurrency teardown does not cancel once: sse-starlette's task group and
+    `asyncio.timeout` both re-deliver the cancellation into any `await` the cleanup makes. A plain
+    `await` on the audit write would therefore be cancelled at the sink's first suspension point
+    and record nothing — the same missing row, moved one frame later. `asyncio.shield` puts the
+    write on its own task, the pattern `chemclaw.api.runner` already uses for the history rollback.
+    """
+    sink = _SlowSink()
+    middleware = make_audit_middleware(correlation_id="conv-torn", actor="dave", sink=sink)
+
+    async def _run() -> None:
+        started = asyncio.Event()
+        task = asyncio.ensure_future(
+            middleware(_ctx("gather_evidence", {"query": "biaryl"}), _hangs_until(started))
+        )
+        await started.wait()
+        task.cancel()
+        await asyncio.sleep(0)  # let the middleware reach its cancellation handler
+        task.cancel()  # the re-delivery a task group makes while the handler is awaiting
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        await asyncio.wait_for(sink.written.wait(), timeout=5.0)
+
+    asyncio.run(_run())
+
+    assert [event.outcome for event in sink.events] == ["cancelled"]

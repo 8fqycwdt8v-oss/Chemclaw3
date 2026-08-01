@@ -60,9 +60,11 @@ class TurnCost(BaseModel):
     cache_read_tokens: int = Field(default=0, ge=0)
     cache_write_tokens: int = Field(default=0, ge=0)
     duration_seconds: float = Field(default=0.0, ge=0)
-    # False when the turn was torn down by a disconnect or the wall-clock deadline. Recorded rather
-    # than filtered: those turns spent real tokens, and a ledger that kept only the tidy ones would
-    # be wrong in the direction that hides a runaway.
+    # False when the turn was torn down *before it answered* — `chemclaw.api.runner` books
+    # `completed=answered`, so a disconnect or wall-clock deadline that lands after the answer is a
+    # completed turn that keeps its history, and only one that lands before it is not. Recorded
+    # rather than filtered: those turns spent real tokens, and a ledger that kept only the tidy ones
+    # would be wrong in the direction that hides a runaway.
     completed: bool = True
     recorded_at: datetime | None = None
 
