@@ -8,8 +8,15 @@ fail at call time. `mypy` cannot see prose, `pytest` did not read it, and `make 
 checks frontmatter.
 """
 
+import pytest
+
+import chemclaw.cli.validate_prose_contract as prose
 from chemclaw.agent.chemclaw_agent import available_tool_names
-from chemclaw.cli.validate_prose_contract import _ALLOWED_NON_TOOLS, check_prose_contract
+from chemclaw.cli.validate_prose_contract import (
+    _ALLOWED_NON_TOOLS,
+    check_operator_prose,
+    check_prose_contract,
+)
 from chemclaw.kg.note import KNOWN_NOTE_TYPES
 
 
@@ -96,3 +103,124 @@ def test_the_rule_reads_note_types_not_every_backticked_word() -> None:
 def test_the_allowlist_is_small_and_deliberate() -> None:
     """The escape hatch must stay a review decision, not a dumping ground."""
     assert len(_ALLOWED_NON_TOOLS) <= 3
+
+
+# Built from a variable rather than written inline: `tests/test_docstring_paths.py` scans this file
+# too, and a literal backticked path that does not resolve is exactly what it fails on — which is
+# the same rule, one corpus over.
+_MISSING = "/".join(("vanished", "module.py"))
+
+
+def test_the_shipped_operator_documents_name_only_things_that_exist() -> None:
+    """Rules 5-7 over the docs a human operates from — the state this PR had to reach.
+
+    A verification pass found 40 mismatches here: module paths dead since the D-148 package move,
+    a `.github/workflows/deploy.yml` that never existed, and ADR ids with no file. None was visible
+    to any gate, which is why they had accumulated across five documents.
+    """
+    assert check_operator_prose() == []
+
+
+def test_a_path_that_does_not_exist_is_caught(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The rule that carries the whole class: a moved module leaves prose pointing at nothing."""
+    monkeypatch.setattr(
+        prose,
+        "_operator_sources",
+        lambda: {"fake.md": f"The audit sink lives in `{_MISSING}` today."},
+    )
+    problems = check_operator_prose()
+    assert problems == [f"fake.md: names `{_MISSING}`, which does not exist"]
+
+
+def test_a_real_path_passes_from_any_of_the_three_roots(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Repo root, `src/chemclaw/`, and the chart — all three are used and each is unambiguous."""
+    monkeypatch.setattr(
+        prose,
+        "_operator_sources",
+        lambda: {
+            "fake.md": "See `deploy/README.md`, `agent/audit.py` and `templates/podmonitor.yaml`."
+        },
+    )
+    assert check_operator_prose() == []
+
+
+def test_a_bare_filename_is_not_read_as_a_path(monkeypatch: pytest.MonkeyPatch) -> None:
+    """`SKILL.md` and `connector.yaml` are nouns in this prose, not references to one file.
+
+    Requiring a `/` is what keeps the rule from demanding that every filename-shaped word resolve —
+    the difference between a check that is true and one that has to be argued with.
+    """
+    monkeypatch.setattr(
+        prose,
+        "_operator_sources",
+        lambda: {"fake.md": "Each bundle ships a `connector.yaml` and one `SKILL.md` per skill."},
+    )
+    assert check_operator_prose() == []
+
+
+def test_a_placeholder_path_is_left_alone(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Prose has to be able to say "put it here" without naming a file that exists."""
+    monkeypatch.setattr(
+        prose,
+        "_operator_sources",
+        lambda: {"fake.md": "Add `ingest/sources/<name>/datasource.yaml` and `*/SKILL.md`."},
+    )
+    assert check_operator_prose() == []
+
+
+def test_an_adr_id_with_no_file_is_caught(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A citation that resolves to nothing is worse than none: it looks like provenance."""
+    monkeypatch.setattr(prose, "_operator_sources", lambda: {"fake.md": "As decided in D-999."})
+    problems = check_operator_prose()
+    assert len(problems) == 1
+    assert "cites D-999" in problems[0]
+
+
+def test_a_sub_decision_label_an_adr_defines_is_accepted(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`D-A5a` is a real label inside `D-048`, and prose should be able to name it.
+
+    This is the clause that keeps the rule honest rather than merely strict. The first version
+    rejected every `D-A*` token, which would have forced the docs to drop a label that says
+    precisely which half of a two-part decision is meant. Derived by scanning the ADRs, so an
+    invented label is still caught.
+    """
+    monkeypatch.setattr(
+        prose, "_operator_sources", lambda: {"fake.md": "ADR **D-048** (Teilentscheidung D-A5a)."}
+    )
+    assert check_operator_prose() == []
+
+    monkeypatch.setattr(prose, "_operator_sources", lambda: {"fake.md": "See ADR D-A77b."})
+    assert len(check_operator_prose()) == 1
+
+
+def test_a_config_key_that_is_not_a_setting_is_caught(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Prophylactic, and cheap: 60 keys across the docs are correct and nothing was holding them."""
+    monkeypatch.setattr(
+        prose, "_operator_sources", lambda: {"fake.md": "Set `CHEMCLAW_NOT_A_REAL_KEY=1`."}
+    )
+    problems = check_operator_prose()
+    assert problems == ["fake.md: names CHEMCLAW_NOT_A_REAL_KEY, which is not a Settings field"]
+
+
+def test_a_prefix_written_in_prose_is_not_read_as_a_key(monkeypatch: pytest.MonkeyPatch) -> None:
+    """`CHEMCLAW_SERVICE_*` names a family, and the trailing underscore is not a key ending."""
+    monkeypatch.setattr(
+        prose, "_operator_sources", lambda: {"fake.md": "The `CHEMCLAW_SERVICE_*` keys bound it."}
+    )
+    assert check_operator_prose() == []
+
+
+def test_the_planning_documents_are_deliberately_out_of_scope() -> None:
+    """Stated as a test because it is a decision that must not be undone by accident.
+
+    Turning these rules on over the planning directory reports 175 further mismatches, and they
+    are a different defect: a ticket that says "create the QM tools module" names a file D-118
+    later deleted, so there is no path to correct it to — the sentence needs rewording.
+    Mechanically rewriting each to the nearest surviving module would falsify the build record the
+    tickets exist to be.
+    """
+    assert not any("docs/planning/" in origin for origin in prose._operator_sources())
+    assert not any("docs/decisions/" in origin for origin in prose._operator_sources())
+    assert not any("docs/archive/" in origin for origin in prose._operator_sources())

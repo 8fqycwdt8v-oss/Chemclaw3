@@ -24,9 +24,9 @@ pre-Phase-6 "no auth" world. For the design rationale see `docs/reference/archit
 - **Role-scoped skills.** `agents/skill_access.py::RoleScopedSkillsSource` hides a gated skill
   (`skill_role_gates`: skill → allowed roles) from a caller holding none of its roles (D-052).
 - **Ambient identity, one carrier.** The runner stamps the validated identity into
-  `agents/identity_context.py` (a task-local `contextvar`); audit, the authz gate, job attribution,
+  `src/chemclaw/agent/identity_context.py` (a task-local `contextvar`); audit, the authz gate, job attribution,
   and skill scoping all read it there, so concurrent turns never cross identities.
-- **GxP audit trail.** `agents/audit.py` logs every agent tool call once (correlation id, actor,
+- **GxP audit trail.** `src/chemclaw/agent/audit.py` logs every agent tool call once (correlation id, actor,
   truncated args, outcome, latency) via a single middleware, with an optional append-only Postgres
   `audit_events` sink (default log-only).
 - **The PR-gate.** Anything the agent generates (job results, notes, reports, distilled playbooks)
@@ -35,7 +35,7 @@ pre-Phase-6 "no auth" world. For the design rationale see `docs/reference/archit
 - **Transport identity (non-Entra bridges).** Identity rides *inside* the workflow payload, so the
   transports are authenticated separately: Temporal by mTLS (`temporal_tls_*`) or a Cloud API key,
   and the HPC launcher by a bridged/mounted token (F4-T6). Backend pods mint their own short-lived
-  Entra tokens via **workload identity federation** (`agents/identity/workload.py`) — no client
+  Entra tokens via **workload identity federation** (`src/chemclaw/agent/identity/workload.py`) — no client
   secret at rest.
 
 ## Data handling & logging (PII in the audit trail)
@@ -71,7 +71,7 @@ each chat message (`service_max_message_chars`) and the live-session cache
   rejects an absent user, and `authorize_trigger` applies. Set the tenant/client/audience alongside.
 - **`entra_required=false`** (local dev only, no tenant): a fixed dev `Principal` stands in, the
   authz gates are open, and user-triggered workflows attribute to `service_actor_id`. **Never run a
-  shared or exposed deployment in this mode.** The testing CLI's `--admin` bypass (`agents/cli.py`)
+  shared or exposed deployment in this mode.** The testing CLI's `--admin` bypass (`src/chemclaw/cli/chat.py`)
   is a dev-only convenience and inherits this caveat.
 
 The raw LLM inference credential is the one deliberate exception to Entra: it is a single generic API
@@ -84,7 +84,7 @@ infrastructure to exercise end to end and must be validated in a staging tenant/
 production (tracked in `docs/planning/BACKLOG.md`):
 
 - Real Entra token validation against a live tenant JWKS; the federation and On-Behalf-Of
-  (`agents/identity/obo.py`, currently dormant) token exchanges.
+  (`src/chemclaw/agent/identity/obo.py`, currently dormant) token exchanges.
 - Temporal broker mTLS/API-key transport and the HPC identity bridge against real endpoints.
 - Live-cluster delivery: `helm`/`kubeconform` render, the NetworkPolicy ingress gate, and durability
   under a self-hosted Temporal.

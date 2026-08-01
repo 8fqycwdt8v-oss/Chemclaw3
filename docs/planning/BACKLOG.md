@@ -594,12 +594,42 @@ QM path. The rows below are what survives that merge, narrowed to say so.
       for §6 to name OpenShift, Nextflow-on-HPC and the internal LLM adapter instead of Azure AI
       Foundry / Container Apps / raw SLURM, keeping §7/§8. The warning is a workaround for the
       rewrite, not a substitute: the document is still the first thing a newcomer reads.
-- [ ] **Eight documents assert capabilities the code does not have** — [S]. `deploy/README.md` on
-      federation and on tracing spans; `harness_mode.py`'s "waits for a human before executing";
-      `plan_approval_store.py` on where the mode lives; `infra/sql/006` on append-only;
-      `ci.yml` on the eval gate; `architektur.md` §8 on multi-tenancy. Cheap systemic guard: extend
-      the `prose-validate` idea — which D-156 already widened from tool names to note types — to
-      operator-facing prose and config keys.
+- [x] **The systemic guard: `prose-validate` widened to operator prose** — closed by
+      D-2026-08-01-a-path-in-prose-is-a-claim-a-gate-can-check. Three rules over the operator
+      documents: a backticked path must exist, an ADR id must resolve to a shipped decision (or to
+      a sub-decision label some ADR defines), and a `CHEMCLAW_*` key must be a `Settings` field.
+      Fixed what it caught: **33 module paths** dead since the D-148 move, `.github/workflows/`
+      `deploy.yml` which never existed, and three unresolvable ADR citations.
+      **The validator was itself an instance of the defect** — it labelled its own prose source
+      `agents/chemclaw_agent.py`, a path gone since D-148.
+- [ ] **`docs/planning/` fails the widened prose rules 175 times** — [M], and deliberately left out
+      of the gate rather than swept. It is a different defect: a ticket that says "create
+      `agents/qm_tools.py`" names a file D-118 later deleted, so there is no path to correct it *to*
+      — the sentence needs rewording, one judgement at a time, and rewriting each to the nearest
+      surviving module would falsify the build record the tickets exist to be. `BACKLOG.md` and
+      `implementation-tickets.md` carry all 175. Add the glob to `_OPERATOR_DOC_GLOBS` when they are
+      clean; a test currently pins the exclusion so it cannot lapse silently.
+- [ ] **Nine counts in prose are wrong, and a regex cannot check a count** — [S]. `README.md` "the
+      three plain secrets" and "the two Temporal workers" (six env keys plus mTLS; four worker
+      Deployments); `CLAUDE.md` "three-secret model" and "167 numbered ADRs" (165);
+      `deploy/README.md` "Five exist" — in a paragraph that then says the count is no longer
+      restated in prose "because a number in prose is exactly what went stale"; `values.yaml` "a
+      seventh cannot arrive unnoticed" and `test_helm_chart.py` "no sixth crept in", off by one in
+      opposite directions beside an assertion that is correct; `architektur.md` "nur drei
+      Klartext-Secrets"; `runbook.md` "Six bundles" (seven — `qm` is missing) and "`bo` is the one
+      that also owns durable work" (`calc`, `bo` and `qm` do); `ARCHITECTURE.md` "the eight
+      validators" (six live in `cli/`, `make` runs nine). The fix this repo has already found twice:
+      delete the number, let a test assert it.
+- [ ] **Six retired concepts are still asserted as current** — [S]. `architektur.md` §6 names two
+      core task queues (there is one, plus a derived `connector-<name>` per bundle — D-118/D-150)
+      and an "MCP-Server" deployment role that `deploy/README.md` already deleted under D-156 as
+      "prose asserting a deployable that does not exist"; `CLAUDE.md` repeats the two-queue claim and
+      says "MCP servers hold capability" where `ARCHITECTURE.md` correctly says connectors do, and
+      calls HPC/DFT deferred 58 lines after saying F5 shipped the Nextflow launcher;
+      `infra/sql/006` still calls `actor` a Phase-6 seam that is `'unknown'` until Entra is wired,
+      which it has been since F4. **`architektur.md` §8 is wrong in the opposite direction** from
+      what the old row claimed: it says role-aware skill filtering "must be added", and
+      `agent/skill_access.py::RoleScopedSkillsSource` has done it since D-052.
       `servicemonitor.yaml`'s claim about out-of-process metrics is **corrected**
       (D-2026-08-01-every-process-carries-its-own-witness) — and it is the strongest argument for
       the systemic guard this row asks for. It was not one wrong sentence in one comment: the same

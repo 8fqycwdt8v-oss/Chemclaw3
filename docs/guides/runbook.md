@@ -1,7 +1,7 @@
 # Operations runbook (admin)
 
 How a system/admin configures and troubleshoots Chemclaw. Everything environment-dependent
-comes from the one config source (`chemclaw/config.py`, every field mirrored in `.env.example`,
+comes from the one config source (`src/chemclaw/core/config.py`, every field mirrored in `.env.example`,
 overridable as `CHEMCLAW_<FIELD>`); this runbook covers the four recurring admin tasks.
 
 ## Prerequisites
@@ -17,7 +17,7 @@ overridable as `CHEMCLAW_<FIELD>`); this runbook covers the four recurring admin
   affected worker. `configure_logging()` runs at each worker's entrypoint; no code change.
 - **What gets logged:** each worker logs its connected address/namespace/queue and registered
   workflows on startup; every agent tool call is audited (name, arguments, outcome, latency —
-  `agents/audit.py`); the ELN sync logs `ingested/rejected` counts plus a WARNING per rejected
+  `src/chemclaw/agent/audit.py`); the ELN sync logs `ingested/rejected` counts plus a WARNING per rejected
   entry, per skipped broken export file, and one aggregated WARNING naming export files that
   arrived too late to be ingested (recovery: section (v)); `DEBUG` adds calculation cache
   hit-vs-compute (the "why did this recompute?" answer).
@@ -130,7 +130,7 @@ memory jobs read the same active set.
 
 **A new source is a folder and a config token — no core edit.** Write the adapter (satisfying
 `ElnAdapter` for ingest or `SourceRetriever` for retrieval), declare it, enable it. See
-`sources/README.md` for the manifest fields; `make datasource-validate` checks that every declared
+`src/chemclaw/ingest/sources/README.md` for the manifest fields; `make datasource-validate` checks that every declared
 half resolves and that its `config:` binds to the callable's signature.
 
 **A second instance of an existing adapter needs no code at all** — for example a staging ELN drop
@@ -258,7 +258,7 @@ harness_enabled: true  # optional; omit any field to inherit the global default
 `tool_names` narrows the in-process tools *and* each connector's agent-facing allow-list, dropping
 connectors left with nothing; `mcp_server_names` is the coarser dial that selects whole connectors. A
 name nothing provides is a startup error, not a silently smaller agent. See
-`profiles/property-lookup.yaml` for a worked example.
+`data/profiles/property-lookup.yaml` for a worked example.
 
 **To use one:** `POST /sessions {"profile": "property-lookup"}`. The profile is fixed for the
 session's life — a conversation whose tools changed underneath it would have a thread that no longer

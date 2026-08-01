@@ -164,15 +164,15 @@ Chemiker: *"Wie ist die zu erwartende Regioselektivität für die späte C–H-F
   - **Temporal-Worker**: `hpc-jobs` (wenige, schwer) und `background-jobs` (leicht: Sync/Reindex/
     Reports) – dieselben zwei Queues wie im Kern (D-006).
   - **MCP-Server**: die Fingerprint-Capability-Server (molfp/rxnfp).
-- **LLM**: internes OpenAI-kompatibles Endpoint (`agents/llm_provider.py`, `llm_provider=
+- **LLM**: internes OpenAI-kompatibles Endpoint (`src/chemclaw/agent/llm_provider.py`, `llm_provider=
   openai_compatible`). Der Provider ist die *einzige* Stelle, die eine Client-Klasse importiert; ein
   Provider-Wechsel ist eine Config-Änderung. Das LLM nutzt **eine generische API-Credential** (nicht
   Entra) – die eine dokumentierte Ausnahme von der Entra-Durchgängigkeit.
 - **HPC/Nextflow**: der QM-Job läuft real über den Seqera-Platform/Tower-REST-Launcher
-  (`workflows/hpc/nextflow.py`, ADR **D-A5a**); nur `workflows/activities.py` dispatcht auf
+  (`src/chemclaw/connectors/qm/hpc/nextflow.py`, ADR **D-048** (Teilentscheidung D-A5a)); nur `src/chemclaw/connectors/qm/activities.py` dispatcht auf
   `hpc_launch_interface` (`mock` für CI/lokal, `nextflow` produktiv). Der `hpc-jobs`-Worker läuft
   dort, wo er den Launcher erreicht.
-- **Temporal: self-hosted im Cluster** (ADR **D-A6a**), nicht Temporal Cloud – hält den durablen
+- **Temporal: self-hosted im Cluster** (ADR **D-049** (Teilentscheidung D-A6a)), nicht Temporal Cloud – hält den durablen
   Kern innerhalb derselben OIDC-Vertrauensgrenze und vermeidet den Egress von Workflow-Payloads (die
   den Entra-`oid` tragen, D-044). Cloud bleibt ein Values-Swap (`temporal_api_key` statt mTLS-Trio).
 - **Postgres/pgvector**: Operator- oder Managed-Instanz mit mTLS und `statement_timeout`. Migrationen
@@ -190,8 +190,12 @@ Chemiker: *"Wie ist die zu erwartende Regioselektivität für die späte C–H-F
 - **MCP-Server**: bleiben die Integrationsschicht (deterministische Capability); Skills rufen sie bei
   Bedarf auf.
 - **Observability** (F6-T5): `otel_enabled` + `otel_endpoint` verdrahten OTLP zum In-Cluster-Collector.
-- **CI/CD** (`.github/workflows/deploy.yml`): Image-Build + Entrypoint-Smoke, `helm lint`,
-  `helm template | kubeconform`; der Rollout ist auf den Default-Branch beschränkt.
+- **CI/CD** (`.github/workflows/ci.yml` und `.github/workflows/image.yml`): das Gate
+  (lint/type/test), die Deklarations-Validatoren, Image-Build + Entrypoint-Smoke und
+  `helm template | kubeconform`. **Einen Rollout-Job gibt es nicht**: der Stub, dessen Rumpf ein
+  `echo` war, ist mit D-117 gelöscht, und das Ausrollen in den Cluster bleibt bewusst offen
+  (`docs/planning/DEFERRED.md`). `helm lint` läuft nirgends — die Chart-Prüfung ist
+  `helm template | kubeconform`.
 
 ## 7. Identity & Authentication: Entra ID durchgängig
 
@@ -216,14 +220,14 @@ Anforderung: **eine** Identität pro Nutzer, die sich konsequent durch den gesam
 
 > **Umsetzungsstand (Phase F4, ADR D-043…D-047).** Auf OpenShift ersetzt **Entra Workload Identity
 > Federation** die Managed Identity: der Pod tauscht sein projiziertes ServiceAccount-JWT gegen ein
-> Entra-Token (`agents/identity/workload.py`) – kein Client-Secret at rest. Bereits gebaut und
-> offline (Fake-Endpoint) getestet: Front-Door-OIDC-Validierung (`service/auth.py`, Audience-/
+> Entra-Token (`src/chemclaw/agent/identity/workload.py`) – kein Client-Secret at rest. Bereits gebaut und
+> offline (Fake-Endpoint) getestet: Front-Door-OIDC-Validierung (`src/chemclaw/api/auth.py`, Audience-/
 > Issuer-Check gegen den Tenant-JWKS), **eine** Autorisierungsstelle für teure Trigger
 > (`agents/authz.py::authorize_trigger`), die reject-if-absent-Kernregel für user-getriggerte
 > Workflows (`require_actor`, der Entra-`oid` als Pflicht-Claim im Payload, D-044), der OBO-Austausch
-> (`agents/identity/obo.py`, wired-but-dormant bis zur ersten user-scoped Quelle) sowie beide
-> Nicht-Entra-Brücken: Temporal-mTLS/API-Key (`chemclaw/temporal_client.py`) und der HPC-Bridge, der
-> jede `oid`→HPC-Identität-Zuordnung protokolliert (`agents/identity/hpc_bridge.py`). Offene
+> (`src/chemclaw/agent/identity/obo.py`, wired-but-dormant bis zur ersten user-scoped Quelle) sowie beide
+> Nicht-Entra-Brücken: Temporal-mTLS/API-Key (`src/chemclaw/core/temporal_client.py`) und der HPC-Bridge, der
+> jede `oid`→HPC-Identität-Zuordnung protokolliert (`src/chemclaw/agent/identity/hpc_bridge.py`). Offene
 > Live-Kanten benötigen einen echten Tenant/Broker/Cluster.
 
 ## 8. Mehrbenutzerfähigkeit & differenzierte Rechte (Multi-Tenancy/RBAC)
