@@ -30,6 +30,35 @@ app.kubernetes.io/instance: {{ .Release.Name }}
 {{- end }}
 {{- end -}}
 
+{{- /* The image reference every pod uses, in one place so a digest cannot be honoured in some
+       templates and not others.
+
+       `values.yaml` deployed a mutable tag (`0.1.0`) and nine templates each interpolated it
+       themselves. A tag is a pointer: `helm rollback` to a release that names `0.1.0` fetches
+       whatever `0.1.0` means *now*, which is the one thing a rollback must not do — and for a
+       system whose audit trail stamps a build revision onto every result (AG-14), "which bytes
+       produced this" stops being answerable the moment the tag is re-pushed.
+
+       `image.digest` wins when set, because a digest names bytes and nothing can re-point it. The
+       tag stays as the default so a dev install still works with `helm install .`; a release sets
+       the digest, and `docs/guides/runbook.md` §(xiv) says how to get it. */ -}}
+{{- define "chemclaw.image" -}}
+{{- if .Values.image.digest -}}
+{{ .Values.image.repository }}@{{ .Values.image.digest }}
+{{- else -}}
+{{ .Values.image.repository }}:{{ .Values.image.tag }}
+{{- end -}}
+{{- end -}}
+
+{{- /* Registry credentials for a private registry. Absent entirely before, so an operator whose
+       registry needs auth had no field to set and no signal that the chart expected an open one. */ -}}
+{{- define "chemclaw.imagePullSecrets" -}}
+{{- with .Values.image.pullSecrets }}
+imagePullSecrets:
+  {{- toYaml . | nindent 2 }}
+{{- end }}
+{{- end -}}
+
 {{- /* The port a worker serves its probes and its scrape on. Env, so `chemclaw.core.worker_http`
        binds the same number the container port and the PodMonitor name — one value, no third place
        for it to drift. Worker-only: the front door and the connector servers already have an HTTP
@@ -172,7 +201,7 @@ readOnlyRootFilesystem: {{ .Values.securityContext.readOnlyRootFilesystem }}
 {{- define "chemclaw.knowledgeInit" -}}
 {{- if .Values.knowledge.sync.enabled }}
 - name: knowledge-sync-init
-  image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+  image: "{{ include "chemclaw.image" . }}"
   imagePullPolicy: {{ .Values.image.pullPolicy }}
   securityContext:
     {{- include "chemclaw.containerSecurityContext" . | nindent 4 }}
@@ -193,7 +222,7 @@ readOnlyRootFilesystem: {{ .Values.securityContext.readOnlyRootFilesystem }}
 {{- define "chemclaw.knowledgeSidecar" -}}
 {{- if .Values.knowledge.sync.enabled }}
 - name: knowledge-sync
-  image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+  image: "{{ include "chemclaw.image" . }}"
   imagePullPolicy: {{ .Values.image.pullPolicy }}
   securityContext:
     {{- include "chemclaw.containerSecurityContext" . | nindent 4 }}
@@ -239,7 +268,7 @@ readOnlyRootFilesystem: {{ .Values.securityContext.readOnlyRootFilesystem }}
 {{- define "chemclaw.noteRepoInit" -}}
 {{- if .Values.knowledge.sync.enabled }}
 - name: note-repo-init
-  image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+  image: "{{ include "chemclaw.image" . }}"
   imagePullPolicy: {{ .Values.image.pullPolicy }}
   securityContext:
     {{- include "chemclaw.containerSecurityContext" . | nindent 4 }}

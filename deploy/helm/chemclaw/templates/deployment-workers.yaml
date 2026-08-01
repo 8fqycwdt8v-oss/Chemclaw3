@@ -25,12 +25,13 @@ spec:
         azure.workload.identity/use: "true"
     spec:
       serviceAccountName: {{ .Values.serviceAccount.name }}
+      {{- include "chemclaw.imagePullSecrets" . | nindent 6 }}
       {{- include "chemclaw.workerGracePeriod" . | nindent 6 }}
       securityContext:
         {{- include "chemclaw.podSecurityContext" . | nindent 8 }}
       containers:
         - name: background-worker
-          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          image: "{{ include "chemclaw.image" . }}"
           imagePullPolicy: {{ .Values.image.pullPolicy }}
           securityContext:
             {{- include "chemclaw.containerSecurityContext" . | nindent 12 }}

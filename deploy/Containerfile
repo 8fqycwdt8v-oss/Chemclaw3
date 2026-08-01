@@ -4,7 +4,19 @@
 # (see deploy/entrypoint.sh), so the service, the two Temporal workers, and the MCP servers all ship
 # the same bits and differ only by entrypoint. UBI9 + a non-root UID keeps it OpenShift-SCC-friendly
 # (arbitrary high UID at runtime); no secret is ever baked in — all config arrives via env/mounts.
-FROM registry.access.redhat.com/ubi9/python-311:latest
+# The base is an ARG so a release can pin it by digest without editing this file. It defaults to a
+# floating tag, and that default is a deliberate, stated compromise rather than an oversight: a
+# digest written here would be stale within weeks and every developer build would then pull a base
+# missing months of CVE fixes. So the *dev* default floats and a *release* pins, which is the same
+# split `image.digest` makes in the chart. `docs/guides/runbook.md` §(xiv) is the procedure:
+#
+#   docker build --build-arg BASE_IMAGE=registry.access.redhat.com/ubi9/python-311@sha256:<...>
+#
+# A floating base is exactly why the dependency audit and the SBOM in `.github/workflows/image.yml`
+# record what a build actually contained: if the bytes cannot be pinned in advance, they must at
+# least be *named* afterwards.
+ARG BASE_IMAGE=registry.access.redhat.com/ubi9/python-311:latest
+FROM ${BASE_IMAGE}
 
 # uv drives the install to match local/CI exactly (same lockfile). Copy metadata first for layer reuse.
 # `git` is a hard runtime dependency, not a convenience: the PR-gate submitter shells out to it
@@ -20,7 +32,21 @@ FROM registry.access.redhat.com/ubi9/python-311:latest
 # fingerprint with a short TTL, so a retrieval landing inside that window saw a partial or empty
 # graph and the agent answered with no evidence — silently, because a missing note is not an error.
 USER 0
-RUN dnf install -y git rsync && dnf clean all && pip install --no-cache-dir uv
+# `dnf -y update` before installing, and it is not belt-and-braces. Red Hat rebuilds the UBI9 tag
+# periodically, so `:latest` lags the errata stream — the first run of the image scan found fixable
+# HIGH/CRITICAL advisories in openssh, openssl, python3 and python3-urllib3, every one of them
+# already fixed upstream and simply not yet in the base build. Applying the current errata at build
+# time is what makes the floating-base decision coherent: the base moves when Red Hat rebuilds it,
+# and the *packages* move on every build regardless.
+#
+# `setuptools` is upgraded for the same reason one level up. The base ships 65.5.1, which carries
+# two HIGH advisories (CVE-2024-6345, CVE-2025-47273) fixed in 70.0.0 and 78.1.1. It is the
+# *interpreter's* setuptools rather than a locked dependency — `uv export | pip-audit` is clean —
+# so no lockfile change could have reached it, and it would have gone unnoticed for exactly as long
+# as nobody scanned the built image.
+RUN dnf -y update && dnf install -y git rsync && dnf clean all \
+    && pip install --no-cache-dir --upgrade pip setuptools \
+    && pip install --no-cache-dir uv
 WORKDIR /app
 
 # The two calculation binaries (xTB plan X5/X6). Pinned release tarballs rather than a
@@ -32,7 +58,13 @@ WORKDIR /app
 # Licensing: xtb is LGPL-3.0, crest is GPL-3.0. Both are invoked as separate processes
 # over files and never linked, so the usual analysis is that neither affects this
 # codebase's licence — but *distributing* them inside an image is a decision for whoever
-# owns the product. Drop the crest layer to ship without it.
+# owns the product, and this file cannot make it.
+#
+# What it can do is stop the decision from requiring a code change. `INCLUDE_CREST=false` builds
+# without the GPL-3.0 binary: `calc.crest_cli` already reports unavailable rather than failing, so
+# the image loses conformer sampling and nothing else. The instruction used to be "drop the crest
+# layer", which meant editing a RUN block, which meant the decision was never taken because taking
+# it looked like a patch. It is now a build argument and a row in the backlog naming the owner.
 #
 # The xtb link is resolved by *finding* the extracted binary rather than guessing its directory.
 # The previous form tried `/opt/xtb-dist/bin/xtb` and fell back to `/opt/xtb-${XTB_VERSION}/bin/xtb`
@@ -43,6 +75,7 @@ WORKDIR /app
 # `services/chemclaw/.github/`, where GitHub Actions never reads (both fixed in D-117).
 ARG XTB_VERSION=6.6.1
 ARG CREST_VERSION=3.0.2
+ARG INCLUDE_CREST=true
 RUN set -eux; \
     curl -fsSL -o /tmp/xtb.tar.xz \
       "https://github.com/grimme-lab/xtb/releases/download/v${XTB_VERSION}/xtb-${XTB_VERSION}-linux-x86_64.tar.xz"; \
@@ -50,12 +83,16 @@ RUN set -eux; \
     xtb_bin="$(find /opt -maxdepth 4 -type f -name xtb -perm -u+x -print -quit)"; \
     test -n "${xtb_bin}" || { echo "no xtb binary under /opt after extraction" >&2; exit 1; }; \
     ln -sfn "${xtb_bin}" /usr/local/bin/xtb; \
-    curl -fsSL -o /tmp/crest.tar.xz \
-      "https://github.com/crest-lab/crest/releases/download/v${CREST_VERSION}/crest-gnu-12-ubuntu-latest.tar.xz"; \
-    mkdir -p /opt/crest && tar -xJf /tmp/crest.tar.xz -C /opt/crest --strip-components=1; \
-    install -m 0755 /opt/crest/crest /usr/local/bin/crest; \
-    rm -f /tmp/xtb.tar.xz /tmp/crest.tar.xz; \
-    xtb --version >/dev/null && crest --version >/dev/null
+    if [ "${INCLUDE_CREST}" = "true" ]; then \
+      curl -fsSL -o /tmp/crest.tar.xz \
+        "https://github.com/crest-lab/crest/releases/download/v${CREST_VERSION}/crest-gnu-12-ubuntu-latest.tar.xz"; \
+      mkdir -p /opt/crest && tar -xJf /tmp/crest.tar.xz -C /opt/crest --strip-components=1; \
+      install -m 0755 /opt/crest/crest /usr/local/bin/crest; \
+      rm -f /tmp/crest.tar.xz; \
+      crest --version >/dev/null; \
+    fi; \
+    rm -f /tmp/xtb.tar.xz; \
+    xtb --version >/dev/null
 
 COPY pyproject.toml uv.lock README.md ./
 # All first-party code, in one COPY. Before D-141 this was eighteen lines, one per top-level
@@ -79,10 +116,61 @@ COPY deploy/entrypoint.sh /usr/local/bin/chemclaw-entrypoint
 COPY deploy/knowledge-sync.sh /usr/local/bin/chemclaw-knowledge-sync
 
 # Install into a project venv; --frozen fails if the lockfile drifted (reproducible builds).
+#
+# `uv cache clean` is not housekeeping. uv extracts every wheel it downloads into
+# `$HOME/.cache/uv/archive-v0/`, each with its own `dist-info`, and that cache was shipping inside
+# the runtime image — build-time scratch in a production artifact. The image scan is what found it,
+# and found it the hard way: it reported `setuptools` 70.3.0 and `msgpack` 1.1.2, neither of which
+# is *installed* anywhere (uv.lock pins setuptools 83.0.0 and has no msgpack at all), so two rounds
+# of "upgrade it wherever it lives" correctly did nothing — there was nothing to upgrade. They were
+# cached copies of build dependencies, and the fix is to not ship the cache.
 RUN uv sync --frozen --no-dev \
+    && uv cache clean \
     && chmod +x /usr/local/bin/chemclaw-entrypoint /usr/local/bin/chemclaw-knowledge-sync \
     && chown -R 1001:0 /app \
     && chmod -R g=u /app
+
+# Sweep every Python environment in the image, not just the application's.
+#
+# The image scan found `setuptools` 70.3.0 and `msgpack` 1.1.2 with fixable HIGH advisories, and
+# neither is ours: `uv.lock` pins setuptools 83.0.0 and does not contain msgpack at all. They live
+# in the *base image's* Python environments — the UBI9 layer ships more than one interpreter, each
+# with its own `site-packages` — which is exactly the class of finding a lockfile audit is blind to
+# and the reason the row asked for an image scan as well as a dependency scan.
+#
+# Upgraded rather than removed, and only where already installed: `--upgrade` on an absent package
+# would *add* it, growing the closure to fix a vulnerability that was not there. Something in the
+# base may depend on either, and breaking the base's own tooling to satisfy a scanner trades a
+# reported problem for an unreported one — the smoke step that imports every component under a
+# non-root UID is what would catch that, and it should not have to.
+#
+# The interpreters are *discovered*, not listed. A hardcoded list of four plausible paths missed
+# whichever environment actually holds these — `[ -x ... ] || continue` skipped every guess in
+# silence, and the scan came back with the identical two findings. A list of guesses that fails
+# quietly is the same shape of bug as a probe that always passes.
+#
+# The trailing `find` is the diagnostic half and stays in the build. It matched `*.dist-info` at
+# first, which was too narrow to answer the question it was added for: the scan kept reporting a
+# `setuptools` 70.3.0 that the listing did not contain, because that copy carries no `dist-info`.
+# Widened to any versioned artifact, so a bundled seed wheel or an `egg-info` shows up too — the
+# whole point is that the build names what it left rather than a scanner naming a version with no
+# address.
+RUN set -eux; \
+    interpreters="$(find /usr/bin /usr/local/bin /opt -maxdepth 4 -name 'python3*' -type f \
+      -perm -u+x -print 2>/dev/null | sort -u)"; \
+    echo "interpreters found:"; echo "${interpreters}"; \
+    for py in ${interpreters}; do \
+      "${py}" -m pip --version >/dev/null 2>&1 || continue; \
+      if "${py}" -m pip show setuptools >/dev/null 2>&1; then \
+        "${py}" -m pip install --no-cache-dir --upgrade 'setuptools>=78.1.1' >/dev/null; \
+      fi; \
+      if "${py}" -m pip show msgpack >/dev/null 2>&1; then \
+        "${py}" -m pip install --no-cache-dir --upgrade 'msgpack>=1.2.1' >/dev/null; \
+      fi; \
+    done; \
+    echo "every versioned setuptools/msgpack artifact left in the image:"; \
+    find / -xdev \( -name 'setuptools-[0-9]*' -o -name 'msgpack-[0-9]*' \) -print 2>/dev/null \
+      || true
 
 # The revision this image was built from, stamped onto every audit record (AG-14 / REV-17). The
 # config docstring has always said "the F6 image build injects the digest" and no build ever did —

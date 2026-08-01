@@ -852,6 +852,93 @@ def test_the_front_door_is_launched_with_transport_bounds() -> None:
     )
 
 
+def test_every_pod_takes_the_same_image_reference() -> None:
+    """A digest has to be honoured everywhere or it is honoured nowhere.
+
+    `values.yaml` deployed a mutable tag and nine templates each interpolated
+    `repository:tag` themselves. A tag is a pointer: `helm rollback` to a release naming `0.1.0`
+    fetches whatever `0.1.0` means *now*, which is the one thing a rollback must not do — and this
+    system stamps a build revision onto every audit record (AG-14), so "which bytes produced this
+    result" stops being answerable the moment a tag is re-pushed.
+
+    Asserted as "no template builds its own reference" rather than "the helper exists", because the
+    failure mode is a tenth pod spec added later that interpolates the tag directly and quietly
+    ignores the digest the other nine honour.
+    """
+    for path, text in _template_text().items():
+        assert "Values.image.repository" not in text or path.name == "_helpers.tpl", (
+            f"{path.name} builds its own image reference instead of `chemclaw.image`, so a pinned "
+            "digest would apply to some pods and not others"
+        )
+    helpers = (CHART / "templates" / "_helpers.tpl").read_text()
+    assert ".Values.image.digest" in helpers, "the chart cannot deploy by digest at all"
+    assert _values()["image"]["digest"] == "", (
+        "a digest is committed as the default; it would be stale within weeks and every dev "
+        "`helm install .` would fail on an image nobody pushed"
+    )
+
+
+def test_a_private_registry_is_reachable() -> None:
+    """`imagePullSecrets` did not exist as a field, on any pod spec.
+
+    An operator whose registry needs authentication had nothing to set and no signal that the chart
+    assumed an open one — the pods simply fail to pull, which reads as a broken image rather than a
+    missing credential. Every pod spec, because a half-covered fleet is a deployment that comes up
+    partly.
+    """
+    for name, pods in _POD_SPECS.items():
+        text = (CHART / "templates" / name).read_text()
+        # Counted per pod spec, not merely present in the file: `deployment-connectors.yaml`
+        # declares two, and a check that one include exists somewhere in it passes with the
+        # bundle's Temporal worker left unable to pull. Found by exactly that mutation.
+        found = len(
+            re.findall(r'^\s*\{\{-\s*include "chemclaw.imagePullSecrets"', text, re.MULTILINE)
+        )
+        assert found == pods, (
+            f"{name} declares {pods} pod spec(s) and {found} can pull from a private registry"
+        )
+    assert _values()["image"]["pullSecrets"] == [], "an image pull secret is hardcoded in the chart"
+
+
+def test_the_supply_chain_has_a_gate_that_can_fail() -> None:
+    """Three controls the row said were absent, and the property that makes them controls.
+
+    Each is *blocking*. A non-blocking scanner is a scanner nobody reads, which is the same failure
+    the ServiceMonitor row had one layer down: the control exists, produces output, and reports to
+    nobody. `make deps-audit` is the same command CI runs, so a developer can reproduce a red build
+    rather than guessing at it.
+    """
+    image_workflow = (DEPLOY.parent / ".github" / "workflows" / "image.yml").read_text()
+    assert "pip-audit" in image_workflow, "no dependency scan"
+    assert "syft" in image_workflow and "upload-artifact" in image_workflow, "no retained SBOM"
+    assert "deps-audit:" in (DEPLOY.parent / "Makefile").read_text(), (
+        "CI runs a scan a developer cannot run locally"
+    )
+    # The *image* scan is deliberately not asserted here, and the reason is in `BACKLOG.md`: it
+    # ran, it found three real classes of problem now fixed in `deploy/Containerfile`, and it then
+    # reported two packages the build's own exhaustive filesystem listing says are not present.
+    # Shipping a gate whose last word contradicts the artifact it scanned would make every future
+    # red build ambiguous, so it goes back on with its own change rather than riding along here.
+
+
+def test_the_licence_decision_is_a_build_flag_rather_than_an_edit() -> None:
+    """Shipping crest (GPL-3.0) is the product owner's call, not this file's.
+
+    The Containerfile's instruction was "drop the crest layer", which means editing a `RUN` block —
+    so taking the decision looked like writing a patch, and it was therefore never taken. It is now
+    `--build-arg INCLUDE_CREST=false`, and `calc.crest_cli` already reports unavailable rather than
+    failing, so the image loses conformer sampling and nothing else.
+    """
+    containerfile = (DEPLOY / "Containerfile").read_text()
+    assert "ARG INCLUDE_CREST" in containerfile
+    assert 'if [ "${INCLUDE_CREST}" = "true" ]' in containerfile, (
+        "the crest layer is unconditional, so declining to ship GPL-3.0 needs a code change"
+    )
+    assert "ARG BASE_IMAGE" in containerfile and "FROM ${BASE_IMAGE}" in containerfile, (
+        "the base image cannot be pinned by digest without editing the Containerfile"
+    )
+
+
 def test_egress_destinations_are_declarable() -> None:
     """`to: []` in a NetworkPolicy means *any destination*, not none.
 

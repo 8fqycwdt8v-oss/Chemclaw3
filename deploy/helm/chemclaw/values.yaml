@@ -5,7 +5,18 @@
 image:
   repository: image-registry.openshift-image-registry.svc:5000/chemclaw/chemclaw
   tag: "0.1.0"
+  # Set this for any release and the tag above is ignored. A tag is a *pointer*: `helm rollback` to
+  # a release naming `0.1.0` fetches whatever `0.1.0` means now, which is the one thing a rollback
+  # must not do — and this system stamps a build revision onto every audit record (AG-14), so
+  # "which bytes produced this result" stops being answerable the moment a tag is re-pushed. The
+  # tag remains the default only so `helm install .` works in dev without a registry round trip;
+  # `docs/guides/runbook.md` §(xiv) is how to get the digest for a release.
+  digest: ""
   pullPolicy: IfNotPresent
+  # Credentials for a private registry. There was no field at all before, so an operator whose
+  # registry needs authentication had nothing to set and no signal that the chart assumed an open
+  # one. A list of `{name: <secret>}`, passed through verbatim.
+  pullSecrets: []
 
 # The front-door OIDC Route (F6-T2). host empty = let OpenShift assign one.
 route:
