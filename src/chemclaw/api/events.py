@@ -195,12 +195,21 @@ ErrorCode = Literal[
     "llm_timeout",
     "turn_timeout",
     "budget_exhausted",
+    "loop_cap_reached",
     "bad_tool_arguments",
 ]
 
 
 class ErrorEvent(BaseModel):
     """The turn failed; the message is safe to show the user (no stack traces).
+
+    Three of the codes say the turn was *cut off* rather than broken — `turn_timeout`,
+    `budget_exhausted` and `loop_cap_reached` — and they are one family: the turn ran into a
+    guard, so whatever it had said is all it is going to say. `loop_cap_reached` is the only
+    member that shares its turn with an answer: the loop's runaway guard stops a turn that has
+    been streaming text all along, so it arrives after those tokens and *before* the `AnswerEvent`
+    they add up to — the same "mark the answer partial while it is still arriving" ordering
+    `CapabilityDegradedEvent` uses (see `chemclaw.api.runner`).
 
     `code` and `retryable` exist because the message alone made every failure the same failure. A
     surface could not tell a connector being down from an LLM timeout from a database outage from

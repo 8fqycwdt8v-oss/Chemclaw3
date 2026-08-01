@@ -8,6 +8,7 @@ import os
 import re
 from collections.abc import Iterator
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -174,19 +175,35 @@ def test_hpc_and_deploy_defaults() -> None:
 
 
 def test_hpc_launch_interface_env_override(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The real backend is selected by one `CHEMCLAW_`-prefixed env var, like every setting."""
+    """The real backend is selected by `CHEMCLAW_`-prefixed env vars — and never unversioned.
+
+    This test used to stop after the selection: it set the interface, the launcher URL, the
+    pipeline name and the artifact store, left `hpc_pipeline_version` at its empty default, and
+    asserted the settings object came out with `hpc_launch_interface == "nextflow"`. That pinned
+    the defect. An empty version slugs to `unversioned` in the calculation key, so two different
+    real pipelines would key their DFT energies identically and the second would be served the
+    first's number.
+    """
     monkeypatch.setenv("CHEMCLAW_HPC_LAUNCH_INTERFACE", "nextflow")
     monkeypatch.setenv("CHEMCLAW_HPC_API_BASE_URL", "https://tower.internal/api")
     monkeypatch.setenv("CHEMCLAW_HPC_PIPELINE_NAME", "qm-dft")
     monkeypatch.setenv("CHEMCLAW_HPC_ARTIFACT_STORE_URL", "https://artifacts.internal")
-    assert Settings(_env_file=None).hpc_launch_interface == "nextflow"  # type: ignore[call-arg]
+    with pytest.raises(ValueError, match="hpc_pipeline_version"):
+        Settings(_env_file=None)  # type: ignore[call-arg]
+
+    monkeypatch.setenv("CHEMCLAW_HPC_PIPELINE_VERSION", "1.0.0")
+    settings = Settings(_env_file=None)  # type: ignore[call-arg]
+    assert settings.hpc_launch_interface == "nextflow"
+    assert settings.hpc_pipeline_version == "1.0.0"
 
 
 def test_nextflow_requires_launcher_endpoints() -> None:
     """Selecting the real backend without its endpoints fails at startup, naming the fields."""
     with pytest.raises(ValueError, match="hpc_api_base_url"):
         Settings(_env_file=None, hpc_launch_interface="nextflow")  # type: ignore[call-arg]
-    with pytest.raises(ValueError, match="hpc_pipeline_name, hpc_artifact_store_url"):
+    with pytest.raises(
+        ValueError, match="hpc_pipeline_name, hpc_pipeline_version, hpc_artifact_store_url"
+    ):
         Settings(  # type: ignore[call-arg]
             _env_file=None,
             hpc_launch_interface="nextflow",
@@ -207,6 +224,76 @@ def test_nextflow_poll_interval_must_beat_run_heartbeat() -> None:
             qm_poll_heartbeat_timeout_seconds=600.0,  # mock pair satisfied...
             # ...but hpc_run_heartbeat_timeout_seconds stays at its 120s default.
         )
+
+
+def _nextflow(**overrides: Any) -> Settings:
+    """A fully-configured `nextflow` deployment, so the guard under test is the one that fires."""
+    return Settings(  # type: ignore[call-arg]
+        _env_file=None,
+        hpc_launch_interface="nextflow",
+        hpc_api_base_url="https://tower.internal/api",
+        hpc_pipeline_name="qm-dft",
+        hpc_pipeline_version="1.0.0",
+        hpc_artifact_store_url="https://artifacts.internal",
+        **overrides,
+    )
+
+
+def test_the_connector_job_ceiling_stays_above_the_poll_budget_it_bounds() -> None:
+    """A parent ceiling no larger than its child's longest activity is not a ceiling.
+
+    `ConnectorJobWorkflow` gives its child `connector_job_timeout_seconds` as an execution timeout,
+    and the QM workflow inside it gives the HPC poll `hpc_run_timeout_seconds` as a single-attempt
+    `start_to_close`. They used to be equal at 86400, so on the `nextflow` path — the one the
+    shipped chart selects — one poll attempt consumed the entire parent budget: the poll's
+    five-attempt retry policy could never reach a second attempt, and the run died with a bare
+    `WorkflowExecutionTimedOut` naming neither setting.
+    """
+    with pytest.raises(ValueError, match="connector_job_timeout_seconds"):
+        _nextflow(connector_job_timeout_seconds=86_400.0, hpc_run_timeout_seconds=86_400.0)
+
+
+def test_raising_only_the_poll_budget_is_refused_rather_than_silently_ignored() -> None:
+    """The operator error the two comments invited, made loud.
+
+    `hpc_run_timeout_seconds`'s own comment says it "must cover the whole run", so an operator with
+    a 48h DFT job raises it — and gets no behaviour change at all, because the parent's ceiling
+    fires first. Failing at startup with both numbers named is the difference between a two-minute
+    fix and an unexplained timeout a day into a cluster run.
+    """
+    with pytest.raises(ValueError, match="raising the poll budget alone changes nothing"):
+        _nextflow(hpc_run_timeout_seconds=172_800.0)
+
+    # And the fix the message asks for actually works — a guard that cannot be satisfied is a wall.
+    assert (
+        _nextflow(
+            hpc_run_timeout_seconds=172_800.0, connector_job_timeout_seconds=176_400.0
+        ).connector_job_timeout_seconds
+        == 176_400.0
+    )
+
+
+def test_the_shipped_defaults_boot_on_the_backend_the_chart_selects() -> None:
+    """`deploy/helm/chemclaw/values.yaml` sets `nextflow`, so the defaults must satisfy the guard.
+
+    Enforcing a rule the repository's own shipped configuration violates would turn a latent
+    mis-sizing into a crash loop, so the ceiling's default carries the headroom rather than asking
+    every deployment to discover it.
+    """
+    assert _nextflow().connector_job_timeout_seconds > _nextflow().hpc_run_timeout_seconds
+
+
+def test_the_mock_path_is_validated_against_the_budget_it_actually_uses() -> None:
+    """The workflow branches on the backend, so the guard branches with it.
+
+    Checking the mock deployment against `hpc_run_timeout_seconds` — a value it never reads —
+    would reject a perfectly sound dev configuration; checking it against nothing would leave the
+    default path unguarded. `hpc_mock_run_seconds + qm_activity_timeout_seconds` is what
+    `connectors/qm/workflows.py` gives the poll when the interface is `mock`.
+    """
+    Settings(_env_file=None, connector_job_timeout_seconds=200.0)  # type: ignore[call-arg]
+    with pytest.raises(ValueError, match="hpc_mock_run_seconds"):
+        Settings(_env_file=None, connector_job_timeout_seconds=180.0)  # type: ignore[call-arg]
 
 
 def test_openai_compatible_embeddings_require_endpoint_and_model() -> None:
@@ -258,16 +345,36 @@ def test_entra_required_accepts_issuer_plus_jwks_url() -> None:
     assert settings.entra_required is True
 
 
-def test_entra_role_gate_must_be_configured_symmetrically() -> None:
-    """Declaring expensive actions without privileged roles (or vice versa) leaves the gate open."""
-    with pytest.raises(ValueError, match="must be set together"):
+def test_entra_expensive_actions_without_roles_is_rejected() -> None:
+    """Naming a gated action with no privileged role refuses it to everyone — still an error."""
+    with pytest.raises(ValueError, match="entra_expensive_actions needs entra_privileged_roles"):
         Settings(  # type: ignore[call-arg]
             _env_file=None,
             entra_required=True,
             entra_audience="api://x",
             entra_tenant_id="t",
-            entra_expensive_actions="compute_dft_energy",  # roles missing → gate silently open
+            entra_expensive_actions="compute_dft_energy",  # no role can pass the gate
         )
+
+
+def test_entra_privileged_roles_without_actions_is_accepted() -> None:
+    """Roles alone is the *documented remedy*, so it must construct — the other direction is not.
+
+    `expensive: true` in a connector manifest derives into `authz.expensive_actions()`, so a
+    deployment gates its declared jobs by naming roles and nothing else; `docs/guides/runbook.md`
+    tells an operator to set exactly this. The validator used to demand the pair, which made the
+    instructed remedy un-constructable unless the operator also hand-copied the job names the
+    derivation removed.
+    """
+    settings = Settings(  # type: ignore[call-arg]
+        _env_file=None,
+        entra_required=True,
+        entra_audience="api://x",
+        entra_tenant_id="t",
+        entra_privileged_roles="hpc-operator",
+    )
+    assert settings.entra_privileged_role_set == {"hpc-operator"}
+    assert settings.entra_expensive_action_set == frozenset()
 
 
 def test_entra_required_full_config_is_accepted() -> None:

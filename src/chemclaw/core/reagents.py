@@ -24,9 +24,15 @@ Fabricating a structure from a name is the one failure mode that would be worse 
 wrong structure propagates silently into a calculation, a fingerprint search, and a proposed note.
 """
 
+from typing import NamedTuple
+
 from pydantic import BaseModel
 
-from chemclaw.core.chem import InvalidSmilesError, require_canonical_smiles
+from chemclaw.core.chem import (
+    InvalidSmilesError,
+    require_canonical_smiles,
+    require_standard_smiles,
+)
 
 # Common bench reagents, solvents, bases, and catalysts, keyed by every spelling a chemist writes.
 # Entries are grouped by role for review; the lookup itself is flat and folds case/punctuation.
@@ -172,6 +178,41 @@ for _key, (_smiles, _display) in _TABLE.items():
     _BY_STRUCTURE.setdefault(_smiles, _display)
 
 
+class _Compound(NamedTuple):
+    """One entry of the compound-level index: what to call it, and every way it is written."""
+
+    display: str
+    synonyms: list[str]
+
+
+def _index_by_compound() -> dict[str, _Compound]:
+    """Index the table a second time, on the standardized SMILES — the "same compound?" key.
+
+    The canonical index above cannot answer for a reagent whose two keys differ, and seven shipped
+    ones do: DMSO's S=O normalizes to a charge-separated sulfoxide, TBTU and HATU lose their
+    counterion, LDA loses its lithium. Everything downstream of `compound_id` — the compound note,
+    the fingerprint row, `memory.progression`'s species names — holds the *standardized* string, so
+    without this index a DMSO note rendered an anonymous structure with no name on it.
+
+    Built once at import rather than scanned per lookup, because the callers are per-note loops and
+    the scan would re-standardize the whole table each time. First spelling still wins the display
+    name, for the same reason it does above.
+    """
+    synonyms: dict[str, list[str]] = {}
+    displays: dict[str, str] = {}
+    for key, (smiles, display) in _TABLE.items():
+        standard = require_standard_smiles(smiles)
+        displays.setdefault(standard, display)
+        synonyms.setdefault(standard, []).append(key)
+    return {
+        standard: _Compound(displays[standard], sorted(spellings))
+        for standard, spellings in synonyms.items()
+    }
+
+
+_BY_COMPOUND = _index_by_compound()
+
+
 class ResolvedCompound(BaseModel):
     """One resolved identity: the canonical structure plus the name it was recognised as."""
 
@@ -217,8 +258,33 @@ def known_names() -> list[str]:
 
 
 def display_name(smiles: str) -> str | None:
-    """The recognised name for a canonical structure, or `None` if it is not a known reagent."""
+    """The recognised name for a structure, or `None` if it is not a known reagent.
+
+    The exact structure first, then the *compound* it standardizes to. The second lookup is what
+    lets a caller holding a standardized SMILES — a compound note, a `memory.progression` species
+    list — still name DMSO or TBTU, whose two keys differ. It is a lookup, never a guess: an
+    unrecognised structure still returns `None` rather than a fabricated name.
+    """
     try:
-        return _BY_STRUCTURE.get(require_canonical_smiles(smiles))
+        canonical = require_canonical_smiles(smiles)
     except InvalidSmilesError:
         return None
+    exact = _BY_STRUCTURE.get(canonical)
+    if exact is not None:
+        return exact
+    compound = _BY_COMPOUND.get(require_standard_smiles(canonical))
+    return compound.display if compound is not None else None
+
+
+def synonyms_of(smiles: str) -> list[str]:
+    """Every recognised spelling of this *compound*, sorted — the KNW-4 controlled vocabulary.
+
+    The compound question, not the structure question, because the caller writing these into a
+    note body already holds the standardized SMILES its id was hashed from. Empty for an
+    unrecognised or unparseable structure, so a caller can write the line only when there is one.
+    """
+    try:
+        compound = _BY_COMPOUND.get(require_standard_smiles(smiles))
+    except InvalidSmilesError:
+        return []
+    return list(compound.synonyms) if compound is not None else []

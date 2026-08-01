@@ -28,6 +28,22 @@ from pydantic import BaseModel, Field
 from chemclaw.core.config import settings
 from chemclaw.core.ids import stable_hash
 
+# What a caller has to be told about `symmetry_numbers` to supply it correctly, written once
+# because the two reaction-shaped specs advertise the identical contract. It is the *only* field
+# here carrying a description, and deliberately so: every other one is self-evident from its name
+# and type, while this one is a physical quantity whose omission silently costs the free energy.
+# A plain `dict[str, int]` keeps this module leaf — no `chemclaw.science.*` import is needed to
+# state it (D-118).
+_SYMMETRY_NUMBERS_DESCRIPTION = (
+    "Rotational symmetry number per species, keyed by the exact SMILES string given in "
+    "reactants/products: 1 for a molecule with no rotational symmetry, 2 for H2/N2/O2/CO2/water, "
+    "3 for ammonia, 6 for ethane, 12 for benzene. Above level='quick', a species left out of "
+    "this map has its entropy computed at sigma=1 and the job reports no free energy at all "
+    "rather than one too high by R*ln(sigma); the electronic energy and enthalpy do not depend "
+    "on it and are reported either way. Stating 1 is a real statement and does yield a free "
+    "energy — 'no rotational symmetry' and 'not considered' are different claims."
+)
+
 
 class ReactionJobSpec(BaseModel):
     """A durable reaction-energy request (xTB plan X4)."""
@@ -38,6 +54,9 @@ class ReactionJobSpec(BaseModel):
     solvent: str | None = None
     temperature_k: float | None = None
     level: Literal["quick", "standard", "thorough"] = "standard"
+    symmetry_numbers: dict[str, int] | None = Field(
+        default=None, description=_SYMMETRY_NUMBERS_DESCRIPTION
+    )
 
 
 class SolventScreenJobSpec(BaseModel):
@@ -49,6 +68,10 @@ class SolventScreenJobSpec(BaseModel):
     solvents: list[str] = Field(min_length=1)
     temperature_k: float | None = None
     level: Literal["quick", "standard", "thorough"] = "standard"
+    # The same species appear in every solvent, so one map covers the whole screen.
+    symmetry_numbers: dict[str, int] | None = Field(
+        default=None, description=_SYMMETRY_NUMBERS_DESCRIPTION
+    )
 
 
 class ScanJobSpec(BaseModel):

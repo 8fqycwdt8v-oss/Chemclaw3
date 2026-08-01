@@ -148,14 +148,27 @@ def test_bounded_ingest_keeps_overlap_and_truncates_new() -> None:
 
 
 def test_merge_folds_per_source_summaries() -> None:
-    """`_merge` unions ingested/skipped/rejected across sources and takes the max cursor."""
+    """`_merge` unions every per-entry list across sources and takes the max cursor.
+
+    Every list, not the ones a reader remembers: the run's whole outcome arrives through this fold
+    (the workflow syncs each source in chunks and merges once), so a field left out here is a field
+    that silently reports empty for the entire deployment — which is how a stuck review queue would
+    stay invisible again for exactly the operators reading the workflow result.
+    """
     early, late = datetime(2026, 1, 1, tzinfo=UTC), datetime(2026, 6, 1, tzinfo=UTC)
-    a = IngestSummary(ingested=["a1"], skipped_existing=["a0"], rejected=[], next_cursor=early)
+    a = IngestSummary(
+        ingested=["a1"],
+        skipped_existing=["a0"],
+        awaiting_merge=["a1"],
+        rejected=[],
+        next_cursor=early,
+    )
     reject = RejectedEntry(entry_id="b-bad", reason="nope", created_at=late)
     b = IngestSummary(ingested=["b1"], rejected=[reject], next_cursor=late)
     merged = _merge([a, b], _EPOCH)
     assert merged.ingested == ["a1", "b1"]
     assert merged.skipped_existing == ["a0"]
+    assert merged.awaiting_merge == ["a1"]
     assert merged.rejected == [reject]
     assert merged.next_cursor == late
     # No source ran → the cursor holds at the passed floor.

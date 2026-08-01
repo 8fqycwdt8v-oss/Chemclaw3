@@ -39,7 +39,39 @@ does not read this file, so the row survived. Fingerprints deploy as `connector-
   sentence. It had already said so, in the sentence after the one that restated it.)
 - Populate them via `ExternalSecret`/`SealedSecret`; the chart only *names* them.
 
-### Two settings that decide whether the pod boots at all
+#### The one Secret that is files, not env
+
+`secrets.temporalTls.secretName` (default **`chemclaw-temporal-tls`**) is mounted at
+`secrets.temporalTls.mountPath` (default `/etc/temporal/tls`) and must carry exactly three keys:
+
+| Key | What it is |
+|---|---|
+| `tls.crt` | the client certificate this component authenticates to the Temporal frontend with |
+| `tls.key` | that certificate's private key |
+| `ca.crt` | the CA that signs the Temporal frontend, so the client can pin it |
+
+A `kubernetes.io/tls` Secret already uses the first two names; add `ca.crt` beside them. The chart
+does not create it — like every secret here, it only names it.
+
+**`secrets.temporalTls.enabled` decides whether it is needed at all**, and this used to have no
+answer. `chemclaw.env` exported the three PEM *paths* unconditionally while the volume was mounted
+`optional: true`, and `core/temporal_client._tls_config()` short-circuits only when all three
+settings are empty — so a cluster without that Secret got `FileNotFoundError:
+/etc/temporal/tls/tls.crt`: the post-install Schedules hook failed with a message naming neither
+Temporal nor a Secret, the workers crash-looped, and the front door passed both probes because
+`/readyz` never touches Temporal. No value could turn the env off, so the plaintext path
+`connect_options()` documents was unreachable from the chart.
+
+- `enabled: true` (default) — env, volume and a **required** mount. A missing Secret now fails at
+  pod creation: `MountVolume.SetUp failed … secret "chemclaw-temporal-tls" not found`, on the pod,
+  before any process starts.
+- `enabled: false` — none of the three, and the client connects plaintext. The right setting for a
+  dev cluster, or a Temporal frontend fronted by a service mesh that terminates mTLS itself.
+
+### Settings that decide whether the pod boots at all
+
+(No count in this heading. It said "Two" over three bullets, for the same reason the secret count
+moved into the chart and its test: a number written in prose is a number that goes stale.)
 
 - **`CHEMCLAW_ENTRA_REQUIRED=true` is mandatory for any exposed deployment.** With it off, every
   request runs as the shared dev principal and all authorization gates are open, so the front door
@@ -63,6 +95,43 @@ does not read this file, so the row survived. Fingerprints deploy as `connector-
   autoscaling shape outruns its declaration, so that decision cannot reach a cluster by accident.
   `0` disables the check, which is the code default: a CLI or a single-pod dev run has no fleet.
 
+### The setting that does *not* block boot, and closes every expensive job
+
+**`CHEMCLAW_ENTRA_PRIVILEGED_ROLES` ships empty, and empty means every expensive job is refused for
+everyone.** This is the one identity setting whose misconfiguration a pod cannot refuse to start
+over, so it gets its own section beside the ones that can.
+
+`expensive: true` in a connector manifest now derives into the trigger gate, and that gate fails
+closed on an empty role set rather than open. Under the shipped `CHEMCLAW_ENTRA_REQUIRED=true`, with
+this unset, the following are refused for every authenticated user:
+
+| Job | Bundle |
+|---|---|
+| `compute_dft_energy` | `connectors/qm` |
+| `compute_interaction_energy` | `connectors/qm` |
+| `sample_conformers` | `connectors/calc` |
+| `start_optimization_campaign` | `connectors/bo` |
+
+Nothing else breaks: the pod boots, both probes pass, reads and knowledge lookups work, and a
+chemist asking for a DFT run is told they lack a privileged role. That combination — healthy
+deployment, one capability silently shut — is why this is documented at the same volume as a
+crash-loop rather than in a comment nobody reads at 2am.
+
+**The remedy is this setting alone.** Set it to a comma list of the Entra app roles your chemists
+hold; `CHEMCLAW_ENTRA_EXPENSIVE_ACTIONS` is *not* needed beside it, because the action set comes from
+the manifests. Config validation enforces the pair in one direction only: naming actions with no
+role is rejected at startup (nobody could pass that gate), naming roles with no actions is the normal
+production configuration. It used to demand both, which made the instruction above un-followable.
+
+**Why the chart does not ship a placeholder role name.** A plausible-looking value would be a config
+that *looks* configured — it survives review, reaches the cluster, grants nothing, and sends the
+operator hunting through Entra group membership instead of through this file, because "you do not
+hold this role" is the gate working correctly. The other placeholders in `values.yaml` are safe
+because their shape is inert (a zero GUID fails a token exchange loudly); a role name has no such
+shape. The key is written out as an explicit `""` instead, so the emptiness appears in
+`helm show values`, in the rendered ConfigMap, and in any values diff — where an absent key appears
+in none of them.
+
 ## Stateful dependencies (F6-T3, ADR **D-049**, Teilentscheidung D-A6a)
 
 - **Temporal: self-hosted in-cluster** (not Temporal Cloud). Rationale: keeps the durable core inside
@@ -80,11 +149,42 @@ does not read this file, so the row survived. Fingerprints deploy as `connector-
   retrying Job would otherwise hold the release in `pending-upgrade`. Recovery for all three is
   `docs/guides/runbook.md` §(xi).
 
+## Where the knowledge graph lives in a pod
+
+One directory, not two. `Settings.knowledge_path` is `note_repo_dir / knowledge_dir` and there is no
+second resolution — every reader goes through that property — so the chart publishes the synced
+graph to exactly that path (`chemclaw.knowledgePublishPath` = `knowledge.noteRepoPath` +
+`CHEMCLAW_KNOWLEDGE_DIR`) and the PR-gate submitter branches from the clone around it. Two
+containers therefore write one tree, and the sync takes the submitter's own advisory lock — the
+`flock` under the checkout's git directory that `src/chemclaw/kg/git_submitter.py` already uses to
+exclude a second process — for the duration of each publish. A held lock means a submission is in
+flight, and the publish waits for the next tick.
+
+There used to be a separate `knowledge.publishPath: /app/knowledge` on its own `emptyDir`. Nothing
+read it. The consequence was not an error at any layer: `rglob` over the tree readers *did* resolve
+yielded nothing and raised nothing, so the agent answered with no knowledge-graph evidence and said
+so nowhere — and the same `emptyDir` masked the corpus the image ships at that path, which is why
+"leave `repoUrl` empty to run against whatever the image shipped" was false. With no remote
+configured the sync now seeds the published tree from `/app/knowledge` instead.
+
+`knowledge.sync.checkoutPath` survives as the shallow replica the publish copies *from*, which is
+its stated reason for existing: a failed fetch must never leave the directory the app reads
+half-written.
+
 ## Network & probes
 
 - **NetworkPolicy** (`templates/networkpolicy.yaml`): default-deny egress with an allow-list — DNS,
   Postgres (5432), Temporal (7233), HTTPS (443, for the internal LLM + HPC launcher + Entra). Nothing
-  else leaves a pod.
+  else leaves a pod. Ingress rules bound which *peers* may open a connection to the front door, the
+  connectors and the workers' probe port.
+- **`/metrics` is on the public host, and the NetworkPolicy is not what bounds it.** The Route
+  declares no `spec.path`, and neither a Route nor a NetworkPolicy filters by path — the ingress
+  rule must allow the router, and the router publishes every path. What makes an unauthenticated
+  `/metrics` acceptable is the exposition: counts, capacity and an operator-chosen `profile` label,
+  never a session id, an actor or turn content, enforced by D-152's declared-label allowlist. Three
+  places (this chart, `api/app.py`, an ADR) used to name the NetworkPolicy as the control instead.
+  The residual exposure is operational reconnaissance; `route.ipWhitelist` restricts the whole Route
+  to a set of source CIDRs for a deployment that will not accept it.
 - **Probes**: every process exposes `/readyz` (readiness) and `/healthz` (liveness) — the front door
   and the connector servers on their service port, the Temporal workers on the `metrics` port
   (`CHEMCLAW_WORKER_METRICS_PORT`, default 9000). A worker's readiness is its own `is_running`, and

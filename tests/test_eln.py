@@ -740,6 +740,11 @@ def test_sync_fetches_an_overlap_window_behind_the_cursor(
         assert adapter.fetched_since == [cursor - timedelta(seconds=1800)]
         assert summary.ingested == ["late"]
         assert summary.skipped_existing == []  # its note is not merged yet, so it ingests
+        # And it is flagged as awaiting merge, which is the honest report even on a first sync:
+        # the entry sits inside the replay window with no merged note, so the *next* run fetches
+        # and proposes it again. "Will come back until someone merges it" is what a single run can
+        # establish; "was proposed before" is not (this entry never was).
+        assert summary.awaiting_merge == ["late"]
         assert summary.next_cursor == cursor  # the cursor never moves backwards
 
     asyncio.run(_run())
@@ -952,16 +957,16 @@ def test_a_multi_product_reaction_names_no_principal_compound() -> None:
 
 
 def test_solvent_and_catalyst_go_in_the_agent_slot() -> None:
-    """DRFP hashes the whole string, so a solvent on the left dominated the similarity.
+    """The **record** form shows the solvent and the catalyst in the slot that says what they are.
 
-    A solvent is often the largest fragment present and is present in every run, so it contributed
-    a large, nearly constant share of the set bits — and in process development the solvent is
-    usually the variable *being optimized*. Two runs of one coupling in THF and in 2-MeTHF looked
-    less alike than two unrelated reactions sharing a solvent, which is backwards for the two
-    things that similarity drives: campaign grouping and `similar_reactions`.
+    A notation claim and only that. This docstring used to say the three-part form was what stopped
+    the solvent dominating DRFP similarity; it never did — `DrfpEncoder.internal_encode` folds the
+    agent slot back onto the reactants, so the two forms encode identically. What changes the bits
+    is `transformation_smiles`, which leaves those species out; the measurements are in
+    `tests/test_rxnfp.py`.
 
-    A *reagent* stays on the left: a base or an oxidant participates stoichiometrically and is part
-    of what the transformation is.
+    A *reagent* stays on the left in both forms: a base or an oxidant participates
+    stoichiometrically and is part of what the transformation is.
     """
     reaction = OrdReaction(
         reaction_id="rxn-agents",
@@ -984,6 +989,31 @@ def test_solvent_and_catalyst_go_in_the_agent_slot() -> None:
 def test_a_reaction_with_no_agents_still_renders_the_three_part_form() -> None:
     """An empty agent slot is the convention's own shape, not a special case to branch on."""
     assert _ester().reaction_smiles() == "CCO.CC(=O)O>>CCOC(C)=O"
+
+
+def test_the_record_form_keeps_the_solvent_the_fingerprint_form_drops_it() -> None:
+    """The two forms are two questions, and a note must keep answering the first one.
+
+    `reaction_smiles` is what a reaction note, a campaign step list and a playbook's representative
+    reaction render — and the solvent is a headline condition of a process-development run, so a
+    note that no longer named it would be a real loss in the graph's largest note class. That is
+    the whole reason the exclusion is a second method rather than an edit to this one.
+    """
+    reaction = OrdReaction(
+        reaction_id="rxn-two-forms",
+        inputs=[
+            Component(smiles="Brc1ccccc1", role=Role.REACTANT),
+            Component(smiles="OB(O)c1ccccc1", role=Role.REACTANT),
+            Component(smiles="C1CCOC1", role=Role.SOLVENT),
+        ],
+        outcomes=[Component(smiles="c1ccc(-c2ccccc2)cc1", role=Role.PRODUCT)],
+        provenance="eln:chemist-a",
+    )
+
+    assert "C1CCOC1" in reaction.reaction_smiles()
+    assert "C1CCOC1" not in reaction.transformation_smiles()
+    # And the note a human reviews still shows it, which is what the split is protecting.
+    assert "C1CCOC1" in note_from_ord_reaction(reaction).body
 
 
 def test_an_amended_entry_is_re_proposed_rather_than_dropped(
@@ -1021,8 +1051,94 @@ def test_an_amended_entry_is_re_proposed_rather_than_dropped(
 
         assert summary.ingested == ["amended"]
         assert summary.skipped_existing == []
+        # Not awaiting merge: a merged predecessor is proof the review queue moves, so this is new
+        # content going in front of a human rather than the same claim going round again.
+        assert summary.awaiting_merge == []
         assert len(sub.submissions) == 1
         assert "31" in sub.submissions[0].files[0].content
+
+    asyncio.run(_run())
+
+
+def test_an_entry_whose_note_never_merged_is_reported_as_awaiting_merge(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A proposal nobody merged is re-proposed forever, and the summary has to say so.
+
+    `ingested` counts entries whose note was *proposed* through the PR-gate — proposed, because
+    that is as far as an automated step may take a knowledge claim. So an entry whose PR the
+    `kg-validate` hazard gate blocks, or that a reviewer simply never got to, is re-proposed on
+    every subsequent run and counted again each time, while an operator reading the summary sees a
+    steady ingest count and no indication that nothing is landing.
+
+    Asserted through a real `sync_entries` run over an empty knowledge dir (nothing merged) with
+    the entry inside the replay window, plus the WARNING that carries the same fact to an operator
+    who reads logs rather than workflow results.
+    """
+
+    async def _run() -> None:
+        monkeypatch.setattr(settings, "knowledge_dir", str(tmp_path))  # nothing merged, ever
+        cursor = datetime(2026, 1, 2, tzinfo=UTC)
+        blocked = _good_entry("blocked", cursor - timedelta(hours=2))
+        rxn, mol, sub = InMemoryFingerprintStore(), InMemoryFingerprintStore(), FakeSubmitter()
+        with caplog.at_level(logging.WARNING):
+            summary = await sync_entries(_ListAdapter([blocked]), rxn, mol, sub, cursor)
+
+        assert summary.ingested == ["blocked"]  # the proposal really was made again
+        assert summary.awaiting_merge == ["blocked"]  # and it accomplished nothing new
+        assert len(sub.submissions) == 1
+        assert "blocked" in caplog.text and "re-proposed every run" in caplog.text
+
+    asyncio.run(_run())
+
+
+def test_a_first_time_entry_is_not_reported_as_awaiting_merge(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A brand-new entry's note is unmerged too, and reporting it would make the field noise.
+
+    Every fresh proposal is unmerged for as long as review takes; what `awaiting_merge` reports is
+    the narrower thing an operator can act on — an entry the sync will keep re-proposing because it
+    is inside the replay window. A new entry is past the cursor, so the next run never sees it
+    again, and it belongs in `ingested` alone.
+    """
+
+    async def _run() -> None:
+        monkeypatch.setattr(settings, "knowledge_dir", str(tmp_path))
+        cursor = datetime(2026, 1, 2, tzinfo=UTC)
+        fresh = _good_entry("fresh", cursor + timedelta(hours=1))
+        rxn, mol, sub = InMemoryFingerprintStore(), InMemoryFingerprintStore(), FakeSubmitter()
+        summary = await sync_entries(_ListAdapter([fresh]), rxn, mol, sub, cursor)
+
+        assert summary.ingested == ["fresh"]
+        assert summary.awaiting_merge == []
+
+    asyncio.run(_run())
+
+
+def test_an_entry_that_fails_to_ingest_is_only_reported_as_rejected(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The two reports are exclusive: a rejection must not also show up as awaiting merge.
+
+    The unmerged-replay flag is decided before `ingest_reaction` runs (it needs the mapped note)
+    and recorded after it, so a bad entry inside the replay window — which is exactly where a
+    rejection is deterministic and repeats every run — reports one outcome, not two.
+    """
+
+    async def _run() -> None:
+        monkeypatch.setattr(settings, "knowledge_dir", str(tmp_path))
+        cursor = datetime(2026, 1, 2, tzinfo=UTC)
+        bad = RawEntry(
+            entry_id="bad",
+            created_at=cursor - timedelta(hours=2),
+            payload={"reactants": [{"smiles": "CCO"}], "products": [{"smiles": "CCCl"}]},
+        )
+        rxn, mol, sub = InMemoryFingerprintStore(), InMemoryFingerprintStore(), FakeSubmitter()
+        summary = await sync_entries(_ListAdapter([bad]), rxn, mol, sub, cursor)
+
+        assert [entry.entry_id for entry in summary.rejected] == ["bad"]
+        assert summary.ingested == [] and summary.awaiting_merge == []
 
     asyncio.run(_run())
 

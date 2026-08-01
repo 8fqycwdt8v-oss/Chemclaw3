@@ -312,9 +312,11 @@ class HpcSettings(BaseSettings):
     # The `hpc_api_*` values address and authenticate that launcher (the token arrives via the
     # HPC bridge / a mounted secret, F4-T6); `hpc_pipeline_name`/`_version` name the pipeline to
     # run; `hpc_artifact_store_url` is where a finished run's QM output blob is fetched from.
-    # All empty in dev. `hpc_pipeline_version` also enters the calculation cache key *when set*,
-    # so a pipeline bump is a cache miss not a stale hit (D-011/D-033) — while an empty version
-    # leaves the mock's keys byte-identical to before F5.
+    # All empty in dev. `hpc_launch_interface` and `hpc_pipeline_version` both enter the
+    # calculation cache key (`connectors.qm.cache.calc_version`), so a pipeline bump is a cache
+    # miss not a stale hit (D-011/D-033) and a mock-produced energy can never be served to a
+    # deployment pointed at a real cluster. `_hpc_launch_config` therefore refuses an empty
+    # version under `nextflow` — see it for why that is a cache rule and not a connectivity one.
     hpc_launch_interface: Literal["mock", "nextflow"] = "mock"
     hpc_api_base_url: str = ""
     hpc_api_token: str = ""
@@ -324,7 +326,10 @@ class HpcSettings(BaseSettings):
     # Real-run budgets for the `nextflow` poll (the mock uses `hpc_mock_run_seconds`). A real
     # QM/DFT run takes far longer than the mock: `hpc_run_timeout_seconds` is the poll
     # activity's single-attempt `start_to_close` cap (default 24h — heartbeating does NOT extend
-    # it, so it must cover the whole run); `hpc_run_heartbeat_timeout_seconds` is the poll's
+    # it, so it must cover the whole run — and it must in turn fit *inside*
+    # `connector_job_timeout_seconds`, the ceiling on the workflow that runs it, or raising this
+    # one alone changes nothing at all; `Settings._the_job_ceiling_covers_the_poll_it_bounds`
+    # refuses that pairing at startup); `hpc_run_heartbeat_timeout_seconds` is the poll's
     # heartbeat timeout, set comfortably above one poll's HTTP round-trip +
     # `hpc_poll_interval_seconds` so a slow launcher does not trip a false dead-worker timeout;
     # `hpc_http_timeout_seconds` bounds each launcher or artifact HTTP call (a dedicated knob,
@@ -384,16 +389,25 @@ class HpcSettings(BaseSettings):
 
     @model_validator(mode="after")
     def _hpc_launch_config(self) -> Self:
-        """`nextflow` needs the launcher endpoint, pipeline, and artifact store to be set.
+        """`nextflow` needs the launcher endpoint, pipeline, version, and artifact store set.
 
         Checked at startup (mirroring `_llm_provider_config`) so a half-configured backend fails
         here with a clear message rather than as an opaque httpx protocol error five retried
         activity attempts deep in the first QM job. The `mock` dev path needs none.
+
+        **`hpc_pipeline_version` is required here, and it is a cache rule rather than a connectivity
+        one.** The other three are needed to reach the cluster at all; this one is needed to tell
+        one cluster result from another. An empty version renders as the `unversioned` slug
+        (`connectors.qm.cache.version_slug`), so two genuinely different pipelines would key their
+        DFT energies identically and the second would be served the first's number. Refusing the
+        empty value is the mechanism; the shipped Helm values pinning `1.0.0` was only a default,
+        and a default protects the deployments that did not need protecting.
         """
         if self.hpc_launch_interface == "nextflow":
             required = (
                 ("hpc_api_base_url", self.hpc_api_base_url),
                 ("hpc_pipeline_name", self.hpc_pipeline_name),
+                ("hpc_pipeline_version", self.hpc_pipeline_version),
                 ("hpc_artifact_store_url", self.hpc_artifact_store_url),
             )
             missing = [name for name, value in required if not value]
@@ -576,6 +590,18 @@ class CalculatorSettings(BaseSettings):
     # logD (calc.logd, D-092): the working pH used when a caller does not name one.
     # 7.4 (physiological pH) is the conventional analytical-chemistry default.
     logd_default_ph: float = 7.4
+    # The ionised fraction of the *one* site `calc.pka` reports, at or below which further
+    # unmodelled sites of the same kind can still be dismissed; above it `calc.logd` refuses
+    # rather than report a single-equilibrium number for a polyprotic molecule.
+    #
+    # The bound is arithmetic, not taste. `calc.pka` reports the *most* ionisable site, so with
+    # r = f/(1-f) its ionisation ratio, every other site's is at most r, and the species sum the
+    # single term omits is bounded by the geometric series: the neglected shift is at most
+    # -log10(1 - r**2). At f = 0.05 that is 0.0012 log units, three orders below the +/-1.6 the
+    # result already carries. The bound diverges as f approaches 0.5, where the unseen sites can
+    # contribute as much as the modelled one (~0.3 log units for a diprotic acid) — which is why
+    # this is a small number and not "is the pH past the pKa".
+    logd_negligible_ionised_fraction: float = Field(default=0.05, gt=0, lt=0.5)
 
     # Reaction energetics (calc.reaction, D-098): a reaction electronic energy at or
     # below this threshold (kcal/mol, negative = exothermic) is flagged for thermal-hazard
@@ -1187,9 +1213,24 @@ class EntraSettings(BaseSettings):
           deny-all availability outage that should surface at startup, not as mysterious 401s.
           The issuer and the JWKS endpoint derive independently from the tenant, so each needs
           its own source: an issuer alone cannot resolve the keys endpoint;
-        - declaring privileged roles *or* expensive actions but not the other leaves the role gate
-          silently open (an action with no expensive-set entry authorizes every user), so the
-          two must be set together — set neither to deliberately gate nothing.
+        - naming an expensive action with **no** privileged role closes that action to everyone:
+          `authz.authorize_trigger` fails closed on an empty role set, so the very action the
+          operator singled out is refused for every user, with no role in existence that could
+          pass it. That is a silent deny-all on one deliberate path, and it stays an error.
+
+        **The converse is a valid configuration, and rejecting it was a shipped contradiction.**
+        This validator used to demand the two settings be set *together*, on the reasoning that a
+        role without an action gated nothing. That stopped being true when `expensive: true` in a
+        `connector.yaml` started deriving into the gate (`authz.expensive_actions`): the action set
+        now comes from the manifests, so `entra_privileged_roles` alone is the *complete* and
+        intended configuration — it is the operator's remedy for a deployment whose declared
+        expensive jobs currently refuse everyone, and it is exactly what `docs/guides/runbook.md`
+        instructs. Requiring `entra_expensive_actions` beside it would force operators to
+        hand-maintain the list of job names the derivation exists to eliminate, and a hand-copied
+        list of other people's job names goes stale the first time a bundle adds one.
+
+        Hence the asymmetry: actions without roles is a deny-all mistake, roles without actions is
+        the normal production setup.
         """
         if not self.entra_required:
             return self
@@ -1202,10 +1243,13 @@ class EntraSettings(BaseSettings):
                 "entra_tenant_id or entra_jwks_url must be set when entra_required "
                 "(the issuer alone cannot resolve the JWKS keys endpoint)"
             )
-        if bool(self.entra_expensive_actions) != bool(self.entra_privileged_roles):
+        if self.entra_expensive_actions and not self.entra_privileged_roles:
             raise ValueError(
-                "entra_expensive_actions and entra_privileged_roles must be set together "
-                "(the role gate is silently open otherwise)"
+                "entra_expensive_actions needs entra_privileged_roles: naming a gated action "
+                "with no privileged role refuses it to every user, since the trigger gate fails "
+                "closed on an empty role set. The reverse is fine — entra_privileged_roles alone "
+                "is the normal setup, because the expensive set derives from the connector "
+                "manifests"
             )
         return self
 
@@ -1596,7 +1640,15 @@ class ConnectorSettings(BaseSettings):
     # wedged connector workflow eventually fails instead of pinning a run forever. Deliberately
     # one global ceiling rather than a per-manifest field: a bundle in the repo must not be able
     # to grant itself unlimited runtime — that is a deployment's call.
-    connector_job_timeout_seconds: float = Field(default=86_400.0, gt=0)
+    #
+    # It is a ceiling over the *whole* child, so it must exceed the longest activity that child
+    # runs — the QM poll, budgeted by `hpc_run_timeout_seconds`/`hpc_mock_run_seconds` — plus the
+    # activities around it. `_the_job_ceiling_covers_the_poll_it_bounds` enforces that; raise this
+    # whenever you raise the poll budget. The default is the 24h `hpc_run_timeout_seconds` plus an
+    # hour, rather than equal to it: the shipped chart selects `hpc_launch_interface="nextflow"`,
+    # and two equal defaults made the ceiling the tighter of the two on the path the deployment
+    # actually runs.
+    connector_job_timeout_seconds: float = Field(default=90_000.0, gt=0)
 
     # Bound on the record write every finished connector job performs (D-157). Small: it is one
     # upsert of a row the job has already earned, and a database that cannot take it in this long
@@ -2009,6 +2061,53 @@ class Settings(
                 f"embedding_dim={self.embedding_dim} disagrees with the note_index vector column "
                 f"({_NOTE_INDEX_VECTOR_DIM}, infra/sql/012_note_index.sql); pgvector would reject "
                 "every write. Change both together, or drop 'vector' from data_sources."
+            )
+        return self
+
+    @model_validator(mode="after")
+    def _the_job_ceiling_covers_the_poll_it_bounds(self) -> Self:
+        """A parent ceiling no larger than its child's longest activity is not a ceiling.
+
+        `ConnectorJobWorkflow` gives its child `connector_job_timeout_seconds` as an
+        **execution** timeout (`durable/connector_job.py`), and the longest thing inside that child
+        on the QM path is the HPC poll, whose single-attempt `start_to_close` budget is
+        `hpc_run_timeout_seconds` under `nextflow` (`connectors/qm/workflows.py`). Both default to
+        86400, so the shipped `nextflow` configuration gives the parent *less* room than the one
+        activity it has to contain.
+
+        Two things break, and neither says so. The poll's `BAD_DATA_RETRY` is dead — a single
+        attempt already exhausts the parent's whole budget, so `activity_max_attempts` is a number
+        that can never be reached. And an operator following `hpc_run_timeout_seconds`'s own
+        comment ("it must cover the whole run") raises it, observes no change whatsoever, and gets
+        a bare `WorkflowExecutionTimedOut` naming neither setting. A rule that two comments already
+        imply and nothing enforces is the shape this file's other guard was written for.
+
+        Checked on the *selected* backend, mirroring the workflow's own branch, so the mock path is
+        validated as the mock path rather than against a budget it does not use. The allowance is
+        the rest of that workflow: five activities around the poll — prepare, the cache lookup and
+        submit before it, parse and persist after — each capped at `qm_activity_timeout_seconds`.
+        Strictly greater rather than at least, because equality is the defect.
+
+        Scoped to `Settings` and not to `HpcSettings` because it is the one rule here that spans
+        two sections: the ceiling is a connector-wide deployment choice and the poll budget is the
+        QM path's, and neither section can see the other.
+        """
+        if self.hpc_launch_interface == "nextflow":
+            poll_budget = self.hpc_run_timeout_seconds
+            budget_name = "hpc_run_timeout_seconds"
+        else:
+            poll_budget = self.hpc_mock_run_seconds + self.qm_activity_timeout_seconds
+            budget_name = "hpc_mock_run_seconds + qm_activity_timeout_seconds"
+        needed = poll_budget + 5 * self.qm_activity_timeout_seconds
+        if self.connector_job_timeout_seconds <= needed:
+            raise ValueError(
+                f"connector_job_timeout_seconds={self.connector_job_timeout_seconds} does not "
+                f"cover the QM job it bounds: the poll alone may take {poll_budget}s "
+                f"({budget_name}, hpc_launch_interface={self.hpc_launch_interface!r}) and the five "
+                f"activities around it up to {5 * self.qm_activity_timeout_seconds}s more "
+                f"(qm_activity_timeout_seconds). Raise connector_job_timeout_seconds above "
+                f"{needed}, or lower the poll budget — raising the poll budget alone changes "
+                "nothing, because the parent's ceiling fires first."
             )
         return self
 

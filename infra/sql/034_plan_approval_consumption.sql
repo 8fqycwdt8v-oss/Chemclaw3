@@ -1,0 +1,40 @@
+-- When a plan approval was *spent*, recorded where the approval is (D-167, closing the last half).
+--
+-- An approval authorizes one turn. Migration 020 made the decision durable; nothing made the
+-- *spending* of it durable. The marker saying "this approval has had its turn"
+-- (`harness_mode._CONSUMED_STATE_KEY`) lived in `session.state`, which an LRU eviction or a pod
+-- roll drops — `chemclaw.api.app._rehydrate_session` rebuilds the session handle over the durable
+-- history alone. So the two halves of one control had different lifetimes: the row survived
+-- anything, the fact that it had been used survived nothing.
+--
+-- The consequence is a spent authorization coming back to life with no human act. A session that
+-- reconstructs a byte-identical todo list after an eviction hashes to the same `plan_hash`, meets
+-- its own already-spent approval, and finds it looking fresh — precisely the "one approval
+-- authorizes one turn" limit D-167 states, defeated by an infrastructure event rather than by a
+-- decision. (The empty-plan case was closed separately, by refusing to treat the empty-item hash as
+-- an approvable identity at all; this closes the rest.)
+--
+-- **Why a column and not a second table.** The question "has this decision been used?" is an
+-- attribute of that decision, has exactly its lifetime, and is read in the same query that reads
+-- the verdict. A `plan_approval_consumptions` table would need its own key back to this row, its
+-- own index, and a join on the hot path to answer something one nullable timestamp answers.
+--
+-- **It does not make the table mutable in the sense 020 forbids.** 020's rule is that a *decision*
+-- is append-only: a second decision on one plan is a second row, never an edit of the first, so a
+-- rejection recorded after an approval revokes it. That still holds — nothing here rewrites
+-- `approved`, `actor` or `decided_at`. This stamps, once, a fact about what the system subsequently
+-- did with the row, which is the audit-friendlier record of the two: a spent approval keeps saying
+-- who approved it and *when it was used up*, where the in-process marker said neither.
+--
+-- NULL means "not yet spent", which is what every existing row is: an approval that has already had
+-- its turn under the old marker is re-armed exactly once by this migration. That is the honest
+-- direction to fail — the alternative, back-filling `now()`, would silently revoke live approvals
+-- across an upgrade, and one extra approval request is cheaper than a chemist's plan going dead
+-- mid-session for no visible reason.
+ALTER TABLE plan_approvals ADD COLUMN IF NOT EXISTS consumed_at TIMESTAMPTZ;
+
+-- `plan_approvals_lookup` already leads on `(session_id, plan_hash, decided_at DESC)`, which is the
+-- whole of both access paths: the read takes the latest row for a plan and then asks whether
+-- `consumed_at` is NULL, and the consume writes to the latest *unspent* one found the same way. A
+-- partial index on `consumed_at IS NULL` would index a table whose rows are already reached by a
+-- one-row index lookup, so this migration adds none.

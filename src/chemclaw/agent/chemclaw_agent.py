@@ -50,6 +50,7 @@ from chemclaw.agent import subscriptions as _subscriptions  # noqa: F401
 from chemclaw.agent.audit import AuditSink, make_audit_middleware
 from chemclaw.agent.harness_mode import PlanApprovalModeProvider
 from chemclaw.agent.llm_provider import build_chat_client
+from chemclaw.agent.loop_cap import observe_loop_cap
 from chemclaw.agent.plan_gate import (
     approved_todos_remaining,
     enforce_plan_approval,
@@ -382,7 +383,12 @@ def _build_harness_agent(
         # Under `plan_only` the predicate is additionally conditioned on the plan actually being
         # approved (D-167): without that an unapproved session still loops, has every write
         # refused, and spends the whole runaway budget achieving nothing.
-        loop_should_continue=(
+        #
+        # `observe_loop_cap` sits outermost and decides nothing: it reads the decision the loop
+        # acts on so a capped turn can say so. The cap is otherwise silent — MAF stops and returns
+        # normally — which left a runaway indistinguishable from a finished turn both in production
+        # and in the eval layer (`chemclaw.agent.loop_cap`).
+        loop_should_continue=observe_loop_cap(
             approved_todos_remaining(todos_remaining(looping_modes=["execute"]))
             if autonomy == "plan_only"
             else todos_remaining(looping_modes=["execute"])

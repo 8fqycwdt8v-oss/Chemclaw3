@@ -25,9 +25,9 @@ from chemclaw.agent.harness_mode import (
     PLAN_MODE,
     current_plan_hash,
     grant_execute,
-    rearm_plan,
     session_mode,
 )
+from chemclaw.agent.harness_todo import mark_awaiting_job, todo_titles
 from chemclaw.agent.plan_approval_store import InMemoryPlanApprovalStore
 from chemclaw.agent.plan_gate import (
     PlanNotApprovedError,
@@ -105,6 +105,28 @@ async def _call(tool: str, session: AgentSession | None) -> bool:
     context = _Context(tool, session)
     await enforce_plan_approval(context, _body)  # type: ignore[arg-type]
     return ran
+
+
+async def _record(store: InMemoryPlanApprovalStore, session: AgentSession) -> None:
+    """Record an approval for whatever identity the session hashes to right now.
+
+    Deliberately not `_approve`: these cases record against an identity the decision route now
+    refuses to write, because the gate must hold against a row that exists however it got there —
+    written before the route was fixed, or by a path that never went through it.
+    """
+    await store.record(session.session_id, await current_plan_hash(session), "chemist", True)
+
+
+async def _try_call(tool: str, session: AgentSession) -> bool:
+    """`_call` with the refusal reported as "the tool did not run" rather than raised.
+
+    For the cases that assert *whether* a write happened across several attempts, where a raise
+    would end the sequence before the interesting one.
+    """
+    try:
+        return await _call(tool, session)
+    except PlanNotApprovedError:
+        return False
 
 
 def test_an_approved_plan_does_not_authorize_the_next_one(
@@ -341,9 +363,11 @@ def test_an_approval_is_spent_by_the_turn_that_used_it(
             after = await _call("propose_knowledge_note", session)
         except PlanNotApprovedError:
             after = False
-        # Re-approving the same unchanged plan is a person saying "yes, again".
+        # Re-approving the same unchanged plan is a person saying "yes, again" — and recording it
+        # is the whole of that act, because the store is append-only and reads the latest row, so a
+        # fresh decision is an unspent one. It used to need a separate `rearm_plan` call against
+        # session state, which every future writer of a decision path had to remember.
         await _approve(approvals, session)
-        rearm_plan(session, await current_plan_hash(session))
         again = await _call("propose_knowledge_note", session)
         return during, after, again
 
@@ -417,3 +441,120 @@ def test_spending_never_raises_when_the_store_is_unreachable(
         await consume_turn_approval(session)  # must not raise
 
     asyncio.run(_run())
+
+
+# --- "nothing" is not an approvable plan, and a spent approval stays spent ---------------------
+
+
+def test_the_empty_plan_is_not_an_approvable_identity(
+    approvals: InMemoryPlanApprovalStore,
+) -> None:
+    """A decision recorded against the empty plan must authorize nothing, ever.
+
+    `current_plan_hash([])` is a *constant* — the same string in every session of every deployment
+    for all time — so an approval keyed on it is not a fact about this session's plan. The gate
+    treated it as one, which is what let the second half of this finding compose: see the
+    rehydration test below.
+    """
+
+    async def _run() -> bool:
+        session = AgentSession(session_id="empty-plan")
+        # Recorded directly, as a row written before this was refused (or by any other path):
+        # the gate must not depend on the decision route having filtered it out.
+        await _record(approvals, session)
+        grant_execute(session)
+        return await _try_call("propose_knowledge_note", session)
+
+    assert not asyncio.run(_run()), "an approval of the empty plan authorized a knowledge write"
+
+
+def test_only_awaiting_job_todos_are_still_no_plan(
+    approvals: InMemoryPlanApprovalStore,
+) -> None:
+    """A session showing rows a chemist never agreed to is still proposing nothing.
+
+    `todo_plan_items` strips the `awaiting-job:` rows the launcher writes, so a session can display
+    a non-empty plan through `GET /plan` and hash to the empty constant. Whatever the display says,
+    there is no *work item* here for a human to have approved.
+    """
+
+    async def _run() -> bool:
+        session = AgentSession(session_id="awaiting-only")
+        await mark_awaiting_job(session, "job-1", title="waiting on the DFT run")
+        assert await todo_titles(session), "the precondition is that the display is non-empty"
+        await _record(approvals, session)
+        grant_execute(session)
+        return await _try_call("propose_knowledge_note", session)
+
+    assert not asyncio.run(_run()), "a plan of nothing but bookkeeping rows was approvable"
+
+
+def test_a_spent_approval_stays_spent_across_a_rehydrate(
+    approvals: InMemoryPlanApprovalStore,
+) -> None:
+    """An eviction must not re-arm an authorization a turn already used.
+
+    The two halves of the composition, in order. The consumed marker lives in `session.state`,
+    which `chemclaw.api.app._rehydrate_session` drops when the live LRU evicts a session or the pod
+    rolls — it rebuilds the handle over the durable history alone, so the todo state goes with it.
+    The `plan_approvals` row does not go: it is durable. A rehydrated session therefore proposes
+    the empty plan, and while that constant was an approvable identity a spent approval of it came
+    back armed, with no human act, outside the single-turn limit D-167 states.
+
+    Modelled the way the front door does it — a new `AgentSession` over the same session id — since
+    that *is* the rehydration.
+    """
+
+    async def _run() -> tuple[bool, bool]:
+        session = AgentSession(session_id="evicted")
+        await _record(approvals, session)
+        grant_execute(session)
+        before = await _try_call("propose_knowledge_note", session)
+        await consume_turn_approval(session)
+
+        rehydrated = AgentSession(session_id="evicted")  # the LRU evicted it; state is gone
+        assert not await todo_titles(rehydrated), "a rehydrated session has no plan by construction"
+        return before, await _try_call("propose_knowledge_note", rehydrated)
+
+    before, after = asyncio.run(_run())
+    assert not before, "the empty plan authorized a write even before the eviction"
+    assert not after, "a spent approval re-armed itself when the session was rehydrated"
+
+
+def test_a_spent_approval_survives_losing_the_session_state(
+    approvals: InMemoryPlanApprovalStore,
+) -> None:
+    """The narrow half of the same defect: a **reconstructed** plan must not revive its approval.
+
+    The empty-plan fix closed the composition — a rehydrated session can only re-propose the empty
+    identity, which is unapprovable — and left the underlying split intact: the `plan_approvals` row
+    was durable and the marker saying it had been spent lived in `session.state`, so a model that
+    rebuilt a byte-identical todo list after an eviction hashed to the same plan and met its own
+    spent approval looking fresh. One approval, two turns, with an LRU eviction standing in for the
+    human decision the second turn needed.
+
+    So the session here loses its state exactly as `_rehydrate_session` makes it lose it, and then
+    proposes *the same work items again* — the one case the empty-plan check cannot see. Consumption
+    now lives on the decision (`plan_approvals.consumed_at`), which is the only place with the same
+    lifetime as the thing it qualifies.
+    """
+
+    async def _run() -> tuple[bool, bool]:
+        plan = ["screen the species", "compute the barrier"]
+        session = AgentSession(session_id="rebuilt")
+        await _set_plan(session, plan)
+        await _approve(approvals, session)
+        during = await _call("propose_knowledge_note", session)
+        await consume_turn_approval(session)  # the approved turn ends and spends it
+
+        rebuilt = AgentSession(session_id="rebuilt")  # evicted: state, todos and markers all gone
+        await _set_plan(rebuilt, plan)  # the model proposes a byte-identical plan
+        assert await current_plan_hash(rebuilt) == await current_plan_hash(session), (
+            "the precondition is that the reconstructed plan has the same identity"
+        )
+        grant_execute(rebuilt)  # and the mode came back with it, as the durable state it is
+        return during, await _try_call("propose_knowledge_note", rebuilt)
+
+    during, after = asyncio.run(_run())
+    assert during, "the approved turn's own write was refused"
+    assert not after, "an eviction re-armed a spent approval for a reconstructed plan"

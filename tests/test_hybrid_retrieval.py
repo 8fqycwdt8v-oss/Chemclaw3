@@ -6,6 +6,7 @@ honor filters, that Reciprocal Rank Fusion rewards notes ranked by more than one
 """
 
 import asyncio
+from collections import Counter
 from pathlib import Path
 from typing import Any
 
@@ -190,9 +191,79 @@ def test_gather_evidence_hybrid_mode_fuses_rankings(monkeypatch: pytest.MonkeyPa
     assert [c.source_note_id for c in out] == ["b", "a", "c"]
 
 
-def test_gather_evidence_graph_mode_is_flat_union(monkeypatch: pytest.MonkeyPatch) -> None:
-    """In the default graph mode gather_evidence keeps the flat, dedup'd union (unchanged)."""
+def test_gather_evidence_graph_mode_round_robins_the_sources(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """In the default graph mode gather_evidence merges the sources by rank, de-duplicating.
+
+    Named for what it does rather than "flat union": the merge takes each source's best hit before
+    any source's second, which for these two two-hit sources is the same answer the old
+    concatenation gave, and is not the same answer once one source is longer than the cap.
+    """
     _wire_two_sources(monkeypatch)
     monkeypatch.setattr(settings, "retrieval_mode", "graph")
     out = asyncio.run(research_tools.gather_evidence("q"))
     assert [c.source_note_id for c in out] == ["a", "b", "c"]
+
+
+# --- the cap is fair across sources ------------------------------------------------------------
+
+
+def _ranked(prefix: str, retriever: str, scores: list[float]) -> list[EvidenceChunk]:
+    """One source's ranked hit-list, best first, with its own score scale."""
+    return [
+        EvidenceChunk(
+            content=f"{prefix}{i}", source_note_id=f"{prefix}{i}", retriever=retriever, score=score
+        )
+        for i, score in enumerate(scores)
+    ]
+
+
+def test_truncation_is_fair_across_sources(monkeypatch: pytest.MonkeyPatch) -> None:
+    """No enabled source is starved by the cap, whatever scale its scores happen to use.
+
+    The measured defect, with the measured numbers. `EvidenceChunk.score` is a note's `confidence`
+    from the graph, a `ts_rank` from Postgres FTS, a cosine from the dense index and a Tanimoto
+    from the fingerprint store — comparable *within* a source and meaningless across them, which
+    the field's own docstring states. `graph` mode nonetheless concatenated the lists and sorted
+    the union by that number, so the cap kept a prefix of whichever scale ran highest.
+
+    Against this fixture (45 graph hits at the notes' 0.8 confidence, 8 lexical at ts_rank
+    0.02-0.09, 7 dense at cosine 0.60-0.85, 40-chunk cap) the flat union returned 38 graph /
+    0 lexical / 2 vector; with the sort removed it returned 40 / 0 / 0, so the concatenation order
+    alone starved the later sources and the sort was mitigating rather than causing it. The lexical
+    leg contributed nothing an agent could read either way, which is the entire reason a deployment
+    enables it. Round-robin gives every source its best hit before any source gets its second.
+    """
+    sources = [
+        _FakeSource("graph", _ranked("g", "graph", [0.8] * 45)),
+        _FakeSource("lexical", _ranked("l", "lexical", [0.09 - 0.01 * i for i in range(8)])),
+        _FakeSource("vector", _ranked("v", "vector", [0.85 - 0.04 * i for i in range(7)])),
+    ]
+    monkeypatch.setattr(research_tools, "_text_retrievers", lambda: sources)
+    monkeypatch.setattr(settings, "retrieval_mode", "graph")
+    monkeypatch.setattr(settings, "gather_evidence_max_chunks", 40)
+
+    out = asyncio.run(research_tools.gather_evidence("q"))
+
+    counts = Counter(chunk.retriever for chunk in out)
+    assert len(out) == settings.gather_evidence_max_chunks
+    assert counts == {"graph": 25, "lexical": 8, "vector": 7}
+
+
+def test_a_single_source_keeps_its_own_ranking(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The merge never re-ranks a source, because the source already ranked itself.
+
+    Concretely the case the union's score sort broke: on a widened search `GraphRetriever` orders
+    by term *coverage* first and confidence only within it, so a note matching three of four terms
+    leads one matching a single term. Re-sorting the union by score alone discarded that and put
+    the confident near-miss on top. The default deployment runs exactly one text source, so this is
+    the ordering most sweeps actually get.
+    """
+    ranked = _ranked("n", "graph", [0.2, 0.9, 0.5])  # the retriever's order, not score order
+    monkeypatch.setattr(research_tools, "_text_retrievers", lambda: [_FakeSource("graph", ranked)])
+    monkeypatch.setattr(settings, "retrieval_mode", "graph")
+
+    out = asyncio.run(research_tools.gather_evidence("q"))
+
+    assert [chunk.source_note_id for chunk in out] == ["n0", "n1", "n2"]

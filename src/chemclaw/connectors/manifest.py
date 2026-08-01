@@ -226,10 +226,13 @@ class JobSpec(BaseModel):
     declared queue could therefore hold exactly one correct value and any number of wrong ones,
     each of which starts a job successfully and then leaves it in a queue nobody polls.
 
-    `expensive` marks the job for the coarse `authorize_trigger` gate (a costly HPC/BO run must
-    be entitled, not merely authenticated). `publish_to_graph` lets core PR-gate a `Note` the
-    job's result carries — the write still goes through `chemclaw.kg.pr_gate`, never through the
-    connector.
+    `expensive` puts the job in the coarse `authorize_trigger` gate's set (a costly HPC/BO run must
+    be entitled, not merely authenticated) — the declaration *is* the gate's source, read by
+    `chemclaw.agent.authz.expensive_actions`, so it needs no matching operator entry and gains
+    nothing from one. It was for a while a marker that authorized nothing, because the gate
+    consulted only `entra_expensive_actions`; `tests/test_authz.py` now cross-checks every declared
+    job against the effective set. `publish_to_graph` lets core PR-gate a `Note` the job's result
+    carries — the write still goes through `chemclaw.kg.pr_gate`, never through the connector.
     """
 
     model_config = ConfigDict(extra="forbid", frozen=True)

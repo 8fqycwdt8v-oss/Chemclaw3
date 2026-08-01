@@ -12,54 +12,52 @@ consequences the analysis traced back to the same root:
   `CN(C)C=O` were three unrelated tokens to every lexical path, and the optimization-campaign
   grouping compared conditions that were textually different and chemically identical (KNW-4).
 
-A compound note is the one identity both needed. The id is derived from the canonical SMILES
+A compound note is the one identity both needed. The id is derived from the **standardized** SMILES
 (`chemclaw.core.chem.compound_id`, which lives in `core` so a connector can cite a note without
 importing the graph), so the same molecule always maps to the same note from any source — which is
 what makes a citation stable and a vocabulary possible.
 
-The note deliberately records only what is *known with certainty*: the canonical structure, the
+The note's *body* is written from that same standardized SMILES, not from a merely canonicalized
+one. Two spellings that share an id must render byte-identically, or re-proposing an already-merged
+note produces a diff and the last spelling ingested wins: `compound_note("CCN")` and
+`compound_note("CCN.Cl")` are one note by id, so they have to be one note by content too.
+
+The note deliberately records only what is *known with certainty*: the standardized structure, the
 recognised name when `chemclaw.core.reagents` knows one, and the synonyms that resolve to it. No
 predicted properties — those live in the calculation cache and would go stale here.
 """
 
-from chemclaw.core.chem import compound_id, require_canonical_smiles
-from chemclaw.core.reagents import display_name, known_names, resolve_compound_name
+from chemclaw.core.chem import compound_id, require_standard_smiles
+from chemclaw.core.reagents import display_name, synonyms_of
 from chemclaw.kg.note import Note
 
 
-def synonyms_for(smiles: str) -> list[str]:
-    """Every recognised spelling that resolves to this structure (the KNW-4 vocabulary).
-
-    Written into the note body so the *lexical* retrieval leg can match a trivial name against a
-    structure-keyed corpus — the concrete fix for "DMF and CN(C)C=O are unrelated tokens".
-    """
-    canonical = require_canonical_smiles(smiles)
-    matches = []
-    for name in known_names():
-        resolved = resolve_compound_name(name)
-        if resolved is not None and resolved.smiles == canonical:
-            matches.append(name)
-    return sorted(matches)
-
-
 def compound_note(smiles: str) -> Note:
-    """Build the `compound` note for a molecule (idempotent: same structure, same note).
+    """Build the `compound` note for a molecule (idempotent: same compound, same note).
 
     Authored as `agent`, so it passes the PR-gate like every other machine-written note (D-005).
+
+    Every field is derived from the **standardized** SMILES, the same key `compound_id` hashes and
+    the same one `ingest.eln.ingest` indexes on. Deriving the id from one notion of sameness and
+    the body from another gave two spellings of one compound a shared id and different bodies, so
+    re-proposing an already-merged note rewrote its structure line and the last spelling ingested
+    won — the opposite of the "renders byte-identically, produces no diff" contract
+    `compound_dependencies` relies on.
     """
-    canonical = require_canonical_smiles(smiles)
-    name = display_name(canonical)
-    aliases = synonyms_for(canonical)
-    body = f"Compound `{canonical}`.\n\n"
+    standard = require_standard_smiles(smiles)
+    name = display_name(standard)
+    aliases = synonyms_of(standard)
+    body = f"Compound `{standard}`.\n\n"
     if name:
         body += f"- name: {name}\n"
     if aliases:
-        # Spelled out rather than only listed as tags, because the lexical index reads bodies.
+        # Spelled out rather than only listed as tags, because the lexical index reads bodies:
+        # this is what lets a trivial-name query match a structure-keyed corpus (KNW-4).
         body += f"- also written: {', '.join(aliases)}\n"
     return Note(
-        id=compound_id(canonical),
+        id=compound_id(standard),
         type="compound",
-        compound_smiles=canonical,
+        compound_smiles=standard,
         created_by="agent",
         tags=["compound"],
         body=body,

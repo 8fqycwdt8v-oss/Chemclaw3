@@ -25,7 +25,14 @@ toward a free rotor, which is what `xtb` itself does.
 exactly R ln(sigma) — 1.4 cal/mol/K for a C2 axis, 4.9 for benzene — and deriving it
 needs point-group detection this layer does not do. It defaults to 1 and is part of
 the cache key, so setting it correctly is a recompute rather than a silent correction.
-Within a balanced reaction the error partly cancels; between unlike species it does not.
+
+The error does **not** cancel within a balanced reaction unless both sides carry the same
+symmetry, and for the chemistry that matters they do not: every hydrogenation has H2
+(sigma 2) on one side only, and anything aromatic carries benzene's sigma 12. An earlier
+version of this paragraph claimed the cancellation as a defence for defaulting sigma, and
+`calc.reaction` relied on it — computing every species at 1 with no way for a caller to say
+otherwise, which cost 0.41 kcal/mol on a hydrogenation and 1.47 on a benzene. That path now
+takes sigma per species and withholds delta-G when it is unstated.
 """
 
 import asyncio
@@ -341,7 +348,7 @@ def _rotational(
     linear = _is_linear(moments)
     factor = 8 * math.pi**2 * _BOLTZMANN * temperature / _PLANCK**2
     if linear:
-        partition = factor * moments[2] / (2 * symmetry)
+        partition = factor * moments[2] / symmetry
         return _GAS_CONSTANT * temperature, _GAS_CONSTANT * (math.log(partition) + 1.0)
     partition = math.sqrt(math.pi * factor**3 * moments.prod()) / symmetry
     return 1.5 * _GAS_CONSTANT * temperature, _GAS_CONSTANT * (math.log(partition) + 1.5)

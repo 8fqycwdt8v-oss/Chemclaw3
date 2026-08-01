@@ -31,6 +31,12 @@ FROM ${BASE_IMAGE}
 # against the directory the serving container reads live. `kg/graph.py` caches on a stat
 # fingerprint with a short TTL, so a retrieval landing inside that window saw a partial or empty
 # graph and the agent answered with no evidence — silently, because a missing note is not an error.
+#
+# `util-linux` is installed for `flock(1)`, and named here for the same reason rsync is. The publish
+# target is the PR-gate submitter's own checkout, so `knowledge-sync.sh` takes the submitter's
+# advisory lock (`kg/git_submitter.py`) around the `rsync --delete`. A missing `flock` would make
+# that guard a no-op, and the whole lesson of the rsync line above is that a missing binary must be
+# a named dependency rather than a runtime discovery.
 USER 0
 # `dnf -y update` before installing, and it is not belt-and-braces. Red Hat rebuilds the UBI9 tag
 # periodically, so `:latest` lags the errata stream — the first run of the image scan found fixable
@@ -44,7 +50,7 @@ USER 0
 # *interpreter's* setuptools rather than a locked dependency — `uv export | pip-audit` is clean —
 # so no lockfile change could have reached it, and it would have gone unnoticed for exactly as long
 # as nobody scanned the built image.
-RUN dnf -y update && dnf install -y git rsync && dnf clean all \
+RUN dnf -y update && dnf install -y git rsync util-linux && dnf clean all \
     && pip install --no-cache-dir --upgrade pip setuptools \
     && pip install --no-cache-dir uv
 WORKDIR /app

@@ -10,10 +10,19 @@ import asyncio
 
 import pytest
 
+from chemclaw.core.chem import STANDARDIZATION_VERSION, standard_smiles
 from chemclaw.core.config import settings
-from chemclaw.science.fingerprints.rxnfp.fingerprint import drfp_bitstring
+from chemclaw.ingest.eln.ord import Component, OrdReaction, Role
+from chemclaw.science.fingerprints.rxnfp.fingerprint import (
+    drfp_bitstring,
+    reaction_definition,
+)
 from chemclaw.science.fingerprints.rxnfp.search import find_similar_reactions, record_for_reaction
-from chemclaw.science.fingerprints.store import FingerprintError, InMemoryFingerprintStore
+from chemclaw.science.fingerprints.store import (
+    FingerprintError,
+    InMemoryFingerprintStore,
+    tanimoto,
+)
 
 # Three esterifications (similar) and one unrelated halogenation.
 _ESTER_ETHYL = "CCO.CC(=O)O>>CCOC(C)=O"
@@ -63,3 +72,127 @@ def test_find_similar_reactions_ranks_by_tanimoto() -> None:
         assert hits[0].label == _ESTER_ETHYL  # the label carries the reaction SMILES
 
     asyncio.run(_run())
+
+
+# --- The agent slot has to change the bits, not just the notation --------------------------------
+#
+# The measurements below are the point of this block. A previous change moved solvent and catalyst
+# into the reaction SMILES' agent slot and four places recorded that the solvent no longer
+# dominated similarity — but `DrfpEncoder.internal_encode` opens with `sides[0] += "." + sides[1]`,
+# folding the agent slot straight back onto the reactants, so the three-part and two-part forms
+# encode to byte-identical bits. Every one of those claims was false, and nothing here measured the
+# thing they claimed. So these tests assert *numbers*, taken from the pinned drfp: a fingerprint
+# change that produces the same bits is the exact failure being repaired.
+
+
+def _suzuki(solvent: str) -> OrdReaction:
+    """One Suzuki coupling, varying only the solvent — the pair the claim was always about."""
+    return OrdReaction(
+        reaction_id=f"rxn-{solvent}",
+        inputs=[
+            Component(smiles="Brc1ccc(C)cc1", role=Role.REACTANT),
+            Component(smiles="OB(O)c1ccccc1", role=Role.REACTANT),
+            Component(smiles="[K+].[K+].[O-]C([O-])=O", role=Role.REAGENT),
+            Component(smiles="CC(=O)O[Pd]OC(C)=O", role=Role.CATALYST),
+            Component(smiles=solvent, role=Role.SOLVENT),
+        ],
+        outcomes=[Component(smiles="Cc1ccc(-c2ccccc2)cc1", role=Role.PRODUCT)],
+        provenance="eln:chemist-a",
+    )
+
+
+_THF, _METHF = _suzuki("C1CCOC1"), _suzuki("CC1CCCO1")
+
+
+def test_the_agent_slot_alone_changes_no_bits_which_is_why_species_are_excluded() -> None:
+    """The defect, pinned so no future change can re-claim the notation as a fix.
+
+    DRFP folds `>agents>` onto the reactants before it shingles anything, so writing a solvent in
+    the middle slot and writing it on the left are the same input. This is a property of the pinned
+    encoder rather than of our code, which is exactly why it is worth asserting: it is the fact
+    that makes `transformation_smiles` necessary, and a reader looking at the three-part record
+    form has no way to guess it.
+    """
+    folded_back = (
+        "Brc1ccc(C)cc1.OB(O)c1ccccc1.[K+].[K+].[O-]C([O-])=O.CC(=O)O[Pd]OC(C)=O.C1CCOC1"
+        ">>Cc1ccc(-c2ccccc2)cc1"
+    )
+    assert drfp_bitstring(_THF.reaction_smiles()) == drfp_bitstring(folded_back)
+
+
+def test_excluding_the_agents_actually_moves_the_bits() -> None:
+    """The fix has to be visible in the fingerprint, not only in the string.
+
+    Held against the *standardized* three-part form rather than against `reaction_smiles`, so the
+    exclusion is the only difference under test. Compared with the raw record form this assertion
+    survives removing the exclusion entirely — standardization alone moves the bits, and the test
+    would then pass while measuring the wrong half of the change. That is the same shape of
+    mistake as the defect itself: a claim about the encoding checked against something that
+    happens to differ for another reason.
+    """
+    excluded = _THF.transformation_smiles()
+    reactants, products = excluded.split(">>")
+    agents = ".".join(
+        standard_smiles(c.smiles) for c in _THF.inputs if c.role in {Role.SOLVENT, Role.CATALYST}
+    )
+    assert drfp_bitstring(f"{reactants}>{agents}>{products}") != drfp_bitstring(excluded)
+
+
+def test_two_solvents_of_one_coupling_are_the_same_transformation() -> None:
+    """The behaviour the whole change is for, as a number.
+
+    Indexed as recorded, the THF and 2-MeTHF runs of one coupling scored 0.82 against each other —
+    the solvent, present only on the left, survives DRFP's symmetric difference whole and spends a
+    large constant block of bits on the variable being optimized. Indexed as transformations they
+    are identical, which is the honest answer: they are the same chemistry run two ways, and the
+    solvent is recorded beside the note rather than inside the structure.
+    """
+    as_recorded = tanimoto(
+        drfp_bitstring(_THF.reaction_smiles()), drfp_bitstring(_METHF.reaction_smiles())
+    )
+    as_indexed = tanimoto(
+        drfp_bitstring(_THF.transformation_smiles()),
+        drfp_bitstring(_METHF.transformation_smiles()),
+    )
+    assert as_recorded == pytest.approx(0.8194, abs=1e-3)
+    assert as_indexed == pytest.approx(1.0)
+    assert as_indexed > as_recorded
+
+
+def test_a_reagent_still_belongs_to_the_transformation() -> None:
+    """The other half of the rule: a base is consumed stoichiometrically and stays on the left.
+
+    Without this, "exclude what is not the transformation" quietly becomes "exclude everything
+    that is not a named reactant", which would erase the base and ligand screens that process
+    development actually runs.
+    """
+    without_base = _THF.model_copy(
+        update={"inputs": [c for c in _THF.inputs if c.role is not Role.REAGENT]}
+    )
+    assert drfp_bitstring(_THF.transformation_smiles()) != drfp_bitstring(
+        without_base.transformation_smiles()
+    )
+
+
+def test_the_indexed_string_is_standardized() -> None:
+    """`STANDARDIZATION_VERSION` is in the definition, so the rows have to actually be standardized.
+
+    They were not: `reaction_smiles` built the string from raw `c.smiles`, so the standardization
+    half of the definition bump was bits-neutral for every reaction row while the token claimed
+    otherwise. Asserted through a spelling RDKit re-canonicalizes, so it fails if the call is
+    dropped rather than merely if the pipeline changes.
+    """
+    assert _THF.transformation_smiles().startswith("Cc1ccc(Br)cc1")  # from `Brc1ccc(C)cc1`
+    assert STANDARDIZATION_VERSION in reaction_definition()
+
+
+def test_the_definition_retires_rows_built_under_the_old_encoding() -> None:
+    """Old rows must fall out of similarity search rather than be ranked against new ones.
+
+    The store refuses to rank across definitions, so the token is the whole retirement mechanism —
+    and a token that did not move would leave rows encoding a solvent-dominated fingerprint being
+    compared against solvent-neutral ones and reporting the difference as chemistry.
+    """
+    definition = reaction_definition()
+    assert "agents-excluded" in definition
+    assert record_for_reaction("r", _THF.transformation_smiles()).definition == definition

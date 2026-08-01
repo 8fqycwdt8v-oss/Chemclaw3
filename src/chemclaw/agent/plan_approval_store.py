@@ -17,12 +17,33 @@ single state-changing tool? Both answers are bad, and the question is malformed.
 above is the whole argument for durability and it is an argument about a *mismatch*: the approval
 must not outlive, or be outlived by, the mode it authorizes. Under `session_store="memory"` that
 mode lives in an in-process session and dies with the process, so a process-lifetime approval
-matches it exactly; under `postgres` both are durable. So the backend follows the session store,
-there is no third posture to configure, and the gate is fail-closed everywhere — a plan that was
-never approved is never approved, whichever backend answered.
+matches it exactly. So the backend follows the session store, there is no third posture to
+configure, and the gate is fail-closed everywhere — a plan that was never approved is never
+approved, whichever backend answered.
+
+**Both halves of the control are durable, and for a while only one was.** A decision row here
+survived anything; the marker recording that the row had been *spent* lived in `session.state`
+(`harness_mode._CONSUMED_STATE_KEY`), which an LRU eviction or a pod roll drops —
+`chemclaw.api.app._rehydrate_session` rebuilds the session handle over the durable history alone. So
+a session that reconstructed a byte-identical todo list after an eviction hashed to the same plan
+and met its own already-spent approval looking fresh: an authorization revived by an infrastructure
+event rather than by a person, outside the one-turn limit D-167 states.
+
+Consumption is therefore recorded where the decision is — `plan_approvals.consumed_at`
+(`infra/sql/034_plan_approval_consumption.sql`), stamped by `consume` and folded into `decision`,
+which reports a spent approval as *not approved* while still naming who decided. That fold is the
+point: every caller already asks this store one question ("is this plan approved right now?") and
+now gets one answer, instead of asking here and then asking session state whether the answer still
+counts. It also deletes the seam — there is no longer a `plan_consumed` for a caller to forget.
+
+The in-memory backend mirrors it exactly, which costs nothing and matters: `session_store="memory"`
+is a real deployment (the CLI is one), and a control with two implementations that disagree about
+when an approval is spent is a control nobody can reason about.
 """
 
 from contextlib import AbstractAsyncContextManager
+from dataclasses import dataclass
+from datetime import UTC, datetime
 from functools import cache
 from typing import Protocol, runtime_checkable
 
@@ -33,17 +54,33 @@ from chemclaw.agent.session_store import _session_connection, _session_dsn
 from chemclaw.core.config import settings
 
 # Append-only: every decision is a GxP record of something a person did at a moment, so a second
-# decision on the same plan is a second row rather than an update of the first.
+# decision on the same plan is a second row rather than an update of the first. That is also what
+# re-arms a plan: approving an unchanged plan again inserts a fresh, unspent row, so "yes, again"
+# needs no separate operation and cannot be performed by anything but a decision.
 _INSERT = (
     "INSERT INTO plan_approvals (session_id, plan_hash, actor, approved) VALUES (%s, %s, %s, %s)"
 )
 
 # The latest decision wins, so a rejection recorded after an approval revokes it — which is what a
 # person clicking "no" second means. `LIMIT 1` over the covering index; no sort at run time.
+#
+# `approved AND consumed_at IS NULL` is the *effective* verdict: an approval that has had its turn
+# is no longer an approval (D-167). The actor comes back either way, because "approved earlier,
+# already used" is a different thing for a surface to show than "nobody has decided".
 _LATEST = (
-    "SELECT approved, actor FROM plan_approvals "
+    "SELECT approved AND consumed_at IS NULL, actor FROM plan_approvals "
     "WHERE session_id = %s AND plan_hash = %s "
     "ORDER BY decided_at DESC, id DESC LIMIT 1"
+)
+
+# Spend the latest still-unspent approval for this plan. Scoped by `approved AND consumed_at IS
+# NULL` so it is idempotent (a second call matches nothing) and so it can never stamp a rejection or
+# reach back past a newer decision — the subquery picks exactly the row `_LATEST` reads.
+_CONSUME = (
+    "UPDATE plan_approvals SET consumed_at = now() WHERE id = ("
+    "SELECT id FROM plan_approvals "
+    "WHERE session_id = %s AND plan_hash = %s AND approved AND consumed_at IS NULL "
+    "ORDER BY decided_at DESC, id DESC LIMIT 1)"
 )
 
 
@@ -55,8 +92,12 @@ class ApprovalStore(Protocol):
         """Record one human decision about one specific plan."""
         ...
 
+    async def consume(self, session_id: str, plan_hash: str) -> None:
+        """Spend this plan's live approval, so it stops authorizing anything."""
+        ...
+
     async def decision(self, session_id: str, plan_hash: str) -> tuple[bool, str] | None:
-        """The latest `(approved, actor)` for this exact plan, or None if nobody has decided."""
+        """The latest *effective* `(approved, actor)`, or None if nobody has decided."""
         ...
 
 
@@ -78,11 +119,26 @@ class PlanApprovalStore:
                 await cur.execute(_INSERT, (session_id, plan_hash, actor, approved))
             await conn.commit()
 
-    async def decision(self, session_id: str, plan_hash: str) -> tuple[bool, str] | None:
-        """The latest `(approved, actor)` for this exact plan, or None if nobody has decided.
+    async def consume(self, session_id: str, plan_hash: str) -> None:
+        """Stamp this plan's live approval as spent — durably, unlike the marker this replaces.
 
-        Returning the actor as well as the verdict is what lets a caller say *who* approved rather
-        than only *that* it was approved — the difference between a usable GxP record and a flag.
+        Idempotent by construction (`_CONSUME` matches only an unspent approval), because the
+        callers cannot guarantee they run once: a turn that answers and is then torn down, and a
+        turn that fails after running tools, both spend the same approval.
+        """
+        async with self._connection() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(_CONSUME, (session_id, plan_hash))
+            await conn.commit()
+
+    async def decision(self, session_id: str, plan_hash: str) -> tuple[bool, str] | None:
+        """The latest *effective* `(approved, actor)`, or None if nobody has decided.
+
+        Effective, not merely recorded: an approval that has already had its turn comes back
+        `approved=False` (`_LATEST` folds `consumed_at IS NULL` into the verdict). Returning the
+        actor as well is what lets a caller say *who* decided rather than only *that* it was
+        approved — the difference between a usable GxP record and a flag, and what separates
+        "approved earlier, already used" from "nobody has decided".
         """
         async with self._connection() as conn:
             async with conn.cursor() as cur:
@@ -91,12 +147,29 @@ class PlanApprovalStore:
         return (bool(row[0]), str(row[1])) if row is not None else None
 
 
+@dataclass
+class _Decision:
+    """One recorded decision, with the moment it was spent — the in-memory row of `plan_approvals`.
+
+    A mutable record rather than a tuple precisely because `consumed_at` is the one field that
+    changes after the fact, exactly as migration 034 makes it the one column an UPDATE may touch.
+    """
+
+    session_id: str
+    plan_hash: str
+    actor: str
+    approved: bool
+    consumed_at: datetime | None = None
+
+
 class InMemoryPlanApprovalStore:
     """The same contract for a deployment whose sessions are in-process too.
 
     Append-only like its Postgres sibling, and for the same reason: a second decision on one plan
     is a second thing a person did, not an edit of the first, so a rejection after an approval
-    revokes rather than overwrites. Reading the last matching entry reproduces `_LATEST` exactly.
+    revokes rather than overwrites, and re-approving an unchanged plan re-arms it. Reading the last
+    matching entry and folding `consumed_at` into the verdict reproduces `_LATEST` exactly; spending
+    the latest unspent approval reproduces `_CONSUME`.
 
     It is *not* a test double. It is the backend a `session_store="memory"` deployment gets, and
     the CLI is a real one of those — so the harness gate holds there rather than being waived, and
@@ -105,18 +178,31 @@ class InMemoryPlanApprovalStore:
 
     def __init__(self) -> None:
         """Start with no decisions recorded."""
-        self._decisions: list[tuple[str, str, str, bool]] = []
+        self._decisions: list[_Decision] = []
+
+    def _latest(self, session_id: str, plan_hash: str) -> _Decision | None:
+        """The most recent decision for this plan, mirroring `_LATEST`'s ordering."""
+        for decision in reversed(self._decisions):
+            if decision.session_id == session_id and decision.plan_hash == plan_hash:
+                return decision
+        return None
 
     async def record(self, session_id: str, plan_hash: str, actor: str, approved: bool) -> None:
         """Append one human decision about one specific plan."""
-        self._decisions.append((session_id, plan_hash, actor, approved))
+        self._decisions.append(_Decision(session_id, plan_hash, actor, approved))
+
+    async def consume(self, session_id: str, plan_hash: str) -> None:
+        """Spend this plan's live approval, if it has one that has not been spent already."""
+        latest = self._latest(session_id, plan_hash)
+        if latest is not None and latest.approved and latest.consumed_at is None:
+            latest.consumed_at = datetime.now(UTC)
 
     async def decision(self, session_id: str, plan_hash: str) -> tuple[bool, str] | None:
-        """The latest `(approved, actor)` for this exact plan, or None if nobody has decided."""
-        for stored_session, stored_hash, actor, approved in reversed(self._decisions):
-            if stored_session == session_id and stored_hash == plan_hash:
-                return (approved, actor)
-        return None
+        """The latest *effective* `(approved, actor)`, or None if nobody has decided."""
+        latest = self._latest(session_id, plan_hash)
+        if latest is None:
+            return None
+        return (latest.approved and latest.consumed_at is None, latest.actor)
 
 
 @cache

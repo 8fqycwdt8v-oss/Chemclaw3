@@ -12,8 +12,12 @@ import sys
 
 import pytest
 
-from chemclaw.core.config import settings
-from chemclaw.core.logging import configure_logging, configure_telemetry
+from chemclaw.core.config import Settings, settings
+from chemclaw.core.logging import (
+    _SECRET_SETTINGS,
+    configure_logging,
+    configure_telemetry,
+)
 
 
 def test_configure_logging_applies_configured_level(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -281,3 +285,31 @@ def test_configure_logging_installs_both_filters_on_the_handler() -> None:
     for handler in handlers:
         kinds = {type(f) for f in handler.filters}
         assert ContextFilter in kinds and SecretRedactingFilter in kinds
+
+
+def test_every_named_secret_is_a_real_settings_field() -> None:
+    """The credential inventory names fields that exist, so a rename cannot silently disarm it.
+
+    `_SECRET_SETTINGS` is read through `getattr(settings, name, "")`, which turns a name that no
+    longer resolves into an empty string and then skips it as too short to redact. That is silent
+    by construction: the inventory keeps listing the credential, the filter keeps running, and
+    nothing redacts anything. `knowledge_repo_token` sat here in exactly that state — it is not a
+    `Settings` field and never was one under that name.
+
+    No credential was actually exposed by it, because the entry was dead rather than wrong. The
+    hazard is the next rename: three of the listed values (`hpc_api_token`,
+    `hpc_artifact_store_token`, `temporal_api_key`) are touched by no other test, so renaming one
+    in `config.py` would leave a real secret reaching the log with the suite still green.
+
+    Deliberately one-directional. It does not assert that every secret-looking field is listed,
+    because "secret-looking" is exactly the name-pattern heuristic the inventory's own comment
+    rejects — `entra_token_endpoint` is a URL, `budget_max_tokens_per_user` is an integer, and
+    `temporal_tls_key` is a path to a PEM rather than the key material. Whether a new field holds a
+    credential stays a human judgement made in review; whether a listed one still exists does not.
+    """
+    unknown = sorted(set(_SECRET_SETTINGS) - set(Settings.model_fields))
+    assert not unknown, (
+        f"_SECRET_SETTINGS names fields that are not on Settings: {unknown}. Each is read with a "
+        'getattr default of "", so it redacts nothing and fails silently — delete it, or correct '
+        "it to the field's current name."
+    )

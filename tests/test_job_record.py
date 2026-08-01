@@ -21,6 +21,7 @@ from chemclaw.durable.job_record import (
     NullJobRecordSink,
     default_job_record_sink,
     note_with_run_provenance,
+    record_job,
     search_job_records,
 )
 from chemclaw.kg.note import Note
@@ -161,6 +162,86 @@ def test_the_null_sink_keeps_nothing_and_says_so() -> None:
     record = job_record_for("job-1", _INPUT, _RESULT)
     assert asyncio.run(NullJobRecordSink().record(record)) is None
     assert isinstance(record, JobRecord)
+
+
+def _counted(monkeypatch: pytest.MonkeyPatch) -> list[tuple[str, float, dict[str, str]]]:
+    """Capture what `record_job` books on the consumption counter instead of a live registry.
+
+    Patched at the bridge rather than at `chemclaw.api.metrics.METRICS`, because the bridge
+    swallows every exception — a stub that raised, or a registry that rejected the name, would be
+    silently indistinguishable from an increment that never happened, which is the exact property
+    these two tests are trying to tell apart.
+    """
+    booked: list[tuple[str, float, dict[str, str]]] = []
+
+    class _Registry:
+        def increment(
+            self, name: str, value: float = 1.0, labels: dict[str, str] | None = None
+        ) -> None:
+            booked.append((name, value, dict(labels or {})))
+
+    monkeypatch.setattr(
+        "chemclaw.durable.job_record.record_metric",
+        lambda update: update(_Registry()),
+    )
+    return booked
+
+
+def _sink(monkeypatch: pytest.MonkeyPatch, *, fails: bool) -> None:
+    """Point `record_job` at a sink that either keeps the row or refuses to."""
+
+    class _Sink:
+        async def record(self, record: JobRecord) -> None:
+            if fails:
+                raise RuntimeError("the job_records database is unreachable")
+
+    monkeypatch.setattr("chemclaw.durable.job_record.default_job_record_sink", _Sink)
+
+
+def test_the_runtime_counter_is_booked_only_once_the_record_is_durable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The write succeeds, so the compute it describes is countable — the ordinary path.
+
+    Paired with the test below rather than written alone: an assertion that the counter moves is
+    satisfied by booking it anywhere in the activity, which is exactly what the defect did.
+    """
+    booked = _counted(monkeypatch)
+    _sink(monkeypatch, fails=False)
+    record = job_record_for("bo-campaign-abc", _INPUT, _RESULT, runtime_seconds=21600.0)
+
+    asyncio.run(record_job(record))
+
+    assert booked == [("chemclaw_job_runtime_seconds_total", 21600.0, {"connector": "bo"})]
+
+
+def test_a_run_with_no_durable_record_is_not_counted_as_compute(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The defect: the counter was incremented at the top of an activity that then retried.
+
+    `record_job` runs under `BAD_DATA_RETRY` (`activity_max_attempts`), so an increment before the
+    awaited write is booked once per *attempt*, not once per run. Two consequences, and the second
+    is the one that misleads: an upsert that commits and then overruns
+    `job_record_timeout_seconds` counts one run twice, and a sustained outage counts a run five
+    times while `ConnectorJobWorkflow._record_run` swallows the `ActivityError` — so the counter
+    reports five runs' worth of cluster time for a run with no row anywhere.
+
+    Simulated by driving the activity directly, once per attempt, exactly as Temporal would: the
+    retry policy is Temporal's to apply, and what is under test is what one attempt books.
+    """
+    booked = _counted(monkeypatch)
+    _sink(monkeypatch, fails=True)
+    record = job_record_for("bo-campaign-abc", _INPUT, _RESULT, runtime_seconds=21600.0)
+
+    for _ in range(settings.activity_max_attempts):
+        with pytest.raises(RuntimeError):
+            asyncio.run(record_job(record))
+
+    assert booked == [], (
+        f"a run that was never recorded booked {sum(v for _, v, _ in booked)}s of compute on "
+        "chemclaw_job_runtime_seconds_total"
+    )
 
 
 def test_the_background_worker_actually_serves_the_record_activity() -> None:

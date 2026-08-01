@@ -196,18 +196,40 @@ class GitNoteSubmitter:
                 return await self._submit_locked(submission)
 
     async def _submit_locked(self, submission: NoteSubmission) -> str:
-        """The submission body, called with both the in-process and OS locks held."""
-        await self._git("fetch", self._remote, self._base)
-        # Start from a clean slate: a prior submission that died between `add`
-        # and `commit` leaves its note staged, and `checkout -B` would carry
-        # that residue into this note's branch and commit. Dropping staged,
-        # dirty, and untracked state first also guarantees the checkout below
-        # cannot fail on local changes. Safe because `note_repo_dir` is a
-        # dedicated clone (module docstring) — there is never work to keep.
-        await self._git("reset", "--hard")
-        await self._git("clean", "-fd")
-        await self._git("checkout", "-B", submission.branch, f"{self._remote}/{self._base}")
+        """The submission body, called with both the in-process and OS locks held.
 
+        The note branch is checked out inside a `try/finally`, so the shared checkout is
+        returned to `base` on **every** exit — a rejected push, a dead remote, a containment
+        refusal, any exception in the write at all. Without that guarantee a failed submission
+        left the tree on `note/<id>` with the unreviewed note in it, where every reader
+        resolving `settings.knowledge_path` served an agent-authored note as merged knowledge
+        (and `ingest.eln.sync._merged_note_bodies` counted it as merged): a PR-gate bypass that
+        no retry repaired, because a retry lands on the same branch.
+        """
+        await self._git("fetch", self._remote, self._base)
+        await self._checkout_clean(submission.branch)
+        try:
+            return await self._write_and_push(submission)
+        finally:
+            await self._return_to_base()
+
+    async def _write_and_push(self, submission: NoteSubmission) -> str:
+        """Write the submission's files onto the checked-out note branch, commit, and push.
+
+        Split from `_submit_locked` so the whole post-checkout body sits inside one `try`
+        whose `finally` restores the base branch — there is no exit from here that can leave
+        the shared checkout on the note branch.
+
+        **Deliberately does not bust the graph cache.** It used to, right after the write, on the
+        grounds that "the authoring loop must see its own write immediately". That reason stopped
+        being true when the restore moved into `_submit_locked`'s `finally`: the note lives only on
+        `note/<id>`, so by the time `submit()` returns, the tree a reader sees never contains it —
+        there is no own-write to see. What the call did do was open the TTL window *inside* the
+        checkout window, making a concurrent reader more likely to scan the tree while the note
+        branch was checked out and cache the unreviewed note as merged knowledge for
+        `graph_cache_ttl_seconds` (DARK-10). One invalidation, in `_return_to_base`, at the one
+        moment the tree is actually restored.
+        """
         # Every file in the submission, not just the subject note: a note and the notes its links
         # depend on land together or the links dangle (STO-7, see `NoteSubmission`). Each path is
         # containment-checked independently — a dependency is no more trusted than the note.
@@ -215,19 +237,11 @@ class GitNoteSubmitter:
             note_path = self._contained_note_path(file.path)
             note_path.parent.mkdir(parents=True, exist_ok=True)
             note_path.write_text(file.content, encoding="utf-8")
-        # This process just changed the note tree, so do not make a subsequent read wait out the
-        # `graph_cache_ttl_seconds` scan window (DA-5) — the authoring loop must see its own write
-        # immediately. Also needed because the `checkout -B`/`reset --hard` above rewrite the tree
-        # wholesale: where `note_repo_dir` and `knowledge_dir` overlap (a dev checkout), a stale
-        # cached graph would otherwise describe a tree that no longer exists.
-        invalidate_cache()
-
         await self._git("add", *(file.path for file in submission.files))
         # Idempotent: if the note is byte-identical to what the base already has,
         # there is nothing to commit — re-proposing it is a no-op, not an error.
         returncode, _ = await self._run("diff", "--cached", "--quiet")
         if returncode == 0:
-            await self._return_to_base()
             return submission.branch
         await self._git("commit", "-m", submission.title)
         # `--force-with-lease` needs a fresh remote-tracking ref: in a fresh
@@ -240,8 +254,25 @@ class GitNoteSubmitter:
             f"+refs/heads/{submission.branch}:refs/remotes/{self._remote}/{submission.branch}",
         )
         await self._git("push", "--force-with-lease", "-u", self._remote, submission.branch)
-        await self._return_to_base()
         return submission.branch
+
+    async def _checkout_clean(self, branch: str) -> None:
+        """Switch to `branch` at the fetched base tip, discarding every local change first.
+
+        Start from a clean slate: a prior submission that died between `add` and `commit`
+        leaves its note staged, and `checkout -B` would carry that residue into this note's
+        branch and commit. Dropping staged, dirty, and untracked state first also guarantees
+        the checkout cannot fail on, or silently carry over, local changes. Safe because
+        `note_repo_dir` is a dedicated clone (module docstring) — there is never work to keep.
+
+        One helper for both switches (into the note branch, and back to base) because the
+        restoring switch needs the discard just as much: a submission that failed *before*
+        `git add` leaves the rendered note as an untracked file, which a bare `checkout` would
+        carry onto `base` and hand straight to the readers this returns the tree for.
+        """
+        await self._git("reset", "--hard")
+        await self._git("clean", "-fd")
+        await self._git("checkout", "-B", branch, f"{self._remote}/{self._base}")
 
     async def _return_to_base(self) -> None:
         """Leave the shared checkout on `base`, reset to the tip already fetched this submission.
@@ -253,11 +284,20 @@ class GitNoteSubmitter:
         checked out on `note/<id>` after a submission — the prior behavior — made every one of
         those readers see that one proposed note's isolated content instead of the merged
         knowledge base, until the *next* submission happened to check out `base` again first.
-        `checkout -B` (not a plain `checkout`) reuses the same reset-and-switch idiom the note
-        branch checkout above already relies on, so this never fails on the note branch's now-
-        stray local changes.
+
+        Runs from `_submit_locked`'s `finally`, so it covers the failed submission too, which is
+        the case that actually mattered: a push that git rejected left an unreviewed,
+        agent-authored note checked out and being read as merged knowledge indefinitely, since
+        every retry re-created the same branch and never restored the tree.
+
+        `invalidate_cache()` is in a `finally` of its own because the tree has changed either
+        way — back to base, or to whatever state a failed switch left — and a cached graph
+        describing the note branch must not outlive it under `graph_cache_ttl_seconds`.
         """
-        await self._git("checkout", "-B", self._base, f"{self._remote}/{self._base}")
+        try:
+            await self._checkout_clean(self._base)
+        finally:
+            invalidate_cache()
 
 
 def default_submitter() -> NoteSubmitter:

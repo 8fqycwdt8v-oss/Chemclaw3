@@ -16,6 +16,9 @@ module closes the window the *only* way the note schema already supports: the su
 `valid_to` set (excluded from current-evidence sweeps by `Note.is_current`, never deleted — it stays
 in Git and remains reachable by id) plus a body line naming its replacement.
 
+Only notes this synthesis itself minted are candidates. "Same type, overlapping members" is not
+enough — see `_is_synthesis_minted` for the promoted-observation playbook it wrongly retired.
+
 The replacement is named as **plain text, not a `[[wikilink]]`**: the replacement note is itself an
 unmerged proposal in the same run, so a link would dangle and fail `kg-validate` if a reviewer
 merged the supersede PR first — an ordering trap for a human, in exchange for an edge nothing
@@ -25,6 +28,7 @@ traverses (a non-current note is already out of retrieval).
 from datetime import date
 
 from chemclaw.kg.note import Note
+from chemclaw.memory.ids import is_cluster_anchored
 
 _SUPERSEDED_MARKER = "Superseded by"
 
@@ -33,16 +37,22 @@ def supersede_updates(new_notes: list[Note], existing: list[Note], as_of: date) 
     """Return retired copies of `existing` notes that `new_notes` replaced (empty when none).
 
     A note is superseded when it carries no end date yet, shares a type with this run's output,
-    keeps an id this run no longer mints, and cites at least one member that a new note now covers.
-    The id check is what keeps ordinary growth untouched: a grown cluster re-mints the *same* id,
-    so that note is updated in place by the normal publish, not retired here. Testing `valid_to`
-    rather than `is_current` makes the job idempotent (a re-run cannot re-close, and re-append to,
-    a note it already closed) and still covers a note whose validity starts in the future.
+    is one **this synthesis itself minted** (`_is_synthesis_minted`), keeps an id this run no
+    longer mints, and cites at least one member that a new note now covers. The id check is what
+    keeps ordinary growth untouched: a grown cluster re-mints the *same* id, so that note is
+    updated in place by the normal publish, not retired here. Testing `valid_to` rather than
+    `is_current` makes the job idempotent (a re-run cannot re-close, and re-append to, a note it
+    already closed) and still covers a note whose validity starts in the future.
+
+    The type match stays *beside* the lineage test rather than being replaced by it: the two rule
+    out different things. Lineage rules out a note this job never wrote; the type match rules out
+    an `optimization-campaign` note being retired by the *campaign* run that happens to share a
+    reaction with it, which is a different job's cluster and a different id sequence.
 
     Args:
         new_notes: The notes this synthesis run just built (all of one or more memory types).
         existing: Already-merged notes to check against — typically the whole knowledge corpus;
-            notes of unrelated types are ignored, so passing everything is safe.
+            notes outside the synthesis lineage are ignored, so passing everything is safe.
         as_of: The run's date, used as the retired note's `valid_to`.
 
     Returns:
@@ -58,9 +68,32 @@ def supersede_updates(new_notes: list[Note], existing: list[Note], as_of: date) 
         if note.type in types
         and note.id not in new_ids
         and note.valid_to is None
+        and _is_synthesis_minted(note)
         and (successors := _successors_of(note, members))
     ]
     return retired
+
+
+def _is_synthesis_minted(note: Note) -> bool:
+    """True when `note`'s id is exactly the one memory synthesis mints from the members it cites.
+
+    The lineage test, and the reason it replaced a bare type match. "Same type, overlapping
+    members" retires notes this job could never have written, and one such note now exists by
+    design: since D-161 the observations tier promotes an observation into `playbook-<obs-hash>`,
+    an id anchored on the observation's *scope* rather than on the cluster's smallest member, so
+    `distill_playbooks` can never re-mint it. It was therefore always "an id this run no longer
+    mints" and was proposed for retirement on every run, carrying the body line "this cluster's
+    membership changed (merge or shrink)" — which is untrue of it. The PR-gate makes that a
+    misleading PR inviting a rubber-stamp, and merging one drops a human-approved playbook out of
+    every current-evidence sweep via `Note.is_current`. The same match caught human-authored notes
+    of a memory type, which at least failed loudly (`pr_gate.propose_note` refuses a `human` note).
+
+    Reconstructing the id is the whole check, and it lives in `chemclaw.memory.ids` beside the
+    `stable_id` it inverts — `memory.playbook` asks the same question to state a note's provenance,
+    and the two must never be able to answer it differently. This wrapper exists to name what the
+    answer *means* here, which is not the same thing as what it means there.
+    """
+    return is_cluster_anchored(note.id, note.outgoing_links())
 
 
 def _successors_of(note: Note, members: dict[str, set[str]]) -> list[str]:

@@ -10,10 +10,11 @@ entered `baseline.json` for the drift check to watch.
 **What these metrics do and do not measure, because the names invite the wrong reading.** A case
 here carries a *scripted* transcript: the model's replies are pinned, so nothing about the model's
 judgment is under test. What is under test is the harness around it — that a plan is emitted at
-all, that its steps survive into the event stream, that work is closed before an answer goes out,
-that the A/B arithmetic holds. **These do not supersede AG-13**, which is deferred on a live
-endpoint precisely because judging judgment needs one. `retrieval_recall` once carried a name that
-promised more than it scored, and the correction is cheaper written down than discovered.
+all, that its steps survive into the event stream, that a turn a guard cut off says so instead of
+looking finished, that the A/B arithmetic holds. **These do not supersede AG-13**, which is
+deferred on a live endpoint precisely because judging judgment needs one. `retrieval_recall` once
+carried a name that promised more than it scored, and the correction is cheaper written down than
+discovered.
 
 **The transcript is validated against the closed `Event` union**, not read as loose dicts. That is
 the union's whole value here: a case naming an event type the front door cannot emit is rejected at
@@ -24,16 +25,16 @@ from typing import Any
 
 from pydantic import TypeAdapter, ValidationError
 
-from chemclaw.api.events import AnswerEvent, ErrorEvent, Event, PlanEvent
+from chemclaw.api.events import ErrorEvent, Event, PlanEvent
 from chemclaw.core.config import settings
 from chemclaw.evals.ab import TaskScores, compare_tool_utility
 from chemclaw.evals.metric import EvalCase, MetricError, MetricResult, metric
 from chemclaw.evals.metrics import precision_recall_f1
 
-# Error codes that mean the turn was cut off rather than finished. `turn_timeout` and
-# `budget_exhausted` are the two exhaustion outcomes the front door reports; the rest of the
-# taxonomy describes failures that are not runaways (a storage outage is not the agent looping).
-_EXHAUSTION_CODES = frozenset({"turn_timeout", "budget_exhausted"})
+# Error codes that mean the turn was cut off rather than finished: it ran out of wall clock, out
+# of budget, or out of loop iterations. The rest of the taxonomy describes failures that are not
+# runaways (a storage outage is not the agent looping).
+_EXHAUSTION_CODES = frozenset({"turn_timeout", "budget_exhausted", "loop_cap_reached"})
 
 _TRANSCRIPT = TypeAdapter(list[Event])
 
@@ -61,17 +62,6 @@ def _final_plan(transcript: list[Event]) -> PlanEvent | None:
     """
     plans = [event for event in transcript if isinstance(event, PlanEvent)]
     return plans[-1] if plans else None
-
-
-def _open_steps(plan: PlanEvent) -> list[str]:
-    """The still-unchecked work items of a rendered plan.
-
-    `PlanEvent.todos` carries display strings — `"[x] title"` / `"[ ] title"` — because the surfaces
-    must not have to infer completion state (`agent.harness_todo.todo_titles`). Reading the checkbox
-    back off is the price of scoring the transcript the user actually saw rather than a second,
-    private view of the same state.
-    """
-    return [step[4:] for step in plan.todos if step.startswith("[ ] ")]
 
 
 def _plan_steps(plan: PlanEvent) -> list[str]:
@@ -129,25 +119,27 @@ def plan_quality(case: EvalCase) -> MetricResult:
 
 @metric("runaway_rate")
 def runaway_rate(case: EvalCase) -> MetricResult:
-    """Share of the case's turns that stopped without finishing what they had planned.
+    """Share of the case's turns that a guard cut off instead of letting them finish.
 
-    Reads `output.transcripts` — a list of transcripts, because a rate over one turn is a coin
-    flip and the name would be a lie. A turn counts as a runaway when either:
+    Reads `output.transcripts` — a list of transcripts, because a rate over one turn is a coin flip
+    and the name would be a lie. A turn counts as a runaway when it carries an `ErrorEvent` whose
+    code is one of `_EXHAUSTION_CODES`: `turn_timeout` (out of wall clock), `budget_exhausted` (out
+    of budget) or `loop_cap_reached` (out of loop iterations). One rule, and the transcript states
+    the outcome rather than the metric guessing at it.
 
-    - it ends in an `ErrorEvent` whose code is `turn_timeout` or `budget_exhausted`, the two ways
-      the front door reports being cut off; or
-    - it produced an `AnswerEvent` while its final plan still held unchecked steps.
+    **This used to infer the loop cap from residue — an answer sent while the plan still held
+    unchecked steps — and that scored correct turns as runaways.** The residue of a capped loop and
+    the residue of a *correctly deferred* one are the same thing: `mark_awaiting_job` opens a todo
+    that stays open precisely because the work moved to a durable job, so "I've started the DFT run,
+    job abc123" arrived as a runaway and, at the 0.0 gate, as a failure. The evidence that would
+    separate the two is not in the transcript at all — the marker lives in the todo's *description*
+    and `PlanEvent.todos` carries only rendered display strings — so no prefix filter could have
+    fixed it. The fix was to stop proxying: `AgentLoopMiddleware` no longer stops silently
+    (`chemclaw.agent.loop_cap`), the runner emits `loop_cap_reached`, and this reads that. A metric
+    that measures less and means it beats one that gates at 0.0 on evidence it cannot interpret.
 
-    **The second clause exists because the iteration cap emits no event, and that is worth stating
-    plainly.** `AgentLoopMiddleware` stops at `harness_max_loop_iterations` and returns normally, so
-    a capped turn is externally identical to a finished one apart from its residue: open todos and
-    an answer anyway. `tests/test_harness_execution.py` asserts exactly that residue
-    (`assert not items[0].is_complete`) from inside the process; this is the same observation made
-    from the transcript, which is all an eval case has. A metric that waited for a `runaway` event
-    would score 0.0 forever and read as proof the cap never fires.
-
-    Gated at `eval_runaway_max` (0.0): the pinned turns are scripted to complete, so a runaway
-    among them is broken plumbing rather than a hard problem.
+    Gated at `eval_runaway_max` (0.0): the pinned turns are scripted to complete, so a runaway among
+    them is broken plumbing rather than a hard problem.
     """
     raw = case.output.get("transcripts")
     if not isinstance(raw, list) or not raw:
@@ -162,11 +154,6 @@ def runaway_rate(case: EvalCase) -> MetricResult:
         ]
         if cut_off:
             runaways.append(f"#{index} cut off ({cut_off[-1].code})")
-            continue
-        plan = _final_plan(transcript)
-        answered = any(isinstance(event, AnswerEvent) for event in transcript)
-        if answered and plan is not None and _open_steps(plan):
-            runaways.append(f"#{index} answered with {len(_open_steps(plan))} step(s) still open")
     value = len(runaways) / len(raw)
     return MetricResult(
         metric="runaway_rate",
@@ -174,7 +161,7 @@ def runaway_rate(case: EvalCase) -> MetricResult:
         unit=None,
         passed=value <= settings.eval_runaway_max,
         provenance=(
-            f"{len(runaways)}/{len(raw)} turn(s) did not finish their plan"
+            f"{len(runaways)}/{len(raw)} turn(s) were cut off before they finished"
             + (f"; {'; '.join(runaways)}" if runaways else "")
         ),
     )

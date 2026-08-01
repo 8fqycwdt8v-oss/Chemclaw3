@@ -47,7 +47,13 @@ spec:
             {{- include "chemclaw.envFrom" . | nindent 12 }}
           resources:
             {{- toYaml .Values.resources.connector | nindent 12 }}
+          {{- /* Conditional key, not just a conditional body: `volumeMounts:` with nothing under it
+                 renders `null`. This hook is also where an absent `chemclaw-temporal-tls` Secret
+                 used to surface — as `FileNotFoundError: /etc/temporal/tls/tls.crt` from a Job whose
+                 message named neither Temporal nor a Secret. */}}
+          {{- if .Values.secrets.temporalTls.enabled }}
           volumeMounts:
             {{- include "chemclaw.tlsMount" . | nindent 12 }}
+          {{- end }}
       volumes:
         {{- include "chemclaw.volumes" . | nindent 8 }}

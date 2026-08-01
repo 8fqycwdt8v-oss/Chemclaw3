@@ -21,7 +21,10 @@ from chemclaw.memory.chains import detect_chains
 from chemclaw.memory.ids import stable_id
 from chemclaw.memory.interaction import note_from_confirmed_answer
 from chemclaw.memory.jobs import build_campaign_notes, distill_playbooks, synthesize_campaigns
+from chemclaw.memory.observations import Observation
 from chemclaw.memory.playbook import (
+    SOURCE_DISTILLATION,
+    SOURCE_PROMOTED_OBSERVATION,
     PlaybookError,
     find_playbook_candidates,
     playbook_note,
@@ -151,17 +154,25 @@ def test_growing_cluster_keeps_its_note_id() -> None:
 
 
 def _memory_note(
-    note_id: str,
     member_ids: list[str],
     *,
+    note_id: str | None = None,
+    note_type: str = "campaign",
     valid_from: date | None = None,
     valid_to: date | None = None,
 ) -> Note:
-    """A merged campaign-style note citing its members, as the corpus would hold it."""
+    """A merged campaign-style note citing its members, as the corpus would hold it.
+
+    The id is derived the way the builders derive it (`stable_id` over the cited members), because
+    that derivation is now what marks a note as this synthesis's own — a hand-picked id like
+    "campaign-aaa" is a note no memory job could have written, and the retirement pass must (and
+    now does) leave those alone. `note_id` overrides it only where a test needs a note *outside*
+    the lineage.
+    """
     citations = "\n".join(f"- [[reaction-{rid}]]" for rid in member_ids)
     return Note(
-        id=note_id,
-        type="campaign",
+        id=note_id if note_id is not None else stable_id(note_type.split("-")[0], member_ids),
+        type=note_type,
         body=f"Campaign.\n\n{citations}\n",
         valid_from=valid_from,
         valid_to=valid_to,
@@ -174,25 +185,25 @@ def test_merged_cluster_retires_the_losing_note() -> None:
     The winner keeps its anchor id and updates in place; without this the loser stayed in the
     graph as a *current* account of experiments it no longer describes.
     """
-    winner = _memory_note("campaign-aaa", ["r1", "r2"])  # the merged cluster's note
-    loser = _memory_note("campaign-bbb", ["r2"])  # the pre-merge note for a subset
+    winner = _memory_note(["r1", "r2"])  # the merged cluster's note
+    loser = _memory_note(["r2"])  # the pre-merge note for a subset
     today = date(2026, 7, 25)
 
     retired = supersede_updates([winner], [winner, loser], today)
 
-    assert [n.id for n in retired] == ["campaign-bbb"]
+    assert [n.id for n in retired] == [loser.id]
     assert retired[0].valid_to == today  # excluded from current-evidence sweeps from tomorrow
-    assert "Superseded by campaign-aaa" in retired[0].body
-    assert "[[campaign-aaa]]" not in retired[0].body  # plain text: the successor is not merged yet
+    assert f"Superseded by {winner.id}" in retired[0].body
+    assert f"[[{winner.id}]]" not in retired[0].body  # plain text: the successor is not merged yet
     assert "[[reaction-r2]]" in retired[0].body  # the original record is kept, not rewritten
 
 
 def test_shrunk_cluster_retires_the_pre_shrink_note() -> None:
     """Losing the anchor member mints a new id, so the pre-shrink note must be retired too."""
-    before = _memory_note("campaign-old", ["r1", "r2", "r3"])
-    after = _memory_note("campaign-new", ["r2", "r3"])  # r1 (the anchor) dropped out
+    before = _memory_note(["r1", "r2", "r3"])
+    after = _memory_note(["r2", "r3"])  # r1 (the anchor) dropped out
     retired = supersede_updates([after], [before, after], date(2026, 7, 25))
-    assert [n.id for n in retired] == ["campaign-old"]
+    assert [n.id for n in retired] == [before.id]
 
 
 def test_growing_cluster_is_not_retired() -> None:
@@ -201,8 +212,9 @@ def test_growing_cluster_is_not_retired() -> None:
     This is the case anchoring on the smallest member was designed for; retiring here would
     close a note's validity on every routine ELN sync.
     """
-    grown = _memory_note("campaign-aaa", ["r1", "r2", "r3"])
-    previous = _memory_note("campaign-aaa", ["r1", "r2"])
+    grown = _memory_note(["r1", "r2", "r3"])
+    previous = _memory_note(["r1", "r2"])
+    assert grown.id == previous.id  # the anchor survived the growth, so it is one note
     assert supersede_updates([grown], [previous], date(2026, 7, 25)) == []
 
 
@@ -212,18 +224,49 @@ def test_unrelated_and_already_retired_notes_are_left_alone() -> None:
     The already-retired case is what makes the job idempotent — a second run must not re-close a
     note it already closed, which would append the marker line again on every single run.
     """
-    new = _memory_note("campaign-aaa", ["r1"])
-    unrelated = _memory_note("campaign-zzz", ["r9"])
-    other_type = Note(id="playbook-p", type="playbook", body="- [[reaction-r1]]\n")
-    already = _memory_note("campaign-old", ["r1"], valid_to=date(2026, 1, 1))
+    new = _memory_note(["r1"])
+    unrelated = _memory_note(["r9"])
+    other_type = _memory_note(["r1"], note_type="playbook")
+    already = _memory_note(["r0", "r1"], valid_to=date(2026, 1, 1))  # overlaps, but already closed
+    assert already.id != new.id  # ...so only the closed window keeps it out
     retired = supersede_updates([new], [unrelated, other_type, already], date(2026, 7, 25))
     assert retired == []
 
 
+def test_a_note_this_synthesis_never_minted_is_not_retired() -> None:
+    """The lineage rule (D-161 fallout): a `playbook` id nothing here mints is left alone.
+
+    The observations tier promotes an observation into `playbook-<observation hash>`, an id
+    anchored on the observation's *scope* rather than on the cluster's smallest member — so
+    `distill_playbooks` can never re-mint it, and "same type, overlapping members, id I no longer
+    mint" matched it on every single run. The retirement it proposed carried the body line "this
+    cluster's membership changed (merge or shrink)", which is untrue of a note that was never a
+    cluster's; through the PR-gate that is a misleading PR inviting a rubber-stamp, and merging one
+    drops a human-approved playbook out of every current-evidence sweep (`Note.is_current`).
+
+    The human-authored variant of the same match is covered here too: it used to reach
+    `propose_note`, which refuses a `human` note — loud, but still a synthesis run crashing on a
+    note it had no business touching.
+    """
+    fresh = _memory_note(["r1", "r2"], note_type="playbook")
+    # Exactly how `observation_jobs.promote_observations_activity` names a promoted playbook.
+    observation = Observation(
+        statement="failed in both projects",
+        scope="transformation:r1",
+        evidence_note_ids=["reaction-r1", "reaction-r2"],
+    ).with_id()
+    promoted_id = f"playbook-{observation.id.removeprefix('observation-')}"
+    promoted = _memory_note(["r1", "r2"], note_id=promoted_id, note_type="playbook")
+    handwritten = _memory_note(["r1"], note_id="playbook-degassing", note_type="playbook")
+
+    assert promoted.id != fresh.id  # the scope anchor, not the cluster anchor — hence "never mints"
+    assert supersede_updates([fresh], [promoted, handwritten], date(2026, 7, 25)) == []
+
+
 def test_retiring_a_not_yet_valid_note_keeps_a_legal_window() -> None:
     """A note whose validity starts in the future closes at its start, never before it (F10-G2)."""
-    future = _memory_note("campaign-future", ["r1"], valid_from=date(2027, 1, 1))
-    retired = supersede_updates([_memory_note("campaign-new", ["r1"])], [future], date(2026, 7, 25))
+    future = _memory_note(["r1"], valid_from=date(2027, 1, 1))
+    retired = supersede_updates([_memory_note(["r0", "r1"])], [future], date(2026, 7, 25))
     assert retired[0].valid_to == date(2027, 1, 1)  # == valid_from, a legal (single-day) window
 
 
@@ -241,10 +284,9 @@ def test_synthesis_publishes_supersedes_alongside_new_notes(
     a = _reaction("a", ["CCO"], ["CC=O"])
     b = _reaction("b", ["CC=O"], ["CC(O)O"])
     # The corpus already holds the note for the "b"-only cluster, from before "a" was ingested.
-    stale_id = stable_id("campaign", ["b"])
-    (knowledge / f"{stale_id}.md").write_text(
-        render_note(_memory_note(stale_id, ["b"])), encoding="utf-8"
-    )
+    stale = _memory_note(["b"])  # its id is `stable_id("campaign", ["b"])` — the lineage marker
+    stale_id = stale.id
+    (knowledge / f"{stale_id}.md").write_text(render_note(stale), encoding="utf-8")
     monkeypatch.setattr(settings, "knowledge_dir", str(tmp_path / "knowledge"))
 
     notes = build_campaign_notes([a, b])
@@ -303,6 +345,36 @@ def test_playbook_note_requires_evidence() -> None:
     assert playbook_note("p", "s", ["interaction-42"]).outgoing_links() == ["interaction-42"]
     with pytest.raises(PlaybookError, match="no evidence"):
         playbook_note("playbook-empty", "no evidence here", [])
+
+
+def test_a_playbook_states_which_of_its_two_producers_wrote_it() -> None:
+    """`playbook` has two provenances, and a reader of the merged file has to be able to tell.
+
+    Cluster distillation ("this transformation recurs across projects") and a promoted observation
+    ("enough merged notes backed this reading that a human was asked to judge it") are different
+    kinds of claim, and both used to stamp `memory:cross-project-distillation` — so the graph said
+    the second was the first.
+
+    Derived from the id, never asserted by the caller: distillation anchors on the cluster's
+    smallest member, promotion on the observation's scope. A `source` a caller passes could
+    disagree with the id, which is why `supersede._is_synthesis_minted` cannot trust one — and
+    deriving both from `is_cluster_anchored` is what keeps the note's own statement and the
+    retirement rule from ever answering differently.
+    """
+    evidence = ["reaction-r1", "reaction-r2"]
+    distilled = playbook_note(stable_id("playbook", ["r1", "r2"]), "recurs", evidence)
+    assert distilled.source == SOURCE_DISTILLATION
+
+    observation = Observation(
+        statement="failed in both projects", scope="transformation:r1", evidence_note_ids=evidence
+    ).with_id()
+    promoted = playbook_note(
+        f"playbook-{observation.id.removeprefix('observation-')}", "noticed", evidence
+    )
+    assert promoted.source == SOURCE_PROMOTED_OBSERVATION
+    # The note the graph already distinguishes is also the note supersede must not retire, from the
+    # same derivation — one rule, two readings, no way for them to disagree.
+    assert supersede_updates([distilled], [promoted], date(2026, 7, 25)) == []
 
 
 # --- jobs (5.3/5.4 wiring) ------------------------------------------------------------

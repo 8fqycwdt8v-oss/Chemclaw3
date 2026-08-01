@@ -41,7 +41,7 @@ from chemclaw.science.calc.crest_cli import CrestEffort
 from chemclaw.science.calc.store import CalculationKey, ResultStore, run_cached
 from chemclaw.science.calc.structure import Structure, structure_from_smiles
 from chemclaw.science.calc.xtb_opt import OptSpec, optimize_structure
-from chemclaw.science.calc.xtb_spec import CrestSpec
+from chemclaw.science.calc.xtb_spec import CrestSpec, backend_version
 
 _HARTREE_TO_KCAL = 627.5094740631
 
@@ -50,8 +50,7 @@ class ComplexSpec(CrestSpec):
     """Settings of one non-covalent complex search.
 
     `CrestSpec` because the search is crest's; the three optimizations around it run on
-    whatever `chemclaw.science.calc.xtb_opt` resolves, and `_opt_spec` keeps that consistent with
-    this one.
+    `engine`, and `_opt_spec` keeps that consistent with this one.
     """
 
     task: Literal["complex"] = "complex"
@@ -60,6 +59,27 @@ class ComplexSpec(CrestSpec):
     # Angstrom. Only a starting point — the wall potential and the search decide where
     # they end up — but far enough apart that the pair does not begin fused.
     separation_angstrom: float = Field(default=3.5, gt=0)
+
+    def calc_version(self) -> str:
+        """Two programs run here, so the key names both (D-2026-08-01-a-key-names-what-ran).
+
+        `CrestSpec` drops `engine` because a pure ensemble search never touches it — crest
+        produces every number in a `ConformerEnsemble`. That premise is false for this spec, and
+        it is false in the direction that matters: crest only *chooses the binding mode*, while
+        every number `InteractionResult` reports — the interaction energy, the complex energy,
+        both monomer energies, the reported geometry — comes out of the three
+        `optimize_structure` calls in `compute_interaction`, which run on `engine`
+        (see `_opt_spec`). `chemclaw.science.calc.xtb_opt` keys its *own* rows on the backend for
+        exactly this reason ("the two are separately cached because they do not produce identical
+        geometries"); a composite that omits it would let a tblite interaction energy be served to
+        a deployment that has the xtb binary, under a key claiming the binary computed it.
+
+        In `calc_version` rather than in `params`, on the same grounds as `XtbSpec`: a backend is
+        a program, not a knob, and `calc_version` is also the calibration ledger's key
+        (`chemclaw.science.calc.calibration.calibration_for`) — residuals measured against
+        ANCopt-relaxed complexes must not reconcile against Cartesian-L-BFGS ones.
+        """
+        return f"{super().calc_version()}+{self.engine}+{backend_version(self.engine)}"
 
 
 class InteractionResult(BaseModel):
@@ -137,10 +157,11 @@ def _ordered(smiles_a: str, smiles_b: str) -> tuple[str, str]:
 def _opt_spec(spec: ComplexSpec) -> OptSpec:
     """The optimization settings the monomers and the bound complex all share.
 
-    `engine` is carried across rather than left to re-resolve. It defaults to the same
-    thing, so this changes no result today — but an explicitly-engined `ComplexSpec` would
-    otherwise have optimized on one backend while its key named the other, which is the
-    cache defect (D-011) rather than a preference.
+    `engine` is carried across rather than left to re-resolve, and that propagation is what
+    makes `ComplexSpec.calc_version` honest: the key names the backend, so the backend named
+    has to be the one that actually relaxes the three species. Re-resolving here would let an
+    explicitly-engined `ComplexSpec` optimize on one backend while its key claimed the other,
+    which is the cache defect (D-011) rather than a preference.
     """
     return OptSpec(method=spec.method, engine=spec.engine, solvent=spec.solvent)
 

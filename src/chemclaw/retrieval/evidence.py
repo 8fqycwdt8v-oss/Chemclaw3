@@ -22,10 +22,19 @@ class EvidenceChunk(BaseModel):
     retriever: str = Field(min_length=1)
     # A relevance/support score in [0, 1], higher = keep first when a sweep must truncate (KM-5).
     # Each retriever sets it in its own terms — graph hits by the note's `confidence`, structural
-    # hits by similarity — so it orders within a sweep; it is a ranking heuristic, not a calibrated
-    # cross-source probability. Defaults to a neutral 0.5: every current retriever sets it
-    # explicitly, so this only governs a future retriever that forgets to — and neutral keeps such
-    # a chunk in the middle of the ranking rather than silently pinning it last (and truncated).
+    # hits by similarity, index hits by `ts_rank` or cosine — so it is a ranking heuristic, not a
+    # calibrated cross-source probability.
+    #
+    # **Which is why it orders a source's own list and nothing wider.** `gather_evidence` used to
+    # sort the union of every source by this number before capping it, and measurably starved the
+    # lexical leg to zero surviving chunks: a note's `confidence` and a Postgres `ts_rank` are not
+    # the same quantity and the higher scale simply won. Both merge modes now go by rank position,
+    # which *is* comparable across sources, and each retriever applies this score inside its own
+    # ranking where it means something.
+    #
+    # Defaults to a neutral 0.5: every current retriever sets it explicitly, so this only governs a
+    # future retriever that forgets to — and neutral keeps such a chunk in the middle of its
+    # source's ranking rather than silently pinning it last (and truncated).
     score: float = Field(default=0.5, ge=0.0, le=1.0)
     # Notes this chunk's source note is known or suspected to disagree with (`kg.conflicts`,
     # KM-8). A *flag*, never a filter: retrieval has no basis for deciding which of two curated

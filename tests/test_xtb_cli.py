@@ -239,17 +239,48 @@ def test_crest_backed_specs_are_keyed_on_crests_own_build() -> None:
     "for the cache key (an upgrade must recompute)" — and no caller ever passed it to one,
     so upgrading crest silently served every stored ensemble and interaction energy.
 
-    Asserted on both CREST-backed specs, and asserted *negatively* against the engine build
-    too: naming the wrong program is what the defect was, so keeping both names would not
-    fix it.
+    Asserted on both CREST-backed specs. The *negative* half — that the engine build is absent —
+    holds only for the ensemble search, where crest produces every number; see
+    `test_a_complex_key_names_both_programs_that_produced_it`.
     """
     from chemclaw.science.calc.complexes import ComplexSpec
     from chemclaw.science.calc.xtb_spec import backend_version
 
     for spec in (ConformerSpec(), ComplexSpec()):
-        version = spec.calc_version()
-        assert crest_cli.binary_version() in version
-        assert backend_version("tblite") not in version
+        assert crest_cli.binary_version() in spec.calc_version()
+    assert backend_version("tblite") not in ConformerSpec().calc_version()
+
+
+def test_a_complex_key_names_both_programs_that_produced_it() -> None:
+    """An interaction energy is crest's binding mode relaxed by `engine` — so both are keyed.
+
+    `CrestSpec` drops `engine` because a pure ensemble search never runs one. D-106 placed that
+    drop on the base class and, in the same edit, routed `engine` into the `OptSpec` that
+    `compute_interaction` uses for all three of its optimizations — which made the premise false
+    here. Crest only *chooses* the binding mode; every number `InteractionResult` carries
+    (`interaction_energy_kcal`, `complex_energy_hartree`, both `monomer_energies_hartree`, the
+    reported `structure`) comes out of `optimize_structure`, and
+    `chemclaw.science.calc.xtb_opt` keys its own rows on the backend precisely because the two
+    do not produce identical geometries.
+
+    So the defect was a real one, not a documentation gap: a tblite-relaxed interaction energy
+    and an ANCopt-relaxed one shared a cache entry, and whichever ran first was served to the
+    other deployment under a `calc_refs` stamp naming it.
+    """
+    from chemclaw.science.calc.complexes import ComplexSpec
+
+    library = ComplexSpec(engine="tblite")
+    binary = ComplexSpec(engine="xtb")
+    assert crest_cli.binary_version() in library.calc_version()
+    assert backend_version("tblite") in library.calc_version()
+    assert backend_version("xtb") in binary.calc_version()
+
+    # Through the key, not only the version string: the two must not collide anywhere.
+    subject = structure_from_smiles("O")
+    assert library.cache_key(subject) != binary.cache_key(subject)
+    # ...and the split is a *version* split, as it is for `XtbSpec`: a backend is a program,
+    # not a knob, and `calc_version` is also the calibration ledger's key.
+    assert library.cache_key(subject).params_hash == binary.cache_key(subject).params_hash
 
 
 def test_a_crest_spec_does_not_claim_a_backend_it_never_runs_on() -> None:

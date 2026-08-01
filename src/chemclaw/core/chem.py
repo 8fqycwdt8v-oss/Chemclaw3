@@ -23,6 +23,32 @@ conventional order, because a bespoke normalization is a bespoke notion of samen
 3. `Uncharger` — neutralize what can be neutralized, so a carboxylate meets its acid.
 4. `TautomerEnumerator.Canonicalize` — one representative per tautomer set.
 
+Steps 2 and 3 say **"the counterion is not part of the identity"**, and that claim holds for an
+amine hydrochloride and for sodium benzoate but not for every species a chemist writes. It fails
+in three directions, each of which deletes the reagent rather than normalizing it, and
+`_identity_survives_stripping` is the one gate that holds them off:
+
+- **Nothing organic is left to be the compound.** A wholly inorganic reagent has no organic parent
+  to keep, so the strip discards half the formula: NaOH and KOH both became water, CsF became a
+  bare caesium ion, and K2CO3, Cs2CO3, Na2CO3 and NaHCO3 became one carbonic acid.
+- **The discarded fragment is the reactive centre, not a spectator.** `Cleanup` disconnects metals,
+  so Pd(OAc)2 arrived at step 2 as `[Pd+2]` beside two acetates and left it as acetic acid, and
+  Pd(dppf)Cl2 left it as the bare ligand — a Pd-source screen therefore reported that nothing had
+  changed, exactly as the base screen did.
+- **The compound is organometallic, and the discarded fragment is its solvent.** An alkyllithium or
+  a Grignard is supplied and logged as a solution — "n-BuLi in hexanes", "iPrMgCl in THF" — and the
+  solvent is the larger fragment, so the parent chosen was the *solvent*: n-BuLi standardized to
+  hexane, MeMgBr to diethyl ether, PhLi to dibutyl ether, and AlMe3 — whose Al–C bond `Cleanup`
+  does break — plain methane. A pyrophoric reagent and an alkane sharing one compound id is the
+  worst instance of this defect, since a hazard screen reads that id.
+
+Two properties separate the three from the salts that must keep collapsing, and neither is "does it
+contain a metal": a **d- or f-block metal** is what the flask is for, while a group-1/2 counterion
+only balances a charge (`_REACTIVE_METALS`); and a **metal–carbon bond** is the reagent itself,
+while the same metals in an ionic salt have none (`_is_organometallic`). Sodium benzoate and LDA
+fail both tests and still collapse. See `_is_organic` for why "organic" is a C–H/C–C test and not
+"contains a carbon".
+
 **There are two questions here, and conflating them is how this goes wrong in the other
 direction.** Applying the pipeline everywhere neutralizes species a chemist meant as ions, and a
 calculation submitted for acetate must not silently compute acetic acid — the test suite says so
@@ -53,7 +79,41 @@ from chemclaw.core.ids import stable_hash
 # search rather than being silently compared against rows built under a newer one — the guard
 # `science/fingerprints/store.py` already applies to a changed radius or bit width, extended to the
 # other thing that decides what a row *is*.
-STANDARDIZATION_VERSION = "std1"
+STANDARDIZATION_VERSION = "std4"
+
+# The d- and f-block by atomic number — Sc→Zn, Y→Cd, La→Hg (lanthanides included) and Ac onward.
+# A block rather than a hand-picked element list, because the property being asserted is a block
+# property: these are the metals a synthesis puts in the flask to *do* the chemistry (Pd, Cu, Ni,
+# Ru, Fe, Zn, Sm), so a species containing one is a complex whose identity is the whole complex.
+# Their absence is what makes a counterion a spectator — the group-1/2 metals that balance a charge
+# in sodium benzoate or LDA are outside it, and keep collapsing. RDKit exposes no block predicate,
+# so the ranges are spelled out here rather than derived.
+_REACTIVE_METALS = frozenset((*range(21, 31), *range(39, 49), *range(57, 81), *range(89, 113)))
+
+# Every metal, for the metal–carbon test — the block above widened by the two groups it excludes.
+# The metalloids (B, Si, Ge, As, Sb, Te) are deliberately left out: a boronic acid and a silyl azide
+# are organic reagents, and calling boron metallic would exempt every Suzuki boron source from a
+# strip that is correct for it.
+_METALS = _REACTIVE_METALS | frozenset(
+    (
+        # the s-block below helium — groups 1 and 2
+        *range(3, 5),
+        *range(11, 13),
+        *range(19, 21),
+        *range(37, 39),
+        *range(55, 57),
+        *range(87, 89),
+        # the post-transition metals — Al, Ga, In, Sn, Tl, Pb, Bi, Po
+        13,
+        31,
+        49,
+        50,
+        81,
+        82,
+        83,
+        84,
+    )
+)
 
 # One `TautomerEnumerator` for the process. Constructing it parses its transform catalogue, which
 # is not free, and this runs per component per ingested reaction.
@@ -75,16 +135,77 @@ def _standardized(smiles: str) -> str | None:
     return str(Chem.MolToSmiles(standardize(mol)))
 
 
+def _is_organic(fragment: Chem.Mol) -> bool:
+    """Whether a fragment is organic: does it hold a carbon bonded to hydrogen or to carbon?
+
+    The C–H/C–C test rather than the obvious "does it contain a carbon", because the obvious one
+    calls carbonate and bicarbonate organic — and then `FragmentParent` keeps `[O-]C([O-])=O` as
+    the "parent" of K2CO3 and throws the potassium away, which is precisely how K2CO3, Cs2CO3,
+    Na2CO3 and NaHCO3 collapsed into one compound. Cyanide fails the test for the same reason and
+    equally correctly: NaCN and KCN are two reagents, not one.
+
+    It is the classical organic/inorganic line (carbonates, cyanides, carbides and CO/CO2 are the
+    conventional carbon-containing exceptions), and it is deliberately a *structural* test rather
+    than an element list, so no table has to be kept in step with the reagents chemists write.
+    """
+    return any(
+        atom.GetAtomicNum() == 6
+        and (
+            atom.GetTotalNumHs(includeNeighbors=True) > 0
+            or any(neighbor.GetAtomicNum() == 6 for neighbor in atom.GetNeighbors())
+        )
+        for atom in fragment.GetAtoms()
+    )
+
+
+def _is_organometallic(mol: Chem.Mol) -> bool:
+    """Whether the species has a metal–carbon bond, the bond that *is* the reagent.
+
+    n-Butyllithium, a Grignard, a cuprate and an organozinc are defined by their M–C bond, so the
+    hydrocarbon left after it is broken is a different substance in every way that matters: n-BuLi
+    is pyrophoric and butane is a fuel gas. An ionic salt of the same metals has no M–C bond, which
+    is what lets sodium benzoate and LDA keep collapsing — the cut is the bond, not the element.
+    """
+    for bond in mol.GetBonds():
+        ends = {bond.GetBeginAtom().GetAtomicNum(), bond.GetEndAtom().GetAtomicNum()}
+        if 6 in ends and ends & _METALS:
+            return True
+    return False
+
+
+def _identity_survives_stripping(original: Chem.Mol, cleaned: Chem.Mol) -> bool:
+    """Whether keeping only the parent fragment still names the same compound.
+
+    All three ways it can fail delete the reagent rather than normalize it (see the module
+    docstring). The two molecules are not interchangeable, and each check deliberately asks the
+    stage that still holds its evidence:
+
+    - the **cleaned** one for a reactive metal, because `Cleanup` is what disconnects the metal into
+      the fragment that would then be thrown away, and the check exists to see that fragment;
+    - the **original** one for a metal–carbon bond, because the same `MetalDisconnector` breaks M–C
+      for some metals and not others — Al–C yes, Li–C and Mg–C no — so by the time the molecule is
+      cleaned the evidence has been destroyed for exactly the ones no other check catches. AlMe3 is
+      the case that decides it: aluminium is outside `_REACTIVE_METALS`, so reading the cleaned
+      molecule standardizes trimethylaluminium to methane.
+    """
+    if _is_organometallic(original):
+        return False  # the M–C bond is the reagent; the hydrocarbon left without it is not
+    if any(atom.GetAtomicNum() in _REACTIVE_METALS for atom in cleaned.GetAtoms()):
+        return False  # a metal complex: the metal is the chemistry, not a counterion
+    return any(_is_organic(fragment) for fragment in Chem.GetMolFrags(cleaned, asMols=True))
+
+
 def standardize(mol: Chem.Mol) -> Chem.Mol:
     """Apply the standardization pipeline to a parsed molecule (see the module docstring).
 
     Separate from the SMILES helpers so a caller that already holds a molecule — and a test that
     wants to check one stage — does not have to round-trip through a string.
     """
-    mol = rdMolStandardize.Cleanup(mol)
-    mol = rdMolStandardize.FragmentParent(mol)
-    mol = rdMolStandardize.Uncharger().uncharge(mol)
-    return _TAUTOMERS.Canonicalize(mol)
+    cleaned = rdMolStandardize.Cleanup(mol)
+    if _identity_survives_stripping(mol, cleaned):
+        cleaned = rdMolStandardize.FragmentParent(cleaned)
+        cleaned = rdMolStandardize.Uncharger().uncharge(cleaned)
+    return _TAUTOMERS.Canonicalize(cleaned)
 
 
 class InvalidSmilesError(ChemclawError):

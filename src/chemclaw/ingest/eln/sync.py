@@ -69,15 +69,33 @@ class IngestSummary(BaseModel):
     skip every later real entry forever. `next_cursor` also never regresses below the
     run's `since`, even though the fetch reaches an overlap window behind it.
 
-    `skipped_existing` lists overlap-window entries whose note already sits merged in
-    the knowledge dir: they were fully ingested by an earlier run, so this run skipped
-    them cheaply instead of re-running the fingerprint upserts and the PR-gate git
-    cycle. Kept separate from `ingested` so operators see the overlap short-circuit
-    working rather than a re-inflated ingest count.
+    **Three of the lists describe an entry that was *not* rejected, and they say three
+    different things — the middle one used to be silent.** An entry is *ingested* when
+    this run indexed its fingerprints and opened its note on a branch — proposed, which is
+    as far as an automated step is allowed to take a knowledge claim (the PR-gate: a human
+    merges). It is
+    *skipped_existing* when its note already sits merged in the knowledge dir with the
+    same body, so there was nothing to index or review again and the run short-circuited
+    the fingerprint upserts and the git cycle. Those are the two ends; `awaiting_merge` is
+    what lies between them, and the terminology used to collapse it into the first one —
+    `skipped_existing` called its entries "fully ingested by an earlier run" while
+    `ingested` counted entries that were only *proposed*.
+
+    `awaiting_merge` is the subset of `ingested` that sits inside the replay window with
+    no merged note — so **the next run will propose it again**, and every run after that,
+    until a human merges it. That is the operator-facing claim, and it is deliberately the
+    one a single run can actually establish: whether the entry was proposed before is not
+    knowable from here (a late-landing export file lands in the same window on its first
+    sync), but whether it is coming back is. A PR the `kg-validate` hazard gate blocks and
+    a PR nobody has looked at both live here, indefinitely, and without this an operator
+    sees a healthy steady ingest count with no sign that the same entries are going round.
+    A subset rather than a fourth disjoint bucket because the work really did happen — the
+    run paid for the ingest — it just may not have accomplished anything new.
     """
 
     ingested: list[str]
     skipped_existing: list[str] = Field(default_factory=list)
+    awaiting_merge: list[str] = Field(default_factory=list)
     rejected: list[RejectedEntry]
     next_cursor: datetime
 
@@ -102,14 +120,18 @@ async def sync_entries(
     contract): the workflow's chunk loop reaches behind the cursor only on its first
     chunk, so draining a backlog does not re-fetch the whole overlap window per chunk.
 
-    Overlap replay is cheap, not just idempotent: an overlap entry whose note is already
-    merged into the knowledge dir was fully ingested by an earlier run — ELN exports are
-    immutable (the overlap window's premise), so it is skipped by a note-id lookup
-    instead of re-running fingerprint upserts plus a PR-gate git submission cycle.
+    Overlap replay is cheap, not just idempotent: an overlap entry whose merged note carries
+    the same body has nothing left to index or to review, so it is skipped by a note-id
+    lookup instead of re-running fingerprint upserts plus a PR-gate git submission cycle.
+    A replay-window entry with *no* merged note is the opposite case — the review queue
+    has not moved, so this run proposes it and the next one will too — and it is reported
+    under `awaiting_merge`, because an entry stuck in review forever must not read as a
+    fresh ingest every hour.
     """
     entries = await adapter.fetch_new_entries(_fetch_floor(since) if apply_overlap else since)
     ingested: list[str] = []
     skipped_existing: list[str] = []
+    awaiting_merge: list[str] = []
     rejected: list[RejectedEntry] = []
     merged: dict[str, str] | None = None
     cursor = since
@@ -129,6 +151,10 @@ async def sync_entries(
             )
             continue
         cursor = max(cursor, raw.created_at)
+        # Whether this entry will come back on the next run: it is inside the replay window and
+        # its note is not merged. Decided inside the try (it needs the mapped note) and recorded
+        # after it, so an entry that then fails to ingest is only ever reported as rejected.
+        unmerged_replay = False
         try:
             reaction = adapter.map_to_ord(raw)
             note = note_from_ord_reaction(reaction)
@@ -141,13 +167,22 @@ async def sync_entries(
                 # off the event loop, and only when a replay actually happened.
                 if merged is None:
                     merged = await asyncio.to_thread(_merged_note_bodies)
-                if merged.get(note.id) == note.body.strip():
+                merged_body = merged.get(note.id)
+                if merged_body == note.body.strip():
                     # Byte-identical to what is merged: nothing to review, so skip the whole
                     # ingest. A *different* body falls through and is re-proposed, which the
                     # PR-gate renders as a diff for a human — which is what a git-backed graph is
                     # for, and why an amendment needs no separate versioning scheme.
                     skipped_existing.append(raw.entry_id)
                     continue
+                # A replay-window entry with no merged note at all will be fetched and proposed
+                # again next run, and every run after that, until a human merges it. Proposing is
+                # right — the branch is idempotent and the PR-gate is where a knowledge claim
+                # belongs — but it is not progress, and reporting it as a plain ingest is what let
+                # a permanently blocked entry look like a fresh one forever. (An amendment,
+                # `merged_body is not None`, is new content and is not reported here: its merged
+                # predecessor proves the queue is moving.)
+                unmerged_replay = merged_body is None
             await ingest_reaction(reaction, reaction_store, molecule_store, submitter)
         except (ChemclawError, ValidationError) as exc:
             # The shared bad-data base covers *any* per-entry failure: an adapter's
@@ -163,15 +198,29 @@ async def sync_entries(
             )
             continue
         ingested.append(raw.entry_id)
+        if unmerged_replay:
+            awaiting_merge.append(raw.entry_id)
     # The summary is a return value the scheduler stores; also log the outcome so an admin
     # running this under a Temporal Schedule sees it without opening the workflow result, and
     # gets a WARNING trail of exactly which entries were rejected and why.
     logger.info(
-        "eln sync: ingested=%d rejected=%d skipped_existing=%d",
+        "eln sync: ingested=%d rejected=%d skipped_existing=%d awaiting_merge=%d",
         len(ingested),
         len(rejected),
         len(skipped_existing),
+        len(awaiting_merge),
     )
+    if awaiting_merge:
+        # WARNING, not INFO, and on every run: this is the one outcome nothing else reports. These
+        # entries were proposed into a review queue that has not moved — nobody is working it, or a
+        # `kg-validate` hazard gate is refusing the branch — so the next run proposes them again,
+        # while the ingest count above reads as steady progress.
+        logger.warning(
+            "eln sync proposed %d entry/entries whose notes are still unmerged; they will be "
+            "re-proposed every run until a human merges or rejects them: %s",
+            len(awaiting_merge),
+            ", ".join(_log_safe(entry_id) for entry_id in awaiting_merge),
+        )
     for entry in rejected:
         # An overlap-window rejection (`created_at <= since`) is a replay: the cursor advances
         # past sane-timestamped rejections, so this entry was already warned about when first
@@ -188,13 +237,14 @@ async def sync_entries(
     return IngestSummary(
         ingested=ingested,
         skipped_existing=skipped_existing,
+        awaiting_merge=awaiting_merge,
         rejected=rejected,
         next_cursor=cursor,
     )
 
 
 def _merged_note_bodies() -> dict[str, str]:
-    """Every merged note's id mapped to its body (the already-ingested check).
+    """Every merged note's id mapped to its body (the already-*merged* check).
 
     Why: the hourly overlap replay must not pay a full ingest (fingerprint upserts + the
     PR-gate's fetch/checkout/push dance) per already-merged entry just to discover it was a

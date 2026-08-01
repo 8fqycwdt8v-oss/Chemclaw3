@@ -7,6 +7,10 @@ repetition is episodic, not a transferable rule). `find_playbook_candidates` is 
 (config threshold); `playbook_note` builds the note and **requires evidence references** — a
 playbook with no citations is inadmissible (plan 5.4: Belegverweise verpflichtend). The
 distilled rule's prose is the `playbook-distillation` skill's judgment, layered on this base.
+
+`playbook_note` is also what the observations tier calls when a human promotes an observation
+(`durable.observation_jobs`), so a `playbook` note has two provenances. It states which, on the
+note, derived from the id rather than asserted by the caller — see the function's docstring.
 """
 
 from pydantic import BaseModel
@@ -15,7 +19,15 @@ from chemclaw.core.config import settings
 from chemclaw.core.errors import ChemclawError
 from chemclaw.ingest.eln.ord import OrdReaction, OutcomeClass
 from chemclaw.kg.note import Note
+from chemclaw.memory.ids import is_cluster_anchored
 from chemclaw.memory.similarity import cluster_by_similarity, reaction_fingerprints
+
+# The two things that mint a `playbook` note, told apart on the note itself. A reader of the merged
+# file — and every retrieval path that surfaces `source` — deserves to know which one wrote it: a
+# cluster distilled from reactions that recur across projects is a different kind of claim from a
+# reading the observations tier accumulated support for and a human then chose to promote (D-161).
+SOURCE_DISTILLATION = "memory:cross-project-distillation"
+SOURCE_PROMOTED_OBSERVATION = "memory:promoted-observation"
 
 
 class PlaybookCandidate(BaseModel):
@@ -78,6 +90,15 @@ def playbook_note(note_id: str, summary: str, evidence_note_ids: list[str]) -> N
     note, and stripping-then-re-adding the prefix turned `interaction-42` into a link to
     `reaction-interaction-42` — a dangling citation that fails `kg-validate` on the very PR the
     promotion opens. A function that cites what it is given cannot make that mistake.
+
+    **`source` is derived, not passed.** Both producers already say which one they are, in the id
+    they mint: cluster distillation anchors it on the cluster's smallest member, and promotion
+    anchors it on the observation's scope, so `is_cluster_anchored` tells them apart from the
+    arguments already here. Taking the provenance as a parameter instead would make it a claim the
+    caller asserts — and a claim can disagree with the id, which is exactly why
+    `memory.supersede._is_synthesis_minted` has to reconstruct the id rather than read `source`.
+    Deriving both from one function means the note's stated provenance and the retirement pass's
+    lineage rule cannot come apart.
     """
     if not evidence_note_ids:
         raise PlaybookError(f"playbook {note_id!r} has no evidence references")
@@ -87,6 +108,10 @@ def playbook_note(note_id: str, summary: str, evidence_note_ids: list[str]) -> N
         id=note_id,
         type="playbook",
         created_by="agent",
-        source="memory:cross-project-distillation",
+        source=(
+            SOURCE_DISTILLATION
+            if is_cluster_anchored(note_id, evidence_note_ids)
+            else SOURCE_PROMOTED_OBSERVATION
+        ),
         body=body,
     )

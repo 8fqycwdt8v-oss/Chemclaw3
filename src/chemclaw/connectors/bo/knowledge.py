@@ -16,6 +16,8 @@ and over what space", and never has to know the job id or the requester — whic
 mapping a pure function of the campaign.
 """
 
+from rdkit import Chem
+
 from chemclaw.core.config import settings
 from chemclaw.core.ids import stable_hash
 from chemclaw.kg.note import Note
@@ -25,6 +27,7 @@ from chemclaw.science.bo.problem import (
     Observation,
     OptimizationProblem,
     Parameter,
+    ParamValue,
 )
 
 
@@ -58,11 +61,19 @@ def note_from_campaign_result(
     of the possible truncations. Leading with the number puts it, its provenance and the model's
     own uncertainty about it inside the prefix that actually gets quoted back.
 
+    **The molecules it recommends are written as structures, not as prose** — see `_condition` and
+    `_recommended_molecule`. That is what puts a `bo-candidate` in front of the hazard gate, which
+    could not see one at all before.
+
     The note carries no `[[wikilink]]` (a dangling link would fail `chemclaw.kg.validate` on the
     very PR this opens).
     """
     best = result.best
-    conditions = "\n".join(f"- {name}: {value}" for name, value in sorted(best.params.items()))
+    by_name = {parameter.name: parameter for parameter in problem.parameters}
+    conditions = "\n".join(
+        f"- {_condition(by_name.get(name), name, value)}"
+        for name, value in sorted(best.params.items())
+    )
     space = "\n".join(f"- {_parameter_range(parameter)}" for parameter in problem.parameters)
     body = (
         f"Bayesian-optimization recommendation for objective `{objective_name}`, "
@@ -77,8 +88,80 @@ def note_from_campaign_result(
         type="bo-candidate",
         created_by="agent",
         source=f"bo:{objective_name}",
+        compound_smiles=_recommended_molecule(by_name, best),
         body=body,
     )
+
+
+def _molecule_in(parameter: Parameter | None, value: ParamValue) -> str | None:
+    """The SMILES a recommended parameter value names, or None when it names no molecule.
+
+    A campaign declares "this choice is a molecule" in one of two ways and both have to be read
+    here, because between them they cover every shipped objective: a featurized categorical carries
+    an explicit label → SMILES map (`CategoricalParameter.structures`), while a library campaign
+    (`science.bo.objectives.molecule_library_problem`) makes the SMILES *itself* the category
+    label. Only the second needs RDKit, and only to answer "is this label a structure at all" —
+    the same arbiter, for the same reason, that `science.safety.notes.structures_in` applies to a
+    note body: a heuristic over label spellings would be a second, weaker answer to one question.
+
+    `parameter` is optional because the caller looks it up by name from the recommended point: a
+    result whose params do not line up with the problem still has to yield a readable note rather
+    than a `KeyError` that loses a completed campaign.
+    """
+    if not isinstance(parameter, CategoricalParameter):
+        return None
+    label = str(value)
+    declared = (parameter.structures or {}).get(label)
+    if declared is not None:
+        return declared
+    return label if Chem.MolFromSmiles(label) is not None else None
+
+
+def _condition(parameter: Parameter | None, name: str, value: ParamValue) -> str:
+    """One recommended parameter value, written so any molecule in it stays machine-readable.
+
+    The backticks are load-bearing rather than styling. The hazard gate reads a note's structures
+    out of `compound_smiles` and the body's inline code spans
+    (`science/safety/notes.py::structures_in`), and this line is where a `bo-candidate` names the
+    molecules it is asking a human to put in a flask. Emitted as plain prose — `- molecule:
+    CCN=[N+]=[N-]`, which is what this wrote — the gate found *no* structures in any machine-minted
+    candidate and passed every one of them unscreened, organic azides included. That is the exact
+    inversion of the gate's purpose: `bo-candidate` is the note type proposing work nobody has run,
+    so it is the one type with no chemist who has already formed a judgment about the mixture.
+
+    A label that is not a SMILES yields nothing downstream (RDKit arbitrates), so it is left as
+    plain text; a label that *is* one is backticked; and a label with a declared structure behind
+    it gets that structure appended, because "L7" is not something any extractor could resolve.
+    """
+    smiles = _molecule_in(parameter, value)
+    if smiles is None:
+        return f"{name}: {value}"
+    if smiles == str(value):
+        return f"{name}: `{value}`"
+    return f"{name}: {value} (`{smiles}`)"
+
+
+def _recommended_molecule(by_name: dict[str, Parameter], best: Observation) -> str | None:
+    """The molecule this note is *about*, when the recommendation names exactly one.
+
+    `compound_smiles` is where every by-compound question starts — `kg.conflicts` groups on
+    `(type, compound_smiles)`, `find_notes` searches it, and the hazard gate reads it first — and
+    a `bo-candidate` carried none, so a recommendation to *make a specific molecule* was invisible
+    to all three.
+
+    Only when there is exactly one, for the reason `ingest/eln/note.py::_principal_product` gives
+    about the same field: "the molecule this note is about" has no honest answer for a
+    recommendation naming a ligand *and* a substrate, and picking one would file the note under a
+    compound nobody chose. A wrong `compound_smiles` is worse than none — it is what a by-compound
+    search returns, and it would look right. Nothing is lost for the gate either way: every
+    recommended structure is in the body as a code span.
+    """
+    named = [
+        smiles
+        for name, value in sorted(best.params.items())
+        if (smiles := _molecule_in(by_name.get(name), value)) is not None
+    ]
+    return named[0] if len(named) == 1 else None
 
 
 def _surrogate_belief(best: Observation) -> str:

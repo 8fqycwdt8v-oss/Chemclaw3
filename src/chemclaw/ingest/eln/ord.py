@@ -21,6 +21,8 @@ from enum import StrEnum
 
 from pydantic import BaseModel, Field, model_validator
 
+from chemclaw.core.chem import standard_smiles
+
 
 class Role(StrEnum):
     """A component's role in the reaction (a subset of ORD's reaction roles)."""
@@ -30,6 +32,13 @@ class Role(StrEnum):
     SOLVENT = "solvent"
     CATALYST = "catalyst"
     PRODUCT = "product"
+
+
+# The roles the reaction-SMILES convention calls agents: present in the flask, not consumed into
+# the product skeleton. One definition, because `reaction_smiles` and `transformation_smiles` must
+# agree on which species the middle slot names — one showing them and the other omitting them is
+# the whole distinction between the two methods.
+_AGENT_ROLES = frozenset({Role.SOLVENT, Role.CATALYST})
 
 
 class Component(BaseModel):
@@ -210,27 +219,55 @@ class OrdReaction(BaseModel):
         return [c for step in self.steps for c in step.components]
 
     def reaction_smiles(self) -> str:
-        """Build the reaction SMILES (`reactants>agents>products`) for DRFP fingerprinting.
+        """The **record** form: `reactants>agents>products`, exactly as the chemist wrote it.
 
-        **Solvent and catalyst belong in the agent slot, and putting them on the left was a real
-        distortion.** DRFP hashes circular substructures over the whole string, so a solvent —
-        often the largest fragment present, and present in every run — contributed a large, nearly
-        constant share of the set bits. Similarity was therefore dominated by the solvent, which in
-        process development is usually the variable *being optimized*: two runs of one coupling in
-        THF and in 2-MeTHF looked less alike than two unrelated reactions that shared a solvent.
-        That similarity drives campaign grouping (`memory.optimization`) and `similar_reactions`,
-        so the effect was not cosmetic.
+        Three-part because that is what the reaction-SMILES convention has always meant by an
+        agent — a species present in the reaction but not consumed into the product skeleton — so
+        a note body, a campaign step list and a playbook's representative reaction all show the
+        solvent and the catalyst in the slot that says what they are. Raw component SMILES for the
+        same reason (D-2026-07-31): what is displayed should be what was recorded, and the
+        standardized spellings exist to be *keys*, not to be read.
 
-        The three-part form is what the reaction-SMILES convention has always meant by an agent:
-        a species present in the reaction that is not consumed into the product skeleton. Reagents
-        stay on the left with the reactants — a base or an oxidant participates stoichiometrically
-        and is part of what the transformation *is*.
+        **This is not the string that is fingerprinted, and believing that it was is what made a
+        previous fix a no-op.** `DrfpEncoder.internal_encode` begins by folding the agent slot back
+        onto the reactants (`sides[0] += "." + sides[1]`), so `A.B>solvent>C` and `A.B.solvent>>C`
+        produce byte-identical bits — moving the solvent here changed the notation and nothing
+        else. What the fingerprints index is `transformation_smiles`; see it for what the agent
+        slot now actually does.
         """
-        agent_roles = {Role.SOLVENT, Role.CATALYST}
-        left = ".".join(c.smiles for c in self.inputs if c.role not in agent_roles)
-        agents = ".".join(c.smiles for c in self.inputs if c.role in agent_roles)
+        agents = ".".join(c.smiles for c in self.inputs if c.role in _AGENT_ROLES)
+        left = ".".join(c.smiles for c in self.inputs if c.role not in _AGENT_ROLES)
         right = ".".join(c.smiles for c in self.outcomes)
         return f"{left}>{agents}>{right}"
+
+    def transformation_smiles(self) -> str:
+        """The **fingerprint** form: `reactants>>products`, agent-slot species left out entirely.
+
+        Solvent and catalyst are dropped rather than moved, because dropping them is the only
+        thing DRFP can see. DRFP shingles each side and keeps the symmetric difference, so a
+        species that appears only on the left — which every solvent and every catalyst does —
+        survives that difference whole and contributes a large, nearly constant block of set bits.
+        The solvent is often the largest fragment present and is present in every run, so
+        similarity was dominated by the variable process development is usually *optimizing*: two
+        runs of one coupling in THF and in 2-MeTHF scored 0.82 against each other, less than two
+        unrelated reactions sharing a solvent. Excluded, the same pair scores 1.0 — they are the
+        same transformation, which is what campaign grouping (`memory.optimization`) and
+        `similar_reactions` are asking about. Conditions are recorded beside the note, not inside
+        the structure.
+
+        Reagents stay on the left: a base or an oxidant participates stoichiometrically and is part
+        of what the transformation *is*.
+
+        `standard_smiles` per species, because "the same compound" is what a fingerprint row should
+        be keyed on and `STANDARDIZATION_VERSION` is already folded into `reaction_definition()` —
+        a claim the reaction rows did not honour while this built the string from raw `smiles`. The
+        lenient helper, not the strict one: an ELN drop with one odd label must not abort ingestion
+        (a genuinely unparseable reaction is caught downstream by `drfp_bitstring`).
+        """
+        reactants = (c for c in self.inputs if c.role not in _AGENT_ROLES)
+        left = ".".join(standard_smiles(c.smiles) for c in reactants)
+        right = ".".join(standard_smiles(c.smiles) for c in self.outcomes)
+        return f"{left}>>{right}"
 
     def compounds(self) -> list[Component]:
         """Every distinct component (inputs + outcomes), for per-compound indexing."""

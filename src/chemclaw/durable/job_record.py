@@ -171,11 +171,21 @@ async def record_job(record: JobRecord) -> None:
 
     The metric is booked here, in the activity, rather than in the workflow: a workflow body may be
     replayed, and a replayed increment would count one expensive run several times — the arithmetic
-    error a consumption counter must not make. An activity's side effects happen once per successful
-    execution, which is exactly the guarantee this needs. It is booked *before* the write for the
-    same reason `chemclaw_notes_proposed_total` is: a database that is down must not also cost the
-    operator the signal that work is happening.
+    error a consumption counter must not make.
+
+    **And it is booked after the write, for exactly the reason `chemclaw_notes_proposed_total` is
+    (`kg/pr_gate.py`).** "An activity's side effects happen once per successful execution" is the
+    guarantee this counter needs, and it is a guarantee only about the code that runs *after* the
+    part which can fail: this activity runs under `BAD_DATA_RETRY`, so an increment at the top is
+    booked once per *attempt*. The everyday case is not an outage — the upsert commits and the
+    activity then overruns `job_record_timeout_seconds`, so Temporal retries a run that is already
+    recorded and one run is counted twice. In a sustained outage all five attempts increment, the
+    wrapper swallows the resulting `ActivityError`, and the counter reports five times the compute
+    for a run with no durable record at all. Counting after the awaited write makes the number mean
+    "a run was recorded", which is the only claim it can honestly make; the upsert keys on
+    `job_id`, so a retry after a committed-but-timed-out write replaces the row and increments once.
     """
+    await default_job_record_sink().record(record)
     if record.runtime_seconds:
         record_metric(
             lambda m: m.increment(
@@ -184,7 +194,6 @@ async def record_job(record: JobRecord) -> None:
                 {"connector": record.connector},
             )
         )
-    await default_job_record_sink().record(record)
 
 
 def note_with_run_provenance(note: Note, record: JobRecord) -> Note:

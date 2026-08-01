@@ -51,6 +51,30 @@ _RESULT = CampaignResult(
 )
 
 
+# A campaign that recommends *molecules*, by both routes the spec offers: a categorical whose
+# levels are SMILES (what `molecule_library_problem` builds) and a featurized categorical carrying
+# a label → SMILES map. What the note does with these is what the hazard gate can see.
+_MOLECULE_PROBLEM = OptimizationProblem(
+    parameters=[
+        CategoricalParameter(name="molecule", categories=["CCCN=[N+]=[N-]", "CCCCO"]),
+        CategoricalParameter(
+            name="ligand", categories=["L1", "L2"], structures={"L1": "CCO", "L2": "CCOCC"}
+        ),
+        ContinuousParameter(name="temperature", lower=20.0, upper=100.0),
+    ],
+    objective=Objective(name="yield", direction="maximize"),
+)
+
+_MOLECULE_BEST = Observation(
+    params={"molecule": "CCCN=[N+]=[N-]", "ligand": "L1", "temperature": 80.0},
+    value=61.0,
+    provenance="predicted",
+    surrogate_sd=3.0,
+)
+
+_MOLECULE_RESULT = CampaignResult(best=_MOLECULE_BEST, history=[_MOLECULE_BEST])
+
+
 def test_note_from_campaign_result_maps_fields() -> None:
     """The recommendation becomes an agent `bo-candidate` note with conditions + provenance."""
     note = note_from_campaign_result("reizman_suzuki", _PROBLEM, _RESULT)
@@ -79,6 +103,70 @@ def test_the_note_says_what_space_was_searched() -> None:
     assert "temperature: 30 to 110" in body
     # And which way "better" runs, which decides whether the best point is a max or a min.
     assert "maximize `yield`" in body
+
+
+def test_the_note_carries_the_molecules_it_recommends() -> None:
+    """A recommendation has to name its structures *as* structures, or nothing downstream sees them.
+
+    This note used to write `- molecule: CCN=[N+]=[N-]` as plain markdown and set no
+    `compound_smiles`, so `science.safety.notes.structures_in` — which reads that field and the
+    body's inline code spans — returned `[]` for every machine-minted `bo-candidate`. The hazard
+    gate therefore passed all of them, including this one, while `screen_reaction` on the same
+    SMILES returns a high-severity organic-azide flag. `bo-candidate` is the note type that
+    proposes an experiment nobody has run, which is exactly the type that must not go unscreened.
+
+    Both routes a campaign has to name a molecule are covered: `molecule` is a library-style
+    categorical whose levels are SMILES (`bo.objectives.molecule_library_problem`), `ligand` is a
+    featurized categorical carrying a label → SMILES `structures` map, and neither reaches the body
+    without the writer putting it there — a categorical's `structures` are not printed at all by
+    the searched-space listing, so no extractor change could have recovered them.
+    """
+    from chemclaw.science.safety.notes import hazard_problems, structures_in
+
+    note = note_from_campaign_result("azide_yield", _MOLECULE_PROBLEM, _MOLECULE_RESULT)
+    assert "- molecule: `CCCN=[N+]=[N-]`" in note.body  # the level is itself a SMILES
+    assert "- ligand: L1 (`CCO`)" in note.body  # the label alone resolves to nothing
+    assert set(structures_in(note)) >= {"CCCN=[N+]=[N-]", "CCO"}
+    assert hazard_problems(note), "the gate must now see the azide it is being asked to run"
+
+
+def test_a_label_that_names_no_molecule_is_left_as_prose() -> None:
+    """The backticks mark structures; a bare catalyst label is not one and gains nothing from them.
+
+    RDKit is the arbiter, so the writer needs no "is this a SMILES?" heuristic of its own — and a
+    campaign over `P1`/`P2` reads exactly as it did before.
+    """
+    body = note_from_campaign_result("reizman_suzuki", _PROBLEM, _RESULT).body
+    assert "- catalyst: P1" in body and "`P1`" not in body
+
+
+def test_compound_smiles_is_set_only_when_one_molecule_is_recommended() -> None:
+    """`compound_smiles` is what a by-compound search returns, so a wrong one is worse than none.
+
+    `kg.conflicts` groups on `(type, compound_smiles)` and `find_notes` searches it, and a
+    `bo-candidate` carried none at all — a recommendation to make a specific molecule was
+    invisible to both. It is filled in only when the recommendation names exactly one molecule,
+    for the reason `ingest/eln/note.py::_principal_product` gives about the same field: a point
+    naming a ligand *and* a substrate has no single subject, and picking one would file the note
+    under a compound nobody chose.
+    """
+    from chemclaw.science.bo.objectives import molecule_library_problem
+
+    library = molecule_library_problem(["CCCN=[N+]=[N-]", "CCCCO"])
+    best = Observation(params={"molecule": "CCCN=[N+]=[N-]"}, value=-1.0, provenance="predicted")
+    one = note_from_campaign_result(
+        "solubility_max", library, CampaignResult(best=best, history=[best])
+    )
+    assert one.compound_smiles == "CCCN=[N+]=[N-]"
+    # Two molecules recommended (a library level *and* a featurized ligand): no single subject.
+    assert (
+        note_from_campaign_result(
+            "azide_yield", _MOLECULE_PROBLEM, _MOLECULE_RESULT
+        ).compound_smiles
+        is None
+    )
+    # No molecule at all: the campaign optimizes conditions, not a compound.
+    assert note_from_campaign_result("reizman_suzuki", _PROBLEM, _RESULT).compound_smiles is None
 
 
 def test_a_campaign_cannot_suppress_its_own_record() -> None:

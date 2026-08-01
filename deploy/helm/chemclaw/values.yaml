@@ -25,6 +25,24 @@ route:
   tls:
     termination: edge
     insecureEdgeTerminationPolicy: Redirect
+  # Source CIDRs allowed to use this Route. Empty = anyone who can reach the router.
+  #
+  # This is the only control at this layer that is real. A Route declares no `spec.path`, and neither
+  # a Route nor a NetworkPolicy can filter by path — so every path the front door serves is on the
+  # external host, `/metrics` included, and no rule in this chart changes that. Three places used to
+  # assert otherwise ("`/metrics` is unauthenticated because the NetworkPolicy keeps it inside the
+  # cluster"); a NetworkPolicy bounds which *peers* may open a connection to the port, which the
+  # router is one of, and says nothing about what they then ask for.
+  #
+  # What actually bounds the exposure is D-152's declared-label allowlist: the exposition carries
+  # counts, capacity and an operator-chosen `profile` label, never a session id, an actor or turn
+  # content — enforced by `test_metrics_carry_no_identifiers_or_turn_content`, not by this chart.
+  # What is left is operational reconnaissance (fleet size, in-flight turns, budget refusals), and
+  # for a deployment that will not accept that, this list is the answer: set it to the corporate
+  # ranges and the whole Route — API and `/metrics` alike — stops answering the open internet.
+  #
+  # Space-separated CIDRs in the rendered annotation, which is what the HAProxy router parses.
+  ipWhitelist: []
 
 service:
   port: 8080
@@ -67,22 +85,24 @@ workers:
 # directory, so a pod only sees a merged note once something writes it to that pod's filesystem
 # (gap DEP-1). `sync` is that something: an init container fills the tree before the pod serves
 # traffic, and a sidecar refreshes it on `intervalSeconds` so merges land without a redeploy.
-# Leave `repoUrl` empty to run against whatever corpus the image shipped (dev / read-only).
+# Leave `repoUrl` empty to run against whatever corpus the image shipped (dev / read-only) — the
+# sync then copies `/app/knowledge` into the published tree rather than leaving it empty.
 knowledge:
   sync:
     enabled: true
     repoUrl: ""
     # Refresh cadence for the sidecar. Also the worst-case staleness of a merged note.
     intervalSeconds: 300
-    # Where the sidecar keeps its clone. Distinct from the published tree so a failed fetch can
-    # never leave the directory the app reads in a half-written state.
+    # Where the sidecar keeps its shallow read replica. Distinct from the published tree so a failed
+    # fetch can never leave the directory the app reads in a half-written state; the publish copies
+    # from here into the tree below.
     checkoutPath: /app/knowledge-repo
-  # The directory the application reads. Must match CHEMCLAW_KNOWLEDGE_DIR resolved against the
-  # image WORKDIR (/app) — the default `knowledge` resolves to exactly this.
-  publishPath: /app/knowledge
-  # The background worker's own writable clone, which the PR-gate submitter branches and
-  # force-pushes from (gap DEP-2). Deliberately NOT the published tree: `git checkout -B` switches
-  # a whole working tree, so the submitter needs a checkout nothing else is reading.
+  # The PR-gate submitter's writable clone (gap DEP-2) — and, at its `CHEMCLAW_KNOWLEDGE_DIR`
+  # subdirectory, the tree the application reads. There is no separate `publishPath` value, and that
+  # is the fix rather than an omission: `Settings.knowledge_path` is `note_repo_dir / knowledge_dir`
+  # and nothing else, so a second declared path could only ever agree with it by hand — and did not,
+  # publishing to `/app/knowledge` while every reader looked here. `chemclaw.knowledgePublishPath`
+  # derives the publish target from this value and that ConfigMap key, so they cannot drift.
   noteRepoPath: /var/lib/chemclaw/note-repo
 
 # Connector bundles (`connectors/<name>/`), each its own Deployment + Service serving that
@@ -206,6 +226,11 @@ config:
   CHEMCLAW_HARNESS_ENABLED: "true"
   CHEMCLAW_HARNESS_AUTONOMY: "plan_only"
   CHEMCLAW_SESSION_STORE: "postgres"
+  # Stated rather than left to the code default, because the chart *derives* the publish target from
+  # it: the knowledge-sync containers write to `knowledge.noteRepoPath` + this, which is exactly how
+  # `Settings.knowledge_path` resolves. Left implicit, the chart would have to name the notes
+  # subdirectory a second time, and a second name is what published the graph where nothing read it.
+  CHEMCLAW_KNOWLEDGE_DIR: "knowledge"
   CHEMCLAW_TEMPORAL_ADDRESS: "chemclaw-temporal-frontend.temporal.svc:7233"
   CHEMCLAW_TEMPORAL_NAMESPACE: "chemclaw"
   CHEMCLAW_HPC_LAUNCH_INTERFACE: "nextflow"
@@ -221,6 +246,29 @@ config:
   CHEMCLAW_ENTRA_WORKLOAD_FEDERATION_ENABLED: "true"
   CHEMCLAW_ENTRA_WORKLOAD_CLIENT_ID: "00000000-0000-0000-0000-000000000000"
   CHEMCLAW_ENTRA_TOKEN_ENDPOINT: "https://login.microsoftonline.com/TENANT/oauth2/v2.0/token"
+  # ⚠ EMPTY ON PURPOSE, AND EMPTY MEANS CLOSED. Until an operator sets this to their own Entra app
+  # role(s), **every job a connector manifest declares `expensive: true` is refused for everyone**:
+  # `compute_dft_energy`, `compute_interaction_energy`, `sample_conformers` and
+  # `start_optimization_campaign`. The trigger gate fails closed on an empty role set rather than
+  # open (`agent/authz.authorize_trigger`), which is the safe direction and a silent one — the pod
+  # boots, the probes pass, reads work, and a chemist asking for a DFT run is told they lack a
+  # privileged role. Set it to a comma list of the Entra app roles your chemists actually hold
+  # (`"my-org-dft-users,my-org-platform-admins"` in shape, not in content) and the jobs open.
+  #
+  # **The key is written out, rather than left to the code default, exactly so the emptiness is
+  # visible.** An absent key shows up in nothing — not `helm show values`, not the rendered
+  # ConfigMap, not an operator's values diff. A present, empty one shows up in all three.
+  #
+  # **And it is empty rather than a placeholder role name, deliberately.** A plausible-looking name
+  # here would be worse than nothing: it is a *config that looks configured*, so it survives review
+  # and reaches a cluster, where it grants nothing and the refusal ("the account holds none of the
+  # roles this tool requires") points the operator at Entra group membership instead of at this
+  # file. The other placeholders in this block get away with it because their shape is inert — a
+  # zero GUID fails a token exchange loudly. A role name has no such shape: every string is a valid
+  # role, and the wrong one fails silently *by design*, because "you do not hold this role" is the
+  # gate working correctly. Naming a role would also be this chart asserting an organizational fact
+  # it cannot know.
+  CHEMCLAW_ENTRA_PRIVILEGED_ROLES: ""
   CHEMCLAW_OTEL_ENABLED: "true"
   CHEMCLAW_OTEL_ENDPOINT: "http://otel-collector.observability.svc:4317"
   # The runaway-cost guard, on in production (REV-16). Off is the *code* default because a CLI or
@@ -305,8 +353,31 @@ secrets:
     # modification, reordering, interior deletion and prefix truncation — and a point-in-time
     # restore stays what it was: an undetectable trailing deletion of the compliance trail.
     auditAnchorSecret: "CHEMCLAW_AUDIT_ANCHOR_SECRET"
-  # Temporal mTLS is mounted as files; the env points at the mount paths.
+  # Temporal mTLS is mounted as files; the env points at the mount paths. Unlike the keys above,
+  # this Secret is *not* optional when it is switched on — see the toggle.
   temporalTls:
+    # Whether this deployment's Temporal frontend speaks mTLS. On by default, because the one this
+    # chart describes does (self-hosted in-cluster, D-049).
+    #
+    # It is a toggle because it had to be one of two things and was neither. `chemclaw.env` exported
+    # the three PEM paths unconditionally, and `core/temporal_client._tls_config()` short-circuits
+    # only when all three settings are empty — so every pod read three files from a Secret the chart
+    # names and never creates, mounted `optional: true`. A deployment without that Secret got
+    # `FileNotFoundError: /etc/temporal/tls/tls.crt`: the post-install Schedules hook failed naming
+    # neither Temporal nor a Secret, the workers crash-looped, and the front door passed both probes
+    # because `/readyz` never touches Temporal. No value could turn the env off, so the plaintext
+    # path `connect_options()` documents was unreachable from the chart.
+    #
+    # `true`  — the env, the volume and a **required** mount. A missing Secret now fails at pod
+    #           creation with `secret "chemclaw-temporal-tls" not found` on the pod, before any
+    #           process starts, which is a message that names what to create.
+    # `false` — none of the three. The client connects plaintext, which is the correct shape for a
+    #           dev cluster or a Temporal frontend fronted by a service mesh.
+    enabled: true
+    # Populate this Secret with exactly three keys: `tls.crt` (client certificate), `tls.key` (its
+    # private key) and `ca.crt` (the CA that signs the Temporal frontend). A `kubernetes.io/tls`
+    # Secret supplies the first two under those names; `ca.crt` is added alongside. Documented in
+    # `deploy/README.md` — the chart only names it, like every other secret here.
     secretName: "chemclaw-temporal-tls"
     mountPath: "/etc/temporal/tls"
 
@@ -384,8 +455,10 @@ networkPolicy:
   #   - namespaceSelector: {matchLabels: {name: llm-serving}}
   egressDestinations: []
   # Namespaces allowed to reach the front door, beyond Chemclaw's own pods. The router needs it for
-  # the Route to work and the monitoring stack needs it to scrape `/metrics` — which is
-  # unauthenticated *on the assumption that this rule exists*, and until now it did not. Labels
+  # the Route to work and the monitoring stack needs it to scrape `/metrics`. This rule bounds which
+  # *peers* may open a connection to the port — it does not, and cannot, bound paths, so it is not
+  # what makes an unauthenticated `/metrics` acceptable (D-152's label allowlist is; see
+  # `route.ipWhitelist`). It used to say it was. Labels
   # differ by distribution: OpenShift labels its router namespace
   # `network.openshift.io/policy-group: ingress` and its user-workload monitoring namespace
   # `kubernetes.io/metadata.name: openshift-user-workload-monitoring`.

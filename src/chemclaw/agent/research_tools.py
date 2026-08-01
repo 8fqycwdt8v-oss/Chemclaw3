@@ -18,6 +18,7 @@ evidenced fact from transferred analogy, and drafting new protocols — lives in
 import asyncio
 from collections.abc import Coroutine
 from datetime import date
+from itertools import zip_longest
 from typing import Any
 
 from chemclaw.agent.framing import frame_untrusted
@@ -43,21 +44,41 @@ def _text_retrievers() -> list[SourceRetriever]:
     return list(active_retrieve_sources())
 
 
-def _flat_dedup(ranked_lists: list[list[EvidenceChunk]]) -> list[EvidenceChunk]:
-    """Flatten source hit-lists into one, dropping exact (note, content) repeats (order kept).
+def _interleave_dedup(ranked_lists: list[list[EvidenceChunk]]) -> list[EvidenceChunk]:
+    """Round-robin the per-source hit-lists into one, dropping exact (note, content) repeats.
 
-    The `graph` retrieval mode: a plain union of every source's hits with duplicates removed — the
-    behavior before hybrid fusion existed, preserved verbatim so the default is unchanged.
+    The `graph` retrieval mode's cross-source merge, and the thing that makes the cap at the end of
+    `gather_evidence` fair. **A source's rank position is comparable across sources; its score is
+    not** — `EvidenceChunk.score` is a note's `confidence` from the graph, a `ts_rank` from
+    Postgres FTS, a cosine from the dense index and a Tanimoto from the fingerprint store, and the
+    chunk's own docstring says so. Concatenating the lists and then sorting the union by that
+    number let one source's scale decide the whole sweep, and the cap then kept a prefix of
+    whichever scale ran highest.
+
+    Measured on a mixed sweep — 45 graph hits at the notes' 0.8 confidence, 8 lexical hits at
+    ts_rank 0.02–0.09 and 7 dense hits at cosine 0.60–0.85, against the 40-chunk cap — the flat
+    union returned 38 graph / 0 lexical / 2 vector, and with the sort taken out it returned
+    40 / 0 / 0: the concatenation order alone starves the later sources, and the score sort was
+    mitigating that rather than causing it. Either way the lexical leg contributed nothing an agent
+    could read, which is the whole reason a deployment enables it.
+
+    Round-robin fixes the cap instead of re-tuning the ranking. Each source's own order is
+    preserved (every retriever already returns best-first), each contributes its best hit before
+    any source contributes its second, and a source that runs out simply stops taking a slot — so
+    the budget flows to whoever still has hits rather than being carved into fixed quotas. With a
+    single source it is that source's list unchanged, which is the default deployment.
     """
     seen: set[tuple[str, str]] = set()
-    unique: list[EvidenceChunk] = []
-    for chunks in ranked_lists:
-        for chunk in chunks:
+    merged: list[EvidenceChunk] = []
+    for position in zip_longest(*ranked_lists):
+        for chunk in position:
+            if chunk is None:  # this source has no hit at this depth
+                continue
             key = (chunk.source_note_id, chunk.content)
             if key not in seen:
                 seen.add(key)
-                unique.append(chunk)
-    return unique
+                merged.append(chunk)
+    return merged
 
 
 def _as_date(value: str, field: str) -> date:
@@ -135,7 +156,9 @@ async def gather_evidence(
     ranked_lists: list[list[EvidenceChunk]] = list(await asyncio.gather(*searches))
 
     # `hybrid` fuses the per-source rankings (a note any source ranks highly rises); `graph` (the
-    # default) keeps the flat union + dedup. Either way graph expansion stays the reasoning path.
+    # default) round-robins them. Both are cross-source-fair under the cap below, differing in
+    # whether a note found twice is *rewarded* for it. Either way graph expansion stays the
+    # reasoning path.
     if settings.retrieval_mode == "hybrid":
         # RRF already produces the cross-source ranking (best first), so it *is* the order the cap
         # keeps — re-sorting by a single source's raw score would discard the fusion.
@@ -145,11 +168,12 @@ async def gather_evidence(
             weights=settings.retrieval_source_weights_map,
         )
     else:
-        unique = _flat_dedup(ranked_lists)
-        # Rank by score before the cap so a truncated sweep keeps the best-supported evidence, not
-        # an arbitrary disk-order slice (KM-5). The sort is stable, so equal-scored chunks keep
-        # their retriever/discovery order (the previous behavior for an unscored corpus).
-        ranked = sorted(unique, key=lambda chunk: chunk.score, reverse=True)
+        # Round-robin, not a flat union re-sorted by score: the cap below has to be survivable by
+        # every source, and each retriever has already ranked its own hits by the only signal that
+        # is meaningful within it (KM-5). Sorting the union by `score` compared a note's confidence
+        # against a `ts_rank` against a cosine, which is the comparison `EvidenceChunk.score`
+        # documents as invalid — see `_interleave_dedup` for what it measured.
+        ranked = _interleave_dedup(ranked_lists)
     # Frame each chunk's content as retrieved data before it enters the model context, so a
     # note body carrying adversarial text is read as evidence to cite, not an instruction.
     return [

@@ -197,6 +197,52 @@ def test_an_unchanged_reproposal_does_not_reopen_a_rejection() -> None:
     assert still.reason == "not reproducible"
 
 
+def test_a_retry_that_succeeded_supersedes_the_failure_it_replaced() -> None:
+    """A submission that failed once and then landed must not stay `failed` forever.
+
+    The retries live in `durable/memory_jobs`, `report_workflow` and `observation_jobs`, all under
+    `note_publish_retry()`, and they re-render byte-identical content — so the successful attempt
+    collapses onto the failed row. Leaving that row `failed` made the record assert the opposite of
+    what happened: the branch is up awaiting review, while `state='open'` queries skip it, the
+    decision route answers 409 and the merge webhook's `mark_merged` moves nothing. `failed` is a
+    statement that git was never reached, not a decision, so a later success supersedes it.
+    """
+    store = InMemoryProposalStore()
+    failed_id = _run(
+        store.upsert(_proposal(state=ProposalState.FAILED, reason="git push failed: no route"))
+    )
+
+    retried_id = _run(store.upsert(_proposal(reference="pr://note/reaction-1")))
+
+    assert retried_id == failed_id  # same content, same row — that is why the record was stuck
+    recorded = _run(store.read(failed_id))
+    assert recorded is not None
+    assert recorded.state is ProposalState.OPEN
+    assert recorded.reason == ""  # the stale git error does not outlive the failure it explained
+    assert _run(store.listing(ProposalState.OPEN, "", 10, None)) == [recorded]
+
+
+def test_a_decision_is_never_superseded_by_a_later_submission() -> None:
+    """The other direction, and the rule that must survive the fix above.
+
+    A rejection re-proposed unchanged must not reopen — otherwise the gate is defeatable by
+    re-asking until nobody looking at the queue can tell it was refused. A merged row is likewise
+    final: a redelivered submission must not walk it back to `open` and re-queue merged knowledge.
+    """
+    decisions = ((ProposalState.REJECTED, "not reproducible"), (ProposalState.MERGED, ""))
+    for decision, reason in decisions:
+        store = InMemoryProposalStore()
+        proposal_id = _run(store.upsert(_proposal()))
+        _run(store.decide(proposal_id, decision, "reviewer", reason))
+
+        _run(store.upsert(_proposal(reference="pr://again")))
+
+        still = _run(store.read(proposal_id))
+        assert still is not None
+        assert still.state is decision
+        assert still.reason == reason
+
+
 def test_a_decided_proposal_cannot_be_decided_again() -> None:
     """Two reviewers racing: the second learns it was taken instead of overwriting the first."""
     store = InMemoryProposalStore()

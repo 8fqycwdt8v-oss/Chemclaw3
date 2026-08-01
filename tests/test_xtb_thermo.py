@@ -30,6 +30,12 @@ def _minimum(smiles: str) -> Structure:
     return optimize_structure(OptSpec(), structure_from_smiles(smiles, optimize=True)).structure
 
 
+# Literature standard entropies are tabulated in J/(mol K) while the module reports
+# cal/(mol K); converting the *result* rather than the reference keeps the measured
+# values in the test verbatim as they appear in the tables.
+_JOULES_PER_CALORIE = 4.184
+
+
 def test_water_reproduces_its_measured_standard_entropy() -> None:
     """Water's S° is 45.10 cal/mol/K at 298.15 K and 1 atm. Reproduce it, with sigma=2.
 
@@ -40,6 +46,37 @@ def test_water_reproduces_its_measured_standard_entropy() -> None:
     """
     result = compute_thermochemistry(ThermoSpec(symmetry_number=2), _minimum("O"))
     assert result.entropy_cal_per_mol_k == pytest.approx(45.10, abs=1.0)
+
+
+@pytest.mark.parametrize(
+    ("smiles", "symmetry", "measured_j_per_mol_k"),
+    [("N#N", 2, 191.6), ("O=C=O", 2, 213.8)],
+)
+def test_a_linear_molecule_reproduces_its_measured_standard_entropy(
+    smiles: str, symmetry: int, measured_j_per_mol_k: float
+) -> None:
+    """N2 (191.6) and CO2 (213.8 J/mol/K) at 298.15 K and 1 atm, both sigma=2.
+
+    Regression guard on a real defect: the linear rotational partition function was
+    written `8·pi²·I·k·T / (2·sigma·h²)`, one spurious factor of two, so S_rot came out
+    low by R·ln2 = 5.76 J/(mol K) and G high by 0.41 kcal/mol for **every** linear
+    species — N2, O2, CO, CO2, HCN, every alkyne — and `compute_reaction_energy`
+    published a wrong ΔG for any reaction with an unbalanced one.
+
+    The bug survived because the entropy test above uses water, which is bent: it goes
+    down the nonlinear branch (correctly `/sigma`) and is structurally incapable of
+    seeing an error in the linear one. A linear reference is the only thing that covers
+    it, and N2 is the sharpest — with its single 2400 cm^-1 mode frozen out, its entropy
+    is translation plus rotation and nothing else, so the rotational term is not hidden
+    behind a vibrational sum.
+
+    The tolerance is set by RRHO and GFN2 geometries, not by the defect: 2 J/(mol K) is
+    a third of the error being guarded against and four times the worst deviation
+    actually observed here (CO2, 0.43).
+    """
+    result = compute_thermochemistry(ThermoSpec(symmetry_number=symmetry), _minimum(smiles))
+    entropy_j_per_mol_k = result.entropy_cal_per_mol_k * _JOULES_PER_CALORIE
+    assert entropy_j_per_mol_k == pytest.approx(measured_j_per_mol_k, abs=2.0)
 
 
 def test_the_symmetry_number_shifts_the_entropy_by_exactly_r_ln_sigma() -> None:

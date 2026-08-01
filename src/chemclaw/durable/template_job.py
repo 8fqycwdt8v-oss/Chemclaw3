@@ -28,7 +28,11 @@ from temporalio.common import WorkflowIDReusePolicy
 
 with workflow.unsafe.imports_passed_through():
     from chemclaw.core.config import settings
-    from chemclaw.durable.connector_job import ConnectorJobInput, ConnectorJobResult
+    from chemclaw.durable.connector_job import (
+        ConnectorJobInput,
+        ConnectorJobResult,
+        child_workflow_id,
+    )
     from chemclaw.durable.notify import notify_session_best_effort
     from chemclaw.durable.template_activities import (
         AgentStepInput,
@@ -216,9 +220,15 @@ class TemplateWorkflow:
                     requested_by=identity.actor,
                     publish_to_graph=resolved.publish_to_graph,
                 ),
-                id=f"{workflow.info().workflow_id}-{step.id}",
+                # Named from the run's *execution*, not just its id — `TemplateWorkflow` is also
+                # launched with `ALLOW_DUPLICATE_FAILED_ONLY` (`templates/registry.py`), and a
+                # step id alone made every already-completed step of the first execution refuse to
+                # start on the second. See `child_workflow_id`.
+                id=child_workflow_id(step.id),
                 task_queue=settings.background_task_queue,
                 result_type=ConnectorJobResult,
+                # Still reject-duplicate: within one template execution two steps must never
+                # collide on an id, which is a template-authoring bug worth failing loudly on.
                 id_reuse_policy=WorkflowIDReusePolicy.REJECT_DUPLICATE,
                 retry_policy=BAD_DATA_RETRY,
             ),

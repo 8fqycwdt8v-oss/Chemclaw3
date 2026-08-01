@@ -25,6 +25,26 @@ reactant is the other way a reaction energy silently becomes fiction.
 frequency is not a minimum, so its free energy is not a free energy. It is reported in
 `warnings` rather than quietly folded into the total.
 
+**A rotational symmetry number is stated or ΔG is not reported.** Sigma shifts a species'
+entropy by exactly R ln(sigma), so a defaulted sigma=1 makes its free energy too low by
+RT ln(sigma_true) — 0.41 kcal/mol for H2, N2, O2, CO2 or water, 1.47 for benzene. This
+does *not* cancel across a balanced equation: it cancels only when the two sides carry the
+same symmetry, and the reactions worth computing are exactly the ones where they do not
+(any hydrogenation consumes H2; anything aromatic consumes or makes benzene). So sigma is
+a caller input (`symmetry_numbers`), and a reaction with any species' sigma unstated
+reports ΔE and ΔH — which sigma does not touch — and `delta_g_kcal=None` with a warning
+naming the species. `SpeciesEnergy.symmetry_number` is None for exactly those species, so
+what was known and what was assumed is readable from the result alone.
+
+Deriving sigma from the structure was considered and rejected here rather than deferred
+casually. It is the order of the proper-rotation group of the *3D* geometry, and the
+graph is not enough for it: RDKit's automorphism count gives 24 for methane where sigma is
+12, and 6 for ammonia where sigma is 3, because a graph permutation need not be a rotation.
+The geometric form needs point-group detection, which belongs beside the thermochemistry
+rather than in the composite, and which fails silently — a wrong sigma stamped as known is
+worse than an absent one. Refusing is the same move `logd`/`pka` make on an input they
+cannot do, and the same one `uncertainty.Estimate.in_domain` makes with its third value.
+
 There is deliberately **no reaction-level cache entry**. The expensive parts — one
 optimization and one Hessian per species — are cached individually by
 `chemclaw.science.calc.xtb_opt`/`chemclaw.science.calc.xtb_thermo`, so a second reaction sharing a
@@ -68,6 +88,11 @@ class SpeciesEnergy(BaseModel):
     smiles: str
     role: Literal["reactant", "product"]
     multiplicity: int
+    # The rotational symmetry number this species' entropy was computed with, and the
+    # field that says whether it was *known*. None means the caller stated none, so
+    # sigma=1 was used and the entropy is too high by R ln(sigma_true) — the reason the
+    # reaction then withholds ΔG. It is also None at `quick`, where no entropy exists at all.
+    symmetry_number: int | None
     electronic_energy_hartree: float
     enthalpy_hartree: float | None
     gibbs_free_energy_hartree: float | None
@@ -94,6 +119,10 @@ class ReactionEnergyResult(BaseModel):
     level: ReactionLevel
     delta_e_kcal: float
     delta_h_kcal: float | None
+    # None at `quick` (no Hessian, so no entropy) and None when any species' rotational
+    # symmetry number was left unstated, which `species[i].symmetry_number` pinpoints and
+    # `warnings` explains. One field for the two because they are one fact: a free energy
+    # this run is not entitled to report.
     delta_g_kcal: float | None
     species: list[SpeciesEnergy]
     cache_hits: int
@@ -186,19 +215,47 @@ def check_balance(reactants: list[str], products: list[str]) -> None:
         )
 
 
+def _checked_symmetry_numbers(
+    symmetry_numbers: dict[str, int] | None, species: set[str]
+) -> dict[str, int]:
+    """Validate a caller's sigma map against the equation it claims to describe.
+
+    A key that names no species in the equation is a typo — most often a differently
+    written SMILES for a species that *is* there. Left unchecked it would look exactly
+    like an omission, and the caller would be told their symmetry number is missing while
+    staring at the line where they passed it.
+    """
+    if not symmetry_numbers:
+        return {}
+    if foreign := sorted(set(symmetry_numbers) - species):
+        raise ValueError(
+            "symmetry_numbers names species the equation does not contain (SMILES must "
+            f"match the reactant/product strings exactly): {', '.join(foreign)}"
+        )
+    if invalid := sorted(name for name, sigma in symmetry_numbers.items() if sigma < 1):
+        raise ValueError(f"a rotational symmetry number is at least 1: {', '.join(invalid)}")
+    return dict(symmetry_numbers)
+
+
 async def _species_energy(
     store: ResultStore,
     smiles: str,
     role: Literal["reactant", "product"],
     opt_spec: OptSpec,
     thermo_spec: ThermoSpec | None,
-    conformer_spec: ConformerSpec | None = None,
+    symmetry_number: int | None,
+    conformer_spec: ConformerSpec | None,
 ) -> SpeciesEnergy:
     """Optimize one species and, above `quick`, run its Hessian.
 
     Multiplicity comes from the SMILES' own radical electrons, so a homolysis — the
     reaction whose whole point is that one side is open-shell — needs no extra
     argument to be computable.
+
+    `symmetry_number` is this species' sigma, or None when the caller did not state one.
+    The thermochemistry spec is specialized from `thermo_spec` here rather than handed in
+    ready-made so that the stated value and the value actually used cannot disagree — sigma
+    is part of the cache key, so a mismatch would be a wrong number served from the store.
     """
     # Embedding is synchronous RDKit (ETKDG + a force-field cleanup), tens of milliseconds for
     # a drug-sized molecule; this coroutine shares its loop with every other in-flight request.
@@ -216,19 +273,24 @@ async def _species_energy(
             smiles=smiles,
             role=role,
             multiplicity=structure.multiplicity,
+            symmetry_number=None,
             electronic_energy_hartree=optimization.energy_hartree,
             enthalpy_hartree=None,
             gibbs_free_energy_hartree=None,
             is_minimum=None,
             was_cached=opt_cached,
         )
-    minimum, thermo, cached = await relax_to_minimum(store, structure, opt_spec, thermo_spec)
+    spec = thermo_spec.model_copy(
+        update={"symmetry_number": 1 if symmetry_number is None else symmetry_number}
+    )
+    minimum, thermo, cached = await relax_to_minimum(store, structure, opt_spec, spec)
     # The conformational entropy is a free-energy term only: it changes G, never H.
     gibbs = thermo.gibbs_free_energy_hartree + ensemble_correction / _HARTREE_TO_KCAL
     return SpeciesEnergy(
         smiles=smiles,
         role=role,
         multiplicity=structure.multiplicity,
+        symmetry_number=symmetry_number,
         electronic_energy_hartree=minimum.energy_hartree,
         enthalpy_hartree=thermo.enthalpy_hartree,
         gibbs_free_energy_hartree=gibbs,
@@ -260,6 +322,7 @@ async def compute_reaction_energy(
     solvent: str | None = None,
     temperature_k: float | None = None,
     level: ReactionLevel = "standard",
+    symmetry_numbers: dict[str, int] | None = None,
     progress: Progress = no_progress,
 ) -> ReactionEnergyResult:
     """Compute the energetics of a balanced reaction, one entry per equivalent.
@@ -272,6 +335,14 @@ async def compute_reaction_energy(
         temperature_k: Temperature for the thermal corrections; None takes the config
             default (298.15 K).
         level: `quick` optimizes and gives ΔE only; `standard` adds ΔH and ΔG.
+        symmetry_numbers: Rotational symmetry number per distinct species SMILES, keyed
+            by the exact string given in `reactants`/`products` — 1 for a molecule with
+            no rotational symmetry, 2 for H2/N2/O2/CO2/water, 3 for ammonia, 6 for
+            ethane, 12 for benzene. Above `quick`, a species missing from this map has
+            its entropy computed at sigma=1 and the reaction withholds ΔG rather than
+            report one that is wrong by RT ln(sigma); ΔE and ΔH are unaffected either way.
+            Stating 1 explicitly is a real statement and does yield a ΔG — "no symmetry"
+            and "not considered" are different claims and this is where they part.
         progress: Called with a human-readable line as each species completes. Minute-
             scale runs on drug-sized molecules are the normal case, so a caller that
             needs liveness (the durable activity's heartbeat) passes it here.
@@ -281,6 +352,7 @@ async def compute_reaction_energy(
         species came from the cache, and the method uncertainty to report with them.
     """
     check_balance(reactants, products)
+    sigmas = _checked_symmetry_numbers(symmetry_numbers, set(reactants) | set(products))
     temperature = temperature_k or settings.xtb_thermo_temperature_k
     opt_spec = OptSpec(solvent=solvent)
     thermo_spec = (
@@ -299,7 +371,9 @@ async def compute_reaction_energy(
     for index, (role, smiles) in enumerate(queue, start=1):
         progress(f"species {index}/{len(queue)}: {smiles}")
         species.append(
-            await _species_energy(store, smiles, role, opt_spec, thermo_spec, conformer_spec)
+            await _species_energy(
+                store, smiles, role, opt_spec, thermo_spec, sigmas.get(smiles), conformer_spec
+            )
         )
     warnings = [
         f"{entry.smiles} is not a minimum (imaginary frequency): its free energy is not "
@@ -315,6 +389,23 @@ async def compute_reaction_energy(
             "open-shell species present: unrestricted GFN2 energies are less reliable "
             "than closed-shell ones, so treat a homolysis energy as an ordering"
         )
+    # Only above `quick`, where an entropy exists at all: at `quick` every species reports
+    # sigma=None because none was used, and there is no free energy to withhold.
+    unstated = (
+        sorted({entry.smiles for entry in species if entry.symmetry_number is None})
+        if thermo_spec is not None
+        else []
+    )
+    if unstated:
+        warnings.append(
+            "no rotational symmetry number was given for "
+            + ", ".join(unstated)
+            + ": their rotational entropy was computed at sigma=1, which is too high by "
+            "R ln(sigma) for any symmetric species, so no ΔG is reported. Pass "
+            "symmetry_numbers (1 = no rotational symmetry, 2 = H2/N2/O2/CO2/water, "
+            "3 = ammonia, 6 = ethane, 12 = benzene). ΔE and ΔH do not depend on it and "
+            "stand as reported"
+        )
     # Electronic energies are always present, so this delta is never optional.
     delta_e = _HARTREE_TO_KCAL * sum(
         entry.electronic_energy_hartree * (1 if entry.role == "product" else -1)
@@ -329,7 +420,9 @@ async def compute_reaction_energy(
         level=level,
         delta_e_kcal=round(delta_e, 2),
         delta_h_kcal=_round(_difference(species, "enthalpy_hartree")),
-        delta_g_kcal=_round(_difference(species, "gibbs_free_energy_hartree")),
+        delta_g_kcal=(
+            None if unstated else _round(_difference(species, "gibbs_free_energy_hartree"))
+        ),
         species=species,
         cache_hits=sum(entry.was_cached for entry in species),
         uncertainty_kcal=settings.xtb_reaction_uncertainty_kcal,
@@ -354,6 +447,7 @@ async def compare_solvent_effects(
     solvents: list[str],
     temperature_k: float | None = None,
     level: ReactionLevel = "standard",
+    symmetry_numbers: dict[str, int] | None = None,
     progress: Progress = no_progress,
 ) -> SolventComparisonResult:
     """Rank solvents by how far they push the same reaction toward products.
@@ -368,13 +462,16 @@ async def compare_solvent_effects(
         solvents: ALPB solvent names to compare.
         temperature_k: Temperature for the thermal corrections; None uses the default.
         level: As `compute_reaction_energy`.
+        symmetry_numbers: As `compute_reaction_energy`; the same species appear in every
+            solvent, so one map covers the whole screen. Omitting it ranks by ΔE, since
+            every reaction then withholds its ΔG.
         progress: As `compute_reaction_energy`; a screen is one reaction per solvent, so
             this is the call most likely to run for minutes.
 
     Returns:
         One entry per solvent plus the gas phase, most favourable (most negative ΔG,
-        or ΔE at `quick`) first, with the spread and a warning when that spread is
-        inside the method's uncertainty.
+        or ΔE where no ΔG was reported) first, with the spread and a warning when that
+        spread is inside the method's uncertainty.
     """
     if not solvents:
         raise ValueError("give at least one solvent to compare")
@@ -388,7 +485,14 @@ async def compare_solvent_effects(
 
         results.append(
             await compute_reaction_energy(
-                store, reactants, products, solvent, temperature_k, level, progress=relay
+                store,
+                reactants,
+                products,
+                solvent,
+                temperature_k,
+                level,
+                symmetry_numbers,
+                progress=relay,
             )
         )
     effects = [

@@ -129,6 +129,14 @@ async def run_cached_solubility(
     RMSE, so bumping the model, upgrading RDKit (all four ESOL descriptors are
     RDKit-computed), or re-tuning `solubility_rmse_log` recomputes rather than
     serving a prediction (or a stale uncertainty) from the old one.
+
+    None of those cover the *shape* of what is stored, which is what went wrong when `estimate`
+    was added: the ESOL arithmetic was untouched, so `calc_version` correctly did not move, and
+    every row already written came back with `estimate=None` — an out-of-domain salt reading as
+    "not assessed" rather than "OUT OF DOMAIN". That is `CALCULATION_EPOCH`'s job, folded into the
+    key by `CalculationKey.build` itself; bumping `calc_version` for it would have been wrong twice
+    over, because that string is also the REV-12 calibration ledger's key and the calibration data
+    was still valid.
     """
     key = CalculationKey.build(
         calc_type=CALC_TYPE,

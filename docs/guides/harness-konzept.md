@@ -220,7 +220,11 @@ keine „für später"-Settings):
 **Kill-Switch & Beobachtbarkeit:** `harness_enabled=false` fällt sofort auf das heutige
 Verhalten zurück (der Harness-Agent degradiert zur klassischen `Agent`-Konstruktion). Die
 `execute`-Loop ist zusätzlich durch `harness_max_loop_iterations` hart begrenzt
-(`AgentLoopMiddleware.max_iterations`). Loop-/Plan-Metriken für Schicht 2b sind Folgearbeit
+(`AgentLoopMiddleware.max_iterations`). **Der Deckel ist sichtbar**: MAF stoppt zwar lautlos, aber
+`chemclaw.agent.loop_cap` liest die letzte Loop-Entscheidung mit (der Deckel greift genau dann,
+wenn das Prädikat zuletzt „weiter" sagte), `run_turn` sendet daraufhin
+`ErrorEvent(code="loop_cap_reached")` vor der — dann unvollständigen — Antwort und zählt
+`chemclaw_turn_loop_caps_total`. Weitere Loop-/Plan-Metriken für Schicht 2b sind Folgearbeit
 (Backlog).
 
 **Governance-Härtung (implementiert):** Der Harness aktiviert per Default generische

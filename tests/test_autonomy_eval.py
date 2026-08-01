@@ -8,10 +8,13 @@ for:
   scores a fiction, reports healthy numbers, and gates nothing. So one test here drives the real
   `run_turn` with a fake agent and asserts the events it produces are exactly what the committed
   cases contain — that is the only assertion that makes the other ones mean anything.
-- **The iteration cap emits no event.** `AgentLoopMiddleware` stops at
-  `harness_max_loop_iterations` and returns normally, so a runaway is visible only as residue: an
-  answer sent with todos still open. A metric written against a `runaway` event would score 0.0
-  forever and read as proof the cap never fires.
+- **The iteration cap used to emit no event, and the metric paid for it.** `AgentLoopMiddleware`
+  stops at `harness_max_loop_iterations` and returns normally, so `runaway_rate` inferred a cap
+  from residue — an answer sent with todos still open — and thereby scored a turn that correctly
+  deferred to a durable job as a runaway, because `mark_awaiting_job` leaves exactly that residue.
+  The cap is observable now (`chemclaw.agent.loop_cap` → `ErrorEvent(code="loop_cap_reached")`),
+  so the metric reads the outcome instead of guessing at it. Both halves are pinned below: the
+  deferral is not a runaway, and the explicit signal is.
 """
 
 import asyncio
@@ -114,19 +117,25 @@ def test_a_committed_transcript_is_the_shape_the_front_door_really_emits(
     assert result.value == 1.0
 
 
-def test_a_turn_that_answers_with_open_work_is_the_runaway_the_cap_leaves_behind(
+def test_a_turn_that_defers_to_a_durable_job_is_not_a_runaway(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The cap's residue, produced by a real turn rather than asserted from a hand-written dict.
+    """The defect this metric was rewritten for, driven through the real runner.
 
-    `tests/test_harness_execution.py` pins the cap from inside the process by reading the todo store
-    (`assert not items[0].is_complete`). An eval case has only the transcript, so the same fact has
-    to be observable there — an `AnswerEvent` alongside a final plan with unchecked steps. If it
-    were not, `runaway_rate` could never see the one failure mode it exists for.
+    Launching a durable job and saying so is the *correct* end of a turn: the work is safe in
+    Temporal and the answer reports it. `mark_awaiting_job` records that by opening a todo, which
+    stays open on purpose — so the turn answers with an unchecked step, which the residue heuristic
+    read as "the loop cap stopped it mid-plan" and scored 1/1 against a gate of 0.0.
+
+    Nothing in the transcript can separate the two by looking harder, which is why the heuristic
+    could not be repaired: the `awaiting-job:` marker lives in the todo's *description* and
+    `PlanEvent.todos` carries only the rendered display strings. Hence the fixture below produces a
+    genuine `run_turn` stream rather than a hand-written dict — the residue is real, and the metric
+    must still say 0.0.
     """
     monkeypatch.setattr(settings, "harness_enabled", True)
 
-    class _StallingAgent:
+    class _DeferringAgent:
         mcp_tools: list[object] = []
 
         def run(  # noqa: D102 - a fake agent's run, documented by its class
@@ -134,20 +143,43 @@ def test_a_turn_that_answers_with_open_work_is_the_runaway_the_cap_leaves_behind
         ) -> Any:
             async def _gen() -> Any:
                 await mark_awaiting_job(session, "qm-9", title="Await the DFT job")
-                yield _Update(text="still working on it")
+                yield _Update(text="I've started the DFT run, job qm-9.")
 
             return _gen()
 
-    events = [e.model_dump(mode="json") for e in _drive(_StallingAgent(), "s-stall")]
+    events = [e.model_dump(mode="json") for e in _drive(_DeferringAgent(), "s-defer")]
+    # The residue really is there — otherwise this test would pass for the wrong reason.
+    assert any(todo.startswith("[ ] ") for e in events for todo in e.get("todos", []))
     case = _case(metrics=["runaway_rate"], output={"transcripts": [events]})
     result = _score("runaway_rate", case)
+    assert result.value == 0.0
+    assert result.passed is True
+
+
+def test_a_capped_loop_is_a_runaway_and_says_so_in_the_transcript() -> None:
+    """The signal that replaced the residue: the runner states the cap fired.
+
+    `chemclaw.agent.loop_cap` observes the loop's last decision and `run_turn` emits
+    `loop_cap_reached` for it — the third member of the exhaustion family. That the *runner* really
+    emits it for a really capped MAF loop is pinned in `tests/test_harness_execution.py`; what is
+    pinned here is that the metric scores it, which is the half an eval case can see.
+    """
+    capped = [
+        {"type": "plan", "todos": ["[ ] never finished"]},
+        {"type": "token", "text": "still working on it"},
+        {"type": "error", "message": "reached its 25-iteration limit", "code": "loop_cap_reached"},
+        _ANSWER,
+    ]
+    result = _score(
+        "runaway_rate", _case(metrics=["runaway_rate"], output={"transcripts": [capped]})
+    )
     assert result.value == 1.0
     assert result.passed is False
-    assert "still open" in result.provenance
+    assert "loop_cap_reached" in result.provenance
 
 
 def test_a_cut_off_turn_counts_even_though_it_planned_nothing() -> None:
-    """The other runaway class: exhaustion, which *does* have an event.
+    """The other runaway class: exhaustion the front door reports, with no plan behind it.
 
     `turn_timeout` and `budget_exhausted` are the two codes the front door reports for a turn that
     was stopped rather than finished. A turn can burn its budget before emitting any plan at all, so
@@ -182,15 +214,33 @@ def test_a_turn_with_no_plan_at_all_is_not_a_runaway() -> None:
     assert result.value == 0.0
 
 
+def test_an_open_step_is_not_by_itself_a_runaway() -> None:
+    """The residue heuristic is gone, and its absence is the behaviour worth pinning.
+
+    An open step at the end of a turn is ordinary: the agent deferred it to a durable job, or asked
+    the chemist something, or planned further than one turn's worth of work. Only the guard firing
+    makes it a runaway, and the guard now says so itself.
+    """
+    open_step = [{"type": "plan", "todos": ["[ ] a"]}, _ANSWER]
+    result = _score(
+        "runaway_rate", _case(metrics=["runaway_rate"], output={"transcripts": [open_step]})
+    )
+    assert result.value == 0.0
+
+
 def test_the_rate_is_a_fraction_of_the_turns_it_was_given() -> None:
-    """Three turns, one of them unfinished — the denominator has to be the turn count."""
+    """Three turns, one of them cut off — the denominator has to be the turn count."""
     finished = [{"type": "plan", "todos": ["[x] a"]}, _ANSWER]
-    unfinished = [{"type": "plan", "todos": ["[ ] a"]}, _ANSWER]
+    capped = [
+        {"type": "plan", "todos": ["[ ] a"]},
+        {"type": "error", "message": "iteration limit", "code": "loop_cap_reached"},
+        _ANSWER,
+    ]
     result = _score(
         "runaway_rate",
         _case(
             metrics=["runaway_rate"],
-            output={"transcripts": [finished, unfinished, finished]},
+            output={"transcripts": [finished, capped, finished]},
         ),
     )
     assert result.value == pytest.approx(1 / 3)

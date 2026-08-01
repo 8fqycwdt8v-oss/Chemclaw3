@@ -17,6 +17,7 @@ from chemclaw.agent.authz import (
     STATE_CHANGING_TOOLS,
     AuthorizationError,
     authorize_trigger,
+    expensive_actions,
     require_actor,
 )
 from chemclaw.agent.identity_context import reset_current_identity, set_current_identity
@@ -91,6 +92,74 @@ def test_require_actor_rejects_absent_user(monkeypatch: pytest.MonkeyPatch) -> N
     monkeypatch.setattr(settings, "entra_required", True)
     with pytest.raises(AuthorizationError):
         require_actor()
+
+
+# --- `expensive: true` is the gate's source, not a comment ---------------------------------------
+
+
+def _declared_expensive_jobs() -> set[str]:
+    """Every job the enabled bundles declare `expensive: true`, read from the manifests."""
+    from chemclaw.connectors.registry import enabled
+
+    return {job.name for manifest in enabled() for job in manifest.jobs if job.expensive}
+
+
+def test_every_declared_expensive_job_is_in_the_effective_gate_set() -> None:
+    """A manifest's `expensive: true` must gate the job, with no operator entry to remember.
+
+    It did not. `authorize_trigger` consulted `entra_expensive_actions` alone, so the declaration
+    authorized nothing and a bundle marking a job expensive got a comment rather than a gate — the
+    live shape being `entra_required=true` with both role settings empty, exactly what the shipped
+    chart renders. This checks the two against each other, so a bundle added later cannot regress
+    it: the property being pinned is that the *declaration* is what the gate reads.
+    """
+    declared = _declared_expensive_jobs()
+    assert declared, "no enabled bundle declares an expensive job; this test would prove nothing"
+    assert declared <= expensive_actions(), (
+        "these jobs declare `expensive: true` and are not in the effective trigger gate, so they "
+        f"start for any authenticated user: {sorted(declared - expensive_actions())}"
+    )
+
+
+def test_a_declared_expensive_job_is_refused_on_the_shipped_config(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The chart's own shape — enforcement on, neither role setting filled in — must fail closed.
+
+    Two failures composed here. The gate never saw a declared job at all, and even once it does,
+    `_has_required_role` reads an empty requirement as "no specific role needed" and would allow
+    every one of them. `authorize_tool` already states the rule for its built-in write gate; a
+    trigger gate that says a job needs a privileged role must not allow it where none exists.
+    """
+    monkeypatch.setattr(settings, "entra_required", True)
+    monkeypatch.setattr(settings, "entra_expensive_actions", "")
+    monkeypatch.setattr(settings, "entra_privileged_roles", "")
+    token = set_current_identity("u-3", frozenset({"process-chemist"}))
+    try:
+        for job in sorted(_declared_expensive_jobs()):
+            with pytest.raises(AuthorizationError, match="privileged role"):
+                authorize_trigger(job)
+    finally:
+        reset_current_identity(token)
+
+
+def test_a_declared_expensive_job_is_allowed_with_a_privileged_role(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The gate entitles rather than forbids: the declared job runs for a privileged user.
+
+    The counterweight to the test above — a fail-closed gate that never opens is a broken
+    capability, not a control.
+    """
+    monkeypatch.setattr(settings, "entra_required", True)
+    monkeypatch.setattr(settings, "entra_expensive_actions", "")
+    monkeypatch.setattr(settings, "entra_privileged_roles", "hpc-operator")
+    token = set_current_identity("u-4", frozenset({"hpc-operator"}))
+    try:
+        for job in sorted(_declared_expensive_jobs()):
+            authorize_trigger(job)  # does not raise
+    finally:
+        reset_current_identity(token)
 
 
 # --- the write/read classification, held to the registry it describes (D-167) ------------------

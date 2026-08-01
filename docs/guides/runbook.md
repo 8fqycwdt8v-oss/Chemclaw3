@@ -56,7 +56,11 @@ overridable as `CHEMCLAW_<FIELD>`); this runbook covers the four recurring admin
   nothing else (`git checkout -B note/<id>` switches the whole working tree, and
   `--force-with-lease` needs real history). The Helm chart already supplies one —
   `knowledge.noteRepoPath`, default `/var/lib/chemclaw/note-repo`, provisioned by
-  `deploy/knowledge-sync.sh`. Deliberately *not* the read replica the retriever serves from.
+  `deploy/knowledge-sync.sh`. It is also the tree the retriever serves from, because it has to be:
+  `settings.knowledge_path` is `note_repo_dir` joined with `knowledge_dir` and there is no second
+  resolution, so the sync publishes into that subdirectory (taking the submitter's checkout lock
+  while it does) rather than to a path of its own. The *shallow* replica at
+  `knowledge.sync.checkoutPath` is what it publishes from, never what anything reads.
   Leaving it unset outside Helm is the quieter failure: `knowledge-sync.sh` logs
   `CHEMCLAW_NOTE_REPO_DIR unset — no submitter clone provisioned` and skips the clone, so the
   first note submission is the thing that discovers it.
@@ -174,8 +178,16 @@ connectors/<name>/
    (`summary`, `data`, optional `Note`); core's `ConnectorJobWorkflow` supplies the idempotent job
    id, the actor attribution, the PR-gate publish and the session push-back. A job declares its
    arguments inline (`params:`) or by reference (`params_model: module:Model`) when the input is a
-   structured domain object. Mark it `expensive: true` to require a privileged role before any
-   durable work starts.
+   structured domain object. Mark it `expensive: true` to require a privileged role
+   (`CHEMCLAW_ENTRA_PRIVILEGED_ROLES`) before any durable work starts — the declaration is what the
+   trigger gate reads, so no matching `CHEMCLAW_ENTRA_EXPENSIVE_ACTIONS` entry is needed. Under
+   `entra_required` a deployment that declares **no** privileged role refuses every expensive job
+   rather than allowing it — so an exposed deployment that wants these jobs usable must set
+   `CHEMCLAW_ENTRA_PRIVILEGED_ROLES` — and that setting **alone** is the whole remedy.
+   `CHEMCLAW_ENTRA_EXPENSIVE_ACTIONS` remains only for gating something no manifest declares
+   expensive, and config validation requires it beside a role in one direction only: actions named
+   with no role are rejected (nobody could pass that gate), roles named with no actions are the
+   normal production configuration.
    *If the same request is sometimes fast and sometimes slow* — a reaction energy over two small
    species versus eight with Hessians — add `inline_wait_seconds: <n>`. The launcher then waits up
    to that long and returns the result if it lands, or the job id if it does not, so one tool serves
@@ -335,6 +347,16 @@ The **same procedure backfills a late-arriving export**: a file dropped into the
 after the sync's overlap window, carrying an older payload timestamp, is filtered out permanently
 and reported as `… export file(s) arrived after the sync cursor but carry an older timestamp …`.
 Start the sync with `since` set before those entries' timestamps to pull them in.
+
+**A steady ingest count is not proof anything landed.** `IngestSummary.ingested` counts entries
+whose note this run *proposed* — the PR-gate is where a human merges it — so an entry whose branch
+is blocked (the `kg-validate` hazard gate refuses it) or simply unreviewed is proposed again on
+every run, indefinitely. Those entries are listed in `IngestSummary.awaiting_merge` (a subset of
+`ingested`) and logged as `eln sync proposed N entry/entries whose notes are still unmerged`. A
+count that does not fall between runs is a review queue nobody is working, not a source producing
+new data: open the branches those entries named, and merge or reject them. Note that an entry's
+*first* sync can appear here too when its export landed late — it sits inside the replay window,
+so it will indeed be re-proposed next run.
 
 ## (vi) Change a fingerprint definition (ECFP radius/bits or DRFP bits)
 

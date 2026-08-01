@@ -12,8 +12,9 @@ into a playbook note, which still passes the same PR-gate as everything else.
 
 Two rules make that safe, and both are enforced rather than documented:
 
-- **An observation's identity is its scope**, so a finding that grows updates one row instead of
-  minting a near-duplicate every time the corpus does. See `with_id`.
+- **An observation's identity is its scope**, so a finding that grows normally updates one row
+  instead of minting a near-duplicate every time the corpus does. "Normally" is load-bearing and
+  `with_id` spells out the exception and what it costs.
 - **Support is `len(evidence_note_ids)`**, not a counter. A counter can be incremented by something
   that is not a merged note; a derived count cannot. Migration `025` additionally forbids an
   observation id from ever appearing in that column, because the dangerous failure is the agent
@@ -143,16 +144,41 @@ class Observation(BaseModel):
 
         **Scope only, never the statement.** The statement names what the evidence currently shows
         — "run in 2 projects … (2 runs)" — so it changes the moment a cluster gains a member, which
-        is routine under periodic ELN sync. Hashing it would mint a *new* row for every growth
-        step: support would never accumulate, `first_seen` would reset, and the superseded row
-        would sit open for the whole retirement window contradicting its own successor in
-        `recall_observations`. That is exactly the failure `memory/ids.py` documents for note ids,
-        and the fix is the same one — anchor on something stable.
+        is routine under periodic ELN sync. Hashing it would mint a *new* row for **every** growth
+        step, so support would never accumulate at all and the tier's one threshold would never be
+        crossed. That is the failure `memory/ids.py` documents for note ids, and the fix is the
+        same one — anchor on something that moves less often than the wording does.
 
-        Scope is that anchor by construction: `transformation:<smallest member id>` for a corpus
-        cluster (stable as the cluster grows, since clusters are disjoint partitions) and
-        `interaction:<note id>` for an interaction. The two miners cannot collide, because their
-        scopes carry different prefixes.
+        **Scope is a better anchor, not a stable one, and it is worth saying which.**
+        `interaction:<note id>` is genuinely stable: a merged note keeps its id.
+        `transformation:<smallest member id>` is not. It moves in two cases — a new reaction whose
+        id sorts below the current anchor joins the cluster, and two clusters merge because a new
+        reaction bridges them under single linkage (`memory.similarity`), after which the merged
+        cluster answers to the smaller of the two anchors. Cluster disjointness prevents neither;
+        it buys a *different* property, that two clusters never claim one scope, and the two
+        miners' scope prefixes do the same job between them.
+
+        **What an anchor move costs, in full.** The next run mints one row for the superset and
+        stops refreshing the old one, which sits `open` with its subset statement until
+        `retire_stale` reaps it — at most `observation_retire_after_days`. `open_observations`
+        orders by support, and the superset holds the subset's evidence plus the new member, so a
+        reader of `recall_observations` sees a weaker restatement ranked below the current finding.
+        Redundancy, bounded and self-healing, never a contradiction.
+
+        Two further costs are **not** among them, which is what makes this acceptable where
+        hashing the statement is not. `first_seen` resets on the new row, and nothing reads that
+        column — no ranking, promotion or retirement query touches it. And no duplicate PR is
+        reachable: `durable.observation_jobs.ObservationSynthesisWorkflow` promotes on every pass,
+        so a row that had crossed both thresholds was already `promoted` — and so out of
+        `_SELECT_OPEN` and `_SELECT_PROMOTABLE` — before any later run could move the anchor, while
+        a row still below them gains no further evidence after the move and never crosses them.
+
+        **Kept rather than replaced, deliberately.** A merge-stable key would have to survive two
+        clusters becoming one, and a single-linkage cluster's identity *is* its membership — the
+        one thing a merge changes. Nothing derived from the members can be stable across it, so the
+        alternative is a union-find identity persisted between runs: new state, plus a
+        reconciliation step of its own, bought against a redundancy that expires inside the
+        retirement window and is outranked for as long as it lasts.
         """
         digest = stable_hash({"scope": self.scope}, chars=12)
         return self.model_copy(update={"id": f"observation-{digest}"})

@@ -772,13 +772,30 @@ async def predict_developability_profile(smiles: str) -> DescriptorProfile:
 
 @server.tool()
 async def predict_logd(smiles: str, ph: float | None = None) -> LogdResult:
-    """Predict the pH-dependent distribution coefficient (logD) of a neutral O-H/S-H acid.
+    """Predict the pH-dependent distribution coefficient (logD) of a singly-ionisable molecule.
 
     Answers "how lipophilic is this at the pH I actually work at?" — useful for HPLC
     mobile-phase pH selection, extraction, and formulation, where the pH-independent LogP alone
-    is not the number that matters. Built from the same acidic-site model as `predict_pka`, so it
-    shares its domain limits: only O-H/S-H acids (carboxylic acids, phenols, alcohols, thiols);
-    it raises an error for a base or a molecule with no such site rather than guessing.
+    is not the number that matters.
+
+    Built on `predict_pka`, but its domain is **strictly narrower** than that tool's rather than
+    the same, so a working pKa is not a promise of a logD. `predict_pka` reports one pKa and one
+    Henderson-Hasselbalch term consumes exactly one, so this is defined only where a single
+    equilibrium describes the molecule at the pH asked for.
+
+    Served: one O-H/S-H acid (carboxylic acid, phenol, alcohol, thiol) **or** one aromatic/aryl
+    nitrogen base — bases are supported and corrected in the opposite direction, which is why the
+    result names the site. Further sites are fine while they stay un-ionised at that pH, so a
+    diol or sugar (pKa ~15) is served at any ordinary pH and a diacid is served well below its
+    pKa.
+
+    Refused, with a `ValueError` naming the reason rather than a guess: aliphatic amines and
+    charged or unparseable inputs (inherited from `predict_pka`); anything **amphoteric**, an
+    acid site plus a base site, since `predict_pka` always answers with the acid and never
+    evaluates the base; and any **polyprotic** molecule substantially ionised at that pH. The
+    second pKa is not computable here at all, so the alternative would be a number wrong by 2-5
+    log units carrying a ±1.6 uncertainty. Relay the refusal; do not fall back to logP or retry
+    at a pH chosen to get past it.
 
     Args:
         smiles: The molecule as a SMILES string.

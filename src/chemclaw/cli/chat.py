@@ -193,27 +193,42 @@ async def _plan_command(prompt: str, session: Any) -> str:
     `POST /sessions/{id}/plan/decision` does — there is no hash to mistype here, but there is also
     no window in which a plan could change between being shown and being approved, because the
     person reading it and the person approving it are the same terminal.
+
+    **Both commands ask `approvable_plan_hash`, not `current_plan_hash`, and that is the whole
+    difference.** `/approve` used to guard on `todo_titles` and record against `current_plan_hash`,
+    which are two different questions: `todo_titles` counts the `awaiting-job:` bookkeeping rows the
+    launcher writes, and `current_plan_hash` falls back to `EMPTY_PLAN_HASH` for a session with no
+    *work items*. So a session whose todo list held nothing but bookkeeping passed the guard and
+    recorded an approval against the empty-plan constant — an identity every session in every
+    deployment shares, which the gate then refuses. Harmless, and it told the person their plan was
+    approved when nothing had been. The route learned to refuse that; this is the same refusal here,
+    from the same function, so the two front doors cannot drift again.
     """
-    from chemclaw.agent.harness_mode import current_plan_hash, grant_execute, session_mode
+    from chemclaw.agent.harness_mode import approvable_plan_hash, grant_execute, session_mode
     from chemclaw.agent.harness_todo import todo_titles
     from chemclaw.agent.plan_approval_store import plan_approval_store
 
     if session is None:
         return "no session; plan commands need a chat session"
-    plan = await todo_titles(session)
-    plan_hash = await current_plan_hash(session)
+    plan_hash = await approvable_plan_hash(session)
     if prompt.lower() == "/plan":
+        # Displayed, so it shows whatever the chemist is looking at — the checkboxes and the
+        # bookkeeping rows included. Only the *decision* is restricted to a real plan.
+        lines = await todo_titles(session) or ["(no plan yet)"]
+        if plan_hash is None:
+            return "\n".join([*lines, f"[no approvable plan, mode={session_mode(session)}]"])
         decision = await plan_approval_store().decision(session.session_id, plan_hash)
+        # The store's verdict is already the effective one — a spent approval reports as not
+        # approved — so this line says what the gate would do, not merely what was once recorded.
         verdict = "approved" if decision and decision[0] else "not approved"
-        lines = plan or ["(no plan yet)"]
         return "\n".join([*lines, f"[{plan_hash} — {verdict}, mode={session_mode(session)}]"])
-    if not plan:
+    if plan_hash is None:
         return "there is no plan to approve yet; ask a question first"
     await plan_approval_store().record(
         session.session_id, plan_hash, settings.cli_admin_actor, True
     )
     grant_execute(session)
-    return f"approved {plan_hash} ({len(plan)} item(s)); the session may now execute"
+    return f"approved {plan_hash}; the session may now execute"
 
 
 def _parse_args(argv: Sequence[str] | None) -> argparse.Namespace:

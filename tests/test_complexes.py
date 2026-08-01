@@ -14,6 +14,7 @@ from chemclaw.science.calc import crest_cli
 from chemclaw.science.calc.complexes import (
     ComplexSpec,
     _combine,
+    _opt_spec,
     _ordered,
     compute_interaction,
     run_cached_interaction,
@@ -170,6 +171,19 @@ def test_a_repeated_pair_is_served_from_the_store() -> None:
         assert (first.smiles_a, first.smiles_b) == (second.smiles_a, second.smiles_b)
 
     asyncio.run(_run())
+
+
+def test_the_three_optimizations_run_on_the_backend_the_key_names() -> None:
+    """The half of the cache key that a *propagation* has to keep true.
+
+    `ComplexSpec.calc_version` names `engine` because the three `optimize_structure` calls in
+    `compute_interaction` produce every number in an `InteractionResult`. That claim is only
+    honest while `_opt_spec` carries the engine across instead of letting `OptSpec` re-resolve
+    it from config — a re-resolve would let the key say `xtb` while tblite did the relaxing,
+    which is the same defect (D-011) read from the other end.
+    """
+    assert _opt_spec(ComplexSpec(engine="xtb")).engine == "xtb"
+    assert _opt_spec(ComplexSpec(engine="tblite")).engine == "tblite"
 
 
 def test_an_open_shell_monomer_is_rejected_before_any_search_runs() -> None:

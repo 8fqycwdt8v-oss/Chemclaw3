@@ -128,6 +128,68 @@ class _StatePoisoningAgent:
         return _gen()
 
 
+class _AnsweringAgent:
+    """An agent that completes an ordinary turn: two tokens, a stored message, then it returns.
+
+    The message is written the way a durable provider writes one — the runner never sees it, and
+    by the time the answer is assembled it is already committed. That is what makes the teardown
+    *after* the answer different in kind from one before it: there is no unmatched `tool_use` and
+    nothing half-written, only a finished exchange somebody could still delete.
+    """
+
+    mcp_tools: list[Any] = []
+
+    def __init__(self, history: "_RecordingHistory") -> None:
+        self._history = history
+
+    def run(  # noqa: D102 - a fake agent's run, documented by its class
+        self,
+        message: str,
+        *,
+        stream: bool,
+        session: AgentSession,
+        **_run_options: Any,
+    ) -> Any:
+        async def _gen() -> Any:
+            yield _update("the ", 5)
+            yield _update("answer", 5)
+            self._history.rows.append((session.session_id, "user: " + message))
+            self._history.rows.append((session.session_id, "assistant: the answer"))
+
+        return _gen()
+
+
+class _RecordingHistory:
+    """A durable history provider, reduced to the two calls the runner's rollback guard makes.
+
+    `latest_message_id` is the pre-turn watermark and `rollback_to` deletes everything above it —
+    the same contract `chemclaw.agent.session_store.PostgresHistoryProvider` implements against
+    Postgres. Holding the rows in a list is what lets a test assert on what a rollback *destroyed*
+    rather than on whether it was called.
+    """
+
+    def __init__(self) -> None:
+        self.rows: list[tuple[str, str]] = []
+        self.rollbacks: list[int | None] = []
+
+    async def latest_message_id(self, session_id: str) -> int | None:
+        """The highest stored row id for the session, or None when it has no history yet."""
+        rows = [index for index, row in enumerate(self.rows, start=1) if row[0] == session_id]
+        return rows[-1] if rows else None
+
+    async def rollback_to(self, session_id: str, watermark: int | None) -> int:
+        """Delete this session's rows above `watermark`, returning how many went."""
+        self.rollbacks.append(watermark)
+        keep = [
+            row
+            for index, row in enumerate(self.rows, start=1)
+            if row[0] != session_id or index <= (watermark or 0)
+        ]
+        deleted = len(self.rows) - len(keep)
+        self.rows[:] = keep
+        return deleted
+
+
 class _StallingAgent:
     """Emits a fixed number of updates and then blocks, announcing that it has.
 
@@ -294,6 +356,110 @@ def test_a_cancelled_turn_rolls_back_a_half_written_turn() -> None:
         assert session.state["messages"] == [{"role": "user", "text": "an earlier, completed turn"}]
 
     asyncio.run(_drive())
+
+
+def test_a_disconnect_after_the_answer_keeps_the_completed_turn() -> None:
+    """A turn that answered is never rolled back, however the stream is then torn down.
+
+    The window is one send plus one round trip and it was open on the only path production takes:
+    the client drops while sse-starlette is writing the `AnswerEvent`, the runner's teardown clause
+    runs unconditionally, and under `session_store="postgres"` `rollback_to` DELETEs the user and
+    assistant rows the finished turn had already committed. The turn is billed `completed=True` and
+    its output is gone — silent loss of conversation history, which in a GxP system is the
+    expensive outcome rather than the cheap one.
+
+    The rollback exists to discard a *half-written* turn (an unmatched `tool_use` that would brick
+    every later turn, ISSUE-B-10). An answered turn has none: `agent.run` returned, and the pair is
+    complete. So the guard is the answer, and this pins it under both teardowns — `aclose()`, which
+    sse-starlette uses on a send timeout, and the cancellation a real disconnect delivers into the
+    yield the answer is suspended in.
+    """
+    history = _RecordingHistory()
+    session = AgentSession(session_id="s6")
+
+    async def _drive() -> None:
+        for teardown in ("aclose", "cancel"):
+            stream = _closable(
+                run_turn(
+                    _AnsweringAgent(history),
+                    session,
+                    f"hi ({teardown})",
+                    history=history,
+                    connectors=[],
+                )
+            )
+            seen: list[str] = []
+            async for event in stream:
+                seen.append(event.type)
+                if event.type == "answer":
+                    break  # the client goes away while the answer is being sent
+            assert seen[-1] == "answer", f"the turn never answered: {seen}"
+            if teardown == "aclose":
+                await stream.aclose()
+            else:
+                with pytest.raises(asyncio.CancelledError):
+                    await stream.athrow(asyncio.CancelledError())
+            assert history.rollbacks == [], (
+                f"a {teardown} teardown after the answer rolled the durable history back"
+            )
+            assert history.rows[-1][1] == "assistant: the answer", (
+                f"the answered turn's committed rows did not survive a {teardown} teardown: "
+                f"{history.rows}"
+            )
+
+    asyncio.run(_drive())
+    assert len(history.rows) == 4, f"both completed turns should be stored: {history.rows}"
+
+
+def test_a_disconnect_after_the_answer_is_billed_as_completed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`TurnCost.completed` means "the turn answered", not "the turn was never torn down".
+
+    The runner books `completed=answered`, so the flag draws its line at the answer and not at the
+    teardown: a client dropping while sse-starlette writes the `AnswerEvent` produces a cancelled
+    turn that nonetheless answered, kept its history, and must be billed as the completed turn it
+    is. The neighbouring test pins the history half of that; this pins the ledger half, which had
+    only the *failed*-turn direction pinned (`tests/test_turn_observability.py`) — so a change
+    booking `completed=False` for every torn-down turn passed the suite and quietly made every
+    disconnected-after-answering turn look abandoned in the spend ledger.
+    """
+    from chemclaw.agent.turn_cost import TurnCost
+
+    booked: list[TurnCost] = []
+
+    class _CapturingSink:
+        async def record(self, cost: TurnCost) -> None:
+            booked.append(cost)
+
+    monkeypatch.setattr("chemclaw.agent.turn_cost.default_turn_cost_sink", _CapturingSink)
+    history = _RecordingHistory()
+
+    async def _drive() -> None:
+        stream = _closable(
+            run_turn(
+                _AnsweringAgent(history),
+                AgentSession(session_id="s-answered-cancel"),
+                "hi",
+                history=history,
+                connectors=[],
+            )
+        )
+        async for event in stream:
+            if event.type == "answer":
+                break  # the client goes away while the answer is being sent
+        with pytest.raises(asyncio.CancelledError):
+            await stream.athrow(asyncio.CancelledError())
+        # The ledger write is scheduled on the loop rather than awaited (see `record_turn_cost`).
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+
+    asyncio.run(_drive())
+
+    assert len(booked) == 1, "a turn torn down after answering never reached the cost ledger"
+    assert booked[0].completed is True, (
+        "a turn that answered was billed as incomplete because its client then disconnected"
+    )
 
 
 def test_a_cancelled_turn_still_books_its_tokens() -> None:

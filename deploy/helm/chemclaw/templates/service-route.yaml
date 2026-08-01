@@ -35,6 +35,15 @@ metadata:
     # rather than round-robin because turns are long-lived and wildly uneven in duration.
     haproxy.router.openshift.io/disable_cookies: "false"
     haproxy.router.openshift.io/balance: leastconn
+    {{- /* Source-IP allowlist for the whole Route. Empty by default, and rendered only when set,
+           because a chart cannot invent a deployment's corporate ranges.
+           This is the one control that exists at this layer: a Route declares no `spec.path` and
+           neither it nor a NetworkPolicy can filter by path, so `/metrics` is on the public host
+           exactly like every other route the front door serves. `values.yaml` carries the argument
+           for why that is acceptable by default and what this knob is for. */}}
+    {{- with .Values.route.ipWhitelist }}
+    haproxy.router.openshift.io/ip_whitelist: {{ join " " . | quote }}
+    {{- end }}
 spec:
   {{- if .Values.route.host }}
   host: {{ .Values.route.host }}

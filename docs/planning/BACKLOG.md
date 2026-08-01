@@ -3,6 +3,43 @@
 Prioritized open action items. Top = next. Keep in sync with `docs/planning/implementation-plan.md`
 (phase/step numbers) at session end.
 
+## Open — Left open by the full-codebase review (2026-08-01)
+
+An adversarially-verified review across every layer and phase; 22 distinct defects were fixed (see
+the `D-2026-08-01-*` ADRs). These are what the fixes uncovered and deliberately did not close.
+
+- [ ] **REV-1 [Medium] — a `similar_reactions` query is not standardized the way its index is.**
+  `drfp_bitstring` takes a bare reaction string with no roles or components, so a query naming a
+  salt, a charged species or another tautomer scores against rows built from the standardized form.
+  Plain canonicalization is bits-neutral (RDKit parses both spellings to one mol), so this only
+  bites where standardization does real work — which is now a much larger surface, since inorganic
+  salts, metal complexes and organometallics no longer collapse onto a fragment
+  (D-2026-08-01-a-reagent-is-not-its-largest-fragment). Fix: standardize per `.`-separated species
+  inside `drfp_bitstring`. No `definition` bump needed — it makes queries match the index rather
+  than changing the index.
+- [ ] **REV-2 [Medium] — a solvate collapses onto whichever fragment is larger.**
+  `standard_smiles("CCN.C1CCOC1")` returns THF: `FragmentParent` keeps the largest fragment and
+  both are organic, so the ethylamine is discarded. Different mechanism from the counterion rule
+  and not addressed by it. Needs a rule for what a solvate's identity is — probably the solute,
+  which is the opposite of "largest".
+- [ ] **REV-3 [Low] — connector *server* pods receive `CHEMCLAW_TEMPORAL_TLS_*` but mount no TLS
+  volume.** `chemclaw.env` is shared and `chemclaw.tlsMount` is not included there. Harmless only
+  because the sole `connect()` caller on that path runs in the front door, not the MCP server — a
+  trap for the first connector server that needs Temporal. Not fixed because no `helm` binary and
+  no cluster exist here to render the change against.
+- [ ] **REV-4 [Low] — four hazard rules are narrow rather than wrong.** From the rule-by-rule audit
+  (~90 molecules): `peroxide` and `n-halamine` miss the sanitised ionic spellings (Na2O2 parses to
+  `[O-][O-]`, both X1; chloramine-T's `[N-]Cl` is X2); `hydrazine`'s `H2,H1` excludes fully
+  substituted free hydrazines such as UDMH while its prose says "free hydrazine motif";
+  `complex-hydride-with-chlorinated-solvent` matches *gem*-dihalides only, so 1,2-dichloroethane
+  does not fire. Recorded rather than widened — widening a cited hazard rule on taste is how a
+  table stops being citable. The azide table's own precedent for the ionic gap was a *separate*
+  rule (`non-carbon-azide`), which is the shape a fix should take.
+- [ ] **REV-5 [Low] — local development needs pgvector >= 0.7.** The migrations use
+  `bit_jaccard_ops`; the common distribution package is 0.6.0, so a database stood up from `apt`
+  fails to migrate. Pre-existing. CI is unaffected (it provides a pgvector-enabled Postgres), so
+  this is a `deploy/README.md` note, not a code change.
+
 ## Done — Reviewing the experiment-progression change (2026-07-31, D-164)
 
 Re-reading D-162 with fresh eyes. One real defect, found because the new `experiment-proposal`
@@ -115,9 +152,10 @@ QM path. The rows below are what survives that merge, narrowed to say so.
       has no calculation to cite until the durable path is reconciled with the inline one. ELN
       reaction notes rest on no calculation at all and correctly cite none.
 - [ ] **`Note.confidence` is never set by any machine path — and the obvious fix would make
-      things worse** — [M], re-diagnosed while implementing it. The consequences stand
-      (`GraphRetriever` scores every machine note at the default, so KM-5's truncation ordering is
-      a no-op; `kg/conflicts.py` needs a confidence on both sides). What is wrong is the implied
+      things worse** — [M], re-diagnosed while implementing it. One consequence stands
+      (`kg/conflicts.py` needs a confidence on both sides); the truncation half is now stale twice
+      over — the cross-source score ordering is gone, and `EvidenceChunk.score` orders only a
+      source's own list (D-2026-08-01-a-cap-that-starves-a-source). What is wrong is the implied
       remedy. The two consumers want *different signals*: retrieval wants a trust score for
       ordering, `_suspected` wants a disagreement signal — and it fires purely on a confidence gap
       ≥ `conflict_confidence_gap` between same-`(type, compound_smiles)` notes. So populating
@@ -269,16 +307,22 @@ QM path. The rows below are what survives that merge, narrowed to say so.
       Two of the three measures already existed in pieces — `evals/ab.py::compare_tool_utility` is
       the A/B and was simply never registered, and `precision_recall_f1` already defines "did it
       name the right things".
-      **`runaway_rate` infers the cap from its residue** (an answer sent with todos still open),
-      because `AgentLoopMiddleware` stops and returns normally without emitting anything. A metric
-      written against a `runaway` event would score 0.0 forever.
+      **`runaway_rate` originally inferred the cap from its residue** (an answer sent with todos
+      still open), because `AgentLoopMiddleware` stops and returns normally without emitting
+      anything. That proxy counted a turn that correctly deferred to a durable job as a runaway —
+      `mark_awaiting_job` leaves the same residue — so it was replaced by the explicit signal
+      described in the row below.
       **AG-13 is not closed by this and the ADR says so explicitly**: a scripted transcript pins the
       model's replies, so these gate the harness's plumbing, never the model's judgment.
-- [ ] **The loop cap is silent, so nothing can alert on a runaway in production** — [S]. The eval
-      metric infers it from residue, which is all a transcript allows; a deployment watching live
-      turns has no signal at all. Needs a new `Event` member plus a runner branch plus a UI branch —
-      the three-part change `api/events.py` documents — which is a front-door decision rather than
-      an eval one.
+- [x] **The loop cap is silent, so nothing can alert on a runaway in production** — closed.
+      `chemclaw.agent.loop_cap` wraps the loop predicate and records its last stop decision (the
+      loop hit the cap exactly when it still wanted another iteration — MAF exposes no hook on the
+      cap itself), `run_turn` emits `ErrorEvent(code="loop_cap_reached")` before the partial answer
+      and increments `chemclaw_turn_loop_caps_total`, and `runaway_rate` scores that instead of the
+      residue it used to guess from. An `ErrorCode` member rather than a new `Event` member: a
+      capped turn is cut off, which is what `turn_timeout` and `budget_exhausted` already say.
+      *Left open:* `Chemclaw3_ui` renders the new code through its generic error path and does not
+      yet label it.
 - [ ] **The plan-vs-single-shot A/B has no real task set** — [M], blocked on AG-13.
       `plan_execute_utility` scores the pairs a case hands it, and the shipped case is illustrative.
       Genuine baseline-vs-augmented numbers mean running the same tasks twice against a live model.
@@ -346,11 +390,24 @@ QM path. The rows below are what survives that merge, narrowed to say so.
       components of one mixture SMILES, so a quench reagent added at step 8 is screened against one
       consumed at step 1. Needs a `same_step` scope on the rule table, which is a change to
       `rules.yaml`'s schema rather than to the matcher.
-- [x] **Reaction fingerprints are dominated by solvent choice** — closed. `reaction_smiles` builds
-      the three-part `reactants>agents>products` form, with solvent and catalyst in the agent slot;
-      reagents stay on the left because a base or an oxidant participates stoichiometrically.
-      `drfp:b2048:agents` retires rows built under the old form rather than ranking a
-      solvent-dominated fingerprint against a solvent-neutral one.
+- [x] **Reaction fingerprints are dominated by solvent choice** — closed by
+      D-2026-08-01-the-agent-slot-that-changed-no-bits, which is the *second* attempt: this row
+      was ticked once for moving solvent and catalyst into the agent slot, and DRFP folds that slot
+      back onto the reactants (`sides[0] += "." + sides[1]`), so the bits were byte-identical and a
+      THF/2-MeTHF pair still scored 0.8194. The fingerprint is now built from
+      `OrdReaction.transformation_smiles` — `reactants>>products` with the agent-slot species left
+      out and every species standardized — and that pair scores 1.0. `reaction_smiles` stays as the
+      record form a note renders; reagents stay on the left. `drfp:b2048:agents-excluded:std4`
+      retires rows built under either earlier token.
+- [ ] **A `similar_reactions` query is not standardized the way the index is** — [S], opened by the
+      row above. The index now goes through `standard_smiles` per species; a query string is
+      fingerprinted exactly as the caller wrote it, because `drfp_bitstring` takes a string and has
+      no roles or components to work from. Plain canonicalization is bits-neutral (RDKit parses
+      both spellings to one mol), so this only bites where standardization does real work — a
+      query naming a salt, a charged species or the other tautomer scores against rows built from
+      the stripped, neutral, canonical-tautomer form. Fix is to standardize per `.`-separated
+      species inside `drfp_bitstring`, which makes index and query symmetric with no definition
+      bump, since the rows are already built that way.
 
 **Operations.**
 
@@ -708,10 +765,18 @@ deliberately not fixed there, each because it needs a decision rather than a pat
   later prediction of the same thing reconciles against it on write, so measure-then-predict works
   as well as the reverse.
 - [ ] **DARK-10 [Low] — the PR-gate's checkout window exposes unreviewed notes to readers.**
-  `knowledge_path` is the same tree the submitter runs `checkout -B note/<id>` against, and
-  `invalidate_cache()` is called *inside* that window, so a concurrent turn can retrieve an
-  agent-proposed, unreviewed note as authoritative evidence. `_return_to_base` fixed the permanent
-  version of this; the transient one spans a commit, a fetch and a push.
+  `knowledge_path` is the same tree the submitter runs `checkout -B note/<id>` against, so a
+  concurrent turn can retrieve an agent-proposed, unreviewed note as authoritative evidence. The
+  remaining window is transient and spans a commit, a fetch and a push.
+  **This row previously claimed `_return_to_base` had fixed the permanent version. It had not** —
+  `_return_to_base` was reachable only on the two success returns, so *every* failed push left the
+  checkout on `note/<id>` permanently, and retries landed on the same branch without repairing it.
+  A bare `checkout -B` also keeps untracked files, so a failure between `write_text` and `git add`
+  leaked the note even once the restore was unconditional. Both are fixed and pinned by separate
+  mutations (D-2026-08-01-a-gate-that-leaks-on-the-failure-path); the mid-window
+  `invalidate_cache()` named above is gone, because it widened this very window and its stated
+  justification died with the `try/finally`. Closing the transient window needs the submitter to
+  work somewhere readers do not resolve — a second checkout, or a bare repo and a temporary index.
 ## Done — The daily experiment progression (2026-07-31, D-162)
 
 Asked whether the system could read a technician's week-by-week series on one step and propose the

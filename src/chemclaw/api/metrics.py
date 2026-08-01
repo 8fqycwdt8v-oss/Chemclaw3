@@ -51,7 +51,10 @@ def _escape(value: str) -> str:
 # the exposition always carries HELP/TYPE lines (a scrape without them is much harder to read).
 _COUNTERS: dict[str, str] = {
     "chemclaw_turns_started_total": "Turns admitted and started.",
-    "chemclaw_turns_failed_total": "Turns that ended in an error event.",
+    # "emitted", not "ended in": a turn stopped by the harness loop's iteration cap emits an error
+    # event and then still delivers its partial answer, so it is counted here and, more precisely,
+    # by `chemclaw_turn_loop_caps_total` below.
+    "chemclaw_turns_failed_total": "Turns that emitted an error event.",
     # The two halves of a contended front door, and they mean different things: queueing is the
     # system absorbing a burst, shedding is it declining one. A rising queue rate with a flat shed
     # rate is capacity being used; both rising together is capacity being exceeded. Since D-166
@@ -67,6 +70,11 @@ _COUNTERS: dict[str, str] = {
     "chemclaw_turns_refused_budget_total": "Turns refused with 429 by the turn/token budget.",
     "chemclaw_turns_conflict_total": "Turns rejected with 409 (a turn was already running).",
     "chemclaw_turn_timeouts_total": "Turns cancelled by the wall-clock turn timeout.",
+    # The wall-clock timeout's sibling, and the reason it needed one: a turn stopped by the
+    # harness loop's iteration cap used to return normally and emit nothing, so the runaway guard
+    # firing was invisible to everything outside the process. A rising rate here is an agent that
+    # keeps planning more work than a turn can close — a prompt or skill problem, not an outage.
+    "chemclaw_turn_loop_caps_total": "Turns stopped by the harness loop's iteration cap.",
     "chemclaw_audit_sink_failures_total": (
         "GxP audit records that could not be persisted (the trail is incomplete)."
     ),

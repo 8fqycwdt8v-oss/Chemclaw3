@@ -16,16 +16,22 @@ from agent_framework import AgentSession
 from agent_framework._harness._mode import AgentModeProvider
 
 from chemclaw.agent.harness_mode import (
+    EMPTY_PLAN_HASH,
     EXECUTE_MODE,
     MODEL_MODE_TOOL,
     PLAN_MODE,
     PlanApprovalModeProvider,
+    approvable_plan_hash,
     current_plan_hash,
     grant_execute,
     session_mode,
 )
 from chemclaw.agent.harness_todo import mark_awaiting_job
-from chemclaw.agent.plan_approval_store import PlanApprovalStore
+from chemclaw.agent.plan_approval_store import (
+    ApprovalStore,
+    InMemoryPlanApprovalStore,
+    PlanApprovalStore,
+)
 from tests.pg import migrated_db_or_skip
 
 
@@ -197,6 +203,30 @@ def test_a_launched_job_does_not_revoke_its_own_approval() -> None:
     assert before == after
 
 
+def test_no_work_items_is_no_approvable_identity() -> None:
+    """The empty plan hashes to a constant, and a constant cannot be an authorization.
+
+    `EMPTY_PLAN_HASH` is the same string for every session in every deployment for all time, so a
+    decision recorded against it says nothing about *this* session's plan — and a session that has
+    lost its todo state (a rehydrate) proposes it again for free. `approvable_plan_hash` answers
+    None there, which is what the gate and the decision route ask; `current_plan_hash` stays total
+    for the display route.
+    """
+
+    async def _identities() -> tuple[str | None, str, str | None]:
+        session = AgentSession(session_id="plan-empty")
+        empty, displayed = await approvable_plan_hash(session), await current_plan_hash(session)
+        # A row nobody agreed to: the launcher's bookkeeping, which `todo_plan_items` strips. The
+        # display is non-empty, the plan is not.
+        await mark_awaiting_job(session, "job-1", title="awaiting the DFT run")
+        return empty, displayed, await approvable_plan_hash(session)
+
+    empty, displayed, bookkeeping_only = asyncio.run(_identities())
+    assert empty is None, "the empty plan was offered as an identity to approve"
+    assert displayed == EMPTY_PLAN_HASH, "the display route lost its hash for a planless session"
+    assert bookkeeping_only is None, "an `awaiting-job:` row alone made the plan approvable"
+
+
 def test_the_same_plan_hashes_stably() -> None:
     """Re-reading an unchanged plan gives the same hash, so approval is not spuriously lost."""
 
@@ -262,5 +292,97 @@ def test_a_later_rejection_revokes_an_earlier_approval() -> None:
         await store.record("s-revoke", "hash-a", "first@example.com", True)
         await store.record("s-revoke", "hash-a", "second@example.com", False)
         assert await store.decision("s-revoke", "hash-a") == (False, "second@example.com")
+
+    asyncio.run(_run())
+
+
+# --- consumption is durable evidence too, and both backends must agree about it ----------------
+#
+# Parametrized over the two real backends rather than tested once against the easy one. They are not
+# a implementation and a double: `session_store="memory"` is a deployment (the CLI is one), so a
+# disagreement about when an approval is spent would be a control that behaves differently depending
+# on whether a database happens to be configured. The Postgres case skips where no server is
+# reachable; the in-memory case always runs, so a regression in the shared semantics is caught
+# offline and the SQL is checked wherever a database exists.
+
+
+async def _consumable_store_or_skip(backend: str) -> ApprovalStore:
+    """One of the two real approval stores, skipping the Postgres one when no server is up."""
+    if backend == "memory":
+        return InMemoryPlanApprovalStore()
+    await migrated_db_or_skip()
+    return PlanApprovalStore()
+
+
+@pytest.mark.parametrize("backend", ["memory", "postgres"])
+def test_a_consumed_approval_reads_back_as_unapproved(backend: str) -> None:
+    """Spending an approval must change what the *store* says, not a marker beside it.
+
+    This is the defect D-167 left open. The `plan_approvals` row was durable and the marker saying
+    it had been spent lived in `session.state`, which an LRU eviction or a pod roll drops — so the
+    two halves of one control had different lifetimes and a reconstructed plan met a spent approval
+    looking fresh. `consumed_at` puts the second half on the row, and `decision` reports the
+    *effective* verdict, so no caller can read one without the other.
+
+    The actor still comes back: "approved earlier, already used" is a different thing for a surface
+    to show than "nobody has decided", and `GET /sessions/{id}/plan` shows exactly that difference.
+    """
+
+    async def _run() -> None:
+        store = await _consumable_store_or_skip(backend)
+        await store.record("s-spend", "hash-a", "chemist@example.com", True)
+        assert await store.decision("s-spend", "hash-a") == (True, "chemist@example.com")
+
+        await store.consume("s-spend", "hash-a")
+        assert await store.decision("s-spend", "hash-a") == (False, "chemist@example.com")
+
+        # Idempotent: turn teardown reaches this on two paths (answered, and failed-after-running),
+        # and spending twice must not cost a second plan's authorization or raise.
+        await store.consume("s-spend", "hash-a")
+        assert await store.decision("s-spend", "hash-a") == (False, "chemist@example.com")
+
+        # Untouched plans are untouched — consumption is scoped to the one identity, like the read.
+        assert await store.decision("s-spend", "hash-b") is None
+
+    asyncio.run(_run())
+
+
+@pytest.mark.parametrize("backend", ["memory", "postgres"])
+def test_re_approving_a_spent_plan_re_arms_it(backend: str) -> None:
+    """A person saying "yes, again" is a fresh decision, and needs no second operation to be one.
+
+    Append-only plus latest-wins means a new row is unspent by construction, which is why the
+    `rearm_plan` that used to sit beside every decision path is gone rather than reimplemented here.
+    """
+
+    async def _run() -> None:
+        store = await _consumable_store_or_skip(backend)
+        await store.record("s-again", "hash-a", "chemist@example.com", True)
+        await store.consume("s-again", "hash-a")
+        assert await store.decision("s-again", "hash-a") == (False, "chemist@example.com")
+
+        await store.record("s-again", "hash-a", "reviewer@example.com", True)
+        assert await store.decision("s-again", "hash-a") == (True, "reviewer@example.com")
+
+    asyncio.run(_run())
+
+
+@pytest.mark.parametrize("backend", ["memory", "postgres"])
+def test_consuming_never_spends_a_rejection(backend: str) -> None:
+    """Nothing to spend means nothing happens — a "no" must not be quietly stamped as used.
+
+    The distinction is not cosmetic: a rejection that had been marked consumed would still read
+    `approved=False`, but the record of what a person did would say the system had *used* their
+    refusal. Turn teardown calls `consume` on paths where the latest decision may well be a no.
+    """
+
+    async def _run() -> None:
+        store = await _consumable_store_or_skip(backend)
+        await store.record("s-no", "hash-a", "chemist@example.com", False)
+        await store.consume("s-no", "hash-a")
+        assert await store.decision("s-no", "hash-a") == (False, "chemist@example.com")
+        # And an approval recorded afterwards is live, rather than having been consumed early.
+        await store.record("s-no", "hash-a", "chemist@example.com", True)
+        assert await store.decision("s-no", "hash-a") == (True, "chemist@example.com")
 
     asyncio.run(_run())
