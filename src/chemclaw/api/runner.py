@@ -35,6 +35,7 @@ from chemclaw.agent.identity_context import (
     set_current_identity,
 )
 from chemclaw.agent.job_results import await_job_results
+from chemclaw.agent.loop_cap import begin_loop_watch, end_loop_watch, loop_hit_cap
 from chemclaw.agent.plan_gate import consume_turn_approval, gate_applies
 from chemclaw.agent.profiles import get_profile
 from chemclaw.agent.session_context import (
@@ -189,6 +190,10 @@ async def run_turn(
     # proposals) — the runner only sees the model's updates, so tools hand these over out of
     # band.
     signals_token = begin_turn()
+    # Watch the harness loop's stop decisions, so a turn stopped by the runaway cap can say so
+    # instead of looking exactly like one that finished (`chemclaw.agent.loop_cap`). No-op for the
+    # classic agent, which has no loop to watch.
+    loop_token = begin_loop_watch()
     # Durable jobs this turn launched, for the optional mid-turn resume below.
     started_jobs: list[str] = []
     dry_run_token = set_dry_run(dry_run)
@@ -320,6 +325,31 @@ async def run_turn(
                 if current_plan is not None and current_plan != last_plan:
                     last_plan = current_plan
                     yield PlanEvent(todos=last_plan)
+        # The runaway guard fired: the harness loop still had work it wanted to do and its
+        # iteration cap stopped it (`chemclaw.agent.loop_cap`). Said out loud, before the answer,
+        # for the same reason `CapabilityDegradedEvent` precedes the tokens — the answer that
+        # follows is whatever the last iteration managed, and a surface must be able to mark it
+        # partial rather than present it as the finished work. The turn is not failed by this: the
+        # answer still goes out, and the ledger still bills it as completed.
+        if loop_hit_cap():
+            METRICS.increment("chemclaw_turn_loop_caps_total")
+            logger.warning(
+                "the harness loop for session %s hit its %d-iteration cap with work still open",
+                session.session_id,
+                settings.harness_max_loop_iterations,
+            )
+            yield ErrorEvent(
+                message=(
+                    f"The turn reached its {settings.harness_max_loop_iterations}-iteration limit "
+                    "and stopped with work still open, so the answer below is partial "
+                    f"(session {session.session_id})."
+                ),
+                code="loop_cap_reached",
+                # Not retryable unchanged: the same request drives the same loop into the same
+                # cap. The useful next step is a narrower request, not another 25 iterations.
+                retryable=False,
+                correlation_id=correlation_id,
+            )
         answer = await _answer_event("".join(answer_parts))
         # **Before the yield, not after it.** `agent.run` has ended by now, so the history provider
         # has already committed this turn's rows and they are a complete, paired exchange — there is
@@ -491,6 +521,7 @@ async def run_turn(
             if value:
                 METRICS.increment(name, float(value), spend_labels)
         end_turn(signals_token)
+        end_loop_watch(loop_token)
         reset_dry_run(dry_run_token)
         reset_current_session_id(session_token)
         reset_current_session(live_session_token)

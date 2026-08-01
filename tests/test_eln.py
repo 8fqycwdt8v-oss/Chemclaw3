@@ -740,6 +740,11 @@ def test_sync_fetches_an_overlap_window_behind_the_cursor(
         assert adapter.fetched_since == [cursor - timedelta(seconds=1800)]
         assert summary.ingested == ["late"]
         assert summary.skipped_existing == []  # its note is not merged yet, so it ingests
+        # And it is flagged as awaiting merge, which is the honest report even on a first sync:
+        # the entry sits inside the replay window with no merged note, so the *next* run fetches
+        # and proposes it again. "Will come back until someone merges it" is what a single run can
+        # establish; "was proposed before" is not (this entry never was).
+        assert summary.awaiting_merge == ["late"]
         assert summary.next_cursor == cursor  # the cursor never moves backwards
 
     asyncio.run(_run())
@@ -1046,8 +1051,94 @@ def test_an_amended_entry_is_re_proposed_rather_than_dropped(
 
         assert summary.ingested == ["amended"]
         assert summary.skipped_existing == []
+        # Not awaiting merge: a merged predecessor is proof the review queue moves, so this is new
+        # content going in front of a human rather than the same claim going round again.
+        assert summary.awaiting_merge == []
         assert len(sub.submissions) == 1
         assert "31" in sub.submissions[0].files[0].content
+
+    asyncio.run(_run())
+
+
+def test_an_entry_whose_note_never_merged_is_reported_as_awaiting_merge(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A proposal nobody merged is re-proposed forever, and the summary has to say so.
+
+    `ingested` counts entries whose note was *proposed* through the PR-gate — proposed, because
+    that is as far as an automated step may take a knowledge claim. So an entry whose PR the
+    `kg-validate` hazard gate blocks, or that a reviewer simply never got to, is re-proposed on
+    every subsequent run and counted again each time, while an operator reading the summary sees a
+    steady ingest count and no indication that nothing is landing.
+
+    Asserted through a real `sync_entries` run over an empty knowledge dir (nothing merged) with
+    the entry inside the replay window, plus the WARNING that carries the same fact to an operator
+    who reads logs rather than workflow results.
+    """
+
+    async def _run() -> None:
+        monkeypatch.setattr(settings, "knowledge_dir", str(tmp_path))  # nothing merged, ever
+        cursor = datetime(2026, 1, 2, tzinfo=UTC)
+        blocked = _good_entry("blocked", cursor - timedelta(hours=2))
+        rxn, mol, sub = InMemoryFingerprintStore(), InMemoryFingerprintStore(), FakeSubmitter()
+        with caplog.at_level(logging.WARNING):
+            summary = await sync_entries(_ListAdapter([blocked]), rxn, mol, sub, cursor)
+
+        assert summary.ingested == ["blocked"]  # the proposal really was made again
+        assert summary.awaiting_merge == ["blocked"]  # and it accomplished nothing new
+        assert len(sub.submissions) == 1
+        assert "blocked" in caplog.text and "re-proposed every run" in caplog.text
+
+    asyncio.run(_run())
+
+
+def test_a_first_time_entry_is_not_reported_as_awaiting_merge(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A brand-new entry's note is unmerged too, and reporting it would make the field noise.
+
+    Every fresh proposal is unmerged for as long as review takes; what `awaiting_merge` reports is
+    the narrower thing an operator can act on — an entry the sync will keep re-proposing because it
+    is inside the replay window. A new entry is past the cursor, so the next run never sees it
+    again, and it belongs in `ingested` alone.
+    """
+
+    async def _run() -> None:
+        monkeypatch.setattr(settings, "knowledge_dir", str(tmp_path))
+        cursor = datetime(2026, 1, 2, tzinfo=UTC)
+        fresh = _good_entry("fresh", cursor + timedelta(hours=1))
+        rxn, mol, sub = InMemoryFingerprintStore(), InMemoryFingerprintStore(), FakeSubmitter()
+        summary = await sync_entries(_ListAdapter([fresh]), rxn, mol, sub, cursor)
+
+        assert summary.ingested == ["fresh"]
+        assert summary.awaiting_merge == []
+
+    asyncio.run(_run())
+
+
+def test_an_entry_that_fails_to_ingest_is_only_reported_as_rejected(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The two reports are exclusive: a rejection must not also show up as awaiting merge.
+
+    The unmerged-replay flag is decided before `ingest_reaction` runs (it needs the mapped note)
+    and recorded after it, so a bad entry inside the replay window — which is exactly where a
+    rejection is deterministic and repeats every run — reports one outcome, not two.
+    """
+
+    async def _run() -> None:
+        monkeypatch.setattr(settings, "knowledge_dir", str(tmp_path))
+        cursor = datetime(2026, 1, 2, tzinfo=UTC)
+        bad = RawEntry(
+            entry_id="bad",
+            created_at=cursor - timedelta(hours=2),
+            payload={"reactants": [{"smiles": "CCO"}], "products": [{"smiles": "CCCl"}]},
+        )
+        rxn, mol, sub = InMemoryFingerprintStore(), InMemoryFingerprintStore(), FakeSubmitter()
+        summary = await sync_entries(_ListAdapter([bad]), rxn, mol, sub, cursor)
+
+        assert [entry.entry_id for entry in summary.rejected] == ["bad"]
+        assert summary.ingested == [] and summary.awaiting_merge == []
 
     asyncio.run(_run())
 

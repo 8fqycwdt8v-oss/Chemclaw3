@@ -307,16 +307,22 @@ QM path. The rows below are what survives that merge, narrowed to say so.
       Two of the three measures already existed in pieces — `evals/ab.py::compare_tool_utility` is
       the A/B and was simply never registered, and `precision_recall_f1` already defines "did it
       name the right things".
-      **`runaway_rate` infers the cap from its residue** (an answer sent with todos still open),
-      because `AgentLoopMiddleware` stops and returns normally without emitting anything. A metric
-      written against a `runaway` event would score 0.0 forever.
+      **`runaway_rate` originally inferred the cap from its residue** (an answer sent with todos
+      still open), because `AgentLoopMiddleware` stops and returns normally without emitting
+      anything. That proxy counted a turn that correctly deferred to a durable job as a runaway —
+      `mark_awaiting_job` leaves the same residue — so it was replaced by the explicit signal
+      described in the row below.
       **AG-13 is not closed by this and the ADR says so explicitly**: a scripted transcript pins the
       model's replies, so these gate the harness's plumbing, never the model's judgment.
-- [ ] **The loop cap is silent, so nothing can alert on a runaway in production** — [S]. The eval
-      metric infers it from residue, which is all a transcript allows; a deployment watching live
-      turns has no signal at all. Needs a new `Event` member plus a runner branch plus a UI branch —
-      the three-part change `api/events.py` documents — which is a front-door decision rather than
-      an eval one.
+- [x] **The loop cap is silent, so nothing can alert on a runaway in production** — closed.
+      `chemclaw.agent.loop_cap` wraps the loop predicate and records its last stop decision (the
+      loop hit the cap exactly when it still wanted another iteration — MAF exposes no hook on the
+      cap itself), `run_turn` emits `ErrorEvent(code="loop_cap_reached")` before the partial answer
+      and increments `chemclaw_turn_loop_caps_total`, and `runaway_rate` scores that instead of the
+      residue it used to guess from. An `ErrorCode` member rather than a new `Event` member: a
+      capped turn is cut off, which is what `turn_timeout` and `budget_exhausted` already say.
+      *Left open:* `Chemclaw3_ui` renders the new code through its generic error path and does not
+      yet label it.
 - [ ] **The plan-vs-single-shot A/B has no real task set** — [M], blocked on AG-13.
       `plan_execute_utility` scores the pairs a case hands it, and the shipped case is illustrative.
       Genuine baseline-vs-augmented numbers mean running the same tasks twice against a live model.

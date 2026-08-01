@@ -31,6 +31,7 @@ from agent_framework._middleware import ChatMiddlewareLayer
 from agent_framework._tools import FunctionInvocationLayer
 
 from chemclaw.agent.chemclaw_agent import build_agent
+from chemclaw.agent.loop_cap import begin_loop_watch, end_loop_watch, loop_hit_cap
 from chemclaw.agent.message_pairing import calls_without_adjacent_results
 from chemclaw.cli import chat as cli
 from chemclaw.connectors.registry import open_reachable
@@ -224,6 +225,50 @@ def test_loop_is_capped_by_the_configured_max_iterations(monkeypatch: pytest.Mon
     assert len(client.calls) == 3
     items = asyncio.run(TodoSessionStore().load_items(session, source_id=DEFAULT_TODO_SOURCE_ID))
     assert not items[0].is_complete  # the cap stopped the loop, not the model finishing the todo
+
+
+def test_a_capped_loop_says_so_and_a_completed_one_does_not(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The cap is observable from outside the loop — the fact `runaway_rate` had to guess at.
+
+    `AgentLoopMiddleware` stops at `max_iterations` and returns normally, emitting nothing, so a
+    capped turn was externally identical to a finished one. `chemclaw.api.runner` turns this
+    question into an `ErrorEvent` coded `loop_cap_reached`; before that could mean anything, the
+    question itself had to have an answer, and the answer comes from a real MAF loop here rather
+    than from a stub. Both directions are asserted in one test on purpose: a signal that is always
+    on is as useless as one that never fires, and the two scripts differ only in whether the model
+    ever completes the todo it added.
+    """
+    monkeypatch.setattr(settings, "harness_enabled", True)
+    monkeypatch.setattr(settings, "harness_autonomy", "execute")
+    monkeypatch.setattr(settings, "harness_max_loop_iterations", 2)
+
+    never_finished = [_call("c1", "todos_add", {"todos": [{"title": "never finished"}]})] + [
+        _text("still working on it") for _ in range(10)
+    ]
+    capped_agent = build_agent(chat_client=ScriptedChatClient(never_finished))
+    # Watched from out here, not inside the run: `asyncio.run` copies the context into its task, so
+    # a flag *set* in there would never be seen out here — which is why the watch holds a mutable
+    # record rather than rebinding the contextvar (`chemclaw.agent.loop_cap`, same reason as
+    # `agent.turn_signals`).
+    token = begin_loop_watch()
+    try:
+        _run_turn(capped_agent, "do a task", capped_agent.create_session())
+        assert loop_hit_cap() is True
+    finally:
+        end_loop_watch(token)
+
+    # Raised *before* the agent is built: `loop_max_iterations` is read at construction, and a
+    # two-step script under a cap of 2 is a capped loop rather than a completed one.
+    monkeypatch.setattr(settings, "harness_max_loop_iterations", 10)
+    finishing_agent = build_agent(chat_client=ScriptedChatClient(_two_step_script()))
+    token = begin_loop_watch()
+    try:
+        _run_turn(finishing_agent, "do the two-step task", finishing_agent.create_session())
+        assert loop_hit_cap() is False
+    finally:
+        end_loop_watch(token)
 
 
 def test_no_tool_call_reaches_the_model_without_its_result(

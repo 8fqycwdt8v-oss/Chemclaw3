@@ -348,6 +348,16 @@ after the sync's overlap window, carrying an older payload timestamp, is filtere
 and reported as `… export file(s) arrived after the sync cursor but carry an older timestamp …`.
 Start the sync with `since` set before those entries' timestamps to pull them in.
 
+**A steady ingest count is not proof anything landed.** `IngestSummary.ingested` counts entries
+whose note this run *proposed* — the PR-gate is where a human merges it — so an entry whose branch
+is blocked (the `kg-validate` hazard gate refuses it) or simply unreviewed is proposed again on
+every run, indefinitely. Those entries are listed in `IngestSummary.awaiting_merge` (a subset of
+`ingested`) and logged as `eln sync proposed N entry/entries whose notes are still unmerged`. A
+count that does not fall between runs is a review queue nobody is working, not a source producing
+new data: open the branches those entries named, and merge or reject them. Note that an entry's
+*first* sync can appear here too when its export landed late — it sits inside the replay window,
+so it will indeed be re-proposed next run.
+
 ## (vi) Change a fingerprint definition (ECFP radius/bits or DRFP bits)
 
 `CHEMCLAW_ECFP_RADIUS`/`_ECFP_BITS`/`_DRFP_BITS` define the fingerprints. A **width** change

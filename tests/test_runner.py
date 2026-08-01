@@ -13,10 +13,12 @@ from agent_framework import AgentSession
 
 import chemclaw.api.runner as runner
 from chemclaw.agent.harness_todo import complete_awaiting_job, mark_awaiting_job
+from chemclaw.agent.loop_cap import observe_loop_cap
 from chemclaw.agent.turn_signals import record_job_started
 from chemclaw.agent.verifier import ClaimCheck, VerificationResult
 from chemclaw.api.events import (
     AnswerEvent,
+    ErrorEvent,
     Event,
     JobStartedEvent,
     PlanEvent,
@@ -231,6 +233,49 @@ def test_plan_is_emitted_and_only_when_it_changes(monkeypatch: pytest.MonkeyPatc
         ["[ ] Await QM job qm-1"],
         ["[x] Await QM job qm-1"],
     ]
+
+
+class _CappedLoopAgent:
+    """An agent whose loop still wanted another iteration when it stopped — a capped turn.
+
+    Drives the *real* `observe_loop_cap` wrapper, called the way MAF's loop middleware calls a
+    predicate, rather than poking the contextvar: what the runner then reads is what a genuinely
+    capped loop leaves behind. That a real MAF loop leaves it is pinned in
+    `tests/test_harness_execution.py`; this is the front-door half — the turn says so.
+    """
+
+    mcp_tools: list[object] = []
+
+    def run(  # noqa: D102 - a fake agent's run, documented by its class
+        self, message: str, *, stream: bool, session: AgentSession, **_run_options: Any
+    ) -> Any:
+        async def _gen() -> Any:
+            await observe_loop_cap(lambda **_kwargs: True)(session=session, agent=None)
+            yield _Update(text="still working on it")
+
+        return _gen()
+
+
+def test_a_capped_turn_reports_the_runaway_guard_before_its_partial_answer() -> None:
+    """The cap stops being silent: one `loop_cap_reached` error, and the answer still goes out.
+
+    Both halves matter. Without the event a capped turn is indistinguishable from a finished one —
+    the silence that forced `runaway_rate` onto a residue proxy and left production with nothing to
+    alert on. Without the answer the turn would lose the work the capped iterations did do.
+    """
+    events = _events(_CappedLoopAgent())
+    errors = [e for e in events if isinstance(e, ErrorEvent)]
+    assert [e.code for e in errors] == ["loop_cap_reached"]
+    assert errors[0].retryable is False
+    assert str(settings.harness_max_loop_iterations) in errors[0].message
+    # Before the answer, so a surface can mark it partial as it lands rather than retroactively.
+    assert events.index(errors[0]) < events.index(_answer(events))
+    assert _answer(events).text == "still working on it"
+
+
+def test_an_ordinary_turn_does_not_claim_the_cap_fired() -> None:
+    """A signal that is always on is worth nothing; the common path must stay silent."""
+    assert [e for e in _run_turn() if isinstance(e, ErrorEvent)] == []
 
 
 def test_unreadable_plan_does_not_sink_the_turn(monkeypatch: pytest.MonkeyPatch) -> None:

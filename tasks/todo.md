@@ -95,10 +95,10 @@ D-158…D-170.)
 - [x] **D5** Re-opened (a): the repo holds two opposite rules about whether the producing backend
       belongs in a calculation key, with a test pinning one. Decide once, apply to both, supersede
       whichever ADR loses.
-- [ ] **D6** Re-opened (b): does `ingest/eln/sync` report a reaction as ingested when its PR was
+- [x] **D6** Re-opened (b): does `ingest/eln/sync` report a reaction as ingested when its PR was
       blocked by `hazard_problems`?
 - [x] **D7** Re-opened (c): re-test empirically whether the lexical/vector legs are
       deterministically dropped by cross-source truncation.
-- [ ] **D8** Re-opened (d): whether `runaway_rate` intends to count async-job turns, and if so
+- [x] **D8** Re-opened (d): whether `runaway_rate` intends to count async-job turns, and if so
       whether it is misnamed.
 

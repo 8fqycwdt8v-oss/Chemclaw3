@@ -235,6 +235,7 @@ and is kept only for reservations that were in flight when this changed.
 | [D-2026-08-01-spend-is-a-ledger-not-a-label](D-2026-08-01-spend-is-a-ledger-not-a-label.md) | Spend is a ledger, not a label |
 | [D-2026-08-01-symmetry-is-an-input-not-a-default](D-2026-08-01-symmetry-is-an-input-not-a-default.md) | Symmetry is an input, not a default |
 | [D-2026-08-01-the-agent-slot-that-changed-no-bits](D-2026-08-01-the-agent-slot-that-changed-no-bits.md) | The agent slot that changed no bits |
+| [D-2026-08-01-the-cap-reports-itself](D-2026-08-01-the-cap-reports-itself.md) | The cap reports itself |
 | [D-2026-08-01-the-count-lives-in-the-test-not-in-the-prose](D-2026-08-01-the-count-lives-in-the-test-not-in-the-prose.md) | The count lives in the test, not in the prose |
 | [D-2026-08-01-trust-travels-on-the-value-line](D-2026-08-01-trust-travels-on-the-value-line.md) | Trust travels on the value line |
 | [D-2026-08-01-unknown-is-not-fine](D-2026-08-01-unknown-is-not-fine.md) | "Unknown" is not "fine": one shape for how much to trust a number |

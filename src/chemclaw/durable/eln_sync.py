@@ -55,16 +55,19 @@ def _merge(summaries: list[IngestSummary], floor: datetime) -> IngestSummary:
     """
     ingested: list[str] = []
     skipped_existing: list[str] = []
+    awaiting_merge: list[str] = []
     rejected: list[RejectedEntry] = []
     cursors: list[datetime] = []
     for summary in summaries:
         ingested.extend(summary.ingested)
         skipped_existing.extend(summary.skipped_existing)
+        awaiting_merge.extend(summary.awaiting_merge)
         rejected.extend(summary.rejected)
         cursors.append(summary.next_cursor)
     return IngestSummary(
         ingested=ingested,
         skipped_existing=skipped_existing,
+        awaiting_merge=awaiting_merge,
         rejected=rejected,
         next_cursor=max(cursors, default=floor),
     )
