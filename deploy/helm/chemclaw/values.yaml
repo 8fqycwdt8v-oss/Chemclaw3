@@ -248,6 +248,9 @@ config:
   # ingress rather than here.
   CHEMCLAW_SERVICE_RATE_LIMIT_PER_MINUTE: "120"
   CHEMCLAW_SERVICE_RATE_LIMIT_BURST: "30"
+  # JSON logs in-cluster. Every line already carries correlation_id / actor / session_id from the
+  # context filter; JSON is what lets a log stack index them instead of regexing a `%`-string.
+  CHEMCLAW_LOG_JSON: "true"
   # Stated here rather than left to the code default, because the chart *derives* the front door's
   # `terminationGracePeriodSeconds` from it: a turn is bounded by this, so a drain that outlasts it
   # cannot cut one short. Left implicit, an operator raising the turn budget would silently start

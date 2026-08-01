@@ -84,6 +84,12 @@ class ObservabilitySettings(BaseSettings):
     # The format carries the timestamp, level, and logger name every diagnosis needs.
     log_level: str = "INFO"
     log_format: str = "%(asctime)s %(levelname)s %(name)s: %(message)s"
+    # One JSON object per line instead of the `%`-format string above. Off in code and on in the
+    # chart, the same split `budget_enabled` uses: a developer reading a terminal wants the string,
+    # and a cluster log stack wants to parse rather than guess. The `%`-format is left as the
+    # default *shape* rather than widened with the three ids, because `log_json` supersedes it and
+    # two formats to keep in step is how one of them goes stale.
+    log_json: bool = False
     # GxP tool-audit trail (agents.audit): every agent tool call is logged once (name, args,
     # outcome, latency) by one MAF function middleware. Arguments are truncated to this many
     # characters so a large payload (a full optimization problem, an observation list) cannot
