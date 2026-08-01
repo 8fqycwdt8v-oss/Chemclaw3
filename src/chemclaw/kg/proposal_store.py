@@ -9,7 +9,9 @@ Writes are an **upsert on `(note_id, content_hash)`**, so a re-proposal of a byt
 touches the existing row rather than appending — matching `GitNoteSubmitter`, which pushes nothing
 when there is no diff. A *changed* note is a new version and appends, leaving any decision already
 recorded against the earlier version standing: overwriting a rejection with a fresh `open` row
-would erase the one thing this table exists to keep.
+would erase the one thing this table exists to keep. The single exception is a `failed` row, which
+is not a decision at all but a record that git was never reached — the retry that finally lands
+supersedes it (see `_UPSERT`).
 """
 
 from contextlib import AbstractAsyncContextManager
@@ -29,8 +31,20 @@ _COLUMNS = (
 # The mutable columns of an unchanged re-proposal: a fresh reference (the submitter may have
 # returned a different one), refreshed provenance (a second chemist proposing the same note is who
 # the row should now name), and a bumped `submitted_at` so the review queue orders by the most
-# recent ask. `state` is deliberately absent — a note re-proposed unchanged after a rejection must
-# not silently reopen itself; the rejection stands until the content actually changes.
+# recent ask.
+#
+# `state` moves in exactly one direction, out of `failed`. A *decision* is never touched: a note
+# re-proposed unchanged after a rejection must not silently reopen itself, or the gate is
+# defeatable by re-asking. But `failed` is not a decision (see `ProposalState`) — it says the
+# submission never reached git — and the retry that finally lands pushes byte-identical content, so
+# it collapses onto the same row. Leaving that row `failed` made the record assert the opposite of
+# what happened: the branch sits awaiting review while `state='open'` queries skip it,
+# `POST /proposals/{id}/decision` answers 409, and the merge webhook's `mark_merged` moves nothing.
+# `reason` follows `state` so a superseded failure does not keep explaining itself with a git error
+# that no longer applies.
+#
+# Both `CASE`s read `note_proposals.*`, the row as it was *before* this statement — SET expressions
+# are evaluated against the old row — so the two stay consistent however they are ordered.
 _UPSERT = """
     INSERT INTO note_proposals
         (note_id, note_type, content_hash, content, branch, reference, actor, session_id,
@@ -41,7 +55,11 @@ _UPSERT = """
         actor = EXCLUDED.actor,
         session_id = EXCLUDED.session_id,
         correlation_id = EXCLUDED.correlation_id,
-        submitted_at = now()
+        submitted_at = now(),
+        state = CASE WHEN note_proposals.state = 'failed'
+                     THEN EXCLUDED.state ELSE note_proposals.state END,
+        reason = CASE WHEN note_proposals.state = 'failed'
+                      THEN EXCLUDED.reason ELSE note_proposals.reason END
     RETURNING id
 """
 

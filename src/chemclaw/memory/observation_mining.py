@@ -22,6 +22,11 @@ from chemclaw.memory.similarity import cluster_by_similarity, reaction_fingerpri
 logger = logging.getLogger(__name__)
 
 
+def _runs(count: int) -> str:
+    """`1 run` / `3 runs` — a record a human signs off on must not say "1 runs"."""
+    return f"{count} run" if count == 1 else f"{count} runs"
+
+
 def mine_corpus(reactions: list[OrdReaction]) -> list[Observation]:
     """Cross-project transformation clusters the playbook bar discards, as observations.
 
@@ -34,6 +39,18 @@ def mine_corpus(reactions: list[OrdReaction]) -> list[Observation]:
     This tier can hold it because an observation is not a recommendation. The same cluster that
     would make an inadmissible playbook makes a legitimate thing to notice, and the statement says
     what the record shows rather than what to do about it.
+
+    **The statement is scoped to the runs it counted, and says so.** Successes are dropped *before*
+    fingerprinting, so a cluster only ever contains non-successful runs — and a sentence like "on
+    every recorded attempt" then asserted the opposite of the record for a transformation with five
+    successes and two failures. `durable.observation_jobs._promotion_summary` copies this sentence
+    verbatim into a promoted playbook's PR body, cited only by the non-success runs, so the human at
+    the gate could not see what falsified it. It now names the failures, names the inconclusive runs
+    separately, and states that any success lies outside the cluster.
+
+    A cluster with no `FAILURE` in it is not emitted at all: `INCONCLUSIVE` means aborted,
+    mis-charged or never assayed, which per `OutcomeClass` carries no evidence about the chemistry,
+    so "nothing here succeeded" would read as a finding where there is none.
 
     Deterministic: same corpus in, same observations out, ordered by cluster anchor.
     """
@@ -51,14 +68,24 @@ def mine_corpus(reactions: list[OrdReaction]) -> list[Observation]:
         if len(projects) < 2:
             # One project repeating itself is episodic, which the campaign layer already covers.
             continue
-        outcomes = sorted({str(outcome_of[m]) for m in cluster if m in outcome_of})
+        failures = [m for m in cluster if outcome_of.get(m) is OutcomeClass.FAILURE]
+        if not failures:
+            continue
+        inconclusive = [m for m in cluster if outcome_of.get(m) is OutcomeClass.INCONCLUSIVE]
+        aside = (
+            f", with {_runs(len(inconclusive))} inconclusive (no evidence either way)"
+            if inconclusive
+            else ""
+        )
         observations.append(
             Observation(
                 statement=(
-                    f"A transformation run in {len(projects)} projects "
-                    f"({', '.join(projects)}) has {' and '.join(outcomes)} outcomes on every "
-                    f"recorded attempt ({len(cluster)} runs). Nothing proposes this as a playbook, "
-                    "because a playbook may only be distilled from successes."
+                    f"One transformation failed in {_runs(len(failures))} across "
+                    f"{len(projects)} projects ({', '.join(projects)}){aside}. No successful run "
+                    "is in this cluster: it is built from non-successful runs only, so any success "
+                    "of the same transformation lies outside it and is not counted here. Nothing "
+                    "proposes this as a playbook, because a playbook may only be distilled from "
+                    "successes."
                 ),
                 scope=f"transformation:{min(cluster)}",
                 evidence_note_ids=sorted(f"reaction-{member}" for member in cluster),

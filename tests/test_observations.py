@@ -67,9 +67,9 @@ class TestTheAntiFeedbackRule:
         """The statement changes whenever the evidence does, so it must not be part of the id.
 
         A cluster gaining a member is routine under periodic ELN sync, and it rewrites the
-        statement ("2 runs" -> "3 runs"). Hashing that would mint a new row per growth step:
-        support would never accumulate, `first_seen` would reset, and the superseded row would sit
-        open contradicting its successor for the whole retirement window.
+        statement ("2 runs" -> "3 runs"). Hashing that would mint a new row on *every* growth step,
+        so support would never accumulate at all and the promotion threshold would never be
+        crossed.
         """
         first = Observation(statement="seen in 2 projects", scope="t").with_id()
         grown = Observation(statement="seen in 3 projects", scope="t").with_id()
@@ -77,6 +77,50 @@ class TestTheAntiFeedbackRule:
         assert first.id.startswith("observation-")
         # Different findings still get different rows.
         assert Observation(statement="seen in 2 projects", scope="u").with_id().id != first.id
+
+    def test_the_cluster_anchor_moves_when_a_lower_id_joins(self) -> None:
+        """`min(cluster)` is not merge-stable, and `with_id` now says so instead of claiming it is.
+
+        The docstring used to justify the anchor with "stable as the cluster grows, since clusters
+        are disjoint partitions" — a non sequitur: disjointness means two clusters never claim one
+        scope, which is collision-freedom, not stability. A reaction whose id sorts below the
+        current anchor (a re-ingested older run, a differently-prefixed ELN batch) moves it, and so
+        does a new reaction bridging two clusters under single linkage.
+
+        Pinned rather than fixed, and this test is what makes the accepted cost visible: the growth
+        step that keeps the anchor still upserts one row, and the step that moves it mints a second
+        whose support strictly exceeds the row it supersedes — so `open_observations`, which orders
+        by support, always ranks the current finding above the subset it leaves behind.
+        """
+        pair = mine_corpus(
+            [
+                _reaction("r2", "alpha", OutcomeClass.FAILURE),
+                _reaction("r3", "beta", OutcomeClass.FAILURE),
+            ]
+        )[0].with_id()
+        grown = mine_corpus(
+            [
+                _reaction("r2", "alpha", OutcomeClass.FAILURE),
+                _reaction("r3", "beta", OutcomeClass.FAILURE),
+                _reaction("r4", "gamma", OutcomeClass.FAILURE),
+            ]
+        )[0].with_id()
+        moved = mine_corpus(
+            [
+                _reaction("r1", "gamma", OutcomeClass.FAILURE),
+                _reaction("r2", "alpha", OutcomeClass.FAILURE),
+                _reaction("r3", "beta", OutcomeClass.FAILURE),
+            ]
+        )[0].with_id()
+
+        assert (pair.scope, grown.scope, moved.scope) == (
+            "transformation:r2",
+            "transformation:r2",
+            "transformation:r1",
+        )
+        assert grown.id == pair.id, "an ordinary growth step must keep accumulating on one row"
+        assert moved.id != pair.id, "a moved anchor mints a second row — the documented cost"
+        assert moved.support > pair.support, "the superset must outrank the row it supersedes"
 
 
 class TestTheCorpusMiner:
@@ -100,7 +144,70 @@ class TestTheCorpusMiner:
         assert found[0].projects_seen == ["alpha", "beta"]
         assert found[0].evidence_note_ids == ["reaction-r1", "reaction-r2"]
         assert found[0].origin == "corpus-mining"
-        assert "failure" in found[0].statement
+        assert "failed in 2 runs" in found[0].statement
+
+    def test_the_statement_never_asserts_more_than_the_cluster_it_counted(self) -> None:
+        """The observation must not contradict the record it is derived from.
+
+        Successes are dropped *before* fingerprinting, so a cluster only ever holds non-successful
+        runs — and the statement used to read "…has failure outcomes on every recorded attempt (2
+        runs)" for a transformation the corpus records five successes for. That is the opposite of
+        what happened, and `observation_jobs._promotion_summary` copies the sentence verbatim into a
+        promoted playbook's PR body cited only by the non-success runs, so the human at the gate
+        cannot see what falsifies it. It must scope itself to the runs it actually counted.
+        """
+        corpus = [
+            _reaction(f"s{n}", "alpha" if n % 2 else "beta", OutcomeClass.SUCCESS) for n in range(5)
+        ] + [
+            _reaction("r1", "alpha", OutcomeClass.FAILURE),
+            _reaction("r2", "beta", OutcomeClass.FAILURE),
+        ]
+
+        [found] = mine_corpus(corpus)
+
+        assert "every recorded attempt" not in found.statement
+        assert "No successful run is in this cluster" in found.statement
+        assert "lies outside it" in found.statement
+        # ...and the count is the non-successful runs, never the transformation's whole record.
+        assert "failed in 2 runs" in found.statement
+        assert found.evidence_note_ids == ["reaction-r1", "reaction-r2"]
+
+    def test_an_inconclusive_run_is_named_apart_from_the_failures(self) -> None:
+        """`OutcomeClass` calls the distinction structural, so the sentence has to keep it.
+
+        An aborted, mis-charged or never-assayed run carries no evidence about the chemistry.
+        Folding it into the failure count would teach the corpus something untrue — the exact
+        thing `INCONCLUSIVE` exists to prevent.
+        """
+        [found] = mine_corpus(
+            [
+                _reaction("r1", "alpha", OutcomeClass.FAILURE),
+                _reaction("r2", "beta", OutcomeClass.FAILURE),
+                _reaction("r3", "gamma", OutcomeClass.INCONCLUSIVE),
+            ]
+        )
+
+        assert "failed in 2 runs" in found.statement
+        assert "with 1 run inconclusive (no evidence either way)" in found.statement
+        # All three are merged notes and all three back the reading; only the claim is narrowed.
+        assert found.evidence_note_ids == ["reaction-r1", "reaction-r2", "reaction-r3"]
+
+    def test_a_purely_inconclusive_cluster_states_nothing(self) -> None:
+        """Runs that were never assayed are not a finding, in either direction.
+
+        The filter is "not SUCCESS", so these clustered and were asserted to have "inconclusive
+        outcomes on every recorded attempt" — a sentence that reads as a result while contradicting
+        `OutcomeClass`'s own rule that an inconclusive run says nothing about the chemistry.
+        """
+        assert (
+            mine_corpus(
+                [
+                    _reaction("r1", "alpha", OutcomeClass.INCONCLUSIVE),
+                    _reaction("r2", "beta", OutcomeClass.INCONCLUSIVE),
+                ]
+            )
+            == []
+        )
 
     def test_a_successful_cluster_is_left_to_the_playbook_layer(self) -> None:
         """Two tiers must not both hold the same finding, or a reviewer sees it twice."""

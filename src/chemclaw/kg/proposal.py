@@ -91,7 +91,9 @@ class NoteProposal(BaseModel):
         byte-identical note touches the existing row (matching `GitNoteSubmitter`, which pushes
         nothing when there is no diff); a changed body appends a new row and leaves any earlier
         decision standing, because overwriting a rejection with a fresh `open` row would erase the
-        one thing this record exists to keep.
+        one thing this record exists to keep. Collapsing onto one row is also what lets the retry
+        of a `FAILED` submission correct it rather than leave a permanently false record — see
+        `InMemoryProposalStore.upsert`.
         """
         return stable_hash(self.content)
 
@@ -134,9 +136,10 @@ class InMemoryProposalStore:
 
     Every rule its Postgres sibling enforces in SQL is enforced here in the same terms, because a
     backend that agrees on the happy path and diverges on the contended one is worse than no second
-    backend: keyed on `(note_id, content_hash)` so a re-proposal collapses, `state` untouched on
-    that collapse so a rejection does not silently reopen, and decisions confined to open rows so a
-    second reviewer cannot overwrite the first.
+    backend: keyed on `(note_id, content_hash)` so a re-proposal collapses, a *decision* untouched
+    on that collapse so a rejection does not silently reopen, a `FAILED` row superseded by the
+    retry that succeeded, and decisions confined to open rows so a second reviewer cannot overwrite
+    the first.
     """
 
     def __init__(self) -> None:
@@ -152,15 +155,26 @@ class InMemoryProposalStore:
         existing_id = self._by_version.get(version)
         if existing_id is not None:
             existing = self._by_id[existing_id]
-            self._by_id[existing_id] = existing.model_copy(
-                update={
-                    "reference": proposal.reference,
-                    "actor": proposal.actor,
-                    "session_id": proposal.session_id,
-                    "correlation_id": proposal.correlation_id,
-                    "submitted_at": now,
-                }
-            )
+            update = {
+                "reference": proposal.reference,
+                "actor": proposal.actor,
+                "session_id": proposal.session_id,
+                "correlation_id": proposal.correlation_id,
+                "submitted_at": now,
+            }
+            if existing.state is ProposalState.FAILED:
+                # The one state transition a re-proposal may make, and the Postgres `CASE` in
+                # `proposal_store._UPSERT` is its mirror. `FAILED` is not a decision — it says the
+                # submission never reached git — and the retry that finally lands carries
+                # byte-identical content, so it collapses onto this row. Leaving it `FAILED` made
+                # the record assert the opposite of what happened: the branch awaits review while
+                # every `state='open'` query skips the row, the decision route answers 409, and
+                # `mark_merged` moves nothing. A *decision* still stands: a rejected note
+                # re-proposed unchanged must not silently reopen, or the gate is defeated by
+                # re-asking.
+                update["state"] = proposal.state
+                update["reason"] = proposal.reason
+            self._by_id[existing_id] = existing.model_copy(update=update)
             return existing_id
         new_id = self._next_id
         self._next_id += 1

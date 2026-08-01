@@ -24,7 +24,10 @@ def reaction_fingerprints(reactions: list[OrdReaction]) -> dict[str, str]:
     fingerprints: dict[str, str] = {}
     for reaction in reactions:
         try:
-            fingerprints[reaction.reaction_id] = drfp_bitstring(reaction.reaction_smiles())
+            # The transformation, not the record form: clustering asks "is this the same
+            # chemistry?", and a solvent left in the string answers "was it run in the same
+            # flask?" instead — see `OrdReaction.transformation_smiles`.
+            fingerprints[reaction.reaction_id] = drfp_bitstring(reaction.transformation_smiles())
         except FingerprintError:
             continue
     return fingerprints

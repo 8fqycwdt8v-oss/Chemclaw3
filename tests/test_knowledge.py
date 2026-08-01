@@ -113,6 +113,16 @@ def _note_submission(note_id: str, content: str = "body\n") -> NoteSubmission:
     )
 
 
+def _current_branch(work: Path) -> str:
+    """The branch `work` is checked out on right now."""
+    return subprocess.run(
+        ["git", "-C", str(work), "branch", "--show-current"],
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.strip()
+
+
 def test_git_submitter_pushes_branch(tmp_path: Path) -> None:
     """GitNoteSubmitter branches off the base and pushes the note (local-git only)."""
     _, work = _make_remote_and_clone(tmp_path)
@@ -158,24 +168,75 @@ def test_submit_leaves_the_shared_checkout_on_base(tmp_path: Path) -> None:
     submitter = GitNoteSubmitter(repo_dir=str(work), base_branch="main", remote="origin")
     asyncio.run(submitter.submit(_note_submission("job-abc")))
 
-    current_branch = subprocess.run(
-        ["git", "-C", str(work), "branch", "--show-current"],
-        capture_output=True,
-        text=True,
-        check=True,
-    ).stdout.strip()
-    assert current_branch == "main"
+    assert _current_branch(work) == "main"
     # The note this submission wrote is not on `main`'s working tree — only merging the PR
     # puts it there — so a reader pointed at this checkout right now sees no proposed notes.
     assert not (work / "knowledge" / "job-result" / "job-abc.md").exists()
 
 
-def test_submit_busts_the_graph_cache(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """The authoring loop never waits out the TTL window: submitting a note invalidates the cache.
+def test_a_rejected_push_still_leaves_the_checkout_on_base(tmp_path: Path) -> None:
+    """A submission that fails *after* the branch checkout must still restore the tree.
 
-    Without this the `graph_cache_ttl_seconds` window (DA-5) could serve a note the process just
-    wrote as absent — and the submitter's `checkout -B`/`reset --hard` rewrite the tree wholesale,
-    so a stale cached graph could describe a tree that no longer exists.
+    This is the PR-gate bypass the `try/finally` closes. `_return_to_base` used to be reached
+    only on the two success returns, so a rejected push (a dead remote, a protected ref, a
+    hook) left `note_repo_dir` on `note/<id>` with the unreviewed, agent-authored note in the
+    working tree — and every reader resolves that same checkout through
+    `settings.knowledge_path`, so the note was served as merged knowledge and counted as
+    merged by `ingest/eln/sync._merged_note_bodies`. Retrying did not repair it: the retry
+    re-creates the same branch. Nothing but a *later, successful* submission ever fixed it.
+    """
+    remote, work = _make_remote_and_clone(tmp_path)
+    hook = remote / "hooks" / "pre-receive"
+    hook.write_text("#!/bin/sh\nexit 1\n", encoding="utf-8")
+    hook.chmod(0o755)
+
+    submitter = GitNoteSubmitter(repo_dir=str(work), base_branch="main", remote="origin")
+    with pytest.raises(GitSubmitError, match="push"):
+        asyncio.run(submitter.submit(_note_submission("job-unreviewed")))
+
+    assert _current_branch(work) == "main"
+    assert not (work / "knowledge" / "job-result" / "job-unreviewed.md").exists()
+
+
+def test_a_failure_before_the_commit_leaves_no_note_in_the_tree(tmp_path: Path) -> None:
+    """Restoring `base` also discards a note written but never staged.
+
+    A submission carries a note *and its dependencies*, so it can die between two
+    `write_text` calls — here on the containment check of the second file. The first file is
+    already on disk and untracked, and a bare `checkout` back to `base` keeps untracked files,
+    which would hand an unreviewed note to every reader of the checkout just as surely as
+    being stuck on the note branch would. The restore discards first, so nothing survives it.
+    """
+    _, work = _make_remote_and_clone(tmp_path)
+    submitter = GitNoteSubmitter(repo_dir=str(work), base_branch="main", remote="origin")
+    pair = NoteSubmission(
+        branch="note/job-pair",
+        files=[
+            NoteFile(path="knowledge/job-result/job-pair.md", content="the note\n"),
+            NoteFile(path="../escape.md", content="the dependency\n"),
+        ],
+        title="Add job-result note: job-pair",
+        body="review please",
+    )
+
+    with pytest.raises(GitSubmitError, match="escapes"):
+        asyncio.run(submitter.submit(pair))
+
+    assert _current_branch(work) == "main"
+    assert not (work / "knowledge" / "job-result" / "job-pair.md").exists()
+
+
+def test_submit_busts_the_graph_cache(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A submission rewrites the tree, so no graph cached across it may survive it.
+
+    `checkout -B`/`reset --hard` replace the working tree wholesale — twice, into the note branch
+    and back to base — and where `note_repo_dir` and `knowledge_dir` overlap (a dev checkout) a
+    graph cached before that would describe a tree that no longer exists for the whole
+    `graph_cache_ttl_seconds` window (DA-5).
+
+    The invalidation belongs to the *restore*, not to the write: the note only ever exists on
+    `note/<id>`, so busting the cache mid-submission cached nothing useful and merely widened the
+    window in which a concurrent reader could scan the checked-out note branch (DARK-10).
     """
     from chemclaw.kg import graph as kg_graph
 
