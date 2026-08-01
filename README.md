@@ -50,9 +50,10 @@ plan→approve→execute harness. Entra identity is enforced when
 `deploy/` holds the OpenShift delivery: one rootless multi-target image
 (`deploy/Containerfile`, role chosen by `CHEMCLAW_COMPONENT`) and a Helm chart
 (`deploy/helm/chemclaw/`). See `deploy/README.md` for the topology (front-door
-Route behind OIDC, the two Temporal workers, MCP servers, workload identity
-federation, and the three plain secrets). The build order and per-phase status
-live in `docs/planning/implementation-tickets.md`.
+Route behind OIDC, the background worker plus one Temporal worker per connector
+bundle that owns durable work, the connector servers, workload identity
+federation, and the plain secrets `values.yaml` declares). The build order and
+per-phase status live in `docs/planning/implementation-tickets.md`.
 
 ## Security
 

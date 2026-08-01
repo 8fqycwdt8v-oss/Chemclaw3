@@ -38,7 +38,7 @@ generates enters the graph through a **PR-gate**, so a human signs off before it
 | `memory/` | — | The memory layers over past campaigns, interactions and failures, plus the ungated observations tier (D-161). |
 | `templates/` | — | Step templates: the manifest, registry and resolver. |
 | `evals/` | — | The eval harness and metrics. |
-| `cli/` | — | Every terminal entrypoint in one place: `chat` (the admin CLI, and the `chemclaw` console script) and the eight validators `make` runs. |
+| `cli/` | — | Every terminal entrypoint in one place: `chat` (the admin CLI, and the `chemclaw` console script) plus the validator and verifier entrypoints `make` invokes — `kg-validate` and `eln-validate` are the exceptions, living with the code they check. |
 
 Layer 3 has no code: it is `SKILL.md` files — the global ones in `skills/`, the bundled ones
 inside each connector.

@@ -167,7 +167,10 @@ def test_chart_config_values_load_as_settings(monkeypatch: pytest.MonkeyPatch) -
 
 
 def test_chart_declares_only_the_documented_secrets() -> None:
-    """The chart names exactly the plain secrets the architecture signed off — no sixth crept in.
+    """The chart names exactly the plain secrets the architecture signed off.
+
+    Deliberately without a number: the count belongs in the assertion below, not in a sentence
+    describing it (D-2026-08-01-the-count-lives-in-the-test-not-in-the-prose).
 
     Everything else is workload-identity federation, i.e. no client secret at rest; a new plain
     secret is an architecture change (D-047), so it should not pass unnoticed. Each addition is

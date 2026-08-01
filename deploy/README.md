@@ -26,16 +26,17 @@ does not read this file, so the row survived. Fingerprints deploy as `connector-
 ## Config & secrets (F6-T2 / F6-T6)
 
 - **Non-secret** config is the Helm `values.yaml` `config:` block → a `ConfigMap` → `CHEMCLAW_*` env.
-  Keys mirror `chemclaw/config.Settings` **exactly** — there is no second config system in-cluster.
-- **Plain secrets are the exceptions, not the model.** Five exist, and each is a credential for a
-  system that does not speak Entra: the generic LLM API key (F0, the one documented Entra
-  exception), the Postgres DSN, the HPC-bridge credential, the knowledge-repo push token, and the
-  git host's webhook-signing secret. The Temporal mTLS certs are a sixth, mounted as files rather
-  than env. Everything that *can* federate does: **Workload Identity Federation** (F4-T2) annotates
-  the pod's ServiceAccount so its projected token is exchanged for an Entra token, with no client
-  secret at rest. (This section said "only three" from F6-T6 until each later gap added one; the
-  count is now derived from `values.yaml`'s `secrets.keys` rather than restated here, because a
-  number in prose is exactly what went stale.)
+  Keys mirror `src/chemclaw/core/config.py`'s `Settings` **exactly** — there is no second config
+  system in-cluster.
+- **Plain secrets are the exceptions, not the model.** Each is a credential for a system that does
+  not speak Entra, and the set is `values.yaml`'s `secrets.keys` — declared there with the argument
+  for each one written beside it, and pinned by `tests/test_helm_chart.py`. The Temporal mTLS certs
+  are the one that is not env: they mount as files. Everything that *can* federate does: **Workload
+  Identity Federation** (F4-T2) annotates the pod's ServiceAccount so its projected token is
+  exchanged for an Entra token, with no client secret at rest.
+  (This section said "only three" from F6-T6, then "five", while the real number reached six —
+  which is the whole reason the count now lives in the chart and the test rather than in this
+  sentence. It had already said so, in the sentence after the one that restated it.)
 - Populate them via `ExternalSecret`/`SealedSecret`; the chart only *names* them.
 
 ### Two settings that decide whether the pod boots at all

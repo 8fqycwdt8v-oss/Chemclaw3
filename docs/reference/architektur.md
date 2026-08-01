@@ -159,11 +159,16 @@ Chemiker: *"Wie ist die zu erwartende Regioselektivität für die späte C–H-F
 - **Ein einziges, rootless Multi-Target-Image** (`deploy/Containerfile`, UBI9, UID 1001,
   arbitrary-UID-fähig für die OpenShift-SCC). Alle Rollen teilen dieselben Bits; `deploy/
   entrypoint.sh` wählt die Rolle über `CHEMCLAW_COMPONENT`:
-  - **Front-Door-Service**: `uvicorn service.app:create_app` hinter einer OIDC-**Route**
+  - **Front-Door-Service**: `uvicorn chemclaw.api.app:create_app` hinter einer OIDC-**Route**
     (FastAPI + SSE, POST-Streaming). HPA skaliert nur den zustandslosen Front-Door.
-  - **Temporal-Worker**: `hpc-jobs` (wenige, schwer) und `background-jobs` (leicht: Sync/Reindex/
-    Reports) – dieselben zwei Queues wie im Kern (D-006).
-  - **MCP-Server**: die Fingerprint-Capability-Server (molfp/rxnfp).
+  - **Temporal-Worker**: `background-jobs` (leicht: Sync/Reindex/Reports, der Connector-Job-Wrapper)
+    plus je eine abgeleitete `connector-<name>`-Queue pro Bundle mit eigener durabler Arbeit. Die
+    schwere `hpc-jobs`-Queue ist mit dem QM-Job nach `connectors/qm/` gewandert (D-118/D-150); im
+    Kern gibt es keine zweite Queue mehr.
+  - **Connector-Server**: `connector-molfp`, `connector-rxnfp` und die übrigen Bundles — dieselbe
+    Rolle wie jeder andere Connector. Einen eigenen „MCP-Server"-Deployment-Typ gibt es nicht;
+    `deploy/entrypoint.sh` kennt nur `service`, `background-worker`, `connector-worker-*` und
+    `connector-*` (D-156 hat dieselbe Zeile in `deploy/README.md` bereits gestrichen).
 - **LLM**: internes OpenAI-kompatibles Endpoint (`src/chemclaw/agent/llm_provider.py`, `llm_provider=
   openai_compatible`). Der Provider ist die *einzige* Stelle, die eine Client-Klasse importiert; ein
   Provider-Wechsel ist eine Config-Änderung. Das LLM nutzt **eine generische API-Credential** (nicht
@@ -179,9 +184,12 @@ Chemiker: *"Wie ist die zu erwartende Regioselektivität für die späte C–H-F
   laufen als **Pre-Deploy-Helm-Hook-Job** (`python -m calc.migrate`, D-034), bevor ein App-Container
   startet.
 - **Eine Config-Quelle**: die `values.yaml`-`config:`-Sektion → ein `ConfigMap` → `CHEMCLAW_*`-Env,
-  Schlüssel identisch zu `chemclaw/config.Settings`. Kein zweites Config-System im Cluster.
-- **Nur drei Klartext-Secrets** (F6-T6): die generische LLM-API-Credential, Temporal-mTLS,
-  HPC-Bridge-Credential. Alles andere ist Workload Identity Federation – kein Client-Secret at rest.
+  Schlüssel identisch zu `Settings` in `src/chemclaw/core/config.py`. Kein zweites Config-System im Cluster.
+- **Klartext-Secrets sind die Ausnahme, nicht das Modell** (F6-T6): jedes ist eine Credential für
+  ein System, das kein Entra spricht. Die Menge steht in `values.yaml` unter `secrets.keys` und ist
+  in `tests/test_helm_chart.py` gepinnt — hier bewusst keine Zahl, weil genau diese Zahl schon
+  zweimal veraltet ist. Temporal-mTLS wird als Datei gemountet statt als Env. Alles andere ist
+  Workload Identity Federation – kein Client-Secret at rest.
 - **NetworkPolicy**: Default-Deny-Egress mit Allow-List (DNS/Postgres/Temporal/HTTPS). **Probes**:
   `/readyz`+`/healthz` für den Service; die Temporal-Poll-Schleife ist die Worker-Liveness.
 - **Skills-Repo**: Git-Repo, read-only in Produktion gemountet, von Fachexperten gepflegt.
@@ -232,11 +240,15 @@ Anforderung: **eine** Identität pro Nutzer, die sich konsequent durch den gesam
 
 ## 8. Mehrbenutzerfähigkeit & differenzierte Rechte (Multi-Tenancy/RBAC)
 
-**Kurzfassung:** Reine Nebenläufigkeit (viele gleichzeitige Nutzer) ist in allen vier Schichten gut gelöst. **Differenzierte Rechte pro Nutzer/Rolle sind dagegen nicht automatisch vorhanden** – sie müssen an mehreren Stellen bewusst nachgerüstet werden. Schicht für Schicht:
+**Kurzfassung:** Reine Nebenläufigkeit (viele gleichzeitige Nutzer) ist in allen vier Schichten gut gelöst. Differenzierte Rechte pro Nutzer/Rolle waren zum Zeitpunkt dieses Entwurfs nirgends vorhanden.
+
+> **Stand heute (D-052, D-2026-08-01):** Zwei der hier als offen beschriebenen Punkte sind gebaut. Rollenbewusstes Skill-Filtering existiert als `RoleScopedSkillsSource` in `src/chemclaw/agent/skill_access.py` (D-052). Die Tool-Autorisierung liegt **nicht** im MCP-Server, sondern in `src/chemclaw/agent/authz.py` und `src/chemclaw/agent/tool_authz.py` — ein Gate, das jeder Tool-Aufruf passiert, unabhängig davon, ob das Tool in-process oder hinter einem Connector liegt. Die Tabelle unten ist der ursprüngliche Befund und wird als solcher gelesen.
+
+Schicht für Schicht:
 
 | Schicht | Nebenläufigkeit (viele Nutzer gleichzeitig) | Differenzierte Rechte (unterschiedliche Rollen) |
 |---|---|---|
-| **MAF-Agents** | ✅ Zustandslos hostbar (Azure AI Foundry/Container Apps), horizontal skalierbar, eine Session pro Nutzer | ⚠️ **Nicht automatisch**: `SkillsProvider` lädt standardmäßig alle Skills aus dem Verzeichnisbaum, unabhängig vom Nutzer. Muss um eine rollenbewusste Filterung erweitert werden (z. B. eigener Context-Provider, der aus den Entra-ID-Claims der Session – App-Rollen/Gruppenmitgliedschaft – ableitet, welche Skills überhaupt advertised werden) |
+| **MAF-Agents** | ✅ Zustandslos hostbar (Azure AI Foundry/Container Apps), horizontal skalierbar, eine Session pro Nutzer | ⚠️ **Damals nicht automatisch** (inzwischen gebaut, s. o.): `SkillsProvider` lädt standardmäßig alle Skills aus dem Verzeichnisbaum, unabhängig vom Nutzer. Braucht eine rollenbewusste Filterung (z. B. eigener Context-Provider, der aus den Entra-ID-Claims der Session – App-Rollen/Gruppenmitgliedschaft – ableitet, welche Skills überhaupt advertised werden) |
 | **MCP-Server (eigen, FastMCP)** | ✅ Zustandslos, horizontal skalierbar | ✅ **Bester Ansatzpunkt**: Da jeder Tool-Call bereits das Entra-Token des aufrufenden Nutzers trägt (OBO-Flow), lässt sich hier pro Tool-Aufruf autorisieren (Rollen-/Gruppen-Claim prüfen, bevor z. B. `submit_qm_job` oder `extract_reaction_from_eln` ausgeführt wird). **Copilot Studios DLP wirkt nur serverweit, nicht pro Tool** – feingranulare Rechte dürfen sich nicht darauf verlassen, sondern müssen im eigenen MCP-Server implementiert sein |
 | **Temporal** | ✅ Für genau diesen Zweck gebaut: Namespaces isolieren Traffic/Konfiguration, Tausende gleichzeitige Workflow-Executions sind Standard | ⚠️ **Temporal-eigenes RBAC (Account-Rollen wie Developer/Read-Only/Custom Roles, per SCIM aus Entra ID synchronisierbar) regelt nur den *operativen* Zugriff** (wer darf Workflows im Temporal-Dashboard einsehen/verwalten) – **nicht**, ob ein bestimmter Chemiker einen bestimmten teuren DFT-Job auslösen darf. Diese fachliche Autorisierung muss *vor* dem `submit_qm_job`-Aufruf in MCP/MAF geprüft werden; die Entra-ID des auslösenden Nutzers wird danach nur noch als Claim im Workflow-Payload mitgeführt (Audit, nicht Zugriffskontrolle). Empfehlung: **Namespace pro Team/Projekt** (Temporals eigene Best Practice für Multi-Tenancy) plus HPC-seitige Quotas/QOS, damit ein Nutzer nicht das gemeinsame Compute-Budget anderer blockiert |
 | **Knowledge-Graph (Git)** | ✅ Git ist für viele gleichzeitige menschliche Autoren gebaut (Branches/PRs); bei vielen *agentengenerierten* Schreibzugriffen gleichzeitig ggf. Warteschlange vor dem PR-Merge einplanen | ⚠️ **Größte Lücke**: Git kennt nativ nur Repo-weite Zugriffsrechte, kein Note-Level-ACL. Wenn nicht jeder Chemiker jede Notiz sehen darf (z. B. projektvertrauliche Kampagnen), reicht ein einzelnes Repo nicht. Zwei Optionen: (a) Repos entlang Vertraulichkeitsgrenzen aufsplitten und Entra-ID-Gruppen repo-weise berechtigen (einfach, aber grob), oder (b) eine Serving-/Query-Schicht vor den Graphen setzen, die `visibility`-Metadaten im Frontmatter jeder Notiz gegen die Entra-Gruppen des anfragenden Nutzers prüft, bevor Ergebnisse an den Agenten zurückgehen (flexibler; das ist ohnehin der natürliche Ort, weil der `knowledge-graph-query`-Skill/Tool schon dort sitzt) |

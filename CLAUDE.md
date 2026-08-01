@@ -19,7 +19,8 @@ offline**, each phase ADR'd (D-039…D-050) and green under `make lint type test
 - **F4** Entra identity/RBAC: front-door OIDC, one authorization gate, `require_actor` reject-if-absent
   core rule, workload identity federation, OBO (dormant), Temporal-mTLS + HPC identity bridges.
 - **F5** real Nextflow (Seqera/Tower) launcher behind the QM activities (mock kept for CI).
-- **F6** OpenShift delivery: one rootless image, Helm chart, CI, three-secret model, Temporal self-hosted.
+- **F6** OpenShift delivery: one rootless image, Helm chart, CI, the plain-secret set `values.yaml`
+  declares and `tests/test_helm_chart.py` pins, Temporal self-hosted.
 - **F7** the generic `DataSource` seam (`chemclaw.ingest.sources`) — ELN re-hosted unchanged; a new source is one
   `ingest/sources/<name>/datasource.yaml` folder plus its name in `CHEMCLAW_DATA_SOURCES`, with **zero**
   core edits (D-120). First live connector (deferred): a custom Snowflake ELN source.
@@ -75,15 +76,20 @@ Three rules the tree is arranged around, each enforced by a test rather than ask
 Four layers, each with a single responsibility. **Never merge their concerns.**
 
 1. **MAF** (Microsoft Agent Framework) — conversation orchestration + short reasoning steps.
-2. **Temporal** — durable execution of long/expensive jobs. Early focus is fast local compute
-   (xTB/GFN2, ML predictors) + BoFire BO; **HPC/DFT is deferred** (D-010). Two task queues:
-   `hpc-jobs` (few, heavy workers) and `background-jobs` (light workers: sync, re-index, reports).
+2. **Temporal** — durable execution of long/expensive jobs. Fast local compute (xTB/GFN2, ML
+   predictors) + BoFire BO, and **HPC/DFT execution is built** (F5, D-048: the real Nextflow
+   launcher behind the QM activities) — what it waits on is a cluster, not code
+   (`docs/planning/DEFERRED.md`). Queues: `background-jobs` for core's light work (sync, re-index,
+   reports, the connector-job wrapper) plus one derived `connector-<name>` queue per bundle that
+   owns durable work. The heavy `hpc-jobs` queue went with the QM job into `connectors/qm/`
+   (D-118/D-150), so there is no second *core* queue.
    Every result is persisted once via the calculation store — never recomputed (D-011).
 3. **Agent Skills** (`SKILL.md`) — "how do I do X" (judgment), loaded on demand.
 4. **Markdown knowledge graph in Git** (NetworkX indexer) — "what do we know" (data + relations).
 
-Durability lives **only** in Temporal, never in MAF. Skills hold judgment; MCP servers hold
-capability (deterministic tools). Anything agent-generated enters the graph via a **PR-gate**
+Durability lives **only** in Temporal, never in MAF. Skills hold judgment; **connectors** hold
+capability (deterministic tools) — MCP is the protocol a connector speaks, not the thing that holds
+the capability (D-110/D-118). Anything agent-generated enters the graph via a **PR-gate**
 (human validates before merge) — this is the GxP "AI proposes, human signs off" line, reused
 everywhere (job results, reports, distilled playbooks). See `docs/reference/architektur.md` §4, §9, §12.
 
@@ -96,8 +102,8 @@ invocations — CI runs exactly these, so a green `make` locally means a green C
 - **The gate**: `make lint` (ruff lint + format) · `make type` (`mypy --strict`, every first-party
   package) · `make test` (pytest) · `make check` runs all three · `make cov` adds the coverage floor.
 - **The validators**, each guarding a declaration against the live surface: `kg-validate`,
-  `skill-validate`, `connector-validate`, `template-validate`, `prose-validate`, `eln-validate`,
-  `helm-validate`, `audit-verify`. (`datasource-validate` joins them with D-120.)
+  `skill-validate`, `connector-validate`, `datasource-validate`, `template-validate`,
+  `prose-validate`, `eln-validate`, `helm-validate`, `audit-verify`.
 - **Running things**: `make up` (docker-compose: Temporal + Postgres/pgvector) · `make connectors`
   (every enabled connector in one dev process) · `make chat` · `make db-migrate`.
 - Single test: `pytest path/to/test_file.py::test_name` or `pytest -k "name substring"`.
@@ -191,7 +197,7 @@ happening — in a single day one branch renumbered three ADRs twice while anoth
 times, five collisions, all on numbers nobody had merged. This file used to name date-plus-slug ids
 as the escape hatch to take deliberately if that continued. It continued; D-2026-07-31 takes it.
 
-**The `D-NNN` sequence is frozen, not migrated.** All 167 numbered ADRs keep their names, so every
+**The `D-NNN` sequence is frozen, not migrated.** Every numbered ADR keeps its name, so every
 citation still resolves — a *merged* ADR never collided, and there are no unallocated numbers left
 to contend for. Never renumber one, and never renumber to close a gap: a gap is harmless, a moved
 number breaks every citation to it (`D-008` was written after `D-009` for exactly this reason).
