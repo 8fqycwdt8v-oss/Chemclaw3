@@ -32,7 +32,21 @@ FROM ${BASE_IMAGE}
 # fingerprint with a short TTL, so a retrieval landing inside that window saw a partial or empty
 # graph and the agent answered with no evidence — silently, because a missing note is not an error.
 USER 0
-RUN dnf install -y git rsync && dnf clean all && pip install --no-cache-dir uv
+# `dnf -y update` before installing, and it is not belt-and-braces. Red Hat rebuilds the UBI9 tag
+# periodically, so `:latest` lags the errata stream — the first run of the image scan found fixable
+# HIGH/CRITICAL advisories in openssh, openssl, python3 and python3-urllib3, every one of them
+# already fixed upstream and simply not yet in the base build. Applying the current errata at build
+# time is what makes the floating-base decision coherent: the base moves when Red Hat rebuilds it,
+# and the *packages* move on every build regardless.
+#
+# `setuptools` is upgraded for the same reason one level up. The base ships 65.5.1, which carries
+# two HIGH advisories (CVE-2024-6345, CVE-2025-47273) fixed in 70.0.0 and 78.1.1. It is the
+# *interpreter's* setuptools rather than a locked dependency — `uv export | pip-audit` is clean —
+# so no lockfile change could have reached it, and it would have gone unnoticed for exactly as long
+# as nobody scanned the built image.
+RUN dnf -y update && dnf install -y git rsync && dnf clean all \
+    && pip install --no-cache-dir --upgrade pip setuptools \
+    && pip install --no-cache-dir uv
 WORKDIR /app
 
 # The two calculation binaries (xTB plan X5/X6). Pinned release tarballs rather than a

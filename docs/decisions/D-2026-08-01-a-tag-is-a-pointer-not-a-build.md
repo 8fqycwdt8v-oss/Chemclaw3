@@ -66,6 +66,24 @@ it, and a registry to push to — all three of which are the cluster-ownership r
 yet answer. Pinning by digest is the property signing would enforce; adding a signature nothing
 verifies would be a fourth control reporting to nobody.
 
+## What the gate found on its first run
+
+Worth recording, because it is the argument for the gate rather than a footnote to it. The image
+scan's first successful run failed on two classes of finding, both fixable, neither reachable by
+any other control in this repo:
+
+- **Base OS packages** — openssh, openssl, python3, python3-libs, python3-urllib3, nodejs — each
+  with an errata already published and simply not yet in Red Hat's periodic UBI9 rebuild. Fixed by
+  `dnf -y update` at build time, which is also what makes the floating-base decision coherent: the
+  base moves when Red Hat rebuilds it, and the packages move on *every* build regardless.
+- **`setuptools` 65.5.1**, carrying two HIGH advisories fixed in 70.0.0 and 78.1.1. This is the
+  *interpreter's* setuptools, not a locked dependency — `uv export | pip-audit` is clean and always
+  was — so no lockfile change could have reached it. It is precisely the half a dependency scan
+  cannot see, which is why the row asked for both.
+
+Neither was found by the offline suite, by `mypy`, by the lockfile audit, or by review. Both had
+been in every image this repo has ever built.
+
 ## Consequences
 
 - A release can be pinned to bytes, and a rollback returns to them.
