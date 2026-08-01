@@ -173,6 +173,16 @@ async def get_durable_job_status(job_id: str) -> DurableJobStatus:
             "completed" with an empty result would tell a chemist their calculation is done while
             silently withholding it.
     """
+    return await job_status(job_id)
+
+
+async def job_status(job_id: str) -> DurableJobStatus:
+    """One durable job's status, from Temporal while it remembers and the record afterwards.
+
+    The tool above and the front door's `GET /jobs/{id}` are the same question asked by different
+    surfaces, so they are one function: a chemist polling in chat and a chemist refreshing a page
+    must not be able to get different answers about the same run.
+    """
     client = await connect()
     handle = client.get_workflow_handle(job_id)
     try:
@@ -293,3 +303,22 @@ async def request_note_reindex() -> str:
     except WorkflowAlreadyStartedError:
         return workflow_id  # a rebuild for this minute is already running or done
     return handle.id
+
+
+async def cancel_job(job_id: str) -> bool:
+    """Ask Temporal to cancel a running job; False when the id is unknown to it.
+
+    Cancellation is cooperative — Temporal delivers it to the workflow, which unwinds through its
+    own teardown — so this returns once the request is *delivered*, not once the run has stopped.
+    Poll `job_status` for the outcome.
+
+    Deliberately **not** an agent tool. Stopping work a person asked for is a decision about that
+    person's work, and the agent already has every incentive to tidy up after itself; the same
+    reasoning keeps `POST /approvals/{id}/decision` and the plan gate off the tool surface (D-005).
+    """
+    client = await connect()
+    try:
+        await client.get_workflow_handle(job_id).cancel()
+    except RPCError:
+        return False
+    return True

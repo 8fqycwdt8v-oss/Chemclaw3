@@ -59,6 +59,7 @@ from chemclaw.api.events import (
     AnswerEvent,
     ApprovalRequestEvent,
     CapabilityDegradedEvent,
+    ErrorCode,
     ErrorEvent,
     Event,
     JobStartedEvent,
@@ -73,6 +74,7 @@ from chemclaw.api.events import (
 from chemclaw.api.metrics import METRICS
 from chemclaw.connectors.registry import open_reachable
 from chemclaw.core.config import settings
+from chemclaw.core.errors import ChemclawError
 
 logger = logging.getLogger(__name__)
 
@@ -80,6 +82,29 @@ logger = logging.getLogger(__name__)
 # was called without streaming a whole evidence payload to the UI (mirrors the audit trail
 # truncation).
 _ARG_PREVIEW_CHARS = 200
+
+
+def _classify(error: BaseException) -> tuple[ErrorCode, bool]:
+    """Map a turn failure onto a user-facing code and whether retrying could plausibly help.
+
+    Deliberately a short, closed mapping rather than an exception hierarchy walk. Each arm answers
+    "what should the person do now?", which is the only question the code exists to answer, and an
+    unrecognised failure stays `internal` — admitting the classification is missing beats guessing
+    a friendlier one.
+
+    `ConnectionError` is what `chemclaw.core.db` raises for an unreachable or saturated database,
+    and it is deliberately not a `ChemclawError` so Temporal retries it; the same reasoning makes
+    it retryable here. `ChemclawError` is the bad-data contract — a malformed SMILES, an
+    unbalanced equation — so retrying it unchanged cannot work, and saying so saves the user a
+    wasted turn.
+    """
+    if isinstance(error, ConnectionError):
+        return "storage_unavailable", True
+    if isinstance(error, TimeoutError):
+        return "llm_timeout", True
+    if isinstance(error, ChemclawError):
+        return "bad_tool_arguments", False
+    return "internal", False
 
 
 async def run_turn(
@@ -151,7 +176,8 @@ async def run_turn(
     # are cached per profile for the process's lifetime, so a build-time id was shared by every
     # turn from every user on the pod — the audit trail could not tell two conversations apart,
     # which is the one thing a correlation id exists to do.
-    correlation_token = set_current_correlation_id(uuid.uuid4().hex)
+    correlation_id = uuid.uuid4().hex
+    correlation_token = set_current_correlation_id(correlation_id)
     # Buffer for what tools learn mid-turn that the stream must surface (started jobs, PR-gate
     # proposals) — the runner only sees the model's updates, so tools hand these over out of
     # band.
@@ -347,18 +373,21 @@ async def run_turn(
                     session.session_id,
                 )
         raise
-    except Exception:
+    except Exception as exc:
         # One turn's failure becomes one user-safe event, never a 500 mid-stream or a leaked
         # trace. The exception detail (DB hosts, SMILES, workflow ids, driver errors) stays
-        # server-side in the log; the client gets a generic message keyed by the session id it
-        # already knows, so an operator can correlate the report to the logged stack trace
-        # without leaking internals.
+        # server-side in the log; the client gets a *classified* failure plus the correlation id
+        # the audit trail is keyed on, so a bug report is findable without leaking internals.
         logger.exception("turn failed for session %s", session.session_id)
+        code, retryable = _classify(exc)
         yield ErrorEvent(
             message=(
                 "The turn could not be completed due to an internal error "
                 f"(session {session.session_id})."
-            )
+            ),
+            code=code,
+            retryable=retryable,
+            correlation_id=correlation_id,
         )
         # A turn that spent the authorization and then broke has still spent it: tools may have
         # run before it failed, and re-running under the same approval is exactly what a person

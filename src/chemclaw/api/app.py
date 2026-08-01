@@ -42,7 +42,12 @@ from chemclaw.agent.agent_pool import AgentPool
 from chemclaw.agent.attachments import STORE as ATTACHMENTS
 from chemclaw.agent.attachments import AttachmentError, AttachmentSummary, parse_attachment
 from chemclaw.agent.chemclaw_agent import build_agent, connector_tools, history_provider
-from chemclaw.agent.durable_tools import request_note_reindex
+from chemclaw.agent.durable_tools import (
+    DurableJobStatus,
+    cancel_job,
+    job_status,
+    request_note_reindex,
+)
 from chemclaw.agent.harness_mode import (
     current_plan_hash,
     grant_execute,
@@ -76,6 +81,7 @@ from chemclaw.connectors.health import (
 from chemclaw.core import db
 from chemclaw.core.config import settings
 from chemclaw.core.logging import configure_logging, configure_telemetry
+from chemclaw.durable.job_record import JobRecordSummary, search_job_records
 from chemclaw.kg.proposal import (
     NoteProposal,
     ProposalState,
@@ -966,7 +972,11 @@ def create_app(
                         # Shedding is the admission control working as designed — and was
                         # completely invisible from outside until this counter existed.
                         METRICS.increment("chemclaw_turns_shed_total")
-                        shed = ErrorEvent(message=_AT_CAPACITY)
+                        # Retryable and honestly so: shedding says "not now", not "not ever",
+                        # and it is the one failure where trying again shortly is exactly right.
+                        shed = ErrorEvent(
+                            message=_AT_CAPACITY, code="budget_exhausted", retryable=True
+                        )
                         yield {"event": shed.type, "data": shed.model_dump_json()}
                         return
                 else:
@@ -1020,7 +1030,11 @@ def create_app(
                             "The turn exceeded the "
                             f"{settings.service_turn_timeout_seconds:g}s time limit and was "
                             f"cancelled (session {session_id})."
-                        )
+                        ),
+                        code="turn_timeout",
+                        # Not retryable unchanged: the same question will take the same time. The
+                        # useful next step is a narrower question, not another wait.
+                        retryable=False,
                     )
                     yield {"event": timeout_event.type, "data": timeout_event.model_dump_json()}
             finally:
@@ -1416,6 +1430,86 @@ def create_app(
         if decided is None:
             raise HTTPException(status_code=409, detail="this proposal has already been decided")
         return Response(status_code=204)
+
+    @app.get("/profiles")
+    async def profiles(
+        principal: Principal = Depends(require_principal),
+    ) -> list[str]:
+        """The specialized agents a session may be started as.
+
+        `POST /sessions` accepts a `profile` and 400s an unknown one, and nothing exposed the list —
+        so a surface had to hardcode names that live in files it cannot see, and a deployment adding
+        a profile had no way to make it discoverable.
+        """
+        return sorted(profile.name for profile in load_profiles())
+
+    @app.get("/jobs")
+    async def list_jobs(
+        text: str = "",
+        connector: str = "",
+        principal: Principal = Depends(require_principal),
+    ) -> list[JobRecordSummary]:
+        """Durable runs this system has finished, newest first — what ran, and why.
+
+        There was no job surface at all: status and result were reachable *only* as an agent tool
+        inside a turn, so a chemist could not list what was running, and a result from a session
+        that had since been evicted was unreachable even though `job_records` held it.
+
+        **Not owner-scoped**, and that is the deployment's existing position rather than an
+        oversight: `find_past_jobs` — the agent tool over this same table — is unscoped for the
+        cross-project learning D-004/KM-9 argues for, and a read that the agent can make on a
+        chemist's behalf is not one to withhold from the chemist. `requested_by` is on every row, so
+        a surface can filter by it; nothing here pretends the row is private.
+        """
+        return await search_job_records(text=text, connector=connector)
+
+    @app.get("/jobs/{job_id}")
+    async def get_job(
+        job_id: str,
+        principal: Principal = Depends(require_principal),
+    ) -> DurableJobStatus:
+        """One job's status and, once finished, its result.
+
+        The same function the agent's `get_durable_job_status` calls, so a chemist polling in chat
+        and a chemist refreshing a page cannot get different answers about one run. Answers for
+        finished jobs indefinitely: Temporal expires a closed run's history, and `job_records` is
+        what survives it (D-157).
+        """
+        try:
+            return await job_status(job_id)
+        except ValueError as exc:
+            raise HTTPException(status_code=404, detail="no such job") from exc
+
+    @app.delete("/jobs/{job_id}", status_code=202)
+    async def cancel_durable_job(
+        job_id: str,
+        principal: Principal = Depends(require_principal),
+    ) -> dict[str, str]:
+        """Ask Temporal to stop a running job — an operator action, not an owner's.
+
+        The obvious design — "let a chemist cancel their own job" — cannot be built, and the reason
+        is a property of the system rather than a missing column. `job_workflow_id` hashes
+        `[connector, job, payload]` and *deliberately excludes the requester*, so two chemists
+        asking for the identical campaign rejoin one run (D-011: never compute twice). A running job
+        therefore has no single owner: cancelling it cancels it for everyone who joined it, and the
+        first requester is not more entitled to that than the second.
+
+        So it is gated on the same privileged role every other consequential write is, and the cost
+        — a chemist cannot stop their own runaway run without an operator — is stated rather than
+        hidden behind a scope check that would read as ownership and not be it.
+
+        Cancellation is cooperative: this returns 202 once the request is delivered, not once the
+        run has stopped. Poll `GET /jobs/{id}` for the outcome.
+        """
+        if not _is_reviewer(principal):
+            raise HTTPException(
+                status_code=403,
+                detail="cancelling a durable job is an operator action: the run may be shared by "
+                "several requesters, so it needs a privileged role",
+            )
+        if not await cancel_job(job_id):
+            raise HTTPException(status_code=404, detail="no such job")
+        return {"status": "cancelling", "job_id": job_id}
 
     @app.get("/sessions/{session_id}/plan")
     async def get_plan(
