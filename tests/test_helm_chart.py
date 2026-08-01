@@ -92,9 +92,13 @@ def _rendered_derived_values() -> dict[str, str]:
         for name, cfg in _VALUES["connectors"].items()
         if cfg.get("enabled") and cfg.get("server")
     }
+    autoscaling = _VALUES["service"]["autoscaling"]
     return {
         "CHEMCLAW_NOTE_REPO_DIR": _VALUES["knowledge"]["noteRepoPath"],
         "CHEMCLAW_CONNECTOR_URLS": json.dumps(urls),
+        "CHEMCLAW_SERVICE_FLEET_REPLICAS": str(
+            autoscaling["maxReplicas"] if autoscaling["enabled"] else _VALUES["service"]["replicas"]
+        ),
     }
 
 

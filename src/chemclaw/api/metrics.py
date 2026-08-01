@@ -213,6 +213,12 @@ _MAX_SERIES_PER_COUNTER = 64
 _GAUGES: dict[str, str] = {
     "chemclaw_turns_in_flight": "Turns currently streaming.",
     "chemclaw_turn_capacity": "Configured maximum concurrent turns (the admission cap).",
+    # The right-hand side of the only question the per-process cap cannot answer. `sum()` of the
+    # gauge above across pods is what the fleet is *admitting* right now; this is what it was
+    # declared to be allowed to admit. Config validation catches the product at deploy time, but it
+    # cannot see a Deployment scaled by hand or an HPA edited in the cluster — an alert comparing
+    # these two can. 0 when no ceiling is declared, which is what makes that alert self-disabling.
+    "chemclaw_fleet_turn_ceiling": "Declared fleet-wide ceiling on concurrent turns (0 = none).",
     "chemclaw_live_sessions": "Sessions held in the front door's in-process LRU.",
     # Out-of-process capability can fail independently of the chat service, so its reachability
     # is a first-class signal rather than something to find in a log (`connectors.health`).

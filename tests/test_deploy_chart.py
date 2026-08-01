@@ -800,6 +800,71 @@ def test_two_replicas_may_not_be_one_node_or_one_eviction() -> None:
     )
 
 
+def test_the_shipped_fleet_ceiling_matches_the_fleet_the_chart_renders() -> None:
+    """The chart may not declare a ceiling its own autoscaling shape exceeds.
+
+    The admission cap is per-process by design (SCALE-1 rejected a fleet-wide counter as a durable
+    write and a heartbeat per turn to bound a resource). Its consequence was left unstated: the load
+    the shared LLM endpoint sees is `maxReplicas × uvicorn workers × the cap`, and with the shipped
+    values that is 48 while the only number anyone reads is 8.
+
+    `Settings` now refuses a configuration whose product exceeds the declared ceiling — but a pod
+    only validates the values it was *given*, so raising `maxReplicas` here would ship a chart that
+    CrashLoops every front-door pod on first deploy. This is the check that catches it before then,
+    against the same arithmetic the validator performs.
+    """
+    values = _values()
+    autoscaling = values["service"]["autoscaling"]
+    replicas = (
+        autoscaling["maxReplicas"] if autoscaling["enabled"] else values["service"]["replicas"]
+    )
+    workers = int(values["config"].get("CHEMCLAW_SERVICE_UVICORN_WORKERS", 1))
+    per_process = int(values["config"].get("CHEMCLAW_SERVICE_MAX_CONCURRENT_TURNS", 8))
+    declared = int(values["config"]["CHEMCLAW_SERVICE_FLEET_MAX_CONCURRENT_TURNS"])
+
+    assert replicas * workers * per_process <= declared, (
+        f"the chart scales to {replicas} replicas × {workers} worker(s) × {per_process} turns = "
+        f"{replicas * workers * per_process} concurrent turns against a declared ceiling of "
+        f"{declared}; every front-door pod would refuse to start"
+    )
+
+    # The fleet size must be *derived* from the autoscaling block, not written beside it. A second
+    # copy of `maxReplicas` in `config:` goes stale the first time someone scales the front door —
+    # which is precisely the silent multiplication the ceiling exists to catch, reintroduced by the
+    # mechanism meant to catch it.
+    assert "CHEMCLAW_SERVICE_FLEET_REPLICAS" not in values["config"], (
+        "the fleet size must be derived from service.autoscaling in templates/config.yaml, not "
+        "hand-written as a second copy of maxReplicas"
+    )
+    config_template = (CHART / "templates" / "config.yaml").read_text()
+    assert re.search(
+        r"^\s*CHEMCLAW_SERVICE_FLEET_REPLICAS:.*\.Values\.service\.autoscaling\.maxReplicas",
+        config_template,
+        flags=re.MULTILINE,
+    ), "CHEMCLAW_SERVICE_FLEET_REPLICAS does not come from the number the HPA obeys"
+
+
+def test_the_fleet_ceiling_has_a_runtime_check_config_validation_cannot_do() -> None:
+    """Startup validation sees the rendered shape once; a cluster keeps changing after that.
+
+    `kubectl scale`, an HPA edited in place, or a rollout that leaves both generations up all push
+    the fleet past its ceiling while every individual pod's configuration stays perfectly valid.
+    Only summing the live per-pod capacity against the declared ceiling can see that, which is why
+    the ceiling is exported as a gauge and not merely validated.
+    """
+    rules = (CHART / "templates" / "prometheusrule.yaml").read_text()
+    assert "ChemclawFleetAboveItsTurnCeiling" in rules
+    assert "sum(chemclaw_turn_capacity) > max(chemclaw_fleet_turn_ceiling)" in rules
+    # Self-disabling, or every deployment that declares no ceiling alerts forever.
+    assert "max(chemclaw_fleet_turn_ceiling) > 0" in rules
+
+    from chemclaw.api.metrics import METRICS
+
+    assert "chemclaw_fleet_turn_ceiling" in METRICS.render(), (
+        "the alert compares against a gauge the app never exposes"
+    )
+
+
 def test_the_migration_hook_cannot_hold_a_release_open_forever() -> None:
     """Helm waits for a `pre-upgrade` hook, so a Job with no deadline is an unbounded wait.
 

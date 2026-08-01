@@ -51,6 +51,16 @@ does not read this file, so the row survived. Fingerprints deploy as `connector-
 - **`CHEMCLAW_ENTRA_CLIENT_ID` no longer exists.** `Settings` is `extra="forbid"`, so a stale export
   of the removed field aborts startup with a validation error naming it. Drop it from any inherited
   ConfigMap/env before upgrading.
+- **`CHEMCLAW_SERVICE_FLEET_MAX_CONCURRENT_TURNS` is the ceiling the whole deployment may put on the
+  shared LLM endpoint** (D-2026-08-01-a-per-process-cap-multiplied-by-a-number-nobody-wrote-down).
+  The admission cap is per-process by design, so the load that endpoint really sees is
+  `maxReplicas × uvicorn workers × CHEMCLAW_SERVICE_MAX_CONCURRENT_TURNS` — 48 for the shipped chart,
+  which is exactly what it declares. A configuration whose product exceeds the declared ceiling
+  **refuses to start**, in every pod, with a message naming the product and each factor. Raising
+  `service.autoscaling.maxReplicas` or the per-process cap therefore means raising this too, with a
+  number from the endpoint's throughput budget — and the repository's own tests fail on a chart whose
+  autoscaling shape outruns its declaration, so that decision cannot reach a cluster by accident.
+  `0` disables the check, which is the code default: a CLI or a single-pod dev run has no fleet.
 
 ## Stateful dependencies (F6-T3, ADR **D-A6a**)
 
@@ -171,6 +181,13 @@ that they are user free text, may contain PII, and are recorded *intentionally* 
 attributable "who did what to which inputs" record. A deployment's retention, access control and
 PII policy must cover the trail; that remains a policy obligation and not something this code
 silently satisfies by deleting the evidence.
+
+**One alert exists because config validation can only see the shape it was handed.** The fleet's
+turn ceiling is checked at startup, but a `kubectl scale`, an HPA edited in the cluster, or a
+rollout leaving both generations up all push the live fleet past it while every pod's own
+configuration stays valid. `ChemclawFleetAboveItsTurnCeiling` compares
+`sum(chemclaw_turn_capacity)` — what the running pods actually admit — against
+`chemclaw_fleet_turn_ceiling`, and is self-disabling when no ceiling is declared.
 
 ## CI/CD (F6-T4)
 

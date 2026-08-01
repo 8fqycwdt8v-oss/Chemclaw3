@@ -746,6 +746,14 @@ def create_app(
     METRICS.bind_gauge(
         "chemclaw_turn_capacity", lambda: float(settings.service_max_concurrent_turns)
     )
+    # Per-pod capacity summed across pods is what the fleet admits; this is what it was declared
+    # allowed to admit. Config validation refuses the product at startup, but only for the shape the
+    # chart rendered — a hand-scaled Deployment or an in-cluster HPA edit never re-reads it, and
+    # only this pair can see that.
+    METRICS.bind_gauge(
+        "chemclaw_fleet_turn_ceiling",
+        lambda: float(settings.service_fleet_max_concurrent_turns),
+    )
     METRICS.bind_gauge("chemclaw_live_sessions", lambda: float(len(app.state.live_sessions)))
     # Out-of-process capability is a new failure mode, so it gets a signal an operator can alert
     # on. Refreshed by the readiness probe (and at startup), read from the snapshot here — a

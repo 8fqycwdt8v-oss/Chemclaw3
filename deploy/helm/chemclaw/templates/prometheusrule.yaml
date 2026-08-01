@@ -101,6 +101,30 @@ spec:
             summary: More than 10% of turns are ending in an error
             description: Every failure reaches a chemist as an opaque internal-error message.
 
+        {{- /* The other direction from the shed alert below, and the one nothing could see. The
+               admission cap is per-process, so the fleet's real demand on the shared LLM endpoint
+               is the sum across pods. `Settings` refuses a configuration whose *declared* product
+               exceeds the ceiling — but that check runs on the shape the chart rendered, and it
+               never re-runs: a `kubectl scale`, an HPA edited in the cluster, or a stuck rollout
+               leaving old and new replicas up together all push the live sum past the ceiling with
+               every pod's own config still perfectly valid. Comparing the two gauges is the only
+               way to see it. Self-disabling: the ceiling gauge is 0 when undeclared. */}}
+        - alert: ChemclawFleetAboveItsTurnCeiling
+          expr: >-
+            max(chemclaw_fleet_turn_ceiling) > 0
+            and sum(chemclaw_turn_capacity) > max(chemclaw_fleet_turn_ceiling)
+          for: 10m
+          labels:
+            severity: warning
+          annotations:
+            summary: The front-door fleet can admit more concurrent turns than it is allowed to
+            description: >-
+              More front-door pods are running than the declared fleet ceiling accounts for, so the
+              shared LLM endpoint can be offered more concurrent turns than its throughput budget
+              permits. Usual causes are a manual scale, an HPA `maxReplicas` edited in the cluster,
+              or a rollout that left both generations up. Either scale back or raise
+              `CHEMCLAW_SERVICE_FLEET_MAX_CONCURRENT_TURNS` with a number the endpoint can serve.
+
         - alert: ChemclawTurnsShed
           expr: sum(rate(chemclaw_turns_shed_total[10m])) > 0
           for: 10m

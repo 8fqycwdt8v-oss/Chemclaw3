@@ -248,6 +248,20 @@ config:
   # ingress rather than here.
   CHEMCLAW_SERVICE_RATE_LIMIT_PER_MINUTE: "120"
   CHEMCLAW_SERVICE_RATE_LIMIT_BURST: "30"
+  # What the shared LLM endpoint may be asked to serve by this whole deployment, at once.
+  #
+  # The admission cap is per-process and stays that way (SCALE-1: a fleet-wide counter would cost a
+  # durable write and a heartbeat per turn to bound a resource). The consequence is that the number
+  # that matters is `service.autoscaling.maxReplicas × uvicorn workers ×
+  # CHEMCLAW_SERVICE_MAX_CONCURRENT_TURNS`, and until now nothing stated it: raising the per-process
+  # cap from 8 to 16 to "use the box better" doubled fleet demand on a shared endpoint, silently.
+  #
+  # 48 is exactly what the shipped values produce (6 × 1 × 8) — deliberately, so this ships as a
+  # *statement* of the current shape rather than as slack. Raise it only with a number from the
+  # endpoint's throughput budget; anything that exceeds it fails `Settings` validation at startup,
+  # in every pod, naming both sides. The runtime half is `chemclaw_fleet_turn_ceiling` against
+  # `sum(chemclaw_turn_capacity)`, which also catches a Deployment scaled by hand.
+  CHEMCLAW_SERVICE_FLEET_MAX_CONCURRENT_TURNS: "48"
   # JSON logs in-cluster. Every line already carries correlation_id / actor / session_id from the
   # context filter; JSON is what lets a log stack index them instead of regexing a `%`-string.
   CHEMCLAW_LOG_JSON: "true"

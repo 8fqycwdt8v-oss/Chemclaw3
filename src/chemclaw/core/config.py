@@ -928,6 +928,29 @@ class ServiceSettings(BaseSettings):
     # are not gated (they are not LLM-bound).
     service_max_concurrent_turns: int = Field(default=8, gt=0)
     service_turn_admission_timeout_seconds: float = Field(default=5.0, gt=0)
+    # The two numbers that turn the *per-process* cap above into the load the shared LLM endpoint
+    # actually sees, because a process cannot discover either of them.
+    #
+    # The guard is per-process by design and stays that way: SCALE-1 rejected a fleet-wide admission
+    # counter because bounding a *resource* is not worth a durable write and a heartbeat on every
+    # turn. But that decision left the real ceiling — `replicas × uvicorn workers × the cap above` —
+    # written down nowhere and checked by nothing. With `maxReplicas: 6` the shipped chart admits 48
+    # concurrent turns against an endpoint sized by whoever set `8`, and an operator raising the cap
+    # to "use the box better" multiplies the fleet's demand sixfold without touching anything named
+    # fleet. That is the gap: not that the guard is per-process, but that nobody states the product.
+    #
+    # `fleet_replicas` is how many front-door pods this deployment may reach — the chart derives it
+    # from `autoscaling.maxReplicas` (or `service.replicas` when the HPA is off), so it is the same
+    # number the HPA obeys and cannot drift from it. 1 is the honest default for a CLI, a test or a
+    # single-pod dev run.
+    #
+    # `fleet_max_concurrent_turns` is the ceiling the LLM endpoint's throughput budget permits,
+    # declared by the operator who knows it. When it is set, the validator refuses a configuration
+    # whose product exceeds it, at startup, in every pod — so the multiplication fails loudly at
+    # deploy time instead of silently at 3am. 0 = undeclared, which is the code default for the same
+    # reason `budget_enabled` and the rate limiter are off in code: a dev run has no fleet.
+    service_fleet_replicas: int = Field(default=1, gt=0)
+    service_fleet_max_concurrent_turns: int = Field(default=0, ge=0)
     # Per-principal request budget (`api/rate_limit.py`), spent inside `require_principal` so it
     # covers every authenticated route and none of the probes. The two guards above are scoped to
     # *turns*, so a caller holding them at zero could still drive `/proposals`, `/jobs`,
@@ -1883,12 +1906,18 @@ class Settings(
 
     @model_validator(mode="after")
     def _guards_that_the_comments_already_demand(self) -> Self:
-        """Four combinations whose prose already forbids them, now enforced at startup.
+        """The combinations whose prose already forbids them, now enforced at startup.
 
         Each of these was documented in a field comment as "must stay below" / "this must stay 1"
         and enforced by nothing, so a deployment could set it and find out in production. A rule
-        worth writing down is worth failing on.
+        worth writing down is worth failing on. (Counted in the list below, not in this sentence —
+        a number in prose beside a list is a number that goes stale.)
 
+        - **A fleet admitting more concurrent turns than its declared ceiling.** The admission cap
+          is per-process by design (SCALE-1), which makes `replicas × uvicorn workers × cap` the
+          number the shared LLM endpoint actually sees — and nothing stated it, so raising the
+          per-process cap multiplied fleet demand invisibly. Only checked once an operator declares
+          the ceiling their endpoint can serve; undeclared, there is nothing to check against.
         - **`session_store="memory"` with more than one uvicorn worker.** Each process would hold
           its own conversation history and its own turn guard, so two turns on one session would
           interleave into different threads. The durable turn claim (D-121) is what makes multiple
@@ -1914,6 +1943,21 @@ class Settings(
                 "session_store='memory' cannot serve service_uvicorn_workers>1: each process would "
                 "keep its own history and turn guard. Use session_store='postgres' (D-121)."
             )
+        if self.service_fleet_max_concurrent_turns:
+            admitted = (
+                self.service_fleet_replicas
+                * self.service_uvicorn_workers
+                * self.service_max_concurrent_turns
+            )
+            if admitted > self.service_fleet_max_concurrent_turns:
+                raise ValueError(
+                    f"this deployment may admit {admitted} concurrent turns "
+                    f"({self.service_fleet_replicas} replicas × {self.service_uvicorn_workers} "
+                    f"uvicorn worker(s) × {self.service_max_concurrent_turns} per process) against "
+                    f"a declared fleet ceiling of {self.service_fleet_max_concurrent_turns}. Lower "
+                    "service_max_concurrent_turns or the replica ceiling, or raise "
+                    "service_fleet_max_concurrent_turns if the LLM endpoint can serve it."
+                )
         if self.mid_turn_resume_enabled and (
             self.mid_turn_resume_timeout_seconds >= self.service_turn_timeout_seconds
         ):
