@@ -6,8 +6,17 @@ launched from the front door *and* from a Temporal worker, and a note reaches th
 both. `agents` and `connectors` must not hard-depend on `service` — the workers import them and
 never build the front door.
 
-So the bridge is: import the registry lazily, apply the update, and tolerate its absence. A missing
-registry means "no scrape target in this process", which is the truth rather than an error.
+So the bridge is: import the registry lazily, apply the update, and tolerate a failure.
+
+**This docstring used to say a failure means "no scrape target in this process", and that reading
+was wrong in a way that cost the deployment its worker observability.** `api/metrics.py` is
+stdlib-only and `chemclaw/api/__init__.py` is a docstring, so the import succeeds in *every*
+process: a metric recorded in the background worker or a connector has always landed in a real,
+live registry. What those processes lacked was a reader, and the chart's ServiceMonitor was written
+on the strength of the sentence above — it scraped the front door alone, so everything the workers
+counted was recorded and collected by nobody. `chemclaw.core.worker_http` is the reader, and this
+swallow is what it always actually was: a guarantee that a metrics update cannot break the caller's
+path, not a statement about where metrics exist.
 
 This began as a private helper in `agent/audit.py` with two callers (the audit-sink failure
 counter, the tool-latency histogram). It moved here at the fourth, rather than being imported

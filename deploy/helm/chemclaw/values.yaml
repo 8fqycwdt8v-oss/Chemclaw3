@@ -127,6 +127,13 @@ connectors:
 # keeps the computed URL map and the probes trivially consistent.
 connectorPort: 8080
 
+# The port every *worker* container serves `/healthz`, `/readyz` and `/metrics` on
+# (`chemclaw.core.worker_http`). A worker has no Service — nothing routes to it — so this is a bare
+# container port, named `metrics` for the PodMonitor and the probes to reference. One value across
+# core's worker and every bundle's for the same reason `connectorPort` is one: separate pods, no
+# port to deconflict, and one number keeps the monitor and the probes consistent by construction.
+workerMetricsPort: 9000
+
 resources:
   service:
     # Raised from 1 CPU. The front door does real CPU work off its event loop now (RDKit, cache-key
@@ -303,4 +310,10 @@ networkPolicy:
     enabled: true
   ingressNamespaces:
     - network.openshift.io/policy-group: ingress
+    - kubernetes.io/metadata.name: openshift-user-workload-monitoring
+  # The monitoring stack alone — a subset of the list above, and separate because it is granted
+  # somewhere the router must never reach: the connector pods (whose whole ingress rule exists to
+  # keep everything but Chemclaw out) and the worker pods' probe port. The front door needs the
+  # router *and* the scraper; nothing else needs the router.
+  monitoringNamespaces:
     - kubernetes.io/metadata.name: openshift-user-workload-monitoring

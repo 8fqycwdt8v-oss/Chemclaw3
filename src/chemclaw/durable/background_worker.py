@@ -23,6 +23,7 @@ from chemclaw.core import db
 from chemclaw.core.config import settings
 from chemclaw.core.logging import configure_logging, configure_telemetry
 from chemclaw.core.temporal_client import connect
+from chemclaw.core.worker_http import worker_http
 
 # Importing the modules is what registers their workflows and activities (the same
 # side-effect pattern `agents.chemclaw_agent` uses for tools). With the registry
@@ -74,7 +75,14 @@ async def main() -> None:
     # Every activity here is a coroutine on this process's one event loop, so a per-call Postgres
     # handshake is loop time stolen from task polling and heartbeats. Pooled for the worker's
     # whole life and closed on shutdown.
-    async with db.pooling():
+    #
+    # `worker_http` is what makes this process observable and probeable at all: readiness is the
+    # worker's own `is_running` rather than the comment that used to stand in for it, and the
+    # counters this worker has always incremented finally have a reader.
+    async with (
+        db.pooling(),
+        worker_http(component="background-worker", ready=lambda: worker.is_running),
+    ):
         await worker.run()
 
 

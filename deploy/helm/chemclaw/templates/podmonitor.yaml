@@ -1,0 +1,38 @@
+{{- if .Values.monitoring.enabled }}
+{{- /* The other half of REV-2: collect the pods that have no Service.
+
+       `servicemonitor.yaml` selects Services, and a worker has none — nothing routes to it, so
+       there was nothing to select. That is exactly why the workers went uncollected: the
+       observability story was built around routable traffic, and the processes doing the durable,
+       expensive work take none. A PodMonitor targets pods directly, which is what this fleet needs.
+
+       The `metrics` port is a *container* port with no Service behind it, declared purely so this
+       monitor can name it rather than a number (`deployment-workers.yaml`,
+       `deployment-connectors.yaml`). `chemclaw.core.worker_http` binds it inside each worker
+       process, on the worker's own event loop — which is also what makes the probes on those same
+       Deployments a real liveness signal instead of the comment they replaced.
+
+       One selector for every worker in the release: `component` is `background-worker` or
+       `connector-worker-<name>`, so matching on the release labels plus the port name collects
+       core's worker and every bundle's, and a bundle enabled tomorrow is scraped without an edit
+       here. Pods that *do* have a Service (the front door, connector servers) are collected by the
+       ServiceMonitor and do not declare a `metrics` port, so the two never double-scrape. */ -}}
+apiVersion: monitoring.coreos.com/v1
+kind: PodMonitor
+metadata:
+  name: {{ include "chemclaw.name" . }}-workers
+  labels:
+    {{- include "chemclaw.labels" . | nindent 4 }}
+    {{- with .Values.monitoring.additionalLabels }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+spec:
+  selector:
+    matchLabels:
+      {{- include "chemclaw.selectorLabels" . | nindent 6 }}
+  podMetricsEndpoints:
+    - port: metrics
+      path: {{ .Values.monitoring.path | quote }}
+      interval: {{ .Values.monitoring.interval | quote }}
+      scrapeTimeout: {{ .Values.monitoring.scrapeTimeout | quote }}
+{{- end }}

@@ -1,8 +1,8 @@
 """The connector-side runtime: wrap a FastMCP capability as the FastAPI app a connector serves.
 
 Every connector we own is the same shape — a FastAPI application exposing `/healthz` for the startup
-probe and `/mcp` for the MCP streamable-HTTP transport, over a `FastMCP` instance holding the
-capability's tools. That shape is written once here so a new connector's
+probe, `/metrics` for the scrape, and `/mcp` for the MCP streamable-HTTP transport, over a `FastMCP`
+instance holding the capability's tools. That shape is written once here so a new connector's
 `connectors/<name>/server/app.py` is three lines, and so the two cross-cutting behaviors it needs
 cannot be forgotten per connector:
 
@@ -30,6 +30,7 @@ from starlette.requests import Request
 from starlette.responses import Response
 from starlette.types import ASGIApp
 
+from chemclaw.api.metrics import CONTENT_TYPE, METRICS
 from chemclaw.connectors.caller import bind_caller, reset_caller
 from chemclaw.connectors.identity import (
     HEADER_ACTOR,
@@ -97,7 +98,7 @@ def connector_app(server: FastMCP, *, name: str) -> FastAPI:
             health payload and the request log.
 
     Returns:
-        A FastAPI app exposing `GET /healthz` and the MCP endpoint at `/mcp`.
+        A FastAPI app exposing `GET /healthz`, `GET /metrics`, and the MCP endpoint at `/mcp`.
     """
     mcp_app = server.streamable_http_app()
 
@@ -119,10 +120,28 @@ def connector_app(server: FastMCP, *, name: str) -> FastAPI:
 
     @app.get("/healthz")
     async def healthz() -> dict[str, str]:
-        """Liveness/readiness for the core startup probe (`chemclaw.connectors.health`)."""
+        """Liveness/readiness for the core startup probe (`chemclaw.connectors.health`).
+
+        One route for both, and honestly so rather than by omission: uvicorn accepts connections
+        only after the lifespan above has completed, so this route answering *is* the evidence
+        that the MCP session manager is running and the Postgres pool is open. A separate
+        `/readyz` here could only assert the same fact a second time.
+        """
         return {"status": "ok", "connector": name}
 
-    # Mounted last: Starlette matches routes in definition order, so `/healthz` above wins and
+    @app.get("/metrics")
+    async def metrics() -> Response:
+        """Prometheus exposition for this connector process.
+
+        A connector records through `chemclaw.core.metrics_bridge` like everything else, and the
+        registry that bridge finds is per-process — so these counters are this pod's, and until
+        this route existed nothing could read them. Unauthenticated for the same reason the front
+        door's copy is: a scrape happens independently of user identity, the NetworkPolicy keeps
+        the port inside the cluster, and the exposition carries counts only.
+        """
+        return Response(content=METRICS.render(), media_type=CONTENT_TYPE)
+
+    # Mounted last: Starlette matches routes in definition order, so the routes above win and
     # everything else — notably `/mcp` — falls through to the MCP transport.
     app.mount("/", mcp_app)
     return app
