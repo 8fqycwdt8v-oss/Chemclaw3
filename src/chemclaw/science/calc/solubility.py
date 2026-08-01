@@ -16,6 +16,7 @@ from rdkit.Chem import Crippen, Descriptors, rdMolDescriptors
 from chemclaw.core.chem import require_canonical_smiles
 from chemclaw.core.config import settings
 from chemclaw.science.calc.store import CalculationKey, ResultStore, run_cached
+from chemclaw.science.calc.uncertainty import Estimate, structural_domain
 
 CALC_TYPE = "solubility"
 
@@ -31,12 +32,18 @@ class SolubilityResult(BaseModel):
 
     `uncertainty_log` is one standard deviation in log-S units — report it so a
     consumer never treats the point estimate as exact.
+
+    `estimate` carries the same number in the uniform F8-T1 shape, adding the two things this model
+    could not previously say: **where the uncertainty came from** and **whether this molecule is
+    something ESOL can speak about at all**. Kept beside the domain fields rather than replacing
+    them, so a chemist still reads `model` and a skill reads one shape across every calculator.
     """
 
     smiles: str
     model: str
     log_s_mol_per_l: float
     uncertainty_log: float
+    estimate: Estimate | None = None
 
 
 class EsolBaseline:
@@ -78,11 +85,26 @@ def predict_solubility(job: SolubilityInput) -> SolubilityResult:
     if mol is None:
         raise ValueError(f"invalid SMILES: {job.smiles!r}")
     log_s, uncertainty = _MODEL.predict(mol)
+    # The domain check runs on the molecule ESOL was actually handed. It cannot be inferred from the
+    # result: a salt and its free base give different predictions and the same result shape, and the
+    # whole point of F8-T1 is that the second one is not merely less accurate but undefined.
+    in_domain, reasons = structural_domain(mol)
     return SolubilityResult(
         smiles=job.smiles,
         model=f"{_MODEL.name}@{_MODEL.version}",
         log_s_mol_per_l=log_s,
         uncertainty_log=uncertainty,
+        estimate=Estimate(
+            value=log_s,
+            unit="log10(mol/L)",
+            uncertainty=uncertainty,
+            # "reported", not "conformal": this is the constant from Delaney's paper. A conformal
+            # interval replaces it only where this deployment has reconciled measurements, which is
+            # a database read and therefore belongs on the cached path, not in the pure predictor.
+            method="reported",
+            in_domain=in_domain,
+            domain_reasons=reasons,
+        ),
     )
 
 
