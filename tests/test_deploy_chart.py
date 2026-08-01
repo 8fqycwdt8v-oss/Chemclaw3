@@ -800,6 +800,29 @@ def test_two_replicas_may_not_be_one_node_or_one_eviction() -> None:
     )
 
 
+def test_the_migration_hook_cannot_hold_a_release_open_forever() -> None:
+    """Helm waits for a `pre-upgrade` hook, so a Job with no deadline is an unbounded wait.
+
+    A migration that keeps failing — most often on a lock it cannot get — would retry to its
+    `backoffLimit` and leave the release in `pending-upgrade`, a state that blocks every later
+    `helm upgrade` and needs a recovery an operator has to already know. With a deadline the Job
+    fails, Helm reports it, and `docs/guides/runbook.md` §(xi) documents the way out.
+
+    Unlike the Deployments' grace periods this one is *not* derived, and deliberately: it bounds the
+    Job including its retries, and the term it would need — how long this deployment's slowest
+    `CREATE INDEX` takes on its own data — is not something the chart can know. A stated default an
+    operator raises beats a formula that pretends to compute one.
+    """
+    job = (CHART / "templates" / "migrate-job.yaml").read_text()
+    assert re.search(r"^\s*activeDeadlineSeconds:", job, flags=re.MULTILINE), (
+        "the migration hook has no deadline, so a failing migration wedges the release"
+    )
+    settings_ = _values()["migrateJob"]
+    assert settings_["activeDeadlineSeconds"] > settings_["backoffLimit"] * 60, (
+        "the deadline leaves no room for the retries the same Job is configured to make"
+    )
+
+
 def test_egress_destinations_are_declarable() -> None:
     """`to: []` in a NetworkPolicy means *any destination*, not none.
 

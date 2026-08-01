@@ -204,6 +204,24 @@ class StoreSettings(BaseSettings):
     # start-to-close budget. 0 disables it; migrations deliberately connect without a statement
     # timeout (an index build may be slow).
     pg_statement_timeout_seconds: float = Field(default=30.0, ge=0)
+    # How long a migration's DDL may *wait for a table lock* (libpq `lock_timeout`) before giving
+    # up. Deliberately not `statement_timeout`, and the distinction is the whole point: an
+    # `ALTER TABLE` needs `ACCESS EXCLUSIVE`, and a lock request that queues behind one long read
+    # **blocks every subsequent query on that table behind it**, because Postgres's lock queue is
+    # FIFO. So a migration run against a live system does not merely wait — it takes the table down
+    # while waiting. `lock_timeout` bounds the wait and leaves the work unbounded, which is exactly
+    # right here: a `CREATE INDEX` may legitimately build for minutes once it *has* its lock, and
+    # capping that with a statement timeout would break migrations that are behaving correctly.
+    # 5 s is the conventional value: long enough to slip between ordinary queries, short enough
+    # that a failed attempt costs nothing. The Job's `backoffLimit` is what retries it.
+    pg_migration_lock_timeout_seconds: float = Field(default=5.0, gt=0)
+    # How long to wait for *another migrator* to finish before giving up (the advisory lock). Much
+    # larger than the DDL bound above and for the opposite reason: a concurrent migration is a
+    # legitimate event, not a fault — two `helm upgrade`s, or an operator running `make db-migrate`
+    # during a deploy — and the right response is to wait for it and then find every file already
+    # applied. Bounded all the same, so a migrator that died holding a session lock cannot wedge
+    # the next release forever.
+    pg_migration_lock_wait_seconds: float = Field(default=300.0, gt=0)
     # Per-process connection pool (`chemclaw.db.pooling`). Connect-per-call was measured at ~2.7
     # TCP+auth handshakes per chat turn, and the cost lands on the event loop rather than on the
     # database — a connect that cannot be scheduled inside `pg_connect_timeout_seconds` fails,
