@@ -49,6 +49,7 @@ from chemclaw.agent.identity_context import (
 )
 from chemclaw.agent.session_context import get_current_session_id
 from chemclaw.connectors.manifest import BearerAuth, ConnectorAuth, NoAuth
+from chemclaw.core.tracing import trace_headers
 
 # The header contract, as constants so the connector-side reader and this writer cannot drift.
 HEADER_ACTOR = "X-Chemclaw-Actor"
@@ -101,6 +102,13 @@ def turn_headers() -> dict[str, str]:
         # Absent rather than empty for the same reason the actor is: off the request path there is
         # genuinely no turn, and an empty id in a connector's log would read as one that exists.
         headers[HEADER_CORRELATION] = correlation_id
+    # W3C trace context, alongside — not instead of — the correlation id above. The custom header
+    # was the readiness review's tell that the standard one was missing, and the two answer
+    # different questions: a correlation id joins *log lines* after the fact, by grep, and survives
+    # where no collector is configured; `traceparent` joins *spans*, live, so a connector's work
+    # appears inside the turn that asked for it instead of as an orphan trace nobody looks for.
+    # Empty when tracing is off, which is the default, so this adds a boolean read per request.
+    headers.update(trace_headers())
     return headers
 
 

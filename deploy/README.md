@@ -133,8 +133,22 @@ this becomes binding at the first production deploy.
 ## Observability (F6-T5)
 
 `CHEMCLAW_OTEL_ENABLED=true` + `CHEMCLAW_OTEL_ENDPOINT` wire OTLP to the in-cluster collector
-(`chemclaw/logging.py` bridges the one config value to `OTEL_EXPORTER_OTLP_ENDPOINT`). Spans cover a
-turn and a job; dashboards track loop iterations, tool latency, and job status.
+(`chemclaw/logging.py` bridges the one config value to `OTEL_EXPORTER_OTLP_ENDPOINT`).
+
+**Two first-party spans, and the propagation that joins them up.** A `chemclaw.turn` span wraps a
+turn and a `chemclaw.tool` span wraps each tool call, so "the question took 40 seconds and 31 of
+them were one xTB call" is answerable — which it was not. Connector calls carry W3C `traceparent`
+alongside the custom `X-Chemclaw-Correlation` header, and the connector adopts it, so a
+calculation's spans appear *inside* the turn that asked for it instead of as an orphan trace. The
+two headers are not redundant: the correlation id is what `audit_events` is keyed on and works with
+no collector at all; `traceparent` is what makes a distributed trace a tree.
+
+These three paragraphs used to read "Spans cover a turn and a job; dashboards track loop iterations,
+tool latency, and job status." None of that existed — the only spans were MAF's own model calls,
+and there are no dashboards in this repo to track anything
+(D-2026-08-01-a-turn-you-can-follow-across-a-process). What is *still* absent is named rather than
+implied: no span around a durable job (it spans two processes and a Temporal boundary, so it needs
+the workflow to carry the context), and no FastAPI/httpx/Temporal auto-instrumentation.
 
 **Metrics come from every process, not only the front door.** `templates/servicemonitor.yaml`
 collects the Services (the front door and each connector's MCP server, by their `http` port name);

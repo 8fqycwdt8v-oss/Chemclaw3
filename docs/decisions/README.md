@@ -218,4 +218,5 @@ and is kept only for reservations that were in flight when this changed.
 | [D-2026-08-01-a-restore-is-a-truncation-nobody-can-see](D-2026-08-01-a-restore-is-a-truncation-nobody-can-see.md) | A restore is a truncation nobody can see |
 | [D-2026-08-01-a-running-job-has-no-owner](D-2026-08-01-a-running-job-has-no-owner.md) | A running job has no owner, so cancelling one is an operator action |
 | [D-2026-08-01-a-tag-is-a-pointer-not-a-build](D-2026-08-01-a-tag-is-a-pointer-not-a-build.md) | A tag is a pointer, not a build |
+| [D-2026-08-01-a-turn-you-can-follow-across-a-process](D-2026-08-01-a-turn-you-can-follow-across-a-process.md) | A turn you can follow across a process |
 | [D-2026-08-01-every-process-carries-its-own-witness](D-2026-08-01-every-process-carries-its-own-witness.md) | Every process carries its own witness, and the sentence that stopped two of them |

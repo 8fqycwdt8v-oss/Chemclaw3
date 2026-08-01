@@ -29,6 +29,7 @@ from chemclaw.agent.identity_context import get_current_actor, get_current_corre
 from chemclaw.agent.session_context import get_current_session_id
 from chemclaw.core.config import settings
 from chemclaw.core.metrics_bridge import record_metric
+from chemclaw.core.tracing import start_span
 
 logger = logging.getLogger(__name__)
 
@@ -180,7 +181,13 @@ def make_audit_middleware(
         event_session = get_current_session_id() or ""
         start = time.perf_counter()
         try:
-            await call_next()
+            # One span per tool call, which with the turn span above it is the whole first-party
+            # trace: "this question took 40 seconds and 31 of them were one xTB call" is the
+            # question an operator actually asks, and nothing could answer it. Deliberately not a
+            # span per loop iteration or per retriever — the finding was that the docs *overstate*
+            # the tracing, and answering that with more unread spans is the same mistake mirrored.
+            with start_span("chemclaw.tool", **{"tool.name": name}):
+                await call_next()
         except Exception as exc:
             elapsed_ms = (time.perf_counter() - start) * 1000.0
             _observe_tool_latency(elapsed_ms)

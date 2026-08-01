@@ -75,6 +75,7 @@ from chemclaw.api.metrics import METRICS
 from chemclaw.connectors.registry import open_reachable
 from chemclaw.core.config import settings
 from chemclaw.core.errors import ChemclawError
+from chemclaw.core.tracing import start_span
 
 logger = logging.getLogger(__name__)
 
@@ -227,6 +228,17 @@ async def run_turn(
             )
     try:
         async with AsyncExitStack() as stack:
+            # The turn span, which is the parent every other span in this request hangs from — the
+            # model calls MAF emits, the tool spans `agent/audit.py` opens, and (through
+            # `traceparent`) whatever a connector does on our behalf. Pushed onto the stack that is
+            # already here rather than wrapping the body, so the span's lifetime is exactly the
+            # turn's teardown and there is no second place that has to remember to close it.
+            stack.enter_context(
+                start_span(
+                    "chemclaw.turn",
+                    **{"session.id": session.session_id, "profile": profile or ""},
+                )
+            )
             # This turn's own connector tools, connected for its duration and torn down after.
             # Built per turn rather than held on the agent because a connector's connection must
             # belong to exactly one turn — see `agents.chemclaw_agent.connector_tools`. They are
