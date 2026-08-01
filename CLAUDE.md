@@ -142,6 +142,14 @@ destructive/ambiguous, or the user asked to review before merge for this task.
   obvious fixes — don't over-engineer.
 - **Root cause, not band-aid**: no temporary patches; fix the underlying cause. Keep changes
   minimal and focused — touch only what the task needs, and don't introduce new bugs.
+- **Measure it, don't argue it**: when two explanations of a defect compete, or a claim is that
+  something works, run it and report the number. Prose is evidence about what its author believed,
+  never about what the code does — a solvent-domination fix was asserted by two docstrings, an ADR
+  and a closed backlog row, and the similarity was unchanged to the fourth decimal. The cost is
+  usually one script; the alternative is picking the more articulate explanation, which is
+  uncorrelated with the true one. This is also how you find out both explanations were wrong: the
+  retrieval leg everyone was arguing about turned out to contribute *zero* chunks, and the mechanism
+  each side blamed was mitigating a third cause neither had named (D-2026-08-01-a-cap-that-starves-a-source).
 - **KISS**: simplest working solution; no over-engineering. No abstraction without a second
   real caller (Rule of Three); an abstraction with one caller gets inlined.
 - **DRY**: no duplicate logic — extract shared code. The PR-gate and the retriever interface

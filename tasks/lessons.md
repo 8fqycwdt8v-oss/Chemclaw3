@@ -693,3 +693,77 @@ the source at all.
 **Rule.** Before writing a test whose fixture is a deliberately-invalid instance of something the
 repo validates, check whether an existing gate scans the test file itself. When one does, construct
 the invalid value at runtime rather than writing it literally.
+
+## A test can pin the shape of a control and never touch its effect
+
+**Context.** The full-codebase review found 22 defects. Five of the highest-severity ones were
+invisible to a green `make lint type test`, and in each case the project's *own guard* was what hid
+them:
+
+- `polynitro-aromatic`'s reference molecule was the one isomer its buggy SMARTS matched, so TNT and
+  picric acid screened clean while the rule's test passed.
+- The safety-gate fixture backticked structures the real writer does not emit, so a gate blind to
+  every `bo-candidate` note had a passing test that appeared to cover it.
+- `test_helm_chart.py` fed the note-repo path into `Settings` as modelled pod env — correct
+  modelling — and never compared the result to the path the chart publishes to. It *encoded* the
+  mismatch and asserted nothing about it.
+- `test_config.py` pinned the permissiveness that let mock DFT energies key like real ones.
+- The only entropy-against-experiment test used water, which is nonlinear, and so was structurally
+  incapable of seeing a bug in the linear-rotor branch.
+
+**Rule.** When a test exists for a control, ask what it would do if the control were *inert*. A test
+that constructs the input the implementation happens to handle, or that asserts a value is wired
+through without asserting what the value does, passes forever while the control does nothing. The
+cheap check is a mutation: break the control, and if the test still passes it was pinning shape, not
+effect.
+
+**Rule.** For a rule table with one reference molecule per rule, a single molecule can demonstrate a
+*motif* and can never demonstrate a *count* or a *position*. Any rule whose prose says "multiple",
+"poly", "adjacent" or "on one ring" needs a negative case and an isomer, or the discipline is blind
+by construction.
+
+## Measure it; an argument between two plausible mechanisms settles nothing
+
+**Context.** Three of four re-opened refutations changed conclusion once counted rather than
+reasoned about. The sharpest: a review blamed a score sort for starving the lexical retrieval leg; a
+verifier proved the sort was not causally responsible and stopped there. Both were half right and
+neither had run it. Measured, the default mode delivered 38 graph chunks, 2 vector and **zero**
+lexical — and removing the sort made it *worse* (40/0/0), so the sort was mitigating a different
+cause neither had named.
+
+The same pattern produced the DRFP finding: four separate places — a docstring, a second docstring,
+an ADR and a closed backlog row — asserted a solvent-domination fix worked. Nobody had measured the
+similarity. It was unchanged to the fourth decimal.
+
+**Rule.** When two analyses disagree about *why* something is broken, stop arguing and run it. The
+cost is usually one script; the alternative is picking the more articulate explanation, which is
+uncorrelated with the true one.
+
+**Rule.** A claim that a fix worked is worth nothing without the number. "Four places assert it is
+delivered" is evidence about the authors' beliefs, not about the bits.
+
+## Generalize the defect before fixing the symptom
+
+**Context.** The review reported that `standardize()` turned NaOH into water, via a base-screen
+symptom. Fixing exactly that would have left `NaBH4` → borane, `Pd(OAc)2` → acetic acid and
+`n-BuLi` → butane in place. 18 of 87 shipped reagents were affected; the review named one.
+
+Each was found by asking "what else does this mechanism reach?" rather than "is the reported case
+fixed?" — and each needed a *different* discriminator (organic fragment, spectator counterion,
+metal–carbon bond), asked at a different stage of the pipeline, because `Cleanup` destroys the
+evidence the organometallic test needs.
+
+**Rule.** A defect report is a sample, not a specification. Before fixing, enumerate the whole set
+the broken mechanism touches — run the real corpus through it — and report the blast radius. The
+reported case is rarely the worst one.
+
+## Do not mark work complete because you analysed it
+
+**Context.** I wrote detailed diagnoses of two findings, including the exact fix each needed, then
+ticked both off. `git diff` showed neither file had been touched by any of the eleven commits. The
+analysis read enough like a resolution that I stopped distinguishing them — and one of the two was a
+defect I had introduced myself earlier in the same programme.
+
+**Rule.** Before marking an item done, verify it against the artefact, not against your memory of
+having thought about it: `git diff` the file, or run the test. Writing the fix down is not applying
+it, and a convincing write-up is the easiest thing to mistake for finished work.
