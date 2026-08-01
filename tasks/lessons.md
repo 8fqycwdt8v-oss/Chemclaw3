@@ -611,3 +611,31 @@ inside an import.
 **Rule.** Before calling a local run green, read the skip count and name what it excludes. If the
 change touches a layer whose tests are all skipped offline (Temporal, Postgres, the container
 build), say so in the PR body and expect CI to be the first real run — do not report it as verified.
+
+## A test fixture is not the place to buy an assertion (2026-08-01)
+
+The durable job record gained a measured `runtime_seconds`, and no test could tell a measurement
+from a hardcoded `0.0`: the measurement happens inside a Temporal workflow, so the offline suite
+cannot watch it and the server-backed test had nothing to bound it against. The fix I reached for
+was to make the shared fixture child sleep a minute on the workflow clock — free under the
+time-skipping server, in theory, and it broke the end-to-end test outright with
+`No completion event found`.
+
+Two things went wrong and only one of them is about Temporal. The Temporal one: time-skipping is
+not a free knob you can turn inside a workflow that a test drives through several hops. The general
+one is worse — **I changed a shared, expensive, hard-to-run fixture in order to strengthen one
+assertion**, and the fixture serves four tests and only runs in CI. The cost of being wrong there is
+paid in a five-minute CI round, which is exactly where I have least ability to iterate.
+
+The claim was held instead over the **AST** of the call site: the `runtime_seconds` argument must be
+a computed expression mentioning `workflow.now`, never a constant. It runs offline in milliseconds
+and kills both mutations (hardcoded value; computed from the wrong clock).
+
+**Rule.** When a claim lives somewhere no test can reach, look for a *different level* to assert it
+at — the AST, the signature, the rendered config — before changing a shared fixture to create the
+conditions. Modifying a fixture to make one assertion possible taxes every other test that fixture
+serves, and taxes them in CI.
+
+**Rule.** Parse, don't substring, when asserting about source. `"workflow.now" in source` is
+satisfied by the comment above the line — the same trap already recorded twice above. `ast.parse` +
+`ast.unparse` of the specific node is exact and costs three extra lines.

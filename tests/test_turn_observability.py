@@ -162,6 +162,92 @@ def test_token_spend_is_counted_not_only_budgeted() -> None:
     assert METRICS.value("chemclaw_tokens_total") == before + 42
 
 
+def test_a_real_turn_books_its_spend_against_the_actor(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The metric and the ledger must be fed by the same turn, not merely both exist.
+
+    Asserting that `runner.py` contains a `record_turn_cost(...)` call would pass on a call placed
+    where it never runs — the same trap that made the tracing check unable to tell a context manager
+    *created* from one *entered*. So this drives a real turn through `run_turn` and reads what the
+    sink was handed: the tokens must match the metric's, and the row must carry the identity the
+    metric structurally cannot.
+    """
+    from chemclaw.agent.turn_cost import TurnCost
+
+    booked: list[TurnCost] = []
+
+    class _CapturingSink:
+        async def record(self, cost: TurnCost) -> None:
+            booked.append(cost)
+
+    monkeypatch.setattr("chemclaw.agent.turn_cost.default_turn_cost_sink", _CapturingSink)
+
+    class _MeteredAgent:
+        """The same shape as the agent above: one update carrying MAF-style usage."""
+
+        mcp_tools: list[Any] = []
+
+        def run(  # noqa: D102 - a fake agent's run, documented by its class
+            self, message: str, *, stream: bool, session: AgentSession, **_run_options: Any
+        ) -> Any:
+            async def _gen() -> Any:
+                yield SimpleNamespace(
+                    text="ok",
+                    contents=[
+                        SimpleNamespace(
+                            usage_details={"input_token_count": 7, "output_token_count": 3},
+                            name=None,
+                        )
+                    ],
+                    user_input_requests=[],
+                )
+
+            return _gen()
+
+    async def _collect() -> None:
+        async for _ in run_turn(_MeteredAgent(), AgentSession(session_id="s-cost"), "hi"):
+            pass
+        # The write is scheduled rather than awaited (it is booked from a `finally` that also runs
+        # on the disconnect path), so yield to the loop before reading it.
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+
+    asyncio.run(_collect())
+
+    assert len(booked) == 1, "a completed turn did not reach the cost ledger"
+    cost = booked[0]
+    assert cost.session_id == "s-cost"
+    assert cost.input_tokens == 7 and cost.output_tokens == 3
+    assert cost.correlation_id, "the ledger's join to the audit trail is empty"
+    assert cost.completed is True
+    assert cost.duration_seconds > 0
+
+    # And a turn that never answered is billed too, marked as such. Booked from the `finally` and
+    # not from the success path, because a turn that broke — or that a client hung up on — spent
+    # real tokens, and a ledger holding only the tidy ones is wrong in the direction that hides a
+    # runaway. This is the assertion that fails if the call moves onto the answered path.
+    class _BrokenAgent:
+        mcp_tools: list[Any] = []
+
+        def run(  # noqa: D102 - a fake agent's run, documented by its class
+            self, message: str, *, stream: bool, session: AgentSession, **_run_options: Any
+        ) -> Any:
+            async def _gen() -> Any:
+                raise RuntimeError("boom")
+                yield  # pragma: no cover - unreachable, makes this an async generator
+
+            return _gen()
+
+    async def _collect_broken() -> None:
+        async for _ in run_turn(_BrokenAgent(), AgentSession(session_id="s-broken"), "hi"):
+            pass
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+
+    asyncio.run(_collect_broken())
+    assert len(booked) == 2, "a turn that failed was never billed"
+    assert booked[1].completed is False
+
+
 def test_the_front_door_configures_logging_and_telemetry_at_startup(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

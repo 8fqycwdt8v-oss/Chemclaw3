@@ -71,6 +71,17 @@ _COUNTERS: dict[str, str] = {
         "GxP audit records that could not be persisted (the trail is incomplete)."
     ),
     "chemclaw_jobs_started_total": "Durable jobs launched by an agent tool.",
+    # The counter above counts *launches*, which on the most expensive thing this system does is the
+    # least informative number available: a two-second xTB call and a six-hour DFT run increment it
+    # identically. This is the consumption counterpart — accumulated seconds, so `rate()` reads as
+    # "compute-seconds per second", the same shape as the token counters and the standard way spend
+    # is expressed. A histogram would be the wrong instrument twice over: the shared bucket set tops
+    # out at 300 s, which is noise for HPC work, and the question is how much was consumed rather
+    # than how the durations were distributed. Not node-hours — parallelism belongs to the launcher
+    # and none reports it back yet — but runtime is the factor node-hours multiplies.
+    "chemclaw_job_runtime_seconds_total": (
+        "Wall-clock seconds accumulated by finished durable jobs, by connector."
+    ),
     "chemclaw_notes_proposed_total": "Notes opened on a branch through the PR-gate.",
     # The counterpart to the line above, and the reason it could not stand alone: a best-effort
     # publish that fails is logged inside a workflow and swallowed, because the science is already
@@ -200,6 +211,9 @@ _COUNTER_LABELS: dict[str, tuple[str, ...]] = {
     # Four values, fixed by a CHECK constraint in `infra/sql/027_note_proposals.sql` — the only
     # label in this registry whose cardinality is bounded by the database rather than by trust.
     "chemclaw_note_proposals_total": ("state",),
+    # Bounded by configuration exactly as `profile` is: a connector is a bundle the chart enables,
+    # never a name a caller supplies, and the whole shipped fleet is six.
+    "chemclaw_job_runtime_seconds_total": ("connector",),
 }
 
 # The most label-sets one counter may hold. A label *value* is not bounded by this module — it comes

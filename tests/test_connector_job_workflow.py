@@ -285,6 +285,13 @@ def test_a_connector_job_runs_its_own_workflow_and_core_does_the_rest(
     assert record.payload == {"subject": "benzene"}
     assert record.result == result.data  # the full envelope, not a summary of it
     assert record.note_id == "fixture-benzene"
+    # And the run's measured duration reached the record. A lower bound in *seconds* is not
+    # available here: the fixture child returns immediately and the time-skipping server may report
+    # both of the wrapper's clock reads as the same instant, so `> 0` would be a flake rather than
+    # an assertion. What this pins is that the field survives the round trip through the activity
+    # and the pydantic converter; that it is *computed* rather than hardcoded is pinned offline, by
+    # `test_the_wrapper_measures_the_run_rather_than_hardcoding_it`.
+    assert isinstance(record.runtime_seconds, float)
     # The note a human is asked to sign says *why* the run happened, stamped by core rather than
     # by the connector — which is what makes it true of every connector, including ones that
     # know nothing about the record.

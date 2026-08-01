@@ -24,7 +24,7 @@ from chemclaw.durable.job_record import JobRecord, JobRecordSummary
 
 _COLUMNS = (
     "job_id, connector, job, rationale, requested_by, session_id, correlation_id, "
-    "payload, summary, result, note_id"
+    "payload, summary, result, note_id, runtime_seconds"
 )
 
 # Every mutable column is refreshed, **including the attribution**. Updating the reason and the
@@ -35,7 +35,7 @@ _COLUMNS = (
 # answer for the field an audit joins on. The row describes the latest run, whole.
 _UPSERT = f"""
     INSERT INTO job_records ({_COLUMNS})
-    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
     ON CONFLICT (job_id) DO UPDATE SET
         rationale = EXCLUDED.rationale,
         requested_by = EXCLUDED.requested_by,
@@ -45,6 +45,7 @@ _UPSERT = f"""
         summary = EXCLUDED.summary,
         result = EXCLUDED.result,
         note_id = EXCLUDED.note_id,
+        runtime_seconds = EXCLUDED.runtime_seconds,
         completed_at = now()
 """
 
@@ -95,6 +96,7 @@ class PostgresJobRecordSink:
                     record.summary,
                     _json(record.result),
                     record.note_id,
+                    record.runtime_seconds,
                 ),
             )
             await conn.commit()
@@ -119,7 +121,8 @@ async def read_job_record(job_id: str) -> JobRecord | None:
         summary=row[8],
         result=row[9],
         note_id=row[10],
-        completed_at=row[11],
+        runtime_seconds=row[11],
+        completed_at=row[12],
     )
 
 
