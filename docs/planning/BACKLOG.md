@@ -378,6 +378,25 @@ QM path. The rows below are what survives that merge, narrowed to say so.
       is deliberately *not* digest-pinned in the file: a pinned digest goes stale in weeks and every
       developer build then pulls a base months behind on CVE fixes, so the dev default floats, a
       release pins, and the SBOM records what a build actually contained.
+- [ ] **The image vulnerability scan is written but not merged as a gate** — [M]. `trivy image
+      --exit-code 1 --ignore-unfixed --severity HIGH,CRITICAL` was built in
+      D-2026-08-01-a-tag-is-a-pointer-not-a-build, run eight times against real builds, and pulled
+      back out. It **earned its keep**: three classes of real problem, all now fixed in
+      `deploy/Containerfile` and staying — base OS errata (`dnf -y update`), `setuptools` 65.5.1 in
+      the base interpreters, and **uv's wheel cache shipped inside the runtime image**
+      (`uv cache clean`). None was reachable by `make deps-audit`, the offline suite, `mypy` or
+      review; all had been in every image this repo has ever built.
+      **Why it is not merged:** after all three fixes it still reports `setuptools` 70.3.0 and
+      `msgpack` 1.1.2, while an exhaustive `find / -xdev` in the same build — printed into the build
+      log, and still there — lists every versioned artifact of both and contains neither. A gate
+      whose last word contradicts the artifact it scanned makes every future red build ambiguous,
+      which is the non-blocking-scanner disease from the other direction. The two ways to ship it
+      anyway are both worse: softening the severity is the failure the row existed to end, and an
+      `--ignore-vuln` whose reason is "I could not find it" is a documented decision resting on an
+      unverified claim.
+      **What it needs:** an environment with a container runtime, where the built image can be
+      inspected interactively. Every hypothesis here cost a full CI round trip. Start by finding
+      what trivy is actually reading — `trivy image --list-all-pkgs` names the file per package.
 - [ ] **No image signing or admission policy** — [M]. Pinning by digest is the property a signature
       would enforce; adding one nothing verifies would be a fourth control reporting to nobody.
       Needs a key, a policy admission controller, and a registry to push to — all three belong to

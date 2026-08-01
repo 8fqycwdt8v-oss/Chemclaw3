@@ -29,9 +29,10 @@ Nine templates each interpolated `repository:tag` themselves, so this was also n
 - `image.pullSecrets` exists, on every pod spec, counted per spec rather than per file.
 - `deploy/Containerfile` takes `ARG BASE_IMAGE`, so a release pins the base by digest without
   editing the file.
-- CI gains three blocking gates: `pip-audit` over the exported lockfile, an SPDX SBOM from `syft`
-  retained 90 days with the built image's digest, and a `trivy` image scan failing on fixable
-  HIGH/CRITICAL. `make deps-audit` is the same command, so a red build is reproducible locally.
+- CI gains two blocking gates: `pip-audit` over the exported lockfile, and an SPDX SBOM from
+  `syft` retained 90 days with the built image's digest. `make deps-audit` is the same command, so
+  a red build is reproducible locally. The **image** scan is deferred to its own change — see below;
+  it ran here, it earned its keep, and it does not yet belong in a merge gate.
 - `ARG INCLUDE_CREST` makes the licence decision a build flag.
 
 ## Why not the alternatives
@@ -49,11 +50,6 @@ cannot be fixed is an explicit `--ignore-vuln` with its reason in the diff — a
 than a red badge everyone learns to scroll past. The dependency audit was run against the current
 lockfile before this shipped and is clean, so the gate starts green rather than starting ignored.
 
-**Fail the image scan on every severity.** `ignore-unfixed: true` and HIGH/CRITICAL only. A gate
-that fires on every LOW in a distro base is one an operator disables within a week, and a disabled
-gate is the state this row exists to end. What is dropped is stated here rather than left to be
-inferred from the flags.
-
 **Make the crest licence call in this repo.** Not ours to make: whether to redistribute a GPL-3.0
 binary inside a product image is the product owner's decision. What *was* wrong is that taking it
 required editing a `RUN` block, so it looked like writing a patch and was therefore never taken. It
@@ -66,48 +62,54 @@ it, and a registry to push to — all three of which are the cluster-ownership r
 yet answer. Pinning by digest is the property signing would enforce; adding a signature nothing
 verifies would be a fourth control reporting to nobody.
 
-## What the gate found on its first run
+## What the image scan found, and why it is not merged
 
-Worth recording, because it is the argument for the gate rather than a footnote to it. The image
-scan's first successful run failed on two classes of finding, both fixable, neither reachable by
-any other control in this repo:
+The `trivy` image scan was written as a third blocking gate, run eight times against real builds,
+and is **not in this change**. Both halves of that sentence are the finding.
 
-- **Base OS packages** — openssh, openssl, python3, python3-libs, python3-urllib3, nodejs — each
-  with an errata already published and simply not yet in Red Hat's periodic UBI9 rebuild. Fixed by
-  `dnf -y update` at build time, which is also what makes the floating-base decision coherent: the
-  base moves when Red Hat rebuilds it, and the packages move on *every* build regardless.
-- **`setuptools` 65.5.1**, carrying two HIGH advisories fixed in 70.0.0 and 78.1.1. This is the
-  *interpreter's* setuptools, not a locked dependency — `uv export | pip-audit` is clean and always
-  was — so no lockfile change could have reached it. It is precisely the half a dependency scan
-  cannot see, which is why the row asked for both.
+**It earned its keep immediately.** Three classes of real problem, none of them reachable by the
+lockfile audit, the offline suite, `mypy`, or review, and all of them present in every image this
+repo has ever built. Every fix is in `deploy/Containerfile` and stays:
 
-With the errata applied the OS scan came back clean, and what remained took three rounds to
-understand — which is itself the record worth keeping, because the wrong diagnosis was the
-plausible one.
+1. **Base OS packages** — openssh (use-after-free in host-key re-exchange), openssl (heap UAF in
+   `PKCS7_verify`), python3, python3-urllib3, nodejs — each with an errata already published and
+   simply not yet in Red Hat's periodic UBI9 rebuild. `dnf -y update` at build time, which is also
+   what makes the floating-base decision coherent: the base moves when Red Hat rebuilds it, the
+   packages move on *every* build regardless.
+2. **`setuptools` 65.5.1 in the base interpreters**, carrying CVE-2024-6345 (RCE) and
+   CVE-2025-47273. Not a locked dependency — `make deps-audit` is clean and always was — so no
+   lockfile change could have reached it.
+3. **uv's wheel cache shipped in the runtime image.** `uv sync` extracts every downloaded wheel
+   into `$HOME/.cache/uv/archive-v0/`, each with its own `dist-info`, and that build-time scratch
+   was in the production artifact. `uv cache clean` removes it, which is strictly better than
+   upgrading anything: the copies are not made safe, they are made absent.
 
-The scan reported **`setuptools` 70.3.0 and `msgpack` 1.1.2**. Neither is ours: `uv.lock` pins
-setuptools 83.0.0 and contains no msgpack at all. The obvious reading was that they lived in the
-base image's other Python environments — UBI9 ships more than one interpreter, each with its own
-`site-packages` — so the fix was to upgrade them wherever installed. It changed nothing, twice,
-and correctly: **they were not installed anywhere.**
+**And then it said something the artifact contradicts.** After all three fixes, the scan still
+reports `setuptools` 70.3.0 and `msgpack` 1.1.2, while an exhaustive `find / -xdev` in the same
+build — printed into the build log — lists every versioned artifact of both and contains neither.
+What it does list is setuptools 83.0.0 in all three importable environments, RPM-owned 65.5.1 and
+53.0.0 shadowed under `/usr/lib`, and virtualenv seed wheels at 82.0.1 and 83.0.0. No 70.3.0
+anywhere; no msgpack at all.
 
-They were extracted wheels in **uv's package cache**, which `uv sync` writes to
-`$HOME/.cache/uv/archive-v0/` and which was being shipped inside the runtime image. Build-time
-scratch in a production artifact, carrying `dist-info` for build dependencies the application never
-imports. `uv cache clean` is the fix, and it is strictly better than upgrading anything: the
-vulnerable copies are not made safe, they are made absent, along with the rest of a cache that had
-no business in the image.
+That is where it stops, and the reason is about honesty rather than effort. **A gate whose last
+word contradicts the artifact it scanned makes every future red build ambiguous** — the next
+engineer cannot tell a real finding from this one, which is the same disease as a non-blocking
+scanner arrived at from the opposite direction. And the two candidate resolutions are both worse
+than waiting: softening the gate is the failure this whole row exists to end, and writing an
+`--ignore-vuln` whose stated reason is "I could not find it" would be a documented decision resting
+on an unverified claim.
 
-Three things follow from that, and they are the argument for the gate rather than footnotes to it:
+The remaining work is an environment where the image can be inspected interactively — this one has
+no container runtime and no registry, so each hypothesis cost a full CI round trip. It is a backlog
+row with the investigation's exact state recorded, not a lost thread.
 
-- A lockfile audit is structurally blind to this. `make deps-audit` is clean and always was,
-  because the offending files were never in the lockfile.
-- So is the offline suite, `mypy`, and review. This had been in every image this repo has ever
-  built.
-- The diagnosis only became cheap once the *build* was made to name the paths it had left. Two
-  rounds were spent guessing at filesystem layout from a scanner's summary; the build now prints
-  every remaining `setuptools`/`msgpack` `dist-info` it can find, and that line is what located the
-  cache.
+## What the two shipped gates found
+
+`pip-audit` over the lockfile and the SBOM both run clean today, which is the point: the dependency
+gate starts green rather than starting ignored, and the SBOM records the OS packages and the two
+downloaded binaries that no Python-level inventory can see. The image's *contents* are therefore
+still named on every build — which is what makes the floating base defensible — even though nothing
+yet fails the build over them.
 
 ## Consequences
 
