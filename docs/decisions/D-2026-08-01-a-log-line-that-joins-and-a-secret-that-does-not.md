@@ -34,6 +34,16 @@ root handler by *propagation*, and a filter attached to a logger is not consulte
 records. Installed on the logger, redaction would have applied to almost nothing while looking
 correct.
 
+**And neither filter imports anything while filtering.** `ContextFilter` resolves its three getters
+once in `__init__` — called from `configure_logging()` at a process entrypoint — because a filter
+runs at moments its author does not choose: from inside another module's import, and from inside
+Temporal's workflow sandbox, which hooks `__import__` and *logs a warning* when sandboxed code
+touches something restricted. The first version imported inside `filter`, and that closed a loop:
+the import tripped a restriction, the restriction logged, the log re-entered the filter, which
+imported again into a now half-initialised module. The workflow worker wedged until the test run's
+global timeout fired. The import stays inside the function rather than at module scope for the
+layering reason (`agent.*` imports `core.*`, not the reverse); what moved is *when* it runs.
+
 ## Why not the alternatives
 
 **Redact the audit trail's arguments — which is what the row appears to ask for.** It would break
@@ -70,3 +80,6 @@ string rather than duplicating it.
 - An empty or short secret is not matched. `llm_api_key` defaults to `""`, and a substring search
   for the empty string matches every line — the failure that would have made redaction worse than
   none.
+- A filter added here later must not import, allocate a lock, or log. A test watches `__import__`
+  across one `filter` call on both filters and names the module if one slips back in, so the rule is
+  enforced rather than commented.

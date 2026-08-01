@@ -168,19 +168,35 @@ class SecretRedactingFilter(logging.Filter):
 class ContextFilter(logging.Filter):
     """Attach the turn's correlation id, actor and session to every record.
 
-    Imported lazily inside the call because `agent.*` imports `core.*` and not the other way
-    round; reaching for them at module scope would make `core.logging` — which every entrypoint
-    imports first — depend on the agent layer.
+    The three getters are resolved **once, here in `__init__`**, and `filter` then does nothing but
+    call them. Not a style preference: a filter runs at arbitrary moments, including from inside
+    another module's import and from inside Temporal's workflow sandbox, which hooks `__import__`
+    and logs a warning when sandboxed code touches something restricted. An import on the logging
+    path closes that into a loop — the import trips a restriction, the restriction logs, the log
+    re-enters this filter, which imports again into a now half-initialised module. That is not a
+    hypothetical: it deadlocked the workflow worker until the test run's global timeout fired.
+    Construction happens at a process entrypoint (`configure_logging`), where an import is safe.
+
+    The import stays inside the function rather than at module scope because `agent.*` imports
+    `core.*` and not the other way round; at module scope, `core.logging` — which every entrypoint
+    imports first — would depend on the agent layer.
     """
 
-    def filter(self, record: logging.LogRecord) -> bool:
-        """Stamp the ambient identity onto the record and always keep it."""
+    def __init__(self) -> None:
+        """Bind the ambient-identity getters so `filter` never has to import."""
+        super().__init__()
         from chemclaw.agent.identity_context import get_current_actor, get_current_correlation_id
         from chemclaw.agent.session_context import get_current_session_id
 
-        record.correlation_id = get_current_correlation_id() or "-"
-        record.actor = get_current_actor() or "-"
-        record.session_id = get_current_session_id() or "-"
+        self._actor = get_current_actor
+        self._correlation_id = get_current_correlation_id
+        self._session_id = get_current_session_id
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        """Stamp the ambient identity onto the record and always keep it."""
+        record.correlation_id = self._correlation_id() or "-"
+        record.actor = self._actor() or "-"
+        record.session_id = self._session_id() or "-"
         return True
 
 

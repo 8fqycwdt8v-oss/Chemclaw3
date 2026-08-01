@@ -228,6 +228,44 @@ def test_a_traceback_stays_inside_the_json_object() -> None:
     assert "\n" not in line.strip()
 
 
+def test_filtering_a_record_never_imports_anything() -> None:
+    """A filter may not import on the logging path, and this is why.
+
+    A filter runs at arbitrary moments — including from inside another module's import, and from
+    inside Temporal's workflow sandbox, which hooks `__import__` and logs a warning whenever
+    sandboxed code touches something restricted. With the import inside `ContextFilter.filter`,
+    that warning re-entered the filter, which imported again into a now half-initialised module,
+    which tripped another restriction: the workflow worker wedged until the suite's global timeout
+    fired. Watching `__import__` for the duration of one `filter` call is the smallest faithful
+    reproduction, and it holds for both filters rather than only the one that had the defect.
+
+    The hook *records* rather than raises, and the assertions run after it is uninstalled: raising
+    inside `__import__` takes pytest's own reporting machinery down with it, so the failure arrives
+    as an INTERNALERROR naming a pytest module instead of naming this test.
+    """
+    import builtins
+
+    from chemclaw.core.logging import ContextFilter, SecretRedactingFilter
+
+    filters = [ContextFilter(), SecretRedactingFilter()]  # constructing may import; filtering not
+    record = _record("something odd")
+    real_import = builtins.__import__
+    attempted: list[str] = []
+
+    def _watch_import(name: str, *args: object, **kwargs: object) -> object:
+        attempted.append(name)
+        return real_import(name, *args, **kwargs)  # type: ignore[arg-type]
+
+    builtins.__import__ = _watch_import  # type: ignore[assignment]
+    try:
+        kept = [log_filter.filter(record) for log_filter in filters]
+    finally:
+        builtins.__import__ = real_import
+
+    assert kept == [True, True]
+    assert not attempted, f"the logging path imported {attempted}"
+
+
 def test_configure_logging_installs_both_filters_on_the_handler() -> None:
     """On the *handler*, not a logger — the distinction is load-bearing.
 
