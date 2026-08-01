@@ -81,6 +81,15 @@ them makes the guard slower and the ledger subject to the guard's LRU eviction.
 which is noise for HPC work, and the question is how much was consumed rather than how the
 durations were distributed.
 
+**A sleep in the test fixture, to give the measured runtime a lower bound.** Tried, and reverted:
+it broke the end-to-end Temporal test outright (`No completion event found`). The measurement lives
+in a workflow, so no offline test can watch it happen and no server-backed test can bound it — the
+fixture child returns immediately and the time-skipping server may report both of the wrapper's
+clock reads as the same instant, so `> 0` there is a flake rather than an assertion. The claim is
+instead held over the **AST**: the `runtime_seconds` argument must be a computed expression
+mentioning `workflow.now`, never a constant. Parsed rather than string-matched, because a substring
+check is satisfied by the comment above the line.
+
 ## Consequences
 
 - "What did this actor/team spend over this window" is one query (`read_spend_by_actor`), exact,

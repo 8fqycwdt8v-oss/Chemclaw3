@@ -224,6 +224,48 @@ def test_finished_job_runtime_reaches_the_consumption_counter() -> None:
     assert 'chemclaw_job_runtime_seconds_total{connector="calc"} 2' in rendered
 
 
+def test_the_wrapper_measures_the_run_rather_than_hardcoding_it() -> None:
+    """The one claim on this path that no offline test could otherwise hold.
+
+    `job_record_for` is pure and testable, but it takes `runtime_seconds` as an argument — so it
+    passes just as happily on a hardcoded `0.0` as on a measurement, and the place the measurement
+    actually happens is `ConnectorJobWorkflow.run`, which needs a Temporal server. The end-to-end
+    test there cannot supply a lower bound either: the fixture child returns immediately, and the
+    time-skipping server may legitimately report both of the wrapper's clock reads as the same
+    instant, so `> 0` would be a flake rather than an assertion. (A sleep in the fixture to force a
+    gap was tried and broke that test outright — the shared harness is the wrong place to buy this.)
+
+    So the claim is checked where it is cheap and exact: over the AST. The argument must be a
+    *computed expression* mentioning `workflow.now`, never a constant. Parsed rather than
+    string-matched, because a substring check is satisfied by the comment above the line — a trap
+    this repository has already fallen into twice (`tasks/lessons.md`).
+    """
+    import ast
+    import inspect
+
+    from chemclaw.durable import connector_job
+
+    tree = ast.parse(inspect.getsource(connector_job))
+    calls = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id == "job_record_for"
+    ]
+    assert calls, "the wrapper no longer builds a job record"
+    for call in calls:
+        runtime = next((kw.value for kw in call.keywords if kw.arg == "runtime_seconds"), None)
+        assert runtime is not None, "the wrapper builds a record without a runtime"
+        assert not isinstance(runtime, ast.Constant), (
+            "runtime_seconds is a literal — the record would report every run as costing the same"
+        )
+        assert "workflow.now" in ast.unparse(runtime), (
+            "runtime_seconds is not measured from the workflow's own clock, so a replay would "
+            "measure the replay"
+        )
+
+
 def test_the_runtime_counter_is_declared_on_the_process_registry() -> None:
     """The activity books it through the metrics bridge, which needs the name to be declared."""
     assert "chemclaw_job_runtime_seconds_total" in METRICS.render()
