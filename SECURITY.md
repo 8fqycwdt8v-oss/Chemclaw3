@@ -17,8 +17,11 @@ pre-Phase-6 "no auth" world. For the design rationale see `docs/reference/archit
   trigger with no authenticated user** before any durable work starts. The `oid` is stamped into the
   workflow payload (`requested_by`), never inferred later.
 - **One authorization gate for expensive actions.** `agents/authz.py::authorize_trigger(action)` is
-  the single place a costly HPC/BO trigger is checked: an action in `entra_expensive_actions` runs
-  only for a caller holding one of `entra_privileged_roles`. This holds even when the harness plans
+  the single place a costly HPC/BO trigger is checked: a job a connector manifest declares
+  `expensive: true`, or an action named in `entra_expensive_actions`, runs only for a caller holding
+  one of `entra_privileged_roles` — and an empty role set refuses everyone rather than admitting
+  them. The manifest declaration is the source; `entra_expensive_actions` adds to it for anything
+  outside a bundle. This holds even when the harness plans
   autonomously — an autonomously-planned todo cannot launch a job outside the requesting user's
   entitlements.
 - **Role-scoped skills.** `agents/skill_access.py::RoleScopedSkillsSource` hides a gated skill

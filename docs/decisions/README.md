@@ -212,19 +212,29 @@ and is kept only for reservations that were in flight when this changed.
 | [D-2026-07-31-the-audit-chain-is-versioned](D-2026-07-31-the-audit-chain-is-versioned.md) | The audit chain is versioned, so widening the record does not invalidate it |
 | [D-2026-07-31-the-deployment-envelope](D-2026-07-31-the-deployment-envelope.md) | The deployment envelope: a sidecar that emptied the tree, and three assertions the chart never made |
 | [D-2026-07-31-two-spellings-of-one-molecule](D-2026-07-31-two-spellings-of-one-molecule.md) | Two spellings of one molecule, and two questions about them |
+| [D-2026-08-01-a-cap-that-starves-a-source](D-2026-08-01-a-cap-that-starves-a-source.md) | A cap that starves a source |
 | [D-2026-08-01-a-cheap-request-is-still-a-request](D-2026-08-01-a-cheap-request-is-still-a-request.md) | A cheap request is still a request, and a checked upload is still an ingested one |
+| [D-2026-08-01-a-declaration-that-authorizes-nothing](D-2026-08-01-a-declaration-that-authorizes-nothing.md) | A declaration that authorizes nothing |
 | [D-2026-08-01-a-drain-is-not-a-kill-with-extra-steps](D-2026-08-01-a-drain-is-not-a-kill-with-extra-steps.md) | A drain is not a kill with extra steps |
+| [D-2026-08-01-a-gate-that-leaks-on-the-failure-path](D-2026-08-01-a-gate-that-leaks-on-the-failure-path.md) | A gate that leaks on the failure path |
+| [D-2026-08-01-a-key-names-what-ran](D-2026-08-01-a-key-names-what-ran.md) | A calculation key names every program that produced it |
+| [D-2026-08-01-a-key-that-cannot-see-our-own-fix](D-2026-08-01-a-key-that-cannot-see-our-own-fix.md) | A key that cannot see our own fix |
 | [D-2026-08-01-a-log-line-that-joins-and-a-secret-that-does-not](D-2026-08-01-a-log-line-that-joins-and-a-secret-that-does-not.md) | A log line that joins, and a secret that does not |
 | [D-2026-08-01-a-migration-waits-in-front-of-live-traffic](D-2026-08-01-a-migration-waits-in-front-of-live-traffic.md) | A migration that waits, waits in front of live traffic |
 | [D-2026-08-01-a-path-in-prose-is-a-claim-a-gate-can-check](D-2026-08-01-a-path-in-prose-is-a-claim-a-gate-can-check.md) | A path in prose is a claim, and a gate can check it |
 | [D-2026-08-01-a-per-process-cap-multiplied-by-a-number-nobody-wrote-down](D-2026-08-01-a-per-process-cap-multiplied-by-a-number-nobody-wrote-down.md) | A per-process cap, multiplied by a number nobody wrote down |
+| [D-2026-08-01-a-reagent-is-not-its-largest-fragment](D-2026-08-01-a-reagent-is-not-its-largest-fragment.md) | A reagent is not its largest fragment |
 | [D-2026-08-01-a-restore-is-a-truncation-nobody-can-see](D-2026-08-01-a-restore-is-a-truncation-nobody-can-see.md) | A restore is a truncation nobody can see |
+| [D-2026-08-01-a-rule-that-counts-cannot-be-a-chain](D-2026-08-01-a-rule-that-counts-cannot-be-a-chain.md) | A rule that counts cannot be a chain |
 | [D-2026-08-01-a-running-job-has-no-owner](D-2026-08-01-a-running-job-has-no-owner.md) | A running job has no owner, so cancelling one is an operator action |
 | [D-2026-08-01-a-scripted-transcript-gates-the-harness-not-the-judgment](D-2026-08-01-a-scripted-transcript-gates-the-harness-not-the-judgment.md) | A scripted transcript gates the harness, not the judgment |
 | [D-2026-08-01-a-tag-is-a-pointer-not-a-build](D-2026-08-01-a-tag-is-a-pointer-not-a-build.md) | A tag is a pointer, not a build |
 | [D-2026-08-01-a-turn-you-can-follow-across-a-process](D-2026-08-01-a-turn-you-can-follow-across-a-process.md) | A turn you can follow across a process |
 | [D-2026-08-01-every-process-carries-its-own-witness](D-2026-08-01-every-process-carries-its-own-witness.md) | Every process carries its own witness, and the sentence that stopped two of them |
+| [D-2026-08-01-one-equilibrium-or-no-number](D-2026-08-01-one-equilibrium-or-no-number.md) | One equilibrium, or no number |
 | [D-2026-08-01-spend-is-a-ledger-not-a-label](D-2026-08-01-spend-is-a-ledger-not-a-label.md) | Spend is a ledger, not a label |
+| [D-2026-08-01-symmetry-is-an-input-not-a-default](D-2026-08-01-symmetry-is-an-input-not-a-default.md) | Symmetry is an input, not a default |
+| [D-2026-08-01-the-agent-slot-that-changed-no-bits](D-2026-08-01-the-agent-slot-that-changed-no-bits.md) | The agent slot that changed no bits |
 | [D-2026-08-01-the-count-lives-in-the-test-not-in-the-prose](D-2026-08-01-the-count-lives-in-the-test-not-in-the-prose.md) | The count lives in the test, not in the prose |
 | [D-2026-08-01-trust-travels-on-the-value-line](D-2026-08-01-trust-travels-on-the-value-line.md) | Trust travels on the value line |
 | [D-2026-08-01-unknown-is-not-fine](D-2026-08-01-unknown-is-not-fine.md) | "Unknown" is not "fine": one shape for how much to trust a number |
