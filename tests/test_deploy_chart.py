@@ -416,7 +416,7 @@ def test_a_comment_never_swallows_the_line_after_it() -> None:
 # rendered a `PrometheusRule` reported `29 resources found — Valid: 28, Skipped: 1`: exactly one
 # kind in the whole chart lacks a schema, so both Prometheus-operator CRDs were being validated all
 # along. The exemption had never been checked against what kubeconform actually did.
-_CATALOG_VALIDATED_KINDS = frozenset({"ServiceMonitor", "PrometheusRule"})
+_CATALOG_VALIDATED_KINDS = frozenset({"ServiceMonitor", "PodMonitor", "PrometheusRule"})
 
 # The one kind kubeconform genuinely has no schema for, so `make helm-validate` runs with
 # `-ignore-missing-schemas` and *skips* it rather than failing. Keeping the set explicit is what
@@ -490,24 +490,71 @@ def test_something_actually_scrapes_the_metrics_endpoint() -> None:
     assert monitor is not None, "no chart template collects /metrics; every metric is uncollected"
 
 
-def test_the_scrape_targets_the_front_door_by_port_name() -> None:
-    """It must select the Service that serves `/metrics`, on the port that Service names.
+def test_the_scrape_targets_every_service_by_port_name() -> None:
+    """It must select the Services that serve `/metrics`, on the port those Services name.
 
-    By *name* rather than number, so a port change cannot silently orphan the scrape. And only the
-    front door: the workers and connector pods record through `chemclaw.core.metrics_bridge`, whose
-    contract is that a metric recorded outside the front door is a no-op — there is no registry and
-    no HTTP surface there — so a scrape pointed at them would collect nothing while reporting up.
+    By *name* rather than number, so a port change cannot silently orphan the scrape.
+
+    And **all** of them. This assertion used to require `component: service` — the front door alone
+    — on the reasoning that a connector records through `chemclaw.core.metrics_bridge`, "whose
+    contract is that a metric recorded outside the front door is a no-op". That reasoning was
+    false: the bridge imports a stdlib-only module, so the import succeeds in every process and a
+    connector's counters were landing in a live registry nothing read. Pinning the narrow selector
+    is how a wrong sentence in a docstring became a wrong deployment and stayed one.
     """
     text = (CHART / "templates" / "servicemonitor.yaml").read_text()
-    assert "app.kubernetes.io/component: service" in text, (
-        "the scrape does not select the front door specifically"
+    assert "app.kubernetes.io/component:" not in text.split("spec:", 1)[1], (
+        "the scrape selects one component, so every other Service in the release goes uncollected"
     )
     assert re.search(r"^\s*- port: http\s*$", text, flags=re.MULTILINE), (
         "the scrape names a port number rather than the Service's `http` port name"
     )
-    service = (CHART / "templates" / "service-route.yaml").read_text()
-    assert re.search(r"^\s*- name: http\s*$", service, flags=re.MULTILINE), (
-        "the Service no longer names its port `http`, so the ServiceMonitor selects nothing"
+    for template in ("service-route.yaml", "deployment-connectors.yaml"):
+        service = (CHART / "templates" / template).read_text()
+        assert re.search(r"^\s*- name: http\s*$", service, flags=re.MULTILINE), (
+            f"{template}'s Service no longer names its port `http`, so the ServiceMonitor "
+            "selects it and scrapes nothing"
+        )
+
+
+def test_every_worker_is_probed_and_scraped() -> None:
+    """The processes with no Service are exactly the ones that were invisible.
+
+    Three chart templates asserted "no probes: liveness is the Temporal poll itself" — an intent
+    nothing enforced. A worker whose poll loop died held its process open, so Kubernetes reported
+    `Running`, no probe disagreed, and no metric reached anyone either: the two gaps hid each other,
+    because both were waiting on the same missing HTTP surface.
+
+    Asserted through the shared helper rather than per template, which is the point of there being
+    one: a connector bundle enabled tomorrow is probed and scraped without an edit here.
+    """
+    helpers = (CHART / "templates" / "_helpers.tpl").read_text()
+    assert 'define "chemclaw.workerProbes"' in helpers
+
+    def _includes(text: str, helper: str) -> bool:
+        """Whether `text` *invokes* the helper, as opposed to mentioning it.
+
+        Matched as a template action anchored to its line, because both worker templates also
+        name these helpers in their explanatory comments — and a substring check let a mutation
+        that deleted the connector worker's probes pass on the strength of the comment describing
+        them. A test a comment can satisfy is a test of the comment.
+        """
+        return re.search(rf'^\s*\{{\{{-\s*include "{helper}"', text, flags=re.MULTILINE) is not None
+
+    for path in ("deployment-workers.yaml", "deployment-connectors.yaml"):
+        text = (CHART / "templates" / path).read_text()
+        assert _includes(text, "chemclaw.workerProbes"), f"{path} renders a worker with no probes"
+        assert _includes(text, "chemclaw.workerMetricsEnv"), (
+            f"{path}'s worker does not receive CHEMCLAW_WORKER_METRICS_PORT, so `worker_http` "
+            "binds a port the container never declared"
+        )
+    monitor = (CHART / "templates" / "podmonitor.yaml").read_text()
+    assert re.search(r"^\s*- port: metrics\s*$", monitor, flags=re.MULTILINE), (
+        "the PodMonitor does not name the `metrics` container port the workers declare"
+    )
+    assert "name: metrics" in helpers, (
+        "the workers no longer declare a `metrics` container port, so the PodMonitor selects "
+        "pods and scrapes none of them"
     )
 
 
@@ -518,15 +565,28 @@ def test_the_scraped_path_is_a_route_the_app_serves() -> None:
     Prometheus reports the target as down and an operator reads it as a broken pod. Nothing in the
     chart can catch that, because the chart has no idea what routes the app declares. This is the
     same lesson as the OTel crash loop: a production value has to be executed, not type-checked.
+
+    One `monitoring.path` now reaches three kinds of process, so all three are checked against the
+    real app they run: the front door, a connector's MCP server, and a worker's probe surface.
     """
+    from mcp.server.fastmcp import FastMCP
+
     from chemclaw.api.app import create_app
+    from chemclaw.connectors.server import connector_app
+    from chemclaw.core.worker_http import _build_app
 
     path = _values()["monitoring"]["path"]
-    routes = {getattr(route, "path", None) for route in create_app().routes}
-    assert path in routes, (
-        f"the chart scrapes {path!r}, which the app does not serve; "
-        f"the metrics route is one of {sorted(r for r in routes if r and 'metric' in r)}"
-    )
+    apps = {
+        "front door": create_app(),
+        "connector server": connector_app(FastMCP("probe"), name="probe"),
+        "worker": _build_app("probe", lambda: True),
+    }
+    for label, app in apps.items():
+        routes = {getattr(route, "path", None) for route in app.routes}
+        assert path in routes, (
+            f"the chart scrapes {path!r}, which the {label} does not serve; its metric-ish routes "
+            f"are {sorted(r for r in routes if r and 'metric' in r)}"
+        )
 
 
 # Every file that carries a pod template, with how many pod specs it declares. Explicit rather than
@@ -607,6 +667,39 @@ def test_the_front_door_has_an_ingress_policy_at_all() -> None:
     assert "-service-ingress" in policy, "the front door has no ingress NetworkPolicy"
     assert "app.kubernetes.io/component: service" in policy
     assert _values()["networkPolicy"]["serviceIngress"]["enabled"] is True
+
+
+def test_a_new_listening_port_came_with_the_rule_that_bounds_it() -> None:
+    """Opening a port on the worker pods without an ingress rule would have widened the fleet.
+
+    A NetworkPolicy only restricts pods that some Ingress-typed rule selects, and the workers were
+    selected by none — so before they had a listener, "accepts everything" was true and harmless.
+    Giving them `/healthz`, `/readyz` and `/metrics` is what made it matter, so the rule ships in
+    the same change as the port rather than as a follow-up
+    (D-2026-08-01-every-process-carries-its-own-witness).
+
+    The scraper is granted through `monitoringNamespaces` and not `ingressNamespaces`, which is the
+    whole reason the second list exists: the front door needs the router *and* the scraper, and
+    nothing else in the chart should be reachable from the router.
+    """
+    policy = (CHART / "templates" / "networkpolicy.yaml").read_text()
+    assert "-worker-ingress" in policy, (
+        "the workers now listen on a port and no ingress rule selects them"
+    )
+    assert "background-worker" in policy and "connector-worker-" in policy, (
+        "the worker ingress rule misses one of the two worker kinds"
+    )
+    assert ".Values.workerMetricsPort" in policy, (
+        "the rule names a port literal rather than the value the containers bind"
+    )
+    assert policy.count(".Values.networkPolicy.monitoringNamespaces") == 2, (
+        "the scraper must be granted on both the worker probe port and the connector port — a "
+        "connector serves /metrics on the port its Service already exposes"
+    )
+    assert _values()["networkPolicy"]["monitoringNamespaces"], (
+        "no namespace may scrape anything but the front door, so every metric this change "
+        "exposed is collected by nobody — the exact failure it set out to fix"
+    )
 
 
 def test_egress_destinations_are_declarable() -> None:

@@ -30,6 +30,52 @@ app.kubernetes.io/instance: {{ .Release.Name }}
 {{- end }}
 {{- end -}}
 
+{{- /* The port a worker serves its probes and its scrape on. Env, so `chemclaw.core.worker_http`
+       binds the same number the container port and the PodMonitor name — one value, no third place
+       for it to drift. Worker-only: the front door and the connector servers already have an HTTP
+       surface on `service_port` and must not start a second one. */ -}}
+{{- define "chemclaw.workerMetricsEnv" -}}
+- name: CHEMCLAW_WORKER_METRICS_PORT
+  value: {{ .Values.workerMetricsPort | quote }}
+{{- end -}}
+
+{{- /* A worker's container port and its two probes, written once for core's worker and every
+       bundle's.
+
+       These replace a comment. Three templates asserted "no probes: liveness is the Temporal poll
+       itself", which described an intent nothing enforced — a worker whose poll loop had died held
+       its process open, so Kubernetes saw `Running`, no probe disagreed, and (until the same
+       surface started serving `/metrics`) no counter reached anyone either.
+
+       `/readyz` is the worker's own `is_running`, and it is a *readiness* signal rather than a
+       liveness one on purpose: a worker that has stopped polling should be taken out of nothing —
+       it serves no traffic — but it should be visibly not-ready, and restarting it on that alone
+       would turn a Temporal reconnect into a crash loop. `/healthz` is what restarts the pod, and
+       it means more here than "the process exists": it is served on the worker's own event loop, so
+       a loop wedged inside an activity stops answering it.
+
+       `failureThreshold: 6` on liveness against a 20 s period — two minutes of a wedged loop before
+       a restart. Generous deliberately: an activity doing real chemistry can hold the loop for a
+       while, and a false restart mid-job is more expensive than a slow true one. */ -}}
+{{- define "chemclaw.workerProbes" -}}
+ports:
+  - name: metrics
+    containerPort: {{ .Values.workerMetricsPort }}
+readinessProbe:
+  httpGet:
+    path: /readyz
+    port: metrics
+  initialDelaySeconds: 5
+  periodSeconds: 10
+livenessProbe:
+  httpGet:
+    path: /healthz
+    port: metrics
+  initialDelaySeconds: 10
+  periodSeconds: 20
+  failureThreshold: 6
+{{- end -}}
+
 {{- /* The common envFrom (the whole non-secret ConfigMap) + the mTLS volume mount. */ -}}
 {{- define "chemclaw.envFrom" -}}
 - configMapRef:

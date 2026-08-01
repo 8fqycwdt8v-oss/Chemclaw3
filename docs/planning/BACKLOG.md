@@ -316,20 +316,29 @@ QM path. The rows below are what survives that merge, narrowed to say so.
       `chemclaw-temporal-frontend.temporal.svc:7233` and namespace `chemclaw`; there is no subchart,
       no operator manifest, no `register_namespace` call, no retention/archival config, no HA or
       sizing guidance. `helm install` does not produce a working system.
-- [ ] **Worker and connector metrics go nowhere** — [M]. The ServiceMonitor targets only the front
-      door, on the reasoning that recording a metric elsewhere "is a no-op" — which is wrong:
-      `metrics_bridge` imports the registry lazily and the import succeeds in any process, so
-      counters increment into a registry with no HTTP surface. Everything the background worker and
-      six connector workers do is invisible.
+- [x] **Worker and connector metrics go nowhere** — closed by
+      D-2026-08-01-every-process-carries-its-own-witness, together with the probes row below: they
+      were one missing thing. `core/worker_http.py` serves `/healthz`, `/readyz` and `/metrics`
+      beside every Temporal worker, `connectors/server.py` serves `/metrics`, the ServiceMonitor
+      drops its `component: service` selector (so every connector Service is collected too), and a
+      PodMonitor collects the worker pods, which have no Service by design. The row's diagnosis was
+      right and understated: the false sentence was in three places, one of them a *test assertion*
+      pinning the narrow selector, which is how it stayed true-looking.
 - [ ] **No PDB, no topology spread, no graceful shutdown** — [S]+[M]. The front door runs
       `minReplicas: 2` that can land on one node, and the Route pins a browser to one pod *because*
       that pod holds attachments and harness todos in memory — so a node drain loses conversation
       state, not just capacity. No `terminationGracePeriodSeconds`/`preStop` against a 600 s turn
       timeout. `workers.background.replicas: 1` is a hard singleton owning ELN sync, memory
       synthesis, retention, eval drift and audit-chain verification.
-- [ ] **Workers and connectors have no probes** — [M]. "Liveness is the Temporal poll" is asserted,
-      not enforced: a worker whose poll loop died stays `Running` with no probe, no scrape target,
-      and no alert.
+- [x] **Workers and connectors have no probes** — closed by
+      D-2026-08-01-every-process-carries-its-own-witness (see the row above; one HTTP surface
+      answers both). `/readyz` is the worker's own `is_running` and `/healthz` is served on its
+      event loop, so a wedged loop is a restart rather than a permanently `Running` pod. Readiness
+      and liveness are deliberately different signals here: a worker that stopped polling serves no
+      traffic, so restarting on that alone would turn a Temporal reconnect into a crash loop.
+      Connector *servers* keep one route for both, and honestly so — uvicorn accepts only after the
+      lifespan that starts the MCP session manager has completed, so `/healthz` answering **is** the
+      readiness evidence and a second route could only restate it.
 - [ ] **Migrations take no advisory lock and have no lock timeout** — [M] (the forward-only half is
       already tracked below). `infra/sql/011` documents that the *audit writer* takes a transaction
       advisory lock; the migrator, which does DDL, does not, and opens its connection with no
@@ -420,10 +429,15 @@ QM path. The rows below are what survives that merge, narrowed to say so.
 - [ ] **Eight documents assert capabilities the code does not have** — [S]. `deploy/README.md` on
       federation and on tracing spans; `harness_mode.py`'s "waits for a human before executing";
       `plan_approval_store.py` on where the mode lives; `infra/sql/006` on append-only;
-      `servicemonitor.yaml` on out-of-process metrics; `ci.yml` on the eval gate;
-      `architektur.md` §8 on multi-tenancy. Cheap systemic guard: extend the `prose-validate` idea —
-      which D-156 already widened from tool names to note types — to operator-facing prose and
-      config keys.
+      `ci.yml` on the eval gate; `architektur.md` §8 on multi-tenancy. Cheap systemic guard: extend
+      the `prose-validate` idea — which D-156 already widened from tool names to note types — to
+      operator-facing prose and config keys.
+      `servicemonitor.yaml`'s claim about out-of-process metrics is **corrected**
+      (D-2026-08-01-every-process-carries-its-own-witness) — and it is the strongest argument for
+      the systemic guard this row asks for. It was not one wrong sentence in one comment: the same
+      claim sat in `metrics_bridge.py`'s docstring and in a *test assertion* that pinned the
+      deployment to match it, so the three corroborated each other and the deployment stayed wrong
+      for as long as the sentence did. Cost: every metric from seven worker processes, uncollected.
 
 ## Open — Every capability exercised live with the flags on (2026-07-31, D-155)
 

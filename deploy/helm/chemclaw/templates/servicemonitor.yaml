@@ -11,10 +11,19 @@
        operator match this to their Prometheus's `serviceMonitorSelector`, which is release-specific
        and cannot be guessed here.
 
-       Only the front door. The workers and connector pods import `chemclaw.metrics_bridge`, whose
-       whole contract is that recording a metric outside the front door is a no-op — there is no
-       registry and no HTTP surface in those processes — so pointing a scrape at them would collect
-       nothing and report it as healthy. */ -}}
+       **Every Service in the release, not only the front door.** This used to pin
+       `component: service` on the reasoning that the connector pods import
+       `chemclaw.core.metrics_bridge`, "whose whole contract is that recording a metric outside the
+       front door is a no-op". That was wrong: the bridge imports a stdlib-only module, so the
+       import succeeds everywhere and a connector's counters were landing in a live registry with
+       nothing reading it. `connectors/server.py` now serves `/metrics`, and dropping the component
+       from the selector is what collects it — every Service this chart renders (the front door and
+       one per connector that serves MCP tools) names its port `http` and serves the same path, so
+       one endpoint definition covers all of them and a new connector is scraped the day it is
+       enabled rather than the day someone remembers this file.
+
+       Worker pods have no Service at all, by design — nothing routes to them. They are collected
+       by `podmonitor.yaml`, so the two selectors partition the fleet rather than overlapping. */ -}}
 apiVersion: monitoring.coreos.com/v1
 kind: ServiceMonitor
 metadata:
@@ -28,9 +37,8 @@ spec:
   selector:
     matchLabels:
       {{- include "chemclaw.selectorLabels" . | nindent 6 }}
-      app.kubernetes.io/component: service
   endpoints:
-    {{- /* By port *name*, not number: the Service names it `http`, and a name survives a port
+    {{- /* By port *name*, not number: every Service names it `http`, and a name survives a port
            change that a hardcoded number would silently miss. */}}
     - port: http
       path: {{ .Values.monitoring.path | quote }}

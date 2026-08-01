@@ -22,6 +22,7 @@ from chemclaw.connectors.queues import bundle_queue
 from chemclaw.core import db
 from chemclaw.core.logging import configure_logging, configure_telemetry
 from chemclaw.core.temporal_client import connect
+from chemclaw.core.worker_http import worker_http
 from chemclaw.durable.registry import describe, registered_activities, registered_workflows
 
 logger = logging.getLogger(__name__)
@@ -49,7 +50,13 @@ async def run_bundle_worker(connector: str) -> None:
     # Every activity here is a coroutine on this process's one event loop, so a per-call Postgres
     # handshake is loop time stolen from task polling and heartbeats. Pooled for the worker's
     # whole life and closed on shutdown.
-    async with db.pooling():
+    #
+    # The probe and scrape surface, on the same terms as core's worker: a bundle's worker is the
+    # process running the expensive science, so it is the last one that should be unobservable.
+    async with (
+        db.pooling(),
+        worker_http(component=f"connector-worker-{connector}", ready=lambda: worker.is_running),
+    ):
         await worker.run()
 
 

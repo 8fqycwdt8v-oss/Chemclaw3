@@ -68,9 +68,14 @@ does not read this file, so the row survived. Fingerprints deploy as `connector-
 - **NetworkPolicy** (`templates/networkpolicy.yaml`): default-deny egress with an allow-list — DNS,
   Postgres (5432), Temporal (7233), HTTPS (443, for the internal LLM + HPC launcher + Entra). Nothing
   else leaves a pod.
-- **Probes**: the service exposes `/readyz` (readiness) and `/healthz` (liveness); the workers' health
-  is their Temporal poll loop. HPA scales the stateless front door on CPU; workers scale by hand
-  (queue depth), not HPA.
+- **Probes**: every process exposes `/readyz` (readiness) and `/healthz` (liveness) — the front door
+  and the connector servers on their service port, the Temporal workers on the `metrics` port
+  (`CHEMCLAW_WORKER_METRICS_PORT`, default 9000). A worker's readiness is its own `is_running`, and
+  its liveness is answered on its event loop, so a loop wedged inside an activity restarts the pod.
+  This line used to read "the workers' health is their Temporal poll loop", which described an
+  intent nothing enforced: a dead poll loop kept the process open and Kubernetes reported `Running`
+  (D-2026-08-01-every-process-carries-its-own-witness).
+- HPA scales the stateless front door on CPU; workers scale by hand (queue depth), not HPA.
 
 ## Before a deploy that touches workflow code
 
@@ -89,6 +94,15 @@ this becomes binding at the first production deploy.
 `CHEMCLAW_OTEL_ENABLED=true` + `CHEMCLAW_OTEL_ENDPOINT` wire OTLP to the in-cluster collector
 (`chemclaw/logging.py` bridges the one config value to `OTEL_EXPORTER_OTLP_ENDPOINT`). Spans cover a
 turn and a job; dashboards track loop iterations, tool latency, and job status.
+
+**Metrics come from every process, not only the front door.** `templates/servicemonitor.yaml`
+collects the Services (the front door and each connector's MCP server, by their `http` port name);
+`templates/podmonitor.yaml` collects the pods that have none — core's background worker and each
+bundle's — by the `metrics` port they declare. Until D-2026-08-01 the ServiceMonitor selected the
+front door alone, so everything the workers counted (durable jobs launched, PR-gate proposals and
+their failures, lost audit records) was recorded in each worker's own registry and read by nobody.
+Set `monitoring.additionalLabels` to whatever your Prometheus's `serviceMonitorSelector` and
+`podMonitorSelector` match; the defaults match nothing, which is the safe direction.
 
 ## CI/CD (F6-T4)
 

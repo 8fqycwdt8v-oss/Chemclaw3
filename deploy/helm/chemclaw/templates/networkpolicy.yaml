@@ -130,4 +130,66 @@ spec:
       ports:
         - protocol: TCP
           port: {{ .Values.connectorPort }}
+    {{- /* And the scraper, since a connector serves `/metrics` on that same port
+           (D-2026-08-01-every-process-carries-its-own-witness). Worth stating what this costs: the
+           port also carries `/mcp`, so this grant is not "metrics only" and cannot be made so
+           without a second listener in the process — which `make connectors`, running every bundle
+           in one process, could not bind. It is accepted because the sentence above is already the
+           right one: this policy is "the second lock, not the first". A connector authorizes
+           nothing itself; core's `agent/tool_authz` does, and the `X-Chemclaw-*` headers are
+           advisory by construction. The monitoring stack is a cluster component, and the list is a
+           value an operator narrows or empties. */}}
+    {{- range .Values.networkPolicy.monitoringNamespaces }}
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              {{- toYaml . | nindent 14 }}
+      ports:
+        - protocol: TCP
+          port: {{ $.Values.connectorPort }}
+    {{- end }}
+---
+{{- /* The worker pods' probe port. New with the port itself: workers had no listener at all, so
+       they were selected by no Ingress policy and — because NetworkPolicy only restricts pods some
+       Ingress rule selects — accepted everything by default. Opening 9000 without this would have
+       made that default reachable rather than merely theoretical.
+
+       Narrow in a way the connector rule above cannot be: this port serves `/healthz`, `/readyz`
+       and `/metrics` and nothing else, so granting the monitoring namespace grants exactly the
+       scrape. Chemclaw's own pods are allowed for the same reason they are everywhere else — the
+       kubelet's probes come from the node, not from a pod, and are never matched by a
+       NetworkPolicy peer at all. */ -}}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "chemclaw.name" . }}-worker-ingress
+  labels:
+    {{- include "chemclaw.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchExpressions:
+      - key: app.kubernetes.io/component
+        operator: In
+        values:
+          - background-worker
+          {{- range $name, $cfg := .Values.connectors }}
+          {{- if and $cfg.enabled $cfg.worker }}
+          - connector-worker-{{ $name }}
+          {{- end }}
+          {{- end }}
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              {{- include "chemclaw.selectorLabels" . | nindent 14 }}
+        {{- range .Values.networkPolicy.monitoringNamespaces }}
+        - namespaceSelector:
+            matchLabels:
+              {{- toYaml . | nindent 14 }}
+        {{- end }}
+      ports:
+        - protocol: TCP
+          port: {{ .Values.workerMetricsPort }}
 {{- end }}

@@ -111,6 +111,17 @@ class ObservabilitySettings(BaseSettings):
     # MAF's `configure_otel_providers` when set; empty in dev (no collector). Config, so the
     # in-cluster collector address is one value like every other endpoint.
     otel_endpoint: str = ""
+    # Where a *worker* process serves `/healthz`, `/readyz` and `/metrics`
+    # (`chemclaw.core.worker_http`). The front door has `service_port`; every other process had no
+    # HTTP surface at all, which is why its metrics were uncollected and its liveness was a comment
+    # rather than a probe. Separate from `service_port` because these are different processes in
+    # different pods, and a worker binding the chat port would read as one.
+    #
+    # 0 disables the surface. That is for two workers on one developer machine — the second cannot
+    # bind — and never for a deployment: the chart sets the port on every worker Deployment and a
+    # test pins that it does.
+    worker_metrics_host: str = "0.0.0.0"
+    worker_metrics_port: int = Field(default=9000, ge=0)
 
 
 class TemporalSettings(BaseSettings):

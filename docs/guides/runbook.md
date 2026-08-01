@@ -438,3 +438,36 @@ sent.
 `merged` is a queue nobody is working. A non-zero `failed` means submissions are not reaching git
 at all — the note is still recoverable, because a `failed` row keeps the rendered content:
 `SELECT note_id, content FROM note_proposals WHERE state = 'failed';`.
+
+## (x) Find out what a worker is doing (or why it stopped)
+
+Until D-2026-08-01-every-process-carries-its-own-witness the answer was "read the logs and guess".
+The workers had no HTTP surface, so nothing scraped them and no probe could contradict a pod that
+Kubernetes was reporting as `Running` with a dead Temporal poll loop. Every worker now serves three
+routes on `CHEMCLAW_WORKER_METRICS_PORT` (default 9000, the `metrics` container port):
+
+```
+kubectl port-forward deploy/chemclaw-background-worker 9000:9000
+curl -s localhost:9000/readyz    # 200 = polling, 503 = the worker is not running
+curl -s localhost:9000/metrics   # this pod's counters, gauges and histograms
+```
+
+- **`/readyz` is 503 but the pod is up.** The Temporal worker is not polling — a lost broker
+  connection, or a shutdown that has begun. It is deliberately *not* a liveness signal: restarting
+  on it would turn an ordinary reconnect into a crash loop, so the pod stays and reports honestly.
+  Check the broker before the worker.
+- **`/healthz` stops answering.** The event loop is wedged, almost always by a blocking call inside
+  an activity, and the kubelet restarts the pod after `failureThreshold` (2 minutes by default —
+  generous, because a false restart mid-job costs more than a slow true one). The metric to read
+  after the restart is `chemclaw_tool_latency_seconds` on the pod that replaced it.
+- **The counters read zero on a busy worker.** They are per-process, so you are scraping the wrong
+  pod: a durable job launched from the front door increments the front door's registry, and the
+  same job's *activity* increments the worker's. Scrape both before concluding a number is missing.
+
+Two monitors collect all of this in-cluster: `servicemonitor.yaml` for anything with a Service (the
+front door, each connector's MCP server) and `podmonitor.yaml` for the workers, which have none.
+Both need `monitoring.additionalLabels` set to whatever your Prometheus's `serviceMonitorSelector`
+and `podMonitorSelector` match — the default is empty, so a fresh install collects nothing until an
+operator says where. If a target is `down` rather than absent, check
+`networkPolicy.monitoringNamespaces`: that is the list granting the scraper ingress to the connector
+port and the worker probe port.
