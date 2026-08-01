@@ -11,6 +11,13 @@
 # flags half the corpus is worse than no rule — it teaches people to ignore flags), and add a test
 # in tests/test_safety.py pinning one molecule that must match and one that must not.
 #
+# **One reference molecule is not enough when the rule's own words say "multiple", "poly",
+# "adjacent" or "on one ring".** Those semantics are counts and relative positions, and a single
+# pinned example fixes one arrangement of them: `polynitro-aromatic` shipped matching only
+# 1,2-dinitroarenes, and both the unit test and the eval case pinned 1,2-dinitrobenzene, so TNT
+# and picric acid screened clean under a green test suite. Such a rule needs a pinned molecule per
+# arrangement it claims to cover.
+#
 # severity: high   — energetic / shock- or friction-sensitive motifs; do not scale without review
 #           medium — reactive motifs with well-known incident histories; handle with named controls
 #           low    — worth noticing in a procedure; routine controls usually suffice
@@ -83,11 +90,25 @@ structural:
     citation: "Bretherick's Handbook of Reactive Chemical Hazards, 8th ed., nitrate esters"
 
   - id: polynitro-aromatic
-    smarts: "[$([NX3](=[OX1])=[OX1]),$([NX3+](=[OX1])[OX1-])]c1ccccc1[$([NX3](=[OX1])=[OX1]),$([NX3+](=[OX1])[OX1-])]"
+    # One nitro group on an aromatic carbon, *counted* (`min_matches`) rather than drawn. A
+    # substructure boolean cannot express "two of these", so the previous pattern wrote the ring
+    # out — `...c1ccccc1...` — which hangs the second nitro off the ring-closure atom and therefore
+    # matched **ortho only**. TNT, picric acid, tetryl, 2,4-DNT and both the meta and para
+    # dinitrobenzenes all screened clean; 1,2-dinitrobenzene, the single molecule the unit test and
+    # the eval case pinned, matched. Enumerating the arrangements instead (ortho + meta + para)
+    # would only push the same mistake onto the next ring size and every fused system.
+    #
+    # One behaviour change, stated rather than hidden: two nitro groups on *different* rings of a
+    # biphenyl now flag, because the count is over the molecule rather than over one ring. That is
+    # a conservative false positive in a hazard screen — a reviewer reads one extra advisory line,
+    # instead of a nitration procedure reading clean — which is the correct direction of error.
+    smarts: "[$([NX3](=[OX1])=[OX1]),$([NX3+](=[OX1])[OX1-])][c]"
+    min_matches: 2
     severity: high
     explanation: >-
-      Polynitroaromatic: multiple nitro groups on one ring is the archetypal explosive motif
-      (oxygen balance approaching zero). Assess energetic hazard before any scale-up or heating.
+      Polynitroaromatic: two or more nitro groups on aromatic carbons is the archetypal explosive
+      motif (oxygen balance approaching zero). Assess energetic hazard before any scale-up or
+      heating.
     citation: "Bretherick's Handbook of Reactive Chemical Hazards, 8th ed., polynitroaryl compounds"
 
   - id: perchlorate

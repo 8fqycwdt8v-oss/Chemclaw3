@@ -86,6 +86,23 @@ class _StructuralRule(BaseModel):
     severity: Severity
     explanation: str = Field(min_length=1)
     citation: str = Field(min_length=1)
+    # How many *distinct* matches of `smarts` a molecule must contain before the rule fires.
+    #
+    # CLAUDE.md forbids an abstraction with a single caller, and this has one. The exemption is
+    # that a count is not expressible as a substructure boolean: "polynitro" means "two or more
+    # nitro groups", and SMARTS can only say "this arrangement is present", so a single pattern
+    # has to enumerate every relative arrangement — ortho, meta, para, then every ring size, then
+    # every fused system. `polynitro-aromatic` tried to inline the count into the pattern by
+    # spelling the ring out, and therefore matched *only* 1,2-dinitroarenes: TNT and picric acid
+    # screened clean. There is no pattern-only fix; the count has to live beside the pattern.
+    #
+    # Counted with `GetSubstructMatches` at its default `uniquify=True`, and deliberately *not*
+    # with RDKit's `maxMatches` short-circuit: `maxMatches` caps the raw embeddings collected
+    # before uniquification, so a symmetric pattern (`[OX2][OX2]` embeds into HOOH twice, once
+    # each way) could be truncated to fewer unique matches than the molecule really has. That
+    # would be a silent false negative, which is the one failure mode this module exists to
+    # prevent — and no amount of speed is worth buying it.
+    min_matches: int = Field(default=1, ge=1)
 
 
 class _PairRule(BaseModel):
@@ -173,7 +190,7 @@ def screen_structure(smiles: str) -> ScreenResult:
             matched=smiles,
         )
         for rule in table.structural
-        if molecule.HasSubstructMatch(patterns[rule.id])
+        if len(molecule.GetSubstructMatches(patterns[rule.id])) >= rule.min_matches
     ]
     return ScreenResult(flags=_sorted(flags))
 

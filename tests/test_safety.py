@@ -7,6 +7,7 @@ data, so these tests pin its behavior with named molecules rather than mocking t
 """
 
 import asyncio
+from collections.abc import Callable
 from pathlib import Path
 
 import pytest
@@ -37,6 +38,16 @@ _HAZARDOUS = {
     "n-halamine": "ClN1C(=O)CCC1=O",  # N-chlorosuccinimide
 }
 
+# The polynitroarenes, one per substitution pattern. Deliberately more than the one reference
+# molecule `_HAZARDOUS` holds — see `test_polynitroarenes_flag_at_every_substitution_pattern`.
+_POLYNITRO = {
+    "1,2-dinitrobenzene": "O=[N+]([O-])c1ccccc1[N+](=O)[O-]",
+    "1,3-dinitrobenzene": "O=[N+]([O-])c1cccc([N+](=O)[O-])c1",
+    "1,4-dinitrobenzene": "O=[N+]([O-])c1ccc([N+](=O)[O-])cc1",
+    "TNT": "Cc1c(cc(cc1[N+](=O)[O-])[N+](=O)[O-])[N+](=O)[O-]",
+    "picric acid": "Oc1c(cc(cc1[N+](=O)[O-])[N+](=O)[O-])[N+](=O)[O-]",
+}
+
 # Everyday process chemistry that must raise nothing: the false-positive side of the screen.
 _BENIGN = [
     "CCO",  # ethanol
@@ -61,6 +72,40 @@ def test_each_rule_fires_on_its_reference_molecule(rule_id: str, smiles: str) ->
     """
     result = screen_structure(smiles)
     assert rule_id in {flag.rule_id for flag in result.flags}
+
+
+@pytest.mark.parametrize(("name", "smiles"), sorted(_POLYNITRO.items()))
+def test_polynitroarenes_flag_at_every_substitution_pattern(name: str, smiles: str) -> None:
+    """TNT and picric acid must flag, not only the ortho isomer the old pattern happened to match.
+
+    `polynitro-aromatic` shipped as a written six-atom ring chain
+    (`[nitro]c1ccccc1[nitro]`), which hangs the second nitro group off the ring-closure atom and
+    therefore matches **ortho only**. TNT, picric acid and both the meta and para dinitrobenzenes
+    screened clean, and no other rule caught them: the screen answered "no rule in the hazard
+    table matched" about high explosives, on the MCP tool and on the `kg-validate` hazard gate,
+    which consequently demanded no `## Hazards` section for an agent-authored nitration.
+
+    **The interesting part is why a green test suite allowed it.** D-080's discipline is one
+    reference molecule per rule, and both this file and `data/evals/cases/hazard-rule-recall.md`
+    picked 1,2-dinitrobenzene — the single arrangement the broken pattern *did* match. One example
+    is a complete test of a rule that names a motif, and a blind one for a rule whose own words say
+    "multiple" or "on one ring": those semantics are a count and a set of relative positions, so
+    the discipline has to be one molecule per arrangement claimed. Hence this table, and the
+    matching widening of the eval case.
+    """
+    assert "polynitro-aromatic" in {flag.rule_id for flag in screen_structure(smiles).flags}, name
+
+
+def test_a_mononitroarene_is_not_polynitro() -> None:
+    """A count of two: one nitro group on a ring must not fire the polynitro rule.
+
+    Pinned separately from the benign list because it is what makes the count real: `min_matches`
+    wired up as `>= 1` would satisfy every match assertion above while turning the archetypal
+    explosive alert into "contains a nitro group", and a flag that fires on nitrobenzene is a flag
+    people learn to scroll past.
+    """
+    flags = {flag.rule_id for flag in screen_structure("O=[N+]([O-])c1ccccc1").flags}
+    assert "polynitro-aromatic" not in flags
 
 
 @pytest.mark.parametrize("smiles", _BENIGN)
@@ -294,23 +339,94 @@ def test_broken_rule_table_blocks_the_gate_instead_of_crashing_it(
     assert len(problems) == 1 and "hazard screening failed" in problems[0]
 
 
-def _proposal_note(note_type: str) -> Note:
-    """A machine-minted proposal of conditions: a parameter table, with no `## Procedure` heading.
+def _real_bo_candidate() -> Note:
+    """A `bo-candidate` built by the **real** writer, `connectors/bo/knowledge.py`.
 
-    This is the real shape of a `bo-candidate` — `connectors/bo/knowledge.py` writes exactly this,
-    a list of `- name: value` conditions under a sentence — which is why a heading-only gate never
-    saw one.
+    Hand-writing this fixture is what let the gate ship blind. The previous version backticked its
+    parameter values, so it exercised `structures_in` against markdown no producer emitted; the
+    actual writer emitted `- molecule: CCN=[N+]=[N-]` as plain prose and never set
+    `compound_smiles`, so `structures_in` returned `[]` for **every** machine-minted candidate and
+    `hazard_problems` passed all of them. A fixture that hand-writes what the producer is supposed
+    to produce cannot catch a producer that does not produce it, which is precisely why a defect in
+    the one note type the gate's own docstring names as "never screened" survived a suite that
+    appears to cover it.
+
+    Both ways a campaign can name a molecule are exercised, because they reach the body by
+    different routes: `molecule` is a library-style categorical whose levels are SMILES, `ligand`
+    is a featurized categorical carrying a label → SMILES `structures` map.
+    """
+    from chemclaw.connectors.bo.knowledge import note_from_campaign_result
+    from chemclaw.science.bo.problem import (
+        CampaignResult,
+        CategoricalParameter,
+        ContinuousParameter,
+        Objective,
+        Observation,
+        OptimizationProblem,
+    )
+
+    problem = OptimizationProblem(
+        parameters=[
+            CategoricalParameter(name="molecule", categories=["CCCN=[N+]=[N-]", "CCCCO"]),
+            CategoricalParameter(
+                name="ligand",
+                categories=["L1", "L2"],
+                structures={"L1": "CCO", "L2": "CCOCC"},
+            ),
+            ContinuousParameter(name="temperature", lower=20.0, upper=100.0),
+        ],
+        objective=Objective(name="yield", direction="maximize"),
+    )
+    best = Observation(
+        params={"molecule": "CCCN=[N+]=[N-]", "ligand": "L1", "temperature": 80.0},
+        value=61.0,
+        provenance="predicted",
+        surrogate_sd=3.0,
+    )
+    return note_from_campaign_result(
+        "azide_yield", problem, CampaignResult(best=best, history=[best])
+    )
+
+
+def _agent_proposal_note() -> Note:
+    """An `experiment-proposal`: the agent's own free-form proposal of conditions (D-162).
+
+    Hand-written on purpose, unlike the `bo-candidate` above: this type has no dedicated writer —
+    the agent drafts the body itself through `propose_knowledge_note` — so prose with the
+    structures in code spans *is* the real shape.
     """
     body = (
-        "Best point found for objective `yield`.\n\n"
+        "Proposed next run for the azide coupling, argued from reactions x and y.\n\n"
         "- azide source: `CCCN=[N+]=[N-]`\n"
         "- solvent: `CCO`\n"
         "- temperature: 80\n"
     )
-    return Note(id=f"{note_type}-x", type=note_type, created_by="agent", body=body)
+    return Note(
+        id="experiment-proposal-x", type="experiment-proposal", created_by="agent", body=body
+    )
 
 
-def test_a_proposal_of_conditions_is_screened_without_a_procedure_heading() -> None:
+def test_the_real_writer_emits_structures_the_gate_can_see() -> None:
+    """The producer's own output must carry its molecules, in the form the extractor reads.
+
+    The gate reads `compound_smiles` and inline code spans. A `bo-candidate` supplied neither, so
+    every recommendation a surrogate made — the one note type proposing an experiment nobody has
+    run — reached a reviewer with no hazard screening at all, while `screen_reaction` on the very
+    same SMILES returned a high-severity organic-azide flag. Asserted on the real note rather than
+    on a fixture, since the mismatch between the two is the whole defect.
+    """
+    found = structures_in(_real_bo_candidate())
+    assert "CCCN=[N+]=[N-]" in found  # a library-style level: the SMILES is the category label
+    assert "CCO" in found  # a featurized level: the SMILES comes from the `structures` map
+
+
+@pytest.mark.parametrize(
+    ("note_type", "build"),
+    [("bo-candidate", _real_bo_candidate), ("experiment-proposal", _agent_proposal_note)],
+)
+def test_a_proposal_of_conditions_is_screened_without_a_procedure_heading(
+    note_type: str, build: Callable[[], Note]
+) -> None:
     """The note class that proposes work nobody has run was the one class never screened.
 
     A `bo-candidate` names conditions a surrogate wants a human to physically run, and it has no
@@ -318,17 +434,17 @@ def test_a_proposal_of_conditions_is_screened_without_a_procedure_heading() -> N
     unscreened — the exact inversion of what the gate is for, since here there is no chemist who
     has already stood at the bench and formed their own judgment about the mixture.
     """
-    for note_type in ("bo-candidate", "experiment-proposal"):
-        problems = hazard_problems(_proposal_note(note_type))
-        assert len(problems) == 1, note_type
-        assert "organic-azide" in problems[0] and "## Hazards" in problems[0]
+    problems = hazard_problems(build())
+    assert len(problems) == 1, note_type
+    assert "organic-azide" in problems[0] and "## Hazards" in problems[0]
 
 
 def test_a_documented_proposal_passes_like_any_other_note() -> None:
     """Widening which notes are screened must not change what the gate asks of them."""
-    documented = _proposal_note("bo-candidate").model_copy(
+    candidate = _real_bo_candidate()
+    documented = candidate.model_copy(
         update={
-            "body": _proposal_note("bo-candidate").body
+            "body": candidate.body
             + "\n## Hazards\n\nOrganic azide: energetic; do not isolate neat.\n"
         }
     )
