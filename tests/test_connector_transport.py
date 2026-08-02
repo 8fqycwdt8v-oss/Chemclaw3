@@ -437,3 +437,78 @@ def test_concurrent_turns_get_their_own_connections_and_their_own_identity() -> 
     # other's identity: every request is attributable to the turn that made it.
     assert "user-A" in seen and "user-B" in seen
     assert set(seen) == {"user-A", "user-B"}
+
+
+def test_an_unexpected_tool_exception_reaches_the_caller_sanitized() -> None:
+    """An unhandled exception's text must not carry a DSN/path/internal identifier to the caller.
+
+    Measured against the real `mcp` package (installed here, unlike when this was first flagged):
+    `Tool.run` folds an exception's `str()` verbatim into the tool-error text it returns, so a raw
+    `RuntimeError` naming a database DSN reached the caller unredacted before `connector_app`
+    patched the tool manager's `call_tool`. This pins that patch — a future `mcp` upgrade that
+    changes how it composes the error text (or removes the interception point this relies on)
+    should fail this test loudly rather than silently reopen the leak.
+    """
+    from mcp.server.fastmcp import FastMCP
+
+    secret = "postgresql://chemclaw:s3cr3t-pw@10.0.0.7:5432/chemclaw_prod?sslmode=require"
+    server = FastMCP("leak-probe")
+
+    @server.tool()
+    async def blow_up() -> str:
+        """Raise an exception whose text contains a recognizable secret-shaped string."""
+        raise RuntimeError(f"could not connect to database: {secret}")
+
+    app = connector_app(server, name="leak-probe")
+    port = _free_port()
+
+    async def _call() -> str:
+        tool = DegradingHttpConnector(
+            name="leak-probe", url=f"http://127.0.0.1:{port}/mcp", load_prompts=False
+        )
+        async with tool:
+            assert tool.is_connected
+            with pytest.raises(Exception) as excinfo:  # noqa: PT011 - the MCP client's own type
+                await tool.call_tool("blow_up")
+            return str(excinfo.value)
+
+    with _Server(app, port):
+        message = asyncio.run(_call())
+    assert secret not in message
+    assert "an internal error occurred" in message
+
+
+def test_a_deliberate_domain_error_still_reaches_the_caller_unchanged() -> None:
+    """The other half of the same fix: a `ValueError`-family message must not be swallowed too.
+
+    Every connector tool that refuses a bad SMILES or a bad argument raises a `ValueError` (or
+    `ChemclawError`/`ConnectorError`, both subclasses) precisely so the model reads a sentence it
+    can act on. Sanitizing indiscriminately would silently break every one of those.
+    """
+    from mcp.server.fastmcp import FastMCP
+
+    from chemclaw.core.errors import ChemclawError
+
+    server = FastMCP("domain-error-probe")
+
+    @server.tool()
+    async def bad_smiles() -> str:
+        """Raise the deliberately-worded domain error a real connector tool would raise."""
+        raise ChemclawError("could not parse SMILES 'not-a-molecule'")
+
+    app = connector_app(server, name="domain-error-probe")
+    port = _free_port()
+
+    async def _call() -> str:
+        tool = DegradingHttpConnector(
+            name="domain-error-probe", url=f"http://127.0.0.1:{port}/mcp", load_prompts=False
+        )
+        async with tool:
+            assert tool.is_connected
+            with pytest.raises(Exception) as excinfo:  # noqa: PT011 - the MCP client's own type
+                await tool.call_tool("bad_smiles")
+            return str(excinfo.value)
+
+    with _Server(app, port):
+        message = asyncio.run(_call())
+    assert "could not parse SMILES 'not-a-molecule'" in message

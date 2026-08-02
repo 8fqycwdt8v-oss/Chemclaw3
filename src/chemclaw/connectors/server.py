@@ -22,9 +22,11 @@ cannot be forgotten per connector:
 import logging
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from typing import Any
 
 from fastapi import FastAPI
 from mcp.server.fastmcp import FastMCP
+from mcp.server.fastmcp.exceptions import ToolError
 from starlette.middleware.base import BaseHTTPMiddleware, RequestResponseEndpoint
 from starlette.requests import Request
 from starlette.responses import Response
@@ -96,6 +98,55 @@ class CallerLogMiddleware(BaseHTTPMiddleware):
             reset_caller(tokens)
 
 
+def _sanitize_tool_errors(server: FastMCP, *, name: str) -> None:
+    """Replace an unexpected tool exception's text with a generic notice before it reaches a caller.
+
+    Measured, not assumed (a probe against this exact `mcp` version, over the real streamable-HTTP
+    transport): `Tool.run` already turns any exception a tool raises into a JSON-RPC tool-error
+    result rather than an HTTP fault, but it folds the exception's `str()` in verbatim —
+    `f"Error executing tool {name}: {e}"` — so an unhandled `psycopg.OperationalError` or a stray
+    path reaches the model with a DSN or an internal identifier attached. This is not about
+    *whether* a caller sees an error, only about *what it is allowed to say*.
+
+    `ValueError` is the one exception family this codebase already treats as "a deliberately-worded,
+    caller-safe message" (`chemclaw.core.errors.ChemclawError` and `ConnectorError` both derive from
+    it, and so does pydantic's own `ValidationError`) — every connector tool that raises to explain
+    a bad SMILES or a bad argument already raises one of these, so only this family is let through
+    unchanged. Anything else is a bug or an infrastructure fault, not a message written for the
+    model to read, and is replaced here — with the real exception logged so an operator can still
+    find it.
+
+    There is no supported hook for this in `FastMCP` (no tool-call middleware in this version), so
+    the interception point is the tool manager's own `call_tool` — the one place every tool call
+    passes through before `Tool.run` composes the leaking message. Patched once here, the one
+    shared choke point every connector's app is built through, rather than once per bundle.
+    """
+    manager = server._tool_manager  # noqa: SLF001 - the only interception point this mcp version offers
+    original_call_tool = manager.call_tool
+
+    async def _call_tool(
+        tool_name: str,
+        arguments: dict[str, Any],
+        context: Any = None,
+        convert_result: bool = False,
+    ) -> Any:
+        try:
+            return await original_call_tool(
+                tool_name, arguments, context=context, convert_result=convert_result
+            )
+        except ToolError as exc:
+            if isinstance(exc.__cause__, ValueError):
+                raise  # a deliberately-worded domain message (or a validation error) — safe as-is
+            logger.exception(
+                "connector %s: tool %r raised an unexpected exception", name, tool_name
+            )
+            raise ToolError(
+                f"Error executing tool {tool_name}: an internal error occurred"
+            ) from exc.__cause__
+
+    manager.call_tool = _call_tool  # type: ignore[method-assign,assignment]
+
+
 def connector_app(server: FastMCP, *, name: str) -> FastAPI:
     """Build the FastAPI app that serves one connector's MCP capability.
 
@@ -110,6 +161,7 @@ def connector_app(server: FastMCP, *, name: str) -> FastAPI:
     Returns:
         A FastAPI app exposing `GET /healthz`, `GET /metrics`, and the MCP endpoint at `/mcp`.
     """
+    _sanitize_tool_errors(server, name=name)
     mcp_app = server.streamable_http_app()
 
     @asynccontextmanager
