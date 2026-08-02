@@ -1565,7 +1565,7 @@ class ElnSettings(BaseSettings):
     # JSON) from this directory — the "structured recipe" path, alongside the free-text JSON
     # export above. Same `ElnAdapter` contract, so both flow through the one sync loop.
     ord_export_dir: str = "data/eln-exports/ord"
-    # Temporal Schedule cadence for the ELN sync (`cli/schedules.py`, applied by `make
+    # Temporal Schedule cadence for the ELN sync (`durable/schedules.py`, applied by `make
     # schedules-apply`). The sync is self-cursoring (loads/stores its high-water mark in
     # `sync_cursors`), so its Schedule passes no argument. Schedules live in Temporal
     # (durability there, not host cron); overridable so a deployment tunes cadence without code
@@ -1771,7 +1771,7 @@ class MemorySettings(BaseSettings):
     # Cadence for the observation lifecycle job (mine, retire, promote). Daily, like the memory
     # jobs it sits beside and for the same reason: it re-scans the whole corpus.
     observation_schedule_minutes: float = Field(default=1440.0, gt=0)
-    # Temporal Schedule cadence for the memory-synthesis jobs (`cli/schedules.py`): they
+    # Temporal Schedule cadence for the memory-synthesis jobs (`durable/schedules.py`): they
     # re-scan the whole corpus, so they run less often than the cursor-driven ELN sync.
     memory_synthesis_schedule_minutes: float = Field(default=1440.0, gt=0)
     # Fraction of a Schedule's interval used as a deterministic per-job phase offset (gap

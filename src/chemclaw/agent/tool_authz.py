@@ -22,7 +22,7 @@ from collections.abc import Awaitable, Callable
 from agent_framework import FunctionInvocationContext, function_middleware
 
 from chemclaw.agent.authz import AuthorizationError, authorize_tool, side_effecting_tools
-from chemclaw.agent.dialogue_tools import is_dry_run
+from chemclaw.agent.turn_flags import is_dry_run
 from chemclaw.agent.turn_signals import record_tool_failure
 from chemclaw.core.errors import ChemclawError
 

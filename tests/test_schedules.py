@@ -21,15 +21,6 @@ from temporalio.client import (
     ScheduleUpdate,
 )
 
-from chemclaw.cli.schedules import (
-    OWNED_SCHEDULE_IDS,
-    PlannedSchedule,
-    _build_schedule,
-    _jitter,
-    apply_schedules,
-    describe_schedules,
-    planned_schedules,
-)
 from chemclaw.core.config import settings
 from chemclaw.durable.audit_verify import AuditChainVerifyWorkflow
 from chemclaw.durable.eln_sync import ElnSyncWorkflow
@@ -41,6 +32,15 @@ from chemclaw.durable.memory_jobs import (
 )
 from chemclaw.durable.note_index import NoteReindexWorkflow
 from chemclaw.durable.retention import RetentionWorkflow
+from chemclaw.durable.schedules import (
+    OWNED_SCHEDULE_IDS,
+    PlannedSchedule,
+    _build_schedule,
+    _jitter,
+    apply_schedules,
+    describe_schedules,
+    planned_schedules,
+)
 
 
 class _FakeHandle:

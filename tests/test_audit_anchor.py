@@ -180,7 +180,7 @@ def test_the_verifier_holds_the_trail_to_an_anchor_when_given_one() -> None:
     """
     from chemclaw.agent.audit import AuditEvent
     from chemclaw.agent.audit_store import chain_hash
-    from chemclaw.cli.verify_audit_chain import ChainCheck, ChainRow
+    from chemclaw.durable.audit_chain import ChainCheck, ChainRow
 
     rows: list[ChainRow] = []
     previous = ""

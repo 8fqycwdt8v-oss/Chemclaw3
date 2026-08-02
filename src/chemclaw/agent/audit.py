@@ -118,7 +118,7 @@ def default_audit_sink() -> AuditSink:
 
     **The default is here, and not at each entry point, because "each entry point remembers" is
     exactly what failed.** `PostgresAuditSink`, the tamper-evident hash chain, `infra/sql/011`,
-    `make audit-verify` and `cli/verify_audit_chain.py` were all built and tested — and the sink
+    `make audit-verify` and `durable/audit_chain.py` were all built and tested — and the sink
     was constructed in exactly one place, `cli/chat.py`, behind `--audit-postgres`. The deployed
     service passed nothing, so this module installed `NullAuditSink()` and the entire GxP trail was
     log-only in every process a chemist actually talks to. `audit_events` was empty in production

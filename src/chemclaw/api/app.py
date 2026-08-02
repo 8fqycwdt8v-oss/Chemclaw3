@@ -72,7 +72,6 @@ from chemclaw.api.deps import CurrentUser
 from chemclaw.api.events import ErrorEvent, JobCompletedEvent, QueuedEvent
 from chemclaw.api.metrics import CONTENT_TYPE, METRICS
 from chemclaw.api.runner import run_turn
-from chemclaw.cli.schedules import ScheduleHealth, describe_schedules
 from chemclaw.connectors.health import (
     ConnectorHealth,
     check_connectors_at_startup,
@@ -83,6 +82,7 @@ from chemclaw.core.asgi import BodySizeLimit
 from chemclaw.core.config import settings
 from chemclaw.core.logging import configure_logging, configure_telemetry
 from chemclaw.durable.job_record import JobRecordSummary, search_job_records
+from chemclaw.durable.schedules import ScheduleHealth, describe_schedules
 from chemclaw.kg.proposal import (
     NoteProposal,
     ProposalState,

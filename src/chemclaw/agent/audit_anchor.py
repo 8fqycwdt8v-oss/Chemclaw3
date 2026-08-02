@@ -3,7 +3,7 @@
 `agent/audit_store.py` chains every audited row to its predecessor, so modification, reordering,
 interior deletion and prefix truncation all break a link. Deleting a *trailing* run does not: the
 survivors chain cleanly, and nothing ever recorded how many rows there should have been.
-`cli/verify_audit_chain.py` has said so in a "Known limit" paragraph since it was written, and
+`durable/audit_chain.py` has said so in a "Known limit" paragraph since it was written, and
 `DEFERRED.md` held the fix pending a regulated deployment asking for provable tail completeness.
 
 The readiness review turned that from a regulatory question into an operational one, and the

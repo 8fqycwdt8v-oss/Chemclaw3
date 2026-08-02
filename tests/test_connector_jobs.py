@@ -22,9 +22,9 @@ from pydantic import BaseModel, ValidationError
 from temporalio.exceptions import WorkflowAlreadyStartedError
 
 from chemclaw.agent.authz import AuthorizationError, side_effecting_tools
-from chemclaw.agent.dialogue_tools import reset_dry_run, set_dry_run
 from chemclaw.agent.identity_context import reset_current_identity, set_current_identity
 from chemclaw.agent.tool_authz import DryRunRefusal, refuse_writes_on_dry_run
+from chemclaw.agent.turn_flags import reset_dry_run, set_dry_run
 from chemclaw.agent.turn_signals import JobSignal, begin_turn, drain, end_turn
 from chemclaw.connectors.jobs import (
     ConnectorJobError,

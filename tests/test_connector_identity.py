@@ -23,7 +23,6 @@ import asyncio
 import httpx
 import pytest
 
-from chemclaw.agent.dialogue_tools import reset_dry_run, set_dry_run
 from chemclaw.agent.identity_context import (
     reset_current_correlation_id,
     reset_current_identity,
@@ -31,6 +30,7 @@ from chemclaw.agent.identity_context import (
     set_current_identity,
 )
 from chemclaw.agent.session_context import reset_current_session_id, set_current_session_id
+from chemclaw.agent.turn_flags import reset_dry_run, set_dry_run
 from chemclaw.connectors.identity import (
     HEADER_ACTOR,
     HEADER_CORRELATION,

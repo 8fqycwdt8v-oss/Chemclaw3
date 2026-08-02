@@ -433,7 +433,7 @@ def test_the_shipped_config_schedules_the_audit_chain_check(
     Asserted on the built schedule list rather than on the flag, because the flag is one branch
     away from a schedule that is planned but never applied.
     """
-    from chemclaw.cli import schedules as schedules_module
+    from chemclaw.durable import schedules as schedules_module
 
     chart = _settings_from_chart(monkeypatch)
     assert chart.session_store == "postgres", "no durable audit sink; the precondition changed"

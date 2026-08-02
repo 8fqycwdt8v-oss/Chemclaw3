@@ -25,7 +25,6 @@ from typing import Any
 from agent_framework import AgentSession
 
 from chemclaw.agent.chemclaw_agent import connector_tools
-from chemclaw.agent.dialogue_tools import reset_dry_run, set_dry_run
 from chemclaw.agent.framing import frame_untrusted
 from chemclaw.agent.harness_todo import todo_titles
 from chemclaw.agent.identity_context import (
@@ -45,6 +44,7 @@ from chemclaw.agent.session_context import (
     set_current_session_id,
 )
 from chemclaw.agent.turn_cost import TurnCost, record_turn_cost
+from chemclaw.agent.turn_flags import reset_dry_run, set_dry_run
 from chemclaw.agent.turn_signals import (
     ApprovalSignal,
     JobSignal,

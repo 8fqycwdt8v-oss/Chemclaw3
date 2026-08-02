@@ -10,8 +10,7 @@ Writes are append-only (no update or delete path) **and tamper-evident**: each r
 previous row's `row_hash` as its `prev_hash` and its own `row_hash =
 chain_hash(prev_hash, event)` (`infra/sql/011_audit_hash_chain.sql`, plan F10-G1). Modifying,
 reordering, or deleting an interior row — or deleting the leading (genesis) rows — breaks the chain,
-which `chemclaw.cli.verify_audit_chain` (`make audit-verify`) detects; deleting the trailing rows
-(tip
+which `chemclaw.durable.audit_chain` (`make audit-verify`) detects; deleting the trailing rows (tip
 truncation) is the one alteration the chain alone cannot catch (see that module's known-limit note).
 Appends are serialized with a transaction-level advisory lock so two concurrent inserts cannot read
 the same chain tip and fork it — this depends on the connection running in a transaction (psycopg's
@@ -67,7 +66,7 @@ def chain_hash(prev_hash: str, event: AuditEvent, *, version: int = CHAIN_VERSIO
     """The chain link for `event` following `prev_hash`: SHA-256 over both (deterministic).
 
     Shared by the writer (`PostgresAuditSink.record`) and the verifier
-    (`chemclaw.cli.verify_audit_chain`) so the exact bytes hashed can never drift — the single
+    (`chemclaw.durable.audit_chain`) so the exact bytes hashed can never drift — the single
     definition of "what a row's `row_hash` must be". Every audited field is covered, so tampering
     with any of them changes the hash.
 

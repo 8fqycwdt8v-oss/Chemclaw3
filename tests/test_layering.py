@@ -27,25 +27,28 @@ guarded by `if TYPE_CHECKING:` is excluded from both graphs — it is never exec
 runtime edge, so it carries no layering risk (it is what `core.metrics_bridge` uses to name
 `api.metrics.Metrics` in an annotation without importing it at runtime).
 
-**Nine package-level cycles are real, not accidental**, each recorded in `_CYCLE_EDGES` with the
+**Eight package-level cycles are real, not accidental**, each recorded in `_CYCLE_EDGES` with the
 one-line reason a reader needs. Six are "data down, control up" pairs where a registry builds and
 launches a durable job and the job's workflow module imports the registry's own manifest/template
 types back: `templates↔durable`, `templates↔agent`, `connectors↔durable`, `agent↔durable`,
-`agent↔connectors`, `agent↔kg`. **Three more turned up in the walk that no prior note named**:
+`agent↔connectors`, `agent↔kg`. **Two more turned up in the walk that no prior note named**:
 `kg↔science` (the D-080 hazard gate needs `kg.Note` from `science`, and `kg.validate` needs the
-hazard screen back from `science`), `api↔connectors` (the front door health-checks/discovers the
+hazard screen back from `science`) and `api↔connectors` (the front door health-checks/discovers the
 connector registry; a connector's own HTTP surface reuses the front door's stdlib-only metrics
-registry rather than a second implementation), and `cli↔durable` (`cli.schedules` imports every
-workflow class to register it; `durable.audit_verify`'s workflow imports `cli.verify_audit_chain`
-so the chain check has exactly one implementation, shared by the manual command and the job). All
-nine are declared, not hidden, and each direction is checked independently — the reason for A→B
-does not excuse B→A.
+registry rather than a second implementation). All eight are declared, not hidden, and each
+direction is checked independently — the reason for A→B does not excuse B→A.
 
-**`chemclaw.cli` is not a special case.** A previous version of this file excluded `cli` from the
-sibling list on the premise that "nothing imports it". That was false: `api.app` imports
-`cli.schedules` and `durable.audit_verify` imports `cli.verify_audit_chain` at module scope, both
-real edges the walk below finds and the policy declares. `cli` is simply one more package in the
-graph.
+**`chemclaw.cli` is not a special case**, even though it carries no cycle. A previous version of
+this file excluded `cli` from the sibling list on the premise that "nothing imports it". That was
+false while `cli.schedules` and `cli.verify_audit_chain` still held the library logic `api.app` and
+`durable.audit_verify` needed at module scope — a front door and a Temporal workflow reaching into
+the entrypoint layer for library functions, which is exactly backwards for a layer that is supposed
+to be the outermost one. Both moved to `durable/` (R2.B): `chemclaw.durable.schedules` and
+`chemclaw.durable.audit_chain` now hold the logic, `api.app` and `durable.audit_verify` import them
+directly (an ordinary same-or-lower-layer edge, no `cli` involved), and `cli.schedules` /
+`cli.verify_audit_chain` are left as thin `main()` shims that call back down into `durable` to run
+— a plain `cli→durable` edge, declared in the flat set below like every other package `cli` reaches
+into, not a cycle.
 
 **The kernel rule stays a runtime check, driven by the derived module list.** A static walk cannot
 see a *transitive* import — module A importing module B which happens, at runtime, to import
@@ -211,7 +214,7 @@ _FUNCTION_SCOPE_EDGES = _edges(in_function=True)
 # packages instead of a list of files that has to be kept in step with the filesystem.
 # ---------------------------------------------------------------------------------------------
 
-# The nine package-level cycles, each direction with the one-line reason it exists. Declaring them
+# The eight package-level cycles, each direction with the one-line reason it exists. Declaring them
 # here (rather than only in the flat set below) is what makes them visible to a reader instead of
 # indistinguishable from every other allowed edge.
 _CYCLE_EDGES: dict[Edge, str] = {
@@ -255,12 +258,6 @@ _CYCLE_EDGES: dict[Edge, str] = {
     ("chemclaw.connectors", "chemclaw.api"): (
         "a connector's own HTTP surface reuses the front door's stdlib-only metrics registry"
     ),
-    ("chemclaw.cli", "chemclaw.durable"): (
-        "cli.schedules imports every workflow class in order to register its schedule"
-    ),
-    ("chemclaw.durable", "chemclaw.cli"): (
-        "the audit-verify workflow shares cli.verify_audit_chain's implementation (DRY)"
-    ),
 }
 
 # The full declared graph: every module-scope edge the codebase is allowed to have. `core` has no
@@ -277,7 +274,6 @@ _ALLOWED_MODULE_EDGES: set[Edge] = {
     ("chemclaw.agent", "chemclaw.science"),
     ("chemclaw.agent", "chemclaw.templates"),
     ("chemclaw.api", "chemclaw.agent"),
-    ("chemclaw.api", "chemclaw.cli"),
     ("chemclaw.api", "chemclaw.connectors"),
     ("chemclaw.api", "chemclaw.core"),
     ("chemclaw.api", "chemclaw.durable"),
@@ -285,6 +281,11 @@ _ALLOWED_MODULE_EDGES: set[Edge] = {
     ("chemclaw.cli", "chemclaw.agent"),
     ("chemclaw.cli", "chemclaw.connectors"),
     ("chemclaw.cli", "chemclaw.core"),
+    # `cli.schedules`/`cli.verify_audit_chain` are thin `main()` shims that call back down into
+    # their durable-layer implementations (`durable.schedules`, `durable.audit_chain`) — the
+    # library logic itself moved out of `cli` (R2.B) because `api.app` and `durable.audit_verify`
+    # needed it at module scope, which no longer makes this a cycle: only `cli` reaches into
+    # `durable` now.
     ("chemclaw.cli", "chemclaw.durable"),
     ("chemclaw.cli", "chemclaw.evals"),
     ("chemclaw.cli", "chemclaw.ingest"),
