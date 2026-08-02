@@ -4,7 +4,8 @@ Two separate concerns, deliberately carried by two different mechanisms, because
 
 - **Identity** (who is asking) is read from the turn's ambient ContextVars — the same ones audit and
   authorization read — by an `httpx` request hook on the connector's own client, so it lands on
-  every request the connection makes.
+  every request the connection makes *to that connector's own origin*, and on no other
+  (`turn_identity_hook`).
 - **Our credential** (who *we* are) is an `httpx.Auth` on that same client, because it must also be
   present on the MCP `session.initialize()` that happens when the connection opens.
 
@@ -37,7 +38,7 @@ request and is logged, so the audit trail can always answer "which real user dro
 """
 
 import os
-from collections.abc import Generator
+from collections.abc import Awaitable, Callable, Generator
 
 import httpx
 
@@ -62,6 +63,23 @@ HEADER_SESSION = "X-Chemclaw-Session"
 # in this turn" was answerable in core and unanswerable across the four runtimes the turn spans.
 HEADER_CORRELATION = "X-Chemclaw-Correlation-Id"
 HEADER_DRY_RUN = "X-Chemclaw-Dry-Run"
+
+# Every header `turn_headers` can produce that is ours rather than a standard one, so the origin
+# guard in `turn_identity_hook` can remove all of them in one place. A new `X-Chemclaw-*` header
+# belongs in this tuple the day it is written, or it would be the one that survives a redirect the
+# others do not — `tests/test_connector_identity.py` fails if the two ever drift.
+STAMPED_HEADERS = (
+    HEADER_ACTOR,
+    HEADER_ROLES,
+    HEADER_SESSION,
+    HEADER_CORRELATION,
+    HEADER_DRY_RUN,
+)
+
+# The port an origin means when the URL does not spell one out, so `http://h/mcp` and
+# `http://h:80/mcp` compare equal — the same normalization httpx's own `_same_origin` does before
+# it strips `Authorization`.
+_DEFAULT_PORTS = {"http": 80, "https": 443}
 
 
 class MissingConnectorCredential(RuntimeError):
@@ -139,16 +157,46 @@ class _EnvBearerAuth(httpx.Auth):
         yield request
 
 
-async def stamp_turn_identity(request: httpx.Request) -> None:
-    """`httpx` request hook: attach the turn's identity headers to one connector request.
+def _origin(url: httpx.URL) -> tuple[str, str, int]:
+    """The (scheme, host, port) an identity header may travel to, default port filled in."""
+    return (url.scheme, url.host, url.port or _DEFAULT_PORTS.get(url.scheme, 0))
 
-    Registered on the connector's own client (`chemclaw.connectors.registry`), so it runs inside
-    the task
-    that issues the request — the one place that can see the turn's ambient context (see the
+
+def turn_identity_hook(endpoint_url: str) -> Callable[[httpx.Request], Awaitable[None]]:
+    """Build the `httpx` request hook that stamps the turn's identity for one connector endpoint.
+
+    Registered on the connector's own client (`chemclaw.connectors.registry`), so it runs inside the
+    task that issues the request — the one place that can see the turn's ambient context (see the
     module docstring for why MAF's `header_provider` cannot).
+
+    **Bound to the endpoint's origin, and it strips rather than merely skips.** A request hook runs
+    on *every* hop of a redirect chain (httpx `_send_handling_redirects`), and httpx builds the
+    redirected request from the previous request's headers — dropping only `Authorization`, and
+    only cross-origin. So a connector answering `302 https://attacker/` would otherwise have
+    harvested the caller's Entra object id and full role set, on every turn, from a header set that
+    carries identity and nothing else strips. Declining to *re-add* them on a foreign origin is not
+    enough, because the copied originals arrive anyway; the hook therefore removes them. The client
+    also refuses to follow redirects at all (`registry.connector_http_client`) — this is the second
+    layer, for the day someone restores the flag from the MCP SDK's default.
+
+    Args:
+        endpoint_url: The connector's effective endpoint URL — the one origin its identity headers
+            may reach.
+
+    Returns:
+        The request hook to install on that connector's client.
     """
-    for header, value in turn_headers().items():
-        request.headers[header] = value
+    allowed = _origin(httpx.URL(endpoint_url))
+
+    async def stamp(request: httpx.Request) -> None:
+        """Stamp the turn's identity, or remove it if this request left the connector's origin."""
+        if _origin(request.url) != allowed:
+            for header in STAMPED_HEADERS:
+                request.headers.pop(header, None)
+            return
+        request.headers.update(turn_headers())
+
+    return stamp
 
 
 def auth_for(auth: ConnectorAuth, connector: str) -> httpx.Auth | None:
