@@ -98,15 +98,6 @@ and `tasks/live-test/`. The fixed ones are not listed — see the ADR and the co
 An adversarially-verified review across every layer and phase; 22 distinct defects were fixed (see
 the `D-2026-08-01-*` ADRs). These are what the fixes uncovered and deliberately did not close.
 
-- [ ] **REV-1 [Medium] — a `similar_reactions` query is not standardized the way its index is.**
-  `drfp_bitstring` takes a bare reaction string with no roles or components, so a query naming a
-  salt, a charged species or another tautomer scores against rows built from the standardized form.
-  Plain canonicalization is bits-neutral (RDKit parses both spellings to one mol), so this only
-  bites where standardization does real work — which is now a much larger surface, since inorganic
-  salts, metal complexes and organometallics no longer collapse onto a fragment
-  (D-2026-08-01-a-reagent-is-not-its-largest-fragment). Fix: standardize per `.`-separated species
-  inside `drfp_bitstring`. No `definition` bump needed — it makes queries match the index rather
-  than changing the index.
 - [ ] **REV-2 [Medium] — a solvate collapses onto whichever fragment is larger.**
   `standard_smiles("CCN.C1CCOC1")` returns THF: `FragmentParent` keeps the largest fragment and
   both are organic, so the ethylamine is discarded. Different mechanism from the counterion rule
@@ -489,16 +480,6 @@ QM path. The rows below are what survives that merge, narrowed to say so.
       out and every species standardized — and that pair scores 1.0. `reaction_smiles` stays as the
       record form a note renders; reagents stay on the left. `drfp:b2048:agents-excluded:std4`
       retires rows built under either earlier token.
-- [ ] **A `similar_reactions` query is not standardized the way the index is** — [S], opened by the
-      row above. The index now goes through `standard_smiles` per species; a query string is
-      fingerprinted exactly as the caller wrote it, because `drfp_bitstring` takes a string and has
-      no roles or components to work from. Plain canonicalization is bits-neutral (RDKit parses
-      both spellings to one mol), so this only bites where standardization does real work — a
-      query naming a salt, a charged species or the other tautomer scores against rows built from
-      the stripped, neutral, canonical-tautomer form. Fix is to standardize per `.`-separated
-      species inside `drfp_bitstring`, which makes index and query symmetric with no definition
-      bump, since the rows are already built that way.
-
 **Operations.**
 
 - [x] **No backup, restore or DR anywhere** — the GxP trap is closed by

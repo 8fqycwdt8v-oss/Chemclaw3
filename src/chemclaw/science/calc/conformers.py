@@ -46,9 +46,9 @@ from chemclaw.science.calc import crest_cli
 from chemclaw.science.calc.crest_cli import CrestEffort, EnsembleSearch
 from chemclaw.science.calc.store import ResultStore, run_cached
 from chemclaw.science.calc.structure import Structure
+from chemclaw.science.calc.xtb_engine import HARTREE_TO_KCAL
 from chemclaw.science.calc.xtb_spec import CrestSpec
 
-_HARTREE_TO_KCAL = 627.5094740631
 _GAS_CONSTANT_CAL = 1.987204258640832  # cal/(mol K)
 
 
@@ -179,7 +179,7 @@ def compute_ensemble(spec: ConformerSpec, structure: Structure) -> ConformerEnse
     if not members:
         raise ValueError("the conformer search returned no structures")
     lowest = min(member.energy_hartree for member in members)
-    relative = [(member.energy_hartree - lowest) * _HARTREE_TO_KCAL for member in members]
+    relative = [(member.energy_hartree - lowest) * HARTREE_TO_KCAL for member in members]
     degeneracies = [member.degeneracy for member in members]
     populations = _populations(relative, degeneracies, spec.temperature_k)
     entropy = _conformational_entropy(populations, degeneracies)

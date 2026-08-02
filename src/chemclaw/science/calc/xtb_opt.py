@@ -33,10 +33,13 @@ from chemclaw.core.config import settings
 from chemclaw.science.calc import anc, geometry, xtb_cli
 from chemclaw.science.calc.store import ResultStore, run_cached
 from chemclaw.science.calc.structure import Structure
-from chemclaw.science.calc.xtb_engine import Calculator, evaluate_point, make_calculator
+from chemclaw.science.calc.xtb_engine import (
+    HARTREE_TO_KCAL,
+    Calculator,
+    evaluate_point,
+    make_calculator,
+)
 from chemclaw.science.calc.xtb_spec import XtbSpec
-
-_HARTREE_TO_KCAL = 627.5094740631
 
 
 class OptSpec(XtbSpec):
@@ -345,7 +348,7 @@ def _optimize_with_library(spec: OptSpec, structure: Structure) -> OptimizationR
         solvent=spec.solvent,
         initial_energy_hartree=initial_energy,
         energy_hartree=energy,
-        relaxation_kcal=(initial_energy - energy) * _HARTREE_TO_KCAL,
+        relaxation_kcal=(initial_energy - energy) * HARTREE_TO_KCAL,
         steps=steps,
         max_gradient=max_gradient,
         displacement_rms_angstrom=float(np.sqrt(np.mean((final - positions) ** 2))),
@@ -410,7 +413,7 @@ def _optimize_with_binary(spec: OptSpec, structure: Structure) -> OptimizationRe
         solvent=spec.solvent,
         initial_energy_hartree=initial,
         energy_hartree=energy,
-        relaxation_kcal=(initial - energy) * _HARTREE_TO_KCAL,
+        relaxation_kcal=(initial - energy) * HARTREE_TO_KCAL,
         steps=outcome.cycles or 0,
         max_gradient=max_gradient,
         displacement_rms_angstrom=float(np.sqrt(np.mean((final - positions) ** 2))),

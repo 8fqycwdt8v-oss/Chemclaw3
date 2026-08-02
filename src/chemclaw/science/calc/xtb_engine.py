@@ -21,8 +21,10 @@ from tblite.interface import Calculator
 # Re-exported: `calc.xtb_opt` annotates the calculator it passes between its own helpers,
 # and this module is the single place tblite is imported from (the unit boundary).
 __all__ = [
+    "ANGSTROM_TO_BOHR",
     "COMMON_SOLVENTS",
     "Calculator",
+    "HARTREE_TO_KCAL",
     "engine_version",
     "evaluate_point",
     "geometry",
@@ -34,7 +36,14 @@ __all__ = [
 ]
 
 # tblite works in atomic units; everything above this module is in Angstrom.
-_ANGSTROM_TO_BOHR = 1.8897259886
+ANGSTROM_TO_BOHR = 1.8897259886
+
+# CODATA Hartree-to-kcal/mol, to full double precision. Every calculator in this
+# package that reports a relative or interaction energy in kcal/mol (pKa, xTB
+# optimization/scan, conformer ensembles, host-guest complexes) converts through
+# this single value, so a truncated copy cannot drift from the rest (see the ADR
+# for this fix).
+HARTREE_TO_KCAL = 627.5094740631
 
 # ALPB solvents named in the error for an unrecognized one. Not the full parameter
 # set — a curated list of the solvents process chemistry actually asks about, which is
@@ -215,7 +224,7 @@ def make_calculator(
     calculator per single point. `run_singlepoint` goes through it too, so the
     verbosity and solvation setup exist once (DRY).
     """
-    calc = Calculator(method, numbers, positions * _ANGSTROM_TO_BOHR, charge=charge, uhf=uhf)
+    calc = Calculator(method, numbers, positions * ANGSTROM_TO_BOHR, charge=charge, uhf=uhf)
     # tblite prints an SCF iteration table to stdout at its default verbosity, which
     # would pollute every worker log and test run. It affects no numbers.
     calc.set("verbosity", 0)
@@ -259,10 +268,10 @@ def evaluate_point(calc: Calculator, positions: np.ndarray) -> tuple[float, np.n
     An analytic gradient is what makes optimization cheap and puts the
     finite-difference Hessian at 6N single points rather than 6N^2.
     """
-    calc.update(positions=positions * _ANGSTROM_TO_BOHR)
+    calc.update(positions=positions * ANGSTROM_TO_BOHR)
     result = calc.singlepoint()
     energy = float(result.get("energy"))
-    gradient = np.asarray(result.get("gradient"), dtype=float) * _ANGSTROM_TO_BOHR
+    gradient = np.asarray(result.get("gradient"), dtype=float) * ANGSTROM_TO_BOHR
     dipole = np.asarray(result.get("dipole"), dtype=float)
     return energy, gradient, dipole
 

@@ -56,6 +56,7 @@ from chemclaw.science.calc.store import CalculationKey, ResultStore, run_cached
 from chemclaw.science.calc.structure import Structure
 from chemclaw.science.calc.uncertainty import CalculationDomainError
 from chemclaw.science.calc.xtb_engine import (
+    HARTREE_TO_KCAL,
     engine_version,
     geometry,
     gfn2_energy,
@@ -65,7 +66,6 @@ from chemclaw.science.calc.xtb_engine import (
 from chemclaw.science.calc.xtb_opt import OptSpec, optimize_structure
 
 CALC_TYPE = "pka"
-_HARTREE_TO_KCAL = 627.509
 # Heavy atoms whose O-H/S-H protons we treat as acidic sites.
 _ACIDIC_HEAVY = (8, 16)  # O, S
 # Nitrogen valence at which there is no lone pair left to protonate.
@@ -336,7 +336,7 @@ def _predict_base_pka(smiles: str, base: Chem.Mol, sites: list[int]) -> PkaResul
             "implicit solvent — aqueous aliphatic amine basicity is set by the ammonium "
             "ion's hydrogen bonding to water, which a continuum model cannot represent"
         )
-    delta_e_kcal = (energy_base - energy_cation) * _HARTREE_TO_KCAL
+    delta_e_kcal = (energy_base - energy_cation) * HARTREE_TO_KCAL
     return PkaResult(
         smiles=smiles,
         method=f"{settings.xtb_method}/ALPB-{settings.pka_solvent}",
@@ -345,6 +345,39 @@ def _predict_base_pka(smiles: str, base: Chem.Mol, sites: list[int]) -> PkaResul
         deprotonation_energy_kcal=delta_e_kcal,
         uncertainty=settings.pka_base_uncertainty,
         site="base",
+    )
+
+
+def _predict_acid_pka(smiles: str, acid: Chem.Mol, anions: list[Chem.Mol]) -> PkaResult:
+    """Predict the pKa of a neutral O-H/S-H acid from its most stable conjugate base.
+
+    Mirrors `_predict_base_pka`'s shape on the acid side: acid and anions share one
+    geometry policy (MMFF where parametrized, else the embedded geometry), because the
+    calibration was fitted through this exact code path, so any systematic geometry
+    effect is absorbed into slope/intercept. The most acidic site is the one whose
+    anion is most stable (lowest energy).
+    """
+    numbers, positions = geometry(acid, settings.xtb_embed_seed, optimize=True)
+    energy_acid = gfn2_energy(settings.xtb_method, numbers, positions, solvent=settings.pka_solvent)
+
+    best_anion_energy = min(
+        gfn2_energy(
+            settings.xtb_method,
+            *geometry(anion, settings.xtb_embed_seed, optimize=True),
+            charge=-1,
+            solvent=settings.pka_solvent,
+        )
+        for anion in anions
+    )
+
+    delta_e_kcal = (best_anion_energy - energy_acid) * HARTREE_TO_KCAL
+    pka = settings.pka_calibration_slope * delta_e_kcal + settings.pka_calibration_intercept
+    return PkaResult(
+        smiles=smiles,
+        method=f"{settings.xtb_method}/ALPB-{settings.pka_solvent}",
+        pka=pka,
+        deprotonation_energy_kcal=delta_e_kcal,
+        uncertainty=settings.pka_uncertainty,
     )
 
 
@@ -357,6 +390,10 @@ def predict_pka(job: PkaInput) -> PkaResult:
     calibration domain (fitted on neutral acids at charge 0 with -1 anions);
     computing them here would silently run both species at wrong electron
     counts and can even invert real acidity orderings.
+
+    Pure dispatch: parse and validate the input once, then hand off to the acid or
+    base branch, each of which owns its own parse-geometry-energy-calibrate-format
+    sequence (`_predict_acid_pka`, `_predict_base_pka`).
     """
     neutral = parse_molecule(job.smiles)
     formal_charge = Chem.GetFormalCharge(neutral)
@@ -366,44 +403,19 @@ def predict_pka(job: PkaInput) -> PkaResult:
         )
     require_closed_shell(neutral, 0)
     anions = _conjugate_bases(neutral)
-    if not anions:
-        # No proton to lose — but it may have a lone pair to gain one on, which is the
-        # question a chemist asks about an amine. Acid first when both are present: a
-        # molecule with an O-H has a pKa in the ordinary sense, and that is the number
-        # meant by "the pKa" of, say, an aminophenol.
-        basic = _basic_nitrogens(neutral)
-        if basic:
-            return _predict_base_pka(job.smiles, neutral, basic)
-        raise CalculationDomainError(
-            f"no acidic O-H/S-H site and no basic nitrogen in {job.smiles!r}: nothing to "
-            "protonate or deprotonate"
-        )
+    if anions:
+        return _predict_acid_pka(job.smiles, neutral, anions)
 
-    # Acid and anions share one geometry policy (MMFF where parametrized, else the
-    # embedded geometry). The calibration was fitted through this exact code path,
-    # so any systematic geometry effect is absorbed into slope/intercept.
-    numbers, positions = geometry(neutral, settings.xtb_embed_seed, optimize=True)
-    energy_acid = gfn2_energy(settings.xtb_method, numbers, positions, solvent=settings.pka_solvent)
-
-    # The most acidic site gives the most stable (lowest-energy) conjugate base.
-    best_anion_energy = min(
-        gfn2_energy(
-            settings.xtb_method,
-            *geometry(anion, settings.xtb_embed_seed, optimize=True),
-            charge=-1,
-            solvent=settings.pka_solvent,
-        )
-        for anion in anions
-    )
-
-    delta_e_kcal = (best_anion_energy - energy_acid) * _HARTREE_TO_KCAL
-    pka = settings.pka_calibration_slope * delta_e_kcal + settings.pka_calibration_intercept
-    return PkaResult(
-        smiles=job.smiles,
-        method=f"{settings.xtb_method}/ALPB-{settings.pka_solvent}",
-        pka=pka,
-        deprotonation_energy_kcal=delta_e_kcal,
-        uncertainty=settings.pka_uncertainty,
+    # No proton to lose — but it may have a lone pair to gain one on, which is the
+    # question a chemist asks about an amine. Acid first when both are present: a
+    # molecule with an O-H has a pKa in the ordinary sense, and that is the number
+    # meant by "the pKa" of, say, an aminophenol.
+    basic = _basic_nitrogens(neutral)
+    if basic:
+        return _predict_base_pka(job.smiles, neutral, basic)
+    raise CalculationDomainError(
+        f"no acidic O-H/S-H site and no basic nitrogen in {job.smiles!r}: nothing to "
+        "protonate or deprotonate"
     )
 
 

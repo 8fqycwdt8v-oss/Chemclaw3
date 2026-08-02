@@ -9,6 +9,7 @@ we prove the DRFP-specific fingerprinting and that it plugs into the shared stor
 import asyncio
 
 import pytest
+from drfp import DrfpEncoder
 
 from chemclaw.core.chem import STANDARDIZATION_VERSION, standard_smiles
 from chemclaw.core.config import settings
@@ -146,6 +147,14 @@ def test_two_solvents_of_one_coupling_are_the_same_transformation() -> None:
     large constant block of bits on the variable being optimized. Indexed as transformations they
     are identical, which is the honest answer: they are the same chemistry run two ways, and the
     solvent is recorded beside the note rather than inside the structure.
+
+    `as_recorded`'s pin moved from 0.8194 to 0.7937 under REV-1 (`drfp_bitstring` now standardizes
+    every `.`-separated species, agent slot included, so the two calls under test are symmetric
+    with `test_the_agent_slot_alone_changes_no_bits...`'s hand-folded fixture — see
+    `_standardize_species`). The shift is `Cleanup`'s metal disconnection reaching this fixture's
+    agents for the first time: `CC(=O)O[Pd]OC(C)=O` becomes two acetate anions plus bare Pd2+,
+    identically on both sides, so the qualitative claim (`as_indexed > as_recorded`, near-1.0 once
+    agents are excluded) is untouched.
     """
     as_recorded = tanimoto(
         drfp_bitstring(_THF.reaction_smiles()), drfp_bitstring(_METHF.reaction_smiles())
@@ -154,7 +163,7 @@ def test_two_solvents_of_one_coupling_are_the_same_transformation() -> None:
         drfp_bitstring(_THF.transformation_smiles()),
         drfp_bitstring(_METHF.transformation_smiles()),
     )
-    assert as_recorded == pytest.approx(0.8194, abs=1e-3)
+    assert as_recorded == pytest.approx(0.7937, abs=1e-3)
     assert as_indexed == pytest.approx(1.0)
     assert as_indexed > as_recorded
 
@@ -196,3 +205,81 @@ def test_the_definition_retires_rows_built_under_the_old_encoding() -> None:
     definition = reaction_definition()
     assert "agents-excluded" in definition
     assert record_for_reaction("r", _THF.transformation_smiles()).definition == definition
+
+
+# --- REV-1: a query is standardized the same way the index is ------------------------------------
+
+
+def test_a_charged_species_query_matches_the_row_indexed_from_its_neutral_form() -> None:
+    """A query spelling one reagent as its charged form still finds the standardized row.
+
+    The index is built from `transformation_smiles()`, which runs every species through
+    `standard_smiles` before fingerprinting (acetic acid, not the acetate anion). Before REV-1's
+    fix a query spelled any other way scored against a form it could never equal — measured, not
+    argued: acetate and acetic acid are different molecules to a DRFP that has not standardized
+    them, so a match here can only come from the query being standardized the same way.
+    """
+
+    async def _run() -> None:
+        store = InMemoryFingerprintStore()
+        indexed = OrdReaction(
+            reaction_id="ester",
+            inputs=[
+                Component(smiles="CCO", role=Role.REACTANT),
+                Component(smiles="CC(=O)O", role=Role.REACTANT),
+            ],
+            outcomes=[Component(smiles="CCOC(C)=O", role=Role.PRODUCT)],
+            provenance="eln:chemist-a",
+        )
+        await store.add(record_for_reaction("ester", indexed.transformation_smiles()))
+
+        # The query spells the acid as its conjugate base (acetate), not the neutral form the
+        # index was built from.
+        charged_query = "CCO.CC(=O)[O-]>>CCOC(C)=O"
+        hits = await find_similar_reactions(store, charged_query, threshold=0.99)
+        assert hits and hits[0].id == "ester"
+        assert hits[0].similarity == pytest.approx(1.0)
+
+    asyncio.run(_run())
+
+
+def test_a_tautomer_query_matches_the_row_indexed_from_its_canonical_tautomer() -> None:
+    """A query spelling one reagent as another tautomer still finds the standardized row.
+
+    Acetylacetone's enol and keto forms are different SMILES for the same substance;
+    `standard_smiles` canonicalizes to one, and a query in the other tautomer must land on the
+    same row.
+    """
+
+    async def _run() -> None:
+        store = InMemoryFingerprintStore()
+        indexed = OrdReaction(
+            reaction_id="acac-amine",
+            inputs=[
+                Component(smiles="CC(=O)CC(C)=O", role=Role.REACTANT),  # keto
+                Component(smiles="CCN", role=Role.REACTANT),
+            ],
+            outcomes=[Component(smiles="CCNC(C)=CC(C)=O", role=Role.PRODUCT)],
+            provenance="eln:chemist-a",
+        )
+        await store.add(record_for_reaction("acac-amine", indexed.transformation_smiles()))
+
+        enol_query = "CC(O)=CC(C)=O.CCN>>CCNC(C)=CC(C)=O"
+        hits = await find_similar_reactions(store, enol_query, threshold=0.99)
+        assert hits and hits[0].id == "acac-amine"
+        assert hits[0].similarity == pytest.approx(1.0)
+
+    asyncio.run(_run())
+
+
+def test_an_already_standardized_query_is_bits_neutral() -> None:
+    """REV-1's fix must be a no-op wherever standardization was already a no-op.
+
+    `_ESTER_ETHYL` is already every species' `standard_smiles` form (plain organic, neutral,
+    one tautomer), so folding it through the new per-species pass must reproduce exactly the
+    bits `DrfpEncoder` computes with no preprocessing at all — proving the fix changes what a
+    query means only where standardization does real work, per the backlog row's own claim.
+    """
+    direct = DrfpEncoder.encode(_ESTER_ETHYL, n_folded_length=settings.drfp_bits)[0]
+    direct_bits = "".join("1" if value else "0" for value in direct)
+    assert drfp_bitstring(_ESTER_ETHYL) == direct_bits

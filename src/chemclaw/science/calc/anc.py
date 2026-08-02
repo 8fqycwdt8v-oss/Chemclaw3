@@ -55,6 +55,7 @@ if these two paths ever become the common case.
 import numpy as np
 
 from chemclaw.core.config import settings
+from chemclaw.science.calc.xtb_engine import ANGSTROM_TO_BOHR
 
 # Lindh's parameters, indexed by periodic-table row (H; Li-Ne; Na-Ar and below). `alpha`
 # is in inverse bohr^2 and `r_ref` in bohr, so distances are converted before use.
@@ -74,8 +75,6 @@ _R_REF = np.array(
 )
 # Lindh's stretch force constant, in Hartree/bohr^2.
 _K_STRETCH = 0.45
-
-_ANGSTROM_TO_BOHR = 1.8897259886
 
 
 # Pairs further apart than this (Angstrom) contribute nothing: the Lindh factor has
@@ -110,12 +109,12 @@ def model_hessian(numbers: np.ndarray, positions: np.ndarray) -> np.ndarray:
             distance = float(np.linalg.norm(delta))
             if distance > _INTERACTION_CUTOFF or distance < 1e-8:
                 continue
-            bohr = distance * _ANGSTROM_TO_BOHR
+            bohr = distance * ANGSTROM_TO_BOHR
             alpha = _ALPHA[rows[i], rows[j]]
             reference = _R_REF[rows[i], rows[j]]
             force = _K_STRETCH * np.exp(alpha * (reference**2 - bohr**2))
             # Hartree/bohr^2 -> Hartree/Angstrom^2.
-            force *= _ANGSTROM_TO_BOHR**2
+            force *= ANGSTROM_TO_BOHR**2
             unit = delta / distance
             block = force * np.outer(unit, unit)
             a, b = slice(3 * i, 3 * i + 3), slice(3 * j, 3 * j + 3)

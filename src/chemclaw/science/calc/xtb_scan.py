@@ -30,10 +30,8 @@ from chemclaw.core.config import settings
 from chemclaw.science.calc.progress import Progress, no_progress
 from chemclaw.science.calc.store import ResultStore, run_cached
 from chemclaw.science.calc.structure import Structure
-from chemclaw.science.calc.xtb_engine import parse_molecule
+from chemclaw.science.calc.xtb_engine import HARTREE_TO_KCAL, parse_molecule
 from chemclaw.science.calc.xtb_opt import OptSpec, optimize_structure
-
-_HARTREE_TO_KCAL = 627.5094740631
 
 # How many atoms define each internal coordinate, and the unit its value is in.
 _COORDINATES: dict[int, tuple[str, str]] = {
@@ -195,7 +193,7 @@ def run_scan(spec: ScanSpec, structure: Structure, progress: Progress = no_progr
 
     energies = np.array([point.energy_hartree for point in points])
     lowest = int(np.argmin(energies))
-    relative = (energies - energies[lowest]) * _HARTREE_TO_KCAL
+    relative = (energies - energies[lowest]) * HARTREE_TO_KCAL
     for point, value in zip(points, relative, strict=True):
         point.relative_kcal = round(float(value), 3)
     return ScanResult(
