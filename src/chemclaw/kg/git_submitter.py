@@ -24,6 +24,7 @@ from collections.abc import Iterator
 from pathlib import Path
 
 from chemclaw.core.config import settings
+from chemclaw.core.errors import ChemclawError
 from chemclaw.kg.graph import invalidate_cache
 from chemclaw.kg.pr_gate import NoteSubmission, NoteSubmitter
 
@@ -70,8 +71,16 @@ def _checkout_lock(repo_dir: str) -> Iterator[None]:
         lock_file.close()
 
 
-class GitSubmitError(RuntimeError):
-    """A git command in the submission flow failed."""
+class GitSubmitError(ChemclawError):
+    """A git command in the submission flow failed.
+
+    A `ChemclawError`, so `agent.tool_authz.surface_domain_errors` shows the reason to the model.
+    As a bare `RuntimeError` it did not, and the 2026-08-02 live run measured what that costs:
+    every `propose_knowledge_note` call failed, the model was told only "Error: Function failed.",
+    it retried five times permuting its *arguments* because nothing said the problem was elsewhere,
+    and then printed the ungated document into the chat as a fallback. The PR-gate's failure mode
+    was to publish without the gate.
+    """
 
 
 def _process_repo_root() -> Path | None:

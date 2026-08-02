@@ -42,6 +42,7 @@ from rdkit.Chem import Crippen
 from chemclaw.core.config import settings
 from chemclaw.science.calc.pka import PkaInput, PkaResult, ionisable_sites, run_cached_pka
 from chemclaw.science.calc.store import ResultStore
+from chemclaw.science.calc.uncertainty import CalculationDomainError
 
 
 class LogdInput(BaseModel):
@@ -97,7 +98,7 @@ def _require_a_single_equilibrium(result: PkaResult, ph: float, ionised_ratio: f
     """
     sites = ionisable_sites(result.smiles)
     if sites.acidic and sites.basic:
-        raise ValueError(
+        raise CalculationDomainError(
             f"{result.smiles!r} is amphoteric ({sites.acidic} acidic O-H/S-H site(s) and "
             f"{sites.basic} basic nitrogen(s)): its acid and base equilibria run in opposite "
             "directions and this calculator applies one ionisation term to the single pKa "
@@ -109,7 +110,7 @@ def _require_a_single_equilibrium(result: PkaResult, ph: float, ionised_ratio: f
     ionised_fraction = ionised_ratio / (1.0 + ionised_ratio)
     if ionised_fraction > settings.logd_negligible_ionised_fraction:
         kind = "acidic O-H/S-H site(s)" if result.site == "acid" else "basic nitrogen(s)"
-        raise ValueError(
+        raise CalculationDomainError(
             f"{result.smiles!r} has {sites.total} {kind} and is {ionised_fraction:.0%} ionised at "
             f"pH {ph:g} on the one site `calc.pka` reports (pKa {result.pka:.2f}). A second "
             "ionisation of comparable size is unaccounted for and its pKa is not computable from "

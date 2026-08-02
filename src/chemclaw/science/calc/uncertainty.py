@@ -43,6 +43,8 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field
 from rdkit import Chem
 
+from chemclaw.core.errors import ChemclawError
+
 # How an uncertainty was arrived at. Not decoration: it is the difference between "the paper that
 # published this model measured this spread on its own test set" and "this deployment measured this
 # spread on its own chemistry", and a reviewer weighs the two differently.
@@ -62,6 +64,28 @@ _METHOD_PROSE: dict[Method, str] = {
     "propagated": "propagated from the inputs",
     "none": "no uncertainty established",
 }
+
+
+class CalculationDomainError(ChemclawError):
+    """A calculator refuses a molecule it cannot speak about, and says why.
+
+    The refusal end of the same question `Estimate.in_domain` answers. `in_domain=False` means
+    "here is a number, do not trust it"; this means "there is no number to give you" — a molecule
+    with no protonatable nitrogen has no basic pKa, and returning one would be an invention rather
+    than a poor estimate.
+
+    It exists because these refusals were raised as bare `ValueError`. `ChemclawError` *subclasses*
+    `ValueError`, so `except ChemclawError` in `agent.tool_authz.surface_domain_errors` does not
+    catch one — the inheritance runs the wrong way for that. The consequence was measured in the
+    2026-08-02 live run: `predict_pka`'s carefully worded aliphatic-amine explanation, which names
+    the Spearman -0.17 correlation and tells the chemist to measure it instead, reached the model
+    as MAF's opaque "Error: Function failed." The answer then guessed the reason and presented the
+    guess as a fact about system behaviour, which on the next substrate would be wrong.
+
+    A message raised here is shown to the model verbatim, so it carries the same caller-safe
+    contract as every other `ChemclawError`: explain the limit in the chemist's terms, never echo
+    internal state.
+    """
 
 
 class Estimate(BaseModel):

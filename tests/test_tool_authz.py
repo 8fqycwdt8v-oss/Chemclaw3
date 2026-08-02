@@ -466,3 +466,69 @@ def test_a_long_failure_message_is_truncated_before_it_reaches_the_stream() -> N
     (signal,) = _drive_announcing(_ctx("predict_pka"), _boom)
     assert isinstance(signal, ToolFailureSignal)
     assert len(signal.message) <= 300
+
+
+# --- infrastructure and calculator refusals must reach the model, not just the trace ----
+
+
+def test_a_calculator_domain_refusal_reaches_the_model_verbatim() -> None:
+    """`predict_pka`'s real refusal, driven through the real middleware, arrives as its message.
+
+    Deliberately raised by the production code path rather than by a hand-thrown error: the defect
+    was that these sites raised a *bare* `ValueError`, and `ChemclawError` subclasses `ValueError`,
+    so `except ChemclawError` could not catch one — the inheritance runs the wrong way. A test that
+    throws `CalculationDomainError` itself would pass before the fix and prove nothing.
+
+    Measured consequence, 2026-08-02 live run: the aliphatic-amine explanation — which names the
+    Spearman -0.17 correlation and tells the chemist to measure instead — reached the model as
+    "Error: Function failed.", and the answer then guessed the reason and stated the guess as fact.
+    """
+    from chemclaw.science.calc.pka import PkaInput, predict_pka
+
+    async def _refuse() -> None:
+        # Ethane: nothing acidic to lose, no nitrogen to protonate.
+        predict_pka(PkaInput(smiles="CC"))
+
+    ctx = _ctx("predict_pka")
+    _drive_domain_errors(ctx, _refuse)  # must not raise
+    assert isinstance(ctx.result, str)
+    assert ctx.result.startswith("Error: ")
+    assert "nothing to" in ctx.result, ctx.result
+
+
+def test_an_unreachable_durable_backend_says_nothing_was_started() -> None:
+    """A broker outage must reach the model as an outage, and must say nothing is queued.
+
+    A chemist who believes a job may be running will wait for it. The live run's failure was worse
+    than silence: the model read the opaque error as bad input, retried three SMILES variants, and
+    ended the turn mid-sentence.
+    """
+    from chemclaw.connectors.jobs import ConnectorJobError
+
+    async def _unreachable() -> None:
+        raise ConnectorJobError(
+            "the durable execution backend is unreachable, so the 'compute_reaction_energy' job "
+            "was not started and nothing is queued (RPCError)."
+        )
+
+    ctx = _ctx("compute_reaction_energy")
+    _drive_domain_errors(ctx, _unreachable)
+    assert isinstance(ctx.result, str)
+    assert "not started" in ctx.result and "nothing is queued" in ctx.result
+
+
+def test_a_pr_gate_git_failure_reaches_the_model() -> None:
+    """`GitSubmitError` must surface, because its silence made the gate publish ungated.
+
+    Told only "Error: Function failed.", the model retried five times permuting its arguments and
+    then printed the unreviewed document into the chat as a fallback.
+    """
+    from chemclaw.kg.git_submitter import GitSubmitError
+
+    async def _git_failed() -> None:
+        raise GitSubmitError("note_repo_dir has no 'origin' remote; nothing was submitted")
+
+    ctx = _ctx("propose_knowledge_note")
+    _drive_domain_errors(ctx, _git_failed)
+    assert isinstance(ctx.result, str)
+    assert "no 'origin' remote" in ctx.result
