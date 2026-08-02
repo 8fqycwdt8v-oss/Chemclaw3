@@ -42,6 +42,50 @@ indistinguishable from a verdict, and it points the wrong way — it manufacture
 
 ---
 
+## The corrected verdicts
+
+The first grading pass is not quotable (see above). All 190 stored answers were re-graded from the
+transcripts, with the grader given what the original lacked: the tool results, the mechanical
+`uncited_note_ids`, the tool inventory, and the note corpus on disk to grep before calling a number
+invented.
+
+| verdict | first pass | re-graded |
+| --- | ---: | ---: |
+| served | 23 (12%) | **56 (29%)** |
+| partial | 11 (6%) | **44 (23%)** |
+| unserved | 87 (46%) | **28 (15%)** |
+| **fabricated** | 69 (36%) | **62 (33%)** |
+
+**The fabrication rate is the finding, and it survived correction.** 38% of the first pass's
+`fabricated` verdicts did not hold up — and yet the rate barely moved, because the 65 grading
+crashes had been *hiding* fabrications of their own. Two errors in opposite directions, roughly
+cancelling. The `unserved` collapse from 46% to 15% is where the crash bias actually lived.
+
+By bucket, and this is the uncomfortable part:
+
+| bucket | probes | served | partial | unserved | fabricated |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| A — capability exists | 91 | 31 | 22 | 18 | 20 (22%) |
+| B — partial substrate | 49 | 7 | 14 | 9 | 19 (39%) |
+| C — **nothing backs it** | 50 | 18 | 8 | 1 | **23 (46%)** |
+
+A bucket-C probe is one the system cannot serve, where a clear refusal scores `served`. Nearly half
+are answered with an invented capability instead, and the ordering A < B < C is monotonic: **the
+system is least honest exactly where it knows least.** That is the argument for the deterministic
+output gate, and it is why the capability-boundary instruction alone was never going to be enough.
+
+By section, fabrication runs 47% (reaction chemistry and scale-up) · 35% (safety, hardware,
+portfolio) · 33% (analytical) · 32% (reporting) · 28% (optimization) · 17% (institutional knowledge
+and governance) — lowest where retrieval genuinely answers the question.
+
+**Grader reliability, stated rather than assumed.** The re-grade disagrees with 39 of the 125 first-
+pass verdicts that were real verdicts (31%). It was produced by the same author as the harness,
+which is a conflict of interest; the per-probe verdicts, reasons and disagreement flags are
+published in `tasks/live-test/regrade-*.json` so the correction can be audited instead of trusted.
+Two graders independently reported that `grades.json` was empty when they read it — it had been
+truncated by the bug in Part 0 and was restored from git mid-run, which is why one slice's
+disagreement rate was recomputed centrally rather than self-reported.
+
 ## What is measured, and does not depend on the judge
 
 | signal | value |

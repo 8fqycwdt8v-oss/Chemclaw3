@@ -114,6 +114,27 @@ def _load_transcripts(directory: Path) -> tuple[list[Probe], list[ProbeOutcome]]
     return probes, outcomes
 
 
+def _write_outputs(transcript_dir: Path, report: str, grades: list[Judgement]) -> None:
+    """Write the summary and grades *beside their own transcripts*, never in a shared parent.
+
+    Two bugs in one line, both of which destroyed evidence. The outputs were written to
+    `transcript_dir.parent`, so a second run against a different transcript directory silently
+    overwrote the first run's results — and `grades.json` was written unconditionally, so a
+    `--no-judge` run replaced 190 real verdicts with `[]`. That happened, and the file was only
+    recoverable because it had been committed.
+
+    So: outputs live with the transcripts that produced them, and a run that graded nothing writes
+    no grades file. An empty grades file is indistinguishable from a run where every answer failed.
+    """
+    transcript_dir.mkdir(parents=True, exist_ok=True)
+    (transcript_dir / "summary.md").write_text(report, encoding="utf-8")
+    if grades:
+        (transcript_dir / "grades.json").write_text(
+            json.dumps([g.model_dump() for g in grades], indent=2, ensure_ascii=False),
+            encoding="utf-8",
+        )
+
+
 async def _main(args: argparse.Namespace) -> int:
     if args.regrade:
         # Re-grade without re-asking. The first run's verdicts were wrong for a reason that had
@@ -133,12 +154,7 @@ async def _main(args: argparse.Namespace) -> int:
         regraded: list[Judgement] = list(await asyncio.gather(*(regrade(o) for o in outcomes)))
         report = _summary(probes, outcomes, regraded)
         print(report)
-        out = directory.parent
-        (out / "summary.md").write_text(report, encoding="utf-8")
-        (out / "grades.json").write_text(
-            json.dumps([g.model_dump() for g in regraded], indent=2, ensure_ascii=False),
-            encoding="utf-8",
-        )
+        _write_outputs(directory, report, regraded)
         return 0
 
     probes = load_probes(args.probe_dir)
@@ -167,12 +183,7 @@ async def _main(args: argparse.Namespace) -> int:
     report = _summary(probes, outcomes, grades)
     print(report)
 
-    out = Path(args.transcript_dir or settings.live_probe_transcript_dir).parent
-    out.mkdir(parents=True, exist_ok=True)
-    (out / "summary.md").write_text(report, encoding="utf-8")
-    (out / "grades.json").write_text(
-        json.dumps([g.model_dump() for g in grades], indent=2, ensure_ascii=False), encoding="utf-8"
-    )
+    _write_outputs(Path(args.transcript_dir or settings.live_probe_transcript_dir), report, grades)
     return 0
 
 

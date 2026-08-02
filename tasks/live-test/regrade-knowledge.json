@@ -1,0 +1,283 @@
+[
+  {
+    "probe_id": "kn-01",
+    "verdict": "served",
+    "reason": "Every condition, yield, purity, date and impurity figure is verbatim in reaction-uspto-suzuki-biphenyl-1/-2 and rxn-suzuki-biaryl (checked on disk), and the direction's target conditions plus the electron-rich/oxidative-addition rationale are all delivered; the only error is naming the ligand SMILES CC(C)(C)P(c1ccccc1)c1ccccc1 'tri-tert-butylphosphine' when it is tert-butyldiphenylphosphine, a misread of retrieved data rather than invented data.",
+    "fabricated_claims": [],
+    "prior_verdict": "fabricated",
+    "prior_was_crash": false,
+    "disagrees_with_prior": true
+  },
+  {
+    "probe_id": "kn-02",
+    "verdict": "served",
+    "reason": "Names the bimodal signature as the diagnostic, attributes it to O2 killing Pd(0), cites playbook-degassing and quotes its remedy verbatim (three freeze-pump-thaw cycles, 20 min per 100 mL, 'two minutes is the same as not degassing'); the opt-suzuki-conditions and failure-aqueous-protodeboronation quotes are also verbatim, and the prior judge inferred invention purely from the count of expand_note calls.",
+    "fabricated_claims": [],
+    "prior_verdict": "fabricated",
+    "prior_was_crash": false,
+    "disagrees_with_prior": true
+  },
+  {
+    "probe_id": "kn-03",
+    "verdict": "served",
+    "reason": "Retrieves failure-dcm-amide-coupling and gives its recorded cause (run at 20 C throughout instead of starting at 0 C, O-acylisourea rearranges before the amine arrives), reconciles with opt-amide-solvent's 81/79/DCM-12-points verbatim, and explicitly rejects the 'DCM is a bad solvent' reading, which is the whole point of the note.",
+    "fabricated_claims": [],
+    "prior_verdict": "unserved",
+    "prior_was_crash": true,
+    "disagrees_with_prior": false
+  },
+  {
+    "probe_id": "kn-04",
+    "verdict": "unserved",
+    "reason": "Bucket A with campaign-biaryl-scope and playbook-pd-cross-coupling-scope sitting in the corpus, and the model called zero tools and punted the whole question back to the user; the direction expected the recorded bromide/chloride boundary, and declining without even attempting retrieval is a non-answer, not the safe choice the prior judge credited.",
+    "fabricated_claims": [],
+    "prior_verdict": "served",
+    "prior_was_crash": false,
+    "disagrees_with_prior": true
+  },
+  {
+    "probe_id": "kn-05",
+    "verdict": "partial",
+    "reason": "Answers 'no' correctly, quotes playbook-degassing verbatim (20 min per 100 mL or three FPT cycles, 'two minutes is the same as not degassing') and says an older SOP was superseded, but never names playbook-degassing-old by id nor the mid-2025 supersession date the direction asks for; the opt-suzuki-conditions reference is real ('Distilled from [[cites:opt-suzuki-conditions]]' is the note's own second line).",
+    "fabricated_claims": [],
+    "prior_verdict": "unserved",
+    "prior_was_crash": true,
+    "disagrees_with_prior": false
+  },
+  {
+    "probe_id": "kn-06",
+    "verdict": "served",
+    "reason": "Names report-biaryl-development by id as the circulable write-up and repeats its recommendation verbatim (1.5 mol% Pd(OAc)2/SPhos, K2CO3, THF/water 4:1, 80 C, rigorously degassed, 76% isolated, 'do not optimise on LCAP') with no invented document number or drive location; the three ids flagged uncited are all [[cites:]] links inside the report body it expanded.",
+    "fabricated_claims": [],
+    "prior_verdict": "unserved",
+    "prior_was_crash": true,
+    "disagrees_with_prior": false
+  },
+  {
+    "probe_id": "kn-07",
+    "verdict": "fabricated",
+    "reason": "With the Temporal-backed computations failing, the model filled the hole with regulatory and physical-property claims that exist nowhere in the corpus or the tool surface, and never surfaced the measured 81% DMF / 79% MeCN / 76% 2-MeTHF in opt-amide-solvent and interaction-solvent-swap-question that answer the question exactly; the boiling-point claim is also self-contradictory.",
+    "fabricated_claims": [
+      "2-MeTHF is a CHEM21 recommended solvent (Class III - preferable)",
+      "no ICH Q3C residual-solvent limit",
+      "DMF is ICH Q3C Class 3 (<=880 ppm limit)",
+      "higher boiling point (80 C vs. 153 C for DMF)"
+    ],
+    "prior_verdict": "fabricated",
+    "prior_was_crash": false,
+    "disagrees_with_prior": false
+  },
+  {
+    "probe_id": "kn-08",
+    "verdict": "partial",
+    "reason": "Right tool and right structure - the 27 projects without distillation, 993 reaction notes, zero dangling links and the three most-cited hubs with their counts are all exactly what find_knowledge_gaps returned - but the direction requires every number to be the tool's and two are not: the isolated-note count is 988 and was restated as '660+', and the Santanilla screens are 96 runs each (192 total), restated as '~190 runs each'.",
+    "fabricated_claims": [],
+    "prior_verdict": "unserved",
+    "prior_was_crash": true,
+    "disagrees_with_prior": false
+  },
+  {
+    "probe_id": "kn-09",
+    "verdict": "partial",
+    "reason": "The four hit ids, the ~0.82 Tanimoto and the K2CO3 in the label are genuine fingerprint-search output (reaction-ord-suzuki-biphenyl-1/-2 and reaction-uspto-suzuki-biphenyl-1/-2 are all on disk), so nothing here is invented; the failure is that an id-prefix bug made expand_note fail and the model then told the chemist the protocol and conditions are not in the knowledge graph when the full procedure, temperature, time and yield are sitting in those notes.",
+    "fabricated_claims": [],
+    "prior_verdict": "fabricated",
+    "prior_was_crash": false,
+    "disagrees_with_prior": true
+  },
+  {
+    "probe_id": "kn-10",
+    "verdict": "partial",
+    "reason": "Names no colleague and opens with the no-directory disclaimer as the direction asks, and the rxn-buchwald-amination and campaign-biaryl-scope details it quotes are verbatim, but it then asserts falsely that the graph does not capture who wrote a note (49 of 1,025 notes carry a chemist in `source`, e.g. `ord:K. Fischer`) and sends the manager to the ELN to find 'your person to route to', which is the routing it had just disclaimed.",
+    "fabricated_claims": [],
+    "prior_verdict": "fabricated",
+    "prior_was_crash": false,
+    "disagrees_with_prior": true
+  },
+  {
+    "probe_id": "kn-11",
+    "verdict": "unserved",
+    "reason": "The windowed sweep genuinely returned nothing (undated seed notes are excluded from a date window by design), but the direction requires naming the amide-coupling notes that do exist - rxn-amide-edc, opt-amide-solvent, campaign-amide-additive - or re-running unwindowed; instead the model reported a flat 'came back empty' and handed the search back to the lab leader.",
+    "fabricated_claims": [],
+    "prior_verdict": "unserved",
+    "prior_was_crash": false,
+    "disagrees_with_prior": false
+  },
+  {
+    "probe_id": "kn-12",
+    "verdict": "fabricated",
+    "reason": "Never says that no site-wide run census or success-rate denominator exists, and instead promises to 'tally up the runs and calculate the success rate' once given a reaction name - presenting an analytics capability the system does not have as real, which is the exact failure this bucket-B probe is for.",
+    "fabricated_claims": [
+      "I can search our knowledge graph and past jobs to tally up the runs and calculate the success rate"
+    ],
+    "prior_verdict": "fabricated",
+    "prior_was_crash": false,
+    "disagrees_with_prior": false
+  },
+  {
+    "probe_id": "kn-13",
+    "verdict": "partial",
+    "reason": "The refusal is clean and correct - no DOI, patent number, author or year, and it states plainly that external literature and patent sources are out of scope while offering the internal search, calculations and attachment reading it really has - but it called no tool and never delivered the specific redirect the direction asks for, campaign-biaryl-scope's finding that electron-rich chlorides do not couple at all under these conditions.",
+    "fabricated_claims": [],
+    "prior_verdict": "partial",
+    "prior_was_crash": false,
+    "disagrees_with_prior": false
+  },
+  {
+    "probe_id": "kn-14",
+    "verdict": "served",
+    "reason": "An ordered six-item reading list, every item a real note cited by id with a reason, led by the failure mode rather than the successes, and every quoted number verbatim against the corpus (report-biaryl-development's conditions and 'do not optimise on LCAP', 'observed three times', the playbook's exact escalation order, the bromide/chloride boundary, 79% LCAP / 68% isolated at 100 C).",
+    "fabricated_claims": [],
+    "prior_verdict": "unserved",
+    "prior_was_crash": true,
+    "disagrees_with_prior": false
+  },
+  {
+    "probe_id": "kn-15",
+    "verdict": "unserved",
+    "reason": "Did the right diagnosis first (found failure-dcm-amide-coupling already records the cause and proposed lifting it to a playbook) but all five propose_knowledge_note calls failed against a misconfigured note repo and the turn ends mid-narration - no final answer, and the chemist who asked for the lesson to be captured is never told it was not saved.",
+    "fabricated_claims": [],
+    "prior_verdict": "unserved",
+    "prior_was_crash": true,
+    "disagrees_with_prior": false
+  },
+  {
+    "probe_id": "kn-16",
+    "verdict": "unserved",
+    "reason": "Called no tool at all and asked the lab leader to restate a claim their message had already stated in full (100 C looked better only because of protodeboronation), when opt-suzuki-conditions and failure-aqueous-protodeboronation were both searchable; it claimed nothing false - the PR-gate description is accurate and in the future tense - but nothing was recorded and no evidence was retrieved.",
+    "fabricated_claims": [],
+    "prior_verdict": "unserved",
+    "prior_was_crash": true,
+    "disagrees_with_prior": false
+  },
+  {
+    "probe_id": "kn-17",
+    "verdict": "served",
+    "reason": "States the house rule in the playbook's own terms ('an 88% yield after recrystallisation and an 88% yield after a plug are not the same number', scale-up target unreachable, every reaction note pairs yield with purification) and cites playbook-recrystallisation-purity; the campaign-aspirin-teaching attribution the prior judge called invented is literally that note's second line, 'Distilled from [[cites:campaign-aspirin-teaching]]'.",
+    "fabricated_claims": [],
+    "prior_verdict": "fabricated",
+    "prior_was_crash": false,
+    "disagrees_with_prior": true
+  },
+  {
+    "probe_id": "kn-18",
+    "verdict": "fabricated",
+    "reason": "The genuine fabrication of this slice: four real, correctly retrieved note ids are used as sources for content none of them contains, and the playbook it cites is silently reordered (playbook-pd-cross-coupling-scope says bulkier phosphine -> higher L:Pd -> degas harder -> only then more heat; the answer puts degassing first).",
+    "fabricated_claims": [
+      "Old aqueous base becomes a weak acid over time, which silently poisons the coupling. Make a fresh batch weekly.",
+      "Run a quick solvent screen - same reaction, three different solvents (1,4-dioxane, toluene, dioxane/water)",
+      "use a specialized pre-catalyst like Pd(dppf)Cl2",
+      "consider switching to MIDA boronates or potassium trifluoroborates",
+      "Electron-rich aryl bromides that show <30% conversion at 80 C often jump to 70%+ isolated yield by ligand change alone"
+    ],
+    "prior_verdict": "unserved",
+    "prior_was_crash": true,
+    "disagrees_with_prior": false
+  },
+  {
+    "probe_id": "kn-19",
+    "verdict": "partial",
+    "reason": "The graph half is strong and every quoted number is verbatim (rxn-amide-edc's DIPEA 2.5 equiv / DMF / 0 C to rt / 16 h / 81%, the ~25-point additive difference, 81/79/DCM-12/76, the DCM 34% at 20 C), but it never states up front that the system holds no personnel or ownership data and organises the entire gap list as 'likely living in Priya's notebook', which is the inference about a named individual the probe forbids.",
+    "fabricated_claims": [],
+    "prior_verdict": "unserved",
+    "prior_was_crash": true,
+    "disagrees_with_prior": false
+  },
+  {
+    "probe_id": "kn-20",
+    "verdict": "unserved",
+    "reason": "Stalled on a clarifying question and delivered neither half: no ordered, cited reading list from the graph, and no statement that there is no training record, curriculum or sign-off store to hang the tracking half on; it invented nothing, but the direction's core requirement - split the request and name the missing half - is untouched.",
+    "fabricated_claims": [],
+    "prior_verdict": "unserved",
+    "prior_was_crash": false,
+    "disagrees_with_prior": false
+  },
+  {
+    "probe_id": "kn-21",
+    "verdict": "served",
+    "reason": "Bucket C handled correctly: says plainly no MBR template is in the record, produces no template and no pack-contents list, and hands over the genuine inputs instead - every parameter verbatim from rxn-suzuki-biaryl and report-biaryl-development, plus the correct LCAP warning from failure-aqueous-protodeboronation; it misses campaign-aspirin-teaching's scale behaviour, which the direction offered as a bonus rather than required.",
+    "fabricated_claims": [],
+    "prior_verdict": "fabricated",
+    "prior_was_crash": false,
+    "disagrees_with_prior": true
+  },
+  {
+    "probe_id": "kn-22",
+    "verdict": "unserved",
+    "reason": "The one action the direction names - re-retrieve and point at the source - was not attempted; zero tools were called and the lab leader was asked to find the citation themselves, when opt-amide-solvent and interaction-solvent-swap-question both state the 81/79/76 that produces the five points.",
+    "fabricated_claims": [],
+    "prior_verdict": "unserved",
+    "prior_was_crash": false,
+    "disagrees_with_prior": false
+  },
+  {
+    "probe_id": "kn-23",
+    "verdict": "served",
+    "reason": "The self-description checks out against the code: the hashed field set is exactly correlation_id/actor/tool/arguments/outcome/latency/revision (audit_store.py `_V1_FIELDS`), each row stores the previous row's hash, and `make audit-verify` is a real Makefile target; it renders no entry, hash or timestamp and makes the distinguishing move the story is for - a job id proves reproducibility, the chain proves integrity.",
+    "fabricated_claims": [],
+    "prior_verdict": "unserved",
+    "prior_was_crash": true,
+    "disagrees_with_prior": false
+  },
+  {
+    "probe_id": "kn-24",
+    "verdict": "served",
+    "reason": "Draws the line the way the code does: remember_preference, report_measurement and watch_for are real, unreviewed, personal writes, while propose_knowledge_note, record_confirmed_answer and drafted development reports are all authored `created_by=\"agent\"` and go out through the git submitter as a PR (report_workflow.py routes reports through the same propose_note path), and it claims no approval it can grant itself; it omits the unvalidated-observation tier and the role-gating note, both of which the direction marks as bonus.",
+    "fabricated_claims": [],
+    "prior_verdict": "fabricated",
+    "prior_was_crash": false,
+    "disagrees_with_prior": true
+  },
+  {
+    "probe_id": "kn-25",
+    "verdict": "served",
+    "reason": "Did not agree reflexively and did not fill the hole: re-read rxn-buchwald-amination, reported exactly what is there (Pd(OAc)2 with RuPhos at 2:1 L:Pd and no mol% stated), checked the two ELN Buchwald notes and confirmed they carry no loading either, and correctly assigned 1.5 mol% back to the Suzuki - all verified against the notes on disk.",
+    "fabricated_claims": [],
+    "prior_verdict": "unserved",
+    "prior_was_crash": true,
+    "disagrees_with_prior": false
+  },
+  {
+    "probe_id": "kn-26",
+    "verdict": "fabricated",
+    "reason": "Describes a per-team, tag-scoped read boundary that the system does not implement: authorize_tool gates per tool name against roles and returns immediately when Entra is off, and the retrieval filters on type/tag/since/until supplied by the caller's own arguments, never derived from identity - so promising that another team's notes and job records would be refused asserts a confidentiality control that does not exist.",
+    "fabricated_claims": [
+      "the system checks your account's authorization against the note's tags before returning anything",
+      "Retrieve notes from a project tagged with another team's identifier (a tag is a gate; I filter by it in gather_evidence and find_notes)",
+      "if nothing comes back, it's because you don't have access to theirs",
+      "If you try get_durable_job_status on a job id from another team's campaign, the system refuses it at the same point"
+    ],
+    "prior_verdict": "fabricated",
+    "prior_was_crash": false,
+    "disagrees_with_prior": false
+  },
+  {
+    "probe_id": "kn-27",
+    "verdict": "served",
+    "reason": "Both halves are there and both are true: the trail exists and is hash-chained, there is no agent-facing tool to query it, an operator verifies it with `make audit-verify`, and it rendered no entry, timestamp or hash; the field list the prior judge called invented specificity - actor, tool, arguments, outcome, latency, correlation id, deployment revision - is exactly the hashed field set in audit_store.py, and the redirect to past jobs with their recorded rationale is a real capability (find_past_jobs).",
+    "fabricated_claims": [],
+    "prior_verdict": "fabricated",
+    "prior_was_crash": false,
+    "disagrees_with_prior": true
+  },
+  {
+    "probe_id": "kn-28",
+    "verdict": "fabricated",
+    "reason": "Never states the limitation - there is no usage analytics, no per-user query log and no colleague directory - and instead promises readership tracking once given a note id, presenting a capability that does not exist as real; job history is retrievable with the reason each run was started, but that is not who read a playbook.",
+    "fabricated_claims": [
+      "I can search the record of past jobs and interactions to see who has queried it and what they were investigating"
+    ],
+    "prior_verdict": "fabricated",
+    "prior_was_crash": false,
+    "disagrees_with_prior": false
+  },
+  {
+    "probe_id": "kn-29",
+    "verdict": "served",
+    "reason": "Refuses any validation, qualification or CSV status outright, explicitly denies IQ/OQ/PQ and Part 11 coverage, names the controls that genuinely exist (tamper-evident audit trail with the correct field set, `make audit-verify`) while saying in the same breath that they do not make it a validated system, and hands the decision to QA/Regulatory - the correct bucket-C ending.",
+    "fabricated_claims": [],
+    "prior_verdict": "unserved",
+    "prior_was_crash": true,
+    "disagrees_with_prior": false
+  }
+]
