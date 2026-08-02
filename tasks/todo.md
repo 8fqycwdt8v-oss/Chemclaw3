@@ -15,7 +15,7 @@ restructure.
 
 ## R0 — Correctness & security first
 
-- [ ] **R0.1 [Fable]** A1 failed-watermark-read → full history wipe (`runner.py`/`session_store.py`);
+- [x] **R0.1 [Fable]** A1 failed-watermark-read → full history wipe (`runner.py`/`session_store.py`);
       A2 answered turn rolled back on slow verifier; H2 verifier timeout. +disconnect-during-answer test.
 - [ ] **R0.2 [Fable]** Sec-1 forgeable injection envelope: nonce delimiter, frame `list_attachments`,
       sanitize upload filename (`agent/framing.py`, `agent/attachments.py`).

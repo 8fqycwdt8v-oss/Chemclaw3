@@ -691,6 +691,13 @@ class LlmSettings(BaseSettings):
     # behavior change.
     verifier_enabled: bool = False
     verifier_confidence_threshold: float = Field(default=0.7, ge=0, le=1)
+    # The judge call's own deadline. It is the one awaited call between the model's last token and
+    # the AnswerEvent with no timeout beneath it, so a stalled judge endpoint was billed to
+    # `service_turn_timeout_seconds` (600 s) — and a teardown landing in that stall is what rolled
+    # back finished turns. Half `llm_timeout_seconds`' default and far under the turn deadline: a
+    # verdict is one cheap structured call, and on expiry the verifier degrades to the offline
+    # deterministic citation gate rather than holding the finished answer hostage.
+    verifier_timeout_seconds: float = Field(default=30.0, gt=0)
     # The ungrounded-parameter scan over a drafted answer: shapes a chemist would read as
     # specification — a flow rate, a gradient table, a wavelength, a back pressure, a column brand,
     # an ICH limit, a polymorph form — marked for review when no tool in the turn produced them.

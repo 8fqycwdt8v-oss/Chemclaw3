@@ -344,3 +344,37 @@ def test_a_verifier_that_cannot_be_built_still_gets_the_offline_gate(
     result = asyncio.run(verify_answer("Yield was 90% [[reaction-x]].", [_chunk("reaction-y")]))
     assert result.confidence == 0.0  # the offline gate caught the fabricated citation
     assert result.unsupported[0].cited_note_id == "reaction-x"
+
+
+def test_a_stalled_judge_degrades_to_the_deterministic_gate(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A judge that hangs costs the score, never the turn — bounded by the verifier's own budget.
+
+    The judge call had no timeout of its own, so a stalled endpoint was charged to the front
+    door's whole-turn deadline (`service_turn_timeout_seconds`, minutes): the finished answer sat
+    undelivered behind a scoring aid, and the teardown that eventually arrived rolled the turn
+    back. On expiry the verdict must be the same one an *unreachable* judge produces — the
+    deterministic citation gate's — because a slow judge and a down judge are the same event to
+    the chemist waiting.
+
+    The outer `wait_for` is the mutation guard: without `asyncio.timeout` around the judge call
+    the stall escapes `verify_answer` entirely and this test fails as a `TimeoutError` rather
+    than hanging the suite.
+    """
+    monkeypatch.setattr(settings, "verifier_enabled", True)
+    monkeypatch.setattr(settings, "verifier_timeout_seconds", 0.05)
+
+    class _Stalled:
+        async def get_response(self, *_args: object, **_kwargs: object) -> object:
+            await asyncio.sleep(3600)
+            raise AssertionError("unreachable")  # pragma: no cover
+
+    async def _bounded() -> VerificationResult:
+        return await asyncio.wait_for(
+            verify_answer("A general remark with no citation.", [], client=_Stalled()), timeout=5
+        )
+
+    result = asyncio.run(_bounded())
+    assert result.confidence == 0.0
+    assert result.unsupported, "a stalled judge must route the answer to a human, not certify it"

@@ -246,17 +246,25 @@ class PostgresHistoryProvider(HistoryProvider):
                 row = await cur.fetchone()
         return None if row is None or row[0] is None else int(row[0])
 
-    async def rollback_to(self, session_id: str, watermark: int | None) -> int:
+    async def rollback_to(self, session_id: str, watermark: int) -> int:
         """Delete everything stored for `session_id` after `watermark`; return how many rows went.
 
         The durable half of the turn rollback in `chemclaw.api.runner`: that only restored the
         in-process session state, which under this provider is not where the messages live — they
         are already committed, so a half-written turn survived the rollback that was supposed to
         discard it.
+
+        `watermark` is deliberately non-optional. It used to be `int | None` with `None` treated
+        as 0, and that made one value mean two opposite things: "this session has no history yet"
+        (where deleting above 0 is correct) and "the pre-turn read failed" (where the only safe
+        delete is none at all). The runner's failed-read path left its watermark `None`, so a
+        disconnect after a store hiccup ran `DELETE … id > 0` — the whole conversation, not the
+        turn. A caller that genuinely means "the session was empty" now has to *decide* that and
+        pass `0`; a caller that could not read the watermark has nothing to pass and must not call.
         """
         async with self._connection() as conn:
             async with conn.cursor() as cur:
-                await cur.execute(_DELETE_AFTER, (session_id, watermark or 0))
+                await cur.execute(_DELETE_AFTER, (session_id, watermark))
                 deleted = cur.rowcount
             await conn.commit()
         return max(deleted, 0)

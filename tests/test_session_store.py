@@ -64,7 +64,7 @@ def test_an_orphaned_tool_call_is_repaired_on_read() -> None:
     async def _run() -> None:
         provider = await _provider_or_skip()
         session_id = "sess-orphan-repair"
-        await provider.rollback_to(session_id, None)  # a clean slate for a rerun
+        await provider.rollback_to(session_id, 0)  # a clean slate for a rerun
         await provider.save_messages(
             session_id,
             [
@@ -104,7 +104,7 @@ def test_repair_rewrites_the_right_rows_when_an_earlier_one_is_dropped() -> None
     async def _run() -> None:
         provider = await _provider_or_skip()
         session_id = "sess-orphan-shift"
-        await provider.rollback_to(session_id, None)
+        await provider.rollback_to(session_id, 0)
         await provider.save_messages(
             session_id,
             [
@@ -146,7 +146,7 @@ def test_a_matched_pair_is_never_touched_by_the_repair() -> None:
     async def _run() -> None:
         provider = await _provider_or_skip()
         session_id = "sess-orphan-healthy"
-        await provider.rollback_to(session_id, None)
+        await provider.rollback_to(session_id, 0)
         await provider.save_messages(
             session_id,
             [
@@ -178,7 +178,7 @@ def test_rollback_deletes_only_what_the_turn_wrote() -> None:
     async def _run() -> None:
         provider = await _provider_or_skip()
         session_id = "sess-rollback"
-        await provider.rollback_to(session_id, None)
+        await provider.rollback_to(session_id, 0)
         await provider.save_messages(session_id, [Message(role="user", contents=["turn one"])])
 
         watermark = await provider.latest_message_id(session_id)
@@ -193,7 +193,13 @@ def test_rollback_deletes_only_what_the_turn_wrote() -> None:
 
 
 def test_watermark_is_none_for_a_session_with_no_history() -> None:
-    """A first turn has nothing to roll back to, and rolling back to `None` clears the session."""
+    """A first turn reads no watermark; the caller decides that means 0, the store never guesses.
+
+    `None` here is the store saying "no history yet" — and only that. The runner maps it to a
+    watermark of 0 itself, because `rollback_to` deliberately no longer accepts `None`: the same
+    value used to also mean "the read failed", and defaulting it to 0 turned a failed read plus a
+    disconnect into a full history wipe.
+    """
 
     async def _run() -> None:
         provider = await _provider_or_skip()
