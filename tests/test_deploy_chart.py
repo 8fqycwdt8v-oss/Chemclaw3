@@ -915,7 +915,11 @@ def test_the_front_door_is_launched_with_transport_bounds() -> None:
         ("CHEMCLAW_SERVICE_PORT", "--port", "service_port"),
         ("CHEMCLAW_SERVICE_MAX_CONNECTIONS", "--limit-concurrency", "service_max_connections"),
         ("CHEMCLAW_SERVICE_KEEPALIVE_SECONDS", "--timeout-keep-alive", "service_keepalive_seconds"),
-        ("CHEMCLAW_SERVICE_MAX_HEADER_BYTES", "--h11-max-incomplete-event-size", "service_max_header_bytes"),
+        (
+            "CHEMCLAW_SERVICE_MAX_HEADER_BYTES",
+            "--h11-max-incomplete-event-size",
+            "service_max_header_bytes",
+        ),
     ]
 
     from chemclaw.core.config import settings
@@ -933,7 +937,8 @@ def test_the_front_door_is_launched_with_transport_bounds() -> None:
         # Compare with the Python default
         python_value = getattr(settings, field_name)
         assert bash_value == python_value, (
-            f"{env_var} bash fallback {bash_value} disagrees with settings.{field_name} {python_value}"
+            f"{env_var} bash fallback {bash_value} disagrees with "
+            f"settings.{field_name} {python_value}"
         )
 
     assert settings.service_max_connections > settings.service_max_concurrent_turns, (

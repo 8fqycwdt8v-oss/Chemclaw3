@@ -224,7 +224,7 @@ _COUNTER_LABELS: dict[str, tuple[str, ...]] = {
     "chemclaw_job_runtime_seconds_total": ("connector",),
     # Two sources of conflict, different causes and different operator responses. `process` is a
     # same-process double-submit (impossible with the LRU's single-session cardinality guarantee,
-    # but tracked for debugging). `durable` is a cross-replica race on the shared session-turn claim.
+    # but tracked for debugging). `durable` is a cross-replica race on the shared turn claim.
     "chemclaw_turns_conflict_total": ("scope",),
 }
 
