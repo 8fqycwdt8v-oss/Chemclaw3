@@ -8,6 +8,7 @@ fails — which is the whole point of the KM-13 gate. The gold cases and their e
 live in `data/evals/cases/retrieval-*.md`; this file loads those exact cases and scores them.
 """
 
+import asyncio
 import shutil
 from pathlib import Path
 from typing import Any
@@ -155,6 +156,40 @@ def test_the_metric_refuses_rather_than_mislabel_a_different_retrieval_path(
     monkeypatch.setattr(settings, "data_sources", "graph,vector")
     with pytest.raises(MetricError, match="active source"):
         retrieval_recall(case)
+
+
+def test_metric_scores_correctly_from_inside_a_running_event_loop(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A metric that drives live retrieval must not require its caller to be a plain sync frame.
+
+    `_retrieved_ids` used to reach the retriever with a bare `asyncio.run`, which raises
+    `RuntimeError: asyncio.run() cannot be called from a running event loop` the moment a metric is
+    scored from a coroutine — exactly the shape `chemclaw.durable.eval_drift` (66% async) or any
+    future async surface can take if it scores a case inline rather than wrapping `run_eval` in
+    `asyncio.to_thread` (R7). Scoring here from inside `asyncio.run(...)` reproduces that shape
+    directly and must still return the same, correct number.
+
+    A fresh corpus copy (not the shared fixture corpus) guarantees a live retrieval actually runs
+    inside the loop rather than serving a memo hit some other, already-run test left behind.
+    """
+    corpus = tmp_path / "corpus"
+    shutil.copytree(_CORPUS, corpus)
+    monkeypatch.setattr(settings, "eval_retrieval_corpus_dir", str(corpus))
+    monkeypatch.setattr(settings, "retrieval_recall_min", 0.75)
+    cases = {c.id: c for c in load_eval_cases(settings.eval_case_dir)}
+    case = cases["retrieval-suzuki"]
+    exp_recall, exp_precision, _ = _EXPECTED["retrieval-suzuki"]
+
+    async def _score_inside_a_running_loop() -> tuple[float, float]:
+        recall = get_metric("retrieval_recall")(case)
+        precision = get_metric("retrieval_precision")(case)
+        return recall.value, precision.value
+
+    recall_value, precision_value = asyncio.run(_score_inside_a_running_loop())
+
+    assert recall_value == pytest.approx(exp_recall)
+    assert precision_value == pytest.approx(exp_precision)
 
 
 def test_the_shipped_default_is_still_scored() -> None:

@@ -235,6 +235,12 @@ __marimo__/
 !.vscode/launch.json
 !.vscode/extensions.json
 
+# Agent tooling scratch. Claude Code checks out a throwaway worktree per background
+# agent here; they are transient copies of this repo, never source. Only `worktrees/`
+# is ignored, so a future `.claude/skills/<name>/SKILL.md` (which CLAUDE.md points at
+# for recurring patterns) is still committable.
+.claude/worktrees/
+
 # System files
 .DS_Store
 Thumbs.db

@@ -36,7 +36,7 @@ import yaml
 from pydantic import ValidationError
 
 from chemclaw.agent.tool_registry import CapabilityTool
-from chemclaw.connectors.identity import auth_for, stamp_turn_identity
+from chemclaw.connectors.identity import auth_for, turn_identity_hook
 from chemclaw.connectors.jobs import build_job_tool
 from chemclaw.connectors.manifest import (
     ConnectorManifest,
@@ -47,6 +47,7 @@ from chemclaw.connectors.manifest import (
 )
 from chemclaw.connectors.transport import DegradingHttpConnector, DegradingStdioConnector
 from chemclaw.core.config import settings
+from chemclaw.core.errors import ChemclawError
 from chemclaw.core.metrics_bridge import record_metric
 
 logger = logging.getLogger(__name__)
@@ -67,13 +68,16 @@ _CONNECT_TIMEOUT_SECONDS = 5.0
 ConnectorMcpTool = DegradingStdioConnector | DegradingHttpConnector
 
 
-class ConnectorError(ValueError):
+class ConnectorError(ChemclawError):
     """A connector bundle is malformed, or an enabled connector does not exist.
 
-    A `ValueError` subclass because this is a configuration error surfaced at startup — the same
-    class the config validators and `chemclaw.ingest.sources.registry` raise, so one `except
-    ValueError` at an entry
-    point catches every "this deployment is misconfigured" failure.
+    A `ChemclawError` (so a `ValueError`) because this is a configuration error surfaced at
+    startup — the same class the config validators and `chemclaw.ingest.sources.registry` raise,
+    so one `except ValueError` at an entry point catches every "this deployment is misconfigured"
+    failure. It is also registered in `chemclaw.durable.publish._BAD_DATA_TYPES` by its own class
+    name, because Temporal matches non-retryable error types by exact name, not isinstance — a
+    template step that names an unknown job (`chemclaw.durable.template_activities`) must fail on
+    its first attempt, not burn the transient-retry budget on a job that will never exist.
     """
 
 
@@ -180,14 +184,62 @@ def skills_dirs() -> list[str]:
     return dirs
 
 
-def _endpoint_url(manifest: ConnectorManifest, endpoint: HttpEndpoint) -> str:
+def _endpoint_url(connector: str, endpoint: HttpEndpoint) -> str:
     """The endpoint URL, after any per-deployment override for this connector.
 
     A manifest ships a working dev default (a loopback port), but a cluster's address belongs to
     the deployment, not to a file in the repo. `connector_urls` is that override, so Helm points
     the front door at an in-cluster Service without patching a bundle.
     """
-    return settings.connector_urls.get(manifest.name, endpoint.url)
+    return settings.connector_urls.get(connector, endpoint.url)
+
+
+def connector_http_client(connector: str, endpoint: HttpEndpoint) -> httpx.AsyncClient:
+    """The HTTP client one connector endpoint is reached with — the single definition of it.
+
+    Public because a test that means to prove something about how a connector is reached has to
+    exercise *this* client rather than a hand-rolled lookalike; three transport tests used to build
+    their own and were free to drift from what a deployment actually runs.
+
+    One client carries both halves of what travels with a call (`chemclaw.connectors.identity`):
+    our own credential as `auth`, so it is present on the MCP handshake too, and the turn's identity
+    as a request hook, which is the only place that can see the turn's ambient context — MAF's
+    `header_provider` is invoked in the calling task while the request is issued by the MCP
+    transport's writer task, so its headers never land.
+
+    **Redirects are not followed, and that is a security property rather than a tuning choice.**
+    An httpx request hook runs on every hop and httpx carries the previous request's headers into
+    the redirected one, stripping `Authorization` alone — so a connector (or anything that can bind
+    its Service port; all shipped manifests declare `auth: mode: none`) could answer the MCP POST
+    with a `302` toward an origin it controls and collect the caller's Entra object id and full role
+    set once per turn. MCP streamable-HTTP needs no redirect for any real flow:
+    `FastMCP.streamable_http_app` serves the endpoint as an exact Starlette `Route`, so neither the
+    per-bundle Service address nor the dev composite's `/<name>/mcp` mount ever answers 3xx — proven
+    by the transport tests, which complete the handshake and a tool call over this client.
+    `turn_identity_hook` strips the headers on a foreign origin as the second layer.
+
+    Args:
+        connector: The bundle's name, for the deployment URL override and the credential error.
+        endpoint: The manifest's HTTP endpoint declaration.
+
+    Returns:
+        A client the caller owns; `DegradingHttpConnector.close` is what releases it.
+    """
+    return httpx.AsyncClient(
+        auth=auth_for(endpoint.auth, connector),
+        follow_redirects=False,
+        event_hooks={"request": [turn_identity_hook(_endpoint_url(connector, endpoint))]},
+        # Without this, httpx applies its own 5 s default to *every* phase, and the manifest's
+        # `request_timeout` — which this module's docstring credits with "keeping an unreachable
+        # host from hanging a turn" — did the opposite. Measured against a real server: an 8 s tool
+        # call had its HTTP stream torn down at 5 s, the MCP response then never arrived, and the
+        # caller blocked for the full `request_timeout` (60 s for calc, 120 s for bo) before
+        # surfacing an opaque failure — holding an admission permit and an agent lease the whole
+        # time. A tool slower than 5 s is not exotic here: an uncached `predict_pka` runs xTB
+        # inline. `request_timeout` now bounds the read, which is the phase a slow tool occupies;
+        # connect stays short so a dead host still degrades fast.
+        timeout=httpx.Timeout(endpoint.request_timeout, connect=_CONNECT_TIMEOUT_SECONDS),
+    )
 
 
 def health_url(manifest: ConnectorManifest) -> str | None:
@@ -218,7 +270,7 @@ def health_url(manifest: ConnectorManifest) -> str | None:
     endpoint = manifest.endpoint
     if not isinstance(endpoint, HttpEndpoint) or endpoint.health_url is None:
         return None
-    effective = _endpoint_url(manifest, endpoint)
+    effective = _endpoint_url(manifest.name, endpoint)
     if effective == endpoint.url:
         return endpoint.health_url
     shared = len(os.path.commonprefix([endpoint.url, endpoint.health_url]))
@@ -241,36 +293,13 @@ def _mcp_tool(manifest: ConnectorManifest, endpoint: Endpoint) -> ConnectorMcpTo
     opens each MCP context for the duration of a turn and tears it down after.
     """
     if isinstance(endpoint, HttpEndpoint):
-        # One client carries both halves of what travels with a call (`connectors.identity`):
-        # our own credential as `auth`, so it is present on the MCP handshake too, and the
-        # turn's identity as a request hook, which is the only place that can see the turn's
-        # ambient context — MAF's `header_provider` is invoked in the calling task while the
-        # request is issued by the MCP transport's writer task, so its headers never land.
         return DegradingHttpConnector(
             name=manifest.name,
-            url=_endpoint_url(manifest, endpoint),
+            url=_endpoint_url(manifest.name, endpoint),
             allowed_tools=endpoint.tools,
             request_timeout=endpoint.request_timeout,
             load_prompts=False,
-            http_client=httpx.AsyncClient(
-                auth=auth_for(endpoint.auth, manifest.name),
-                follow_redirects=True,
-                event_hooks={"request": [stamp_turn_identity]},
-                # Without this, httpx applies its own 5 s default to *every* phase, and the
-                # manifest's `request_timeout` — which this module's docstring credits with
-                # "keeping an unreachable host from hanging a turn" — did the opposite. Measured
-                # against a real server: an 8 s tool call had its HTTP stream torn down at 5 s, the
-                # MCP response then never arrived, and the caller blocked for the full
-                # `request_timeout` (60 s for calc, 120 s for bo) before surfacing an opaque
-                # failure — holding an admission permit and an agent lease the whole time. A tool
-                # slower than 5 s is not exotic here: an uncached `predict_pka` runs xTB inline.
-                # `request_timeout` now bounds the read, which is the phase a slow tool occupies;
-                # connect stays short so a dead host still degrades fast.
-                timeout=httpx.Timeout(
-                    endpoint.request_timeout,
-                    connect=_CONNECT_TIMEOUT_SECONDS,
-                ),
-            ),
+            http_client=connector_http_client(manifest.name, endpoint),
         )
     if isinstance(endpoint, StdioEndpoint):
         # No identity headers: a subprocess of our own process, under our own identity, with no

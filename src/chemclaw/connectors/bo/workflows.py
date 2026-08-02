@@ -60,17 +60,24 @@ class BoCampaignWorkflow:
         """
         spec = CampaignSpec.model_validate(payload)
         timeout = timedelta(seconds=settings.bo_activity_timeout_seconds)
+        # Comfortably shorter than `timeout` (Conn-F2): without it, a worker that dies mid-round
+        # is only noticed at the full start-to-close budget, the same silently-killed-and-retried
+        # shape REV-3 fixed for calc's CREST jobs — up to `activity_max_attempts` restarts from
+        # zero, each paying the round's full cost again.
+        heartbeat_timeout = timedelta(seconds=settings.bo_activity_heartbeat_timeout_seconds)
 
         seed = await workflow.execute_activity(
             propose_initial,
             args=[spec.problem, spec.n_initial, spec.seed],
             start_to_close_timeout=timeout,
+            heartbeat_timeout=heartbeat_timeout,
             retry_policy=BAD_DATA_RETRY,
         )
         history: list[Observation] = await workflow.execute_activity(
             evaluate_candidates,
             args=[spec.objective_name, seed],
             start_to_close_timeout=timeout,
+            heartbeat_timeout=heartbeat_timeout,
             retry_policy=BAD_DATA_RETRY,
         )
 
@@ -83,12 +90,14 @@ class BoCampaignWorkflow:
                 propose_next,
                 args=[spec.problem, history, spec.batch, spec.seed],
                 start_to_close_timeout=timeout,
+                heartbeat_timeout=heartbeat_timeout,
                 retry_policy=BAD_DATA_RETRY,
             )
             history += await workflow.execute_activity(
                 evaluate_candidates,
                 args=[spec.objective_name, proposed],
                 start_to_close_timeout=timeout,
+                heartbeat_timeout=heartbeat_timeout,
                 retry_policy=BAD_DATA_RETRY,
             )
 

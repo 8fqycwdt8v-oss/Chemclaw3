@@ -26,7 +26,11 @@ they are unavailable and everything else works unchanged.
 
 **Security.** Same rule as `chemclaw.science.calc.xtb_cli` and for the same reason: argv list,
 `shell=False`, a fresh temporary directory, a scrubbed environment, a timeout, and no
-value that could be read as an option.
+value that could be read as an option. The run itself uses `xtb_cli.run_isolated` (Science-1):
+CREST forks worker subprocesses for its parallel metadynamics/optimization steps, so a naive
+`subprocess.run(timeout=...)` only ever killed the one PID it tracked on a timeout and left every
+forked worker running as an orphan, still writing into the tempdir this function has already torn
+down.
 """
 
 import os
@@ -41,7 +45,7 @@ from pydantic import BaseModel
 
 from chemclaw.core.config import settings
 from chemclaw.science.calc.structure import Structure
-from chemclaw.science.calc.xtb_cli import CliError, _from_xyz, _safe, _to_xyz
+from chemclaw.science.calc.xtb_cli import CliError, _from_xyz, _safe, _to_xyz, run_isolated
 
 # What to search for. Each is a different CREST run mode over the same machinery.
 # Searches over **one** molecule. Separate from the union below because the agent-facing
@@ -218,14 +222,8 @@ def run(
         (directory / "input.xyz").write_text(_to_xyz(structure))
         environment = _environment()
         try:
-            completed = subprocess.run(  # noqa: S603 — fixed argv, no shell, resolved path
-                argv,
-                cwd=directory,
-                env=environment,
-                capture_output=True,
-                text=True,
-                timeout=settings.crest_timeout_seconds,
-                check=False,
+            completed = run_isolated(
+                argv, cwd=directory, env=environment, timeout=settings.crest_timeout_seconds
             )
         except subprocess.TimeoutExpired as error:
             raise CliError(

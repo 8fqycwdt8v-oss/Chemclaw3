@@ -171,10 +171,21 @@ async def run_turn(
     # attach the gate — one predicate, so the two cannot disagree about a profile that overrides
     # the deployment's autonomy.
     plan_gated = gate_applies(get_profile(profile))
-    # Whether this turn produced its answer, which is the line between a turn that finished and one
-    # a disconnect or the wall-clock deadline cut short. Both are billed (the cost ledger reads it);
-    # only one of them got anything for the money, and only the other one has anything to roll back.
+    # Whether this turn produced its answer — the cost ledger's question ("did the user get an
+    # answer for the money"), and only that. It is deliberately *not* the rollback predicate:
+    # `answered` becomes true only after the verifier and any mid-turn resume have run, windows in
+    # which the exchange is already committed and paired, so gating the rollback on it deleted
+    # finished turns whose teardown merely landed in one of those windows. `run_complete` below is
+    # the rollback's predicate; the two questions have different right answers.
     answered = False
+    # Whether the last `agent.run` returned. That is the fact the rollback cares about: the
+    # rollback exists to discard a half-written exchange (an orphaned `tool_use` that would brick
+    # the session), and once `agent.run` has returned the history provider has committed a
+    # complete, paired exchange — there is nothing half-written left to undo, however much
+    # bookkeeping (loop-cap reporting, job-result waits, answer verification) still lies between
+    # here and the AnswerEvent. Cleared again for the mid-turn resume's second run, which can
+    # half-write exactly like the first.
+    run_complete = False
     answer_parts: list[str] = []
     # Metered across the turn's updates and booked once on teardown (even on failure — a failed
     # turn still spent tokens up to the point it broke, so its cost must count toward the next
@@ -233,10 +244,22 @@ async def run_turn(
     # rollback guard is off" is alertable — which is the property that lets an operator act before
     # a chemist finds a bricked session. (The cause was connect churn; that is fixed by pooling in
     # the previous commit. This is the part that must not depend on having fixed the cause.)
-    history_watermark: int | None = None
+    #
+    # `watermark_read` is what "the guard is off" means mechanically. It used to be encoded as the
+    # watermark staying `None`, which the store then treated as 0 — so the failure that was meant
+    # to disarm the guard instead armed it with the maximally destructive value, and a disconnect
+    # after a failed read deleted the session's *entire* history rather than this turn's rows. The
+    # two meanings of `None` ("no history yet" and "could not read") are now separate: an empty
+    # session reads as watermark 0 with the guard armed, and a failed read leaves the guard
+    # disarmed so the teardown skips the durable delete entirely and leans on the next read's
+    # `message_pairing` repair — the same fallback the rollback's own failure branch relies on.
+    history_watermark = 0
+    watermark_read = False
     if history is not None and hasattr(history, "latest_message_id"):
         try:
-            history_watermark = await history.latest_message_id(session.session_id)
+            watermark = await history.latest_message_id(session.session_id)
+            history_watermark = 0 if watermark is None else int(watermark)
+            watermark_read = True
         except Exception:  # noqa: BLE001 - a rollback aid must never fail the turn it guards
             METRICS.increment("chemclaw_rollback_watermark_unavailable_total")
             logger.error(
@@ -306,6 +329,12 @@ async def run_turn(
                 if plan and plan != last_plan:
                     last_plan = plan
                     yield PlanEvent(todos=plan)
+            # The stream is exhausted, so `agent.run` has returned and the history provider has
+            # committed this turn's rows as a complete, paired exchange. From here on a teardown
+            # has nothing half-written to discard — set the fact the rollback gate reads at the
+            # moment it becomes true, not at the answer, which is still a verifier call and
+            # possibly a job-result wait away.
+            run_complete = True
             # A signal recorded while producing the *final* update has no next iteration to
             # carry it, so drain once more before the answer — otherwise the last job started or
             # note proposed in a turn would be silently dropped. The same is true of a tool call
@@ -328,12 +357,17 @@ async def run_turn(
                     timeout_seconds=settings.mid_turn_resume_timeout_seconds,
                 )
                 if results:
+                    # The resume drives a *second* `agent.run`, which can half-write exactly like
+                    # the first — so the exchange is incomplete again until it returns, and a
+                    # teardown landing inside it must roll the turn back after all.
+                    run_complete = False
                     async for event in _resume(
                         agent, session, results, turn_connectors, tool_trace
                     ):
                         if isinstance(event, TokenEvent):
                             answer_parts.append(event.text)
                         yield event
+                    run_complete = True
                 # The resume can itself launch jobs or propose notes, so drain the full signal
                 # buffer rather than only the job ids — a proposal made during the resume would
                 # otherwise never reach the stream.
@@ -400,21 +434,27 @@ async def run_turn(
         # silent weakness rather than an outage; it strips the unmatched tool call on the next
         # read, but only the rollback discards the rest of the abandoned turn.
         #
-        # **Only an *unanswered* turn is rolled back.** A turn torn down after its answer has
-        # nothing half-written about it: `agent.run` returned, the history provider committed a
-        # complete user+assistant pair, and no `tool_use` is left without its result — the sole
-        # failure the rollback exists to prevent. Undoing it anyway deleted a finished exchange
-        # from the conversation because the client dropped during the send of its answer, a window
-        # of one send plus one round trip that the cost ledger simultaneously billed as
-        # `completed`. In a GxP system a silently vanished answer is worse than a lost turn. (The
-        # spent-plan marker used to ride along in that snapshot, so reverting an answered turn's
-        # state re-armed the approval it had just used as well; consumption is a durable column now
-        # — `plan_approvals.consumed_at` — so the answer alone is the reason, which is the reason
-        # that was always sufficient.)
-        if answered:
+        # **Only a turn whose exchange is incomplete is rolled back.** Once the last `agent.run`
+        # returned, the history provider committed a complete user+assistant pair and no
+        # `tool_use` is left without its result — the sole failure the rollback exists to
+        # prevent. Undoing it anyway deleted a finished exchange from the conversation because
+        # the client dropped during the send of its answer. In a GxP system a silently vanished
+        # answer is worse than a lost turn. (The spent-plan marker used to ride along in that
+        # snapshot, so reverting an answered turn's state re-armed the approval it had just used
+        # as well; consumption is a durable column now — `plan_approvals.consumed_at` — so the
+        # committed exchange alone is the reason, which is the reason that was always sufficient.)
+        #
+        # The predicate is `run_complete`, not `answered`, and the gap between them is real time:
+        # after the stack closes the turn still awaits loop-cap reporting, an optional job-result
+        # wait plus resume, and the verifier's judge call — and `answered` only becomes true after
+        # all of them. A teardown landing in any of those windows used to take the rollback branch
+        # and delete an exchange `agent.run` had already committed complete and correctly paired —
+        # the exact outcome this comment says must not happen. `answered` is kept beside it for
+        # the cost ledger, whose question genuinely is "did the user get an answer".
+        if answered or run_complete:
             logger.warning(
-                "turn for session %s was torn down after it answered (client disconnect or the "
-                "front door's turn deadline); the completed turn is kept",
+                "turn for session %s was torn down after its exchange completed (client "
+                "disconnect or the front door's turn deadline); the committed turn is kept",
                 session.session_id,
             )
             raise
@@ -425,7 +465,19 @@ async def run_turn(
         )
         session.state.clear()
         session.state.update(state_snapshot)
-        if history is not None and hasattr(history, "rollback_to"):
+        if history is not None and hasattr(history, "rollback_to") and not watermark_read:
+            # The guard was disarmed at the top of the turn (the ERROR + counter already said so):
+            # without the pre-turn watermark there is no boundary this turn's rows can be told
+            # apart at, and the placeholder 0 would delete the *whole* conversation — a disconnect
+            # would cost the chemist every turn they ever had, not the one that broke. Skip the
+            # durable delete and lean on the next read's `message_pairing` repair to drop any
+            # orphaned tool call, exactly as `_roll_back`'s own failure branch below already does.
+            logger.warning(
+                "skipping the durable-history rollback for session %s: the pre-turn watermark "
+                "was unreadable, so only the next read's repair can safely drop this turn's rows",
+                session.session_id,
+            )
+        elif history is not None and hasattr(history, "rollback_to"):
 
             async def _roll_back() -> None:
                 """Delete this turn's committed rows, reporting its own failure.

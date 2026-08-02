@@ -378,6 +378,47 @@ def test_submitter_refuses_path_escaping_the_checkout(tmp_path: Path) -> None:
     assert not (tmp_path / "evil.md").exists()
 
 
+def test_leading_dash_note_path_reaches_git_add_as_a_pathspec_not_an_option(
+    tmp_path: Path,
+) -> None:
+    """A note path starting with `-` must be added as a file, never parsed as a git option (Sec-4).
+
+    `_contained_note_path` only checks containment: `repo_root / "-u"` resolves *inside*
+    `repo_root`, so this path passes it and reaches `git add` as a bare positional argument.
+    Without `--` ending option parsing first, git reads `-u` as `--update` (stage only
+    already-tracked changes, no pathspec) instead of the file it names — nothing new gets
+    staged, `_write_and_push`'s "nothing to commit" idempotence check trips, and `submit`
+    returns a branch name as if it had succeeded while the written note is never committed or
+    pushed, then silently wiped by `_return_to_base`'s `reset --hard`/`clean -fd`.
+    """
+    _, work = _make_remote_and_clone(tmp_path)
+    submitter = GitNoteSubmitter(repo_dir=str(work), base_branch="main", remote="origin")
+    submission = NoteSubmission(
+        branch="note/dash",
+        files=[NoteFile(path="-u", content="body\n")],
+        title="dash path",
+        body="review please",
+    )
+
+    ref = asyncio.run(submitter.submit(submission))
+    assert ref == "note/dash"
+
+    remote_refs = subprocess.run(
+        ["git", "-C", str(work), "ls-remote", "origin", "note/dash"],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    assert "note/dash" in remote_refs.stdout  # actually pushed, not silently dropped
+    shown = subprocess.run(
+        ["git", "-C", str(work), "show", "note/dash:-u"],
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout
+    assert shown == "body\n"  # committed as a real file named "-u", not consumed as an option
+
+
 def test_submit_refuses_the_checkout_the_process_runs_from(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

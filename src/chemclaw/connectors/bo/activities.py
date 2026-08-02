@@ -16,6 +16,16 @@ the hand-maintained list it forced re-created, one level down, the "written, imp
 the worker's list, never runs" failure `chemclaw.durable.registry` exists to prevent (D-118).
 `tests/test_workflow_registry.py` now asserts the import boundary directly, which is the property
 that was actually doing the work.
+
+**Every activity heartbeats (Conn-F2).** `propose_initial`/`propose_next` wrap the BoFire fit and
+acquisition step — a single opaque call with no unit boundary to report progress at, the same
+shape as calc's two CREST jobs (`connectors.calc.activities`) — in the shared
+`chemclaw.durable.heartbeat.beating` timer, so a stuck fit is noticed within
+`bo_activity_heartbeat_timeout_seconds` instead of at the full `bo_activity_timeout_seconds`
+budget. `evaluate_candidates` has a real unit boundary (one candidate), so it heartbeats directly
+between them instead, mirroring calc's per-species pattern; a registered objective is not
+guaranteed sub-second (`chemclaw.science.bo.objectives.solubility_objective` calls an uncached
+calculator), so a batch is not always fast enough to skip this.
 """
 
 import asyncio
@@ -23,6 +33,8 @@ import asyncio
 from temporalio import activity
 
 from chemclaw.connectors.queues import bundle_queue
+from chemclaw.core.config import settings
+from chemclaw.durable.heartbeat import beating
 from chemclaw.durable.registry import durable_activity
 from chemclaw.science.bo.engine import initial_candidates, propose_candidates
 from chemclaw.science.bo.objectives import get_objective
@@ -39,7 +51,11 @@ async def propose_initial(
     problem: OptimizationProblem, n: int, seed: int | None = None
 ) -> list[Candidate]:
     """Space-filling seed candidates (random design) for a new campaign."""
-    return await asyncio.to_thread(initial_candidates, problem, n, seed)
+    return await beating(
+        asyncio.to_thread(initial_candidates, problem, n, seed),
+        "sampling initial candidates",
+        settings.bo_activity_heartbeat_timeout_seconds,
+    )
 
 
 @durable_activity(bundle_queue("bo"))
@@ -51,7 +67,11 @@ async def propose_next(
     seed: int | None = None,
 ) -> list[Candidate]:
     """Model-guided candidates from the observations so far (BoFire SOBO)."""
-    return await asyncio.to_thread(propose_candidates, problem, observations, n, seed)
+    return await beating(
+        asyncio.to_thread(propose_candidates, problem, observations, n, seed),
+        f"fitting the surrogate to {len(observations)} observation(s)",
+        settings.bo_activity_heartbeat_timeout_seconds,
+    )
 
 
 @durable_activity(bundle_queue("bo"))
@@ -59,10 +79,16 @@ async def propose_next(
 async def evaluate_candidates(
     objective_name: str, candidates: list[Candidate]
 ) -> list[Observation]:
-    """Evaluate each candidate with the named objective into observations."""
+    """Evaluate each candidate with the named objective into observations.
+
+    Heartbeats between candidates rather than through `beating`: a batch has a real unit
+    boundary (one candidate), the same shape calc's reaction/scan jobs report progress at, so a
+    background timer would only obscure it.
+    """
     objective = get_objective(objective_name)
     observations = []
-    for candidate in candidates:
+    for index, candidate in enumerate(candidates, start=1):
+        activity.heartbeat(f"evaluating candidate {index}/{len(candidates)}")
         value = await objective(candidate.params)
         observations.append(
             Observation(

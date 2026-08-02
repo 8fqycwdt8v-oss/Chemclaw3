@@ -44,14 +44,24 @@ proposal (§9) applies here rather than only at the expert seam: every invocatio
 shell string, and no path from model-authored text to a flag. Values that reach argv are
 checked for a leading `-` — the one way a data string can become an option — and the
 process runs in a fresh temporary directory with a scrubbed environment and a timeout.
+
+The timeout is enforced by `run_isolated` (Science-1), not a bare `subprocess.run(timeout=...)`:
+xtb's own `--parallel` flag, like CREST's metadynamics workers, can leave more than one process
+running, and killing only the one PID `subprocess.run` tracks orphans the rest — still burning
+CPU, and still writing into the tempdir after this function's `TemporaryDirectory.__exit__` has
+removed it. `run_isolated` starts the child in its own process group and kills the whole group
+on a timeout; `crest_cli` imports it rather than duplicating it, since both callers need exactly
+the same fix.
 """
 
 import json
 import logging
 import os
 import shutil
+import signal
 import subprocess
 import tempfile
+from contextlib import suppress
 from functools import lru_cache
 from pathlib import Path
 from typing import Any, Literal
@@ -107,6 +117,53 @@ def _task_flags(task: CliTask) -> list[str]:
 # xtb reads XTBPATH, XTBHOME and OMP_* , and inheriting a worker's full environment into
 # a subprocess is how credentials leak into a tool that writes files it does not own.
 _ENV_ALLOWLIST = ("PATH", "HOME", "LANG", "LC_ALL")
+
+
+def run_isolated(
+    argv: list[str], *, cwd: Path, env: dict[str, str], timeout: float
+) -> subprocess.CompletedProcess[str]:
+    """Run `argv` in its own process group, and kill the whole group on timeout (Science-1).
+
+    Shared between `xtb_cli` and `crest_cli` — both run a scientific binary that can fork its
+    own workers (CREST's own module docstring: it "forks worker subprocesses for parallel
+    metadynamics/optimization steps"; xtb's `--parallel` can do the same), so the naive
+    `subprocess.run(argv, timeout=...)` this replaced was wrong for both in the same way: on a
+    timeout it kills only the one PID it is tracking, and a forked worker is not in that
+    process's process group by default, so it survives as an orphan — still burning CPU, and
+    still writing into the tempdir after the caller's `TemporaryDirectory.__exit__` has removed
+    it.
+
+    `start_new_session=True` puts the child in a new session and process group of its own, so
+    `os.killpg` on a timeout reaches every process the run spawned, not just the one this
+    function's `Popen` is watching. Everything else matches `subprocess.run(..., timeout=...,
+    capture_output=True, text=True, check=False)`: `stdout`/`stderr` are captured separately
+    (never merged, so a caller that only reads `.stdout` sees exactly what it saw before), and a
+    timeout still raises `subprocess.TimeoutExpired` — callers keep their existing `except
+    subprocess.TimeoutExpired` handling unchanged.
+    """
+    process = subprocess.Popen(  # noqa: S603 — fixed argv, no shell, resolved path
+        argv,
+        cwd=cwd,
+        env=env,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        start_new_session=True,
+    )
+    try:
+        stdout, stderr = process.communicate(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        # The group leader's pgid is its own pid (start_new_session guarantees the child is the
+        # leader of a fresh group), so this reaches every process the run forked. A race where the
+        # process has already exited between the timeout and here is not an error — there is
+        # nothing left to kill.
+        with suppress(ProcessLookupError):
+            os.killpg(os.getpgid(process.pid), signal.SIGKILL)
+        # Reap the now-dead group leader and collect whatever it had written; the pipes are
+        # closed and the process is gone, so this returns immediately rather than blocking again.
+        stdout, stderr = process.communicate()
+        raise subprocess.TimeoutExpired(argv, timeout, output=stdout, stderr=stderr) from None
+    return subprocess.CompletedProcess(argv, process.returncode, stdout, stderr)
 
 
 class CliError(RuntimeError):
@@ -339,14 +396,8 @@ def run(
         if settings.xtb_cli_threads > 0:
             environment["OMP_NUM_THREADS"] = str(settings.xtb_cli_threads)
         try:
-            completed = subprocess.run(  # noqa: S603 — fixed argv, no shell, resolved path
-                argv,
-                cwd=directory,
-                env=environment,
-                capture_output=True,
-                text=True,
-                timeout=settings.xtb_cli_timeout_seconds,
-                check=False,
+            completed = run_isolated(
+                argv, cwd=directory, env=environment, timeout=settings.xtb_cli_timeout_seconds
             )
         except subprocess.TimeoutExpired as error:
             raise CliError(

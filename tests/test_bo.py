@@ -7,11 +7,18 @@ BoFire runs; kept small so it stays fast.
 
 import asyncio
 import warnings
+from typing import Any
 
+import numpy.linalg
+import pandas as pd
 import pytest
+import torch
+from bofire.strategies import api as bofire_strategies
+from botorch.exceptions.errors import BotorchError, ModelFittingError
+from linear_operator.utils.errors import NanError, NotPSDError
 
 from chemclaw.science.bo.campaign import optimize
-from chemclaw.science.bo.engine import initial_candidates, propose_candidates
+from chemclaw.science.bo.engine import SurrogateFitError, initial_candidates, propose_candidates
 from chemclaw.science.bo.problem import (
     CategoricalParameter,
     ContinuousParameter,
@@ -190,3 +197,102 @@ def test_the_surrogate_belief_survives_evaluation_into_the_history() -> None:
     seeded, guided = result.history[:3], result.history[3:]
     assert [o.surrogate_sd for o in seeded] == [None] * 3
     assert all(o.surrogate_sd is not None and o.surrogate_sd > 0 for o in guided)
+
+
+class _RaisingStrategy:
+    """A fake BoFire strategy whose `tell`/`ask` always raise one chosen error.
+
+    Standing in for BoFire here — genuinely forcing botorch/gpytorch into a numerically
+    degenerate fit is not reproducible on demand (duplicate and near-duplicate observations
+    were tried directly against the real strategy in developing this test and every one of
+    them was absorbed by gpytorch's own jitter/noise regularization). This tests the one
+    thing `chemclaw.science.bo.engine` owns: that each of the library's known failure classes,
+    however it is raised, is translated to `SurrogateFitError` before it leaves the module —
+    never that BoFire raises them under any particular input.
+    """
+
+    def __init__(self, error: Exception) -> None:
+        self._error = error
+
+    def tell(self, frame: pd.DataFrame) -> None:
+        raise self._error
+
+    def ask(self, n: int) -> pd.DataFrame:
+        raise self._error
+
+
+# One instance of every class `_SURROGATE_FAILURES` names, so the parametrization proves the
+# *tuple*, not just its first member.
+_SURROGATE_ERRORS: list[Exception] = [
+    BotorchError("botorch blew up"),
+    ModelFittingError("could not fit after all restarts"),
+    NotPSDError("matrix not positive definite after repeatedly adding jitter"),
+    NanError("cholesky_cpu: elements of the tensor are NaN"),
+    numpy.linalg.LinAlgError("singular matrix"),
+    torch.linalg.LinAlgError("cholesky_cpu: failed"),  # type: ignore[attr-defined]
+]
+
+
+_SURROGATE_ERROR_IDS = [type(e).__name__ for e in _SURROGATE_ERRORS]
+
+
+@pytest.mark.parametrize("error", _SURROGATE_ERRORS, ids=_SURROGATE_ERROR_IDS)
+def test_propose_candidates_translates_every_known_surrogate_failure(
+    monkeypatch: pytest.MonkeyPatch, error: Exception
+) -> None:
+    """Every library exception the fit/acquisition step can raise becomes `SurrogateFitError`.
+
+    Mirrors `_fractional_design`'s existing precedent for the classical path: the caller must
+    never see BoFire's/botorch's own exception type, so a chemist's or a Temporal retry policy's
+    `except` clause has one name to match regardless of which numerical failure occurred inside.
+    """
+    problem = OptimizationProblem(parameters=_PARAMS, objective=Objective(name="y"))
+    observations = [
+        Observation(params={"x1": 0.0, "x2": 0.0}, value=1.0),
+        Observation(params={"x1": 0.0, "x2": 0.0}, value=1.0),
+    ]
+    monkeypatch.setattr(bofire_strategies, "map", lambda data_model: _RaisingStrategy(error))
+    with pytest.raises(SurrogateFitError, match="duplicate or near-duplicate"):
+        propose_candidates(problem, observations, n=1)
+
+
+def test_initial_candidates_also_translates_surrogate_failures(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The seeding path shares the same boundary as the model-guided one.
+
+    `initial_candidates` uses a `RandomStrategy` rather than SOBO, so in real use it has no GP to
+    fail — but the translation is written around the exception types, not around which strategy
+    raised them, so a future caller of this path (or a config that changes what seeds a campaign)
+    is covered without a second boundary to remember.
+    """
+    problem = OptimizationProblem(parameters=_PARAMS, objective=Objective(name="y"))
+    monkeypatch.setattr(
+        bofire_strategies, "map", lambda data_model: _RaisingStrategy(ModelFittingError("boom"))
+    )
+    with pytest.raises(SurrogateFitError):
+        initial_candidates(problem, n=1)
+
+
+def test_propose_candidates_does_not_swallow_unrelated_errors(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The translation is scoped to the known failure classes, not a blanket `except Exception`.
+
+    A programming bug inside the fit (a `KeyError`, a `TypeError`) must still surface as itself —
+    swallowing it into `SurrogateFitError` would misdiagnose a code defect as bad chemistry data
+    and make it non-retryable for the wrong reason.
+    """
+    problem = OptimizationProblem(parameters=_PARAMS, objective=Objective(name="y"))
+    observations = [
+        Observation(params={"x1": 0.0, "x2": 0.0}, value=1.0),
+        Observation(params={"x1": 0.0, "x2": 0.0}, value=1.0),
+    ]
+
+    class _BoomStrategy:
+        def tell(self, frame: Any) -> None:
+            raise KeyError("unrelated bug")
+
+    monkeypatch.setattr(bofire_strategies, "map", lambda data_model: _BoomStrategy())
+    with pytest.raises(KeyError):
+        propose_candidates(problem, observations, n=1)

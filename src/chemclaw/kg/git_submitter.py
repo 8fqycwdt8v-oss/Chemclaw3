@@ -246,7 +246,10 @@ class GitNoteSubmitter:
             note_path = self._contained_note_path(file.path)
             note_path.parent.mkdir(parents=True, exist_ok=True)
             note_path.write_text(file.content, encoding="utf-8")
-        await self._git("add", *(file.path for file in submission.files))
+        # `--` ends option parsing before the note paths: `_contained_note_path` only checks
+        # containment, and a leading-dash relative path (e.g. `-x`) resolves *inside* `repo_root`
+        # and would otherwise reach git as an option rather than a pathspec.
+        await self._git("add", "--", *(file.path for file in submission.files))
         # Idempotent: if the note is byte-identical to what the base already has,
         # there is nothing to commit — re-proposing it is a no-op, not an error.
         returncode, _ = await self._run("diff", "--cached", "--quiet")

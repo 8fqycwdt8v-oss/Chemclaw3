@@ -116,6 +116,31 @@ def test_another_users_hold_is_indistinguishable_from_absent(
     assert seam["decisions"] == []  # and the signal was never sent
 
 
+def test_unowned_hold_is_unreachable_once_entra_is_required(
+    seam: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A hold left ownerless by a dev-mode write must not become anyone's once identity is enforced.
+
+    Mirrors the session-ownership fix (Sec-3): `owner()` returns `""` for a hold started with no
+    real actor, and `_owned_approval` used to read that as "answerable by anyone". Reverting
+    `_owner_authorizes` to the old `owner and owner != principal.oid` check makes this test fail.
+    """
+    from chemclaw.api.auth import Principal, require_principal
+    from chemclaw.core.config import settings
+
+    app = create_app(agent_factory=lambda _profile: _FakeAgent())
+    app.dependency_overrides[require_principal] = lambda: Principal(
+        oid="stranger", upn="stranger@corp", roles=frozenset()
+    )
+    monkeypatch.setattr(settings, "entra_required", True)
+    seam["owner"] = ""  # the NULL/empty-owner case
+    scoped_client = TestClient(app)
+    assert scoped_client.get("/approvals/approval-1").status_code == 404
+    response = scoped_client.post("/approvals/approval-1/decision", json={"approved": True})
+    assert response.status_code == 404
+    assert seam["decisions"] == []
+
+
 def test_listing_is_scoped_to_the_caller(client: TestClient, seam: dict[str, Any]) -> None:
     """The queue shows the caller's holds, not everyone's."""
     seam["pending"] = [

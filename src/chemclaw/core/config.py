@@ -613,14 +613,20 @@ class CalculatorSettings(BaseSettings):
 class BoSettings(BaseSettings):
     """Durable BoFire BO campaigns (plan step 1d.4).
 
-    Grouped because these three knobs shape one thing: how a Bayesian-optimization campaign runs
-    durably — its per-round activity budget, reproducibility seed, and the round ceiling that
-    protects Temporal's event-history limit.
+    Grouped because these four knobs shape one thing: how a Bayesian-optimization campaign runs
+    durably — its per-round activity budget and heartbeat, reproducibility seed, and the round
+    ceiling that protects Temporal's event-history limit.
     """
 
     # A single round (BoFire propose + evaluate) can be slow, so activities get a generous
     # start-to-close budget.
     bo_activity_timeout_seconds: float = Field(default=300.0, gt=0)
+    # How long a BO activity may go without a heartbeat before Temporal declares the worker dead
+    # and retries (Conn-F2). Comfortably shorter than `bo_activity_timeout_seconds` so a dead
+    # worker is noticed well before the full start-to-close budget — the same discipline
+    # `xtb_job_heartbeat_timeout_seconds` applies to calc's durable jobs, sized down for a
+    # per-round budget an order of magnitude smaller.
+    bo_activity_heartbeat_timeout_seconds: float = Field(default=60.0, gt=0)
     # Seed for BoFire's random design + SOBO strategies, so a campaign is reproducible
     # (deterministic seeding + proposals) rather than flaky run-to-run.
     bo_seed: int = 42
@@ -691,6 +697,13 @@ class LlmSettings(BaseSettings):
     # behavior change.
     verifier_enabled: bool = False
     verifier_confidence_threshold: float = Field(default=0.7, ge=0, le=1)
+    # The judge call's own deadline. It is the one awaited call between the model's last token and
+    # the AnswerEvent with no timeout beneath it, so a stalled judge endpoint was billed to
+    # `service_turn_timeout_seconds` (600 s) — and a teardown landing in that stall is what rolled
+    # back finished turns. Half `llm_timeout_seconds`' default and far under the turn deadline: a
+    # verdict is one cheap structured call, and on expiry the verifier degrades to the offline
+    # deterministic citation gate rather than holding the finished answer hostage.
+    verifier_timeout_seconds: float = Field(default=30.0, gt=0)
     # The ungrounded-parameter scan over a drafted answer: shapes a chemist would read as
     # specification — a flow rate, a gradient table, a wavelength, a back pressure, a column brand,
     # an ICH limit, a polymorph form — marked for review when no tool in the turn produced them.
@@ -1033,7 +1046,7 @@ class ServiceSettings(BaseSettings):
     # limit. Eviction costs that caller one free burst and costs the process nothing.
     service_rate_limit_max_principals: int = Field(default=10_000, gt=0)
     # Hard ceiling on a request body, refused with 413 *before* anything reads it
-    # (`api/app._BodySizeLimit`). `attachment_max_bytes` was the only size check and it runs inside
+    # (`core.asgi.BodySizeLimit`). `attachment_max_bytes` was the only size check and it runs inside
     # `parse_attachment` — by then Starlette's multipart parser has already written the whole body
     # to a spooled temp file (RAM to 1 MB, then the pod's ephemeral disk), so a 5 GB upload was
     # ingested in full and then refused. Above `attachment_max_bytes` because a multipart envelope
@@ -1690,6 +1703,16 @@ class ConnectorSettings(BaseSettings):
     # and two equal defaults made the ceiling the tighter of the two on the path the deployment
     # actually runs.
     connector_job_timeout_seconds: float = Field(default=90_000.0, gt=0)
+
+    # Hard ceiling on a connector's request body, refused with 413 before anything reads it
+    # (`connectors.server.connector_app`, `core.asgi.BodySizeLimit`). A connector's own setting
+    # rather than reusing `service_max_request_bytes`: that one is sized for the front door's
+    # multipart attachment upload, a shape a connector's `/mcp` never carries — every request there
+    # is one MCP JSON-RPC call, whose arguments are chemistry-sized (a SMILES string, a job spec, a
+    # batch of candidates), not a file. A smaller default follows from that difference in what a
+    # legitimate request looks like, not from copying the front door's number. 0 disables, matching
+    # the front door's knob.
+    connector_max_request_bytes: int = Field(default=1_000_000, ge=0)
 
     # Bound on the record write every finished connector job performs (D-157). Small: it is one
     # upsert of a row the job has already earned, and a database that cannot take it in this long

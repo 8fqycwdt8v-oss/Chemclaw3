@@ -32,6 +32,7 @@ import yaml
 from pydantic import ValidationError
 
 from chemclaw.core.config import settings
+from chemclaw.core.errors import ChemclawError
 from chemclaw.ingest.sources.base import DataSource, IngestHalf, RetrieveHalf, SourceSpec
 from chemclaw.ingest.sources.manifest import DataSourceManifest
 
@@ -42,12 +43,14 @@ logger = logging.getLogger(__name__)
 MANIFEST_FILENAME = "datasource.yaml"
 
 
-class DataSourceError(ValueError):
+class DataSourceError(ChemclawError):
     """A data-source folder is malformed, or an enabled source does not exist.
 
-    A `ValueError` subclass for the same reason `ConnectorError` is one: this is a configuration
-    error surfaced at startup, so a single `except ValueError` at an entry point catches every
-    "this deployment is misconfigured" failure regardless of which seam raised it.
+    A `ChemclawError` (so a `ValueError`) for the same reason `ConnectorError` is one: this is a
+    configuration error surfaced at startup, so a single `except ValueError` at an entry point
+    catches every "this deployment is misconfigured" failure regardless of which seam raised it.
+    Also registered in `chemclaw.durable.publish._BAD_DATA_TYPES` by its own class name, since
+    Temporal matches non-retryable types by exact name, not isinstance.
     """
 
 

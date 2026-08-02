@@ -126,6 +126,7 @@ module = [
     "networkx.*",
     "drfp",
     "openpyxl",
+    "linear_operator.*",
 ]
 follow_imports = "skip"
 follow_imports_for_stubs = true

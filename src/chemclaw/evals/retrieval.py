@@ -26,11 +26,57 @@ mislabel, and every provenance string names the retriever behind the figure.
 """
 
 import asyncio
+import threading
+from collections.abc import Coroutine
 from pathlib import Path
+from typing import Any, TypeVar
 
 from chemclaw.core.config import NOTE_INDEX_SOURCES, settings
 from chemclaw.evals.metric import EvalCase, MetricError, MetricResult, metric
 from chemclaw.retrieval.retrievers import GraphRetriever
+
+_T = TypeVar("_T")
+
+
+def _run_sync(coro: Coroutine[Any, Any, _T]) -> _T:
+    """Run a coroutine to completion from this metric's sync interface (`Metric`, KISS over R7).
+
+    `asyncio.run` refuses to nest inside a loop that is already running, but the `Metric` contract
+    (`chemclaw.evals.metric.Metric`) is sync and every registered metric is a pure function —
+    turning it async would ripple through the whole registry and `run_eval` for the sake of the one
+    metric that happens to need live I/O. `chemclaw.durable.eval_drift` already works around this
+    by wrapping the *whole* `run_eval` call in `asyncio.to_thread`, but that is a convention every
+    future caller must remember, not a property this function has on its own — call a registered
+    metric directly from a coroutine (a test, a future async surface) without that wrapper and the
+    bare `asyncio.run` used to raise `RuntimeError: asyncio.run() cannot be called from a running
+    event loop`.
+
+    So: when nothing is running (the common, zero-overhead case — a script's `main()`, or the
+    worker thread `to_thread` already lands this call in), run directly. Only when a loop is
+    already running on this thread is a second thread spun up with its own fresh loop, so retrieval
+    still completes instead of raising; the calling thread just blocks on `join` like any other
+    synchronous call.
+    """
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        return asyncio.run(coro)
+
+    outcome: list[_T] = []
+    failure: list[BaseException] = []
+
+    def _target() -> None:
+        try:
+            outcome.append(asyncio.run(coro))
+        except BaseException as exc:  # re-raised on the calling thread below, not swallowed here
+            failure.append(exc)
+
+    thread = threading.Thread(target=_target)
+    thread.start()
+    thread.join()
+    if failure:
+        raise failure[0]
+    return outcome[0]
 
 
 def _expected_ids(case: EvalCase) -> set[str]:
@@ -130,7 +176,7 @@ def _retrieved_ids(case: EvalCase) -> list[str]:
     ids = _RETRIEVAL_MEMO.get(key)
     if ids is None:
         retriever = GraphRetriever(corpus_dir)
-        chunks = asyncio.run(retriever.retrieve(query, filters))
+        chunks = _run_sync(retriever.retrieve(query, filters))
         ids = list(dict.fromkeys(chunk.source_note_id for chunk in chunks))
         for stale in [k for k in _RETRIEVAL_MEMO if k[0] == corpus_dir and k[1] != signature]:
             del _RETRIEVAL_MEMO[stale]

@@ -17,7 +17,6 @@ on in F4.
 import asyncio
 import hashlib
 import hmac
-import json
 import logging
 import time
 import uuid
@@ -33,7 +32,7 @@ from fastapi import Depends, FastAPI, HTTPException, UploadFile
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, field_validator
 from sse_starlette.sse import EventSourceResponse
-from starlette.datastructures import Headers, MutableHeaders
+from starlette.datastructures import MutableHeaders
 from starlette.middleware.cors import CORSMiddleware
 from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
@@ -79,6 +78,7 @@ from chemclaw.connectors.health import (
     probe_connectors,
 )
 from chemclaw.core import db
+from chemclaw.core.asgi import BodySizeLimit
 from chemclaw.core.config import settings
 from chemclaw.core.logging import configure_logging, configure_telemetry
 from chemclaw.durable.job_record import JobRecordSummary, search_job_records
@@ -165,6 +165,23 @@ def _webhook_signature_ok(body: bytes, header: str) -> bool:
         return False
     expected = hmac.new(secret.encode(), body, hashlib.sha256).hexdigest()
     return hmac.compare_digest(expected, header.removeprefix("sha256="))
+
+
+def _owner_authorizes(owner: str | None, principal: Principal) -> bool:
+    """Whether a stored owner (session, approval hold, ...) lets `principal` reach the row.
+
+    Mirrors `_is_reviewer`'s dev/enforced split, applied to ownership rather than role: in dev
+    (`entra_required` off) there is no real actor, so an owner-less row degrades open, exactly as
+    every other route does. Once identity is enforced, a *recorded* absence of an owner is no
+    longer "everyone's" — `entra_required` never mints a new owner-less row, so a `None`/empty
+    owner surviving into enforcement is a leftover from a dev-mode write, and treating it as
+    "anyone's" would let it be read, resumed or decided by every authenticated principal instead
+    of nobody. `owner` is falsy for both `None` (sessions) and `""` (the empty-string sentinel a
+    Temporal query returns for an approval hold's owner), so one check covers both call shapes.
+    """
+    if not owner:
+        return not settings.entra_required
+    return owner == principal.oid
 
 
 # Loopback interfaces: binding here keeps the unauthenticated dev mode reachable only from the
@@ -790,7 +807,7 @@ def create_app(
         """
         entry = _live_sessions().get(session_id)
         if entry is not None:
-            if entry.owner is not None and entry.owner != principal.oid:
+            if not _owner_authorizes(entry.owner, principal):
                 raise HTTPException(status_code=404, detail="unknown session")
             return entry
         return await _rehydrate_session(session_id, principal)
@@ -801,7 +818,7 @@ def create_app(
         if owners is None:
             raise HTTPException(status_code=404, detail="unknown session")
         found, owner, profile = await owners.lookup(session_id)
-        if not found or (owner is not None and owner != principal.oid):
+        if not found or not _owner_authorizes(owner, principal):
             raise HTTPException(status_code=404, detail="unknown session")
         # Re-check the cache after the awaited lookup: two racing requests would otherwise each
         # mint a live handle over the same durable thread, and the loser's handle would keep
@@ -1243,13 +1260,14 @@ def create_app(
 
         Mirrors `_resolve_session`: an unknown hold and someone else's hold are indistinguishable
         from outside. The dev path (`entra_required` off) has no real actor, so an unowned hold
-        stays answerable — matching how every other route degrades in dev.
+        stays answerable — matching how every other route degrades in dev; under enforcement an
+        unowned hold is nobody's (`_owner_authorizes`), not everyone's.
         """
         try:
             owner = await approval_owner(approval_id)
         except ValueError as exc:
             raise HTTPException(status_code=404, detail="no such approval hold") from exc
-        if owner and owner != principal.oid:
+        if not _owner_authorizes(owner, principal):
             raise HTTPException(status_code=404, detail="no such approval hold")
 
     @app.post("/sessions/{session_id}/attachments")
@@ -1821,106 +1839,15 @@ class _SecurityHeaders:
         await self._app(scope, receive, _send)
 
 
-class _BodySizeLimit:
-    """Refuse an oversized request body before anything reads it (413).
-
-    The attachment route validated its size in the wrong place, and the mistake is easy to make
-    because the check *was* there: `parse_attachment` refuses anything over
-    `attachment_max_bytes`. But by the time a route handler runs, Starlette's multipart parser has
-    already consumed the whole request body into a `SpooledTemporaryFile` — memory up to 1 MB, then
-    the pod's ephemeral disk. So a 5 GB upload was written out in full and *then* refused, and the
-    route's own `await file.read()` would have pulled whatever survived into RAM. The cap was a
-    statement about what the parser would accept, never about what the process would ingest.
-
-    This is the layer that can actually refuse it, because it runs before the body is touched:
-
-    - A declared `Content-Length` over the cap is refused without reading a byte.
-    - A chunked body (no `Content-Length`) is counted as it arrives and refused the moment it
-      crosses, so the ceiling holds for a client that simply declines to declare a size.
-
-    Pure ASGI and wrapping only `receive`, for the reason `_SecurityHeaders` is pure ASGI: a
-    `BaseHTTPMiddleware` runs the app as a second task through a memory stream and turns every
-    cancelled SSE stream into a spurious 500.
-
-    `parse_attachment`'s own check stays. It is not redundant — it is a *different* check: this
-    one bounds what the process will ingest and is transport-shaped (413), that one bounds what an
-    attachment may be and is data-shaped (422), and it has a second caller (the backfill CLI)
-    that never passes through here at all.
-    """
-
-    def __init__(self, app: ASGIApp, max_bytes: int) -> None:
-        """Wrap `app`, refusing bodies over `max_bytes`."""
-        self._app = app
-        self._max_bytes = max_bytes
-
-    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
-        """Bound this request's body, or pass a non-HTTP scope straight through."""
-        if scope["type"] != "http":
-            await self._app(scope, receive, send)
-            return
-        declared = Headers(scope=scope).get("content-length")
-        if declared is not None and declared.isdigit() and int(declared) > self._max_bytes:
-            await self._refuse(send)
-            return
-
-        received = 0
-        too_large = False
-        answered = False
-
-        async def _receive() -> Message:
-            """Pass the body through, truncating the stream the moment it crosses the ceiling."""
-            nonlocal received, too_large
-            message = await receive()
-            if message["type"] == "http.request" and not too_large:
-                received += len(message.get("body", b""))
-                if received > self._max_bytes:
-                    too_large = True
-                    # Truncate rather than raise. An exception here surfaces *inside* whatever is
-                    # reading the body, and FastAPI wraps any failure during body parsing in
-                    # `HTTPException(400, "There was an error parsing the body")` — so the caller
-                    # would be told their JSON was malformed when what happened is that it was too
-                    # big. Ending the stream lets the app react however it likes; `_send` below is
-                    # what makes the answer the truthful one.
-                    return {"type": "http.request", "body": b"", "more_body": False}
-            return message
-
-        async def _send(message: Message) -> None:
-            """Replace whatever the app decided to say with the 413 that is actually true."""
-            nonlocal answered
-            if not too_large:
-                await send(message)
-                return
-            if message["type"] == "http.response.start" and not answered:
-                answered = True
-                await self._refuse(send)
-            # Everything after the substituted response is dropped: the app is answering a request
-            # it only saw part of, and two responses on one connection is a protocol error.
-
-        await self._app(scope, _receive, _send)
-
-    async def _refuse(self, send: Send) -> None:
-        """Answer 413, either before the app runs or in place of what it produced."""
-        METRICS.increment("chemclaw_requests_too_large_total")
-        body = json.dumps(
-            {"detail": f"request body exceeds the {self._max_bytes} byte limit"}
-        ).encode()
-        await send(
-            {
-                "type": "http.response.start",
-                "status": 413,
-                "headers": [
-                    (b"content-type", b"application/json"),
-                    (b"content-length", str(len(body)).encode()),
-                ],
-            }
-        )
-        await send({"type": "http.response.body", "body": body})
-
-
 def _add_body_size_limit(app: FastAPI) -> None:
-    """Bound every request body when `service_max_request_bytes` is set (0 disables)."""
+    """Bound every request body when `service_max_request_bytes` is set (0 disables).
+
+    `BodySizeLimit` itself lives in `chemclaw.core.asgi` — shared with `connectors.server`, whose
+    `/mcp` needed the identical fix (Sec-5) — not here, so this is only the front door's wiring of
+    it to its own setting.
+    """
     if settings.service_max_request_bytes:
-        app.add_middleware(_BodySizeLimit, max_bytes=settings.service_max_request_bytes)
+        app.add_middleware(BodySizeLimit, max_bytes=settings.service_max_request_bytes)
 
 
 def _add_security_headers(app: FastAPI) -> None:

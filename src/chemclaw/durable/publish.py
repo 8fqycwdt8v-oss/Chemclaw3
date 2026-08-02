@@ -47,6 +47,14 @@ _BAD_DATA_TYPES = [
     "ConnectorJobError",
     "GitSubmitError",
     "CalculationDomainError",
+    "ConnectorError",
+    "DataSourceError",
+    "TemplateError",
+    "UnresolvedReference",
+    # A BoFire/botorch surrogate fit or acquisition step failed on the given observations
+    # (Science-4, `chemclaw.science.bo.engine`). Deterministic in the data: the same duplicate
+    # or degenerate points collapse the same kernel on a retry, so this is bad-data, not transient.
+    "SurrogateFitError",
     # A vendored dataset that is absent, malformed, or does not match its manifest checksum
     # (D-135). Emphatically not transient: a retry re-reads the same bytes from the same image
     # layer and reaches the same conclusion, and the fix is a rebuild.

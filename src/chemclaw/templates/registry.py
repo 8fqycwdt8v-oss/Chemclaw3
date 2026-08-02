@@ -27,6 +27,7 @@ from chemclaw.agent.identity_context import get_current_roles
 from chemclaw.agent.session_context import get_current_session_id
 from chemclaw.agent.tool_registry import CapabilityTool
 from chemclaw.core.config import settings
+from chemclaw.core.errors import ChemclawError
 from chemclaw.core.ids import stable_hash
 from chemclaw.core.temporal_client import connect
 from chemclaw.durable.template_job import TemplateRunInput, TemplateWorkflow
@@ -47,8 +48,14 @@ _INPUT_ANNOTATIONS: dict[InputType, Any] = {
 }
 
 
-class TemplateError(ValueError):
-    """A template file is malformed, or an enabled template does not exist."""
+class TemplateError(ChemclawError):
+    """A template file is malformed, or an enabled template does not exist.
+
+    A `ChemclawError` (so a `ValueError`) and registered in
+    `chemclaw.durable.publish._BAD_DATA_TYPES` by its own class name: Temporal matches
+    non-retryable error types by exact name, not isinstance, so a raw `ValueError` subclass would
+    still retry across an activity boundary.
+    """
 
 
 def _load(path: Path) -> Template:

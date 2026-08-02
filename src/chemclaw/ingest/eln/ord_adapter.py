@@ -237,6 +237,8 @@ def _components(
     reaction_input: dict[str, Any], default_role: Role = Role.REAGENT
 ) -> list[Component]:
     """Map an ORD `ReactionInput`'s `components` to canonical `Component`s (empty if none)."""
+    if not isinstance(reaction_input, dict):
+        return []
     components: list[Component] = []
     for compound in _as_list(reaction_input.get("components")):
         if not isinstance(compound, dict):
@@ -362,6 +364,8 @@ def _percentage(product: dict[str, Any], measurement_type: str) -> float | None:
 
 def _amount(amount: dict[str, Any]) -> tuple[float | None, float | None]:
     """Convert an ORD `Amount` to (mass_mg, amount_mmol); either or both may be absent."""
+    if not isinstance(amount, dict):
+        return None, None
     return _measure(amount.get("mass"), _TO_MG), _measure(amount.get("moles"), _TO_MMOL)
 
 

@@ -39,6 +39,7 @@ low-confidence answer is marked, not blocked. That wiring is the deferred part; 
 docs/planning/DEFERRED.md.
 """
 
+import asyncio
 import logging
 import re
 from collections.abc import Sequence
@@ -222,9 +223,16 @@ async def verify_answer(
         # is the likelier of the two on the day the feature is switched on.
         if client is None:
             client = _default_client()
-        response = await client.get_response(
-            _verifier_prompt(answer, evidence), response_format=VerificationResult
-        )
+        # Bounded by its own budget, because the judge is the one awaited call between the model's
+        # last token and the AnswerEvent that has no timeout anywhere beneath it: a stalled judge
+        # endpoint was charged to `service_turn_timeout_seconds` — minutes of a finished answer
+        # sitting undelivered — and the front-door deadline then tore down a turn that had already
+        # committed its exchange. On expiry the `TimeoutError` lands in the degrade path below,
+        # so a slow judge costs the score, never the answer.
+        async with asyncio.timeout(settings.verifier_timeout_seconds):
+            response = await client.get_response(
+                _verifier_prompt(answer, evidence), response_format=VerificationResult
+            )
     except Exception:
         # An unreachable/failing judge endpoint must not weaken verification below the offline
         # gate: degrade to the deterministic citation check (which needs no network) instead of

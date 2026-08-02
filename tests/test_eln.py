@@ -1298,6 +1298,131 @@ def test_ord_compound_with_no_resolvable_identifier_is_still_refused(tmp_path: P
         _map_ord(tmp_path, [{"type": "NAME", "value": "2a, Boronic Acid"}])
 
 
+# --- ORD malformed-shape robustness (Ingest-1) ----------------------------------------
+
+
+def _ord_reaction_with(**overrides: object) -> dict[str, object]:
+    """A minimal, otherwise-valid ORD reaction payload with the given top-level overrides."""
+    payload = _ord_payload([{"type": "SMILES", "value": "CCO"}])
+    payload.update(overrides)
+    return payload
+
+
+def test_ord_malformed_component_amount_is_treated_as_absent_not_crashed(tmp_path: Path) -> None:
+    """A component whose `amount` is a list (not an object) never crashes the mapper.
+
+    A real exporter can produce this shape error. `_amount` used to call `.get()` straight on
+    the value, so this raised a bare `AttributeError` that escaped `map_to_ord`'s except clause
+    and would have aborted the whole sync batch (Ingest-1). Mirroring the sibling helpers
+    (`_measure`/`_temperature`), a malformed shape is treated the same as an absent one: the
+    component still maps, just with no mass/mole data.
+    """
+    payload = _ord_reaction_with(
+        inputs={
+            "m1": {
+                "components": [
+                    {
+                        "identifiers": [{"type": "SMILES", "value": "CCO"}],
+                        "reactionRole": "REACTANT",
+                        "amount": [1, 2, 3],  # malformed: should be an Amount object
+                    }
+                ]
+            }
+        }
+    )
+    (tmp_path / "bad_amount.json").write_text(json.dumps(payload), encoding="utf-8")
+
+    async def _run() -> OrdReaction:
+        adapter = OrdJsonAdapter(str(tmp_path))
+        entries = await adapter.fetch_new_entries(_EPOCH)
+        return adapter.map_to_ord(entries[0])
+
+    reaction = asyncio.run(_run())
+    assert reaction.inputs[0].mass_mg is None
+    assert reaction.inputs[0].amount_mmol is None
+
+
+def test_ord_malformed_workup_input_is_treated_as_absent_not_crashed(tmp_path: Path) -> None:
+    """A workup whose `input` is a list (not an object) never crashes the mapper.
+
+    `_components` used to call `.get()` straight on the value, so a malformed workup `input`
+    raised a bare `AttributeError` reached through `_workup_step` (Ingest-1). Mirroring the
+    sibling helpers, the malformed shape now yields no components for that step rather than
+    crashing.
+    """
+    payload = _ord_reaction_with(workups=[{"type": "FILTRATION", "input": [1, 2, 3]}])
+    (tmp_path / "bad_workup.json").write_text(json.dumps(payload), encoding="utf-8")
+
+    async def _run() -> OrdReaction:
+        adapter = OrdJsonAdapter(str(tmp_path))
+        entries = await adapter.fetch_new_entries(_EPOCH)
+        return adapter.map_to_ord(entries[0])
+
+    reaction = asyncio.run(_run())
+    workup_steps = [s for s in reaction.steps if s.kind == StepKind.PURIFICATION]
+    assert len(workup_steps) == 1
+    assert workup_steps[0].components == []
+
+
+class _OrdListAdapter:
+    """A fake adapter serving fixed ORD `RawEntry`s through the real `OrdJsonAdapter` mapper."""
+
+    def __init__(self, entries: list[RawEntry]) -> None:
+        self.entries = entries
+
+    async def fetch_new_entries(self, since: datetime) -> list[RawEntry]:
+        return [e for e in self.entries if e.created_at >= since]
+
+    def map_to_ord(self, raw: RawEntry) -> OrdReaction:
+        return OrdJsonAdapter().map_to_ord(raw)
+
+
+def test_ord_malformed_entry_does_not_abort_the_sync_batch() -> None:
+    """The batch-level proof: a malformed nested field never aborts the whole sync run.
+
+    Reproduces the sync-aborting shape (Ingest-1) end to end through `sync_entries`: without the
+    `isinstance` guards in `_amount`/`_components`, the malformed entry's bare `AttributeError`
+    would escape `sync_entries`'s `except (ChemclawError, ValidationError)` entirely — aborting
+    the batch before the second entry is ever reached. With the guards, the malformed field maps
+    to "absent" (matching the sibling helpers) and both entries ingest in order.
+    """
+    malformed_payload = _ord_reaction_with(
+        reactionId="malformed-amount",
+        inputs={
+            "m1": {
+                "components": [
+                    {
+                        "identifiers": [{"type": "SMILES", "value": "CCO"}],
+                        "reactionRole": "REACTANT",
+                        "amount": [1, 2, 3],
+                    }
+                ]
+            }
+        },
+    )
+    good_payload = _ord_payload([{"type": "SMILES", "value": "CCO"}])
+    good_payload["reactionId"] = "good"
+
+    async def _run() -> None:
+        malformed = RawEntry(
+            entry_id="malformed-amount",
+            created_at=datetime(2026, 1, 1, tzinfo=UTC),
+            payload=malformed_payload,
+        )
+        good = RawEntry(
+            entry_id="good", created_at=datetime(2026, 2, 1, tzinfo=UTC), payload=good_payload
+        )
+        rxn, mol, sub = InMemoryFingerprintStore(), InMemoryFingerprintStore(), FakeSubmitter()
+        summary = await sync_entries(_OrdListAdapter([malformed, good]), rxn, mol, sub, _EPOCH)
+
+        # Both land: the malformed field never poisoned the batch, and the second entry
+        # (which the un-guarded AttributeError would never have let the run reach) ingests too.
+        assert summary.ingested == ["malformed-amount", "good"]
+        assert summary.rejected == []
+
+    asyncio.run(_run())
+
+
 def test_a_search_hit_id_is_the_note_id_the_ingest_wrote() -> None:
     """The round trip a chemist takes: a `similar_reactions` hit handed to `expand_note`.
 

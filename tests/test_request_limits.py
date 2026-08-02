@@ -263,7 +263,7 @@ def test_a_declared_oversize_body_is_refused_without_reading_a_byte() -> None:
     has crossed the network and been parsed. Asserted by driving the middleware directly with a
     sentinel app, because in-process test transport cannot show the difference at the HTTP level.
     """
-    from chemclaw.api.app import _BodySizeLimit
+    from chemclaw.core.asgi import BodySizeLimit
 
     reached = False
 
@@ -284,7 +284,7 @@ def test_a_declared_oversize_body_is_refused_without_reading_a_byte() -> None:
             "type": "http",
             "headers": [(b"content-length", b"999999999")],
         }
-        await _BodySizeLimit(_app, max_bytes=1024)(scope, _receive, _send)  # type: ignore[arg-type]
+        await BodySizeLimit(_app, max_bytes=1024)(scope, _receive, _send)  # type: ignore[arg-type]
 
     asyncio.run(_exercise())
 

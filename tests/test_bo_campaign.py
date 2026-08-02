@@ -7,10 +7,11 @@ offline sandbox — proving a real reaction campaign runs end-to-end and resumab
 
 import asyncio
 import warnings
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Iterator, Sequence
 from typing import Any
 
 import pytest
+from temporalio import activity
 from temporalio.client import Client
 from temporalio.worker import Worker
 
@@ -48,6 +49,18 @@ from tests.temporal_env import pydantic_client, start_env_or_skip
 warnings.filterwarnings("ignore")
 
 _BO_ACTIVITIES: Sequence[Callable[..., Any]] = [propose_initial, propose_next, evaluate_candidates]
+
+
+@pytest.fixture(autouse=True)
+def _no_op_heartbeat_outside_activity_context(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
+    """Let the BO activities run directly (not under a Temporal worker) in this file.
+
+    `activity.heartbeat` raises outside a real activity context (Conn-F2 gave all three BO
+    activities a heartbeat), and this file calls them directly rather than through Temporal — the
+    same idiom `tests/test_calc_jobs.py` uses for the same reason.
+    """
+    monkeypatch.setattr(activity, "heartbeat", lambda *args: None)
+    yield
 
 
 def test_get_objective_unknown_raises() -> None:

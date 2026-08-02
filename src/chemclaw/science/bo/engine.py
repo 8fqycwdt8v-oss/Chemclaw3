@@ -7,15 +7,25 @@ without touching the campaign, agents, or skills. `factorial_design` (D-092) is 
 same adapter shape for BoFire's classical `FractionalFactorialStrategy`, alongside
 the Bayesian-optimization strategies — full grid by default, and a reduced two-level
 design when the chemist's plate cannot hold the whole one.
+
+Errors leak nowhere past this boundary either (Science-4): `_fractional_design` catches
+BoFire's own validator error and re-raises a plain `ValueError`, and `initial_candidates`/
+`propose_candidates` catch the botorch/gpytorch/linear-algebra exceptions a degenerate fit
+or acquisition step can raise and re-raise `SurrogateFitError` — see
+`_translating_surrogate_errors`.
 """
 
 import itertools
 import operator
 import string
+from collections.abc import Iterator
+from contextlib import contextmanager
 from functools import reduce
 from typing import Any
 
+import numpy.linalg
 import pandas as pd
+import torch
 from bofire.data_models.domain.api import Domain, Inputs, Outputs
 from bofire.data_models.features.api import (
     CategoricalDescriptorInput,
@@ -31,8 +41,11 @@ from bofire.data_models.strategies.api import (
 )
 from bofire.strategies import api as strategies
 from bofire.utils.doe import get_generator
+from botorch.exceptions.errors import BotorchError, ModelFittingError
+from linear_operator.utils.errors import NanError, NotPSDError
 
 from chemclaw.core.config import settings
+from chemclaw.core.errors import ChemclawError
 from chemclaw.science.bo.problem import (
     MIN_SEED_OBSERVATIONS,
     Candidate,
@@ -45,6 +58,57 @@ from chemclaw.science.bo.problem import (
     discrete_candidate_count,
     params_key,
 )
+
+
+class SurrogateFitError(ChemclawError):
+    """BoFire's Bayesian strategy could not fit or query its surrogate (Science-4).
+
+    Raised in place of whatever `botorch`/`gpytorch`/`linear_operator` exception the fit or the
+    acquisition step actually threw. The classical path (`_fractional_design`) already had this
+    boundary — it catches BoFire's validator error and re-raises a plain `ValueError` "so the
+    caller sees a plain ValueError instead of a pydantic ValidationError wrapping it" — and the
+    Bayesian path had no equivalent, so a duplicate observation or a degenerate kernel propagated
+    a raw library exception straight through the Temporal activity or the in-process campaign
+    loop. `chemclaw.core.errors.ChemclawError` is what `agent.tool_authz.surface_domain_errors`
+    catches for the in-process seam; for the durable one, this class's name is listed in
+    `chemclaw.durable.publish._BAD_DATA_TYPES`, because the failure is a property of the *data*
+    (the same observations will fail the same way again) rather than a transient one a retry
+    could fix.
+    """
+
+
+# The library exceptions a GP fit or an acquisition-optimization step is known to raise on
+# degenerate input: a near-singular kernel (duplicate/near-duplicate points), a covariance matrix
+# that stays non-positive-definite after every jitter attempt, or a fit that produces NaNs.
+# `ModelFittingError` does not subclass `BotorchError` (botorch's own hierarchy), so it is listed
+# separately rather than assumed to be covered by it.
+_SURROGATE_FAILURES: tuple[type[Exception], ...] = (
+    BotorchError,
+    ModelFittingError,
+    NotPSDError,
+    NanError,
+    numpy.linalg.LinAlgError,
+    torch.linalg.LinAlgError,  # type: ignore[attr-defined] # torch's stubs omit this re-export
+)
+
+
+@contextmanager
+def _translating_surrogate_errors(context: str) -> Iterator[None]:
+    """Turn a known BoFire/botorch numerical failure into `SurrogateFitError`.
+
+    `context` names the step in the caller's own words (e.g. "fitting the surrogate to 3
+    observation(s)"), so the translated message says what was being attempted without this
+    helper needing to know which of `tell`/`ask` raised.
+    """
+    try:
+        yield
+    except _SURROGATE_FAILURES as error:
+        raise SurrogateFitError(
+            f"the Bayesian surrogate failed while {context}: {error}. This is usually duplicate "
+            "or near-duplicate observations collapsing the model's kernel, or an objective with "
+            "no spread across the points seen so far — vary the inputs, or the measured values, "
+            "before retrying; the same data will fail the same way again."
+        ) from error
 
 
 def _resolve_seed(seed: int | None) -> int:
@@ -164,21 +228,24 @@ def initial_candidates(
     """
     strategy = strategies.map(RandomStrategy(domain=_to_domain(problem), seed=_resolve_seed(seed)))
     space = discrete_candidate_count(problem)
-    if space is None:
-        return _frame_to_candidates(problem, strategy.ask(n))
-    if n > space:
-        raise ValueError(f"cannot seed {n} distinct points: the discrete space has only {space}")
-    # Re-ask until `n` distinct points are collected; each ask advances the
-    # strategy's RNG, and n <= space guarantees enough fresh points exist.
-    candidates: list[Candidate] = []
-    seen: set[tuple[tuple[str, ParamValue], ...]] = set()
-    while len(candidates) < n:
-        for candidate in _frame_to_candidates(problem, strategy.ask(n - len(candidates))):
-            key = params_key(candidate.params)
-            if key not in seen:
-                seen.add(key)
-                candidates.append(candidate)
-    return candidates
+    with _translating_surrogate_errors("sampling initial candidates"):
+        if space is None:
+            return _frame_to_candidates(problem, strategy.ask(n))
+        if n > space:
+            raise ValueError(
+                f"cannot seed {n} distinct points: the discrete space has only {space}"
+            )
+        # Re-ask until `n` distinct points are collected; each ask advances the
+        # strategy's RNG, and n <= space guarantees enough fresh points exist.
+        candidates: list[Candidate] = []
+        seen: set[tuple[tuple[str, ParamValue], ...]] = set()
+        while len(candidates) < n:
+            for candidate in _frame_to_candidates(problem, strategy.ask(n - len(candidates))):
+                key = params_key(candidate.params)
+                if key not in seen:
+                    seen.add(key)
+                    candidates.append(candidate)
+        return candidates
 
 
 def propose_candidates(
@@ -198,8 +265,11 @@ def propose_candidates(
             f"propose_candidates needs at least {MIN_SEED_OBSERVATIONS} observations; seed first"
         )
     strategy = strategies.map(SoboStrategy(domain=_to_domain(problem), seed=_resolve_seed(seed)))
-    strategy.tell(_observations_to_frame(problem, observations))
-    return _frame_to_candidates(problem, strategy.ask(n))
+    context = f"fitting the surrogate to {len(observations)} observation(s)"
+    with _translating_surrogate_errors(context):
+        strategy.tell(_observations_to_frame(problem, observations))
+        candidates = strategy.ask(n)
+    return _frame_to_candidates(problem, candidates)
 
 
 def _resolution(generator: str) -> int:

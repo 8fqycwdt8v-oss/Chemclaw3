@@ -77,6 +77,9 @@ def test_parity_defaults_are_backward_compatible() -> None:
     assert settings.tool_authz_default == "allow"  # every tool callable by default
     assert settings.verifier_enabled is False  # deterministic citation gate, no LLM judge
     assert settings.verifier_confidence_threshold == 0.7
+    # Far under service_turn_timeout_seconds (600): a stalled judge degrades, never holds the turn.
+    assert settings.verifier_timeout_seconds == 30.0
+    assert settings.verifier_timeout_seconds < settings.service_turn_timeout_seconds
     assert settings.eval_drift_enabled is False  # no scheduled drift job until opted in
     assert settings.eval_drift_epsilon == 0.05  # relative band: 5% proportional move
     assert settings.eval_drift_timeout_seconds == 300.0

@@ -18,22 +18,33 @@ that
 made MAF's own `header_provider` look usable (see `chemclaw.connectors.identity`).
 """
 
+import asyncio
+
 import httpx
 import pytest
 
 from chemclaw.agent.dialogue_tools import reset_dry_run, set_dry_run
-from chemclaw.agent.identity_context import reset_current_identity, set_current_identity
+from chemclaw.agent.identity_context import (
+    reset_current_correlation_id,
+    reset_current_identity,
+    set_current_correlation_id,
+    set_current_identity,
+)
 from chemclaw.agent.session_context import reset_current_session_id, set_current_session_id
 from chemclaw.connectors.identity import (
     HEADER_ACTOR,
+    HEADER_CORRELATION,
     HEADER_DRY_RUN,
     HEADER_ROLES,
     HEADER_SESSION,
+    STAMPED_HEADERS,
     MissingConnectorCredential,
     auth_for,
     turn_headers,
+    turn_identity_hook,
 )
 from chemclaw.connectors.manifest import BearerAuth, NoAuth
+from chemclaw.core.tracing import trace_headers
 
 
 def test_no_ambient_identity_sends_no_identity_headers() -> None:
@@ -84,6 +95,69 @@ def test_the_headers_carry_only_identity_never_call_content() -> None:
     assert set(turn_headers()) == {HEADER_DRY_RUN}
 
 
+def test_stamped_headers_lists_every_header_this_module_writes() -> None:
+    """The strip list and the stamp list must not drift, or one header outlives the guard.
+
+    `turn_identity_hook` removes exactly `STAMPED_HEADERS` when a request leaves the connector's
+    origin, so a new `X-Chemclaw-*` header that is stamped and not listed would be the single one
+    that still walks a redirect. Standard headers are excluded deliberately: `traceparent` grants
+    nothing, and pruning it would only orphan a span.
+    """
+    identity = set_current_identity("user-1", frozenset({"process-chemist"}))
+    session = set_current_session_id("session-abc")
+    correlation = set_current_correlation_id("turn-7f3a")
+    try:
+        ours = set(turn_headers()) - set(trace_headers())
+    finally:
+        reset_current_correlation_id(correlation)
+        reset_current_session_id(session)
+        reset_current_identity(identity)
+    assert ours == set(STAMPED_HEADERS)
+
+
+def test_the_hook_strips_the_identity_when_a_request_leaves_the_connector_origin() -> None:
+    """Defence in depth for Sec-2: the hook is bound to one origin and prunes on any other.
+
+    The client refuses redirects (`registry.connector_http_client`), so this is the second layer —
+    what protects the header set if that flag is ever restored to the MCP SDK's own default. It has
+    to *strip* rather than decline to re-add: httpx builds a redirected request from the previous
+    request's headers and drops only `Authorization`, so a hook that merely skipped a foreign origin
+    would let the originals travel untouched. Asserted on a client that *does* follow redirects,
+    because that is the configuration the guard exists for.
+    """
+    seen: dict[str, httpx.Headers] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        """Answer the connector's origin with a redirect elsewhere; record both requests."""
+        seen[str(request.url.host)] = request.headers
+        if request.url.host == "connector":
+            return httpx.Response(307, headers={"Location": "http://attacker/mcp"})
+        return httpx.Response(200)
+
+    async def _post() -> None:
+        async with httpx.AsyncClient(
+            transport=httpx.MockTransport(handler),
+            follow_redirects=True,
+            event_hooks={"request": [turn_identity_hook("http://connector/mcp")]},
+        ) as client:
+            await client.post("http://connector/mcp")
+
+    identity = set_current_identity("user-99", frozenset({"process-chemist"}))
+    session = set_current_session_id("session-leak")
+    try:
+        asyncio.run(_post())
+    finally:
+        reset_current_session_id(session)
+        reset_current_identity(identity)
+
+    assert seen["connector"][HEADER_ACTOR] == "user-99"
+    assert seen["connector"][HEADER_ROLES] == "process-chemist"
+    assert seen["connector"][HEADER_SESSION] == "session-leak"
+    # Nothing of ours survived the hop, including the flags that are not identity themselves but
+    # would still tell an eavesdropper which of our turns it is looking at.
+    assert [header for header in STAMPED_HEADERS if header in seen["attacker"]] == []
+
+
 def test_no_auth_needs_no_credential() -> None:
     """`mode: none` is the trust-boundary case (stdio, loopback dev): nothing to attach."""
     assert auth_for(NoAuth(), "alpha") is None
@@ -128,12 +202,6 @@ def test_the_correlation_id_crosses_the_connector_boundary() -> None:
     Advisory like the rest of these headers: a connector may join its records to ours on it and must
     never make an access decision on it.
     """
-    from chemclaw.agent.identity_context import (
-        reset_current_correlation_id,
-        set_current_correlation_id,
-    )
-    from chemclaw.connectors.identity import HEADER_CORRELATION
-
     token = set_current_correlation_id("turn-7f3a")
     try:
         headers = turn_headers()
