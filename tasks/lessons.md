@@ -887,3 +887,39 @@ set to the worktree's `src/` flipped six of seven to failing, which is the real 
 worktree, a container, a `sys.path` entry and an editable install all give you a directory that
 lies about which code is running. The check costs one line and is the difference between evidence
 and theatre — this is the third variant of the same trap in one session.
+
+## 2026-08-02 — Fanning six worktree agents out twice: what the R0/R1 waves taught
+
+**A subagent's own gate claim is not evidence; the integration run is.** One R1 package reported
+"`make lint type` both green" and arrived with five lines over the limit. Another reported the same
+and was clean. The difference is invisible from the report, so the only safe reading is that a
+worktree gate constrains nothing about the merged tree. **Rule:** never let a WP close on its
+author's gate claim — run `make lint type test` over the *combined* result before the PR, and
+expect it to find something.
+
+**A worktree does not inherit your uncommitted — or unpushed — work.** I fixed the
+`test_repo_map` dot-path bug first, deliberately, so the six agents would run against a clean
+suite. All six worktrees were based on the pre-fix tree anyway: every agent hit the bug, two spent
+real effort proving it was environmental, and one independently fixed it, which was the only merge
+conflict of the wave. **Rule:** commit *and push* a prerequisite before launching worktree agents,
+then verify with `git merge-base --is-ancestor <fix> <agent-branch>` rather than assuming.
+
+**The bugs that only exist between the packages are the ones nobody is assigned to find.** Three
+defects in these two waves were invisible to every individual agent and appeared only when the
+work was combined: a docstring's example URL (`https://attacker/`) tripping an unrelated egress
+guard that scans all host literals in `src/`; a new `safety-validate` target wired into CI by one
+package while the `make ci` meta-target added by another did not list it — the exact drift that
+target exists to prevent; and a config change refusing `service_uvicorn_workers>1` while the
+entrypoint still passed `--workers` and the chart still advertised it. **Rule:** at integration,
+diff what each WP *declared* against what the other WPs *changed underneath it*, especially for
+build files, CI wiring and any list one package extends and another consumes.
+
+**Invite the pushback explicitly and it will arrive on the one that matters.** Two prompts said, in
+effect, "if this is wrong when you read the code, say so rather than forcing it". Both were taken:
+the connector-redirect fix I had specified as "A **or** B" turned out to require both (httpx copies
+the original headers forward *and* the hook re-adds them, so declining to re-stamp closes nothing),
+and reparenting `AuthorizationError` under `ChemclawError` — which I asked for — would have made
+`surface_domain_errors` catch every authorization refusal before `surface_authorization_denials`
+could, silently turning "Refused: …" into "Error: …". Registering the name without reparenting was
+the right fix, and the agent traced the middleware ordering to prove it. **Rule:** a plan's proposed
+remedy is a hypothesis; write the prompt so disproving it is a success condition, not a deviation.
