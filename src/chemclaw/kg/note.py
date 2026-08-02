@@ -59,6 +59,18 @@ def cited_links(text: str) -> list[tuple[str, str]]:
     return list(ordered)
 
 
+def note_id_for_reaction(record_id: str) -> str:
+    """The `reaction` note id for a fingerprint-index record id.
+
+    One definition, because three callers were each spelling `f"reaction-{id}"` themselves and one
+    of them did not. `connectors.rxnfp.similar_reactions` returned the raw index key while
+    `retrieval.retrievers` and the ELN ingest both prefixed it, so a chemist handed a search hit
+    straight to `expand_note` was told the note did not exist — while it sat on disk under the
+    prefixed name. Two spellings of one id is how a search stops reaching the thing it found.
+    """
+    return f"reaction-{record_id}"
+
+
 def cited_ids(text: str) -> list[str]:
     """Extract the note ids a body of text cites via `[[wikilinks]]`, stripped and deduped.
 

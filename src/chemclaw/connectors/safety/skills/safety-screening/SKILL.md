@@ -3,7 +3,10 @@ name: safety-screening
 description: >-
   Judgment for the structural hazard screen: when to call screen_hazards, how to report a flag
   so a chemist can act on it, why an empty result is never "safe", and where the screen's
-  competence ends and a human process-safety assessment begins.
+  competence ends and a human process-safety assessment begins. Also load this before answering
+  anything about mutagenicity, genotoxicity, ICH M7, nitrosamines, elemental impurities or
+  residual solvents — the table has no rules for any of them, and the screen must never be
+  presented as one.
 ---
 
 # Safety screening
@@ -67,6 +70,16 @@ transport classification, thermal-stability data (DSC/ARC), incompatibilities be
 the table, quantities and scale, or engineering controls. Those need an SDS, the site's EHS
 function, and — for anything energetic — a process-safety review. When a question turns on one of
 them, say so and point there rather than guessing.
+
+**Four classes the table does not address at all**, which matter because a chemist may reasonably
+expect a "hazard screen" to: **mutagenicity and genotoxicity** (there is no ICH M7 structural-alert
+set, no Ames or TTC reasoning, and no expert rule base), **nitrosamine risk** (no nitrosatable-amine
+rules, no purge-factor model, no acceptable-intake limits), **elemental impurities** (no ICH Q3D
+PDEs), and **residual solvents** (no ICH Q3C classes or limits). Running the screen and reporting
+its result as any of these is the most serious error available here: it converts sixteen
+process-safety motifs into a regulatory toxicology verdict. Say plainly that no such assessment
+exists in this system, and never quote a limit — a *correct* recalled limit is worse than a wrong
+one, because it trains the reader to trust the next.
 
 **Computation does not extend the screen either.** A semiempirical calculation can estimate a
 decomposition energy or the stability of an energetic motif, and a user will eventually ask for

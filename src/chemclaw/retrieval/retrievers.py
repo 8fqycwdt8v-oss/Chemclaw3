@@ -18,7 +18,7 @@ from chemclaw.core.config import settings
 from chemclaw.core.embeddings import embed_texts
 from chemclaw.kg.conflicts import conflicts_by_note, find_conflicts
 from chemclaw.kg.graph import load_notes
-from chemclaw.kg.note import WIKILINK, Note, split_link
+from chemclaw.kg.note import WIKILINK, Note, note_id_for_reaction, split_link
 from chemclaw.retrieval.evidence import EvidenceChunk
 from chemclaw.retrieval.vector_index import IndexHit, NoteIndex, default_note_index, note_text
 from chemclaw.science.fingerprints.rxnfp.search import find_similar_reactions
@@ -262,7 +262,7 @@ class FingerprintReactionRetriever:
         return [
             EvidenceChunk(
                 content=f"Similar reaction {match.label} (Tanimoto {match.similarity:.2f})",
-                source_note_id=f"reaction-{match.id}",
+                source_note_id=note_id_for_reaction(match.id),
                 retriever=self.name,
                 # Structural hits score by their Tanimoto similarity — a closer precedent survives
                 # truncation first (KM-5). Clamped to [0, 1] to stay a valid chunk score.

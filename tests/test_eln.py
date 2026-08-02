@@ -24,6 +24,7 @@ from chemclaw.ingest.eln.ord import Component, OrdReaction, Role
 from chemclaw.ingest.eln.ord_adapter import OrdFormatError, OrdJsonAdapter
 from chemclaw.ingest.eln.sync import sync_entries
 from chemclaw.ingest.eln.validate import validate_ord
+from chemclaw.kg.note import note_id_for_reaction
 from chemclaw.kg.render import render_note
 from chemclaw.science.fingerprints.store import InMemoryFingerprintStore
 from tests.conftest import FakeSubmitter
@@ -1286,3 +1287,17 @@ def test_ord_compound_with_no_resolvable_identifier_is_still_refused(tmp_path: P
     """
     with pytest.raises(OrdFormatError, match="no resolvable structure identifier"):
         _map_ord(tmp_path, [{"type": "NAME", "value": "2a, Boronic Acid"}])
+
+
+def test_a_search_hit_id_is_the_note_id_the_ingest_wrote() -> None:
+    """The round trip a chemist takes: a `similar_reactions` hit handed to `expand_note`.
+
+    `connectors.rxnfp.similar_reactions` used to return the fingerprint index's own key while the
+    ELN ingest stored the note under a `reaction-` prefix, so a hit could not be opened and the
+    chemist was told the procedure was not in the graph — with the note on disk. Asserted as an
+    equality between the two ends rather than against a literal, so the test still holds if the
+    prefix ever changes and fails if only one end changes.
+    """
+    reaction = _ester()
+    written = note_from_ord_reaction(reaction).id
+    assert note_id_for_reaction(reaction.reaction_id) == written
