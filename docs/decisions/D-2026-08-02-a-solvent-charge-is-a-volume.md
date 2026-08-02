@@ -18,10 +18,24 @@ the one pairing the tool documents was broken on the term that dominates both ou
 
 ## Decision
 
-**Solvents are charged by volume, in their own `solvents`/`volumes` arguments, and a known solvent
-passed as a reagent is rejected outright.** Not accepted-as-written, not silently converted: the
-molar-equivalent path is what produced the 2.17× error, and a table that quietly accepts a solvent
-there gives no sign of which reading was meant. The error message names the fix.
+**A charge expressed in volumes goes in `solvents`/`volumes`, which did not exist before.** That is
+the whole of the fix. The tool converts, so nobody converts by hand, which is where the 2.17× came
+from.
+
+**The tool does not police which path a substance takes, and a first version of this decision that
+did was wrong.** It rejected any reagent `density_of` could answer for, on the reasoning that
+having a density means being a solvent. It does not. Ten entries in the density table are routinely
+charged by molar equivalent *as reagents* — acetic acid at 1.5 equiv, water in a hydrolysis,
+methanol in an esterification, DMSO as the Swern oxidant, DMF as the Vilsmeier reagent — so the
+rejection broke correct calls, and because `density_of` resolves SMILES too there was no spelling
+left that could charge three equivalents of water at all. Having a density is a fact about a
+substance; being charged by volume is a fact about one experiment, and only the chemist knows which
+they meant. The row's `role` reports which path was taken rather than the tool choosing it.
+
+That first version also shipped with a test that hid it: the existing offload test was rewritten
+from `("CCO", 46.0, ["water"], [1.0])` to the solvent path, silently turning 1.0 equivalent
+(18.0 g) into 2.552 equivalents (45.91 g). The test asserted only thread identity, so it passed. **A
+test edited to accommodate a change is evidence about the change**, and this one was the evidence.
 
 **Solvents share `ChargeRow` rather than living in a second list.** A separate list would invite
 the model to hand `green_metrics` the reagent masses alone — precisely how those metrics get
@@ -43,9 +57,13 @@ belong to, rather than in a new table.
 ## Consequences
 
 - The `stoichiometry_table` → `green_metrics` pairing works as its docstring has always described.
-- The rejection is a **behaviour change** for any caller that was passing a solvent as a reagent.
-  That is the intent: such a call was producing a wrong number, and there is no reading under which
-  it was right.
-- A solvent outside `core/reagents.py` cannot be charged by volume until its density is added. The
-  error says so and offers charging it by mass as a reagent, which is correct and merely less
-  convenient — better than a table that is confidently wrong.
+- Every existing call keeps working. The two new arguments default to empty, so this is purely
+  additive — which is what it should have been from the start.
+- A substance outside `core/reagents.py`'s density table cannot be charged by volume until its
+  density is added. The error says so and offers converting to molar equivalents by hand — less
+  convenient, and better than a table that is confidently wrong.
+- **What this does *not* prevent** is the original error itself: nothing stops a caller passing
+  "10 volumes" as 10 equivalents, because 10 equivalents of THF is also a legal charge and the tool
+  cannot see the chemist's intent. The volumes path removes the *need* to convert by hand, and the
+  docstring says which argument a volume belongs in. Making it impossible was the tempting version
+  and it cost more than it bought.

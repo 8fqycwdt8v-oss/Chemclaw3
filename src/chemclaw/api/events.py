@@ -104,7 +104,7 @@ class NoteProposedEvent(BaseModel):
 
 
 class CapabilityDegradedEvent(BaseModel):
-    """One or more connectors did not come up, so this turn answers with fewer tools (REV-6).
+    """A capability did not come up, so this turn answers with fewer tools (REV-6).
 
     The turn is not failed by this and must not be: an unreachable connector costs its tools, not
     the conversation. But the chemist has no other way to tell. The model does not know a tool is
@@ -114,6 +114,13 @@ class CapabilityDegradedEvent(BaseModel):
 
     Emitted before the first token, so a surface can mark the answer as partial while it streams
     rather than retroactively.
+
+    **`connectors` is not only connectors, and a reader must not assume the name resolves in the
+    registry.** The durable execution layer rides in the same list as `durable-jobs (Temporal)`
+    when the broker is unreachable — it is not a bundle, it is every bundle's jobs at once, but
+    what a surface does with the name is identical (say this capability is missing this turn), and
+    a second event type carrying one more unreachable capability would be a contract change for no
+    additional meaning. The name is prefixed so it cannot be mistaken for a bundle.
     """
 
     type: Literal["capability_degraded"] = "capability_degraded"
@@ -134,13 +141,21 @@ class ApprovalRequestEvent(BaseModel):
 class AnswerEvent(BaseModel):
     """The turn's final assembled answer (the complete text, after the token stream).
 
-    When answer verification is enabled (plan F10-B), `confidence` carries the verifier's aggregate
-    citation-faithfulness score in [0, 1] and `unsupported_claims` lists the claim texts the
-    evidence did not support. `review_required` is the routing signal: it is `True` exactly when
-    `confidence < verifier_confidence_threshold`, so a thin UI shows a review affordance (and a
-    future durable hold, D-032, keys off the same flag) only on a genuinely low-confidence answer.
-    All three stay `None`/`False`/empty on the verifier-off path, so the event is byte-for-byte
-    today's answer unless verification is switched on.
+    `review_required` is the routing signal a thin UI shows a review affordance on (and a future
+    durable hold, D-032, keys off the same flag). **Two independent checks can raise it, each
+    behind its own knob**, so it is not a function of `confidence` alone:
+
+    - `verifier_enabled` (plan F10-B) — `confidence` carries the aggregate citation-faithfulness
+      score in [0, 1] against what *this turn's tools returned*, `unsupported_claims` lists what
+      the evidence did not support, and the flag is set when `confidence` falls below
+      `verifier_confidence_threshold`.
+    - `answer_shape_gate_enabled` — a deterministic scan for method-parameter shapes no tool in
+      the turn produced. It sets the flag and appends what it matched to `unsupported_claims`,
+      and leaves `confidence` at `None`: it found something or it did not, and that is not a
+      score. So `review_required` can be `True` while `confidence is None`.
+
+    With both knobs off — the default — all three stay `None`/`False`/empty and the event is
+    byte-for-byte today's answer.
     """
 
     type: Literal["answer"] = "answer"

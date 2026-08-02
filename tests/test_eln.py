@@ -1436,6 +1436,37 @@ def test_scale_falls_back_to_millimoles_when_no_mass_was_recorded() -> None:
     assert "- scale: 220 mmol of reactants charged\n" in note.body
 
 
+def test_a_mixed_unit_record_reports_both_charges_rather_than_dropping_one() -> None:
+    """A record charging one reactant by mass and another by moles must report both.
+
+    `Component` allows mass and moles independently, so "an ELN records one or the other" is true
+    of records and not of the schema — and preferring mass whenever *any* reactant had one dropped
+    the rest.
+
+    Here the 120 mmol of acetic acid is ~7.2 g, so the old rule reported "4.6 g" for an 11.8 g
+    charge: a 2.5x under-report of the single number this bullet exists to make legible, in the
+    direction that makes a pilot batch read as a bench run.
+    """
+    note = note_from_ord_reaction(
+        _charged(
+            Component(smiles="CCO", role=Role.REACTANT, mass_mg=4600),
+            Component(smiles="CC(=O)O", role=Role.REACTANT, amount_mmol=120),
+        )
+    )
+    assert "- scale: 4.6 g + 120 mmol of reactants charged\n" in note.body
+
+
+def test_a_reactant_recording_both_units_is_counted_once() -> None:
+    """Mass is the preferred form, so a species carrying both must not also swell the mmol half."""
+    note = note_from_ord_reaction(
+        _charged(
+            Component(smiles="CCO", role=Role.REACTANT, mass_mg=4600, amount_mmol=100),
+            Component(smiles="CC(=O)O", role=Role.REACTANT, amount_mmol=120),
+        )
+    )
+    assert "- scale: 4.6 g + 120 mmol of reactants charged\n" in note.body
+
+
 def test_the_charge_sheet_lists_every_input_with_what_was_recorded() -> None:
     """The machine-legible form behind the one-line scale: who carried the mass, per species."""
     note = note_from_ord_reaction(

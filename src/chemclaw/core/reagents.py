@@ -151,10 +151,16 @@ _RAW_SYNONYMS: dict[str, tuple[str, str]] = {
 
 # Ambient densities in g/mL (20–25 °C), keyed by one spelling from the solvent block above.
 #
-# Why a second table rather than a field on the first: a density is only meaningful for the
-# substances that are *charged by volume*, and that set is exactly the bulk solvents. Keeping it
-# separate is also what lets `density_of` answer the question `stoichiometry_table` really asks —
-# "is this a solvent?" — without a second list to keep in step with this one.
+# Why a second table rather than a field on the first: a density is only meaningful for a substance
+# that *can* be charged by volume, which is a much smaller set than the reagent table.
+#
+# **It says "can be", and that is not the same as "is", which this comment used to get wrong.** It
+# claimed the table let `density_of` answer "is this a solvent?" and `stoichiometry_table` acted on
+# that, refusing any reagent with a density. Ten of the entries below are routinely charged by
+# molar equivalent *as reagents*: acetic acid at 1.5 equiv, water in a hydrolysis, methanol in an
+# esterification, DMSO as the Swern oxidant, DMF as the Vilsmeier formylating agent. Having a
+# density is a fact about a substance; being charged by volume is a fact about one experiment, and
+# only the chemist knows which they meant. `density_of` answers the first question only.
 #
 # The cost of not having these was measured. `stoichiometry_table` took only molar equivalents, so
 # "THF/water 4:1 at 10 volumes" could not be expressed at all; a live run passed 40 and 10 as

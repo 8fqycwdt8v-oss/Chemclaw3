@@ -114,11 +114,16 @@ async def stoichiometry_table(
     in 10 volumes of THF, what do I charge?" — deterministically, from molecular weights and
     densities.
 
-    **Solvents go in `solvents`/`volumes`, never in `reagents`/`equivalents`, and passing a known
-    solvent as a reagent is rejected.** A solvent charge is a volume, and expressing "THF/water 4:1
-    at 10 volumes" as molar equivalents is not a rounding error: done once on a 2 kg basis it put
-    the principal solvent out by a factor of 2.17, and the answer then certified the figures as
-    self-consistent. The rejection is what makes that unrepeatable.
+    **A charge expressed in volumes goes in `solvents`/`volumes`.** Expressing "THF/water 4:1 at 10
+    volumes" as molar equivalents is not a rounding error: done once on a 2 kg basis it put the
+    principal solvent out by a factor of 2.17, and the answer then certified the figures as
+    self-consistent. Converting volumes yourself is the mistake this argument pair exists to remove.
+
+    **A substance is not owned by one of the two paths, and the tool does not police which you
+    use.** Acetic acid at 1.5 equiv, water in a hydrolysis, methanol in an esterification, DMSO as
+    the Swern oxidant and DMF as the Vilsmeier reagent are all charged by molar equivalent and all
+    have a density on file. Only the chemist knows which reading was meant, so pass the charge in
+    the units it was *specified* in and the table reports which those were on each row's `role`.
 
     Args:
         basis: The limiting reagent (name or SMILES); its mass sets the scale.
@@ -183,14 +188,6 @@ def _charge_table(
         )
     )
     for reagent, equiv in zip(reagents, equivalents, strict=True):
-        if density_of(reagent) is not None:
-            # Rejected outright rather than charged as written: the molar-equivalent path is what
-            # produced the 2.17x error, and a table that quietly accepts a solvent there gives no
-            # sign of which reading was meant.
-            raise ValueError(
-                f"{reagent!r} is charged by volume, not by molar equivalent — "
-                "pass it in `solvents` with a `volumes` figure (mL per gram of basis)"
-            )
         match = resolve_compound_name(reagent)
         if match is None:
             table.unresolved.append(reagent)
@@ -230,7 +227,8 @@ def _solvent_row(solvent: str, volumes: float, basis_mass_g: float, basis_mmol: 
     if density is None:
         raise ValueError(
             f"no density on file for {match.name!r}, so its volume cannot be converted to a mass — "
-            "charge it by mass as a reagent, or add its density to the reagent table"
+            "convert the volume to molar equivalents yourself and pass it in `reagents`, or add "
+            "its density to the reagent table"
         )
     volume_ml = volumes * basis_mass_g
     mass_g = volume_ml * density

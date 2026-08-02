@@ -199,14 +199,28 @@ def test_the_reagent_rows_are_untouched_by_a_solvent_charge() -> None:
     assert base.moles_mmol == pytest.approx(basis.moles_mmol * 1.2)
 
 
-def test_a_solvent_passed_as_a_molar_reagent_is_rejected() -> None:
-    """The original error, made unrepeatable rather than merely documented.
+def test_a_substance_with_a_density_can_still_be_charged_by_molar_equivalent() -> None:
+    """Having a density is a fact about a substance; being charged by volume is a fact about a run.
 
-    Accepting 40 "equivalents" of THF would produce a plausible table with no sign of which
-    reading was meant, and the run showed the wrong reading then being certified as consistent.
+    The tool briefly conflated the two and refused any reagent `density_of` could answer for, which
+    broke five ordinary charges outright: acetic acid at 1.5 equiv, water in a hydrolysis, methanol
+    in an esterification, DMSO as the Swern oxidant, DMF as the Vilsmeier reagent. Water was the
+    worst of them — `density_of` resolves SMILES too, so there was no spelling that let a chemist
+    charge three equivalents of water at all.
+
+    The masses are checked, not merely the absence of a raise: a row that came back on the solvent
+    path would carry a completely different amount, which is how the regression hid in a test that
+    asserted only thread identity.
     """
-    with pytest.raises(ValueError, match="charged by volume"):
-        _run(stoichiometry_table("Boc2O", 2000.0, ["THF"], [40.0]))
+    table = _run(stoichiometry_table("Boc2O", 218.0, ["AcOH", "water", "DMSO"], [1.5, 3.0, 2.0]))
+    assert [row.role for row in table.rows] == ["basis", "reagent", "reagent", "reagent"]
+    by_name = {row.name: row for row in table.rows}
+    # 218 g Boc2O = 0.999 mol, so the equivalents read straight across into moles.
+    assert by_name["acetic acid"].moles_mmol == pytest.approx(1498.6, rel=1e-3)
+    assert by_name["acetic acid"].mass_g == pytest.approx(90.0, rel=1e-2)
+    assert by_name["water"].moles_mmol == pytest.approx(2997.2, rel=1e-3)
+    assert by_name["water"].mass_g == pytest.approx(54.0, rel=1e-2)
+    assert all(row.volume_ml is None for row in table.rows), "no row was charged by volume"
 
 
 def test_a_solvent_with_no_density_refuses_rather_than_guessing() -> None:

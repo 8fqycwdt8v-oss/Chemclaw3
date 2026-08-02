@@ -19,9 +19,13 @@ scores a conversational answer's *faithfulness* to its evidence and returns an a
 conversational path used to re-resolve an answer's citations from the graph on disk, so the set a
 citation was checked against was "note ids that exist" — a citation the model produced from memory
 passed whenever the note happened to exist, which is most of the time. The turn's own tool results
-are now threaded in from `api/runner.py` and are the only thing a citation is checked against. The
-eval harness has scored it this way from the start and says why
-(`chemclaw.evals.live._score_citations`).
+are now threaded in from `api/runner.py` and are the only thing a citation is checked against.
+
+The eval harness has always scored against the turn's results rather than the graph, and states the
+reason (`chemclaw.evals.live._score_citations`) — but it reads them off the SSE event, which
+carries a 200-character preview, so its `uncited_note_ids` is a systematic *over*-count and does not
+yet agree with this. That gap is a backlog row; closing it wants an untruncated `note_ids` field on
+the event rather than a bigger preview.
 
 Beside the citation gate sits `ungrounded_parameter_shapes`: a deterministic scan for *method
 parameter shapes* in an answer that no tool in the turn produced. It is a heuristic keyed on shape,
@@ -69,7 +73,10 @@ _PARAMETER_SHAPES: dict[str, re.Pattern[str]] = {
         r"\b(?:Kinetex|Luna|XBridge|Zorbax|Acquity|Poroshell|Gemini|Symmetry|Hypersil)\b",
         re.IGNORECASE,
     ),
-    "ICH daily limit": re.compile(r"\d+(?:\.\d+)?\s*(?:µg|μg|ug)\s*/\s*day", re.IGNORECASE),
+    # Both units, because Q3D quotes elemental PDEs in µg/day and Q3C quotes solvent PDEs in
+    # mg/day. Only µg was listed, so a fabricated residual-solvent limit — the class the live run
+    # actually produced — passed the scan untouched while an elemental one was caught.
+    "ICH daily limit": re.compile(r"\d+(?:\.\d+)?\s*(?:µg|μg|ug|mg)\s*/\s*day", re.IGNORECASE),
     "ppm limit": re.compile(r"\b\d+(?:\.\d+)?\s*ppm\b", re.IGNORECASE),
     "polymorph form": re.compile(r"\bForm\s+(?:[IVX]{1,4}|[A-D])\b"),
 }
@@ -232,6 +239,16 @@ async def verify_answer(
     return _deterministic_result(answer, evidence)
 
 
+def _mentions(text: str, note_id: str) -> bool:
+    r"""Does `text` name `note_id` as a whole token, rather than merely contain its characters?
+
+    `-` counts as part of a token, unlike `\b`, because every id in this corpus is hyphenated and
+    the collisions that matter are hyphen-suffixed (`playbook-degassing-old` must not ground
+    `playbook-degassing`).
+    """
+    return re.search(rf"(?<![\w-]){re.escape(note_id)}(?![\w-])", text) is not None
+
+
 def turn_evidence(answer: str, tool_outputs: Sequence[str]) -> list[EvidenceChunk]:
     """Build the turn's evidence from what its tools actually returned.
 
@@ -242,9 +259,17 @@ def turn_evidence(answer: str, tool_outputs: Sequence[str]) -> list[EvidenceChun
     `chemclaw.evals.live._score_citations` has scored against the turn's tool results since the
     beginning and states this reason in a comment.
 
-    A cited id is *seen* when it appears anywhere in a tool result's text — substring containment,
-    the same rule the eval harness uses, so a result that renders ids as `[[wikilinks]]`, as bare
-    slugs, or inside JSON is read identically without this having to know each tool's format.
+    A cited id is *seen* when it appears in a tool result's text as a whole token, so a result that
+    renders ids as `[[wikilinks]]`, as bare slugs, or inside JSON is read identically without this
+    having to know each tool's format.
+
+    **A whole token, not a substring, and the difference is a live hole rather than a nicety.** Note
+    ids are not prefix-free: the committed corpus carries both `playbook-degassing` and
+    `playbook-degassing-old`, so plain containment let a turn that retrieved only the *retired* note
+    certify a citation to the *current* one it never saw — at `confidence=1.0`, which is exactly the
+    failure this function exists to catch. Numeric ids have the same shape: `reaction-1` is a
+    substring of `reaction-12`. The boundary treats `-` as part of a token precisely so a longer id
+    cannot ground a shorter prefix of itself.
 
     Chunks the citations did not match are kept under a synthetic `tool-output-N` id rather than
     dropped: they are what the turn actually retrieved, so the LLM judge must see them to check the
@@ -257,7 +282,7 @@ def turn_evidence(answer: str, tool_outputs: Sequence[str]) -> list[EvidenceChun
         text = output.strip()
         if not text:
             continue
-        grounded = [note_id for note_id in citations if note_id in output]
+        grounded = [note_id for note_id in citations if _mentions(output, note_id)]
         if grounded:
             chunks.extend(
                 EvidenceChunk(content=text, source_note_id=note_id, retriever="tool")

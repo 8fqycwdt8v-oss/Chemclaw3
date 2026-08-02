@@ -255,6 +255,75 @@ def test_ordinary_chemistry_prose_does_not_trip_the_scan() -> None:
     assert ungrounded_parameter_shapes(prose, []) == []
 
 
+def test_a_longer_note_id_does_not_ground_a_citation_to_its_prefix() -> None:
+    """The substring hole: `playbook-degassing-old` must not vouch for `playbook-degassing`.
+
+    Both ids are in the committed corpus, so this is a live collision rather than a contrived one.
+    Under plain containment a turn that retrieved only the *retired* note certified a citation to
+    the *current* one at confidence 1.0 — the precise failure `turn_evidence` exists to catch, and
+    the one it was silently unable to catch.
+    """
+    retired_only = "gather_evidence: [[playbook-degassing-old]] — sparge with N2 for 30 min."
+    assert turn_evidence("Degas per [[playbook-degassing]].", [retired_only]) == [
+        EvidenceChunk(content=retired_only, source_note_id="tool-output-0", retriever="tool")
+    ]
+
+
+def test_a_numeric_id_is_not_grounded_by_a_longer_one_sharing_its_digits() -> None:
+    """`reaction-1` is a substring of `reaction-12`; the boundary is what separates them."""
+    other = "similar_reactions: [[reaction-12]] gave 84% yield."
+    assert turn_evidence("See [[reaction-1]].", [other]) == [
+        EvidenceChunk(content=other, source_note_id="tool-output-0", retriever="tool")
+    ]
+
+
+def test_an_id_the_turn_really_did_retrieve_is_still_grounded() -> None:
+    """The boundary must not break the ordinary case — the exact id, however it is rendered.
+
+    Three renderings in one result, because the substring rule was chosen precisely so this
+    function need not know each tool's output format, and a boundary that only understood
+    wikilinks would trade one hole for another.
+    """
+    for rendering in ("[[reaction-12]]", "reaction-12", '{"note_id": "reaction-12"}'):
+        output = f"similar_reactions: {rendering} gave 84% yield."
+        assert turn_evidence("See [[reaction-12]].", [output]) == [
+            EvidenceChunk(content=output, source_note_id="reaction-12", retriever="tool")
+        ]
+
+
+def test_a_fabricated_residual_solvent_limit_is_scanned_like_an_elemental_one() -> None:
+    """Q3C quotes mg/day and Q3D quotes µg/day; the scan has to read both or it reads neither.
+
+    Only µg was listed, so the fabrication class the live run actually produced — a residual-solvent
+    PDE recited from training — passed untouched while the elemental form was caught.
+    """
+    assert ungrounded_parameter_shapes("The PDE for THF is 7.2 mg/day.", []) == [
+        "ICH daily limit: 7.2 mg/day"
+    ]
+    assert ungrounded_parameter_shapes("The PDE for THF is 7.2 mg/day.", ["Q3C: 7.2 mg/day"]) == []
+
+
+def test_the_scan_over_fires_on_a_chemists_own_figures_which_is_why_it_defaults_off() -> None:
+    """Pin the false positives rather than claim they are rare — the docstring reasons about a rate.
+
+    Every answer below is legitimate: the chemist supplied the number and the turn called no tool,
+    so the scan has nothing to match against and marks it for review. This is the documented cost
+    of a shape heuristic, and it is the whole argument for `answer_shape_gate_enabled` defaulting
+    to off. A test that only showed the true positives would let that cost drift unnoticed.
+    """
+    over_fires = {
+        "Your 7.26 ppm singlet is residual CHCl3, not product.": ["ppm limit: 7.26 ppm"],
+        "At 50 bar the hydrogenation you describe should be complete.": ["pressure: 50 bar"],
+        "Yes — 1.0 mL/min at 254 nm is a reasonable starting point.": [
+            "flow rate: 1.0 mL/min",
+            "wavelength: 254 nm",
+        ],
+        "Form II is the one you said you isolated.": ["polymorph form: Form II"],
+    }
+    for answer, expected in over_fires.items():
+        assert ungrounded_parameter_shapes(answer, []) == expected, answer
+
+
 def test_a_verifier_that_cannot_be_built_still_gets_the_offline_gate(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

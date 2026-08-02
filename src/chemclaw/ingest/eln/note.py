@@ -127,9 +127,17 @@ def _scale(reaction: OrdReaction) -> str | None:
     excluded for the same reason in reverse — three equivalents of an inorganic base can outweigh
     the substrate and would inflate the figure well past what anyone would call the scale.
 
-    Mass preferred, `amount_mmol` as the fallback: an ELN records one or the other, and both are
-    unit-labelled here so the two forms are never confused. `None` when the record charges neither
-    — the note stays silent rather than asserting a scale it does not know.
+    Mass preferred, `amount_mmol` as the fallback, and both unit-labelled so the two forms are
+    never confused. `None` when the record charges neither — the note stays silent rather than
+    asserting a scale it does not know.
+
+    **The two forms are chosen per record, not per reactant, and a record carrying both reports
+    both.** `Component` allows `mass_mg` and `amount_mmol` independently, so "an ELN records one or
+    the other" is true of most records and not of the schema. Preferring mass whenever *any*
+    reactant had one silently dropped every reactant that had only moles: a run charging 4.6 g of
+    one substrate and 120 mmol (≈7.2 g) of another reported "4.6 g", a 2.5x under-report of the one
+    number this bullet exists to make legible. Under-reporting scale is the specific direction that
+    matters — it makes a pilot batch read as a bench run.
 
     **First in the block, and in the block rather than in a tag.** A retrieval excerpt is a blind
     character prefix of the body (`retrieval.retrievers._excerpt`, `note_excerpt_chars`), so
@@ -140,12 +148,14 @@ def _scale(reaction: OrdReaction) -> str | None:
     """
     reactants = [c for c in reaction.inputs if c.role is Role.REACTANT]
     masses = [c.mass_mg for c in reactants if c.mass_mg is not None]
-    if masses:
-        return f"{sum(masses) / 1000:g} g of reactants charged"
-    amounts = [c.amount_mmol for c in reactants if c.amount_mmol is not None]
-    if amounts:
-        return f"{sum(amounts):g} mmol of reactants charged"
-    return None
+    # Only those with no mass, so a reactant carrying both is counted once, on the preferred form.
+    amounts = [c.amount_mmol for c in reactants if c.mass_mg is None and c.amount_mmol is not None]
+    grams = f"{sum(masses) / 1000:g} g" if masses else ""
+    mmol = f"{sum(amounts):g} mmol" if amounts else ""
+    charged = " + ".join(part for part in (grams, mmol) if part)
+    if not charged:
+        return None
+    return f"{charged} of reactants charged"
 
 
 def _charge_block(reaction: OrdReaction) -> str:

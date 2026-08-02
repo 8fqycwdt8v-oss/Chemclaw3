@@ -843,3 +843,47 @@ from different waves land in the same module. Cutting teams by wave would have p
 the other five genuinely disjoint. The waves survived as the *PR* boundary, not the work boundary —
 and where a team's items straddled two waves (BO: one wake-up, one new capability), the PR boundary
 bent rather than splitting a file across commits.
+
+## 2026-08-02 — The adversarial pass, and the two things it caught that I had signed off
+
+The reviewer owned no code and read the diff. It found two merge-blockers in work I had already
+run the full gate on, and both were the same species: **a change whose test was edited to fit it.**
+
+**`stoichiometry_table` rejected correct calls.** The reasoning was "a substance with a density is
+a solvent, so charging it by molar equivalent is the error we just fixed". Ten entries in the
+density table are routinely charged by equivalent as reagents — AcOH at 1.5 eq, water in a
+hydrolysis, MeOH in an esterification, DMSO as the Swern oxidant, DMF as the Vilsmeier reagent —
+and because `density_of` resolves SMILES, there was no spelling left that could charge water by
+moles at all. **The existing test that would have caught it was rewritten to the new signature**,
+silently turning 1.0 equivalent of water (18.0 g) into 2.552 equivalents (45.91 g). It asserted
+only thread identity, so it passed. My ADR then asserted "there is no reading under which it was
+right", which the reviewer refuted in four lines of output.
+
+**Rule: when a change requires editing an existing test, that edit is the finding.** Diff the
+*values* the old test asserted against the new ones and say out loud why they differ. "Updated the
+call to the new signature" is a sentence that hides a behaviour change every time.
+
+**Rule: before enforcing a predicate, check the predicate is the one you mean.** "Has a density"
+and "is charged by volume" differ by one being a fact about a substance and the other a fact about
+an experiment. A rejection is a much stronger claim than a conversion and needs the stronger
+evidence.
+
+**The substring hole.** `turn_evidence` grounded a citation with `note_id in output`. Note ids are
+not prefix-free, and the *committed corpus* carries `playbook-degassing` and
+`playbook-degassing-old` — so a turn that retrieved only the retired note certified a citation to
+the current one at confidence 1.0. That is the exact failure the function exists to catch, in the
+commit that added it.
+
+**Rule: an identifier match is a token match. Never `in`.** And when a check is about ids, go
+looking in the real corpus for a prefix pair before claiming the check works.
+
+**And the near-miss in my own verification.** Proving the fixes, I made a git worktree at the
+pre-fix commit, copied the new tests in, ran them — and all seven **passed**. Not because the tests
+were wrong: pytest resolved `chemclaw` through the editable install pointing at the *main* tree, so
+I was running new tests against new source in a directory that looked like old source. `PYTHONPATH`
+set to the worktree's `src/` flipped six of seven to failing, which is the real result.
+
+**Rule: when proving a test fails without its fix, print the module's `__file__` first.** A
+worktree, a container, a `sys.path` entry and an editable install all give you a directory that
+lies about which code is running. The check costs one line and is the difference between evidence
+and theatre — this is the third variant of the same trap in one session.

@@ -44,9 +44,16 @@ checked, an invented *control* gets believed and designed around.
 keeps every tool result in full (`_ToolCallTrace.outputs`) and threads it into the answer check.
 The 200-character `ToolResultEvent` preview stays what it is — a UI budget — and is explicitly not
 reused for grounding: a `gather_evidence` result is ~20,000 characters over 40 chunks, so scoring
-against the preview would call 39 of its 40 citations fabricated. `chemclaw.evals.live` has scored
-this way since it was written, and this makes the production path agree with the harness that
-measures it.
+against the preview would call 39 of its 40 citations fabricated.
+
+**The eval harness does not yet agree, and saying it did was wrong.** `chemclaw.evals.live` scores
+against the turn's tool results rather than the graph — that much it has always done, and it states
+the reason in a comment — but it reads them off the SSE `ToolResultEvent`, which carries the
+200-character preview. So the production gate now reads full text and the harness reads a
+truncation, which makes `uncited_note_ids` a systematic **over**-count of fabricated citations. It
+is also the only metric that could validate this change, so the gap is on the backlog rather than
+buried here. Closing it wants an untruncated `note_ids` field on the event, not a bigger preview:
+that budget is right for the UI.
 
 **An uncited factual answer is unverified, not supported.** This over-flags: a purely
 conversational "which batch do you mean?" is indistinguishable from an uncited assertion without

@@ -66,8 +66,16 @@ operator-facing one.
 - **ICH M7 classification, purge factors and acceptable intakes remain `MISSING-MODEL`** and are
   named as such in `docs/reference/user-story-capability-map.md`. The alerts do not partially
   deliver them; shipping alerts is not progress toward a classifier.
-- The transcribed numbers are the risk this ADR carries. They are pinned by tests against the
-  guideline text rather than against the loader, and the citation on every row is what makes a
-  transcription error findable by a human instead of invisible.
+- **A Class 3 number is not the same kind of number as a Class 2 one, and the payload has to say
+  so.** Q3C assigns Class 2 solvents a specific PDE; Table 3 is a *list of names* with no numeric
+  column, and the 50 mg/day figure is a general statement — and a floor ("50 mg **or more** per
+  day"), not an assignment. Rendered under a bare `basis="PDE"`, the machine-readable half asserted
+  a solvent-specific limit the guideline does not contain, under a real citation. The basis strings
+  are therefore per class and live in the YAML beside the numbers they label.
+- The transcribed numbers are the risk this ADR carries. The 62 Q3C values, the 18 Q3D rows and
+  their class assignments were checked row by row in an adversarial review; the citation on every
+  row is what makes a transcription error findable by a human instead of invisible. **The one field
+  that could not be verified offline is the Q3C revision label itself** ("R9, Step 4, 2024"), which
+  appears on every Q3C citation — a backlog row, not a silent assumption.
 - `GenotoxAlert` deliberately has **no severity field**, unlike `HazardFlag`: ranking alerts is the
   first half of a classification, and the published alert sets do not rank them either.

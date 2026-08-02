@@ -682,7 +682,17 @@ def test_an_unparseable_component_stops_the_alert_screen() -> None:
         ("DMF", "N,N-Dimethylformamide", "PDE", 8.8, "mg/day"),
         ("2-MeTHF", "2-Methyltetrahydrofuran", "PDE", 5.0, "mg/day"),
         ("benzene", "Benzene", "concentration limit", 2.0, "ppm"),  # Class 1: a limit, no PDE
-        ("IPA", "2-Propanol", "PDE", 50.0, "mg/day"),  # Class 3, reached via an abbreviation
+        # Class 3, reached via an abbreviation. Its basis is *not* "PDE": Q3C assigns Class 3 no
+        # solvent-specific PDE, so quoting one under that label would attribute a number to the
+        # guideline that it does not contain.
+        (
+            "IPA",
+            "2-Propanol",
+            "Class 3 general limit — Q3C assigns no solvent-specific PDE; 50 mg/day or more "
+            "is acceptable without justification",
+            50.0,
+            "mg/day",
+        ),
     ],
 )
 def test_a_transcribed_limit_comes_back_with_its_number(
@@ -743,18 +753,35 @@ def test_the_miss_verdict_is_serialized_not_merely_a_property() -> None:
     assert "not that no limit exists" in impurity_limit("unobtainium").model_dump()["verdict"]
 
 
-def test_the_class_2_concentration_limits_agree_with_their_pdes() -> None:
-    """Every Q3C row satisfies the guideline's own ppm = PDE x 100 identity at a 10 g daily dose.
+def test_every_class_2_concentration_limit_agrees_with_its_pde() -> None:
+    """The guideline's own ppm = PDE x 100 identity at a 10 g daily dose, over the whole table.
 
     A transcription's characteristic failure is a mistyped digit, and this is the one internal
     consistency check the table supports — it catches a transposed PDE or ppm without needing the
     source document open.
+
+    **Class 2 only, and read off the file rather than a hand-written name list.** The list was
+    seven names and the docstring said "every row", which is the gap a reviewer is entitled to
+    assume is not there. Class 3 is excluded because the identity is *tautological* for it: both
+    of its numbers are the one general 50 mg/day statement, so agreeing proves nothing about a
+    transcription. Twenty-five of the sixty-two rows are Class 3, so including them would have
+    inflated the check's apparent coverage by more than a third while adding no evidence.
     """
-    for name in ("acetonitrile", "DCM", "toluene", "NMP", "2-MeTHF", "DMSO", "ethyl acetate"):
-        limit = impurity_limit(name).limit
-        assert limit is not None, name
+    from chemclaw.science.safety.ich import _index
+
+    # De-duplicated by substance: the index is keyed by every synonym, so a row with three
+    # spellings would otherwise be checked three times and inflate the count below.
+    class_2 = {
+        limit.substance: limit
+        for limit in _index().values()
+        if limit.limit_class == "Class 2" and limit.guideline.startswith("ICH Q3C")
+    }.values()
+    assert len(class_2) >= 25, "the Class 2 block is the bulk of Q3C; this is checking the table"
+    for limit in class_2:
         by_basis = {entry.basis: entry.value for entry in limit.limits}
-        assert by_basis["concentration limit"] == pytest.approx(by_basis["PDE"] * 100.0), name
+        assert by_basis["concentration limit"] == pytest.approx(by_basis["PDE"] * 100.0), (
+            limit.substance
+        )
 
 
 def test_the_limit_lookup_is_advertised_to_the_agent() -> None:

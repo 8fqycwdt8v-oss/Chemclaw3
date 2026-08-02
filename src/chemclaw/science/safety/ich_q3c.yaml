@@ -8,6 +8,12 @@
 #
 # Provenance: transcribed from ICH Q3C(R9), "Impurities: Guideline for Residual Solvents",
 # ICH Step 4 / minor revision, 2024 — Table 1 (Class 1), Table 2 (Class 2), Table 3 (Class 3).
+#
+# **The revision label is the one field nobody has checked against the source**, and it is on every
+# row's citation, so if "R9 / 2024" is wrong the whole file cites the wrong document while every
+# number in it is right. An adversarial review verified all 62 values and could not verify this;
+# it is a backlog row rather than a silent assumption. Check it against the ICH site and correct
+# `guideline:` below in a pull request — one line, and it does not touch a single figure.
 # Concentration limits for Class 2 are the guideline's own Option 1 figures, computed from the PDE
 # at a 10 g/day maximum daily dose (ppm = PDE in mg/day x 100); every row below satisfies that
 # identity, which is the cheapest check a reviewer can run over the whole table.
@@ -44,10 +50,17 @@ classes:
       Class 2 — solvents to be limited: non-genotoxic animal carcinogens, or agents of other
       irreversible toxicity such as neurotoxicity or teratogenicity.
   "3":
-    table: Table 3
+    # Table 3 is a *list of names* with no numeric column. The two figures below are the
+    # guideline's general Class 3 statement, and they are a floor ("50 mg or more per day"), not a
+    # per-solvent assignment — so they are labelled as such on every row rather than being quoted
+    # as though Q3C had assigned this solvent a PDE.
+    table: Table 3 (the Class 3 solvent list; the figures are the general Class 3 statement)
     meaning: >-
       Class 3 — solvents with low toxic potential: no health-based exposure limit is needed, and
       50 mg/day or less (5000 ppm at a 10 g daily dose) is acceptable without justification.
+    pde_basis: Class 3 general limit — Q3C assigns no solvent-specific PDE; 50 mg/day or more
+      is acceptable without justification
+    concentration_basis: Class 3 general limit at a 10 g daily dose — not a solvent-specific value
 
 solvents:
   # --- Class 1 (Table 1): concentration limit only, no PDE ------------------------------------

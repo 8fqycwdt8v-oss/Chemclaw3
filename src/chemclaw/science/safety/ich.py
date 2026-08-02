@@ -107,10 +107,21 @@ class _Q3cSolvent(BaseModel):
 
 
 class _ClassNote(BaseModel):
-    """Which table a class lives in, and what membership of it means."""
+    """Which table a class lives in, what membership means, and how its numbers are quoted.
+
+    `pde_basis`/`concentration_basis` exist because Class 3's two numbers are **not** what Classes 1
+    and 2's are. Q3C assigns those a solvent-specific PDE; Class 3 has no per-solvent value at all,
+    only a general statement that 50 mg/day *or more* is acceptable without justification. Both were
+    rendered under the same bare `basis="PDE"`, so the machine-readable half — which is what an
+    answer quotes — asserted a solvent-specific limit that the guideline does not contain, and did
+    it under a real citation. That is the exact shape of failure this table was built to end, so the
+    distinction lives on the number rather than only in the prose `meaning` beside it.
+    """
 
     table: str = Field(min_length=1)
     meaning: str = Field(min_length=1)
+    pde_basis: str = Field(default="PDE", min_length=1)
+    concentration_basis: str = Field(default="concentration limit", min_length=1)
 
 
 class _Q3cTable(BaseModel):
@@ -185,11 +196,16 @@ def _index() -> dict[str, ImpurityLimit]:
         note = q3c.classes[solvent.solvent_class]
         limits = [
             LimitValue(
-                basis="concentration limit", value=solvent.concentration_limit_ppm, unit="ppm"
+                basis=note.concentration_basis,
+                value=solvent.concentration_limit_ppm,
+                unit="ppm",
             )
         ]
         if solvent.pde_mg_per_day is not None:
-            limits.insert(0, LimitValue(basis="PDE", value=solvent.pde_mg_per_day, unit="mg/day"))
+            limits.insert(
+                0,
+                LimitValue(basis=note.pde_basis, value=solvent.pde_mg_per_day, unit="mg/day"),
+            )
         meaning = note.meaning
         if solvent.concern is not None:
             meaning = f"{meaning} Concern for this solvent: {solvent.concern.lower()}."

@@ -28,6 +28,12 @@ and `tasks/live-test/`. The fixed ones are not listed — see the ADR and the co
       is visible and the rest read as uncited — the harness therefore *understates* citation
       coverage. Wants an untruncated `note_ids` field on `ToolResultEvent` populated by the
       retrieval tools. Do **not** raise `_ARG_PREVIEW_CHARS` — that budget is correct for the UI.
+- [ ] **The ICH Q3C revision label is unverified** — [XS, but it is on every Q3C citation].
+      `science/safety/ich_q3c.yaml` cites "ICH Q3C(R9) … ICH Step 4 (2024)". An adversarial review
+      verified all 62 transcribed values and the Q3D(R2)/2022 label, and could **not** verify this
+      one offline. If it is wrong, every Q3C answer carries a correct number under the wrong
+      document — the one failure shape the table exists to end. Check it against the ICH site and
+      correct the single `guideline:` line; no figure changes.
 - [ ] **The answer shape gate has not been measured live** — [S]. The deterministic scan
       (`ungrounded_parameter_shapes`, `answer_shape_gate_enabled`, off by default) is argued from
       the run that motivated it, not from a run that includes it. Re-run the analytical and
