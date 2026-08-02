@@ -21,7 +21,7 @@ from chemclaw.ingest.eln.ingest import IngestError, ingest_reaction
 from chemclaw.ingest.eln.json_adapter import ElnFormatError, JsonExportAdapter
 from chemclaw.ingest.eln.note import note_from_ord_reaction
 from chemclaw.ingest.eln.ord import Component, OrdReaction, Role
-from chemclaw.ingest.eln.ord_adapter import OrdJsonAdapter
+from chemclaw.ingest.eln.ord_adapter import OrdFormatError, OrdJsonAdapter
 from chemclaw.ingest.eln.sync import sync_entries
 from chemclaw.ingest.eln.validate import validate_ord
 from chemclaw.kg.render import render_note
@@ -1219,3 +1219,70 @@ def test_an_old_unamended_export_stays_out_of_the_window(tmp_path: Path) -> None
         )
         == []
     )
+
+
+# --- ORD identifier resolution --------------------------------------------------------
+
+
+def _ord_payload(reactant_identifiers: list[dict[str, str]]) -> dict[str, object]:
+    """A minimal ORD reaction whose single reactant carries `reactant_identifiers`."""
+    return {
+        "reactionId": "ord-ident-1",
+        "provenance": {"recordCreated": {"time": {"value": "2026-01-01T00:00:00Z"}}},
+        "inputs": {
+            "m1": {
+                "components": [
+                    {"identifiers": reactant_identifiers, "reactionRole": "REACTANT"},
+                ]
+            }
+        },
+        "outcomes": [
+            {
+                "products": [
+                    {
+                        "identifiers": [{"type": "SMILES", "value": "CCOC(C)=O"}],
+                        "reactionRole": "PRODUCT",
+                    }
+                ]
+            }
+        ],
+    }
+
+
+def _map_ord(tmp_path: Path, identifiers: list[dict[str, str]]) -> OrdReaction:
+    """Write one ORD entry with those reactant identifiers and map it through the adapter."""
+    (tmp_path / "ident.json").write_text(json.dumps(_ord_payload(identifiers)), encoding="utf-8")
+
+    async def _run() -> OrdReaction:
+        adapter = OrdJsonAdapter(str(tmp_path))
+        entries = await adapter.fetch_new_entries(_EPOCH)
+        return adapter.map_to_ord(entries[0])
+
+    return asyncio.run(_run())
+
+
+def test_ord_compound_resolves_from_inchi_when_no_smiles_is_given(tmp_path: Path) -> None:
+    """ORD's identifier union allows InChI, and converting it is exact, not a guess.
+
+    Ethanol's InChI, so the assertion is on the *structure recovered*, not on a round trip
+    through the code under test.
+    """
+    reaction = _map_ord(tmp_path, [{"type": "INCHI", "value": "InChI=1S/C2H6O/c1-2-3/h3H,2H2,1H3"}])
+    assert [c.smiles for c in reaction.inputs] == ["CCO"]
+
+
+def test_ord_compound_resolves_from_a_known_reagent_name(tmp_path: Path) -> None:
+    """A NAME-only component resolves through the same table `resolve_compound` serves."""
+    reaction = _map_ord(tmp_path, [{"type": "NAME", "value": "acetonitrile"}])
+    assert [c.smiles for c in reaction.inputs] == ["CC#N"]
+
+
+def test_ord_compound_with_no_resolvable_identifier_is_still_refused(tmp_path: Path) -> None:
+    """A paper's internal shorthand is not a structure, and inventing one would be worse.
+
+    This is the real Perera flow-Suzuki case: the source spreadsheet publishes the second
+    coupling partner only as `2a, Boronic Acid`. Widening the identifier union must not turn an
+    honest refusal into a fabricated structure.
+    """
+    with pytest.raises(OrdFormatError, match="no resolvable structure identifier"):
+        _map_ord(tmp_path, [{"type": "NAME", "value": "2a, Boronic Acid"}])
