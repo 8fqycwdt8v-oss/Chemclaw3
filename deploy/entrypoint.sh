@@ -12,16 +12,14 @@ case "${component}" in
   service)
     # One asyncio event loop saturates one CPU, so a multi-CPU pod served by a single process
     # leaves the rest idle — a load test measured front-door throughput flat from 10 to 50
-    # concurrent users. CHEMCLAW_SERVICE_UVICORN_WORKERS is the knob for that. It still defaults
-    # to 1, but no longer because of the turn guard: that is a leased row in `session_turns` now
-    # and every process shares it (D-121). What stays per-process is capability — attachments,
-    # harness todos and the admission cap — and no ingress can pin a request below the pod, so
-    # replicas plus Route affinity remain the supported way to use more CPU. Passed only when
-    # raised, so the default keeps today's single-process signal handling and PID 1.
+    # concurrent users. `CHEMCLAW_SERVICE_UVICORN_WORKERS` was the knob for that, and it is now
+    # refused above 1 by `Settings` validation: five per-process guarantees (the rate limiter, the
+    # budget tracker, the attachment store, the live-session LRU and the metrics registry) each
+    # break silently across processes, and the turn guard being durable (D-121) fixed only the
+    # sixth. Replicas plus Route affinity remain the supported way to use more CPU. No `--workers`
+    # flag is passed here: the setting is refused where it is read, so passing it would only turn
+    # one clear startup error into N of them.
     args=(--host "${CHEMCLAW_SERVICE_HOST:-0.0.0.0}" --port "${CHEMCLAW_SERVICE_PORT:-8080}")
-    if [[ "${CHEMCLAW_SERVICE_UVICORN_WORKERS:-1}" -gt 1 ]]; then
-      args+=(--workers "${CHEMCLAW_SERVICE_UVICORN_WORKERS}")
-    fi
     # Transport-level bounds, none of which the application can impose on itself: by the time a
     # request reaches an ASGI app, uvicorn has already accepted the connection and parsed the
     # headers. Every one is a way to exhaust the process without ever sending a valid request.
