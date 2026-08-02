@@ -213,7 +213,10 @@ def test_missing_rule_table_fails_loudly(monkeypatch: pytest.MonkeyPatch) -> Non
     covers — the exact failure this module exists to prevent, so it is fatal, not skipped.
     """
     monkeypatch.setattr(settings, "safety_rules_path", "safety/does-not-exist.yaml")
-    with pytest.raises(SafetyRulesError, match="cannot read hazard rules"):
+    # The filename is in the message: `read_rule_table` is shared with the genotoxicity screen,
+    # and a reader sent to the wrong table by a generic "hazard rules" is the confusion this
+    # package spends the most effort preventing.
+    with pytest.raises(SafetyRulesError, match=r"cannot read the rule table does-not-exist\.yaml"):
         screen_structure("CCO")
 
 

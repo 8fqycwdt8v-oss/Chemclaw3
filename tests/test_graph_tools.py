@@ -335,16 +335,37 @@ def test_record_failure_retires_a_claim_that_stopped_holding_in_the_same_submiss
     assert failure.id in amended.outgoing_links()  # and points at what ended it
 
 
-def test_record_failure_does_not_reclose_an_already_retired_note(
+def test_record_failure_refuses_to_reclose_an_already_retired_note(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Re-closing would extend a closed note's validity and append the marker twice."""
+    """Re-closing would extend a closed note's validity and append the marker twice — so it says so.
+
+    Refused rather than quietly skipped. Both dates came from a person, and dropping one of them
+    is the same silent correction `close_refuted_note` already refuses when the window ends before
+    it starts; the message names the date that already holds so the chemist can pick.
+    """
     _seed_playbook(tmp_path, valid_to="2025-01-01")
     monkeypatch.setattr(settings, "knowledge_dir", str(tmp_path))
     fake = FakeSubmitter()
     monkeypatch.setattr(graph_tools, "default_submitter", lambda: fake)
 
-    asyncio.run(record_failure("playbook-pd", "still does not work", held_until=date(2026, 3, 1)))
+    with pytest.raises(ChemclawError, match="already retired on 2025-01-01"):
+        asyncio.run(
+            record_failure("playbook-pd", "still does not work", held_until=date(2026, 3, 1))
+        )
+    assert fake.submissions == [], "nothing is filed when the dates disagree"
+
+
+def test_record_failure_without_a_date_still_works_on_a_retired_note(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The refusal above is about the *date*, not the note: a plain refutation is always allowed."""
+    _seed_playbook(tmp_path, valid_to="2025-01-01")
+    monkeypatch.setattr(settings, "knowledge_dir", str(tmp_path))
+    fake = FakeSubmitter()
+    monkeypatch.setattr(graph_tools, "default_submitter", lambda: fake)
+
+    asyncio.run(record_failure("playbook-pd", "still does not work"))
 
     assert len(fake.submissions[0].files) == 1  # the failure note only
 
