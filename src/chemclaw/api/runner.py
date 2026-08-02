@@ -9,17 +9,22 @@ runs inside `agent.run`), so plan/execute autonomy needs no separate driver here
 
 Errors are turned into a single `ErrorEvent` with a user-safe message rather than propagating a
 stack trace to the browser — a failed turn must not take down the stream or leak internals.
+
+What is left here is the *lifecycle* — the exit stack, the state snapshot and its rollback, the
+contextvars a turn stamps and must unstamp. The three pieces that are pure functions of what the
+stream hands them live beside it, one module each, because they are the parts that can be tested by
+passing an object in and comparing what comes back: `api/runner_trace.py` (reassembling a streamed
+tool call and rendering an approval prompt), `api/runner_usage.py` (the turn's token arithmetic) and
+`api/runner_answer.py` (scoring the final answer against this turn's tool outputs).
 """
 
 import asyncio
 import copy
-import json
 import logging
 import time
 import uuid
-from collections.abc import AsyncIterator, Mapping, Sequence
+from collections.abc import AsyncIterator, Sequence
 from contextlib import AsyncExitStack
-from dataclasses import dataclass
 from typing import Any
 
 from agent_framework import AgentSession
@@ -34,10 +39,8 @@ from chemclaw.agent.plan_gate import consume_turn_approval, gate_applies
 from chemclaw.agent.profiles import get_profile
 from chemclaw.agent.turn_cost import TurnCost, record_turn_cost
 from chemclaw.agent.turn_flags import reset_dry_run, set_dry_run
-from chemclaw.agent.verifier import ungrounded_parameter_shapes, verify_turn_answer
 from chemclaw.api.budget import BudgetTracker
 from chemclaw.api.events import (
-    AnswerEvent,
     ApprovalRequestEvent,
     CapabilityDegradedEvent,
     ErrorCode,
@@ -48,10 +51,11 @@ from chemclaw.api.events import (
     PlanEvent,
     QuestionEvent,
     TokenEvent,
-    ToolCallEvent,
     ToolFailedEvent,
-    ToolResultEvent,
 )
+from chemclaw.api.runner_answer import build_answer_event
+from chemclaw.api.runner_trace import ToolCallTrace, approval_prompt
+from chemclaw.api.runner_usage import TurnUsage, usage_tokens
 from chemclaw.connectors.registry import open_reachable
 from chemclaw.core.config import settings
 from chemclaw.core.errors import ChemclawError
@@ -80,11 +84,6 @@ from chemclaw.core.turn_signals import (
 )
 
 logger = logging.getLogger(__name__)
-
-# How many characters of a tool call's arguments the trace event carries — enough to see *what*
-# was called without streaming a whole evidence payload to the UI (mirrors the audit trail
-# truncation).
-_ARG_PREVIEW_CHARS = 200
 
 # What the durable subsystem is called when its outage is announced. `CapabilityDegradedEvent`
 # carries a list of *connector* names today, and this is not a connector — it is the whole durable
@@ -189,7 +188,7 @@ async def run_turn(
     # Metered across the turn's updates and booked once on teardown (even on failure — a failed
     # turn still spent tokens up to the point it broke, so its cost must count toward the next
     # check).
-    turn_usage = _TurnUsage()
+    turn_usage = TurnUsage()
     # Stamp the turn's session so a job-launching tool (compute_dft_energy) records push-back to the
     # right session (F3-T3) — ambient, never a model-supplied argument. Reset on turn teardown.
     session_token = set_current_session_id(session.session_id)
@@ -319,9 +318,9 @@ async def run_turn(
             stream = agent.run(
                 user_message, stream=True, session=session, tools=turn_connectors or None
             )
-            tool_trace = _ToolCallTrace()
+            tool_trace = ToolCallTrace()
             async for update in stream:
-                turn_usage.add(_usage_tokens(update))
+                turn_usage.add(usage_tokens(update))
                 # Drain *before* this update's own content: a tool that ran while the model was
                 # producing this update ran before the text it then produced, so emitting the
                 # signal first is the truthful transcript order (RCH-4/RCH-5).
@@ -336,7 +335,7 @@ async def run_turn(
                 for call in tool_trace.feed(update):
                     yield call
                 for request in getattr(update, "user_input_requests", None) or []:
-                    yield ApprovalRequestEvent(prompt=_approval_prompt(request))
+                    yield ApprovalRequestEvent(prompt=approval_prompt(request))
                 plan = await _current_plan(session)
                 if plan and plan != last_plan:
                     last_plan = plan
@@ -416,7 +415,7 @@ async def run_turn(
                 retryable=False,
                 correlation_id=correlation_id,
             )
-        answer = await _answer_event("".join(answer_parts), tool_trace.outputs)
+        answer = await build_answer_event("".join(answer_parts), tool_trace.outputs)
         # **Before the yield, not after it.** `agent.run` has ended by now, so the history provider
         # has already committed this turn's rows and they are a complete, paired exchange — there is
         # nothing half-written left to undo. The cancellation that reaches a finished turn is
@@ -675,69 +674,12 @@ async def _current_plan(session: AgentSession) -> list[str] | None:
         return None
 
 
-async def _answer_event(answer: str, tool_outputs: Sequence[str]) -> AnswerEvent:
-    """Assemble the turn's final `AnswerEvent`, scoring it against what this turn retrieved (F10-B).
-
-    Two independent checks, each behind its own knob and each able to set `review_required` — the
-    one routing signal a surface (or a future D-032 hold) reads to flag an answer rather than
-    present it as authoritative. There is deliberately no second flag: a reviewer needs to know
-    *that* an answer wants a look, and `unsupported_claims` carries *why*, whichever check spoke.
-
-    - `verifier_enabled`: citation faithfulness against `tool_outputs`, stamping the aggregate
-      confidence and flagging below `verifier_confidence_threshold`.
-    - `answer_shape_gate_enabled`: the deterministic scan for method parameters no tool in this
-      turn produced. It flags outright rather than moving a confidence, because it is not a measure
-      of anything — it either found an ungrounded shape or it did not. Off by default and a
-      deployment decision rather than a default-on behaviour, because it is a shape heuristic that
-      both misses and over-fires (see `ungrounded_parameter_shapes`), and an answer marked for
-      review that did not need it costs a chemist trust in every mark that follows.
-
-    `tool_outputs` is what the turn's tools actually returned, untruncated, and it is the whole
-    point of both checks. Verification used to re-resolve the answer's citations from the graph on
-    disk, which asked whether a cited note exists rather than whether this turn saw it.
-
-    Neither check may sink the turn: a verifier failure degrades to the unscored answer.
-    """
-    confidence: float | None = None
-    unsupported: list[str] = []
-    review = False
-    if settings.verifier_enabled:
-        try:
-            result = await verify_turn_answer(answer, tool_outputs)
-        except Exception:
-            logger.exception("answer verification failed; returning the unscored answer")
-        else:
-            confidence = result.confidence
-            unsupported = [claim.text for claim in result.unsupported]
-            review = result.confidence < settings.verifier_confidence_threshold
-    if settings.answer_shape_gate_enabled:
-        shapes = ungrounded_parameter_shapes(answer, tool_outputs)
-        if shapes:
-            # WARNING because this is the signal an operator tunes the gate on — how often it
-            # fires, and on what — and the matched text is in the message so a false positive is
-            # diagnosable without reading the transcript. A counter would be the better home for
-            # the rate, but `core/metrics` refuses an undeclared name and declaring one is a
-            # cross-package edit this change does not own.
-            logger.warning(
-                "answer marked for review: parameter shape(s) no tool in this turn produced (%s)",
-                "; ".join(shapes),
-            )
-            unsupported = [*unsupported, *shapes]
-            review = True
-    return AnswerEvent(
-        text=answer,
-        confidence=confidence,
-        unsupported_claims=unsupported,
-        review_required=review,
-    )
-
-
 async def _resume(
     agent: Any,
     session: Any,
     results: dict[str, dict[str, Any]],
     connectors: Sequence[Any],
-    tool_trace: "_ToolCallTrace",
+    tool_trace: ToolCallTrace,
 ) -> AsyncIterator[Event]:
     """Continue the turn with completed job results, streaming the continuation's events.
 
@@ -789,250 +731,3 @@ def _signal_event(signal: Signal) -> Event:
     if isinstance(signal, ToolFailureSignal):
         return ToolFailedEvent(tool=signal.tool, message=signal.message)
     return NoteProposedEvent(note_id=signal.note_id, reference=signal.reference)
-
-
-@dataclass(slots=True)
-class _TurnUsage:
-    """One turn's model usage, split along the dimensions it is *priced* along (REV-10).
-
-    The runner used to accumulate a single int, and `chemclaw_tokens_total` published it. That
-    number cannot answer "what is this deployment costing", which is the question AG-11 asks:
-    input, output and cache-read carry different prices — a cache read is roughly an order of
-    magnitude cheaper than a fresh input token — so a deployment that caches well and one that does
-    not report identical totals while their bills differ several-fold.
-
-    MAF has reported all four since the beginning (`UsageDetails` carries
-    `cache_read_input_token_count` and `cache_creation_input_token_count` beside the input/output
-    pair). Nothing read past the sum.
-
-    `total` stays the sum the budget guard meters, so the runaway-cost refusal is unchanged: this
-    splits what is *published*, not what is enforced.
-    """
-
-    input: int = 0
-    output: int = 0
-    cache_read: int = 0
-    cache_write: int = 0
-    total: int = 0
-
-    def add(self, other: "_TurnUsage") -> None:
-        """Accumulate another update's usage into this turn's running total."""
-        self.input += other.input
-        self.output += other.output
-        self.cache_read += other.cache_read
-        self.cache_write += other.cache_write
-        self.total += other.total
-
-
-def _usage_tokens(update: Any) -> _TurnUsage:
-    """Best-effort usage reported in a streamed update's usage content (all zero if none).
-
-    MAF emits usage as a content carrying a `UsageDetails` mapping. Duck-typed on the mapping so a
-    provider or version that reports no usage — or the fake agent in tests — simply meters 0; the
-    turn caps still bind.
-
-    `total` falls back to input+output when the provider omits it, exactly as before. The cache
-    counts are read separately rather than folded in, because a provider that reports them has
-    already excluded cache reads from `input_token_count` — adding them would double-count the
-    cheap tokens as expensive ones.
-    """
-    usage = _TurnUsage()
-    for content in getattr(update, "contents", None) or []:
-        details = getattr(content, "usage_details", None)
-        if not isinstance(details, Mapping):
-            continue
-        tokens = details.get("total_token_count")
-        if tokens is None:
-            tokens = (details.get("input_token_count") or 0) + (
-                details.get("output_token_count") or 0
-            )
-        usage.add(
-            _TurnUsage(
-                input=int(details.get("input_token_count") or 0),
-                output=int(details.get("output_token_count") or 0),
-                cache_read=int(details.get("cache_read_input_token_count") or 0),
-                cache_write=int(details.get("cache_creation_input_token_count") or 0),
-                total=int(tokens or 0),
-            )
-        )
-    return usage
-
-
-class _ToolCallTrace:
-    """Reassemble a streamed function call, so `tool_call` can carry the arguments it promises.
-
-    A streamed call does not arrive as one object. The provider sends the *name* first, on a
-    content whose `arguments` is still empty, and then streams the argument JSON as fragments on
-    further contents that carry only the `call_id` — no name. Reading name-and-arguments off a
-    single content, as this did, therefore matched exactly the one content that never has any
-    arguments, and skipped every fragment for want of a name: `ToolCallEvent.arguments` was empty
-    on every call ever emitted, and could not have been anything else (D-138). The field is
-    documented as "a short argument preview" and read by the UI trace, so this was a promise the
-    stream never kept.
-
-    Fragments for one call arrive contiguously, so a call is complete once an update goes by
-    without adding to it — that is the flush condition, and it needs no knowledge of which
-    content type terminates a call. The event therefore lands slightly later than before: after
-    the arguments rather than after the name. That is the more truthful order anyway, because a
-    tool cannot run before its arguments are complete.
-
-    **That flush condition was still one step too late** (D-159). For a streamed call the next
-    update to arrive is the one carrying the call's *result* — the provider finishes the argument
-    stream, the framework runs the tool, and only then does anything else come down the wire. So
-    "an update went by without adding to it" fired after execution, and the trace announced
-    `predict_pka(...)` once the twenty seconds were already spent. From the chemist's side a
-    working calculation and a hung server were the same thing.
-
-    So a call now completes the moment its accumulated arguments **parse as JSON**, which is
-    exactly when the provider has finished sending them and before the tool is invoked. No new
-    provider signal is needed and D-138's promise is kept: the event still carries the whole
-    argument preview, it just no longer waits for the result to prove the arguments ended. The
-    update-went-by rule stays as the fallback for arguments that never parse (a provider that
-    streams something other than JSON) so nothing can be stranded.
-
-    Results are matched back by `call_id` and emitted as `ToolResultEvent`, which is why
-    `_names` outlives the flush: the name is what the result event reports, and it is not on the
-    result content.
-
-    Still duck-typed: MAF's function-call content class is not a stable top-level export and its
-    shape varies by version, so this matches on structure (a `call_id`/`arguments` pair) rather
-    than importing a concrete type.
-    """
-
-    def __init__(self) -> None:
-        self._names: dict[str, str] = {}
-        self._fragments: dict[str, list[str]] = {}
-        # The name of every call already announced, kept so its result can be reported under the
-        # same name. Bounded by the calls in one turn, which the loop cap already bounds.
-        self._issued: dict[str, str] = {}
-        # What this turn's tools returned, in full, in the order they came back — the evidence the
-        # answer verifier and the parameter-shape gate check the answer against. Kept here rather
-        # than read back off the emitted `ToolResultEvent`s because those carry a 200-character
-        # *preview*: a `gather_evidence` result is ~20,000 characters over 40 chunks, so scoring
-        # against the preview would call 39 of its 40 citations fabricated. The budget is right for
-        # the UI and wrong for a grounding check, so the two read different things from one place.
-        # Bounded by the calls in one turn, like `_issued`, and never leaves the process.
-        self.outputs: list[str] = []
-
-    def feed(self, update: Any) -> list[Event]:
-        """Take one streamed update; return the calls it issued and the results it returned."""
-        growing: set[str] = set()
-        done: set[str] = set()
-        results: list[Event] = []
-        for content in getattr(update, "contents", None) or []:
-            if not (hasattr(content, "arguments") or hasattr(content, "call_id")):
-                continue
-            name = str(getattr(content, "name", "") or "")
-            key = str(getattr(content, "call_id", "") or "") or name
-            if not key:
-                continue
-            if name:
-                self._names.setdefault(key, name)
-            if key not in self._names and key not in self._issued:
-                continue  # a fragment for a call whose opening content we never saw
-            arguments = getattr(content, "arguments", None)
-            if arguments is None:
-                # The call id with no arguments field at all: this is the call's *result* coming
-                # back, so it must not count as the call still growing. Note the test is `is
-                # None` and not falsiness — an empty string is a real fragment of the argument
-                # stream, and treating it as the end flushed the call before its arguments had
-                # arrived, which is how this reached a second live run still empty.
-                text = _result_text(content)
-                if text is not None:
-                    self.outputs.append(text)
-                    tool = self._issued.get(key) or self._names.get(key, key)
-                    results.append(ToolResultEvent(tool=tool, preview=text[:_ARG_PREVIEW_CHARS]))
-                continue
-            if name and arguments:
-                # The name and the complete arguments in one content: the call arrived whole
-                # rather than streamed, so it is finished now, and waiting would only delay it
-                # behind the next update's text. The streamed shape never looks like this — its
-                # named content carries empty arguments and its fragments carry no name.
-                self._fragments[key] = [
-                    json.dumps(arguments) if isinstance(arguments, Mapping) else str(arguments)
-                ]
-                done.add(key)
-            else:
-                fragments = self._fragments.setdefault(key, [])
-                if isinstance(arguments, str) and arguments:
-                    fragments.append(arguments)
-                elif isinstance(arguments, Mapping) and arguments:
-                    fragments[:] = [json.dumps(arguments)]
-            growing.add(key)
-            if _arguments_complete(self._fragments.get(key)):
-                # The provider has finished sending this call's arguments, so the tool is about
-                # to run. Announcing now is the whole point of D-159: waiting for the next update
-                # means waiting for the result, and the wait between them is the part worth
-                # showing.
-                done.add(key)
-        return [*self._take((set(self._fragments) - growing) | done), *results]
-
-    def flush(self) -> list[Event]:
-        """Emit whatever is still open — the stream ended before an untouched update arrived."""
-        return self._take(set(self._fragments))
-
-    def _take(self, keys: set[str]) -> list[Event]:
-        events: list[Event] = []
-        for key in [k for k in self._fragments if k in keys]:
-            arguments = "".join(self._fragments.pop(key))[:_ARG_PREVIEW_CHARS]
-            name = self._names.pop(key, key)
-            # Remembered rather than discarded: the result content carries no name, so this is
-            # what lets `ToolResultEvent` report which tool answered.
-            self._issued[key] = name
-            events.append(ToolCallEvent(tool=name, arguments=arguments))
-        return events
-
-
-def _arguments_complete(fragments: list[str] | None) -> bool:
-    """Whether the accumulated argument fragments are a finished JSON value.
-
-    This is the signal that replaces "wait for the next update" as the moment a call is announced
-    (D-159). It works because the provider streams a tool call's arguments as one JSON document
-    and does not invoke the tool until that document is closed — so a successful parse is exactly
-    the boundary between "still arriving" and "about to run", and it is knowable from the bytes
-    already in hand rather than from something that follows.
-
-    False for anything that does not parse, which keeps the old update-went-by rule as the
-    fallback: a provider streaming a non-JSON argument format still gets its call announced, just
-    at the previous, later moment. Nothing is stranded, and nothing regresses.
-    """
-    if not fragments:
-        return False
-    try:
-        json.loads("".join(fragments))
-    except (ValueError, TypeError):
-        return False
-    return True
-
-
-def _result_text(content: Any, /) -> str | None:
-    """What a function-result content returned, in full, or None when it carries nothing.
-
-    Duck-typed over the attribute the framework version happens to use, for the same reason the
-    call side is: the concrete content class is not a stable export. A result that is empty or
-    unreadable yields None rather than a value the trace does not have — the trace should not claim
-    one, and the verifier must not treat "nothing came back" as evidence.
-
-    Untruncated on purpose. The caller truncates for the wire (`_ARG_PREVIEW_CHARS`, the UI's
-    budget) and keeps the whole text for grounding, which are different jobs with different right
-    answers; returning the preview here would silently make the second one impossible.
-
-    Failures are deliberately not reported here. A raised call already surfaces as
-    `ToolFailedEvent` through the tool middleware, which has the exception and its message; a
-    second event for the same outcome would leave a consumer choosing which to believe.
-    """
-    for attribute in ("result", "output", "value", "text"):
-        value = getattr(content, attribute, None)
-        if value is None or value == "":
-            continue
-        return value if isinstance(value, str) else str(value)
-    return None
-
-
-def _approval_prompt(request: Any) -> str:
-    """Render a user-input/approval request as a short prompt string for the UI."""
-    for attr in ("prompt", "message", "text", "description"):
-        value = getattr(request, attr, None)
-        if value:
-            return str(value)
-    return "Approval requested."
