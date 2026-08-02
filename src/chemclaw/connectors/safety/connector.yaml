@@ -1,12 +1,14 @@
-# The structural hazard screen. Its own bundle rather than part of a broader chemistry connector
-# because it is separately governed: the rule table is a curated, literature-cited artifact, the
-# `safety-screening` skill (bundled here) is the judgment about what a flag means, and an auditor
-# asking "what did the screen say and by which rule" should find one deployable unit to point at.
+# The cited-reference-table bundle. Its own bundle rather than part of a broader chemistry
+# connector because it is separately governed: every one of its three tables is a curated,
+# literature- or guideline-cited artifact, the `safety-screening` skill (bundled here) is the
+# judgment about what each answer means and does not mean, and an auditor asking "what did the
+# system say and on whose authority" should find one deployable unit to point at.
 name: safety
 description: >-
-  Structural hazard screening: matches molecules and whole reactions against a curated,
-  literature-cited rule table of energetic, shock-sensitive and reactive motifs, plus dangerous
-  combinations between components. Returns advisory flags, never a clearance.
+  Cited safety and impurity reference tables, three separate questions kept separate: structural
+  hazard screening of molecules and whole reactions (energetic and reactive motifs, plus dangerous
+  combinations), DNA-reactive genotoxicity structural alerts, and ICH Q3C/Q3D limit lookup. Every
+  answer is advisory and carries its citation; none is a clearance or a classification.
 
 endpoint:
   transport: http
@@ -18,11 +20,15 @@ endpoint:
     mode: none
   tools:
     - screen_hazards
-  # A rule-table lookup. It must stay open under an unapproved plan for a reason beyond
-  # convenience: a hazard screen is exactly the check a chemist wants *before* deciding whether to
-  # approve the work.
+    - screen_genotoxic_alerts
+    - ich_impurity_limit
+  # Three table lookups. They must stay open under an unapproved plan for a reason beyond
+  # convenience: a hazard screen, an alert list and a published limit are exactly the checks a
+  # chemist wants *before* deciding whether to approve the work.
   read_only:
     - screen_hazards
+    - screen_genotoxic_alerts
+    - ich_impurity_limit
 
 skills:
   - safety-screening

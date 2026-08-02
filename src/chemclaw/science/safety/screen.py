@@ -20,7 +20,7 @@ dangerous than no screen, because it converts an absence of knowledge into appar
 import logging
 from functools import lru_cache
 from pathlib import Path
-from typing import Literal
+from typing import Literal, TypeVar
 
 import yaml
 from pydantic import BaseModel, Field, computed_field
@@ -136,8 +136,39 @@ class _RuleTable(BaseModel):
     incompatible_pairs: list[_PairRule] = Field(default_factory=list)
 
 
-def _compile(smarts: str, rule_id: str) -> Chem.Mol:
-    """Compile one rule's SMARTS, failing loudly with the rule id that owns it."""
+_Table = TypeVar("_Table", bound=BaseModel)
+
+
+def read_rule_table(path: str, model: type[_Table]) -> _Table:
+    """Read one committed SMARTS table off disk and validate it into `model`.
+
+    Public, and generic over the table model, because `science/safety/genotox.py` loads a second
+    committed table with the same failure modes and the same required response to them: a table
+    that cannot be read must stop the screen rather than yield an empty rule set, since an empty
+    rule set reports "nothing matched" — indistinguishable from a clean molecule, and the one
+    outcome both screens exist to prevent.
+    """
+    try:
+        raw = yaml.safe_load(Path(path).read_text(encoding="utf-8"))
+    except (OSError, yaml.YAMLError) as exc:
+        raise SafetyRulesError(f"cannot read hazard rules at {path}: {exc}") from exc
+    if not isinstance(raw, dict):
+        raise SafetyRulesError(
+            f"hazard rules at {path} must be a mapping, got {type(raw).__name__}"
+        )
+    try:
+        return model.model_validate(raw)
+    except ValueError as exc:
+        raise SafetyRulesError(f"invalid hazard rules at {path}: {exc}") from exc
+
+
+def compile_smarts(smarts: str, rule_id: str) -> Chem.Mol:
+    """Compile one rule's SMARTS, failing loudly with the rule id that owns it.
+
+    Public for the same reason `read_rule_table` is: the genotoxicity alert table needs the
+    identical "name the rule that owns the broken pattern" behaviour, and two copies of it would
+    drift.
+    """
     pattern = Chem.MolFromSmarts(smarts)
     if pattern is None:
         raise SafetyRulesError(f"hazard rule {rule_id!r} has unparseable SMARTS: {smarts!r}")
@@ -152,29 +183,22 @@ def _load_rules(path: str) -> tuple[_RuleTable, dict[str, Chem.Mol]]:
     `<rule id>:left` / `:right` for pair rules, so every SMARTS is compiled exactly once per
     process rather than on every screened molecule.
     """
-    try:
-        raw = yaml.safe_load(Path(path).read_text(encoding="utf-8"))
-    except (OSError, yaml.YAMLError) as exc:
-        raise SafetyRulesError(f"cannot read hazard rules at {path}: {exc}") from exc
-    if not isinstance(raw, dict):
-        raise SafetyRulesError(
-            f"hazard rules at {path} must be a mapping, got {type(raw).__name__}"
-        )
-    try:
-        table = _RuleTable.model_validate(raw)
-    except ValueError as exc:
-        raise SafetyRulesError(f"invalid hazard rules at {path}: {exc}") from exc
+    table = read_rule_table(path, _RuleTable)
     if not table.structural and not table.incompatible_pairs:
         raise SafetyRulesError(f"hazard rules at {path} contain no rules")
-    patterns = {rule.id: _compile(rule.smarts, rule.id) for rule in table.structural}
+    patterns = {rule.id: compile_smarts(rule.smarts, rule.id) for rule in table.structural}
     for pair in table.incompatible_pairs:
-        patterns[f"{pair.id}:left"] = _compile(pair.left, pair.id)
-        patterns[f"{pair.id}:right"] = _compile(pair.right, pair.id)
+        patterns[f"{pair.id}:left"] = compile_smarts(pair.left, pair.id)
+        patterns[f"{pair.id}:right"] = compile_smarts(pair.right, pair.id)
     return table, patterns
 
 
-def _parse(smiles: str) -> Chem.Mol:
-    """Parse a SMILES, raising the module's error type so a caller handles one exception (G4)."""
+def parse_molecule(smiles: str) -> Chem.Mol:
+    """Parse a SMILES, raising the module's error type so a caller handles one exception (G4).
+
+    Public because the genotoxicity alert screen must fail the same way on the same input; a
+    second parser there would be a second place for "unparseable" to mean "clean".
+    """
     molecule = Chem.MolFromSmiles(smiles)
     if molecule is None:
         raise SafetyRulesError(f"unparseable SMILES for hazard screening: {smiles!r}")
@@ -192,7 +216,7 @@ def screen_structure(smiles: str) -> ScreenResult:
     Raises:
         SafetyRulesError: the SMILES is unparseable, or the rule table is missing/malformed.
     """
-    molecule = _parse(smiles)
+    molecule = parse_molecule(smiles)
     table, patterns = _load_rules(settings.safety_rules_path)
     flags = [
         HazardFlag(
@@ -222,7 +246,7 @@ def screen_reaction(component_smiles: list[str]) -> ScreenResult:
         SafetyRulesError: any component is unparseable, or the rule table is missing/malformed.
     """
     table, patterns = _load_rules(settings.safety_rules_path)
-    molecules = {smiles: _parse(smiles) for smiles in dict.fromkeys(component_smiles)}
+    molecules = {smiles: parse_molecule(smiles) for smiles in dict.fromkeys(component_smiles)}
     flags = [flag for smiles in molecules for flag in screen_structure(smiles).flags]
     for pair in table.incompatible_pairs:
         left = [s for s, m in molecules.items() if m.HasSubstructMatch(patterns[f"{pair.id}:left"])]

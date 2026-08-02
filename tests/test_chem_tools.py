@@ -17,12 +17,18 @@ from typing import Any
 import pytest
 
 from chemclaw.connectors.chem.server.tools import (
+    green_metrics,
     render_structure,
     resolve_compound,
     stoichiometry_table,
 )
 from chemclaw.core.chem import InvalidSmilesError
-from chemclaw.core.reagents import display_name, known_names, resolve_compound_name
+from chemclaw.core.reagents import (
+    density_of,
+    display_name,
+    known_names,
+    resolve_compound_name,
+)
 
 
 def _run(coro: Any) -> Any:
@@ -151,3 +157,107 @@ def test_an_unparseable_structure_raises_rather_than_drawing_nothing() -> None:
     """An empty box would read as "no structure", not as "bad input"."""
     with pytest.raises(InvalidSmilesError):
         _run(render_structure("not-a-molecule"))
+
+
+# --- TOOL-4b: solvent charges by volume ------------------------------------------------------
+
+
+def test_a_solvent_mixture_is_charged_by_volumes_not_by_equivalents() -> None:
+    """The live-run case: "THF/water 4:1 at 10 volumes" on a 2 kg basis.
+
+    The tool took only molar equivalents, so this charge could not be expressed at all; the model
+    passed 40 and 10 as equivalents instead and the principal solvent came out 2.17x wrong, with
+    the answer then certifying the figures as self-consistent. On the parent commit the same
+    substitution against this fixture's Boc2O basis gives 26431 g of THF where 14224 g is correct,
+    a factor of 1.86 — the multiplier is whatever the basis's molecular weight makes it, which is
+    why the equivalents figure cannot be corrected into a right answer. The fixture is chosen so a
+    naive
+    implementation gives the wrong answer twice over: the two solvents have different densities
+    (0.889 vs 0.998), so assuming 1 g/mL is visibly wrong on both, and the split is 8 + 2 volumes
+    rather than 5 + 5, so a table that ignored the ratio would still land on the wrong masses.
+    """
+    table = _run(
+        stoichiometry_table("Boc2O", 2000.0, ["DIPEA"], [1.2], ["THF", "water"], [8.0, 2.0])
+    )
+    thf, water = (row for row in table.rows if row.role == "solvent")
+    assert thf.volume_ml == pytest.approx(16000.0)  # 8 volumes x 2000 g
+    assert thf.mass_g == pytest.approx(16000.0 * 0.889)
+    assert water.volume_ml == pytest.approx(4000.0)
+    assert water.mass_g == pytest.approx(4000.0 * 0.998)
+    # Moles and equivalents are derived for a solvent too, so every row of the table is comparable
+    # and `green_metrics` can take `mass_g` off all of them.
+    assert thf.moles_mmol == pytest.approx(thf.mass_g / thf.molecular_weight * 1000.0)
+    assert thf.equivalents > 20.0  # ~22 equiv of THF: the number "10 volumes" never means
+
+
+def test_the_reagent_rows_are_untouched_by_a_solvent_charge() -> None:
+    """Adding solvents must not disturb the molar arithmetic the table already did correctly."""
+    table = _run(stoichiometry_table("Boc2O", 2000.0, ["DIPEA"], [1.2], ["THF"], [10.0]))
+    basis, base = (row for row in table.rows if row.role != "solvent")
+    assert (basis.role, base.role) == ("basis", "reagent")
+    assert base.equivalents == pytest.approx(1.2)
+    assert base.moles_mmol == pytest.approx(basis.moles_mmol * 1.2)
+
+
+def test_a_solvent_passed_as_a_molar_reagent_is_rejected() -> None:
+    """The original error, made unrepeatable rather than merely documented.
+
+    Accepting 40 "equivalents" of THF would produce a plausible table with no sign of which
+    reading was meant, and the run showed the wrong reading then being certified as consistent.
+    """
+    with pytest.raises(ValueError, match="charged by volume"):
+        _run(stoichiometry_table("Boc2O", 2000.0, ["THF"], [40.0]))
+
+
+def test_a_solvent_with_no_density_refuses_rather_than_guessing() -> None:
+    """Pyridine is a known reagent with no density on file: an error, not a zero and not 1 g/mL.
+
+    An error rather than an `unresolved` entry, unlike an unknown reagent, and the asymmetry is
+    the point: a chemist reads a charge list line by line and notices a missing reagent, whereas
+    a silently missing solvent leaves a complete-looking table that halves the E-factor and PMI
+    computed from its masses.
+    """
+    with pytest.raises(ValueError, match="no density on file"):
+        _run(stoichiometry_table("Boc2O", 100.0, [], [], ["pyridine"], [5.0]))
+
+
+def test_an_unresolvable_solvent_is_an_error_too() -> None:
+    """A solvent that silently vanished from the table would flatter every mass metric."""
+    with pytest.raises(ValueError, match="could not resolve the solvent"):
+        _run(stoichiometry_table("Boc2O", 100.0, [], [], ["Compound 27b"], [5.0]))
+
+
+def test_mismatched_solvents_and_volumes_are_rejected() -> None:
+    """The same guard the reagent/equivalent pair has, for the same reason."""
+    with pytest.raises(ValueError, match="must match"):
+        _run(stoichiometry_table("Boc2O", 100.0, [], [], ["THF"], [5.0, 5.0]))
+
+
+def test_a_nonpositive_volume_is_rejected() -> None:
+    """Zero volumes is not a charge; it is a missing number that would read as a real one."""
+    with pytest.raises(ValueError, match="volumes must be positive"):
+        _run(stoichiometry_table("Boc2O", 100.0, [], [], ["THF"], [0.0]))
+
+
+def test_a_density_is_looked_up_never_estimated() -> None:
+    """`density_of` answers for the bulk solvents and returns None for everything else."""
+    assert density_of("THF") == pytest.approx(0.889)
+    assert density_of("tetrahydrofuran") == density_of("C1CCOC1") == density_of("THF")
+    assert density_of("DIPEA") is None  # a known reagent, not charged by volume
+    assert density_of("Compound 27b") is None  # not a known substance at all
+
+
+def test_the_charge_table_feeds_green_metrics_with_the_solvent_included() -> None:
+    """The pairing `green_metrics`' docstring promises, on the term that dominates both metrics.
+
+    Without solvent the same batch scores an E-factor of ~1.4; with it, ~10. That gap is why the
+    omission was worth an error rather than a caveat.
+    """
+    table = _run(
+        stoichiometry_table("Boc2O", 2000.0, ["DIPEA"], [1.2], ["THF", "water"], [8.0, 2.0])
+    )
+    with_solvent = _run(green_metrics([row.mass_g for row in table.rows], 1800.0))
+    reagents_only = _run(
+        green_metrics([r.mass_g for r in table.rows if r.role != "solvent"], 1800.0)
+    )
+    assert with_solvent.e_factor > 5 * reagents_only.e_factor

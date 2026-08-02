@@ -58,7 +58,9 @@ def test_stoichiometry_table_weighs_off_the_event_loop(monkeypatch: pytest.Monke
     )
 
     async def _run() -> tuple[int, chem_tools.ChargeTable]:
-        table = await chem_tools.stoichiometry_table("CCO", 46.0, ["water"], [1.0])
+        # Water moved to the `solvents`/`volumes` path when densities landed: a species with a
+        # density is charged by volume and the molar-equivalent path now rejects it outright.
+        table = await chem_tools.stoichiometry_table("CCO", 46.0, [], [], ["water"], [1.0])
         return threading.get_ident(), table
 
     loop_thread, table = asyncio.run(_run())

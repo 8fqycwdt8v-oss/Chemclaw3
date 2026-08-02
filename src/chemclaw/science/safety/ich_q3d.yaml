@@ -1,0 +1,182 @@
+# ICH Q3D elemental-impurity permitted daily exposures — a transcription, not a model.
+#
+# The companion of `ich_q3c.yaml`, and it exists for the same reason: in a live run this system
+# recited a palladium PDE from training as though it were the record. The value happened to be
+# right, which is the worse outcome — a correct recalled limit teaches a chemist to trust the next
+# one, and there is nothing behind it. A transcribed, cited row can be checked against the source;
+# a recalled one cannot be checked at all.
+#
+# Provenance: transcribed from ICH Q3D(R2), "Guideline for Elemental Impurities", ICH Step 4, 2022
+# — Appendix 2, Table A.2.1 (Permitted Daily Exposures for Elemental Impurities). PDEs are in
+# micrograms per day.
+#
+# **Deliberately not transcribed**, and why:
+#
+# - **Ag, Au, Ni.** Q3D(R2) revised these three entries and the transcriber could not verify the
+#   revised numbers against the source document. They are omitted rather than guessed — a lookup
+#   miss says "check the guideline", a wrong PDE says nothing at all about being wrong. Add them in
+#   a pull request that cites the page.
+# - **The cutaneous and transcutaneous routes** introduced by Q3D(R2). Only the three routes of
+#   Table A.2.1 (oral, parenteral, inhalation) are here.
+# - **The "other elements" of Q3D §4** (Al, B, Ca, Fe, K, Mg, Mn, Na, W, Zn), for which the
+#   guideline establishes no PDE. A miss is the correct answer for those, and inventing a row
+#   saying "no limit" would read as a clearance.
+#
+# A PDE is an exposure limit for the *drug product*, not a specification for an intermediate and
+# not a control strategy. Converting one into a limit on an API or a reagent is a judgement about
+# the process — this file supplies the number that judgement needs, and nothing more.
+
+guideline: "ICH Q3D(R2), Guideline for Elemental Impurities, ICH Step 4 (2022)"
+table: Table A.2.1
+
+classes:
+  "1": >-
+    Class 1 — human toxicants that have limited or no use in pharmaceutical manufacture; their
+    presence is normally from commonly used materials, so they need assessment across all
+    routes of administration.
+  "2A": >-
+    Class 2A — route-independent relatively high probability of occurrence in the drug product;
+    assessment is required across all routes of administration.
+  "2B": >-
+    Class 2B — low probability of occurrence in the drug product owing to low natural abundance
+    and low potential to co-isolate; assessment is required only where the element is
+    intentionally added (a catalyst or reagent) somewhere in the process.
+  "3": >-
+    Class 3 — relatively low oral toxicity, but assessment is warranted for the parenteral and
+    inhalation routes; for oral products no assessment is needed unless the element is
+    intentionally added.
+
+elements:
+  # --- Class 1 ---------------------------------------------------------------------------------
+  - symbol: Cd
+    name: Cadmium
+    element_class: "1"
+    oral_pde_ug_per_day: 5
+    parenteral_pde_ug_per_day: 2
+    inhalation_pde_ug_per_day: 3
+  - symbol: Pb
+    name: Lead
+    element_class: "1"
+    oral_pde_ug_per_day: 5
+    parenteral_pde_ug_per_day: 5
+    inhalation_pde_ug_per_day: 5
+  - symbol: As
+    name: Arsenic
+    element_class: "1"
+    oral_pde_ug_per_day: 15
+    parenteral_pde_ug_per_day: 15
+    inhalation_pde_ug_per_day: 2
+  - symbol: Hg
+    name: Mercury
+    element_class: "1"
+    oral_pde_ug_per_day: 30
+    parenteral_pde_ug_per_day: 3
+    inhalation_pde_ug_per_day: 1
+
+  # --- Class 2A --------------------------------------------------------------------------------
+  - symbol: Co
+    name: Cobalt
+    element_class: "2A"
+    oral_pde_ug_per_day: 50
+    parenteral_pde_ug_per_day: 5
+    inhalation_pde_ug_per_day: 3
+  - symbol: V
+    name: Vanadium
+    element_class: "2A"
+    oral_pde_ug_per_day: 100
+    parenteral_pde_ug_per_day: 10
+    inhalation_pde_ug_per_day: 1
+
+  # --- Class 2B: the platinum-group catalysts, plus selenium and thallium -----------------------
+  - symbol: Ir
+    name: Iridium
+    element_class: "2B"
+    oral_pde_ug_per_day: 100
+    parenteral_pde_ug_per_day: 10
+    inhalation_pde_ug_per_day: 1
+  - symbol: Os
+    name: Osmium
+    element_class: "2B"
+    oral_pde_ug_per_day: 100
+    parenteral_pde_ug_per_day: 10
+    inhalation_pde_ug_per_day: 1
+  - symbol: Pd
+    name: Palladium
+    element_class: "2B"
+    oral_pde_ug_per_day: 100
+    parenteral_pde_ug_per_day: 10
+    inhalation_pde_ug_per_day: 1
+  - symbol: Pt
+    name: Platinum
+    element_class: "2B"
+    oral_pde_ug_per_day: 100
+    parenteral_pde_ug_per_day: 10
+    inhalation_pde_ug_per_day: 1
+  - symbol: Rh
+    name: Rhodium
+    element_class: "2B"
+    oral_pde_ug_per_day: 100
+    parenteral_pde_ug_per_day: 10
+    inhalation_pde_ug_per_day: 1
+  - symbol: Ru
+    name: Ruthenium
+    element_class: "2B"
+    oral_pde_ug_per_day: 100
+    parenteral_pde_ug_per_day: 10
+    inhalation_pde_ug_per_day: 1
+  - symbol: Se
+    name: Selenium
+    element_class: "2B"
+    oral_pde_ug_per_day: 150
+    parenteral_pde_ug_per_day: 80
+    inhalation_pde_ug_per_day: 130
+  - symbol: Tl
+    name: Thallium
+    element_class: "2B"
+    oral_pde_ug_per_day: 8
+    parenteral_pde_ug_per_day: 8
+    inhalation_pde_ug_per_day: 8
+
+  # --- Class 3 ---------------------------------------------------------------------------------
+  - symbol: Ba
+    name: Barium
+    element_class: "3"
+    oral_pde_ug_per_day: 1400
+    parenteral_pde_ug_per_day: 700
+    inhalation_pde_ug_per_day: 300
+  - symbol: Cr
+    name: Chromium
+    element_class: "3"
+    oral_pde_ug_per_day: 11000
+    parenteral_pde_ug_per_day: 1100
+    inhalation_pde_ug_per_day: 3
+  - symbol: Cu
+    name: Copper
+    element_class: "3"
+    oral_pde_ug_per_day: 3000
+    parenteral_pde_ug_per_day: 300
+    inhalation_pde_ug_per_day: 30
+  - symbol: Li
+    name: Lithium
+    element_class: "3"
+    oral_pde_ug_per_day: 550
+    parenteral_pde_ug_per_day: 250
+    inhalation_pde_ug_per_day: 25
+  - symbol: Mo
+    name: Molybdenum
+    element_class: "3"
+    oral_pde_ug_per_day: 3000
+    parenteral_pde_ug_per_day: 1500
+    inhalation_pde_ug_per_day: 10
+  - symbol: Sb
+    name: Antimony
+    element_class: "3"
+    oral_pde_ug_per_day: 1200
+    parenteral_pde_ug_per_day: 90
+    inhalation_pde_ug_per_day: 20
+  - symbol: Sn
+    name: Tin
+    element_class: "3"
+    oral_pde_ug_per_day: 6000
+    parenteral_pde_ug_per_day: 600
+    inhalation_pde_ug_per_day: 60
