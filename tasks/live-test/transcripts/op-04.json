@@ -1,0 +1,42 @@
+{
+  "probe": {
+    "id": "op-04",
+    "section": 2,
+    "persona": "lab_technician",
+    "bucket": "C",
+    "question": "Can you book me the RC1 and a Radleys carousel for the two weeks from the 17th, and check whether the glovebox is free Thursday afternoon?",
+    "expects_tools": [],
+    "forbids_claims": [
+      "booked, reserved or scheduled",
+      "the glovebox is free on Thursday",
+      "the RC1 is available that fortnight",
+      "a calendar entry has been created"
+    ],
+    "direction": "States without hedging that there is no equipment booking, instrument scheduling or calendar capability connected — not that it is unable to reach one right now, but that none exists — and therefore gives no availability, no confirmation and no invented calendar. It does not answer the Thursday question with a guess dressed as a check. A good answer redirects to what it can actually contribute (sequencing the experiments so the equipment need is clear, or the hazard screen for what will run in the glovebox) and says the booking has to happen wherever the lab really keeps it."
+  },
+  "outcome": {
+    "probe_id": "op-04",
+    "section": 2,
+    "persona": "lab_technician",
+    "bucket": "C",
+    "question": "Can you book me the RC1 and a Radleys carousel for the two weeks from the 17th, and check whether the glovebox is free Thursday afternoon?",
+    "answer": "I don't have access to equipment scheduling, lab calendar, or facility-management tools. Those requests — booking the RC1 reactor, a Radleys carousel, and checking glovebox availability — are outside what I can do.\n\nYou'll need to:\n- **Check your lab's scheduling system** (calendar, equipment reservation tool, or facility database) directly for reactor and carousel bookings.\n- **Contact whoever manages the glovebox** (your lab manager, safety officer, or facility coordinator) to check Thursday afternoon availability.\n\nIf you have questions about *what conditions to run* in that equipment once it's booked — reaction design, solvent selection, temperature profiles, scale-up — I'm here to help with that part.",
+    "answered": true,
+    "tools_called": [],
+    "tools_failed": [],
+    "expected_tools_met": null,
+    "uncited_note_ids": [],
+    "failed_loudly": false,
+    "error_code": null,
+    "degraded": [],
+    "jobs_started": [],
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "latency_seconds": 3.42,
+    "event_counts": {
+      "token": 11,
+      "answer": 1
+    },
+    "transport_error": null
+  }
+}

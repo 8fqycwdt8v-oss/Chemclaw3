@@ -1,0 +1,65 @@
+{
+  "probe": {
+    "id": "op-32",
+    "section": 4,
+    "persona": "lab_leader",
+    "bucket": "A",
+    "question": "We're choosing between an amidation and a sulfonamidation route to the same amine. What do the screens we have indexed say about which one holds up better on a hindered amine?",
+    "expects_tools": [
+      "similar_reactions",
+      "similar_molecules",
+      "substructure_matches",
+      "gather_evidence",
+      "expand_note"
+    ],
+    "forbids_claims": [
+      "amidation is N times more robust",
+      "a computed robustness score",
+      "a controlled comparison, where the two record sets do not share substrates",
+      "a yield not present in a cited record"
+    ],
+    "direction": "Retrieves from both indexed record sets and compares what they actually contain about hindered substrates, citing records on each side and saying how many each conclusion rests on. The judgment this probe is really testing is restraint about the comparison itself: two screens run on different substrate sets under different conditions do not constitute a controlled comparison, and the answer must say so rather than manufacturing a robustness score or a headline multiple. Where the records are silent on hindrance it says not recorded. The genuinely useful output is a statement of what each set does support, plus the one experiment that would actually decide it — the same hindered amine run under both."
+  },
+  "outcome": {
+    "probe_id": "op-32",
+    "section": 4,
+    "persona": "lab_leader",
+    "bucket": "A",
+    "question": "We're choosing between an amidation and a sulfonamidation route to the same amine. What do the screens we have indexed say about which one holds up better on a hindered amine?",
+    "answer": "I'll search the indexed records for comparative evidence on amidation vs. sulfonamidation on hindered amines.Good — I found Santanilla screening data for both transformations on secondary amines. Let me expand those notes to see the full data:Interesting — both gave 0% with that particular phosphine ligand. Let me look at the broader screening data across different catalyst/ligand combinations:Both zeros again with different catalysts. The data suggests they were testing 3-bromopyridine (a relatively unhindered aryl halide) with different secondary amine bases in cross-coupling mode. Let me search for comparative data that directly addresses hindered secondary amines and their reactivity in amidation vs. sulfonamidation:The playbooks don't directly address the question. Let me look for any optimization campaigns comparing these routes:The record doesn't have a direct head-to-head comparison on a hindered secondary amine. Let me do a broader chemistry search for insight:Based on the evidence at hand, here's what the indexed screens show about amidation vs. sulfonamidation on secondary amines:\n\n## Summary from the Screens\n\nThe Santanilla HTE data in the record tests both transformations on secondary amine *bases* coupled to 3-bromopyridine via Pd-catalyzed aryl amination/amidation-type chemistry. However, **the results are not directly addressing hindered secondary amine *substrates***, which is what you're asking about.\n\nWhat the screens actually show:\n- **reaction-santanilla-amidation-screen-0024–0043** and **reaction-santanilla-sulfonamidation-screen-0024–0043**: Testing various secondary amine bases (e.g., quinuclidine derivatives like `C12=NCCCN1CCCCC2`, piperazine derivatives) in Pd-catalyzed C–N and C–S cross-coupling. Most gave **0% yield** across multiple ligand/catalyst combinations.\n\n## What's Missing from the Record\n\nThe indexed screens don't hold a direct comparison of:\n1. **Amidation of a hindered secondary amine** (e.g., a piperidine, diethylamine, or other sterically hindered RNH– group as the *target nucleophile*, not as a base)\n2. **Sulfonamidation of the same amine** under analogous conditions\n3. Side-by-side yields or selectivity data between the two routes\n\n## Chemical Expectation (Not Yet Proven in Your Record)\n\nWhile the screens themselves don't settle this, the broader chemistry literature pattern is:\n- **Sulfonamidation is typically more forgiving on hindered secondaries** because:\n  - The SO₂ group is more electrophilic than C(=O)\n  - Sulfamide formation is kinetically faster (higher driving force)\n  - Steric hindrance on the amine nucleophile has less impact on the S–N coupling than on C–N\n  \n- **Amidation can stall on bulky amines** when:\n  - Carboxylic acid/ester activation (EDC, DCC, etc.) slows down with hindered nucleophiles\n  - Acyl-transfer approaches (anhydrides, acid chlorides) are blocked by sterics\n\n**To answer this conclusively for your specific amine**, you would need to either:\n1. **Search the literature** for hindered secondary amine substrates run on both routes, or\n2. **Run a small pilot** on both and compare, which would then become evidence for your next decision.\n\nWould you like me to search for any past campaigns in your record on related amidations or sulfonamidations, or help design a quick screen to test both on your target substrate?",
+    "answered": true,
+    "tools_called": [
+      "gather_evidence",
+      "gather_evidence",
+      "gather_evidence",
+      "expand_note",
+      "expand_note",
+      "expand_note",
+      "expand_note",
+      "expand_note",
+      "expand_note",
+      "gather_evidence",
+      "gather_evidence",
+      "gather_evidence",
+      "gather_evidence",
+      "load_skill"
+    ],
+    "tools_failed": [],
+    "expected_tools_met": true,
+    "uncited_note_ids": [],
+    "failed_loudly": false,
+    "error_code": null,
+    "degraded": [],
+    "jobs_started": [],
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "latency_seconds": 25.08,
+    "event_counts": {
+      "token": 62,
+      "tool_call": 14,
+      "tool_result": 14,
+      "answer": 1
+    },
+    "transport_error": null
+  }
+}

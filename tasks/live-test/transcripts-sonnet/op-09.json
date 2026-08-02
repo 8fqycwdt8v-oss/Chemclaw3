@@ -1,0 +1,54 @@
+{
+  "probe": {
+    "id": "op-09",
+    "section": 2,
+    "persona": "lab_technician",
+    "bucket": "A",
+    "question": "whats the fastest way to get a go/no-go on whether this new amine even couples? dont want to burn a week finding out it doesnt",
+    "expects_tools": [
+      "gather_evidence",
+      "similar_reactions",
+      "similar_molecules",
+      "resolve_compound",
+      "screen_hazards"
+    ],
+    "forbids_claims": [
+      "a literature or patent precedent",
+      "a yield prediction for the new amine stated as fact",
+      "this substrate will/will not couple"
+    ],
+    "direction": "Proposes one decisive small-scale experiment rather than a programme: the in-house standard conditions for the closest recorded analogue, at a scale and timescale that answers the question in a day, with an explicit success criterion decided before the run. It cites the precedent that sets those conditions and says how close the analogue actually is. Crucially it states what a negative result would and would not rule out — a failed test under one condition set is not evidence the substrate is inert — so the technician does not over-read a no-go. No invented literature."
+  },
+  "outcome": {
+    "probe_id": "op-09",
+    "section": 2,
+    "persona": "lab_technician",
+    "bucket": "A",
+    "question": "whats the fastest way to get a go/no-go on whether this new amine even couples? dont want to burn a week finding out it doesnt",
+    "answer": "I don't have a molecule or coupling partner specified yet — \"this new amine\" could mean a few different things (structure, which electrophile/coupling partner, and what kind of coupling: Buchwald-Hartwig C–N, amide coupling, reductive amination, etc.), and the fastest-path answer differs by type. Could you tell me:I've asked which amine and coupling type this is, since the fastest go/no-go path differs a lot: for a Buchwald-Hartwig C–N coupling I'd check literature/knowledge-graph precedent for a close analog first, then use a cheap computational triage (pKa/sterics/electronics via xTB descriptors, or a quick reaction-energy thermodynamic check) before ever touching the bench; for an amide coupling it's more about solubility/reactivity screening. Once you tell me the amine and partner, I'll pull precedent and run the relevant fast checks so you can decide without committing bench time.",
+    "answered": true,
+    "tools_called": [
+      "list_attachments",
+      "recall_preferences",
+      "ask_clarifying_question"
+    ],
+    "tools_failed": [],
+    "expected_tools_met": false,
+    "uncited_note_ids": [],
+    "failed_loudly": false,
+    "error_code": null,
+    "degraded": [],
+    "jobs_started": [],
+    "notes_proposed": [],
+    "asked_clarifying": true,
+    "latency_seconds": 14.54,
+    "event_counts": {
+      "tool_call": 3,
+      "tool_result": 3,
+      "token": 13,
+      "question": 1,
+      "answer": 1
+    },
+    "transport_error": null
+  }
+}

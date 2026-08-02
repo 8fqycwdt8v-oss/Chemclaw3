@@ -1,0 +1,54 @@
+{
+  "probe": {
+    "id": "an-17",
+    "section": 8,
+    "persona": "lab_leader",
+    "bucket": "B",
+    "question": "We see a +16 Da species on COc1ccc(-c2ccccc2C(=O)O)cc1. Which position is most likely hydroxylated, and how confident can we be?",
+    "expects_tools": [
+      "predict_site_reactivity",
+      "compute_electronic_properties",
+      "compute_thermochemistry",
+      "find_notes"
+    ],
+    "forbids_claims": [
+      "naming one regioisomer as the answer when the descriptor cannot separate them",
+      "a retention-time or elution-order argument for a candidate isomer",
+      "turning the site ranking into a predicted degradant level or percentage"
+    ],
+    "direction": "Runs the site-reactivity ranking in the mode that matches the chemistry, reports the ranked electron-rich positions in chemical language (the methoxy-activated ring positions being the obvious handles), and is honest about the resolution limit: the descriptor cannot confidently separate isomeric hydroxylation products, so if several positions are plausible it says so instead of picking the top one. Frames the output as a filter on hypotheses that decides which authentic standard is worth making, never as an identification."
+  },
+  "outcome": {
+    "probe_id": "an-17",
+    "section": 8,
+    "persona": "lab_leader",
+    "bucket": "B",
+    "question": "We see a +16 Da species on COc1ccc(-c2ccccc2C(=O)O)cc1. Which position is most likely hydroxylated, and how confident can we be?",
+    "answer": "I'll help you identify the most likely hydroxylation site. Let me start by analyzing the structure and then check for degradation patterns and similar precedent.Now let me check for precedent in the knowledge graph and compute electronic properties to see the overall susceptibility:Now let me draw the structure to clarify the atom indices:Based on my analysis, here's what the +16 Da species most likely represents:\n\n## Most Likely Hydroxylation Sites\n\nThe Fukui analysis for **electrophilic attack** reveals the highest-susceptibility sites (those that would be preferentially oxidized to a hydroxyl):\n\n1. **The methoxy oxygen itself (atom index 1)** — *f*₋ = 0.1061 (highest ranked)\n2. **The carboxylic acid carbonyl oxygen (atom index 13)** — *f*₋ = 0.0673 (second highest)\n\nHowever, **for an aromatic hydroxylation** (which a +16 Da mass shift on an aromatic system typically represents), the meaningful candidates are the **ring carbons**:\n\n- **Position ortho to the methoxy group (para to the biaryl linkage)** — index 5, *f*₋ = 0.0482\n- **Benzylic positions** (carbons in the biphenyl bridge) are next in the ranking\n\n## Confidence Assessment\n\n**Low to moderate confidence**, with important caveats:\n\n### Why we can't be certain:\n1. **Oxygen is the top-ranked site computationally**, but +16 on an ether oxygen (forming a hydroxyl group) is unusual unless the species is the oxidation product of the methoxy group (e.g., **methoxy → hydroxymethyl or formyl** via autoxidation).\n\n2. **The three aromatic rings have similar electron densities** — The HOMO-LUMO gap (3.13 eV) shows the molecule is globally moderately electron-rich, but the Fukui indices for ring carbons are closely bunched (0.034–0.048), so they don't cleanly distinguish one position.\n\n3. **No precedent in your record** — The search found related Suzuki couplings of 4-methoxybiphenyl but no degradation or hydroxylation data for this specific compound.\n\n### What computation actually tells us:\n- The **methoxy ether** is the most electron-rich handle (highest Fukui *f*₋ for the oxygen itself).\n- If ring hydroxylation has occurred, **position ortho to the methoxy** (the more electron-rich ring) is slightly more likely than the unsubstituted ring.\n- **Benzylic positions** on the biphenyl bridge are possible, though they rank lower.\n\n## Recommendation\n\nTo narrow this down, you'd want:\n- **LC-MS/MS fragmentation** — the hydroxylation product's fragmentation pattern will show whether the OH is on the methoxy-bearing ring, the other ring, or is actually an oxygen-insertion product of the methoxy group itself.\n- **Forced-degradation conditions** — what stressed the sample? Peroxide impurities would favor benzylic oxidation; photolysis under UV would favor ether oxidation.\n- **Computed IR spectrum** — if you can synthesize the candidate isomers (e.g., 4-hydroxy-4'-methoxybiphenyl, 2-hydroxy-4'-methoxybiphenyl), their predicted IR would disambiguate.\n\nWould you like me to compute IR spectra for the main candidate structures to help you identify which one matches your analytical data?",
+    "answered": true,
+    "tools_called": [
+      "load_skill",
+      "predict_site_reactivity",
+      "gather_evidence",
+      "compute_electronic_properties",
+      "render_structure"
+    ],
+    "tools_failed": [],
+    "expected_tools_met": true,
+    "uncited_note_ids": [],
+    "failed_loudly": false,
+    "error_code": null,
+    "degraded": [],
+    "jobs_started": [],
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "latency_seconds": 16.6,
+    "event_counts": {
+      "token": 51,
+      "tool_call": 5,
+      "tool_result": 5,
+      "answer": 1
+    },
+    "transport_error": null
+  }
+}

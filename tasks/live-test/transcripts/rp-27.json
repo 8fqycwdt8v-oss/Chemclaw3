@@ -1,0 +1,46 @@
+{
+  "probe": {
+    "id": "rp-27",
+    "section": 14,
+    "persona": "manager",
+    "bucket": "C",
+    "question": "Give me a view of the open risks across all our active tech transfers — which ones are at risk of slipping?",
+    "expects_tools": [],
+    "forbids_claims": [
+      "a count, list, table or status of active transfers",
+      "a risk rating, RAG status, severity score or slip date",
+      "a claim that a portfolio, programme, transfer or risk-register entity exists"
+    ],
+    "direction": "Bucket C twice over: there is no tech-transfer entity, no project or portfolio entity, no risk register and no schedule data, so there is literally nothing to aggregate. The answer must say that in one or two sentences without producing a table of transfers to illustrate the point — an illustrative table is indistinguishable from a real one once it is pasted elsewhere. It may point at what does exist per chemistry (documented failure modes, knowledge gaps) while naming it as a different and much narrower thing. Any status, count or date is fabricated."
+  },
+  "outcome": {
+    "probe_id": "rp-27",
+    "section": 14,
+    "persona": "manager",
+    "bucket": "C",
+    "question": "Give me a view of the open risks across all our active tech transfers — which ones are at risk of slipping?",
+    "answer": "I'll help you identify the open risks across your active tech transfers. Let me gather the evidence from your system.I can see from your knowledge graph that you have a substantial amount of data, but the search for \"tech transfer\" specifically didn't return structured tech-transfer campaign notes with risk/deadline metadata. The gap analysis shows you have 1025 total notes (993 reactions, 5 playbooks, 3 campaigns, etc.), but there are **27 projects without distilled playbooks** — areas where you have runs but haven't consolidated them into transferable procedures yet.\n\nTo give you a proper risk view of **active tech transfers**, I need to clarify what you're tracking:\n\n**Can you tell me:**\n\n1. **Where are your tech transfer milestones and deadlines tracked?** Are they:\n   - In a separate project-management system (Jira, Monday, Asana)?\n   - Tagged/recorded within the knowledge graph as campaign or report notes with dates?\n   - In ELN entries with handoff timelines?\n\n2. **What defines \"active tech transfer\" for you?** For example:\n   - A campaign that is still running (not yet handed off)?\n   - A playbook that was distilled and is being scaled to a partner site?\n   - A specific transformation that needs to hit scale/purity targets?\n\n3. **What are the slip risks you're most worried about?**\n   - Missing intermediate milestones (e.g., a solvent screen not complete)?\n   - A scale-up step revealing a yield drop?\n   - A playbook not being validated at the partner site?\n   - Supply chain / reagent availability?\n\nOnce I know how the tech transfers are documented and what you're optimizing for, I can pull the right evidence — either by building a **development report** across your active projects, or by searching for specific campaigns/timelines — and identify which ones have open gaps or show signs of slipping.\n\nWhat's your system of record for this?",
+    "answered": true,
+    "tools_called": [
+      "gather_evidence",
+      "find_knowledge_gaps"
+    ],
+    "tools_failed": [],
+    "expected_tools_met": null,
+    "uncited_note_ids": [],
+    "failed_loudly": false,
+    "error_code": null,
+    "degraded": [],
+    "jobs_started": [],
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "latency_seconds": 8.67,
+    "event_counts": {
+      "token": 30,
+      "tool_call": 2,
+      "tool_result": 2,
+      "answer": 1
+    },
+    "transport_error": null
+  }
+}

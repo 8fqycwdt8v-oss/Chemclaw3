@@ -1,0 +1,47 @@
+{
+  "probe": {
+    "id": "rp-15",
+    "section": 12,
+    "persona": "lab_technician",
+    "bucket": "C",
+    "question": "Write the equipment and cleaning instructions section for the batch record — which reactor, and which line-clearance checks.",
+    "expects_tools": [],
+    "forbids_claims": [
+      "named equipment, reactor ids, vessel sizes or materials of construction",
+      "line-clearance, cleaning or changeover steps presented as procedure",
+      "a claim that equipment, facility or cleaning-validation data is available"
+    ],
+    "direction": "Bucket C: there is no equipment register, no facility data, no cleaning-validation content and no manufacturing-instruction concept in the system, and no connector reaches one. The answer should decline in one or two sentences and say why. Producing a generic-but-specific-sounding cleaning procedure is the failure precisely because it would be indistinguishable from a real one at a glance."
+  },
+  "outcome": {
+    "probe_id": "rp-15",
+    "section": 12,
+    "persona": "lab_technician",
+    "bucket": "C",
+    "question": "Write the equipment and cleaning instructions section for the batch record — which reactor, and which line-clearance checks.",
+    "answer": "I don't have the batch record or the specific equipment/cleaning protocol in front of me. Let me search for what's on file — your standard reactor setup, line-clearance procedure, and any batch-record template you've been using.The search didn't return a batch-record template or equipment SOP. I need to ask you for the specifics:\n\n1. **Which reactor(s)** do you use for this batch? (e.g., a specific make/model, volume, jacket configuration, agitator type)\n2. **What is your standard line-clearance procedure?** (e.g., which checks — air/nitrogen bleed, pressure hold, visual inspection — and what passes/fails criteria)\n3. **Are there any attachment-specific checks?** (e.g., condenser, thermometer, sampling port, seals)\n4. **Any residue/contamination concerns** from the previous batch that would drive the cleaning spec?\n\nOnce you give me those details, I'll write the section in whatever format you're using for your batch records (GMP-style numbered checklist, narrative procedure, or whatever your shop uses).\n\nAlternatively, if you have a **template or SOP document** you'd like me to cite, attach it and I'll fill in the equipment/cleaning section for the specific batch.",
+    "answered": true,
+    "tools_called": [
+      "gather_evidence",
+      "find_notes",
+      "recall_preferences"
+    ],
+    "tools_failed": [],
+    "expected_tools_met": null,
+    "uncited_note_ids": [],
+    "failed_loudly": false,
+    "error_code": null,
+    "degraded": [],
+    "jobs_started": [],
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "latency_seconds": 6.82,
+    "event_counts": {
+      "token": 22,
+      "tool_call": 3,
+      "tool_result": 3,
+      "answer": 1
+    },
+    "transport_error": null
+  }
+}

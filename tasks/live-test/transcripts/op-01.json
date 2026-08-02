@@ -1,0 +1,61 @@
+{
+  "probe": {
+    "id": "op-01",
+    "section": 2,
+    "persona": "lab_leader",
+    "bucket": "A",
+    "question": "We're picking the 4-bromoanisole Suzuki back up for a new analogue series. Before I write the study plan — what do we already know about this coupling in-house? Conditions, yields, what went wrong. I want the plan grounded in our own runs, not a textbook.",
+    "expects_tools": [
+      "gather_evidence",
+      "find_notes",
+      "expand_note",
+      "similar_reactions"
+    ],
+    "forbids_claims": [
+      "a run, yield or condition set that is not in a cited note",
+      "a literature or patent reference as the source",
+      "we have no records on this coupling"
+    ],
+    "direction": "Reconstructs what the record actually holds for this transformation and cites each note it used: the Suzuki biaryl run (its base, solvent system, temperature, degassing and isolated yield), the aqueous-protodeboronation failure mode, and the degassing / Pd cross-coupling scope playbooks. Every number traces to a note; anything the notes do not record is said to be not recorded rather than filled in. It then turns that into the shape of a study plan — what is already settled and therefore not worth re-running, and what is genuinely open. An answer that asks the chemist to supply the history it could have retrieved is a miss."
+  },
+  "outcome": {
+    "probe_id": "op-01",
+    "section": 2,
+    "persona": "lab_leader",
+    "bucket": "A",
+    "question": "We're picking the 4-bromoanisole Suzuki back up for a new analogue series. Before I write the study plan — what do we already know about this coupling in-house? Conditions, yields, what went wrong. I want the plan grounded in our own runs, not a textbook.",
+    "answer": "I'll search for everything we have on 4-bromoanisole Suzuki couplings — past runs, conditions, yields, and any issues encountered.Good starting set. Let me expand the main Suzuki reaction note and pull the full details from those ELN entries:Now let me check the campaign and playbook notes that were mentioned as neighbors:Perfect. Here's what the record holds on your 4-bromoanisole Suzuki coupling:\n\n## **In-House Experience with 4-Bromoanisole Suzuki**\n\n### **Baseline Conditions & Yields** [[rxn-suzuki-biaryl]]\n- **Transformation:** 4-bromoanisole + phenylboronic acid → 4-methoxybiphenyl\n- **Standard protocol:**\n  - Pd(OAc)₂ (1.5 mol% Pd) with K₂CO₃ (2.0 equiv)\n  - THF/water 4:1, 80 °C, 12 h, under nitrogen (degassed)\n  - **Isolated yield: 76%** with 98.2% product purity\n\n### **Recent Runs on This Exact Reaction** (Jan 2024)\nFour replicate runs under slightly different conditions all yielded well:\n\n| Entry | Operator | Conditions | Yield | Purity | Key Difference |\n|-------|----------|-----------|-------|--------|---|\n| [[reaction-ord-suzuki-biphenyl-1]] | M. Chen | 1,4-dioxane/water 4:1, 82 °C | 90.0% | 98.2% | Slightly hotter, shorter time |\n| [[reaction-ord-suzuki-biphenyl-2]] | S. Patel | 1,4-dioxane/water 4:1, 82 °C | 92.0% | 97.9% | Same as above |\n| [[reaction-uspto-suzuki-biphenyl-1]] | J. Alvarez | 1,4-dioxane/water 4:1, 82 °C, 4 h | 89.5% | 98.2% | Much shorter (4 h vs 12 h) |\n| [[reaction-uspto-suzuki-biphenyl-2]] | M. Chen | 1,4-dioxane/water 4:1, 82 °C, 4 h | 92.5% | 97.8% | Same as above |\n\n**Critical observation:** The newer runs use 1,4-dioxane instead of THF — yields are *slightly better* (89–92% vs 76%) and times are much shorter (4 h vs 12 h). You may want to document this solvent swap in your SOP.\n\n### **What Went Wrong (The Hard-Won Lesson)** [[failure-aqueous-protodeboronation]]\n\nYou've already hit the main pitfall: **protodeboronation at elevated temperature**. \n\n[[opt-suzuki-conditions]] records this: the coupling was optimized experimentally and found that **100 °C gave 79% by LCAP assay but only 68% isolated yield**. The boronic acid decomposes faster than it couples, destroying your yield despite the assay looking better.\n\nThis happened three times before it was recognized — because people were reading LCAP data, not isolated material. **This is a critical point for your analogue series:** your readout matters.\n\n### **The Scope Boundary** [[campaign-biaryl-scope]]\n\nSix couplings were run to establish where this catalytic system works:\n- ✓ **Electron-rich bromides couple at 80 °C** (this is your case)\n- ✗ **Electron-rich chlorides do NOT couple** under these conditions\n\nIf your analogues include any Cl substrates, they'll need different chemistry.\n\n### **Transferable Strategy** [[playbook-pd-cross-coupling-scope]]\n\nDistilled from your own runs:\n\n> When a palladium coupling stalls, **change the ligand before the temperature.**\n\nOxidative addition into an electron-rich aryl halide (like 4-bromoanisole) is the rate-limiting step. It's controlled more by **ligand steric bulk** than by heat. The playbook recommends this order when troubleshooting:\n\n1. **Bulkier biaryl phosphine** (e.g., RuPhos, SPhos, XPhos)\n2. **Higher L:Pd ratio**\n3. **Better degassing**\n4. **Only then** increase temperature\n\n---\n\n## **For Your Study Plan**\n\nYou have **solid baseline data** to build from:\n\n- **Your proven baseline:** 76% on 4-bromoanisole/phenylboronic acid at 80 °C, 12 h\n- **Your optimized protocol:** 89–92% on the same coupling at 82 °C, 4 h, 1,4-dioxane solvent  \n- **Your failure mode:** Don't exceed 100 °C without changing the ligand; protodeboronation will hurt isolated yield\n- **Your scope limit:** Bromides work; chlorides don't\n\nWhen you design the analogue series, I'd recommend:\n1. **Start at 82 °C, 4 h** in 1,4-dioxane (your current best)\n2. **Use LCAP + isolated yield together** — not assay alone\n3. If an analogue stalls, **try a bulkier phosphine first** before reaching for heat\n4. **Test the chloride boundary** if any analogues have that substitution\n\nWant me to pull similar reactions to see how related boronic acids have performed, or help map the decision space for a formal DoE?",
+    "answered": true,
+    "tools_called": [
+      "gather_evidence",
+      "find_notes",
+      "find_past_jobs",
+      "expand_note",
+      "expand_note",
+      "expand_note",
+      "expand_note",
+      "expand_note",
+      "expand_note",
+      "expand_note",
+      "expand_note",
+      "expand_note"
+    ],
+    "tools_failed": [],
+    "expected_tools_met": true,
+    "uncited_note_ids": [],
+    "failed_loudly": false,
+    "error_code": null,
+    "degraded": [],
+    "jobs_started": [],
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "latency_seconds": 21.59,
+    "event_counts": {
+      "token": 72,
+      "tool_call": 12,
+      "tool_result": 12,
+      "answer": 1
+    },
+    "transport_error": null
+  }
+}

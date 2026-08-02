@@ -1,0 +1,56 @@
+{
+  "probe": {
+    "id": "rp-06",
+    "section": 9,
+    "persona": "lab_leader",
+    "bucket": "A",
+    "question": "Run pKa, logD and solubility predictions on 4-methoxybiphenyl and write me two sentences a formulation colleague could act on.",
+    "expects_tools": [
+      "predict_pka",
+      "predict_solubility",
+      "predict_logd",
+      "calculator_trust"
+    ],
+    "forbids_claims": [
+      "a pKa value for a compound with no ionisable centre presented as meaningful",
+      "a solubility or logD value presented as measured rather than predicted",
+      "an accuracy or error bar not returned by calculator_trust"
+    ],
+    "direction": "Call the calculators, then interpret rather than dump. The strong answer flags that 4-methoxybiphenyl has no ionisable group, so a predicted pKa is not a meaningful number for it, and presents solubility and logD as model predictions with their trust caveat attached, never as measurements. Two plainly worded, actionable sentences. Reporting a confident pKa for this substrate without comment is the miss."
+  },
+  "outcome": {
+    "probe_id": "rp-06",
+    "section": 9,
+    "persona": "lab_leader",
+    "bucket": "A",
+    "question": "Run pKa, logD and solubility predictions on 4-methoxybiphenyl and write me two sentences a formulation colleague could act on.",
+    "answer": "I'll run those three predictions for 4-methoxybiphenyl and summarize them for your formulation work.The pKa and logD predictions failed—this is a neutral, non-ionizable aromatic ether with no acidic proton (pKa of a phenolic proton would require an O-H, not an OCH₃) and no basic nitrogen, so both tools correctly declined to return a value for a molecule outside their domain.\n\nFor your formulation work, here are two sentences on what you *can* act on:\n\n**Solubility is the limiting factor: 4-methoxybiphenyl is predicted to be very poorly soluble in water (log S ≈ −3.6 mol/L, ~0.25 μM), with a ±0.75 log unit uncertainty. The molecule's high lipophilicity (driven by the biphenyl core) and lack of ionizable groups mean aqueous solubility will remain low across all pH values, so formulation strategies should focus on organic solvents, cosolvent systems, or particle-size reduction rather than pH adjustment.**",
+    "answered": true,
+    "tools_called": [
+      "predict_pka",
+      "predict_solubility",
+      "predict_logd"
+    ],
+    "tools_failed": [
+      "predict_pka",
+      "predict_logd"
+    ],
+    "expected_tools_met": true,
+    "uncited_note_ids": [],
+    "failed_loudly": true,
+    "error_code": null,
+    "degraded": [],
+    "jobs_started": [],
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "latency_seconds": 6.44,
+    "event_counts": {
+      "token": 17,
+      "tool_call": 3,
+      "tool_failed": 2,
+      "tool_result": 3,
+      "answer": 1
+    },
+    "transport_error": null
+  }
+}

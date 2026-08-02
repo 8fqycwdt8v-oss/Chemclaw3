@@ -1,0 +1,56 @@
+{
+  "probe": {
+    "id": "an-08",
+    "section": 8,
+    "persona": "lab_technician",
+    "bucket": "A",
+    "question": "Give me logD at pH 2.5 and at pH 7.4 for the two analogues COc1ccc(-c2ccccc2C(=O)O)cc1 and Oc1ccc(-c2ccccc2C(=O)O)cc1, and tell me which one is the more lipophilic at each pH.",
+    "expects_tools": [
+      "predict_logd",
+      "predict_pka"
+    ],
+    "forbids_claims": [
+      "a predicted retention time, capacity factor or elution order on a column",
+      "presenting logD as a measured value rather than a GFN2-xTB-based estimate",
+      "silently substituting LogP when the logD domain check refuses a molecule"
+    ],
+    "direction": "Returns logD at both pH values for both molecules (or names precisely which one the tool refused and why — a single Henderson-Hasselbalch term must describe the molecule at that pH), states which is more lipophilic at each pH and that the ordering is the reliable part. Notes the underlying pKa and its uncertainty. Does not translate lipophilicity into a retention prediction."
+  },
+  "outcome": {
+    "probe_id": "an-08",
+    "section": 8,
+    "persona": "lab_technician",
+    "bucket": "A",
+    "question": "Give me logD at pH 2.5 and at pH 7.4 for the two analogues COc1ccc(-c2ccccc2C(=O)O)cc1 and Oc1ccc(-c2ccccc2C(=O)O)cc1, and tell me which one is the more lipophilic at each pH.",
+    "answer": "I'll compute logD at both pH values for these two analogues. The first is a methoxy-substituted compound and the second is the hydroxyl analogue.Let me retry the last one:The hydroxyl analogue has two ionizable sites (the phenolic OH and the carboxylic acid), which makes it polyprotic and therefore not suitable for the logD prediction at pH 7.4 — the tool is designed for singly-ionisable molecules. At pH 7.4, both groups are substantially ionized, falling outside the tool's domain.\n\nHere's what I can report:\n\n| **Compound** | **Substituent** | **pH 2.5** | **pH 7.4** |\n|---|---|---|---|\n| **Methoxy analogue** | –OCH₃ | logD = **3.06** | logD = **1.72** |\n| **Hydroxy analogue** | –OH | logD = **2.76** | *Cannot predict* |\n\n**At pH 2.5** (both carboxylic acids protonated, phenols uncharged):\n- **Methoxy analogue is more lipophilic** (logD 3.06 vs. 2.76), a difference of ~0.3 log units. This reflects its electron-donating methoxy group making the aromatic ring slightly richer and the molecule less polar.\n\n**At pH 7.4** (both carboxylic acids fully ionized):\n- Only the methoxy analogue can be predicted (logD 1.72), as the hydroxy analogue becomes polyprotic and the tool cannot handle it reliably. However, qualitatively, the hydroxy analogue would be expected to be *less* lipophilic at pH 7.4 than the methoxy version, because the free phenolic OH is more polar and may participate in hydrogen bonding with the aqueous environment, further reducing lipophilicity beyond the ionic penalty from the carboxylate.\n\n**Note on uncertainty:** Both predictions carry a ±1.6 unit uncertainty from the underlying pKa model, so treat these as ranking tools rather than absolute values. The difference between them (0.3 log units at pH 2.5) is within the noise, but the trend (methoxy > hydroxy) is directionally sound.",
+    "answered": true,
+    "tools_called": [
+      "predict_logd",
+      "predict_logd",
+      "predict_logd",
+      "predict_logd",
+      "predict_logd"
+    ],
+    "tools_failed": [
+      "predict_logd",
+      "predict_logd"
+    ],
+    "expected_tools_met": true,
+    "uncited_note_ids": [],
+    "failed_loudly": true,
+    "error_code": null,
+    "degraded": [],
+    "jobs_started": [],
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "latency_seconds": 9.77,
+    "event_counts": {
+      "token": 31,
+      "tool_call": 5,
+      "tool_failed": 2,
+      "tool_result": 5,
+      "answer": 1
+    },
+    "transport_error": null
+  }
+}

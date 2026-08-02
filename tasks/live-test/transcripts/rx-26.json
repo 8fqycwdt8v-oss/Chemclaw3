@@ -1,0 +1,60 @@
+{
+  "probe": {
+    "id": "rx-26",
+    "section": 11,
+    "persona": "lab_leader",
+    "bucket": "A",
+    "question": "We are taking the biaryl coupling from 5 g to kilo lab. Have we run anything like this at scale before, and what went wrong when we did?",
+    "expects_tools": [
+      "find_notes",
+      "gather_evidence",
+      "similar_reactions",
+      "expand_note",
+      "find_past_jobs"
+    ],
+    "forbids_claims": [
+      "a scale, batch size or campaign history the record does not contain",
+      "a predicted yield at the larger scale",
+      "an equipment or facility reference"
+    ],
+    "direction": "Precedent retrieval is the capability being tested and it should be exercised properly: the seed record for this coupling (4-bromoanisole and phenylboronic acid, Pd(OAc)2 1.5 mol%, K2CO3, THF/water 4:1, 80 °C, 12 h, degassed, 76% isolated), the two failure modes and the ligand-before-temperature playbook. The scale-relevant reading of the protodeboronation failure is the one to draw out: it was found because assay conversion improved while isolated yield fell, which is exactly the way a scale-up gets misread. Must be honest that the record carries laboratory-scale runs with little or no scale metadata, so 'have we run this at scale' is answered by 'here is what we have, and it is not at scale'. Should name the degassing playbook, since oxygen control is the thing that genuinely changes character on scale-up."
+  },
+  "outcome": {
+    "probe_id": "rx-26",
+    "section": 11,
+    "persona": "lab_leader",
+    "bucket": "A",
+    "question": "We are taking the biaryl coupling from 5 g to kilo lab. Have we run anything like this at scale before, and what went wrong when we did?",
+    "answer": "I'll search the knowledge graph and past job records for biaryl coupling work at scale.The search found a Suzuki-Miyaura biaryl coupling in the graph: [[rxn-suzuki-biaryl]], but no record of it at scale or any scale-up campaigns in the past job database. Let me expand that note to see what conditions and outcomes were recorded at the current scale.Good — the reaction neighbors include a scale-up campaign. Let me pull that and the development report, which should hold scale-up issues.Now let me check that failure mode note, and also the playbook on Pd cross-coupling scope, which is most likely to hold scale-up cautions.Excellent. Now let me search for any specific scale-up notes or issues that might be tagged but not yet found, and check the degassing playbook since that was flagged as important:Based on the evidence from the knowledge graph, here is what we know about the biaryl coupling and what went wrong when it was developed:\n\n## What you have run before\n\nYes — the 4-methoxybiphenyl Suzuki-Miyaura coupling ([[rxn-suzuki-biaryl]]) has been run, optimised, and documented. The recommended conditions are:\n- **1.5 mol% Pd(OAc)₂** with SPhos\n- **K₂CO₃** (2.0 equiv)\n- **THF/water 4:1** \n- **80 °C, 12 h**\n- **Rigorously degassed**\n- **Isolated yield: 76%**\n\nThere is no record of taking this to kilogram scale in past jobs, so you will be the first.\n\n## What went wrong during development ([[opt-suzuki-conditions]], [[failure-aqueous-protodeboronation]])\n\nThree critical issues were found:\n\n1. **Temperature trap: protodeboronation at 100 °C**  \n   Running at 100 °C *raised* LCAP conversion but *lowered* isolated yield to 68%. The boronic acid decomposes to benzene faster than it transmetalates at higher temperature. This was observed three times before being recognised because the HPLC assay looked good. The lesson: **do not optimise on LCAP alone** — it can mask competing side reactions that only show up in isolated yield.\n\n2. **Degassing is not optional: bimodal yield ([[playbook-degassing]])**  \n   Pd(0) oxidises in air to catalytically dead black oxide. The signature is bimodal results — nominally identical runs give 70%+ or under 20%, rarely anything in between — because it depends on whether the catalyst survives the first few minutes. **Three freeze-pump-thaw cycles or 20 minutes sparging per 100 mL**. Two minutes of sparging is the same as not degassing.\n\n3. **Ligand > temperature for stalled couplings ([[playbook-pd-cross-coupling-scope]])**  \n   When an electron-rich aryl bromide couples slowly, the issue is oxidative addition into the aryl halide, which responds to ligand steric bulk far more than to temperature. The recommended troubleshooting order is:\n   - Bulkier biaryl phosphine (e.g. SPhos → RuPhos or XPhos)\n   - Higher L:Pd ratio\n   - Harder degassing\n   - Only then consider more heat\n\n## For your scale-up to kilo lab\n\nThe main risk is **degassing at scale**. Freeze-pump-thaw becomes impractical for multi-litre batches; you will need an inert-gas sparging system that delivers 20 min/100 mL equivalent to your vessel. Underestimating this is the most likely source of the bimodal results seen at small scale. Second: **watch isolated yield closely, not LCAP** — the protodeboronation liability means there is a yield cliff if conditions drift warmer. Third: solvent ratio (4:1 THF:water) matters for the protodeboronation equilibrium, so do not guess it — measure it volumetrically.\n\nDo you have the boronic acid characterisation from the small scale runs, and notes on your degassing plan for kilo scale?",
+    "answered": true,
+    "tools_called": [
+      "gather_evidence",
+      "find_past_jobs",
+      "expand_note",
+      "expand_note",
+      "expand_note",
+      "expand_note",
+      "expand_note",
+      "expand_note",
+      "expand_note",
+      "gather_evidence"
+    ],
+    "tools_failed": [],
+    "expected_tools_met": true,
+    "uncited_note_ids": [],
+    "failed_loudly": false,
+    "error_code": null,
+    "degraded": [],
+    "jobs_started": [],
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "latency_seconds": 22.33,
+    "event_counts": {
+      "token": 67,
+      "tool_call": 10,
+      "tool_result": 10,
+      "answer": 1
+    },
+    "transport_error": null
+  }
+}

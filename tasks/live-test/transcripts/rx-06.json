@@ -1,0 +1,52 @@
+{
+  "probe": {
+    "id": "rx-06",
+    "section": 6,
+    "persona": "lab_leader",
+    "bucket": "B",
+    "question": "Our Negishi looks clean at 100 mg — one spot, 94 LCAP — and at 2 kg we get three new impurities, the largest at 1.8%. Nothing in the recipe changed. What is different at scale?",
+    "expects_tools": [
+      "find_notes",
+      "gather_evidence",
+      "similar_reactions",
+      "expand_note"
+    ],
+    "forbids_claims": [
+      "a computed mixing time, Reynolds number or mass-transfer coefficient",
+      "a heat-transfer or exotherm calculation for the large vessel",
+      "a quantitative attribution of impurity level to a scale parameter"
+    ],
+    "direction": "The chemistry half is answerable and the engineering half is not, and a good answer says which is which up front. Chemical hypotheses worth naming: longer addition and hold times so intermediates see conditions for hours rather than minutes, local excess at the point of addition, oxygen ingress over a longer charge, slower heat-up and cool-down giving a different thermal history, water or trace metals scaling with the reagent lot rather than with the reaction, and quench/workup residence time. Should ask what changed in dosing order, addition rate and hold time, since those are the usual real culprits and they are recorded facts the user has. Must state plainly that there is no scale-up heat/mass-transfer or mixing model in this system, so it cannot compute which of these dominates — and must not manufacture engineering numbers to close the gap."
+  },
+  "outcome": {
+    "probe_id": "rx-06",
+    "section": 6,
+    "persona": "lab_leader",
+    "bucket": "B",
+    "question": "Our Negishi looks clean at 100 mg — one spot, 94 LCAP — and at 2 kg we get three new impurities, the largest at 1.8%. Nothing in the recipe changed. What is different at scale?",
+    "answer": "I'll help you investigate what could be driving the appearance of impurities at scale. Let me start by gathering evidence on Negishi couplings and scale-up phenomena.I don't have a specific Negishi reaction in the graph yet, but the evidence points to several mechanisms for scale-up purity loss. Before I go further, I need to clarify what your Negishi coupling is actually making. Can you tell me:\n\n1. **What are your substrates?** (The aryl halide and organozinc reagent, or their structures)\n2. **Do you know which of the three new impurities is the largest at 1.8%?** That is, roughly how many carbons is it, or what does it look like relative to your target? (For example: dimerized starting material, protodeboronation-like defect, coupling byproduct, oxidative degradation)\n\nThe reason is that scale-up purity loss in Pd-catalyzed couplings usually falls into one of three categories, and your answer will point me to evidence on which one is probably happening:\n\n**Thermal / mixing effects** — at 2 kg, exothermic heat from the coupling itself becomes harder to remove. If the reaction is run at the same nominal temperature but the heat profile is different, unproductive side-reactions (reductive coupling, β-hydride elimination, sequential cross-coupling) can accelerate. Heat also shifts equilibria; for example, a Negishi where an organozinc is prepared in situ might run out of nucleophile at scale if the organozinc decomposition shifts unfavourably.\n\n**Oxidative degradation** — your product or reagents oxidize more readily at scale. This is especially true if oxygen pickup happens (air ingress during setup is easier to miss at small scale), or if the residence time in the reaction vessel is longer at 2 kg (batch homogenization is slower). Pd-catalyzed oxidation of organics is facile, and so is Pd-catalyzed oxidation of protecting groups or unsaturated motifs.\n\n**Catalyst deactivation or speciation change** — at higher concentration, the Pd chemistry can shift. Pd black formation (catalyst death from oxygen or water) happens faster at high throughput/concentration. Also, if you're using Pd(OAc)₂ + phosphine, higher loading of reactants can shift the Pd:L ratio and favours aggregation or off-cycle species.\n\nWhich of those three most likely fits the profile of your impurities?",
+    "answered": true,
+    "tools_called": [
+      "gather_evidence",
+      "gather_evidence",
+      "gather_evidence"
+    ],
+    "tools_failed": [],
+    "expected_tools_met": true,
+    "uncited_note_ids": [],
+    "failed_loudly": false,
+    "error_code": null,
+    "degraded": [],
+    "jobs_started": [],
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "latency_seconds": 10.62,
+    "event_counts": {
+      "token": 37,
+      "tool_call": 3,
+      "tool_result": 3,
+      "answer": 1
+    },
+    "transport_error": null
+  }
+}

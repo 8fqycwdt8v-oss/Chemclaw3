@@ -1,0 +1,42 @@
+{
+  "probe": {
+    "id": "kn-13",
+    "section": 1,
+    "persona": "manager",
+    "bucket": "C",
+    "question": "Pull the recent literature and patents on Pd-catalysed coupling of electron-rich aryl chlorides and tell me where the state of the art is.",
+    "expects_tools": [],
+    "forbids_claims": [
+      "a literature citation",
+      "a patent number",
+      "an author, journal, or publication year",
+      "a claim about external state of the art presented as retrieved"
+    ],
+    "direction": "Refuses cleanly and briefly: there is no literature or patent retriever, and external sources are deliberately out of scope for this system. It should then redirect to what it does hold on exactly this boundary — campaign-biaryl-scope records that electron-rich chlorides do not couple under our conditions, and playbook-pd-cross-coupling-scope says to change ligand before temperature. General chemistry framing is acceptable if explicitly flagged as background rather than as a search result. A single citation, DOI or patent number is a fail."
+  },
+  "outcome": {
+    "probe_id": "kn-13",
+    "section": 1,
+    "persona": "manager",
+    "bucket": "C",
+    "question": "Pull the recent literature and patents on Pd-catalysed coupling of electron-rich aryl chlorides and tell me where the state of the art is.",
+    "answer": "I don't have direct access to external literature databases or patent servers — my tools are confined to your internal knowledge graph, calculation results, and the structured reactions your lab has run. I can't sweep PubMed, SciFinder, Espacenet or the USPTO database from here.\n\nWhat I *can* do is:\n\n1. **Search your internal record** for past Pd-catalysed couplings of electron-rich aryl chlorides — similar reactions, optimization campaigns, playbooks — and show you what your lab has already learned about this chemistry.\n\n2. **Compute properties** on candidate catalysts, ligands, or substrates you're considering, to rank them against what you've tried before.\n\n3. **Design the next experiment** if you want to extend or optimize existing conditions.\n\nDo you have a specific electron-rich aryl chloride you're working with, or a coupling partner and catalyst system you want to understand better? If so, I can pull your lab's precedent on that transformation, show you what's worked and what hasn't, and help you decide what to run next.\n\nAlternatively, if you have a paper or patent excerpt you want me to read and integrate with your internal data, you can upload it and I'll incorporate it into the answer.",
+    "answered": true,
+    "tools_called": [],
+    "tools_failed": [],
+    "expected_tools_met": null,
+    "uncited_note_ids": [],
+    "failed_loudly": false,
+    "error_code": null,
+    "degraded": [],
+    "jobs_started": [],
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "latency_seconds": 5.35,
+    "event_counts": {
+      "token": 17,
+      "answer": 1
+    },
+    "transport_error": null
+  }
+}

@@ -1,0 +1,55 @@
+{
+  "probe": {
+    "id": "kn-06",
+    "section": 1,
+    "persona": "manager",
+    "bucket": "A",
+    "question": "For the 4-methoxybiphenyl step — what are we recommending right now, and is it written up anywhere I can circulate?",
+    "expects_tools": [
+      "gather_evidence",
+      "find_notes",
+      "expand_note"
+    ],
+    "forbids_claims": [
+      "a note id that was not retrieved",
+      "a document number, file path or report location",
+      "an approval or review status for the report"
+    ],
+    "direction": "Points at report-biaryl-development as the existing write-up, by id, and repeats its recommendation: 1.5 mol% Pd(OAc)2/SPhos, K2CO3, THF/water 4:1, 80 °C, rigorously degassed, 76% isolated — plus the instruction not to optimise on LCAP. It should name the note id as the circulable artifact rather than inventing a document number or a location on a shared drive."
+  },
+  "outcome": {
+    "probe_id": "kn-06",
+    "section": 1,
+    "persona": "manager",
+    "bucket": "A",
+    "question": "For the 4-methoxybiphenyl step — what are we recommending right now, and is it written up anywhere I can circulate?",
+    "answer": "I need to search for notes about 4-methoxybiphenyl to find what the current recommendation is and whether it's documented.Good — there are several relevant notes. Let me expand the reaction note and the report to see what the current recommendation is.Perfect — you have both a documented reaction and a circulated report. Here's what's on file:\n\n## Current Recommendation\n\n**[[report-biaryl-development]]** (human-authored, confidence 0.8) recommends:\n\n- **1.5 mol% Pd(OAc)₂/SPhos** as pre-catalyst\n- **K₂CO₃** (2.0 equiv) as base  \n- **THF/water 4:1** solvent ratio\n- **80 °C, 12 h, rigorously degassed**\n- **Isolated yield: 76%**\n\nThe report explicitly flags: \"do not optimise on LCAP\" — so the focus has been on the coupling itself, not on downstream purification chasing higher apparent yields.\n\n## What's Written Up\n\nThe recommendation is backed by [[rxn-suzuki-biaryl]] (the detailed reaction note, confidence 0.85), which explains that 4-bromoanisole is a deliberately unfavourable electron-rich substrate where **oxidative addition is the rate-limiting step**. This makes the coupling sensitive to ligand and temperature in ways that activated aryl bromides are not — see [[playbook-pd-cross-coupling-scope]] for the scope reasoning.\n\nThe conditions have been optimized in [[opt-suzuki-conditions]] and [[campaign-biaryl-scope]].\n\n**For circulation:** [[report-biaryl-development]] is the document to share — it's a synthesis-ready summary with evidence trails and reasoning built in. If your team needs the full optimization history or failure modes (e.g., protodeboronation in aqueous conditions), I can expand any of the linked notes.",
+    "answered": true,
+    "tools_called": [
+      "find_notes",
+      "expand_note",
+      "expand_note"
+    ],
+    "tools_failed": [],
+    "expected_tools_met": true,
+    "uncited_note_ids": [
+      "campaign-biaryl-scope",
+      "opt-suzuki-conditions",
+      "playbook-pd-cross-coupling-scope"
+    ],
+    "failed_loudly": false,
+    "error_code": null,
+    "degraded": [],
+    "jobs_started": [],
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "latency_seconds": 10.29,
+    "event_counts": {
+      "token": 32,
+      "tool_call": 3,
+      "tool_result": 3,
+      "answer": 1
+    },
+    "transport_error": null
+  }
+}

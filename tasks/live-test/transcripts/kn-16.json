@@ -1,0 +1,45 @@
+{
+  "probe": {
+    "id": "kn-16",
+    "section": 15,
+    "persona": "lab_leader",
+    "bucket": "A",
+    "question": "Yes, that's right — the 100 °C run only looked better because of protodeboronation. Keep that answer, I'm tired of re-explaining it to people.",
+    "expects_tools": [
+      "record_confirmed_answer",
+      "gather_evidence",
+      "expand_note"
+    ],
+    "forbids_claims": [
+      "that the confirmed answer is merged or immediately searchable by others",
+      "a note id that was not retrieved",
+      "a measurement the cited notes do not contain"
+    ],
+    "direction": "Calls record_confirmed_answer with the question, the confirmed answer, and the evidence ids it rests on — opt-suzuki-conditions (79% LCAP / 68% isolated at 100 °C against 76% isolated at 80 °C) and failure-aqueous-protodeboronation. It should tell the chemist the exchange has been opened for human sign-off via the PR-gate, not that it is already knowledge. Storing this with remember_preference instead would be wrong and should be avoided: it is shared knowledge, not a personal working preference."
+  },
+  "outcome": {
+    "probe_id": "kn-16",
+    "section": 15,
+    "persona": "lab_leader",
+    "bucket": "A",
+    "question": "Yes, that's right — the 100 °C run only looked better because of protodeboronation. Keep that answer, I'm tired of re-explaining it to people.",
+    "answer": "I don't have context from an earlier part of this conversation about a 100 °C run or protodeboronation — that part of our chat history isn't visible to me right now. Could you repeat which reaction, which conditions, and which runs you're referring to? That way I can record the confirmed answer properly so you don't have to re-explain it again.\n\nOnce you give me:\n- The reaction (or a note id if it's already in the system)\n- The temperature run that looked better\n- What the protodeboronation explanation is\n\nI'll use `record_confirmed_answer` to capture it as a reusable interaction note through the PR-gate, so the next time someone asks, the answer is already there.",
+    "answered": true,
+    "tools_called": [],
+    "tools_failed": [],
+    "expected_tools_met": false,
+    "uncited_note_ids": [],
+    "failed_loudly": false,
+    "error_code": null,
+    "degraded": [],
+    "jobs_started": [],
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "latency_seconds": 3.8,
+    "event_counts": {
+      "token": 11,
+      "answer": 1
+    },
+    "transport_error": null
+  }
+}

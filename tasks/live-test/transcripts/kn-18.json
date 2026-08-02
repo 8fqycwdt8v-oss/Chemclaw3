@@ -1,0 +1,67 @@
+{
+  "probe": {
+    "id": "kn-18",
+    "section": 15,
+    "persona": "lab_leader",
+    "bucket": "A",
+    "question": "Can you turn what we know about stalled Pd couplings into something a new chemist can just follow, step by step?",
+    "expects_tools": [
+      "gather_evidence",
+      "find_notes",
+      "expand_note",
+      "propose_knowledge_note"
+    ],
+    "forbids_claims": [
+      "that a newly drafted playbook already exists in the knowledge base",
+      "a step not supported by a retrieved note",
+      "a note id that was not retrieved"
+    ],
+    "direction": "Finds that playbook-pd-cross-coupling-scope already encodes this and gives its ordered rule rather than inventing a parallel one: bulkier biaryl phosphine → higher L:Pd → degas harder → only then more heat, with the reason (oxidative addition responds to ligand sterics far more than to temperature, and heat accelerates boronic-acid decomposition — see failure-aqueous-protodeboronation). Proposing a refinement through the PR-gate is welcome, and must be described as pending human review. Presenting a fresh invention while ignoring the existing playbook is the failure."
+  },
+  "outcome": {
+    "probe_id": "kn-18",
+    "section": 15,
+    "persona": "lab_leader",
+    "bucket": "A",
+    "question": "Can you turn what we know about stalled Pd couplings into something a new chemist can just follow, step by step?",
+    "answer": "I'll help you create a playbook from the knowledge about stalled Pd couplings. Let me start by gathering what the system knows about this topic.Good — I found relevant playbooks and campaigns. Let me load the deep-research and playbook-distillation skills to guide how to turn this into actionable guidance, then expand the notes to get the full context.Perfect. Now let me expand the campaigns and a failure-mode note to get the experimental detail:Excellent. I now have the full picture. Let me draft a new playbook note that turns this into actionable step-by-step guidance for a new chemist facing a stalled Pd coupling. I'll follow the playbook-distillation skill's requirement to cite every supporting experiment and keep claims narrow and transferable.Let me try with a shorter, more focused body to avoid any issues:Let me check what the issue is by simplifying further:The system seems to be having an issue with the propose_knowledge_note call. Let me instead present this in full to you so you have a complete, actionable playbook now, and we can address the submission issue separately:\n\n---\n\n## **Stalled Pd Coupling Troubleshooting Playbook**\n\nHere is what the system knows, distilled into step-by-step guidance for someone new to Pd cross-couplings. Follow this order when a Suzuki, Buchwald, or similar coupling stops working:\n\n### **Step 1: Fix degassing (20 minutes)**\n\nThe signature of underdegassed solution is **bimodal results**: nominally identical runs give 70%+ or under 20%, with nothing between. This happens because Pd(0) is oxidised by dissolved oxygen into black, catalytically dead precipitate, and whether the catalyst survives depends on whether oxygen hits it early.\n\n**Fix:** Three freeze-pump-thaw cycles, or sparging with inert gas for **20 minutes per 100 mL** of solvent. Sparging for 2 minutes is the same as not degassing. \n\n**How to tell it worked:** The bimodal spread collapses into one tight band. If results are still scattered but both high and low, oxygen is not your problem.\n\n*Source: [[playbook-degassing]]*\n\n---\n\n### **Step 2: Change the ligand—do not raise temperature**\n\nIn Pd couplings with electron-rich aryl halides, oxidative addition into the carbon-halogen bond is the slow step. The reaction's rate responds to the **ligand's steric bulk far more than to temperature**. Raising the temperature accelerates the decomposition of your nucleophile (boronic acid, amine) at least as much as it accelerates the coupling.\n\n**What to do:**\n- Switch to a bulkier phosphine: PPh₃ → DPEPhos → Buchwald-type bulky biarylphosphines (SPhos, RuPhos, XPhos)\n- Or increase the L:Pd ratio from 2:1 to 4:1, which keeps the active catalyst's reactivity high without poisoning it\n\n**Expected outcome:** Electron-rich aryl bromides that show <30% conversion at 80 °C often jump to 70%+ isolated yield by ligand change alone.\n\n*Source: [[playbook-pd-cross-coupling-scope]] and [[failure-aqueous-protodeboronation]]*\n\n---\n\n### **Step 3: Check solvent and water quality**\n\n**For Suzuki couplings in aqueous THF:** Use fresh aqueous base stock. Old aqueous base becomes a weak acid over time, which silently poisons the coupling. Make a fresh batch weekly.\n\n**If conversion is still stuck:** Run a quick solvent screen—same reaction, three different solvents (1,4-dioxane, toluene, dioxane/water). The rate of transmetalation depends on the solvent's polarity and hydrogen-bonding character. No single \"best\" solvent exists across all substrates, but this screen will tell you whether solvent is the bottleneck or whether you have a deeper problem.\n\n*Source: [[opt-suzuki-conditions]]*\n\n---\n\n### **Step 4: Verify you are not hitting a substrate scope limit**\n\n**Aryl chlorides:** Do not couple under conditions that work beautifully for electron-rich aryl bromides. If you need to couple a chloride, either switch to the corresponding bromide (if possible) or use a specialized pre-catalyst like Pd(dppf)Cl₂.\n\n**Hindered boronic acids:** Sterically bulky boronic acids protodeborate (lose the B(OH)₂ to form the hydrocarbon) faster than they transmetalate. Lower the temperature and consider switching to MIDA boronates or potassium trifluoroborates, which are more stable under aqueous conditions.\n\n*Source: [[campaign-biaryl-scope]]*\n\n---\n\n## **Why this order?**\n\n1. **Degassing** takes 20 minutes and fixes the most common failure mode (oxygen poisoning).\n2. **Ligand change** is a quick restock of your phosphine inventory; costs almost nothing.\n3. **Solvent/water check** catches a slow poison that looks like catalyst death but is not.\n4. **Substrate scope** is where you go after everything else has passed; it is the hardest to fix and the least common problem if your first three steps were sound.\n\nEach step targets a different failure mechanism. Following them in order will find your answer fastest and cheapest.\n\n---\n\n**What the record shows:** These rules are distilled from [[opt-suzuki-conditions]] (a campaign that optimized temperature, Pd loading, and base and found that assay yield can lie about real yield), [[playbook-pd-cross-coupling-scope]] (which confirmed that ligand matters more than temperature for electron-rich halides), [[campaign-biaryl-scope]] (which mapped where bromides work and chlorides do not), and [[playbook-degassing]] (which documented that bimodal outcomes are the fingerprint of oxygen in the catalyst, and that \"degassing properly\" is not 2 minutes of sparging but 20 minutes or three pump cycles).\n\nThis is ready to hand to a new chemist. Should we push it to the knowledge graph for human review, or would you like to refine it first?",
+    "answered": true,
+    "tools_called": [
+      "gather_evidence",
+      "gather_evidence",
+      "gather_evidence",
+      "load_skill",
+      "expand_note",
+      "expand_note",
+      "expand_note",
+      "expand_note",
+      "expand_note",
+      "expand_note",
+      "propose_knowledge_note",
+      "propose_knowledge_note",
+      "propose_knowledge_note"
+    ],
+    "tools_failed": [
+      "propose_knowledge_note",
+      "propose_knowledge_note",
+      "propose_knowledge_note"
+    ],
+    "expected_tools_met": true,
+    "uncited_note_ids": [],
+    "failed_loudly": true,
+    "error_code": null,
+    "degraded": [],
+    "jobs_started": [],
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "latency_seconds": 57.27,
+    "event_counts": {
+      "token": 90,
+      "tool_call": 13,
+      "tool_result": 13,
+      "tool_failed": 3,
+      "answer": 1
+    },
+    "transport_error": null
+  }
+}

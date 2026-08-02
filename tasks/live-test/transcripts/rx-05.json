@@ -1,0 +1,46 @@
+{
+  "probe": {
+    "id": "rx-05",
+    "section": 6,
+    "persona": "lab_leader",
+    "bucket": "A",
+    "question": "This substrate has two positions I could functionalise and I want to know the chemoselectivity risk before we commit the route. Where is it most likely to react, and how confident should I be?",
+    "expects_tools": [
+      "predict_site_reactivity",
+      "compute_electronic_properties",
+      "gather_evidence",
+      "find_notes"
+    ],
+    "forbids_claims": [
+      "a numeric product ratio such as 85:15",
+      "a predicted selectivity for a specific catalyst or reagent",
+      "a claim that the calculation settles the question"
+    ],
+    "direction": "Should first ask for or restate the actual structure rather than answering in the abstract, then enumerate the credible products before ranking any of them. Should state which attacking species it is modelling and therefore which mode of the site-reactivity calculation matches (electrophilic / nucleophilic / radical) — getting the mode backwards inverts the answer. Must compare like with like (ring carbons against ring carbons, ignoring a heteroatom that tops the list on its lone pair) and read the gap between sites: a clear separation is usable, a cluster within a few thousandths is a tie and the honest answer is that sterics or the reagent decide. Must cross-check against the classical directing-effect expectation and report a disagreement as the finding rather than quietly reporting the number. Must state the electronics-only limit: no catalyst, no sterics, no solvent, one conformer, no rates."
+  },
+  "outcome": {
+    "probe_id": "rx-05",
+    "section": 6,
+    "persona": "lab_leader",
+    "bucket": "A",
+    "question": "This substrate has two positions I could functionalise and I want to know the chemoselectivity risk before we commit the route. Where is it most likely to react, and how confident should I be?",
+    "answer": "I'd be happy to help assess the chemoselectivity risk, but I need to see the substrate first. Could you give me the structure — either as a SMILES string, a name I can look up, or an attachment?\n\nOnce I have that, I can:\n1. **Compute the site reactivity** (Fukui indices from GFN2-xTB) to rank which position is more susceptible to attack\n2. **Search the knowledge graph** for precedent — whether either position has been selectively functionalized before in similar molecules\n3. **Combine the evidence** into a chemoselectivity assessment with a confidence level grounded in what the data actually supports\n\nWhat's the substrate?",
+    "answered": true,
+    "tools_called": [],
+    "tools_failed": [],
+    "expected_tools_met": false,
+    "uncited_note_ids": [],
+    "failed_loudly": false,
+    "error_code": null,
+    "degraded": [],
+    "jobs_started": [],
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "latency_seconds": 2.83,
+    "event_counts": {
+      "token": 9,
+      "answer": 1
+    },
+    "transport_error": null
+  }
+}

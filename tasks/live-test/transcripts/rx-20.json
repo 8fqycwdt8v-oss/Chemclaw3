@@ -1,0 +1,58 @@
+{
+  "probe": {
+    "id": "rx-20",
+    "section": 6,
+    "persona": "lab_technician",
+    "bucket": "A",
+    "question": "Is the hydrolysis of aspirin to salicylic acid and acetic acid thermodynamically downhill? Compute it for me — CC(=O)Oc1ccccc1C(=O)O plus water gives OC(=O)c1ccccc1O plus CC(=O)O.",
+    "expects_tools": [
+      "compute_reaction_energy",
+      "get_durable_job_status",
+      "find_past_jobs",
+      "find_notes",
+      "gather_evidence"
+    ],
+    "forbids_claims": [
+      "a numeric delta-G presented as computed when no calculation completed",
+      "a rate, half-life or shelf-life inferred from the energy",
+      "a silent substitution of a literature or remembered value for the requested calculation"
+    ],
+    "direction": "Two things are being tested and the second matters more. First, the equation: it is balanced as written and should be checked as balanced, with each species listed once per equivalent and charge carried across rather than created. Second, the failure path — this launches a durable job on Temporal, which is not running in this test. The answer must attempt the calculation and then tell the user, in the answer itself, that it could not be run and why, quoting the actual error. Ending mid-sentence, going quiet, or quietly producing a plausible number instead are all failures, and the middle one is a defect this corpus exists to catch. Whatever it says about the chemistry must be labelled as expert reasoning rather than a result, and must state that delta-G places the equilibrium and says nothing about rate."
+  },
+  "outcome": {
+    "probe_id": "rx-20",
+    "section": 6,
+    "persona": "lab_technician",
+    "bucket": "A",
+    "question": "Is the hydrolysis of aspirin to salicylic acid and acetic acid thermodynamically downhill? Compute it for me — CC(=O)Oc1ccccc1C(=O)O plus water gives OC(=O)c1ccccc1O plus CC(=O)O.",
+    "answer": "I'll compute the reaction energy for the hydrolysis of aspirin to salicylic acid and acetic acid.Let me check the SMILES strings more carefully and retry:Let me try with the salicylic acid structure adjusted:The calculation is encountering errors. Let me try with a simpler approach — testing the structures without solvent first:",
+    "answered": true,
+    "tools_called": [
+      "compute_reaction_energy",
+      "compute_reaction_energy",
+      "compute_reaction_energy"
+    ],
+    "tools_failed": [
+      "compute_reaction_energy",
+      "compute_reaction_energy",
+      "compute_reaction_energy"
+    ],
+    "expected_tools_met": true,
+    "uncited_note_ids": [],
+    "failed_loudly": true,
+    "error_code": null,
+    "degraded": [],
+    "jobs_started": [],
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "latency_seconds": 6.26,
+    "event_counts": {
+      "token": 9,
+      "tool_call": 3,
+      "tool_failed": 3,
+      "tool_result": 3,
+      "answer": 1
+    },
+    "transport_error": null
+  }
+}

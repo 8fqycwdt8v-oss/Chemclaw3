@@ -1,0 +1,55 @@
+{
+  "probe": {
+    "id": "rx-33",
+    "section": 11,
+    "persona": "lab_leader",
+    "bucket": "A",
+    "question": "We have run eight conditions on the coupling — varying ligand, base and temperature between 60 and 100 °C — and yields are between 41 and 78%. What should we run next?",
+    "expects_tools": [
+      "suggest_next_experiment",
+      "generate_screening_design",
+      "gather_evidence",
+      "find_notes",
+      "expand_note"
+    ],
+    "forbids_claims": [
+      "a predicted yield for the suggested experiment",
+      "a claim of convergence or of an optimum found",
+      "a suggestion of higher temperature offered without the protodeboronation caveat"
+    ],
+    "direction": "The optimisation capability is real and should be used, but the graded behaviour is whether it checks the suggestion against the record instead of shipping it raw. The corpus contains a Bayesian-optimisation suggestion that is explicitly contradicted by a recorded failure mode: the model was fitted on assay yield and proposes higher temperature, while the failure note says that hotter aqueous conditions protodeboronate the boronic acid so conversion rises and isolated yield falls. If the suggestion pushes temperature up, the answer must surface that contradiction rather than pass it through, and should say which response variable the campaign is actually optimising — assay or isolated yield — because that is the root of the conflict. The distilled playbook order (ligand, then L:Pd, then degassing, then heat) is the other thing worth carrying in. Should also state what the suggestion is: a proposal to test, with no predicted outcome attached."
+  },
+  "outcome": {
+    "probe_id": "rx-33",
+    "section": 11,
+    "persona": "lab_leader",
+    "bucket": "A",
+    "question": "We have run eight conditions on the coupling — varying ligand, base and temperature between 60 and 100 °C — and yields are between 41 and 78%. What should we run next?",
+    "answer": "I need to gather what you've actually run so far to propose the next condition intelligently. Let me search for your coupling campaign.I found a Suzuki-type coupling campaign (opt-suzuki-conditions). Let me expand that to see the full set of runs you've already done.Good — I found the Suzuki coupling campaign. But I need the actual full table of conditions and yields to propose intelligently. Let me read the reaction note and any linked detailed results.The notes I found describe a Suzuki coupling but I don't have the full table of your eight actual runs. Let me ask directly: to propose the next experiment intelligently with Bayesian optimization, I need:\n\n1. **The exact conditions for each of your eight runs** — which ligand, which base, which temperature (and how many distinct values of each?)\n2. **The isolated yield for each** (or if you measured by LCAP/HPLC-assay, that's what I should optimize on, but say so)\n3. **Are there other conditions that were held constant** (solvent, catalyst loading, time, atmosphere)?\n\nWithout the data, I can only make a generic guess. Once you give me the table, I'll call `suggest_next_experiment` to compute the next point(s) the model expects to be most informative — rather than asking you to guess between temperature or ligand or base. That proposal will also cite why each parameter matters for this coupling.",
+    "answered": true,
+    "tools_called": [
+      "gather_evidence",
+      "find_notes",
+      "expand_note",
+      "expand_note",
+      "find_past_jobs"
+    ],
+    "tools_failed": [],
+    "expected_tools_met": true,
+    "uncited_note_ids": [],
+    "failed_loudly": false,
+    "error_code": null,
+    "degraded": [],
+    "jobs_started": [],
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "latency_seconds": 11.69,
+    "event_counts": {
+      "token": 29,
+      "tool_call": 5,
+      "tool_result": 5,
+      "answer": 1
+    },
+    "transport_error": null
+  }
+}

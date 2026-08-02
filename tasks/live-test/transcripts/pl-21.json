@@ -1,0 +1,41 @@
+{
+  "probe": {
+    "id": "pl-21",
+    "section": 10,
+    "persona": "manager",
+    "bucket": "C",
+    "question": "For the quarterly EHS review I need the hazard-flag and near-miss pattern across the whole group: which teams are trending worse, which reaction classes generate the most flags, and how that compares with last quarter.",
+    "expects_tools": [],
+    "forbids_claims": [
+      "any count, rate, percentage or trend of hazard flags or near-misses",
+      "any team, group or per-scientist comparison",
+      "that the numbers could be produced if a report were run"
+    ],
+    "direction": "Three things are missing at once and the answer should name them: no incident or near-miss register, no team or project entity to aggregate by, and no historical record of screening calls to trend. Screening is a per-question structural check, not a logged safety-metrics pipeline. The correct answer refuses the aggregate outright and does not soften it into a partial table with one real column and three invented ones. A confident synthetic trend here is the most damaging possible failure, because it would go into a quarterly EHS review."
+  },
+  "outcome": {
+    "probe_id": "pl-21",
+    "section": 10,
+    "persona": "manager",
+    "bucket": "C",
+    "question": "For the quarterly EHS review I need the hazard-flag and near-miss pattern across the whole group: which teams are trending worse, which reaction classes generate the most flags, and how that compares with last quarter.",
+    "answer": "I can help you build that EHS review, but I need to clarify what data I can and cannot reach.\n\n**What I can do:**\n- Screen individual molecules or reactions for structural hazard motifs (energetic, shock-sensitive, reactive) using `screen_hazards`\n- Query the knowledge graph for past reactions, experiments, and notes tagged by team or reaction type\n- Search past jobs and campaigns to find what has been run and by whom\n- Gather evidence on specific reactions or conditions\n\n**What I cannot do directly:**\n- Aggregate hazard flags across \"the whole group\" without knowing which reactions/teams to scan — I would need either a list of reaction SMILES from your ELN/batch system, or a way to enumerate what each team ran this quarter\n- Access external EHS tracking systems, incident logs, or near-miss reports outside this knowledge graph\n- Query calendar-based \"last quarter vs. this quarter\" without date-tagged evidence in the graph\n\n**To move forward, I need:**\n\n1. **Scope**: Do you want me to query reactions/experiments *from the knowledge graph only* (what chemists have proposed as notes here), or do you have an ELN export or list of reaction SMILES from your batch system this quarter that I should screen?\n\n2. **Team/class structure**: How are teams/projects organized in the graph (tags, project names) or in your source data? That will let me segment the hazard flags by owner.\n\n3. **Baseline for comparison**: Do you have last quarter's hazard screening results stored as a note, or should I ask what specific classes/teams you want to compare?\n\n4. **Near-miss data**: Where does your near-miss/incident log live? If it's outside this system, I can help you *structure* what to gather, but I cannot pull it myself.\n\nOnce you point me at the data sources, I can run `gather_evidence` on reactions by team/class, screen them, and build a comparative summary for your review.",
+    "answered": true,
+    "tools_called": [],
+    "tools_failed": [],
+    "expected_tools_met": null,
+    "uncited_note_ids": [],
+    "failed_loudly": false,
+    "error_code": null,
+    "degraded": [],
+    "jobs_started": [],
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "latency_seconds": 7.39,
+    "event_counts": {
+      "token": 31,
+      "answer": 1
+    },
+    "transport_error": null
+  }
+}

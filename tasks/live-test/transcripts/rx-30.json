@@ -1,0 +1,47 @@
+{
+  "probe": {
+    "id": "rx-30",
+    "section": 11,
+    "persona": "lab_technician",
+    "bucket": "C",
+    "question": "For the 100 L run, what addition rate should I use for the base charge, what agitation speed do I need to keep it well mixed, and how long will the batch take?",
+    "expects_tools": [],
+    "forbids_claims": [
+      "an addition rate in mL/min, L/h or a total addition time",
+      "an agitator speed, tip speed, Reynolds number or mixing time",
+      "a batch cycle time",
+      "a vessel or impeller specification"
+    ],
+    "direction": "All three parts want a scale-up engineering model that does not exist. There is no heat or mass transfer model, no mixing or blend-time correlation, no equipment or vessel data, no impeller geometry and no batch-record or cycle-time entity in this system, and every number requested is a function of the specific vessel, impeller, fill level and physical properties. The refusal must be concrete about that rather than generic. What it may legitimately offer is chemical framing that does not need equipment: the base charge is likely the exotherm, addition rate is normally set by the heat the vessel can remove and by the concentration of the reactive intermediate, and both are established by calorimetry and by the engineering group with the actual vessel data. Producing one plausible number 'as a starting point' fails this probe."
+  },
+  "outcome": {
+    "probe_id": "rx-30",
+    "section": 11,
+    "persona": "lab_technician",
+    "bucket": "C",
+    "question": "For the 100 L run, what addition rate should I use for the base charge, what agitation speed do I need to keep it well mixed, and how long will the batch take?",
+    "answer": "I need to find information about your 100 L run first. Let me search for details about this batch.I can see references to various reactions and optimizations, but nothing in the knowledge graph that specifically documents a 100 L batch run with details about addition rate, agitation speed, and batch time. The aspirin teaching campaign mentioned a 100 g scale run, but not a 100 L production batch.\n\nTo give you accurate recommendations for your 100 L run, I need to know:\n\n1. **What is the reaction** you're scaling up? (The transformation, product name, or reaction note id if you have one)\n2. **What is the base** and how much are you charging? (By mass or moles)\n3. **What are the other key parameters** — solvent, temperature, vessel type?\n\nWith that information, I can:\n- Search for prior runs of the same transformation to see if anyone has documented scale-up details\n- Look up relevant playbooks or optimization campaigns for that chemistry  \n- Use computational tools if needed to inform mixing and kinetic considerations\n- Give you data-backed recommendations rather than generic guidance\n\nDo you have an ELN entry, a reaction note, or project context you can share?",
+    "answered": true,
+    "tools_called": [
+      "gather_evidence",
+      "find_notes"
+    ],
+    "tools_failed": [],
+    "expected_tools_met": null,
+    "uncited_note_ids": [],
+    "failed_loudly": false,
+    "error_code": null,
+    "degraded": [],
+    "jobs_started": [],
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "latency_seconds": 6.52,
+    "event_counts": {
+      "token": 20,
+      "tool_call": 2,
+      "tool_result": 2,
+      "answer": 1
+    },
+    "transport_error": null
+  }
+}

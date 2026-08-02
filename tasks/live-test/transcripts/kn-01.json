@@ -1,0 +1,54 @@
+{
+  "probe": {
+    "id": "kn-01",
+    "section": 1,
+    "persona": "lab_technician",
+    "bucket": "A",
+    "question": "We've got the 4-bromoanisole + PhB(OH)2 coupling on the plan for next week. Has anyone here run that before, and what conditions did they end up on?",
+    "expects_tools": [
+      "gather_evidence",
+      "find_notes",
+      "expand_note"
+    ],
+    "forbids_claims": [
+      "a note id that was not retrieved",
+      "a yield, catalyst loading or temperature not stated in the retrieved notes",
+      "a literature reference",
+      "a run or campaign that is not in the record"
+    ],
+    "direction": "Cites rxn-suzuki-biaryl by id (and plausibly opt-suzuki-conditions or report-biaryl-development) and gives the conditions actually on file: Pd(OAc)2 at 1.5 mol% Pd, K2CO3 2.0 equiv, THF/water 4:1, 80 °C, 12 h, degassed, 76% isolated. A good answer adds the recorded reason this substrate is awkward — an electron-rich aryl bromide makes oxidative addition the slow step, so it is unusually ligand- and temperature-sensitive. Every number must trace to a cited note."
+  },
+  "outcome": {
+    "probe_id": "kn-01",
+    "section": 1,
+    "persona": "lab_technician",
+    "bucket": "A",
+    "question": "We've got the 4-bromoanisole + PhB(OH)2 coupling on the plan for next week. Has anyone here run that before, and what conditions did they end up on?",
+    "answer": "I'll search the knowledge graph for past runs of that coupling reaction.Good news—we have at least two recent runs of this exact transformation. Let me pull the full details from the most complete note.Yes, we have runs. Here's what's on file:\n\n**Two recent lab runs** ([[reaction-uspto-suzuki-biphenyl-1]], [[reaction-uspto-suzuki-biphenyl-2]]):\n- **Solvent:** 1,4-dioxane/water 4:1\n- **Temperature:** 82 °C\n- **Time:** 4 h\n- **Ligand:** Tri-tert-butylphosphine\n- **Base:** K2CO3 (extracted from the SMILES as carbonate)\n- **Results:** 89–93% yield, 97–98% purity on the 4-methoxybiphenyl product\n\nBoth runs were performed in January 2024. The main impurity is the des-methoxy biphenyl (~1.4% area, from proto-deboronation), with trace unreacted bromoanisole.\n\n**Earlier protocol note** ([[rxn-suzuki-biaryl]], human-authored):\n- **Solvent:** THF/water 4:1\n- **Temperature:** 80 °C\n- **Time:** 12 h\n- **Catalyst:** Pd(OAc)₂ (1.5 mol%)\n- **Base:** K2CO3 (2.0 equiv)\n- **Yield:** 76% (lower than the recent runs)\n\nThe note mentions this is deliberately a challenging substrate—electron-rich aryl bromides are unfavorourable for Suzuki coupling because oxidative addition is rate-limiting. The recent runs with the phosphine ligand get better yields and are significantly faster (4 h vs 12 h), which makes sense: the bulky phosphine accelerates oxidative addition.\n\n**For next week's run**, the dioxane/water solvent system with the phosphine ligand at 82 °C for 4 h looks like the better starting point if you're aiming for speed and yield.",
+    "answered": true,
+    "tools_called": [
+      "gather_evidence",
+      "similar_reactions",
+      "expand_note",
+      "expand_note",
+      "expand_note"
+    ],
+    "tools_failed": [],
+    "expected_tools_met": true,
+    "uncited_note_ids": [],
+    "failed_loudly": false,
+    "error_code": null,
+    "degraded": [],
+    "jobs_started": [],
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "latency_seconds": 13.06,
+    "event_counts": {
+      "token": 29,
+      "tool_call": 5,
+      "tool_result": 5,
+      "answer": 1
+    },
+    "transport_error": null
+  }
+}

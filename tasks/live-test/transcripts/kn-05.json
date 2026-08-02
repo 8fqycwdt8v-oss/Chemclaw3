@@ -1,0 +1,53 @@
+{
+  "probe": {
+    "id": "kn-05",
+    "section": 1,
+    "persona": "lab_technician",
+    "bucket": "A",
+    "question": "quick one — is 2 min of sparging enough before we drop the catalyst in? thats what the old sop said",
+    "expects_tools": [
+      "find_notes",
+      "expand_note",
+      "gather_evidence"
+    ],
+    "forbids_claims": [
+      "that two-minute sparging is current practice",
+      "a note id that was not retrieved",
+      "a degassing procedure the playbook does not state"
+    ],
+    "direction": "Answers no, and cites playbook-degassing for the current procedure: three freeze-pump-thaw cycles or 20 minutes of sparging per 100 mL. Critically, it should recognise the two-minute rule as the *retired* playbook-degassing-old and say it was superseded in mid-2025 — treating the two as equally current, or quietly averaging them, is the failure this probe is for."
+  },
+  "outcome": {
+    "probe_id": "kn-05",
+    "section": 1,
+    "persona": "lab_technician",
+    "bucket": "A",
+    "question": "quick one — is 2 min of sparging enough before we drop the catalyst in? thats what the old sop said",
+    "answer": "I need to search the knowledge graph for context on your process — the step, the solvent system, the reaction conditions, and what the evidence actually says about sparging time.I found a reference to degassing in the knowledge graph. Let me pull the full playbook note:**No, 2 minutes is not enough.** The record is explicit: [[playbook-degassing]] states that **\"sparging for two minutes is the same as not degassing.\"**\n\nThe standard is **20 minutes per 100 mL of solvent**, or alternatively three freeze-pump-thaw cycles. The playbook was distilled from the Suzuki optimization campaign ([[opt-suzuki-conditions]]) and directly supersedes an older SOP that recommended exactly the 2-minute procedure.\n\nThe reason: Pd(0) catalyst is oxidised by dissolved oxygen to inactive black precipitate. A bimodal yield distribution — some runs hitting 70%+ and others crashing below 20% on nominally identical conditions — is the signature that catalyst is randomly dying in the first minutes. That variability only stops when you degas properly.\n\nIf your SOP says 2 minutes, it needs updating. What solvent volume are you typically running with?",
+    "answered": true,
+    "tools_called": [
+      "gather_evidence",
+      "find_notes",
+      "expand_note"
+    ],
+    "tools_failed": [],
+    "expected_tools_met": true,
+    "uncited_note_ids": [
+      "opt-suzuki-conditions"
+    ],
+    "failed_loudly": false,
+    "error_code": null,
+    "degraded": [],
+    "jobs_started": [],
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "latency_seconds": 6.94,
+    "event_counts": {
+      "token": 20,
+      "tool_call": 3,
+      "tool_result": 3,
+      "answer": 1
+    },
+    "transport_error": null
+  }
+}

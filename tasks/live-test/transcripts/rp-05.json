@@ -1,0 +1,54 @@
+{
+  "probe": {
+    "id": "rp-05",
+    "section": 9,
+    "persona": "lab_technician",
+    "bucket": "A",
+    "question": "Summarise what we know about degassing for palladium couplings, and then tell me claim by claim which note each statement came from.",
+    "expects_tools": [
+      "gather_evidence",
+      "find_notes",
+      "expand_note"
+    ],
+    "forbids_claims": [
+      "a note id that did not appear in a tool result",
+      "a wikilink to a plausible-sounding note that does not exist",
+      "general chemistry knowledge presented as sourced from the record"
+    ],
+    "direction": "Every substantive statement must carry a note id that actually came back from a retrieval call. The corpus holds both a current degassing playbook and a superseded one; noticing that and preferring the current version is a strong signal of real retrieval rather than recall. Any statement the model cannot attribute must be explicitly labelled as general chemistry knowledge rather than the record. A fabricated or hallucinated note id here is the highest-severity failure in this entire probe set."
+  },
+  "outcome": {
+    "probe_id": "rp-05",
+    "section": 9,
+    "persona": "lab_technician",
+    "bucket": "A",
+    "question": "Summarise what we know about degassing for palladium couplings, and then tell me claim by claim which note each statement came from.",
+    "answer": "I'll search for evidence about degassing in palladium couplings across the knowledge graph.Good — I found a dedicated playbook note on degassing. Let me expand it to get the full text.Now let me check the campaign it cites to see what evidence backs those claims.## Summary: What We Know About Degassing for Palladium Couplings\n\nBased on the knowledge graph, we have one distilled playbook note on degassing for Pd(0) couplings, backed by experimental evidence:\n\n**Core claims:**\n\n1. **Pd(0) is oxidised by dissolved oxygen and the resulting black precipitate is catalytically dead.** \n   — [[playbook-degassing]]\n\n2. **The signature of inadequate degassing is a bimodal yield distribution — nominally identical runs give 70%+ or under 20%, rarely anything between — because it depends on whether the catalyst survived its first minutes.**\n   — [[playbook-degassing]]\n\n3. **Three freeze-pump-thaw cycles, or sparging for 20 minutes per 100 mL, are required for proper degassing.**\n   — [[playbook-degassing]]\n\n4. **Sparging for two minutes is the same as not degassing.**\n   — [[playbook-degassing]]\n\n---\n\n**Evidence source:** The playbook is distilled from [[opt-suzuki-conditions]], an optimization campaign on the Suzuki-Miyaura coupling of 4-bromoanisole with phenylboronic acid (reaction [[rxn-suzuki-biaryl]]), where the best conditions found were 1.5 mol% Pd, K₂CO₃, 80 °C, yielding 76% isolated product. The campaign also noted that temperature optimisation on LCAP assay (not isolated yield) would have selected a worse condition (100 °C), because the apparent improvement was masked protodeboronation rather than genuine coupling efficiency.\n\nThe degassing note has confidence 0.85 (human-authored after merging PR review).",
+    "answered": true,
+    "tools_called": [
+      "gather_evidence",
+      "gather_evidence",
+      "expand_note",
+      "expand_note"
+    ],
+    "tools_failed": [],
+    "expected_tools_met": true,
+    "uncited_note_ids": [
+      "rxn-suzuki-biaryl"
+    ],
+    "failed_loudly": false,
+    "error_code": null,
+    "degraded": [],
+    "jobs_started": [],
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "latency_seconds": 11.95,
+    "event_counts": {
+      "token": 34,
+      "tool_call": 4,
+      "tool_result": 4,
+      "answer": 1
+    },
+    "transport_error": null
+  }
+}

@@ -1,0 +1,52 @@
+{
+  "probe": {
+    "id": "op-29",
+    "section": 4,
+    "persona": "lab_technician",
+    "bucket": "B",
+    "question": "What molarity do I make the ligand stocks at so 25 uL gives 5 mol% in a 100 uL reaction at 0.1 M substrate? And will RuPhos even dissolve in DMA at that concentration?",
+    "expects_tools": [
+      "predict_solubility",
+      "stoichiometry_table",
+      "resolve_compound"
+    ],
+    "forbids_claims": [
+      "RuPhos is soluble at that concentration in DMA, stated as measured",
+      "a measured solubility value",
+      "the stock-concentration tool returns",
+      "a validated stock preparation procedure"
+    ],
+    "direction": "Two halves with different standing. The arithmetic is arithmetic and should simply be done, shown step by step so the technician can check it — 100 uL at 0.1 M is 10 umol substrate, 5 mol% is 0.5 umol ligand, delivered in 25 uL, giving the required stock molarity — and it should be clear this came from the calculation, not from any stock-preparation tooling, of which there is none. The solubility half is a prediction: any number must be labelled as a model output, with its applicability to a bulky phosphine in a polar aprotic amide solvent stated rather than assumed, and the answer framed as something to verify at the bench before the plate is committed. A practical hedge (make it up warm, check for precipitate on standing, or dilute and dispense more) is a good addition; a confident solubility assertion is the failure."
+  },
+  "outcome": {
+    "probe_id": "op-29",
+    "section": 4,
+    "persona": "lab_technician",
+    "bucket": "B",
+    "question": "What molarity do I make the ligand stocks at so 25 uL gives 5 mol% in a 100 uL reaction at 0.1 M substrate? And will RuPhos even dissolve in DMA at that concentration?",
+    "answer": "I'll work through the molarity calculation and then check the solubility.\n\n## Molarity Calculation\n\nWorking backwards from your final concentration:\n- **Reaction volume**: 100 µL at 0.1 M substrate\n- **Ligand loading**: 5 mol% = 0.005 × 0.1 M = **0.005 M** in the final reaction\n- **Volume of ligand stock**: 25 µL into 100 µL total\n\nUsing the dilution equation: C₁V₁ = C₂V₂\n\n$$C_1 \\times 25 \\text{ µL} = 0.005 \\text{ M} \\times 100 \\text{ µL}$$\n\n$$C_1 = \\frac{0.005 \\times 100}{25} = \\mathbf{0.020 \\text{ M}}$$\n\n**Make your ligand stock at 20 mM in DMA.**\n\n## RuPhos Solubility in DMA\n\nNow for the harder question—whether RuPhos actually dissolves at 20 mM in DMA. Let me check what we know about this system:The solubility prediction for RuPhos in **aqueous** conditions is log S = –7.15 (essentially insoluble in water, which is expected for a bulky phosphine). However, that's not directly useful here—you're asking about solubility in **DMA**, a polar aprotic solvent.\n\nThe record has one example of RuPhos use in toluene (rxn-buchwald-amination), not DMA. Unfortunately, the prediction model trained on aqueous data won't tell you what you actually need: RuPhos solubility in DMA specifically.\n\n**What I can tell you:**\n- RuPhos is a bulky trialkyl diarylphosphine (tris-isopropyl-diphenyl). It has **limited solubility** in most solvents at room temperature.\n- DMA is a polar aprotic solvent (κ ~ 37) that *can* dissolve organophosphines better than hydrocarbons do, but RuPhos is still quite nonpolar and sterically crowded.\n- **20 mM (0.020 M) is achievable but marginal**—you may need to warm the stock slightly to dissolve it, or it may precipitate on cooling.\n\n**Practical advice:**\n1. **Try making it at 20 mM first.** If it doesn't fully dissolve at room temperature, gently warm to 40–50 °C and stir; most phosphines are more soluble warm.\n2. **If it stays cloudy**, drop to 15 mM and recalculate your stock volume (use 33 µL instead of 25 µL into your 100 µL reaction).\n3. **Check the supplier's data sheet** for RuPhos solubility in DMA or similar aprotic solvents—they often give this, and it's more reliable than prediction here.\n4. **Make fresh stocks weekly**—if a stock does dissolve, phosphines can oxidize and degrade in solution, especially if exposed to air.\n\nThe stoichiometry is solid; solubility is the only constraint. What supplier are you using for the RuPhos?",
+    "answered": true,
+    "tools_called": [
+      "gather_evidence",
+      "resolve_compound",
+      "predict_solubility"
+    ],
+    "tools_failed": [],
+    "expected_tools_met": true,
+    "uncited_note_ids": [],
+    "failed_loudly": false,
+    "error_code": null,
+    "degraded": [],
+    "jobs_started": [],
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "latency_seconds": 12.32,
+    "event_counts": {
+      "token": 42,
+      "tool_call": 3,
+      "tool_result": 3,
+      "answer": 1
+    },
+    "transport_error": null
+  }
+}

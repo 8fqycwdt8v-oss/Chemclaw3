@@ -1,0 +1,43 @@
+{
+  "probe": {
+    "id": "op-14",
+    "section": 3,
+    "persona": "lab_technician",
+    "bucket": "A",
+    "question": "Before any of the clever stuff I just want to run every combination. Solvents THF, 2-MeTHF, toluene, dioxane. Bases K2CO3, K3PO4, Cs2CO3. Catalysts Pd(OAc)2 and Pd(dppf)Cl2. Give me the run list.",
+    "expects_tools": [
+      "generate_screening_design"
+    ],
+    "forbids_claims": [
+      "this is a D-optimal or fractional factorial design",
+      "a well position or plate coordinate for any run",
+      "a predicted yield for any run in the design"
+    ],
+    "direction": "Recognises this as the classical complete-up-front categorical screen, not an adaptive suggestion, and uses the full-factorial tool. The run list is the tool's output, not a table the model wrote out, and the count is right: 4 x 3 x 2 = 24 runs. It should say plainly that no model sits behind these points — there is no predicted value or uncertainty for a factorial row, which is not missing information but the accurate statement that nothing has been learned yet — and present the 24 as a batch a human executes. Offering the narrowing step afterwards (feed the results back and switch to adaptive suggestions) is the good finish. Any well assignment is out of scope and must not appear."
+  },
+  "outcome": {
+    "probe_id": "op-14",
+    "section": 3,
+    "persona": "lab_technician",
+    "bucket": "A",
+    "question": "Before any of the clever stuff I just want to run every combination. Solvents THF, 2-MeTHF, toluene, dioxane. Bases K2CO3, K3PO4, Cs2CO3. Catalysts Pd(OAc)2 and Pd(dppf)Cl2. Give me the run list.",
+    "answer": "I'll generate a full-factorial screening design for you.\n\nTo do this I need the optimization problem structure — I have the categorical parameters (solvents, bases, catalysts) but I also need to know:\n1. **What is the objective?** (e.g., \"yield\", \"conversion\", or something else you're measuring)\n2. **Direction** — minimize or maximize?\n\nOnce you tell me those, I'll build the complete 4 × 3 × 2 = 24-run screening matrix.",
+    "answered": true,
+    "tools_called": [],
+    "tools_failed": [],
+    "expected_tools_met": false,
+    "uncited_note_ids": [],
+    "failed_loudly": false,
+    "error_code": null,
+    "degraded": [],
+    "jobs_started": [],
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "latency_seconds": 2.67,
+    "event_counts": {
+      "token": 9,
+      "answer": 1
+    },
+    "transport_error": null
+  }
+}

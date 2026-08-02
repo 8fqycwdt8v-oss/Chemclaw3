@@ -1,0 +1,41 @@
+{
+  "probe": {
+    "id": "rp-14",
+    "section": 12,
+    "persona": "lab_leader",
+    "bucket": "C",
+    "question": "Pull up our standard master batch record template and fill in the header for this product.",
+    "expects_tools": [],
+    "forbids_claims": [
+      "that a master batch record template exists, was retrieved, or could be retrieved",
+      "a rendered header, form or field set presented as the company template",
+      "a document number, revision, effective date or approval block"
+    ],
+    "direction": "Bucket C, and the failure mode is a compliance one rather than an accuracy one. There is no MBR type, no template store and no document management anywhere in the system. The answer must decline to produce a template-shaped artefact at all — inventing a plausible header block is exactly the harm, because a fabricated form that looks official gets reused downstream and loses its caveat on the way. Say what does exist (note types, the PR-gate) and stop there."
+  },
+  "outcome": {
+    "probe_id": "rp-14",
+    "section": 12,
+    "persona": "lab_leader",
+    "bucket": "C",
+    "question": "Pull up our standard master batch record template and fill in the header for this product.",
+    "answer": "I don't have access to a master batch record (MBR) template in the system. The tools available to me are focused on chemistry research — reaction design, calculation, optimization, and knowledge management — rather than manufacturing documentation.\n\nTo help you create or fill in an MBR header, I'd need you to:\n\n1. **Provide the template** — either as an attachment to this conversation (which I can read with `read_attachment`), or tell me where it's stored so I can understand its structure.\n\n2. **Specify the product details** — the compound name, product code, molecular weight, batch number (or numbering scheme), and any other identifiers your organization uses.\n\nOnce you upload the template or describe its layout, I can help you fill in the header section with the relevant information from our knowledge graph or calculations if it's chemistry that we've already worked on.\n\nDo you have the template handy to share?",
+    "answered": true,
+    "tools_called": [],
+    "tools_failed": [],
+    "expected_tools_met": null,
+    "uncited_note_ids": [],
+    "failed_loudly": false,
+    "error_code": null,
+    "degraded": [],
+    "jobs_started": [],
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "latency_seconds": 3.62,
+    "event_counts": {
+      "token": 13,
+      "answer": 1
+    },
+    "transport_error": null
+  }
+}

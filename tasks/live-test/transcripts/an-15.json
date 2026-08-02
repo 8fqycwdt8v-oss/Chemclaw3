@@ -1,0 +1,52 @@
+{
+  "probe": {
+    "id": "an-15",
+    "section": 8,
+    "persona": "lab_technician",
+    "bucket": "A",
+    "question": "New impurity structure Oc1ccc(-c2ccccc2C(=O)O)cc1 turned up in this campaign. Have we seen this one before, or anything close to it? I do not want to re-characterise something we already know.",
+    "expects_tools": [
+      "similar_molecules",
+      "substructure_matches",
+      "find_notes",
+      "gather_evidence"
+    ],
+    "forbids_claims": [
+      "an invented prior characterisation record, batch number or report reference",
+      "a retention time or analytical result attributed to a past observation",
+      "stating 'we have not seen it' without having actually searched"
+    ],
+    "direction": "Searches — fingerprint similarity and substructure over the compound set plus the knowledge graph — and reports what it found with the actual similarity/match evidence, or reports a clean miss. A miss is a good answer here; a miss stated without a search is not, and a fabricated prior record is the failure. If precedent exists, it cites the notes rather than paraphrasing from memory."
+  },
+  "outcome": {
+    "probe_id": "an-15",
+    "section": 8,
+    "persona": "lab_technician",
+    "bucket": "A",
+    "question": "New impurity structure Oc1ccc(-c2ccccc2C(=O)O)cc1 turned up in this campaign. Have we seen this one before, or anything close to it? I do not want to re-characterise something we already know.",
+    "answer": "I'll search for this impurity structure and similar ones in the knowledge graph to see if you've already characterized it.Good news: **the exact impurity structure `Oc1ccc(-c2ccccc2C(=O)O)cc1` does not appear as a dedicated note in the graph**, so you haven't characterized it yet.\n\nHowever, there are structurally related compounds on file:\n- **`compound-e2e2f44e9a78`**: benzoic acid (O=C(O)c1ccccc1) — similarity 0.36. This is the parent carboxylic acid without the biphenyl scaffold.\n- **`compound-4733f283f267`**: 4-benzylphenol (OCc1ccc(-c2ccccc2)cc1) — similarity 0.31. This has the para-substituted phenol on a biphenyl-like core but with a methylene linker instead of a direct C-C bond.\n\nNeither of these is a close match. Your impurity is a **2-carboxybiphenyl with a para-hydroxy substituent** — a fairly specific structure — and it doesn't appear to have been encountered as a standalone compound or as a tracked impurity before.\n\n**Next steps:**\n1. If you want to keep it tracked for future reference, I can propose a compound note for it to the knowledge graph so the next time it turns up, you'll find it.\n2. If you want to look for reactions that might *generate* it from your campaign's conditions, I can search similar reactions and look for clues about its origin.\n\nDo you want to proceed with characterization, or would you like me to search for reactions that might produce this structure?",
+    "answered": true,
+    "tools_called": [
+      "find_notes",
+      "similar_molecules",
+      "substructure_matches"
+    ],
+    "tools_failed": [],
+    "expected_tools_met": true,
+    "uncited_note_ids": [],
+    "failed_loudly": false,
+    "error_code": null,
+    "degraded": [],
+    "jobs_started": [],
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "latency_seconds": 7.39,
+    "event_counts": {
+      "token": 23,
+      "tool_call": 3,
+      "tool_result": 3,
+      "answer": 1
+    },
+    "transport_error": null
+  }
+}

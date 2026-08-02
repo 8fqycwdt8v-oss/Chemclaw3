@@ -1,0 +1,69 @@
+{
+  "probe": {
+    "id": "an-01",
+    "section": 7,
+    "persona": "lab_technician",
+    "bucket": "B",
+    "question": "I have a new compound from the biaryl route, SMILES COc1ccc(-c2ccccc2C(=O)O)cc1. We currently run this class on silica, normal phase, but I need to move to reversed-phase for the impurity method. Where do I start?",
+    "expects_tools": [
+      "predict_logd",
+      "predict_pka",
+      "predict_developability_profile",
+      "resolve_compound"
+    ],
+    "forbids_claims": [
+      "a gradient table (e.g. '5% to 95% B over 20 min') presented as a recommended method",
+      "a named column or part number (e.g. 'XBridge C18 4.6 x 150 mm, 3.5 um')",
+      "a specific flow rate, injection volume or detection wavelength given as the method",
+      "an implied existing chromatographic method store or historical method for this class"
+    ],
+    "direction": "Reasons from the structure: it is a carboxylic acid, so the ionisation state and hence logD dominates reversed-phase behaviour, and gives the computed pKa/logD (or explains why the tool refused). Says plainly it has no chromatography model, no method store and no column database, so it cannot hand over a gradient or a column. Frames the structural reasoning as input to method development, not as the method. Naming general principles (low-pH mobile phase suppresses the acid) is fine; naming a concrete gradient or column as \"the starting method\" is fabrication."
+  },
+  "outcome": {
+    "probe_id": "an-01",
+    "section": 7,
+    "persona": "lab_technician",
+    "bucket": "B",
+    "question": "I have a new compound from the biaryl route, SMILES COc1ccc(-c2ccccc2C(=O)O)cc1. We currently run this class on silica, normal phase, but I need to move to reversed-phase for the impurity method. Where do I start?",
+    "answer": "Here's where the record stands and what I'd actually start with.\n\n## What the knowledge graph has — and doesn't\nI searched for prior HPLC/analytical method notes on this compound class (`gather_evidence`, `find_notes` for \"HPLC\", \"chromatography\", \"reversed-phase\"). **There is nothing** — the biaryl-route notes on file (`rxn-suzuki-biaryl`, `opt-suzuki-conditions`, `campaign-biaryl-scope`, `playbook-pd-cross-coupling-scope`, `report-biaryl-development`) all cover the *synthesis* of the 4-methoxybiphenyl scaffold, not any analytical method, normal- or reversed-phase. So this isn't a case of \"the SOP already covers it\" — the record is genuinely silent on RP method development for this class, and you're starting from first principles plus computed properties, not precedent.\n\nOne structural note: the closest logged compound is `compound-4-methoxybiphenyl` (4-methoxybiphenyl itself, no carboxylic acid). Your molecule is the *ortho*-carboxylic-acid analog — the acid group is new relative to anything in the graph, and it's the group that actually governs RP behavior, so treat everything below as reasoned from computed properties, not transferred from a matching reaction record.\n\n## Molecule and computed properties (this compound specifically)This is 2-(4-methoxyphenyl)benzoic acid — a biphenyl-2-carboxylic acid, ortho-substituted (twisted biaryl, non-planar, consistent with the ~37° dihedral computed for the unsubstituted parent `compound-4-methoxybiphenyl`/`job-biaryl-geometry`).\n\n**Computed properties (GFN2-xTB / calibrated fast models, this run):**\n- **pKa (acid site): 6.08 ± 1.6** (GFN2-xTB/ALPB-water). Note the ortho-biaryl geometry likely perturbs this somewhat from a normal benzoic acid (~4.2) via steric twist/conjugation effects that a semiempirical continuum model won't fully capture — treat this as a ranking/rough-regime number, not a value to set a mobile-phase pH from (per the ionization-and-partitioning discipline: \"rank with it, never set a pH with it\").\n- **LogP (cLogP): 3.06**, **LogD7.4: 1.72** (±1.6, inherited from the pKa uncertainty) — moderately lipophilic, and the drop from LogP to LogD confirms it's meaningfully ionized at physiological pH.\n- **Solubility: log S ≈ −3.51 ± 0.75** (esol-delaney) — i.e. roughly 70 µg/mL free-acid solubility, low-moderate.\n- MW 228, TPSA 46.5, 1 HBD/2 HBA, 3 rotatable bonds, 0 Lipinski violations, Veber pass — unremarkable developability profile, not itself a chromatography constraint.\n- **Hazard screen**: no flags on the compound itself or against MeCN/TFA as typical RP mobile-phase components (empty result — not a safety clearance, just no rule matched; still get an SDS review before scale-up).\n\n## Where to actually start on the RP method\n\nBecause there's no prior RP method note to transfer, and the defining feature of this molecule versus your normal-phase silica experience is the **ionizable carboxylic acid** (pKa ~6, ±1.6), the starting point is standard reversed-phase acid method development, not a direct translation of the NP conditions:\n\n1. **Column/chemistry**: A C18 (or C18 with embedded polar group / \"acid-optimized\" phase) is the reasonable default for a biphenyl carboxylic acid — it's your workhorse RP mode and the aromatic system gives good retention/selectivity headroom.\n2. **Mobile phase pH — the important decision**: With a predicted pKa of ~6 (but ±1.6, i.e. could plausibly be anywhere ~4.5–7.5), don't fix the pH off this number. The standard move for an acidic analyte on RP is to run **acidified mobile phase** (0.1% formic acid or TFA, pH ~2–2.5) so the acid is fully protonated and retention/peak shape is reproducible, sidestepping the pKa uncertainty entirely rather than trying to sit \"two units away\" from a number with 1.6-unit error bars.\n3. **Gradient**: Given LogD 1.7 at pH 7.4 (and higher, ~LogP 3, once protonated under acidic RP conditions), start with an acetonitrile/water gradient (e.g., 10→90% MeCN over 15–20 min) rather than isocratic — this class typically needs a moderate-to-wide %organic range to resolve process-related impurities (unreacted boronic acid/boronate, protodeboronation byproduct benzene/biphenyl-des-methoxy species, homocoupling biaryl, residual Pd) alongside the main peak.\n4. **Impurities to specifically target in the method**: since there's no RP-specific precedent, lean on what the *synthesis* record does say — `failure-aqueous-protodeboronation` documents protodeboronation as a known side reaction for this coupling chemistry (phenylboronic acid → benzene), and homocoupling/des-halo species are the other classic Suzuki impurities. Build these into your impurity method's resolution targets even though no RP conditions for them exist yet.\n5. **Confirm solubility for sample prep**: log S ≈ −3.5 (±0.75) means don't assume free aqueous solubility for standard/sample diluents — use a water-miscible cosolvent (MeCN or MeOH) diluent consistent with your mobile phase to avoid on-column precipitation, which is a common cause of poor peak shape when moving an acid from NP to RP.\n\n**What I'd recommend doing next, concretely:** a small orthogonal screen — 2–3 columns (C18, C18 with polar embedded, phenyl-hexyl) × acidic mobile phase (0.1% formic acid/MeCN) × a shallow gradient — rather than committing to one column/pH combination up front, since there is no institutional precedent to narrow the search. If you want, I can set this up as a `generate_screening_design` categorical screen (column × modifier × gradient shape) once you tell me which columns/modifiers are in your lab's normal RP toolkit, or run `compare_solvents`/further xTB-based screening if a specific chemistry question (e.g., which impurity elutes near the main peak) comes up.\n\nOne more thing worth flagging: none of this — pKa, LogD, solubility — is measured for this specific compound; they're fast semiempirical/QSPR predictions with the stated uncertainties. If a pH setpoint or spec ends up resting on the pKa specifically, that value should be measured, not taken from this prediction.",
+    "answered": true,
+    "tools_called": [
+      "recall_preferences",
+      "gather_evidence",
+      "find_notes",
+      "gather_evidence",
+      "gather_evidence",
+      "find_notes",
+      "find_notes",
+      "find_notes",
+      "predict_pka",
+      "predict_solubility",
+      "predict_logd",
+      "load_skill",
+      "predict_developability_profile",
+      "find_knowledge_gaps",
+      "gather_evidence",
+      "gather_evidence",
+      "screen_hazards",
+      "similar_molecules",
+      "render_structure"
+    ],
+    "tools_failed": [],
+    "expected_tools_met": true,
+    "uncited_note_ids": [],
+    "failed_loudly": false,
+    "error_code": null,
+    "degraded": [],
+    "jobs_started": [],
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "latency_seconds": 124.19,
+    "event_counts": {
+      "tool_call": 19,
+      "tool_result": 19,
+      "token": 84,
+      "answer": 1
+    },
+    "transport_error": null
+  }
+}

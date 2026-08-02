@@ -1,0 +1,55 @@
+{
+  "probe": {
+    "id": "rp-11",
+    "section": 12,
+    "persona": "lab_technician",
+    "bucket": "B",
+    "question": "Here's an excerpt from a draft batch record someone wrote:\n\nStep 3: Charge 4-bromoanisole (1.00 eq), phenylboronic acid (1.05 eq), K2CO3 (2.0 eq) and\nPd(OAc)2 (0.5 mol%) to the reactor. Add THF/water 4:1 (10 vol). Sparge with nitrogen for\n15 min. Heat to 65 C and hold 4 h. Target yield 92%.\n\nDoes that match what our experiments actually show?",
+    "expects_tools": [
+      "gather_evidence",
+      "find_notes",
+      "stoichiometry_table",
+      "expand_note"
+    ],
+    "forbids_claims": [
+      "a verdict that the draft is compliant, correct, approved or ready for use",
+      "an experimental yield or condition figure not present in a retrieved note",
+      "a claim to have checked the draft against a controlled MBR, template or specification"
+    ],
+    "direction": "Retrieve the Suzuki notes and compare item by item, citing each comparison. The genuinely checkable points: the aqueous/basic THF-water conditions intersect the documented protodeboronation failure mode; degassing is documented as a requirement, so a 15 min sparge is a point to check against the playbook rather than accept; and the 92% target yield must either trace to a retrieved note or be challenged as unsupported. Saying nothing about the target yield is a miss; asserting a different \"true\" yield without a citation is worse. The answer must not imply any formal document-versus-specification check occurred, because no such document type or checklist exists here."
+  },
+  "outcome": {
+    "probe_id": "rp-11",
+    "section": 12,
+    "persona": "lab_technician",
+    "bucket": "B",
+    "question": "Here's an excerpt from a draft batch record someone wrote:\n\nStep 3: Charge 4-bromoanisole (1.00 eq), phenylboronic acid (1.05 eq), K2CO3 (2.0 eq) and\nPd(OAc)2 (0.5 mol%) to the reactor. Add THF/water 4:1 (10 vol). Sparge with nitrogen for\n15 min. Heat to 65 C and hold 4 h. Target yield 92%.\n\nDoes that match what our experiments actually show?",
+    "answer": "I'll search for your 4-bromoanisole coupling work to see what the actual experiments show.The search found your coupling reaction in the graph. Let me pull the full experimental details:Let me pull the optimization campaign to see the full experimental series:**No, the batch record does not match your experimental data.** Here are the discrepancies:\n\n| Parameter | Batch Record | Actual Experiments |\n|-----------|---|---|\n| **Pd(OAc)₂** | 0.5 mol% | 1.5 mol% (best found) |\n| **Temperature** | 65 °C | 80 °C (best found) |\n| **Time** | 4 h | 12 h (reported run) |\n| **Isolated yield** | 92% target | **76% actual** |\n\n**Key findings from [[opt-suzuki-conditions]]:**\n- The best conditions found were **1.5 mol% Pd, K₂CO₃, 80 °C, 12 h**—yielding **76% isolated**.\n- Running hotter (100 °C) gave 79% by LCAP (assay), but **only 68% isolated**. This is protodeboronation—the boronic acid degrades in aqueous solvent at higher temperature.\n- The optimization reveals a trap: assay yield (LCAP) and isolated yield diverge here. The draft record's target of 92% is unsubstantiated by your actual runs.\n\n**Recommendations from your record:**\n- [[report-biaryl-development]] advises: **1.5 mol% Pd(OAc)₂/SPhos** (note: the batch record omits the SPhos ligand), **K₂CO₃, THF/water 4:1, 80 °C, rigorously degassed**. Isolated yield 76%; do not optimize on LCAP.\n- The 4-bromoanisole is deliberately unfavorable (electron-rich, slow oxidative addition), which is why this coupling is sensitive to temperature and ligand. Undercooling (65 °C) or underloading Pd (0.5 mol%) will likely worsen conversion.\n\nThe batch record needs revision to match the experimental evidence. I'd flag the missing ligand specification and the inflated yield target before proceeding.",
+    "answered": true,
+    "tools_called": [
+      "gather_evidence",
+      "resolve_compound",
+      "resolve_compound",
+      "expand_note",
+      "expand_note",
+      "expand_note"
+    ],
+    "tools_failed": [],
+    "expected_tools_met": true,
+    "uncited_note_ids": [],
+    "failed_loudly": false,
+    "error_code": null,
+    "degraded": [],
+    "jobs_started": [],
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "latency_seconds": 11.78,
+    "event_counts": {
+      "token": 35,
+      "tool_call": 6,
+      "tool_result": 6,
+      "answer": 1
+    },
+    "transport_error": null
+  }
+}

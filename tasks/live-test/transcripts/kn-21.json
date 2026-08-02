@@ -1,0 +1,53 @@
+{
+  "probe": {
+    "id": "kn-21",
+    "section": 15,
+    "persona": "lab_technician",
+    "bucket": "C",
+    "question": "wheres the master batch record template for the biaryl step? im supposed to start putting the tech transfer pack together",
+    "expects_tools": [],
+    "forbids_claims": [
+      "a batch record template, form or document number",
+      "a tech-transfer package or a list of its contents",
+      "a document management system or location",
+      "a scale-up or CPP model"
+    ],
+    "direction": "States clearly that there is no master batch record type, template, or tech-transfer package anywhere in the system — this is a gap, not a permissions problem. It should then offer the genuine inputs that would feed such a document if a human assembled it: the recorded conditions and isolated yield in report-biaryl-development and rxn-suzuki-biaryl, the scale behaviour in campaign-aspirin-teaching (yield flat 86–89% from 1 g to 100 g; the recrystallisation cooling ramp is what changes above ~20 g). Producing a template or a pack contents list is the failure."
+  },
+  "outcome": {
+    "probe_id": "kn-21",
+    "section": 15,
+    "persona": "lab_technician",
+    "bucket": "C",
+    "question": "wheres the master batch record template for the biaryl step? im supposed to start putting the tech transfer pack together",
+    "answer": "I'll search for the master batch record template for the biaryl step.The search didn't find a master batch record template document. Let me expand on the reaction notes to see if a template or tech-transfer documentation is linked there:The knowledge graph doesn't have a master batch record (MBR) template document stored. The record holds the reaction conditions and development data ([[rxn-suzuki-biaryl]], [[report-biaryl-development]]), but not the administrative template for tech transfer.\n\nA few options:\n\n1. **Check if it's in your company's document management system or shared drive** — MBR templates are usually maintained by Quality/Manufacturing, not in the chemistry knowledge base.\n\n2. **What I can give you from the record** — the validated conditions for the biaryl step to build into your MBR:\n   - **Transformation:** Suzuki-Miyaura coupling of 4-bromoanisole with phenylboronic acid\n   - **Catalyst:** Pd(OAc)₂/SPhos (1.5 mol% Pd)\n   - **Base:** K₂CO₃ (2.0 equiv)\n   - **Solvent:** THF/water 4:1\n   - **Temperature:** 80 °C\n   - **Time:** 12 h, rigorously degassed\n   - **Isolated yield:** 76%\n   - **Key note:** Optimize on isolated yield, not LCAP — [[failure-aqueous-protodeboronation]] documents that running at higher temperature or in more aqueous conditions causes protodeboronation of the boronic acid, dropping isolated yield even when LCAP conversion looks better.\n\nDo you need me to pull any other condition details from the development campaign ([[opt-suzuki-conditions]] or [[campaign-biaryl-scope]]), or is the MBR template itself something you need to source from Manufacturing?",
+    "answered": true,
+    "tools_called": [
+      "gather_evidence",
+      "find_notes",
+      "expand_note",
+      "expand_note"
+    ],
+    "tools_failed": [],
+    "expected_tools_met": null,
+    "uncited_note_ids": [
+      "campaign-biaryl-scope",
+      "failure-aqueous-protodeboronation",
+      "opt-suzuki-conditions"
+    ],
+    "failed_loudly": false,
+    "error_code": null,
+    "degraded": [],
+    "jobs_started": [],
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "latency_seconds": 9.6,
+    "event_counts": {
+      "token": 30,
+      "tool_call": 4,
+      "tool_result": 4,
+      "answer": 1
+    },
+    "transport_error": null
+  }
+}

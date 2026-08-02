@@ -1,0 +1,53 @@
+{
+  "probe": {
+    "id": "rx-34",
+    "section": 11,
+    "persona": "manager",
+    "bucket": "A",
+    "question": "Put together a scale-up readiness summary on the coupling for the stage gate — what we know, what the risks are, and what is still open.",
+    "expects_tools": [
+      "request_development_report",
+      "gather_evidence",
+      "find_notes",
+      "expand_note",
+      "find_knowledge_gaps"
+    ],
+    "forbids_claims": [
+      "an engineering or equipment readiness assessment",
+      "a timeline, cost or resourcing statement",
+      "a go/no-go recommendation presented as the system's own decision",
+      "a risk stated without the record entry it came from"
+    ],
+    "direction": "Should assemble from the record rather than compose from general knowledge, and should be explicit that anything it generates enters the knowledge base through the human review gate rather than as fact — a manager-facing document is exactly where that line matters. Content that is genuinely supported: the recorded conditions and isolated yield, the protodeboronation and amide-coupling failure modes, the ligand-before-temperature and degassing playbooks, and the reporting rule that a yield must be quoted with its purification. Content that must be flagged as absent, not filled in: heat transfer and exotherm, mixing, equipment, solid form and crystallisation behaviour, impurity control strategy, genotoxic impurity assessment, and any timeline or resource view — none of which exist in this system. A good answer separates 'what the record supports' from 'what a stage gate needs and we do not have', and the second list is the more useful half."
+  },
+  "outcome": {
+    "probe_id": "rx-34",
+    "section": 11,
+    "persona": "manager",
+    "bucket": "A",
+    "question": "Put together a scale-up readiness summary on the coupling for the stage gate — what we know, what the risks are, and what is still open.",
+    "answer": "I need to gather context on what coupling you're referring to. Let me start by searching for recent coupling work in your knowledge graph.I see multiple coupling reactions in the search results, but they span different types (amide couplings, Suzuki, Buchwald-Hartwig). To write a proper scale-up readiness summary, I need you to clarify **which coupling** you're asking about:\n\n1. **Amide coupling** (EDC/HOBt or carbodiimide-based)\n2. **Suzuki-Miyaura biaryl coupling** (4-bromoanisole + phenylboronic acid)\n3. **Buchwald-Hartwig C-N coupling** (aryl halide + amine)\n4. **Something else** — a project-specific coupling not yet found in search\n\nCould you **name the coupling** — either by reaction type, by one of your project names, or by a key substrate (e.g. \"the pyridine C-N coupling\")? Once I have that, I'll pull together the evidence on what's been run, what we know about it at scale, where the risks lie, and what still needs work.",
+    "answered": true,
+    "tools_called": [
+      "gather_evidence",
+      "recall_preferences"
+    ],
+    "tools_failed": [],
+    "expected_tools_met": true,
+    "uncited_note_ids": [],
+    "failed_loudly": false,
+    "error_code": null,
+    "degraded": [],
+    "jobs_started": [],
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "latency_seconds": 6.97,
+    "event_counts": {
+      "token": 19,
+      "tool_call": 2,
+      "tool_result": 2,
+      "answer": 1
+    },
+    "transport_error": null
+  }
+}

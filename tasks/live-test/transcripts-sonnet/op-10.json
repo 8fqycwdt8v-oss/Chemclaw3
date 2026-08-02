@@ -1,0 +1,54 @@
+{
+  "probe": {
+    "id": "op-10",
+    "section": 3,
+    "persona": "lab_leader",
+    "bucket": "A",
+    "question": "Ran five conditions on the 4-bromoanisole / PhB(OH)2 Suzuki last week. Everything else held:\n1.5 mol% Pd(OAc)2, K2CO3 2.0 eq, THF/water 4:1, 12 h, degassed.\n\n  70 C, 1.0 eq boronic acid -> 48%\n  70 C, 1.5 eq             -> 61%\n  80 C, 1.5 eq             -> 76%\n  90 C, 1.5 eq             -> 72%\n  80 C, 2.0 eq             -> 79%\n\nWhere next? Give me two conditions I can set up tomorrow.",
+    "expects_tools": [
+      "suggest_next_experiment"
+    ],
+    "forbids_claims": [
+      "these candidates are measured results",
+      "the campaign has converged",
+      "a yield figure for a candidate presented as observed rather than predicted",
+      "a sixth historic run that was not supplied"
+    ],
+    "direction": "Frames the problem from what was actually given: temperature and boronic-acid equivalents as continuous variables with bounds that a real run of this reaction in THF/water could survive, a single objective (maximize yield), and all five runs passed through as measured observations — none dropped, none invented. Calls the tool for two candidates and reports the points the tool returned, not points it reasoned to. Quotes the campaign_id back and explains that asking again with tomorrow's result appended accumulates onto the same campaign. Each candidate is presented as conditions to run, with the surrogate's predicted value and spread distinguished from a measurement, and any extrapolation past the observed range (or past what the solvent system tolerates) called out. Silently choosing an unsupportable bound is a miss."
+  },
+  "outcome": {
+    "probe_id": "op-10",
+    "section": 3,
+    "persona": "lab_leader",
+    "bucket": "A",
+    "question": "Ran five conditions on the 4-bromoanisole / PhB(OH)2 Suzuki last week. Everything else held:\n1.5 mol% Pd(OAc)2, K2CO3 2.0 eq, THF/water 4:1, 12 h, degassed.\n\n  70 C, 1.0 eq boronic acid -> 48%\n  70 C, 1.5 eq             -> 61%\n  80 C, 1.5 eq             -> 76%\n  90 C, 1.5 eq             -> 72%\n  80 C, 2.0 eq             -> 79%\n\nWhere next? Give me two conditions I can set up tomorrow.",
+    "answer": "Here's the read on your five runs, then two conditions for tomorrow.\n\n## What the series establishes\n\nReading the runs as controlled pairs (one variable moved, rest fixed):\n\n| Comparison | Change | Result | Reading |\n|---|---|---|---|\n| Run 1 → 2 (70 °C fixed) | 1.0 → 1.5 eq PhB(OH)₂ | 48% → 61% | **Established**: more boronic acid helps at 70 °C |\n| Run 2 → 3 (1.5 eq fixed) | 70 → 80 °C | 61% → 76% | **Established**: higher temp helps, up to 80 °C |\n| Run 3 → 4 (1.5 eq fixed) | 80 → 90 °C | 76% → 72% | **Established**: above 80 °C, isolated yield falls |\n| Run 3 → 5 (80 °C fixed) | 1.5 → 2.0 eq | 76% → 79% | **Established**: more boronic acid helps at 80 °C too |\n\nThe 80→90 °C drop is not noise — it matches prior history on this exact transformation. [[opt-suzuki-conditions]] recorded 100 °C giving 79% by LCAP but only 68% isolated, and [[failure-aqueous-protodeboronation]] names the mechanism: PhB(OH)₂ protodeboronates to benzene faster than it transmetalates once you're hot in aqueous THF, so conversion/assay keeps climbing while isolated yield doesn't (seen three times historically before it was recognized). Your run 4 (72% at 90 °C, down from 76% at 80 °C) is the same signature. **80 °C looks like the ceiling for this solvent system, not 90+.**\n\n**Untested across your whole series:** Pd loading (fixed at 1.5 mol%), base identity (K2CO3 throughout), and reaction time (fixed at 12 h). None of your five runs touch these.\n\nOne thing on file that's relevant but *not* yet evidence for your series: [[bo-suzuki-next]] (confidence 0.5, only a model recommendation, not a run) proposes 1.2 mol% Pd / Cs2CO3 / 2-MeTHF/water / 75 °C. It changes three variables (base, solvent, Pd loading) at once relative to your series, and the [[failure-aqueous-protodeboronation]] note explicitly flags that this model was fit on assay yield and hasn't seen the protodeboronation failure — so treat it as a hypothesis to test one variable at a time, not a condition to run as-is.\n\n## Two conditions for tomorrow\n\n**1. 80 °C, 2.5 eq PhB(OH)₂** — everything else unchanged (1.5 mol% Pd(OAc)₂, K2CO3 2.0 eq, THF/water 4:1, 12 h, degassed).\nRationale: continues the one clean, twice-corroborated trend (equiv helps, run1→2 and run3→5) at the temperature you've established as the ceiling, so you're not re-entering the protodeboronation regime.\nExpectation: yield should continue upward, plausibly ~80–85%, with the increment likely smaller than the last +3% (diminishing returns). Falsifiable: if yield drops or plateaus below 79%, the equiv trend has topped out and boronic acid excess itself (not just heat) may be starting to promote decomposition — the next diagnostic would be a shorter reaction time at 2.5 eq to see if less time recovers yield.\n\n**2. 80 °C, 2.0 eq PhB(OH)₂, Cs2CO3 in place of K2CO3** — solvent (THF/water 4:1), Pd loading (1.5 mol%), time (12 h) unchanged from your run 5.\nRationale: isolates the single variable the BO note flags (base identity) without also moving temperature, solvent, or Pd loading, and without leaving the 80 °C ceiling you've now established twice. This turns an unconfirmed, confounded model suggestion into a clean single-variable test against your best run so far (79%, run 5).\nExpectation: if Cs2CO3's better solubility genuinely speeds transmetalation relative to protodeboronation, yield should beat 79%. If it doesn't move (or drops), the base wasn't the lever the model thought it was, and Pd loading or time become the next candidates to vary instead.\n\nSafety: I screened 4-bromo",
+    "answered": true,
+    "tools_called": [
+      "load_skill",
+      "gather_evidence",
+      "expand_note",
+      "expand_note",
+      "find_notes",
+      "expand_note",
+      "screen_hazards"
+    ],
+    "tools_failed": [],
+    "expected_tools_met": false,
+    "uncited_note_ids": [],
+    "failed_loudly": false,
+    "error_code": null,
+    "degraded": [],
+    "jobs_started": [],
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "latency_seconds": 81.49,
+    "event_counts": {
+      "tool_call": 7,
+      "tool_result": 7,
+      "token": 42,
+      "answer": 1
+    },
+    "transport_error": null
+  }
+}

@@ -1,0 +1,45 @@
+{
+  "probe": {
+    "id": "op-20",
+    "section": 3,
+    "persona": "lab_leader",
+    "bucket": "A",
+    "question": "Ran the two you gave me. 85 C / 1.8 eq came back 81%, 75 C / 2.2 eq gave 68%. Add them and give me the next point — same problem as before.",
+    "expects_tools": [
+      "suggest_next_experiment",
+      "recall_observations",
+      "find_past_jobs"
+    ],
+    "forbids_claims": [
+      "this is a new campaign",
+      "the earlier observations are unavailable",
+      "an observation that was never supplied"
+    ],
+    "direction": "Understands that a campaign is identified by its decision space, so the same problem with two more results appended continues the existing campaign rather than starting a fresh one — and quotes the campaign_id back to prove it. It must carry the earlier runs forward together with the two new ones, all marked as measured, not call the tool on the two new points alone. Returns a single next candidate as conditions to run, and it is worth reading the trend out loud: the higher-equivalents/lower-temperature point underperformed, which is information the model now has. Losing the earlier observations, or minting a new campaign for an unchanged decision space, is the failure. Asking the chemist to re-supply history it already holds is also a miss."
+  },
+  "outcome": {
+    "probe_id": "op-20",
+    "section": 3,
+    "persona": "lab_leader",
+    "bucket": "A",
+    "question": "Ran the two you gave me. 85 C / 1.8 eq came back 81%, 75 C / 2.2 eq gave 68%. Add them and give me the next point — same problem as before.",
+    "answer": "I need to understand the context from your previous message, but that part of the conversation is out of view for me right now. To give you the next point from a Bayesian-optimization campaign, I need to know:\n\n1. **What transformation are you optimizing?** (starting material, product, reaction type)\n2. **What are the decision variables?** (temperature range, equivalents range, anything else that changes?)\n3. **What are you optimizing for?** (yield, I'd guess, but want to confirm)\n\nCould you restate those briefly, or point me to the note/campaign id if this is a saved campaign? Once I have that, I'll add your two new observations and propose the next point.",
+    "answered": true,
+    "tools_called": [],
+    "tools_failed": [],
+    "expected_tools_met": false,
+    "uncited_note_ids": [],
+    "failed_loudly": false,
+    "error_code": null,
+    "degraded": [],
+    "jobs_started": [],
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "latency_seconds": 5.81,
+    "event_counts": {
+      "token": 11,
+      "answer": 1
+    },
+    "transport_error": null
+  }
+}

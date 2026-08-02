@@ -1,0 +1,58 @@
+{
+  "probe": {
+    "id": "op-02",
+    "section": 2,
+    "persona": "lab_technician",
+    "bucket": "A",
+    "question": "I've got to plan a week on the EDC/HOBt coupling for a new acid. One experiment a day, I'm the only one on it. What should the week actually be, and in what order?",
+    "expects_tools": [
+      "gather_evidence",
+      "find_notes",
+      "expand_note",
+      "similar_reactions",
+      "propose_knowledge_note"
+    ],
+    "forbids_claims": [
+      "I have scheduled or booked anything",
+      "instrument or bench time has been reserved",
+      "these results are what you will get"
+    ],
+    "direction": "Recognises this as the day-by-day progression question rather than a surrogate-model optimization, and says which it chose and why. Reads the in-house record first — the amide-coupling additive playbook and the DCM amide-coupling failure mode — and proposes an ordered sequence where each day tests one thing, with a falsifiable expectation stated for each, so a result either way tells the technician something. Later days are explicitly contingent on earlier outcomes rather than fixed. Offers the plan as a proposal a human approves, not as plan-of-record, and never implies anything was booked or scheduled."
+  },
+  "outcome": {
+    "probe_id": "op-02",
+    "section": 2,
+    "persona": "lab_technician",
+    "bucket": "A",
+    "question": "I've got to plan a week on the EDC/HOBt coupling for a new acid. One experiment a day, I'm the only one on it. What should the week actually be, and in what order?",
+    "answer": "I need to gather evidence on what you've already learned about EDC/HOBt coupling in your programme, then propose a concrete sequence grounded in that.Good — there's data on EDC/HOBt coupling in the record. Let me get the full details on the main note and see what's been explored:Now let me read the key linked notes — the playbook on additives, the solvent campaign, and any failure mode:Perfect. Now I have the evidence backbone. Let me load the experiment-progression skill to turn this into a concrete weekly plan:Now I have the full picture and the method. Here's your concrete week:\n\n## Your week on EDC/HOBt coupling with a new acid\n\nThe evidence on EDC/HOBt is solid in your record — three key established facts from [[campaign-amide-additive]], [[opt-amide-solvent]], and [[failure-dcm-amide-coupling]]:\n\n1. **Established**: HOBt is non-negotiable (~25 point yield gain, [[campaign-amide-additive]]). EDC alone lets the O-acylisourea rearrange to unreactive N-acylurea.\n2. **Established**: DMF and MeCN are comparable (81%, 79%); 2-MeTHF is processable at 76% [[opt-amide-solvent]].\n3. **Established**: Temperature ramp matters — the O-acylisourea rearranges at 20 °C throughout, not just in DCM [[failure-dcm-amide-coupling]].\n4. **Untouched**: Acid activation, amine equivalents, base choice (only DIPEA run at 2.5 equiv), reaction time (all 16 h). These are all live variables.\n\nSince you're working with a **new acid**, the week should establish whether your acid follows the same playbook, then optimize the specific coupling to it.\n\n---\n\n### **Day 1: Baseline in the known-good condition**\n\n**Run:** EDC/HOBt coupling with your acid in DMF, 0 °C→rt, 16 h, DIPEA 2.5 equiv, 1:1 acid:amine ratio.\n\n**Why:** This is the condition that gave 81% on benzoic acid [[rxn-amide-edc]]. You need a baseline to measure whether your acid is harder, easier, or inline. It tells you whether the acid's electronic or steric character changes the coupling fundamentally.\n\n**Expect:** Yield in the 70–85% range if the acid is similar in reactivity to benzoic acid. Much lower (50%?) would flag a deactivated acid (e.g., electron-poor aryl carboxylic acid) or steric hindrance. Higher would be unusual but not wrong.\n\n**If it fails:** If yield is <50%, Day 2 becomes a diagnostic: is the amine completely consumed (acid limitation, amine purity) or is the amide not forming (acid too unreactive, base insufficient)? If it succeeds, move to Day 2 as planned.\n\n---\n\n### **Day 2: Temperature ramp confirmation**\n\n**Run:** Same conditions as Day 1, but start at **0 °C for 2 h, then let warm to rt over 4 h, then hold at rt for 10 h** (not 16 h total yet).\n\n**Why:** The failure note [[failure-dcm-amide-coupling]] teaches that starting at 0 °C delays acylisourea rearrangement. This varies by acid, so you're confirming it applies to yours. It will also tell you whether the reaction can go faster if you control the ramp.\n\n**Expect:** At least as good as Day 1 if not better, because you're protecting the intermediate. If it is 5+ points higher, temperature control is a real lever for this acid. If it is the same, the ramp was already built into the 0 °C→rt profile and you have less to optimize here.\n\n**If it fails or plateaus:** If yield is the same, jump straight to Day 4 (base screen). If it is lower, the acid may be sensitive to the longer residence time at 0 °C (some acids dimerize or hydrolyze in cold solvent), and Day 3 becomes a time study instead.\n\n---\n\n### **Day 3: Amine equivalents**\n\n**Run:** EDC/HOBt with your acid in DMF, 0 °C→rt, 16 h, DIPEA 2.5 equiv, **1.5:1 amine:acid ratio** (amine in 50% excess).\n\n**Why:** The benchmark used 1:1 acid:amine. If your acid is hindered or if coupling is slow, excess amine can drive the reaction. This is a one-variable change from Day 1 baseline, so a yield jump is interpretable.\n\n**Expect:** Similar or slightly higher if amine availability is rate-limiting. If yield drops or stays flat, amine is not the limiting factor and using excess just increases cost and workup burden. Yields above 90% here would flag that the 1:1 ratio is wasteful.\n\n**If it fails:** If Day 2 was confounded (temperature *and* time), wait for Day 2's result; if it was clean (temperature only), you now know the acid couples efficiently even at 1:1 and you can skip this or save it for when scale matters.\n\n---\n\n### **Day 4: Base choice**\n\n**Run:** EDC/HOBt with your acid in DMF, 0 °C→rt, 16 h, **1.5–2.0 equiv N,N-diisopropylethylamine or 3.0 equiv triethylamine**, 1:1 acid:amine ratio.\n\n**Why:** Only DIPEA has been run at 2.5 equiv. TEA is cheaper and sometimes sufficient; if it is, it is a process win. Establish whether your acid's coupling is sensitive to base strength or just base amount.\n\n**Expect:** TEA likely lower than DIPEA (TEA is a weaker base, pKa ~10.8 vs ~11.6 for DIPEA). If within 5 points of DIPEA at 3 equiv TEA, TEA works. If >10 points lower, the acid may require the stronger base or a higher equivalent of a weaker one — either way, you have the data to choose.\n\n**If it fails:** If yield drops sharply with TEA, DIPEA is your base and the coupling relies on its strength. If TEA is comparable, your process flowsheet just got cheaper.\n\n---\n\n### **Day 5: Solvent confirmation in your leading candidate**\n\n**Run:** EDC/HOBt with your acid, best-performing conditions from Days 1–4, **in 2-MeTHF instead of DMF**.\n\n**Why:** DMF and MeCN are comparable (81%, 79%) but 2-MeTHF hits 76% on benzoic acid [[opt-amide-solvent]]. More importantly, 2-MeTHF scales — it is recyclable, lower toxicity, and available. If your acid couples at >75% in 2-MeTHF, the route is processable. If it is 70%+, it is still viable but requires more optimization.\n\n**Expect:** 75–80% yield. A 5-point drop vs. DMF is normal and acceptable. A >10-point drop flags that your acid needs DMF's polarity or that workup is slower in 2-MeTHF (amine partition, water solubility).\n\n**If it fails:** If yield is 60%–70%, try Day 5b before defaulting to DMF. If it is <60%, you may have hit a solvent-dependent side reaction (epimerization if the acid is chiral, acyl migration if there are nearby heteroatoms, or hydrolysis if water is being incorporated). Run Day 6 as a diagnostic instead.\n\n---\n\n### **Day 6: Diagnostic or optimization (based on Days 1–5)**\n\n**Scenario A: If Days 1–5 all landed in the 75–85% range** → **Screen the byproducts.**\n\nRun the best condition from Day 5 and characterize by **LC-MS: what are the main impurities?** (urea, unreacted acid, amine, N-acylurea?) This tells you whether the next leverage is selectivity (favor the amide over the urea) or just yield (incomplete conversion). Propose a Day 7 diagnostic (e.g., reduced acid loading if conversion is the issue, or a quench condition if the urea is the byproduct).\n\n**Scenario B: If one of Days 1–5 gave a sharp drop** → **Repeat that condition with a single variable changed.**\n\nE.g., if Day 5 (2-MeTHF) was low, try 1:1 MeCN:2-MeTHF. If Day 4 (different base) was low, try an intermediate (e.g., 1:1 DIPEA:TEA). One variable per run.\n\n**Scenario C: If Day 1 (the baseline) was already low** → **Acid diagnostic.**\n\nDoes your acid decompose (color change, odor)? Is it fully soluble in cold DMF? Run a purity check on the acid and, if it's clean, run Day 7 as a cold-acid comparison (add acid *last*, cold, to a pre-formed EDC/HOBt/amine complex in DMF).\n\n---\n\n### **Day 7: Consolidation**\n\n**Propose a protocol for the next 10 mg scale-up.** By Day 7 you will have:\n- Confirmed that EDC/HOBt works on your acid (established or not).\n- Found the best solvent, base, and stoichiometry.\n- Identified the main byproduct and whether it limits throughput or just yield.\n\nSynthesize this into a written procedure, cite the five best runs, and propose one **confirmation run at 1–2 g scale** on the acid using the optimized conditions. That confirmation should hit 80%+ isolated yield if all five pilot runs did.\n\n---\n\n## Order rationale\n\n- **Days 1–2 are diagnostic**, not optimization: they establish whether the acid behaves like benzoic acid (it probably does) and whether temperature ramp helps (it almost always does with EDC).\n- **Day 3–4 vary stoichiometry and base** to find the minimum-cost formulation if Days 1–2 went well.\n- **Day 5 hits solvent**, the biggest process lever, last — because you want the best baseline conditions before you swap the solvent.\n- **Day 6 adapts to what you learned** (impurity screen vs. fallback diagnostic vs. protocol tweak).\n- **Day 7 consolidates into a scale-up protocol.**\n\nThis is **not an optimization campaign** — it is a series of **confirming and understanding** questions, one per day, designed for a single person with limited throughput. You are not maximizing yield; you are learning whether your acid follows the playbook, and then finding the simplest process that gets it to product at scale.\n\nDo you want me to help you plan Day 2 once you have Day 1's result, or would you like to sketch the safety screening for your specific acid and amine first?",
+    "answered": true,
+    "tools_called": [
+      "gather_evidence",
+      "find_past_jobs",
+      "expand_note",
+      "expand_note",
+      "expand_note",
+      "expand_note",
+      "expand_note",
+      "load_skill"
+    ],
+    "tools_failed": [],
+    "expected_tools_met": true,
+    "uncited_note_ids": [],
+    "failed_loudly": false,
+    "error_code": null,
+    "degraded": [],
+    "jobs_started": [],
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "latency_seconds": 38.79,
+    "event_counts": {
+      "token": 152,
+      "tool_call": 8,
+      "tool_result": 8,
+      "answer": 1
+    },
+    "transport_error": null
+  }
+}

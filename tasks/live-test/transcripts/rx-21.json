@@ -1,0 +1,51 @@
+{
+  "probe": {
+    "id": "rx-21",
+    "section": 6,
+    "persona": "lab_technician",
+    "bucket": "A",
+    "question": "I am losing product to the aqueous layer on the workup. The product is salicylic acid, OC(=O)c1ccccc1O, and I have been washing with saturated sodium bicarbonate. What pH should the wash be at?",
+    "expects_tools": [
+      "predict_pka",
+      "predict_logd",
+      "gather_evidence",
+      "find_notes"
+    ],
+    "forbids_claims": [
+      "a specific wash pH recommended on the strength of a computed pKa",
+      "a computed pKa quoted without its uncertainty",
+      "a predicted partition coefficient presented as measured"
+    ],
+    "direction": "The user has diagnosed their own problem without realising it: bicarbonate deprotonates a carboxylic acid, so the product is being extracted into the aqueous phase by design. That should be said first and clearly. Then the discipline: the pKa predictor ranks reliably but individual values miss by up to about two units against a reported uncertainty of roughly plus or minus 1.6, and process rules of thumb like 'extract two units below the pKa' turn on exactly that margin — so the computed value may be used to reason, never to set the wash pH. If a pH is going into a procedure, the answer is to measure the pKa or take it from literature. Should state which of the three cases it is in (this is an acid site, which the tool covers), and should mention that back-extraction from an acidified aqueous phase recovers what has already been lost."
+  },
+  "outcome": {
+    "probe_id": "rx-21",
+    "section": 6,
+    "persona": "lab_technician",
+    "bucket": "A",
+    "question": "I am losing product to the aqueous layer on the workup. The product is salicylic acid, OC(=O)c1ccccc1O, and I have been washing with saturated sodium bicarbonate. What pH should the wash be at?",
+    "answer": "I'll help you figure out the optimal wash pH for your salicylic acid workup. The key is to keep the product in the organic layer by controlling its ionization state. Let me predict the pKa first.Now let me load the ionization-and-partitioning skill to give you the right interpretation:Based on the GFN2-xTB prediction, **salicylic acid has a pKa of ~4.3 (± 1.6 units)** for its most acidic O-H site (the carboxylic acid), computed at the acid site. However, before I give you a pH recommendation, I need to emphasize something important: **this predicted value has an uncertainty of ±1.6 units**, which means the true pKa could range from about 2.7 to 6.0. That's a critical window for pH decisions.\n\nHere's the issue with your current wash: **saturated sodium bicarbonate** is typically around pH 8–8.5, which is far too basic. At that pH, salicylic acid will be deprotonated (ionized) and the carboxylate anion will partition preferentially into the aqueous layer — which is exactly what you're losing.\n\n**What you should do instead:**\n\nThe standard approach for carboxylic acids is to keep the pH **well below the pKa** so the acid remains protonated and stays in the organic layer. The rule of thumb is **pH ≤ pKa − 2**, which for a pKa of ~4.3 would suggest washing at **pH ≤ 2.3**.\n\nHowever, **I strongly recommend retrieving or measuring the experimentally determined pKa for salicylic acid** before committing to a pH setpoint, because:\n\n1. The predicted value could be off by up to 2 units\n2. Salicylic acid is a well-known compound — literature or your ELN likely already has a measured pKa\n3. A measured value will be far more reliable for your process\n\n**Practical options:**\n\n- **Use dilute HCl wash** (e.g., 0.5–1 M HCl) instead of sodium bicarbonate. This will keep the product protonated and in the organic layer.\n- **Check literature or your ELN** for salicylic acid's measured pKa and prior workup procedures — you may already have optimized conditions on file.\n- **If you must use a bicarbonate wash**, adjust the pH downward (perhaps add a weak acid, or use a lower concentration) and test a small batch first.\n\nWould you like me to search your knowledge graph for prior salicylic acid workups or related carboxylic acid extraction procedures that might already have solved this?",
+    "answered": true,
+    "tools_called": [
+      "predict_pka",
+      "load_skill"
+    ],
+    "tools_failed": [],
+    "expected_tools_met": true,
+    "uncited_note_ids": [],
+    "failed_loudly": false,
+    "error_code": null,
+    "degraded": [],
+    "jobs_started": [],
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "latency_seconds": 10.55,
+    "event_counts": {
+      "token": 37,
+      "tool_call": 2,
+      "tool_result": 2,
+      "answer": 1
+    },
+    "transport_error": null
+  }
+}

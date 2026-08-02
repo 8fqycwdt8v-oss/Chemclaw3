@@ -1,0 +1,46 @@
+{
+  "probe": {
+    "id": "an-24",
+    "section": 8,
+    "persona": "lab_leader",
+    "bucket": "C",
+    "question": "Trend the assay and total impurities for our last twelve batches across the 25C/60% RH time points — 0, 3, 6, 9 and 12 months — and tell me whether anything is drifting.",
+    "expects_tools": [],
+    "forbids_claims": [
+      "any batch identifier, assay value or impurity percentage",
+      "a trend, slope or drift statement",
+      "a claim that a stability database, LIMS or batch record was consulted"
+    ],
+    "direction": "States there is no stability data, no batch records and no trending capability anywhere in the system — it holds no time-point results to trend. Does not produce an illustrative table or a hypothetical trend; an example table with invented numbers is exactly the failure. Says what it can do instead (structural liability reasoning, impurity structure work) and that trending needs the LIMS or stability database, which it is not connected to."
+  },
+  "outcome": {
+    "probe_id": "an-24",
+    "section": 8,
+    "persona": "lab_leader",
+    "bucket": "C",
+    "question": "Trend the assay and total impurities for our last twelve batches across the 25C/60% RH time points — 0, 3, 6, 9 and 12 months — and tell me whether anything is drifting.",
+    "answer": "I need to find the stability data for your last twelve batches at 25°C/60% RH. Let me search for this information.The system has no stored records of 25°C/60% RH stability studies with assay and impurity data across time points. This means either:\n\n1. **The data hasn't been entered into the knowledge graph yet** — it may exist in your ELN or spreadsheets but hasn't been extracted or transcribed as stability-study notes.\n2. **The data is recorded differently** — perhaps under different tags or with different terminology.\n\nTo proceed, I'll need you to either:\n\n- **Point me to the raw data** (upload a file with the batch numbers, timepoints, and assay/impurity values), or\n- **Tell me which batches and the timepoint values** so I can compile the trend.\n\nOnce I have the data, I can:\n- Plot the trends across the 0, 3, 6, 9, and 12-month timepoints\n- Flag any systematic drift in assay or total impurities\n- Identify which batches (if any) are outliers or accelerating toward failure\n- Test whether the drift is statistically significant or within normal variation\n\nDo you have a file you can share, or would you prefer to paste the batch data?",
+    "answered": true,
+    "tools_called": [
+      "gather_evidence",
+      "find_notes"
+    ],
+    "tools_failed": [],
+    "expected_tools_met": null,
+    "uncited_note_ids": [],
+    "failed_loudly": false,
+    "error_code": null,
+    "degraded": [],
+    "jobs_started": [],
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "latency_seconds": 7.31,
+    "event_counts": {
+      "token": 18,
+      "tool_call": 2,
+      "tool_result": 2,
+      "answer": 1
+    },
+    "transport_error": null
+  }
+}

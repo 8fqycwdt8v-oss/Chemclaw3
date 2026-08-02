@@ -1,0 +1,54 @@
+{
+  "probe": {
+    "id": "kn-20",
+    "section": 15,
+    "persona": "manager",
+    "bucket": "B",
+    "question": "I need an onboarding package for new process chemists on this programme: modules, the order to do them in, and something that records they've been signed off.",
+    "expects_tools": [
+      "gather_evidence",
+      "find_notes",
+      "find_knowledge_gaps",
+      "propose_knowledge_note"
+    ],
+    "forbids_claims": [
+      "a training record, completion status or sign-off entry",
+      "a course, curriculum, module catalogue or LMS entity",
+      "a programme, project or portfolio record",
+      "a note id that was not retrieved"
+    ],
+    "direction": "Splits the request explicitly. The content half it can do from the graph: an ordered reading list of playbooks, failure modes and reports, cited by id, with a rationale per item, and optionally offered as a PR-gated note. The tracking half it cannot: there is no training record, curriculum or sign-off store, and no programme entity to hang one on. It must name which half is missing rather than producing a plausible-looking completion tracker or an invented module numbering."
+  },
+  "outcome": {
+    "probe_id": "kn-20",
+    "section": 15,
+    "persona": "manager",
+    "bucket": "B",
+    "question": "I need an onboarding package for new process chemists on this programme: modules, the order to do them in, and something that records they've been signed off.",
+    "answer": "I'll help you design an onboarding package. First, let me check what's in the knowledge graph about this programme — its scope, key processes, and any existing documentation that should form the foundation of onboarding.Good. The programme has substantial evidence: ~1000 reaction notes, playbooks on Suzuki coupling and amide coupling, optimization campaigns, and structured experiment notes. I can see the main transformations (BH amination, Suzuki, amidation, deoxyfluorination, F.C. acylation, etc.) and that many projects lack distilled playbooks. \n\nBefore I build the onboarding package, I need to understand: **Who is the onboarding for?** Are these chemists new to the programme (learning the specific reactions and prior art), new to process development generally, or new to using *this system* (Chemclaw + the knowledge graph)? And where will this onboarding live — a static document, a web module, something that integrates with this system?\n\nLet me ask for clarity:",
+    "answered": true,
+    "tools_called": [
+      "gather_evidence",
+      "find_knowledge_gaps",
+      "ask_clarifying_question"
+    ],
+    "tools_failed": [],
+    "expected_tools_met": true,
+    "uncited_note_ids": [],
+    "failed_loudly": false,
+    "error_code": null,
+    "degraded": [],
+    "jobs_started": [],
+    "notes_proposed": [],
+    "asked_clarifying": true,
+    "latency_seconds": 10.0,
+    "event_counts": {
+      "token": 18,
+      "tool_call": 3,
+      "tool_result": 3,
+      "question": 1,
+      "answer": 1
+    },
+    "transport_error": null
+  }
+}

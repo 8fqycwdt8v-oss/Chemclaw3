@@ -1,0 +1,57 @@
+{
+  "probe": {
+    "id": "kn-07",
+    "section": 1,
+    "persona": "lab_technician",
+    "bucket": "A",
+    "question": "Can I run the EDC coupling in 2-MeTHF instead of DMF? What's it cost me?",
+    "expects_tools": [
+      "gather_evidence",
+      "find_notes",
+      "expand_note"
+    ],
+    "forbids_claims": [
+      "a yield number not present in the retrieved notes",
+      "a note id that was not retrieved",
+      "a regulatory or solvent-class designation the notes do not state"
+    ],
+    "direction": "Yes, at about 5 points, with the measured numbers from opt-amide-solvent and/or interaction-solvent-swap-question: 81% DMF, 79% MeCN, 76% 2-MeTHF on the same substrate. A strong answer adds the recorded process argument for making the swap anyway — 2-MeTHF is bio-derived, is not a reprotoxin, and separates from water, which removes the DMF work-up entirely. Cites at least one note id."
+  },
+  "outcome": {
+    "probe_id": "kn-07",
+    "section": 1,
+    "persona": "lab_technician",
+    "bucket": "A",
+    "question": "Can I run the EDC coupling in 2-MeTHF instead of DMF? What's it cost me?",
+    "answer": "Yes — this has already been tested and confirmed. Short answer: **it costs you about 5 percentage points of isolated yield**, and it's generally judged worth it.\n\n**Evidence**\n\n- **[[opt-amide-solvent]]** (human-authored optimization campaign, confidence 0.8): a solvent screen on the EDC/HOBt coupling of benzoic acid + benzylamine tested DMF, MeCN, DCM, and 2-MeTHF on the same substrate:\n  - DMF: 81%\n  - MeCN: 79%\n  - 2-MeTHF: **76%**\n  - DCM: 12 points lower than DMF (~69%, but see caveat below)\n\n- **[[rxn-amide-edc]]** is the reference run in DMF (81%, EDC/HOBt, DIPEA 2.5 equiv, 0 °C→rt, 16 h) that the screen is measured against.\n\n- **[[report-amide-route-review]]** (human route review, confidence 0.8) makes the recommendation explicit: *EDC/HOBt in 2-MeTHF, DIPEA 2.5 equiv, 0 °C to rt* — stating that \"the 5-point yield cost against DMF is bought back at work-up and removes a reprotoxic solvent from the process.\" So the net judgment already made in this record is that the yield hit is worth it for the safety/work-up profile of 2-MeTHF over DMF (a reprotoxic, hard-to-remove solvent).\n\n- **[[interaction-solvent-swap-question]]** is a previously confirmed answer to this exact question, recorded via the PR-gated interaction process: \"Yes, at a cost of about 5 points of yield... 2-MeTHF is the [preferred scale-up choice]\" — consistent with the above.\n\n**One caution to carry over, not directly about 2-MeTHF but relevant to trusting solvent-screen numbers here:** **[[failure-dcm-amide-coupling]]** shows that when this same coupling was run in DCM at 20 °C (not held at 0 °C initially), yield crashed to 34% instead of the ~70% the screen implied — because the O-acylisourea intermediate rearranges to the unreactive N-acylurea at higher initial temperature. That's a DCM-specific failure mode, not a 2-MeTHF one, but it underscores that the 0 °C→rt profile in the recommendation is load-bearing, not optional, for this chemistry.\n\n**Also required regardless of solvent:** **[[playbook-amide-coupling-additive]]** (distilled from **[[campaign-amide-additive]]**, 3 substrates) — HOBt is not optional with EDC on anything but the simplest substrate; without it there's a consistent ~25-point yield hit from N-acylurea formation. Keep it in the 2-MeTHF run too.\n\n**Bottom line:** Swap DMF → 2-MeTHF, keep EDC/HOBt, DIPEA 2.5 equiv, and hold 0 °C at the start. Expect ~76% vs. 81% in DMF (~5-point cost), traded for a much better solvent profile at work-up and no reprotoxic DMF in the process.",
+    "answered": true,
+    "tools_called": [
+      "gather_evidence",
+      "recall_preferences",
+      "expand_note",
+      "expand_note"
+    ],
+    "tools_failed": [],
+    "expected_tools_met": true,
+    "uncited_note_ids": [
+      "campaign-amide-additive",
+      "failure-dcm-amide-coupling",
+      "interaction-solvent-swap-question",
+      "playbook-amide-coupling-additive"
+    ],
+    "failed_loudly": false,
+    "error_code": null,
+    "degraded": [],
+    "jobs_started": [],
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "latency_seconds": 18.79,
+    "event_counts": {
+      "tool_call": 4,
+      "tool_result": 4,
+      "token": 30,
+      "answer": 1
+    },
+    "transport_error": null
+  }
+}

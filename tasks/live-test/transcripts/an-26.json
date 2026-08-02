@@ -1,0 +1,52 @@
+{
+  "probe": {
+    "id": "an-26",
+    "section": 8,
+    "persona": "lab_leader",
+    "bucket": "A",
+    "question": "We measured the pKa of COc1ccc(-c2ccccc2C(=O)O)cc1 experimentally and got 3.9. Log it against the prediction, and tell me how far the pKa calculator has actually been off historically before I rely on it for the next compound.",
+    "expects_tools": [
+      "report_measurement",
+      "calculator_trust",
+      "calculator_outliers",
+      "find_calculations"
+    ],
+    "forbids_claims": [
+      "an accuracy or bias figure not returned by the trust tool",
+      "quoting a bias from a sample too small to be meaningful without saying so",
+      "claiming the calculator is validated for setting specifications"
+    ],
+    "direction": "Records the measurement against the right property and molecule, then reports the calculator's measured track record — bias, spread, n — and reads `n` honestly: below the configured minimum it says the calculator is not yet calibrated rather than quoting a bias from a handful of points. Mentions uncertainty coverage if it is low, since narrow error bars are the subtler failure. Ends with what the record does and does not license."
+  },
+  "outcome": {
+    "probe_id": "an-26",
+    "section": 8,
+    "persona": "lab_leader",
+    "bucket": "A",
+    "question": "We measured the pKa of COc1ccc(-c2ccccc2C(=O)O)cc1 experimentally and got 3.9. Log it against the prediction, and tell me how far the pKa calculator has actually been off historically before I rely on it for the next compound.",
+    "answer": "I'll log your measurement, check the prediction, and give you the calculator's historical accuracy.Your measurement has been recorded. Here's what we have:\n\n**Your compound (2-methoxybiphenyl-2-carboxylic acid):**\n- **Predicted pKa:** 6.08 (±1.6 units)\n- **Measured pKa:** 3.9\n- **Error:** –2.18 units (prediction is 2.2 pKa units *too high*)\n\n**Calculator's historical accuracy:**\nThe pKa calculator has **no calibration data yet** — this is the first measurement scored against it in your deployment. With n=0, the bias, MAE, and RMSE figures are empty and not yet meaningful. Your measurement is now on file and will become the first calibration point for future predictions.\n\n**What this means for the next compound:**\n\nThe stated uncertainty of ±1.6 units was assigned by the method, not derived from measurements, so it is a *theoretical* uncertainty range. Your single measurement suggests the calculator can be off by more than that bound, but one point is not enough to know whether this is:\n- A systematic bias (the method runs high on *all* carboxylic acids), \n- An outlier (this particular biaryl geometry confuses it), or  \n- Random noise in a method that is usually closer.\n\n**Before you commit to the next prediction:** Let me know its pKa once you measure it, and I'll give you a better picture of whether the calculator has a directional bias or if 3.9 was an outlier. With 2–3 measurements you can see a pattern; with one, you only know \"it can miss by this much.\"",
+    "answered": true,
+    "tools_called": [
+      "predict_pka",
+      "report_measurement",
+      "calculator_trust"
+    ],
+    "tools_failed": [],
+    "expected_tools_met": true,
+    "uncited_note_ids": [],
+    "failed_loudly": false,
+    "error_code": null,
+    "degraded": [],
+    "jobs_started": [],
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "latency_seconds": 8.09,
+    "event_counts": {
+      "token": 26,
+      "tool_call": 3,
+      "tool_result": 3,
+      "answer": 1
+    },
+    "transport_error": null
+  }
+}

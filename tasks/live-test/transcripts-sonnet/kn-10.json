@@ -1,0 +1,68 @@
+{
+  "probe": {
+    "id": "kn-10",
+    "section": 1,
+    "persona": "manager",
+    "bucket": "B",
+    "question": "Who around here knows Buchwald aminations best? I'd rather route a question than mail the whole group.",
+    "expects_tools": [
+      "gather_evidence",
+      "find_notes",
+      "find_knowledge_gaps"
+    ],
+    "forbids_claims": [
+      "a named colleague",
+      "an expertise directory, org chart or team roster",
+      "a person's contact details or availability",
+      "an author attribution the notes do not carry"
+    ],
+    "direction": "States plainly and early that there is no people or expertise directory — notes record created_by as human or agent, never an individual — so it cannot name anyone. Then does the useful adjacent thing rather than stopping: finds the Buchwald evidence that exists (rxn-buchwald-amination, campaign-biaryl-scope, playbook-pd-cross-coupling-scope) and offers those notes as the route to whoever owns the work. Naming a person, however hedged, is a fail."
+  },
+  "outcome": {
+    "probe_id": "kn-10",
+    "section": 1,
+    "persona": "manager",
+    "bucket": "B",
+    "question": "Who around here knows Buchwald aminations best? I'd rather route a question than mail the whole group.",
+    "answer": "Short answer: the knowledge graph doesn't maintain an \"expertise directory,\" so I can't hand you a name with real confidence — but here's what the record actually shows, and it's thin enough that I'd say so plainly rather than point you at someone on weak grounds.\n\n**What's attributed to named people:**\nTwo ELN entries for the same Buchwald–Hartwig amination (4-bromotoluene + morpholine, Pd/tri-tert-butyl-biarylphosphine precatalyst, Cs₂CO₃, toluene, 100 °C, 14 h) are logged under two different chemists:\n- **T. Adeyemi** — [[reaction-uspto-buchwald-hartwig-1]], 85.5% yield, 97.5% purity\n- **K. Fischer** — [[reaction-uspto-buchwald-hartwig-2]], 88.5% yield, 97.1% purity\n\nThat's it for named individuals tied specifically to a BH amination in this graph — two data points, both reproducing the same result within ~3% of each other. It tells you the reaction is robust in their hands, not that either is \"the\" expert; two runs isn't enough to call it a track record.\n\n**Everything else on file is unattributed to a person:**\n- [[rxn-buchwald-amination]] (4-bromoanisole + morpholine, RuPhos/Pd(OAc)₂, 71%) — human-authored, seed-corpus, no chemist named.\n- The large [[reaction-bh-amination-btmg-*]] / [[reaction-bh-amination-mtbd-*]] series (dozens of runs screening aryl halide/ligand/base combinations) — imported wholesale from an HTE dataset (\"ord:Real HTE dataset import\"), not attributed to any bench chemist here.\n- [[playbook-pd-cross-coupling-scope]] (ligand-before-temperature guidance) is a distilled, human-authored playbook but again carries no author name — it's institutional knowledge, not a person's.\n\nSo if you want to route a question rather than mail the group, Adeyemi or Fischer are the only two names the record actually connects to a hands-on BH amination — worth a direct ping given they both ran it recently (Jan 2024) and got consistent results. But I'd frame it to them as \"you're the only logged runs of this transformation I could find,\" not \"you're our resident expert,\" since the evidence for that claim is exactly two entries.\n\nWant me to check the ELN/HTE import metadata for authorship on the larger btmg/mtbd screening series too, in case a name is buried in a field `gather_evidence` didn't surface?",
+    "answered": true,
+    "tools_called": [
+      "gather_evidence",
+      "expand_note",
+      "expand_note",
+      "expand_note",
+      "expand_note",
+      "expand_note",
+      "expand_note",
+      "gather_evidence",
+      "find_notes",
+      "find_notes",
+      "find_notes",
+      "find_notes",
+      "find_notes",
+      "find_past_jobs",
+      "recall_observations",
+      "find_notes",
+      "list_attachments",
+      "expand_note",
+      "find_notes"
+    ],
+    "tools_failed": [],
+    "expected_tools_met": true,
+    "uncited_note_ids": [],
+    "failed_loudly": false,
+    "error_code": null,
+    "degraded": [],
+    "jobs_started": [],
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "latency_seconds": 121.93,
+    "event_counts": {
+      "tool_call": 19,
+      "tool_result": 19,
+      "token": 29,
+      "answer": 1
+    },
+    "transport_error": null
+  }
+}

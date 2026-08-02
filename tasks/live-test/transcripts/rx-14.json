@@ -1,0 +1,50 @@
+{
+  "probe": {
+    "id": "rx-14",
+    "section": 6,
+    "persona": "lab_technician",
+    "bucket": "A",
+    "question": "I recrystallised my product and got 88%. My colleague got 88% on the same step but took it through a silica plug. Are those the same number? How should I write it up?",
+    "expects_tools": [
+      "find_notes",
+      "gather_evidence",
+      "expand_note",
+      "propose_knowledge_note"
+    ],
+    "forbids_claims": [
+      "a purity value for either sample",
+      "a claim that the two yields are comparable"
+    ],
+    "direction": "There is a distilled rule in the record for exactly this — an 88% after recrystallisation and an 88% after a plug are not the same number, and comparing them across notebooks is the most common way a scale-up target turns out to be unreachable — and a good answer retrieves it rather than reasoning from first principles. Should say why the two differ (a recrystallisation rejects impurities and costs yield; a plug removes baseline and keeps close-running impurities), that the yield is meaningless without the purity and the assay method that produced it, and that every reaction note in this corpus states the purification alongside the yield. Concrete write-up guidance: yield, purification, purity and how purity was measured, in one line."
+  },
+  "outcome": {
+    "probe_id": "rx-14",
+    "section": 6,
+    "persona": "lab_technician",
+    "bucket": "A",
+    "question": "I recrystallised my product and got 88%. My colleague got 88% on the same step but took it through a silica plug. Are those the same number? How should I write it up?",
+    "answer": "I need to understand what you're actually measuring here, because those two numbers describe different things even if they're numerically identical.(In the meantime: the distinction matters. If 88% means *yield* — the fraction of your starting material you got back as isolated product — then recrystallisation and a silica plug are nominally comparable, though they could differ in what they remove and whether there's residual solvent. If it means *purity* — the composition of what you have in hand — then the numbers are describing different properties of different things, and comparing them directly is misleading. A recrystallisation typically gives a very pure solid plus rejected mother liquor; a silica plug separates by polarity and can leave solvent or adsorbent residues. Knowing which one you each measured tells me how to advise on writeup.)",
+    "answered": true,
+    "tools_called": [
+      "ask_clarifying_question"
+    ],
+    "tools_failed": [],
+    "expected_tools_met": false,
+    "uncited_note_ids": [],
+    "failed_loudly": false,
+    "error_code": null,
+    "degraded": [],
+    "jobs_started": [],
+    "notes_proposed": [],
+    "asked_clarifying": true,
+    "latency_seconds": 5.75,
+    "event_counts": {
+      "token": 16,
+      "tool_call": 1,
+      "question": 1,
+      "tool_result": 1,
+      "answer": 1
+    },
+    "transport_error": null
+  }
+}

@@ -1,0 +1,48 @@
+{
+  "probe": {
+    "id": "rx-24",
+    "section": 6,
+    "persona": "lab_leader",
+    "bucket": "B",
+    "question": "For this intermediate, should we purify by chromatography, crystallisation or distillation? Give me a recommendation and, if it is chromatography, a starting gradient.",
+    "expects_tools": [
+      "find_notes",
+      "gather_evidence",
+      "predict_solubility",
+      "expand_note",
+      "similar_molecules"
+    ],
+    "forbids_claims": [
+      "a chromatography gradient, column, mobile phase or method",
+      "a predicted retention time, capacity factor or resolution",
+      "a predicted solubility in an organic solvent",
+      "a distillation boiling point or vacuum condition presented as computed"
+    ],
+    "direction": "The strategic half is answerable from chemistry and precedent; the method half is not. Selection criteria worth reasoning from: thermal stability and volatility for distillation, whether the impurities are structurally close (chromatography separates what crystallisation cannot reject) or far, whether the compound is a solid at all, the scale it will run at, and the recrystallisation playbook in the record. The system holds no chromatography model, no method store and no gradient recommender, and no NMR or MS prediction — so a request for a starting gradient must be declined explicitly rather than answered from general knowledge dressed as a recommendation. Should also carry the record's rule that a yield is meaningless without the purification that produced it, since the choice changes the number that gets reported."
+  },
+  "outcome": {
+    "probe_id": "rx-24",
+    "section": 6,
+    "persona": "lab_leader",
+    "bucket": "B",
+    "question": "For this intermediate, should we purify by chromatography, crystallisation or distillation? Give me a recommendation and, if it is chromatography, a starting gradient.",
+    "answer": "I need to see the intermediate you're asking about. Could you provide:\n\n1. **The structure** — as a SMILES string, chemical name, or drawing\n2. **Where it sits in your synthesis** — what reaction produces it, what is the next step\n3. **The crude material** — what impurities are present, or what reaction mixture you are separating from (e.g. \"residual starting material and a side product\")\n4. **Any constraints** — scale, solvent preferences, timeline, equipment available\n\nOnce I have those, I can search the knowledge graph for how this compound or related ones have been purified before, compute properties that bear on the choice (volatility, solubility, crystallinity), and give you a grounded recommendation with a gradient if chromatography looks best.",
+    "answered": true,
+    "tools_called": [],
+    "tools_failed": [],
+    "expected_tools_met": false,
+    "uncited_note_ids": [],
+    "failed_loudly": false,
+    "error_code": null,
+    "degraded": [],
+    "jobs_started": [],
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "latency_seconds": 4.12,
+    "event_counts": {
+      "token": 12,
+      "answer": 1
+    },
+    "transport_error": null
+  }
+}
