@@ -1,9 +1,10 @@
 """Agent tools for the knowledge graph (plan steps 2.5, 2.6).
 
 Read tools (`find_notes`, `expand_note`) let the agent retrieve by graph traversal
-— the capability behind the `knowledge-graph-query` skill. The write tool
-(`propose_knowledge_note`) routes an agent-authored note through the PR-gate for
-human review (D-005), never straight to the graph. Graph building is file I/O, so
+— the capability behind the `knowledge-graph-query` skill. The write tools route an
+agent-authored note through the PR-gate for human review (D-005), never straight to the graph:
+`propose_knowledge_note` for new knowledge, `record_failure` for the case that had no path at all
+— knowledge the graph already holds turning out to be wrong. Graph building is file I/O, so
 it runs off the event loop.
 """
 
@@ -11,8 +12,10 @@ import asyncio
 import logging
 from datetime import date
 
+import networkx as nx
 from pydantic import BaseModel, Field
 
+from chemclaw.agent.authz import require_actor
 from chemclaw.agent.framing import frame_untrusted
 from chemclaw.agent.tool_registry import tool
 from chemclaw.agent.turn_signals import record_proposal
@@ -24,6 +27,7 @@ from chemclaw.kg.git_submitter import default_submitter
 from chemclaw.kg.graph import build_graph, load_notes, neighborhood
 from chemclaw.kg.note import Note, Relation
 from chemclaw.kg.pr_gate import propose_note
+from chemclaw.memory.failure import close_refuted_note, failure_note
 
 log = logging.getLogger(__name__)
 
@@ -118,6 +122,23 @@ async def find_notes(text: str) -> list[NoteRef]:
     return matches
 
 
+def _require_note(graph: nx.DiGraph, note_id: str) -> Note:
+    """The note `note_id` names, or a `ChemclawError` saying why it could not be found.
+
+    One message for both by-id lookups (`expand_note`, `record_failure`), because the cause a
+    chemist most needs to hear is the same for both and easy to get wrong: an id that resolves to
+    nothing is *usually* a citation to a note whose PR-gate submission has not been merged yet
+    (D-018), which reads identically to a typo unless the message says so.
+    """
+    if note_id not in graph or graph.nodes[note_id].get("note") is None:
+        raise ChemclawError(
+            f"no note with id {note_id!r} — it may not exist, or it may be a citation to a "
+            "reaction that has been indexed but whose note is still pending human review"
+        )
+    note: Note = graph.nodes[note_id]["note"]
+    return note
+
+
 @tool
 async def expand_note(note_id: str, hops: int = 1) -> NoteView:
     """Return a note's body and the notes within `hops` links of it (1–2 typical).
@@ -142,12 +163,7 @@ async def expand_note(note_id: str, hops: int = 1) -> NoteView:
             which the chemist can otherwise not distinguish from a typo or a deleted note.
     """
     graph = await asyncio.to_thread(build_graph, settings.knowledge_path)
-    if note_id not in graph or graph.nodes[note_id].get("note") is None:
-        raise ChemclawError(
-            f"no note with id {note_id!r} — it may not exist, or it may be a citation to a "
-            "reaction that has been indexed but whose note is still pending human review"
-        )
-    note = graph.nodes[note_id]["note"]
+    note = _require_note(graph, note_id)
     # `hops` comes from the model; clamp it to [0, graph_max_hops] so a large value is bounded
     # rather than traversing the whole graph (SEC-4).
     hops = min(max(hops, 0), settings.graph_max_hops)
@@ -169,14 +185,18 @@ async def expand_note(note_id: str, hops: int = 1) -> NoteView:
 async def find_knowledge_gaps() -> GraphGaps:
     """Report where the knowledge graph is thin, unreachable, or load-bearing (gap KNW-5).
 
-    Use this for "what don't we know?" questions — which area has the least evidence, which project
+    Use this for "what don't we know?" questions — which area has the least evidence, which topic
     has runs but no distilled playbook, which notes nothing links to. Ordinary retrieval walks
     *outward from a hit*, so it can only ever answer "what do we know about X"; this is the
     complement, and it is the right input to a "what should we run next?" conversation.
 
+    The undistilled counts are over **note tags**, which are topics (`suzuki`, `solvent`), not
+    projects — there is no project field on a note. Reporting them as projects is how a live run
+    came to state a confident portfolio status the record could not support.
+
     Returns:
-        Counts per note type, isolated (unlinked) notes, projects with evidence but no
-        distillation, the most-cited hub notes, and any dangling links in the served graph.
+        Counts per note type, isolated (unlinked) notes, tags with evidence but no distillation,
+        the most-cited hub notes, and any dangling links in the served graph.
     """
     directory = settings.knowledge_path
     graph = await asyncio.to_thread(build_graph, directory)
@@ -251,5 +271,73 @@ async def propose_knowledge_note(
         note, default_submitter(), dependencies=compound_dependencies(note)
     )
     # Surface the opened branch on the turn's stream (gap RCH-4) — see `agents.turn_signals`.
+    record_proposal(note.id, reference)
+    return reference
+
+
+@tool
+async def record_failure(
+    refutes: str,
+    what_happened: str,
+    compound_smiles: str | None = None,
+    confidence: float | None = None,
+    held_until: date | None = None,
+) -> str:
+    """Record that something the knowledge graph says did **not** hold in practice (PR-gated).
+
+    Call this when a chemist reports that a note is wrong, misfired, or no longer matches the
+    lab — the counterpart to `record_confirmed_answer`, which can only capture an answer that was
+    *confirmed*. It writes a `failure-mode` note carrying a `contradicts` edge back to the note it
+    refutes, so conflict detection finds it and every later retrieval of that note arrives marked
+    as disputed instead of reading as settled fact.
+
+    The edge is `contradicts` and never `supersedes`: a failure report says the old claim is wrong,
+    not that this note is the new right answer — it does not contain one. When you *do* know the
+    replacement, write it with `propose_knowledge_note` and give it a `supersedes` relation.
+
+    Args:
+        refutes: The id of the note that did not hold. It must already be in the graph; find it
+            with `find_notes` or `expand_note` first, and never guess one.
+        what_happened: What was actually observed, in the chemist's own terms. This text is the
+            entire value of a negative result — do not summarize it away, and never invent it.
+        compound_smiles: The molecule involved, when there is one.
+        confidence: How sure the reporter is, 0–1. One bad run is not a refutation of a general
+            rule; leave it unset unless the chemist indicated how firm the finding is.
+        held_until: Set this **only** when the chemist says the old claim *used to be true and
+            stopped* — pass the last date it held, and the refuted note is retired in the same
+            review so it stops being served as current. Leave it unset when the claim is simply
+            wrong: `held_until` records that the claim was valid up to that date, which for a
+            never-true claim would be a new false statement, and the `contradicts` edge already
+            keeps the disputed note visible and marked.
+
+    Returns:
+        The submitted PR reference. Nothing changes in the graph until a human merges it.
+
+    Raises:
+        ChemclawError: When `refutes` names no note, or `held_until` predates that note's own
+            `valid_from`.
+    """
+    graph = await asyncio.to_thread(build_graph, settings.knowledge_path)
+    refuted = _require_note(graph, refutes)
+    # The reporter is the turn's authenticated user, not a parameter: attribution the model can
+    # fill in is attribution that can name someone who said nothing. It is the same `require_actor`
+    # rule every other user-triggered write here follows (F4-T3).
+    note = failure_note(
+        refutes,
+        what_happened,
+        reported_by=require_actor(),
+        compound_smiles=compound_smiles,
+        confidence=confidence,
+    )
+    # Both files ride in one submission, so the reviewer signs off on the refutation and the
+    # retirement as the single decision they are (STO-7's `dependencies`, used here for a note that
+    # is amended rather than newly minted). A note that already carries a `valid_to` is left alone:
+    # re-closing it would extend its validity or append the marker twice.
+    retirement = (
+        [close_refuted_note(refuted, note.id, held_until)]
+        if held_until is not None and refuted.valid_to is None
+        else []
+    )
+    reference = await propose_note(note, default_submitter(), dependencies=retirement)
     record_proposal(note.id, reference)
     return reference

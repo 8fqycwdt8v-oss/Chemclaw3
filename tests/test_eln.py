@@ -20,12 +20,21 @@ from chemclaw.ingest.eln.adapter import RawEntry, parse_iso_utc
 from chemclaw.ingest.eln.ingest import IngestError, ingest_reaction
 from chemclaw.ingest.eln.json_adapter import ElnFormatError, JsonExportAdapter
 from chemclaw.ingest.eln.note import note_from_ord_reaction
-from chemclaw.ingest.eln.ord import Component, OrdReaction, Role
+from chemclaw.ingest.eln.ord import (
+    Component,
+    Impurity,
+    OrdReaction,
+    ReactionStep,
+    Role,
+    StepKind,
+)
 from chemclaw.ingest.eln.ord_adapter import OrdFormatError, OrdJsonAdapter
 from chemclaw.ingest.eln.sync import sync_entries
 from chemclaw.ingest.eln.validate import validate_ord
 from chemclaw.kg.note import note_id_for_reaction
 from chemclaw.kg.render import render_note
+from chemclaw.retrieval.retrievers import GraphRetriever
+from chemclaw.science.fingerprints.molfp.search import find_similar_molecules
 from chemclaw.science.fingerprints.store import InMemoryFingerprintStore
 from tests.conftest import FakeSubmitter
 
@@ -1301,3 +1310,179 @@ def test_a_search_hit_id_is_the_note_id_the_ingest_wrote() -> None:
     reaction = _ester()
     written = note_from_ord_reaction(reaction).id
     assert note_id_for_reaction(reaction.reaction_id) == written
+
+
+# --- impurity structures reach the molecule index -------------------------------------
+
+
+def _with_impurities(*impurities: Impurity) -> OrdReaction:
+    """The esterification, plus an observed impurity profile (the KNW-2 half of an outcome)."""
+    return _ester().model_copy(update={"impurities": list(impurities)})
+
+
+def test_an_identified_impurity_is_findable_by_structure() -> None:
+    """An impurity question — "have we seen this one before?" — is a structure question.
+
+    An impurity's SMILES used to reach the note *text* only, so the molecule it names was findable
+    by lexical search and invisible to `similar_molecules`/`substructure_matches` — the exact
+    inverse of the question. Asserted through the search, not through a record count: what matters
+    is that a chemist querying the structure gets the run back.
+    """
+
+    async def _run() -> None:
+        rxn, mol, sub = InMemoryFingerprintStore(), InMemoryFingerprintStore(), FakeSubmitter()
+        # Diethyl ether — an ether by-product of the esterification, charged nowhere in the record.
+        await ingest_reaction(
+            _with_impurities(Impurity(name="ether", smiles="CCOCC")), rxn, mol, sub
+        )
+        hits = await find_similar_molecules(mol, "CCOCC", threshold=0.99)
+        assert [hit.smiles for hit in hits] == ["CCOCC"]
+
+    asyncio.run(_run())
+
+
+def test_an_impurity_with_no_structure_is_skipped_not_fatal() -> None:
+    """An ELN routinely records only a chromatographic name; that is not an error (KNW-2)."""
+
+    async def _run() -> None:
+        rxn, mol, sub = InMemoryFingerprintStore(), InMemoryFingerprintStore(), FakeSubmitter()
+        await ingest_reaction(_with_impurities(Impurity(name="RRT 0.82")), rxn, mol, sub)
+        # The three reaction compounds, and nothing minted from a nameless chromatographic peak.
+        assert len(await mol.all_records()) == 3
+        assert sub.submissions  # the run was still proposed
+
+    asyncio.run(_run())
+
+
+def test_an_unparseable_impurity_structure_is_skipped_and_logged(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A malformed trace-impurity string must not cost the whole experiment.
+
+    `validate_ord` checks the reaction's own components, never the impurity profile, so a
+    structure the analytics software garbled reaches the fingerprinter unchecked. Dropping it
+    keeps the run; logging it keeps the drop visible.
+    """
+
+    async def _run() -> None:
+        rxn, mol, sub = InMemoryFingerprintStore(), InMemoryFingerprintStore(), FakeSubmitter()
+        bad = Impurity(name="garbled", smiles="C1CC")
+        with caplog.at_level(logging.WARNING, logger="chemclaw.ingest.eln.ingest"):
+            await ingest_reaction(_with_impurities(bad), rxn, mol, sub)
+        assert len(await mol.all_records()) == 3
+        assert sub.submissions
+        assert "unparseable impurity SMILES" in caplog.text
+
+    asyncio.run(_run())
+
+
+# --- the note carries its project, and its scale --------------------------------------
+
+
+def test_a_reaction_note_is_reachable_by_its_project_tag(tmp_path: Path) -> None:
+    """`gather_evidence(tag=…)` is documented as the project filter and was inert on reactions.
+
+    Proven through the retriever's own eligibility gate rather than by reading `note.tags`: the
+    tag is worth setting only because a filtered sweep reaches the note, and a wrong tag must
+    still exclude it.
+    """
+
+    async def _run() -> None:
+        note = note_from_ord_reaction(_ester().model_copy(update={"project": "prj-alpha"}))
+        (tmp_path / "reaction").mkdir()
+        (tmp_path / "reaction" / f"{note.id}.md").write_text(render_note(note), encoding="utf-8")
+        retriever = GraphRetriever(str(tmp_path))
+        found = await retriever.retrieve("eln entry", {"tag": "prj-alpha"})
+        assert [chunk.source_note_id for chunk in found] == [note.id]
+        assert await retriever.retrieve("eln entry", {"tag": "prj-beta"}) == []
+
+    asyncio.run(_run())
+
+
+def test_a_reaction_with_no_project_invents_no_tag() -> None:
+    """A record without a project gets no tag — never a placeholder that a filter would match."""
+    assert note_from_ord_reaction(_ester()).tags == []
+
+
+def _charged(*inputs: Component) -> OrdReaction:
+    """The esterification re-charged with explicit amounts (mass balance is unaffected)."""
+    return _ester().model_copy(update={"inputs": list(inputs)})
+
+
+def test_the_notes_scale_is_the_reactant_charge_not_the_flask() -> None:
+    """A 5 g run and a 2 kg run were indistinguishable without reading the prose.
+
+    The solvent here outweighs the reactants nine to one, so any implementation that sums the
+    whole charge reports ~100 g for a 10.6 g run.
+    """
+    note = note_from_ord_reaction(
+        _charged(
+            Component(smiles="CCO", role=Role.REACTANT, mass_mg=4600),
+            Component(smiles="CC(=O)O", role=Role.REACTANT, mass_mg=6000),
+            Component(smiles="Cc1ccccc1", role=Role.SOLVENT, mass_mg=90000),
+        )
+    )
+    assert "- scale: 10.6 g of reactants charged\n" in note.body
+
+
+def test_scale_falls_back_to_millimoles_when_no_mass_was_recorded() -> None:
+    """An ELN records mass or moles, not always both; the note reports whichever it has."""
+    note = note_from_ord_reaction(
+        _charged(
+            Component(smiles="CCO", role=Role.REACTANT, amount_mmol=100),
+            Component(smiles="CC(=O)O", role=Role.REACTANT, amount_mmol=120),
+        )
+    )
+    assert "- scale: 220 mmol of reactants charged\n" in note.body
+
+
+def test_the_charge_sheet_lists_every_input_with_what_was_recorded() -> None:
+    """The machine-legible form behind the one-line scale: who carried the mass, per species."""
+    note = note_from_ord_reaction(
+        _charged(
+            Component(smiles="CCO", role=Role.REACTANT, mass_mg=4600, amount_mmol=100),
+            Component(smiles="Cc1ccccc1", role=Role.SOLVENT),
+        )
+    )
+    assert "- `CCO` (reactant): 4600 mg, 100 mmol\n" in note.body
+    assert "- `Cc1ccccc1` (solvent): amount not recorded\n" in note.body
+
+
+def test_a_record_with_no_amounts_says_nothing_about_scale() -> None:
+    """Silence, not a fabricated zero: nothing was charged *on the record*, so nothing is said."""
+    body = note_from_ord_reaction(
+        _charged(
+            Component(smiles="CCO", role=Role.REACTANT),
+            Component(smiles="CC(=O)O", role=Role.REACTANT),
+        )
+    ).body
+    assert "scale:" not in body
+    assert "## Charge" not in body
+
+
+def test_scale_survives_the_retrieval_excerpt_of_a_procedure_heavy_note() -> None:
+    """Why scale leads the conditions: an excerpt is a blind character prefix of the body.
+
+    `retrieval.retrievers._excerpt` truncates at `note_excerpt_chars`, so a figure appended after
+    the procedure is invisible to exactly the notes that carry the most detail — the ones a
+    process chemist most needs to place on a scale.
+    """
+    steps = [
+        ReactionStep(
+            index=i,
+            kind=StepKind.STIR,
+            text=f"Step {i}: age the batch and monitor conversion by HPLC until complete.",
+        )
+        for i in range(1, 13)
+    ]
+    note = note_from_ord_reaction(
+        _charged(
+            Component(smiles="CCO", role=Role.REACTANT, mass_mg=4600),
+            Component(smiles="CC(=O)O", role=Role.REACTANT, mass_mg=6000),
+        ).model_copy(update={"steps": steps})
+    )
+    excerpt = note.body[: settings.note_excerpt_chars]
+    assert "scale: 10.6 g of reactants charged" in excerpt
+    # The tail of the same note is past the cut — which is where a scale figure appended after
+    # the procedure would have sat, invisible to every hit on a detailed run.
+    assert "Step 12" in note.body and "Step 12" not in excerpt

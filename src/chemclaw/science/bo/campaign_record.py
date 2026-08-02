@@ -19,7 +19,9 @@ to "start" one first. Two chemists optimizing the same space converge on the sam
 correct: it is the same campaign.
 
 This is the dependency-free half — models, both backends' contract, the in-memory backend, and the
-facade the connector tool calls. The psycopg half is `campaign_record_store.py`, imported lazily:
+two facades the connector tools call (`record_suggestion` writes, `read_campaign_thread` reads back
+what a later session needs to continue). The psycopg half is `campaign_record_store.py`, imported
+lazily:
 the same split `chemclaw.kg.proposal` uses, so a process without Postgres never pulls a driver for
 a store it will not use.
 """
@@ -227,3 +229,67 @@ async def record_suggestion(
     except Exception:
         logger.warning("could not record BO suggestion for %s", campaign_id, exc_info=True)
     return campaign_id
+
+
+class CampaignThread(BaseModel):
+    """A recorded campaign in the shape a later session needs to pick it back up.
+
+    The three parts of "where were we": the decision space as it was last framed, the observations
+    the last suggestion rested on, and the candidates that suggestion proposed. That is the whole
+    ask→observe→ask loop across sessions — without it, turn N+1 can only recover turn N's runs by
+    re-reading them out of the chat transcript, which is why `suggest_next_experiment` telling the
+    chemist to quote a `campaign_id` back was, until now, advice with nothing behind it.
+
+    Only the **latest** suggestion's observations are carried, and that is complete rather than a
+    truncation: each turn passes the campaign's whole run history, so the newest suggestion holds
+    everything known when it was made.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    campaign_id: str = Field(min_length=1)
+    objective: str = Field(min_length=1)
+    direction: str = Field(min_length=1)
+    problem: OptimizationProblem
+    observations: list[Observation] = Field(default_factory=list)
+    last_candidates: list[Candidate] = Field(default_factory=list)
+    opened_by: str = ""
+    last_asked_at: datetime | None = None
+
+
+async def read_campaign_thread(campaign_id: str) -> CampaignThread:
+    """Read one campaign back, or raise saying why the id did not resolve.
+
+    **Raises, where `record_suggestion` deliberately swallows.** The two are not symmetric: a write
+    is incidental to a suggestion the chemist already has, so losing it must not cost them the
+    suggestion — but a read *is* the whole request, and returning an empty thread on a failure
+    would answer "this campaign has no history" to a question about a campaign that does.
+
+    The not-found message names the hash property on purpose. `campaign_id_for` is a hash of the
+    decision space, so the common cause of an unresolvable id is not a typo but a space that has
+    since changed — one widened bound, one swapped ligand — which yields a *different* id rather
+    than a conflicting record. That is the fact the caller needs to act on, and it is the reason
+    resuming is a separate tool rather than an optional argument on `suggest_next_experiment`:
+    given a stale id and a changed space, merging would silently seed a new campaign with
+    observations from a different one, and neither the model nor the chemist would see it happen.
+    """
+    store = campaign_store()
+    campaign = await store.read_campaign(campaign_id)
+    if campaign is None:
+        raise ValueError(
+            f"no campaign is recorded under {campaign_id!r}. A campaign id is a hash of its "
+            "decision space, so a space that has changed since — a widened bound, a swapped or "
+            "added option — has a different id and no history under this one. Ask for a fresh "
+            "suggestion over the current space instead of resuming."
+        )
+    latest = await store.suggestions_for(campaign_id, 1)
+    return CampaignThread(
+        campaign_id=campaign.campaign_id,
+        objective=campaign.objective,
+        direction=campaign.direction,
+        problem=OptimizationProblem.model_validate(campaign.problem),
+        observations=latest[0].observations if latest else [],
+        last_candidates=latest[0].candidates if latest else [],
+        opened_by=campaign.opened_by,
+        last_asked_at=campaign.last_asked_at,
+    )

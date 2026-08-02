@@ -4,10 +4,15 @@ Maps our neutral `OptimizationProblem`/`Observation` types to BoFire's domain an
 strategies, proposes candidates, and maps results back to our `Candidate` type.
 Nothing BoFire leaks past this boundary (gate G6), so the engine could be swapped
 without touching the campaign, agents, or skills. `factorial_design` (D-092) is the
-same adapter shape for BoFire's classical categorical `FactorialStrategy`, alongside
-the Bayesian-optimization strategies.
+same adapter shape for BoFire's classical `FractionalFactorialStrategy`, alongside
+the Bayesian-optimization strategies — full grid by default, and a reduced two-level
+design when the chemist's plate cannot hold the whole one.
 """
 
+import itertools
+import operator
+import string
+from functools import reduce
 from typing import Any
 
 import pandas as pd
@@ -25,6 +30,7 @@ from bofire.data_models.strategies.api import (
     SoboStrategy,
 )
 from bofire.strategies import api as strategies
+from bofire.utils.doe import get_generator
 
 from chemclaw.core.config import settings
 from chemclaw.science.bo.problem import (
@@ -75,6 +81,16 @@ def _categorical_input(
     )
 
 
+def _objective_output(problem: OptimizationProblem) -> ContinuousOutput:
+    """The problem's single objective as a BoFire output, whichever domain shape needs it."""
+    objective = (
+        MinimizeObjective(w=1.0)
+        if problem.objective.direction == "minimize"
+        else MaximizeObjective(w=1.0)
+    )
+    return ContinuousOutput(key=problem.objective.name, objective=objective)
+
+
 def _to_domain(problem: OptimizationProblem) -> Domain:
     """Translate our problem into a BoFire `Domain` (inputs + one objective output)."""
     inputs = []
@@ -85,13 +101,9 @@ def _to_domain(problem: OptimizationProblem) -> Domain:
             )
         else:
             inputs.append(_categorical_input(parameter))
-    objective = (
-        MinimizeObjective(w=1.0)
-        if problem.objective.direction == "minimize"
-        else MaximizeObjective(w=1.0)
+    return Domain(
+        inputs=Inputs(features=inputs), outputs=Outputs(features=[_objective_output(problem)])
     )
-    output = ContinuousOutput(key=problem.objective.name, objective=objective)
-    return Domain(inputs=Inputs(features=inputs), outputs=Outputs(features=[output]))
 
 
 def _cast(parameter: ContinuousParameter | CategoricalParameter, raw: Any) -> ParamValue:
@@ -190,17 +202,99 @@ def propose_candidates(
     return _frame_to_candidates(problem, strategy.ask(n))
 
 
-def factorial_design(problem: OptimizationProblem) -> ScreeningDesign:
-    """Generate every combination of `problem`'s categorical parameters (a full-factorial screen).
+def _resolution(generator: str) -> int:
+    """The resolution of a two-level design with this generator: its shortest defining word.
+
+    Computed rather than reported as a run count, because the run count does not say what was
+    given up. A generator string names one word per factor — a single letter for a base factor,
+    a product like `abc` for a factor aliased onto that interaction — so each derived factor
+    contributes the defining word `abc·d`, and the defining relation is every product of those.
+    The shortest word in that group *is* the resolution, which is the number a chemist needs to
+    know whether a main effect they read off the screen could really be a two-factor interaction.
+
+    Derived here rather than taken from BoFire because BoFire only exposes it as a formatted alias
+    listing (`bofire.utils.doe.get_alias_structure`), and parsing prose to recover a number is a
+    worse dependency than restating a three-line definition.
+    """
+    words = generator.split()
+    # A factor whose word is a single letter is a base factor and aliases nothing.
+    defining = [
+        frozenset(word) ^ {letter}
+        for letter, word in zip(string.ascii_lowercase, words, strict=False)
+        if len(word) > 1
+    ]
+    return min(
+        len(reduce(operator.xor, combination))
+        for size in range(1, len(defining) + 1)
+        for combination in itertools.combinations(defining, size)
+    )
+
+
+def _fractional_design(problem: OptimizationProblem, n_generators: int) -> ScreeningDesign:
+    """A reduced two-level screen: `2**-n_generators` of the grid, with its resolution stated.
+
+    BoFire fractionates the *continuous* half of a domain and always crosses the categorical half
+    in full (`FractionalFactorialStrategy._get_categorical_design` enumerates every combination and
+    never consults `n_generators`) — measured: seven two-level `CategoricalInput`s give 128 runs at
+    every `n_generators` value that validates at all. So the only way to express a reduced screen
+    over categorical factors is to hand BoFire the factors as continuous inputs on [0, 1], let it
+    build the fractional design at those two bounds, and map each bound back to its label. That is
+    what this does; `n_center=0` because a centre point at 0.5 would decode to neither level.
+
+    Two-level only, and a factor with a different number of levels is **refused** rather than
+    quietly crossed in full: this is a two-level design by construction, and a three-level factor
+    smuggled in would make the returned resolution describe only part of the design — the exact
+    "looks complete while omitting a factor" failure `factorial_design` refuses continuous inputs
+    to avoid.
+    """
+    # Total: `factorial_design` has already refused any continuous parameter before calling here.
+    parameters = [p for p in problem.parameters if isinstance(p, CategoricalParameter)]
+    wrong_levels = [p.name for p in parameters if len(p.categories) != 2]
+    if wrong_levels:
+        raise ValueError(
+            f"a fractional design is a two-level design; {wrong_levels!r} have a different "
+            "number of levels — give every factor exactly two levels, or ask for n_generators=0 "
+            "to get the full grid"
+        )
+    # Raised here rather than from inside the strategy's validator so the caller sees a plain
+    # ValueError ("Design not possible, as main factors are confounded with each other") instead of
+    # a pydantic ValidationError wrapping it.
+    generator = get_generator(n_factors=len(parameters), n_generators=n_generators)
+    domain = Domain(
+        inputs=Inputs(
+            features=[ContinuousInput(key=p.name, bounds=(0.0, 1.0)) for p in parameters]
+        ),
+        outputs=Outputs(features=[_objective_output(problem)]),
+    )
+    frame = strategies.map(
+        FractionalFactorialStrategy(domain=domain, generator=generator, n_center=0)
+    ).ask()
+    levels = {p.name: p.categories for p in parameters}
+    runs: list[dict[str, ParamValue]] = [
+        {name: options[0] if row[name] < 0.5 else options[1] for name, options in levels.items()}
+        for _, row in frame.iterrows()
+    ]
+    return ScreeningDesign(runs=runs, resolution=_resolution(generator))
+
+
+def factorial_design(problem: OptimizationProblem, n_generators: int = 0) -> ScreeningDesign:
+    """Screen `problem`'s categorical factors — the full grid, or a reduced fraction of it.
+
+    `n_generators=0` (the default) is every combination: the plain Cartesian product, which is what
+    BoFire's `FractionalFactorialStrategy` returns on an all-categorical domain. Each generator
+    beyond that halves the run count, so seven two-level factors go from 128 runs to 64, 32 or 16 —
+    which is the difference between a design that fits a 96-well plate and one that does not.
 
     Raises `ValueError` if `problem` names any continuous parameter (D-092 research follow-up):
-    on an all-categorical domain BoFire's `FractionalFactorialStrategy` (`n_generators=0`, the
-    default) returns the plain Cartesian product, but the same class silently *fractionates* a
-    continuous input instead of erroring — rejected up front instead (gate G4), since a design that
-    looks complete but quietly omits or fractionates a factor is worse than a clear refusal.
-    Reformulate a continuous factor as a small set of discrete levels (e.g. temperature as
-    "low"/"high") to include it in a screen, or use `propose_candidates`/`initial_candidates` for a
-    continuous decision space.
+    the same class silently *fractionates* a continuous input to its two bounds instead of erroring,
+    and a design that looks complete but quietly omits or fractionates a factor is worse than a
+    clear refusal (gate G4). Reformulate a continuous factor as a small set of discrete levels
+    (e.g. temperature as "low"/"high") to include it in a screen, or use
+    `propose_candidates`/`initial_candidates` for a continuous decision space.
+
+    The returned `ScreeningDesign` carries the design's `resolution` and a `summary` sentence
+    naming it, so a reduced design cannot be presented as an exhaustive one — the same reason the
+    continuous refusal above exists, applied to the reduction this function now performs itself.
     """
     continuous = [p.name for p in problem.parameters if isinstance(p, ContinuousParameter)]
     if continuous:
@@ -208,6 +302,12 @@ def factorial_design(problem: OptimizationProblem) -> ScreeningDesign:
             "factorial_design only supports categorical parameters; "
             f"{continuous!r} are continuous — discretize them into levels first"
         )
+    if n_generators < 0:
+        # Not left to BoFire: a negative count reaches `fracfact` as a malformed generator string
+        # and comes back as a pydantic ValidationError about a generator the caller never wrote.
+        raise ValueError(f"n_generators must be 0 (the full grid) or more; got {n_generators}")
+    if n_generators:
+        return _fractional_design(problem, n_generators)
     strategy = strategies.map(FractionalFactorialStrategy(domain=_to_domain(problem)))
     frame = strategy.ask()
     categorical_names = [p.name for p in problem.parameters]

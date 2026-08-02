@@ -18,10 +18,14 @@ from pydantic import BaseModel
 
 from chemclaw.core.config import settings
 from chemclaw.core.reagents import resolve_compound_name
-from chemclaw.ingest.eln.ord import OrdReaction
+from chemclaw.ingest.eln.ord import Impurity, OrdReaction
 from chemclaw.kg.note import Note
 from chemclaw.memory.progression import Progression, ProgressionStep, progression
 from chemclaw.memory.similarity import cluster_by_similarity, reaction_fingerprints
+
+# What a table cell shows when the record is silent. One spelling, because `_quality_columns`
+# decides a column is empty by comparing against it.
+_MISSING = "—"
 
 
 class OptimizationCampaign(BaseModel):
@@ -70,8 +74,9 @@ def optimization_campaign_note(
     """Build an agent `optimization-campaign` note: the runs in time order, with their deltas.
 
     Each run is one table row — its reaction note (cited), the date it was performed, headline
-    temperature/time, yield, and **what it changed relative to the run before it** — followed by
-    a per-run block carrying the hypothesis it was testing and a short procedure excerpt, so the
+    temperature/time, yield, the outcome-quality columns this campaign actually recorded
+    (`_quality_columns`), and **what it changed relative to the run before it** — followed by a
+    per-run block carrying the hypothesis it was testing and a short procedure excerpt, so the
     intent and the process detail are visible, not just the numbers.
 
     The ordering is chronological (D-162), because a campaign is usually not a screen run in one
@@ -89,18 +94,38 @@ def optimization_campaign_note(
     # disagreement would have mispaired every row silently rather than raising.
     series = progression([reactions[rid] for rid in campaign.reaction_ids])
     members = [reactions[step.reaction_id] for step in series.steps]
+    quality = _quality_columns(members)
+    headers = [
+        "Run",
+        "Performed",
+        "Temp (°C)",
+        "Time (h)",
+        "Yield (%)",
+        *(name for name, _ in quality),
+        "Changed vs previous",
+    ]
     rows = "\n".join(
-        f"| [[reaction-{step.reaction_id}]] | {_date_cell(step.performed_at)} "
-        f"| {_cell(run.temperature_c)} | {_cell(run.time_h)} | {_cell(run.yield_percent)} "
-        f"| {_changes_cell(step, first=index == 0)} |"
+        "| "
+        + " | ".join(
+            [
+                f"[[reaction-{step.reaction_id}]]",
+                _date_cell(step.performed_at),
+                _cell(run.temperature_c),
+                _cell(run.time_h),
+                _cell(run.yield_percent),
+                *(cells[index] for _, cells in quality),
+                _changes_cell(step, first=index == 0),
+            ]
+        )
+        + " |"
         for index, (step, run) in enumerate(zip(series.steps, members, strict=True))
     )
     body = (
         f"Optimization campaign: {len(members)} runs of the same transformation "
         f"(DRFP-similar), representative `{members[0].reaction_smiles()}`.\n\n"
         f"{_ordering_caveat(series)}\n\n"
-        "| Run | Performed | Temp (°C) | Time (h) | Yield (%) | Changed vs previous |\n"
-        "|-----|-----------|-----------|----------|-----------|---------------------|\n"
+        f"| {' | '.join(headers)} |\n"
+        f"|{'|'.join('---' for _ in headers)}|\n"
         f"{rows}\n"
     )
     detail = "\n".join(block for r in members if (block := _run_detail(r)))
@@ -164,14 +189,65 @@ def _run_detail(reaction: OrdReaction) -> str:
     return f"- [[reaction-{reaction.reaction_id}]]:\n" + "\n".join(lines)
 
 
+def _quality_columns(members: list[OrdReaction]) -> list[tuple[str, list[str]]]:
+    """The outcome columns beyond yield — purity and the impurity profile — as `(header, cells)`.
+
+    A process campaign is rarely optimizing yield: it is optimizing the impurity that yield hides,
+    and this is the one artifact built for side-by-side reading, so the three numbers a chemist
+    actually compares belong in its rows. They sit between Yield and "Changed vs previous" —
+    outcomes grouped together, with the widest free-text column left last.
+
+    **A column appears only if some run in this campaign recorded it.** All three fields are
+    optional on `OrdReaction`, and a column of dashes is worse than no column: it costs width in
+    every row, invites the reader to conclude the impurity was measured and found absent, and
+    pushes the columns that do carry data off the side of a narrow view. Emptiness is decided from
+    the rendered cells rather than from a per-field predicate, so one rule covers all three and
+    "recorded" cannot come to mean something different per column. Within a column that survives,
+    a run that is missing the value keeps the table's existing `—`, which reads as "not measured
+    here" against neighbours that were.
+    """
+    candidates = [
+        ("Purity (%)", [_cell(run.purity_percent) for run in members]),
+        ("Major impurity", [_impurity_cell(_major_impurity(run)) for run in members]),
+        (
+            "Impurity area (%)",
+            [_cell(imp.area_percent if (imp := _major_impurity(run)) else None) for run in members],
+        ),
+    ]
+    return [(header, cells) for header, cells in candidates if any(c != _MISSING for c in cells)]
+
+
+def _major_impurity(reaction: OrdReaction) -> Impurity | None:
+    """The impurity a chemist would call the major one, or `None` when the record cannot say.
+
+    Ranked by recorded `area_percent`, the number process development actually chases. When no
+    impurity carries an area% the list is unranked, and naming one anyway would be the same
+    fabrication `eln.note._principal_product` refuses for products — the cell would look like
+    evidence about which impurity dominated while being an artifact of the export's ordering.
+    A single recorded impurity is the exception that needs no ranking: it is the only one the
+    record names, so calling it the major one adds no claim.
+    """
+    ranked = [imp for imp in reaction.impurities if imp.area_percent is not None]
+    if ranked:
+        return max(ranked, key=lambda imp: imp.area_percent or 0.0)
+    return reaction.impurities[0] if len(reaction.impurities) == 1 else None
+
+
+def _impurity_cell(impurity: Impurity | None) -> str:
+    """Name an impurity in a table cell, by whatever identity the record carries."""
+    if impurity is None:
+        return _MISSING
+    return impurity.name or f"`{impurity.smiles}`"
+
+
 def _cell(value: float | None) -> str:
     """Render an optional numeric condition/outcome for a table cell (blank when unknown)."""
-    return "—" if value is None else f"{value:g}"
+    return _MISSING if value is None else f"{value:g}"
 
 
 def _date_cell(value: date | None) -> str:
     """Render the date a run was performed (blank when the source did not record one)."""
-    return "—" if value is None else value.isoformat()
+    return _MISSING if value is None else value.isoformat()
 
 
 def _excerpt(reaction: OrdReaction) -> str:

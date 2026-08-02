@@ -1,14 +1,24 @@
 """Tests for the agent knowledge-graph tools (plan steps 2.5, 2.6)."""
 
 import asyncio
+from datetime import date
 from pathlib import Path
 
 import pytest
 
 import chemclaw.agent.graph_tools as graph_tools
-from chemclaw.agent.graph_tools import expand_note, find_notes, propose_knowledge_note
+from chemclaw.agent.graph_tools import (
+    expand_note,
+    find_notes,
+    propose_knowledge_note,
+    record_failure,
+)
+from chemclaw.agent.identity_context import reset_current_identity, set_current_identity
 from chemclaw.core.config import settings
 from chemclaw.core.errors import ChemclawError
+from chemclaw.kg.conflicts import find_conflicts
+from chemclaw.kg.note import Note, parse_note
+from chemclaw.kg.pr_gate import NoteSubmission
 from tests.conftest import FakeSubmitter
 
 
@@ -193,3 +203,179 @@ def test_propose_knowledge_note_uses_gate(monkeypatch: pytest.MonkeyPatch) -> No
     )
     assert ref == "pr://note/reaction-x"
     assert fake.submissions[0].files[0].path.endswith("reaction/reaction-x.md")
+
+
+def _seed_playbook(tmp_path: Path, **frontmatter: str) -> None:
+    """A merged, human-authored playbook — the kind of note a chemist reports as wrong."""
+    extra = "".join(f"{key}: {value}\n" for key, value in frontmatter.items())
+    (tmp_path / "playbook.md").write_text(
+        f"---\nid: playbook-pd\ntype: playbook\n{extra}---\nUse 5 mol% Pd for the aryl coupling.\n",
+        encoding="utf-8",
+    )
+
+
+def _submitted(submission: NoteSubmission, tmp_path: Path) -> dict[str, Note]:
+    """Parse every file in a submission back off disk, keyed by note id.
+
+    Round-tripping through the parser rather than reading the model in memory is the point: what
+    a reviewer merges is these bytes, so a correction that only exists in the object graph is not
+    a correction.
+    """
+    parsed = {}
+    for index, file in enumerate(submission.files):
+        path = tmp_path / f"submitted-{index}.md"
+        path.write_text(file.content, encoding="utf-8")
+        note = parse_note(path)
+        parsed[note.id] = note
+    return parsed
+
+
+def test_record_failure_submits_a_refutation_conflict_detection_can_see(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The loop that closes: a chemist's report becomes a note that flags the claim it refutes.
+
+    Asserted through `find_conflicts` over the merged corpus rather than by inspecting the note's
+    fields, because "the graph now knows this is disputed" is the behaviour — a `failure-mode` note
+    whose edge conflict detection cannot read would satisfy every structural check and change
+    nothing a chemist ever sees.
+    """
+    _seed_playbook(tmp_path)
+    monkeypatch.setattr(settings, "knowledge_dir", str(tmp_path))
+    fake = FakeSubmitter()
+    monkeypatch.setattr(graph_tools, "default_submitter", lambda: fake)
+
+    ref = asyncio.run(
+        record_failure("playbook-pd", "Ran it four times at scale; the yield was half.")
+    )
+
+    assert ref.startswith("pr://note/failure-")
+    notes = _submitted(fake.submissions[0], tmp_path)
+    (failure,) = notes.values()
+    assert failure.type == "failure-mode"
+    merged = [parse_note(tmp_path / "playbook.md"), failure]
+    assert [(c.kind, c.other_id) for c in find_conflicts(merged, as_of=date.today())] == [
+        ("declared", "playbook-pd")
+    ]
+
+
+def test_record_failure_attributes_the_report_to_the_authenticated_user(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Provenance comes from the turn's identity, never from a string the model composed.
+
+    A reporter the model can fill in is a reporter it can get wrong — and this note's whole content
+    is an accusation that curated knowledge is false, so "who says so" is the load-bearing field.
+    """
+    _seed_playbook(tmp_path)
+    monkeypatch.setattr(settings, "knowledge_dir", str(tmp_path))
+    fake = FakeSubmitter()
+    monkeypatch.setattr(graph_tools, "default_submitter", lambda: fake)
+
+    tokens = set_current_identity("chemist-oid-42", frozenset())
+    try:
+        asyncio.run(record_failure("playbook-pd", "it did not dissolve"))
+    finally:
+        reset_current_identity(tokens)
+
+    (failure,) = _submitted(fake.submissions[0], tmp_path).values()
+    assert failure.source == "feedback:chemist-oid-42"
+    assert "chemist-oid-42" in failure.body
+
+
+def test_record_failure_leaves_the_refuted_note_current_by_default(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Reporting a claim wrong does not mean it was true until today, so nothing is retired.
+
+    `valid_to` is a valid-time bound: closing a never-true claim would assert it held up to the
+    reporting date, and would drop it out of the retrieval-time conflict scan that is the only
+    thing marking it disputed. So the default submission is the failure note alone.
+    """
+    _seed_playbook(tmp_path)
+    monkeypatch.setattr(settings, "knowledge_dir", str(tmp_path))
+    fake = FakeSubmitter()
+    monkeypatch.setattr(graph_tools, "default_submitter", lambda: fake)
+
+    asyncio.run(record_failure("playbook-pd", "the yield was half"))
+
+    assert len(fake.submissions[0].files) == 1
+    assert parse_note(tmp_path / "playbook.md").valid_to is None
+
+
+def test_record_failure_retires_a_claim_that_stopped_holding_in_the_same_submission(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The correction half: the superseded claim stops reading as current, in one reviewable PR.
+
+    Both files ride together so a human signs off on the refutation and the retirement as the one
+    decision they are. The amended note keeps its own content and gains the end date plus a link to
+    the note that ended it.
+    """
+    _seed_playbook(tmp_path)
+    monkeypatch.setattr(settings, "knowledge_dir", str(tmp_path))
+    fake = FakeSubmitter()
+    monkeypatch.setattr(graph_tools, "default_submitter", lambda: fake)
+
+    asyncio.run(
+        record_failure(
+            "playbook-pd",
+            "the supplier changed the Pd lot and 5 mol% stopped converting",
+            held_until=date(2026, 3, 1),
+        )
+    )
+
+    notes = _submitted(fake.submissions[0], tmp_path)
+    amended = notes["playbook-pd"]
+    failure = next(note for note in notes.values() if note.type == "failure-mode")
+    assert amended.valid_to == date(2026, 3, 1)
+    assert amended.is_current(date(2026, 1, 1))  # it really did hold, and still says so
+    assert not amended.is_current(date(2026, 6, 1))  # and no longer reads as current fact
+    assert "Use 5 mol% Pd" in amended.body  # the original claim is kept, never edited away
+    assert failure.id in amended.outgoing_links()  # and points at what ended it
+
+
+def test_record_failure_does_not_reclose_an_already_retired_note(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Re-closing would extend a closed note's validity and append the marker twice."""
+    _seed_playbook(tmp_path, valid_to="2025-01-01")
+    monkeypatch.setattr(settings, "knowledge_dir", str(tmp_path))
+    fake = FakeSubmitter()
+    monkeypatch.setattr(graph_tools, "default_submitter", lambda: fake)
+
+    asyncio.run(record_failure("playbook-pd", "still does not work", held_until=date(2026, 3, 1)))
+
+    assert len(fake.submissions[0].files) == 1  # the failure note only
+
+
+def test_record_failure_on_an_unknown_note_says_so_to_the_model(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A `ChemclawError` reaches the model verbatim; anything else becomes a generic failure.
+
+    And nothing is submitted: a refutation of a note that does not exist would be a `contradicts`
+    edge to nowhere, which `find_conflicts` drops and `kg-validate` fails.
+    """
+    _seed_playbook(tmp_path)
+    monkeypatch.setattr(settings, "knowledge_dir", str(tmp_path))
+    fake = FakeSubmitter()
+    monkeypatch.setattr(graph_tools, "default_submitter", lambda: fake)
+
+    with pytest.raises(ChemclawError, match="no note with id 'playbook-typo'"):
+        asyncio.run(record_failure("playbook-typo", "the yield was half"))
+    assert fake.submissions == []
+
+
+def test_record_failure_refuses_an_end_date_before_the_note_began(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A backwards window is rejected with both dates, not clamped into a date nobody asked for."""
+    _seed_playbook(tmp_path, valid_from="2026-05-01")
+    monkeypatch.setattr(settings, "knowledge_dir", str(tmp_path))
+    fake = FakeSubmitter()
+    monkeypatch.setattr(graph_tools, "default_submitter", lambda: fake)
+
+    with pytest.raises(ChemclawError, match="only became valid on 2026-05-01"):
+        asyncio.run(record_failure("playbook-pd", "no good", held_until=date(2026, 3, 1)))
+    assert fake.submissions == []

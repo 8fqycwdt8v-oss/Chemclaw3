@@ -132,6 +132,64 @@ def test_report_id_is_ref_safe_and_unique() -> None:
     asyncio.run(_run())
 
 
+def _section(*chunks: EvidenceChunk) -> SynthesizedSection:
+    """One rendered section, so a provenance test asserts on the bullet and nothing else."""
+    return SynthesizedSection(heading="S", memory_layer="episodic", evidence=list(chunks))
+
+
+def test_an_ordinary_bullet_carries_no_extra_metadata() -> None:
+    """The common chunk — no conflict, no stated confidence, human-authored — renders as before.
+
+    Provenance is rendered only where it is informative. Rendering all of it unconditionally is
+    the failure this pins: an empty metadata line under every bullet buries the one bullet that
+    carries a warning, which is the only bullet the reader had to see.
+    """
+    chunk = EvidenceChunk(content="Yield rose to 85%.", source_note_id="reaction-a", retriever="g")
+    body = report_note(Report(title="R", sections=[_section(chunk)])).body
+    assert "- Yield rose to 85%. ([[reaction-a]], via g)\n" in body
+
+
+def test_a_conflicting_chunk_warns_instead_of_reading_as_corroboration() -> None:
+    """A flagged disagreement must reach the page; the report dropped `conflicts_with` entirely.
+
+    `kg.conflicts` exists so retrieval marks notes that disagree rather than returning both
+    silently, and the report is exactly where two agreeing-looking bullets get counted as two
+    independent confirmations. The conflicting id is named but *not* wikilinked: the report warns
+    about that note, it does not cite it, and a link would put it in the report's own citations.
+    """
+    chunk = EvidenceChunk(
+        content="Yield rose to 85%.",
+        source_note_id="reaction-a",
+        retriever="g",
+        conflicts_with=["reaction-b"],
+    )
+    note = report_note(Report(title="R", sections=[_section(chunk)]))
+    assert "**Conflicts with reaction-b**" in note.body
+    assert "independent confirmations" in note.body
+    assert note.outgoing_links() == ["reaction-a"]
+
+
+def test_two_chunks_differing_only_in_provenance_render_differently() -> None:
+    """An uncertain agent-drafted note read identically to a human-merged one (D-160).
+
+    Same sentence, same retriever: the only difference is who wrote the source note and how sure
+    it is — which is the whole of "how much of this was AI-drafted?", and the draft answered it
+    the same way for both.
+    """
+    text = "Yield rose to 85%."
+    human = EvidenceChunk(content=text, source_note_id="reaction-a", retriever="g")
+    agent = EvidenceChunk(
+        content=text,
+        source_note_id="playbook-b",
+        retriever="g",
+        created_by="agent",
+        confidence=0.4,
+    )
+    body = report_note(Report(title="R", sections=[_section(human, agent)])).body
+    assert "- Yield rose to 85%. ([[reaction-a]], via g)\n" in body
+    assert "- Yield rose to 85%. ([[playbook-b]], via g, agent-authored, confidence 0.40)\n" in body
+
+
 # --- adversarial verify (5b.4) --------------------------------------------------------
 
 

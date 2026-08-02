@@ -27,9 +27,11 @@ from chemclaw.science.bo.campaign_record import (
     Suggestion,
     campaign_id_for,
     campaign_store,
+    read_campaign_thread,
     record_suggestion,
 )
 from chemclaw.science.bo.problem import (
+    Candidate,
     CategoricalParameter,
     ContinuousParameter,
     Objective,
@@ -228,3 +230,124 @@ def test_suggestions_are_append_only(store: InMemoryCampaignStore) -> None:
 
     assert first != second
     assert len(_run(store.suggestions_for(campaign_id_for(problem), 10))) == 2
+
+
+# --- reading the campaign back, which is what makes writing it worth anything -----------------
+
+
+def test_a_later_session_recovers_the_space_and_the_runs_it_never_saw(
+    store: InMemoryCampaignStore,
+) -> None:
+    """User story 3.2: ask, observe, ask again — across sessions, not across one transcript.
+
+    The record was written on every suggestion and had no reader, so turn N+1 could recover turn
+    N's observations only from the chat transcript. This is the whole loop: one turn records, a
+    second turn holding *nothing but the id* gets the decision space and the runs back.
+    """
+    problem = _problem()
+    observations = [
+        Observation(params={"temperature": 40.0, "ligand": "PPh3"}, value=55.0),
+        Observation(params={"temperature": 80.0, "ligand": "dppf"}, value=78.0),
+    ]
+    campaign_id = _run(
+        record_suggestion(
+            problem=problem,
+            candidates=[Candidate(params={"temperature": 95.0, "ligand": "dppf"})],
+            observations=observations,
+            calc_refs=[],
+            provenance=("chemist-a", "session-1", "corr-1"),
+        )
+    )
+
+    thread = _run(read_campaign_thread(campaign_id))
+
+    assert thread.problem == problem
+    assert [o.value for o in thread.observations] == [55.0, 78.0]
+    assert [c.params["temperature"] for c in thread.last_candidates] == [95.0]
+    assert (thread.objective, thread.direction) == ("yield", "maximize")
+    assert thread.opened_by == "chemist-a"
+
+
+def test_resuming_returns_the_latest_turn_s_evidence_not_the_first(
+    store: InMemoryCampaignStore,
+) -> None:
+    """A resumed campaign must continue from what is known now, not from where it started.
+
+    Each turn passes the campaign's whole history, so the newest suggestion holds all of it —
+    reading the oldest, or merging every turn's list, would resume from stale or duplicated runs.
+    """
+    problem = _problem()
+    for count in (1, 2, 3):
+        _run(
+            record_suggestion(
+                problem=problem,
+                candidates=[],
+                observations=[
+                    Observation(params={"temperature": 40.0 + i, "ligand": "PPh3"}, value=50.0 + i)
+                    for i in range(count)
+                ],
+                calc_refs=[],
+                provenance=("chemist-a", "session-1", "corr-1"),
+            )
+        )
+
+    thread = _run(read_campaign_thread(campaign_id_for(problem)))
+
+    assert [o.value for o in thread.observations] == [50.0, 51.0, 52.0]
+
+
+def test_an_unknown_id_says_the_space_changed_rather_than_answering_from_nothing(
+    store: InMemoryCampaignStore,
+) -> None:
+    """The failure mode that decided the design: a hashed id cannot conflict, only miss.
+
+    A changed decision space yields a *different* id, so an unresolvable id means "this is a new
+    campaign" — not "your history is lost". Returning an empty thread would answer a question about
+    a real campaign with silence, and merging into a suggestion call would seed a new campaign with
+    another one's runs invisibly.
+    """
+    _run(
+        record_suggestion(
+            problem=_problem(),
+            candidates=[],
+            observations=[],
+            calc_refs=[],
+            provenance=("chemist-a", "", ""),
+        )
+    )
+    widened = campaign_id_for(_problem(upper=140.0))
+
+    with pytest.raises(ValueError, match="decision space"):
+        _run(read_campaign_thread(widened))
+
+
+def test_the_bo_connector_serves_and_declares_resuming(store: InMemoryCampaignStore) -> None:
+    """Reachability is the item: the store had both backends, a migration, and no caller at all.
+
+    Both halves, because either alone leaves it unreachable — a tool the MCP server serves but the
+    manifest does not allow-list is never advertised to the agent, and a manifest entry with no
+    tool behind it fails the first time a chemist asks.
+    """
+    from chemclaw.connectors.bo.server.tools import resume_campaign, server
+    from chemclaw.connectors.registry import discovered
+
+    campaign_id = _run(
+        record_suggestion(
+            problem=_problem(),
+            candidates=[],
+            observations=[Observation(params={"temperature": 40.0, "ligand": "PPh3"}, value=55.0)],
+            calc_refs=[],
+            provenance=("chemist-a", "", ""),
+        )
+    )
+
+    thread = _run(resume_campaign(campaign_id))
+    assert [o.value for o in thread.observations] == [55.0]
+
+    assert "resume_campaign" in {tool.name for tool in _run(server.list_tools())}
+    endpoint = discovered()["bo"][1].endpoint
+    # The `bo` bundle declares an endpoint; asserting it rather than narrowing with a cast keeps
+    # the failure legible if a future manifest drops it.
+    assert endpoint is not None
+    assert "resume_campaign" in endpoint.tools
+    assert "resume_campaign" in endpoint.read_only

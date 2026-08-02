@@ -18,11 +18,16 @@ endpoint:
     mode: none
   tools:
     - suggest_next_experiment
+    - resume_campaign
     - generate_screening_design
-  # Both propose experiments and return them; neither runs one or writes anything. The campaign
-  # that *does* persist state is the declared job below, which is gated by being a job.
+  # The two design tools propose experiments and return them; neither runs one. `resume_campaign`
+  # only reads the campaign record back — it is what makes the `campaign_id` that
+  # `suggest_next_experiment` hands out worth quoting, since without it a later session could
+  # recover an optimization's history only from the chat transcript. The job below *does* persist
+  # state, and is gated by being a job.
   read_only:
     - suggest_next_experiment
+    - resume_campaign
     - generate_screening_design
 
 jobs:
