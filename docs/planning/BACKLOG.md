@@ -8,22 +8,6 @@ Prioritized open action items. Top = next. Keep in sync with `docs/planning/impl
 Each reproduced against a running deployment; evidence in `docs/archive/live-user-stories-2026-08.md`
 and `tasks/live-test/`. The fixed ones are not listed — see the ADR and the commits on that run.
 
-- [ ] **The answer verifier checks the wrong thing, and its metric rewards citing nothing** — [M].
-      `agent/verifier.py:190-205` `gather_cited_evidence` resolves an answer's citations from the
-      graph on disk rather than from what the turn retrieved, so `known` means "ids that exist" and
-      a citation recalled from training passes. The deterministic backend returns
-      `supported=True, confidence=1.0` for an answer with **no** citations — measured: 0 of 33
-      analytical answers in the run carried a single wikilink, so every fabricated method in that
-      slice would have scored a perfect citation-faithfulness result. Enabling `verifier_enabled`
-      as-is would therefore change nothing. The fix is to thread the turn's retrieved evidence into
-      `_answer_event` (`api/runner.py:557`) and to score *uncited* factual claims at all; both are
-      contract changes needing their own argument, which is why this is a row and not a patch.
-- [ ] **A durable-job outage is never announced before the turn plans** — [S]. `api/runner.py:263-265`
-      announces degraded capability for connectors only; Temporal is never probed, so no
-      `CapabilityDegradedEvent` is emitted for the durable subsystem. The launcher now fails with a
-      readable message (2026-08-02), but the model still discovers the outage only by trying. The
-      docstring two lines above states the principle: *"the model cannot tell the chemist that a
-      tool was missing, because it never saw one missing."*
 - [ ] **`ask_clarifying_question` does not end the turn** — [M]. `agent/dialogue_tools.py` used to
       promise it did; `agent/turn_signals.py:124-128` records the signal and returns, and the agent
       loop continues. The docstring now states what is true, but the guarantee is still unenforced.
@@ -36,17 +20,20 @@ and `tasks/live-test/`. The fixed ones are not listed — see the ADR and the co
       `similar_reactions` sees only it. `Match` carries no yield, so a facet or aggregate question
       ("rank the three base plates") is unanswerable — and an honest "I could not find it" is
       indistinguishable from "it is not there". Wants a coverage statement on the search result.
-- [ ] **The eval's citation check is bounded by a UI budget** — [S]. `api/runner.py:87`
-      `_ARG_PREVIEW_CHARS = 200` truncates every tool *result*, and `evals/live._score_citations`
-      scores against those previews. A `gather_evidence` result is ~20,000 chars over 40 chunks, so
-      one id is visible and the rest read as uncited. Wants an untruncated `note_ids` field on
-      `ToolResultEvent` populated by the retrieval tools. Do **not** raise `_ARG_PREVIEW_CHARS` —
-      that budget is correct for the UI.
-- [ ] **A fabricated method parameter has no deterministic gate** — [M]. The capability-boundary
-      instruction (2026-08-02) is necessary and **not sufficient**: the stronger model produced a
-      complete branded HPLC method table *while writing* "not a validated method". Wants a scan of
-      the final answer for method-parameter shapes that, when no tool in the turn produced them,
-      marks the answer for review. A heuristic, so it ships behind a config knob or not at all.
+- [ ] **The *eval's* citation check is still bounded by a UI budget** — [S]. Narrowed, not closed,
+      by D-2026-08-02-grounding-is-what-this-turn-saw: the runner now keeps every tool result in
+      full for the in-process verifier, but that text never leaves the process, so
+      `evals/live._score_citations` still scores against the 200-character `ToolResultEvent`
+      previews on the wire. A `gather_evidence` result is ~20,000 chars over 40 chunks, so one id
+      is visible and the rest read as uncited — the harness therefore *understates* citation
+      coverage. Wants an untruncated `note_ids` field on `ToolResultEvent` populated by the
+      retrieval tools. Do **not** raise `_ARG_PREVIEW_CHARS` — that budget is correct for the UI.
+- [ ] **The answer shape gate has not been measured live** — [S]. The deterministic scan
+      (`ungrounded_parameter_shapes`, `answer_shape_gate_enabled`, off by default) is argued from
+      the run that motivated it, not from a run that includes it. Re-run the analytical and
+      bucket-C probes with the gate on — roughly six to thirty probes on Haiku, small credit — and
+      publish the before/after on the 46% fabrication rate. Until then the claim to make is "the
+      mechanism exists and its default is off".
 - [ ] **No document-level provenance share** — [S, recommend refusing rather than building].
       `kg/note.py` `created_by` is whole-note and binary, there is no document entity, and §12's
       "how much of this was AI-drafted" is unanswerable. The honest refusal is one paragraph; the

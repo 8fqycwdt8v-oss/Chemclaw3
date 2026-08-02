@@ -328,6 +328,23 @@ only on caller-supplied arguments; `job_record.py:146` takes no actor at all. Th
 | **Skill routing by data shape, not phrasing** — `experiment-design` triggers on ≥2 runs varying the same factors with a numeric outcome; `experiment-progression` on a qualitative series | untested live; the reason `suggest_next_experiment` saw 0 calls in 190 probes |
 | **The safety skill names its four blind classes** — mutagenicity, ICH M7, nitrosamines, elemental impurities and residual solvents, with why a *correct* recalled limit is worse than a wrong one | `skill-validate` green |
 
+### Shipped after this run, against the findings above
+
+A three-wave implementation pass worked the code audit this run motivated
+(`docs/reference/user-story-capability-map.md`). Against the P0/P1 list on this page:
+
+| finding | what shipped | still open |
+| --- | --- | --- |
+| **1. Fabricated analytical methods** | A deterministic scan for parameter shapes no tool in the turn produced (`ungrounded_parameter_shapes`), flagging the answer for review · ICH Q3C/Q3D limit tables behind a cited lookup, so the palladium-PDE class of fabrication has a real answer to lose to · a genotoxicity structural-alert table (D-2026-08-02-a-limit-is-data-a-classification-is-a-model) | **The gate is off by default and has not been re-measured live.** It is argued from *this* run, not from a run containing it. |
+| **2. Nothing constrains a chat answer's citations** | The verifier now scores against the turn's own tool results instead of the graph on disk, and an uncited factual answer is *unverified* rather than supported at confidence 1.0 (D-2026-08-02-grounding-is-what-this-turn-saw) | `verifier_enabled` still defaults `False`; enabling it is now meaningful, which it was not before. |
+| **5. Infrastructure failures reach the model as `"Error: Function failed."`** | Already fixed in this branch, and now completed at the other end: a Temporal outage is announced as `durable-jobs (Temporal)` *before* the turn plans, not discovered by calling into it | — |
+| **6. The system describes a data-access boundary it does not have** | Two paragraphs in `_INSTRUCTIONS` stating what role gates actually do, and forbidding the description of a records boundary that does not exist | One shared corpus remains the design (KM-9). |
+
+Five subsystems that were built and unreachable were also connected — the BO campaign store, the
+failure-note write path, impurity structure indexing, project tags on ELN notes, and the evidence
+fields reports were discarding (D-2026-08-02-shipped-is-not-reachable). None of it needed a new
+concept, which is the finding: *the machinery was not what was missing.*
+
 ---
 
 ## Genuinely missing capability, sized

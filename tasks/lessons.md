@@ -803,3 +803,43 @@ the same result. Two readers for one syntax is how a gate comes to disagree with
    fails open and looks clean.
 5. When a subagent's analysis contradicts your headline, it is more likely right than the headline:
    it read the artefacts and you read your own summary. Three of four corrections here came that way.
+
+## 2026-08-02 — Six teams, one tree: what the parallel implementation pass taught
+
+**A code audit is evidence about what the author read, not about what runs.** The roadmap said
+threading `n_generators` through `factorial_design` was a one-line change — the parameter exists on
+the imported BoFire class, the docstring even explains it. Team B ran it: 128 runs at
+`n_generators=0`, 128 at 1, 128 at 2. BoFire fractionates only the *continuous* half of a domain and
+crosses the categorical half in full, and `factorial_design` is all-categorical by its own refusal.
+The parameter was inert on the only domain shape that reaches it. This is the second time in one
+session that a measurement beat a documented claim — the first was the solvent-domination fix that
+two docstrings, an ADR and a closed backlog row asserted, and that changed the similarity by zero to
+the fourth decimal.
+
+**Rule: a plan item that says "just thread X through" gets X measured before an agent is told to
+thread it.** One script, thirty seconds; the alternative is an agent implementing a no-op elegantly.
+
+**`git stash push src/` is a shared-tree hazard, and it is the *converse* of the earlier one.**
+Earlier this session I stashed everything to prove a test failed without its fix, which took the
+test with the source and proved nothing. The brief for the six teams therefore said "stash only
+`src/`". With six agents in one working tree, that reverts *every* team's source, not the stasher's
+— three teams hit it independently. The two that got it right did per-file `git checkout --` on
+their own paths, or a detached worktree.
+
+**Rule: "revert the source to prove the test fails" needs a scope that matches the writer, not the
+repo.** Per-file checkout when the tree is shared; a worktree when the change is broad.
+
+**A one-caller helper written to dodge a cross-team dependency must be collapsed at integration.**
+Team E could not add the config field it needed (another team owned `core/config.py`), so it wrote
+`_shape_gate_enabled()` and left a comment saying to point it at `settings` once the field existed.
+That comment is the reason it got collapsed instead of surviving as permanent scaffolding.
+
+**Rule: when an agent reports "I needed something outside my paths and worked around it", the
+workaround is an integration TODO with a name, not a delivered design.**
+
+**Ownership by file, not by feature, is what made six concurrent agents work at all.** Several items
+from different waves land in the same module. Cutting teams by wave would have put two agents in
+`api/runner.py`; cutting by file put all three answer-path items in one serialized agent and left
+the other five genuinely disjoint. The waves survived as the *PR* boundary, not the work boundary —
+and where a team's items straddled two waves (BO: one wake-up, one new capability), the PR boundary
+bent rather than splitting a file across commits.
