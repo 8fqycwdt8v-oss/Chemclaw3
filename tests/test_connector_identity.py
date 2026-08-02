@@ -24,13 +24,6 @@ import httpx
 import pytest
 
 from chemclaw.agent.turn_flags import reset_dry_run, set_dry_run
-from chemclaw.core.identity_context import (
-    reset_current_correlation_id,
-    reset_current_identity,
-    set_current_correlation_id,
-    set_current_identity,
-)
-from chemclaw.core.session_context import reset_current_session_id, set_current_session_id
 from chemclaw.connectors.identity import (
     HEADER_ACTOR,
     HEADER_CORRELATION,
