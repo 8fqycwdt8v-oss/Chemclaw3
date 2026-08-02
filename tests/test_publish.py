@@ -14,12 +14,18 @@ import types
 from typing import Any
 
 import pytest
+from temporalio.api.failure.v1 import Failure
+from temporalio.converter import DefaultFailureConverter, DefaultPayloadConverter
 from temporalio.exceptions import ActivityError, ApplicationError
 
 import chemclaw.durable.publish as publish_module
+from chemclaw.connectors.registry import ConnectorError
 from chemclaw.core.config import settings
 from chemclaw.core.errors import ChemclawError
 from chemclaw.durable.publish import BAD_DATA_RETRY, note_publish_retry, publish_note_best_effort
+from chemclaw.ingest.sources.registry import DataSourceError
+from chemclaw.templates.registry import TemplateError
+from chemclaw.templates.resolve import UnresolvedReference
 
 
 def test_bad_data_retry_is_bounded() -> None:
@@ -65,6 +71,33 @@ def test_every_chemclaw_error_subclass_is_listed_non_retryable() -> None:
 
     missing = names(ChemclawError) - set(BAD_DATA_RETRY.non_retryable_error_types or [])
     assert not missing, f"ChemclawError subclasses not registered in _BAD_DATA_TYPES: {missing}"
+
+
+@pytest.mark.parametrize(
+    "error_cls", [ConnectorError, DataSourceError, TemplateError, UnresolvedReference]
+)
+def test_bad_data_class_crosses_an_activity_boundary_as_non_retryable(
+    error_cls: type[ChemclawError],
+) -> None:
+    """The real classification Temporal applies, not the isinstance mismatch (R5).
+
+    Temporal matches `non_retryable_error_types` by the `ApplicationError.type` string its own
+    `DefaultFailureConverter` assigns — the exact class name, never an ancestor's. A class that
+    derives from `ChemclawError` (hence `ValueError`) but is missing from `_BAD_DATA_TYPES` by its
+    *own* name would still retry `activity_max_attempts` times with transient backoff before
+    failing, exactly as `ConnectorError` did before it and its three siblings were reparented and
+    registered. This drives the real SDK converter (no server needed) rather than asserting on the
+    class hierarchy, so it catches the isinstance/name mismatch the docstring in
+    `template_activities.authorize_job_step` used to get wrong.
+    """
+    converter = DefaultFailureConverter()
+    payload_converter = DefaultPayloadConverter()
+    failure = Failure()
+
+    converter.to_failure(error_cls("boom"), payload_converter, failure)
+
+    assert failure.application_failure_info.type == error_cls.__name__
+    assert error_cls.__name__ in (BAD_DATA_RETRY.non_retryable_error_types or [])
 
 
 def test_note_publish_retry_shares_the_bad_data_types() -> None:

@@ -24,14 +24,22 @@ import json
 import re
 from typing import Any
 
+from chemclaw.core.errors import ChemclawError
+
 # The same two forms `templates.manifest` validates, plus a whole-string variant used to decide
 # between value substitution and text interpolation.
 _REFERENCE = re.compile(r"\$\{(inputs\.[a-z][a-z0-9_]*|steps\.[a-z][a-z0-9_-]*\.result)\}")
 _WHOLE = re.compile(r"^\$\{(inputs\.[a-z][a-z0-9_]*|steps\.[a-z][a-z0-9_-]*\.result)\}$")
 
 
-class UnresolvedReference(ValueError):
-    """A template referenced an input or step result that is not available."""
+class UnresolvedReference(ChemclawError):
+    """A template referenced an input or step result that is not available.
+
+    A `ChemclawError` (so a `ValueError`), registered in `chemclaw.durable.publish._BAD_DATA_TYPES`
+    by its own class name: Temporal matches non-retryable error types by exact name, not
+    isinstance, and raised inside a workflow step this becomes an `ActivityError`/task failure that
+    must fail fast rather than retry a reference that will never resolve.
+    """
 
 
 def _lookup(reference: str, scope: dict[str, Any]) -> Any:

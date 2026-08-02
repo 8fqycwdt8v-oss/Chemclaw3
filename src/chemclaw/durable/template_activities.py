@@ -148,14 +148,17 @@ async def authorize_job_step(step: JobStepInput) -> ResolvedJob:
     same
     reason.
 
-    **A bad job name hung the run instead of failing it.** `find_job` raises `ConnectorError`, which
-    is a `ValueError` — a plain exception, not an SDK `FailureError`. Raised in workflow code, the
-    Temporal SDK treats it as a possible bug and suspends the workflow in an internal task-failure
-    retry loop that ignores the retry policy and never gives up (the same trap D-093 documents for
-    fan-out children). A template naming a job that no enabled connector declares therefore produced
-    a run that sat there forever rather than one that failed and said why. Across an activity
-    boundary the same error arrives as an `ActivityError`, and `BAD_DATA_RETRY` lists `ValueError`
-    non-retryable, so it fails on the first attempt with the message naming the declared jobs.
+    **A bad job name hung the run instead of failing it.** `find_job` raises `ConnectorError`, a
+    plain exception, not an SDK `FailureError`. Raised in workflow code, the Temporal SDK treats it
+    as a possible bug and suspends the workflow in an internal task-failure retry loop that ignores
+    the retry policy and never gives up (the same trap D-093 documents for fan-out children). A
+    template naming a job that no enabled connector declares therefore produced a run that sat
+    there forever rather than one that failed and said why. Across an activity boundary the same
+    error arrives as an `ActivityError` whose `ApplicationError.type` is the exact string
+    `"ConnectorError"` — Temporal matches `non_retryable_error_types` by that name, not by
+    `isinstance`, so being a `ValueError` subclass is not what makes this non-retryable. What does
+    is that `ConnectorError` is itself listed in `BAD_DATA_RETRY` (`chemclaw.durable.publish`), so
+    it fails on the first attempt with the message naming the declared jobs.
     """
     connector, job = find_job(step.job)
     tokens = set_current_identity(step.identity.actor, frozenset(step.identity.roles))

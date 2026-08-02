@@ -47,6 +47,7 @@ from chemclaw.connectors.manifest import (
 )
 from chemclaw.connectors.transport import DegradingHttpConnector, DegradingStdioConnector
 from chemclaw.core.config import settings
+from chemclaw.core.errors import ChemclawError
 from chemclaw.core.metrics_bridge import record_metric
 
 logger = logging.getLogger(__name__)
@@ -67,13 +68,16 @@ _CONNECT_TIMEOUT_SECONDS = 5.0
 ConnectorMcpTool = DegradingStdioConnector | DegradingHttpConnector
 
 
-class ConnectorError(ValueError):
+class ConnectorError(ChemclawError):
     """A connector bundle is malformed, or an enabled connector does not exist.
 
-    A `ValueError` subclass because this is a configuration error surfaced at startup — the same
-    class the config validators and `chemclaw.ingest.sources.registry` raise, so one `except
-    ValueError` at an entry
-    point catches every "this deployment is misconfigured" failure.
+    A `ChemclawError` (so a `ValueError`) because this is a configuration error surfaced at
+    startup — the same class the config validators and `chemclaw.ingest.sources.registry` raise,
+    so one `except ValueError` at an entry point catches every "this deployment is misconfigured"
+    failure. It is also registered in `chemclaw.durable.publish._BAD_DATA_TYPES` by its own class
+    name, because Temporal matches non-retryable error types by exact name, not isinstance — a
+    template step that names an unknown job (`chemclaw.durable.template_activities`) must fail on
+    its first attempt, not burn the transient-retry budget on a job that will never exist.
     """
 
 
