@@ -26,7 +26,7 @@ from agent_framework import AgentSession
 
 from chemclaw.agent.chemclaw_agent import connector_tools
 from chemclaw.agent.framing import frame_untrusted
-from chemclaw.agent.harness_todo import todo_titles
+from chemclaw.agent.harness_todo import apply_deferred_completions, todo_titles
 from chemclaw.agent.job_results import await_job_results
 from chemclaw.agent.live_session import reset_current_session, set_current_session
 from chemclaw.agent.loop_cap import begin_loop_watch, end_loop_watch, loop_hit_cap
@@ -219,6 +219,19 @@ async def run_turn(
     # The harness's todo list as last rendered, so a plan is emitted when it first appears and
     # again whenever it changes — not once per update (which would spam an unchanged plan).
     last_plan: list[str] = []
+    # Apply job completions the push-back stream recorded while no turn could safely take the
+    # write (`chemclaw.agent.harness_todo.defer_job_completion`). Turn start is the one moment
+    # nothing else writes `session.state`, and it must happen *before* the snapshot below: the
+    # flip then belongs to the pre-turn state, so a disconnect that restores the snapshot keeps
+    # it instead of silently un-completing the todo. Guarded because it is bookkeeping — a
+    # failed flip must not cost the chemist the turn it precedes.
+    if settings.harness_enabled:
+        try:
+            await apply_deferred_completions(session)
+        except Exception:  # noqa: BLE001 - a todo flip must never fail the turn it precedes
+            logger.exception(
+                "could not apply deferred job completions for session %s", session.session_id
+            )
     # Snapshot the session state before the turn so a client disconnect can roll it back
     # (ISSUE-B-10). A disconnect mid-tool-call otherwise leaves a `tool_use` block in the stored
     # history with no matching `tool_result`, and every later turn on that session replays it —

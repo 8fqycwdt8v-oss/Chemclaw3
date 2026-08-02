@@ -54,7 +54,7 @@ from chemclaw.agent.harness_mode import (
     grant_execute,
     session_mode,
 )
-from chemclaw.agent.harness_todo import complete_awaiting_job, todo_titles
+from chemclaw.agent.harness_todo import defer_job_completion, todo_titles
 from chemclaw.agent.interaction_tools import (
     PendingApproval,
     approval_owner,
@@ -215,11 +215,23 @@ class _LiveSessions:
     client starting a new session. Session, owner and profile are stored together so they can
     never drift: the profile decides which agent runs the turn *and* which connectors it gets,
     so a session that lost it would silently change agent mid-conversation.
+
+    `pinned` names the sessions eviction must skip: a session with a turn in flight. Evicting one
+    does not stop its turn — the turn holds the `AgentSession` object directly — it makes the next
+    request rehydrate a *second* handle over the same durable history, and the two then diverge in
+    `session.state` (the hazard `_rehydrate_session`'s docstring names). The pin source is the
+    in-process turn lease, which expires (see `_claim_turn_slot`), so a leaked pin releases the
+    cache by itself rather than wedging eviction for the pod's lifetime.
     """
 
-    def __init__(self, capacity: int) -> None:
-        """Create a registry holding at most `capacity` live sessions."""
+    def __init__(self, capacity: int, pinned: Callable[[str], bool] | None = None) -> None:
+        """Create a registry holding at most `capacity` live sessions.
+
+        `pinned` says which session ids must not be evicted right now (default: none). It is
+        consulted at eviction time, not stored per entry, so a pin needs no bookkeeping to clear.
+        """
         self._capacity = capacity
+        self._pinned = pinned if pinned is not None else (lambda _session_id: False)
         self._entries: OrderedDict[str, LiveSession] = OrderedDict()
 
     def __len__(self) -> int:
@@ -234,12 +246,29 @@ class _LiveSessions:
         Returns the entry it stored, so a caller that needs the handle back does not have to
         `get` what it just `add`ed — a round trip that reads as if the entry might be missing
         when it cannot be, and whose `None` branch was previously silenced with a type ignore.
+
+        Eviction takes the least-recently-used entry that is neither pinned (a turn in flight)
+        nor the entry just added (its handle is being handed to the caller, so dropping it would
+        leave a live handle writing outside the cache — the exact divergence the pin prevents).
+        When every candidate is pinned the map briefly holds more than `capacity`: turns in
+        flight are bounded by the admission semaphore, orders of magnitude below the cache cap,
+        so honoring the bound by corrupting a running conversation would be the wrong trade.
         """
         entry = LiveSession(session=session, owner=owner, profile=profile)
         self._entries[session_id] = entry
         self._entries.move_to_end(session_id)
         while len(self._entries) > self._capacity:
-            self._entries.popitem(last=False)
+            victim = next(
+                (
+                    candidate
+                    for candidate in self._entries
+                    if candidate != session_id and not self._pinned(candidate)
+                ),
+                None,
+            )
+            if victim is None:
+                break
+            del self._entries[victim]
         return entry
 
     def get(self, session_id: str) -> "LiveSession | None":
@@ -310,6 +339,41 @@ _CLAIM_REFRESHES_PER_LEASE = 3
 # `_database_unavailable` — and the client behaviour it asks for is the same either way: back off
 # and retry. A browser has no business learning which piece of infrastructure was full.
 _AT_CAPACITY = "server at capacity; retry shortly"
+
+
+def _claim_turn_slot(active_turns: dict[str, float], session_id: str) -> bool:
+    """Take the in-process one-turn-per-session slot, or report that a live turn holds it.
+
+    The slot is a *lease*, not a latch — the same semantics D-121 gave its durable counterpart
+    (`session_turns`), for the same reason: every release site can be skipped. Both of this
+    guard's releases live in a `finally` (the SSE generator's and `post_message`'s, exchanged via
+    `handed_off`), and one real window runs neither — a client gone after the streaming response
+    is handed off but before its generator is first advanced. An async generator that never
+    started runs no `finally` at all, so a latch then answered 409 for the pod's whole lifetime.
+    A leased entry instead stops refusing once its deadline passes.
+
+    The deadline is the widest wall clock a *live* turn can hold the slot — the admission wait
+    plus the streamed run's own timeout — so an expired entry provably belongs to no running
+    turn and ignoring it cannot admit a second writer beside a first.
+
+    Expired entries (this session's or any other's) are swept here rather than by a timer: the
+    map stays bounded, the `turns_in_flight` gauge stays honest, and a leaked entry stops
+    pinning its session in the live cache (`_LiveSessions`) at the same moment it stops 409ing.
+    Check-and-set stays atomic on the event loop — no `await` between the test and the write —
+    so the gate has no race window.
+    """
+    now = time.monotonic()
+    for stale_id, deadline in list(active_turns.items()):
+        if deadline <= now:
+            del active_turns[stale_id]
+    if session_id in active_turns:
+        return False
+    active_turns[session_id] = (
+        now
+        + settings.service_turn_timeout_seconds
+        + settings.service_turn_admission_timeout_seconds
+    )
+    return True
 
 
 async def _hold_turn_claim(claims: SessionTurns, session_id: str, lease_seconds: float) -> None:
@@ -703,10 +767,26 @@ def create_app(
     app.state.agent_factory = agent_factory
     # Called once per turn, not once per process — a connector connection belongs to a single turn.
     app.state.connector_factory = connector_factory
+
+    def _turn_in_flight(session_id: str) -> bool:
+        """Whether `session_id` holds an unexpired in-process turn lease — the eviction pin.
+
+        Reads `active_turns` (below) at call time, so the pin appears when a turn claims the
+        slot and vanishes when the turn releases it *or* when the lease expires — a leaked
+        entry (see `_claim_turn_slot`) can therefore delay an eviction by at most one lease,
+        never wedge it.
+        """
+        deadline = app.state.active_turns.get(session_id)
+        return deadline is not None and deadline > time.monotonic()
+
     # Bounded LRU of live sessions, each carrying its owner Entra oid so a session can only be
     # posted to / streamed by its creator (defense-in-depth beyond the unguessable uuid4 id).
-    # The bound keeps the map from growing for the pod's lifetime (COR-3).
-    app.state.live_sessions = _LiveSessions(settings.service_max_live_sessions)
+    # The bound keeps the map from growing for the pod's lifetime (COR-3). Sessions with a turn
+    # in flight are pinned against eviction: dropping the handle mid-turn lets the next request
+    # rehydrate a second one over the same durable history, and the two diverge (A5).
+    app.state.live_sessions = _LiveSessions(
+        settings.service_max_live_sessions, pinned=_turn_in_flight
+    )
     # Durable session-ownership registry (F3): the record a restarted front door rehydrates from
     # so a returning client reattaches to its session instead of being forced onto a new one.
     # None with the in-memory session store (nothing durable to reattach to — a cache miss stays
@@ -731,16 +811,17 @@ def create_app(
     # turn that cannot get one within the admission timeout is shed with 503. Built here so it
     # binds to the app's event loop on first await.
     app.state.turn_semaphore = asyncio.Semaphore(settings.service_max_concurrent_turns)
-    # Per-session turn serialization: session ids with a turn currently in flight. Two
-    # concurrent turns on one session would drive `agent.run` against the same AgentSession
-    # state at once, interleaving two turns' messages in one thread — so a second turn is
-    # rejected with 409 while one runs, matching the admission semaphore's shed-don't-queue
-    # semantics (a queued turn would silently pin a second permit and still interleave from the
-    # user's point of view; a 409 tells the client — a double-submit or a second tab — to wait
-    # for the running turn). Check-and-add is atomic on the event loop (no await between them),
-    # so the gate has no race window.
-    app.state.active_turns = set()
-    # The same gate at the width the deployment actually has (D-121). The set above is one
+    # Per-session turn serialization: session id → monotonic lease deadline for the turn in
+    # flight. Two concurrent turns on one session would drive `agent.run` against the same
+    # AgentSession state at once, interleaving two turns' messages in one thread — so a second
+    # turn is rejected with 409 while one runs, matching the admission semaphore's
+    # shed-don't-queue semantics (a queued turn would silently pin a second permit and still
+    # interleave from the user's point of view; a 409 tells the client — a double-submit or a
+    # second tab — to wait for the running turn). A deadline map rather than a bare set because
+    # an entry can leak (see `_claim_turn_slot`, which owns the claim's atomicity and expiry);
+    # this is also the pin set `_turn_in_flight` above reads for the live cache's eviction.
+    app.state.active_turns = {}
+    # The same gate at the width the deployment actually has (D-121). The map above is one
     # process's view, and the chart runs the front door at two replicas, so the second POST can
     # land on a process that has never heard of the first. A leased row in `session_turns` is what
     # both processes can see; None under the in-memory session store, where two processes share no
@@ -759,7 +840,15 @@ def create_app(
     # keep in sync (gap DEP-4). In-flight turns against the cap is the saturation signal the HPA
     # should scale on — CPU is close to noise for a stream-bound, model-latency-dominated
     # service.
-    METRICS.bind_gauge("chemclaw_turns_in_flight", lambda: float(len(app.state.active_turns)))
+    # Counts unexpired leases only: a leaked entry waiting out its deadline is not a turn in
+    # flight, and the sweep in `_claim_turn_slot` only runs when a POST arrives, so `len` alone
+    # would report a phantom turn until then.
+    METRICS.bind_gauge(
+        "chemclaw_turns_in_flight",
+        lambda: float(
+            sum(1 for deadline in app.state.active_turns.values() if deadline > time.monotonic())
+        ),
+    )
     METRICS.bind_gauge(
         "chemclaw_turn_capacity", lambda: float(settings.service_max_concurrent_turns)
     )
@@ -1031,25 +1120,26 @@ def create_app(
         stream or a slow-reading client cannot pin a permit forever — on expiry the client gets
         one error event and the permit is released.
 
-        **One turn at a time per session**, claimed twice. The in-process `active_turns` set
-        answers a double-submit that lands on this same process with no I/O and no race window
-        (there is no `await` between the test and the add). The durable claim in `session_turns`
-        answers the case that set cannot see: the shipped chart runs two front-door replicas, so
-        the second POST may arrive at a different process entirely, and both would otherwise be
-        admitted and interleave their messages into one conversation thread. Both answer 409.
-        The durable half is present only under `session_store="postgres"` — with the in-memory
-        store there is no shared history for two processes to corrupt.
+        **One turn at a time per session**, claimed twice, and both claims are *leases*. The
+        in-process `active_turns` map answers a double-submit that lands on this same process
+        with no I/O and no race window (`_claim_turn_slot`: no `await` between the test and the
+        write, and an entry expires rather than outliving a turn whose teardown never ran). The
+        durable claim in `session_turns` answers the case that map cannot see: the shipped chart
+        runs two front-door replicas, so the second POST may arrive at a different process
+        entirely, and both would otherwise be admitted and interleave their messages into one
+        conversation thread. Both answer 409. The durable half is present only under
+        `session_store="postgres"` — with the in-memory store there is no shared history for two
+        processes to corrupt.
         """
         live = await _resolve_session(session_id, principal)
-        active_turns: set[str] = app.state.active_turns
+        active_turns: dict[str, float] = app.state.active_turns
         claims: SessionTurns | None = app.state.turn_claims
         lease = settings.service_turn_claim_lease_seconds
-        if session_id in active_turns:
+        if not _claim_turn_slot(active_turns, session_id):
             METRICS.increment("chemclaw_turns_conflict_total", labels={"scope": "process"})
             raise HTTPException(
                 status_code=409, detail="a turn is already running for this session"
             )
-        active_turns.add(session_id)
         semaphore = app.state.turn_semaphore
 
         async def _turn_events() -> AsyncIterator[dict[str, str]]:
@@ -1151,7 +1241,7 @@ def create_app(
                     heartbeat.cancel()
                 if permit:
                     semaphore.release()
-                active_turns.discard(session_id)
+                active_turns.pop(session_id, None)
                 if claims is not None:
                     await _release_turn_claim(claims, session_id)
 
@@ -1183,9 +1273,11 @@ def create_app(
             # try/finally, not `except Exception`: cancellation (a client gone mid-admission) is
             # a BaseException, and missing it here leaked the session's active-turns entry —
             # 409-bricking the session until restart. Until the streaming response is handed
-            # off, this owns the cleanup; afterwards the generator's own finally does.
+            # off, this owns the cleanup; afterwards the generator's own finally does — except
+            # for the one window neither covers (handed off, never advanced), which the lease
+            # in `_claim_turn_slot` bounds instead.
             if not handed_off:
-                active_turns.discard(session_id)
+                active_turns.pop(session_id, None)
                 if claimed and claims is not None:
                     await _release_turn_claim(claims, session_id)
 
@@ -1228,18 +1320,19 @@ def create_app(
             try:
                 async for pushed in stream_new_events(session_id, kinds=("job_completed",)):
                     job_id = str(pushed.payload.get("job_id", ""))
-                    # Flip the harness todo that was waiting on this job (F3-T3 follow-up), so
-                    # the session's *next* turn sees it as done instead of open forever. The
-                    # live session may already be gone from the LRU cache (`_owned_session`
-                    # above only required it to exist when this stream *started*) — a miss here
-                    # is a safe no-op, matching `complete_awaiting_job`'s own no-op-on-miss
-                    # contract.
+                    # Record the completion for the harness todo waiting on this job (F3-T3
+                    # follow-up) — recorded, not applied. This stream runs concurrently with
+                    # whatever turn the session has in flight, and flipping the todo here was a
+                    # load-modify-save over the live `session.state` under a running writer: a
+                    # flip landing mid-turn was silently un-done when a disconnect teardown
+                    # restored that turn's pre-turn snapshot (`chemclaw.api.runner`). The next
+                    # turn applies it at its start (`apply_deferred_completions`), where nothing
+                    # else writes; the notification itself was already durably claimed above,
+                    # so nothing durable rides on this process surviving.
                     if settings.harness_enabled:
-                        live_entry = app.state.live_sessions.get(session_id)
-                        if live_entry is not None:
-                            await complete_awaiting_job(
-                                live_entry.session, job_id, reason=f"QM job {job_id} completed"
-                            )
+                        defer_job_completion(
+                            session_id, job_id, reason=f"QM job {job_id} completed"
+                        )
                     event = JobCompletedEvent(job_id=job_id, summary=pushed.payload)
                     yield {"event": event.type, "data": event.model_dump_json()}
             finally:

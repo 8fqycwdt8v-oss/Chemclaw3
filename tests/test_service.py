@@ -496,7 +496,14 @@ def test_job_pushback_streams_completed_events(monkeypatch) -> None:  # type: ig
 
 
 def test_job_pushback_flips_the_harness_awaiting_todo(monkeypatch) -> None:  # type: ignore[no-untyped-def]
-    """A `job_completed` push-back flips the harness todo waiting on it (F3-T3 follow-up)."""
+    """A `job_completed` push-back flips the harness todo waiting on it (F3-T3 follow-up).
+
+    Flipped at the *next turn's start*, not by the events stream itself: the stream runs
+    concurrently with whatever turn the session has in flight, so applying the flip there raced
+    the turn's own state writes and was silently discarded by a disconnect's snapshot restore
+    (A4). Both halves are pinned here — the stream records without touching live state, and the
+    next turn applies the recording.
+    """
     import asyncio
 
     from agent_framework import DEFAULT_TODO_SOURCE_ID, TodoSessionStore
@@ -523,6 +530,15 @@ def test_job_pushback_flips_the_harness_awaiting_todo(monkeypatch) -> None:  # t
             assert res.status_code == 200
             for _line in res.iter_lines():  # drain so the handler actually runs
                 pass
+
+        # The stream recorded the completion but must not have written live session state.
+        items = asyncio.run(
+            TodoSessionStore().load_items(live_session, source_id=DEFAULT_TODO_SOURCE_ID)
+        )
+        assert items[0].is_complete is False, "the push-back stream mutated live state (A4)"
+
+        # The next turn applies it at turn start, where nothing else writes.
+        _stream_events(client, session_id)
 
     items = asyncio.run(
         TodoSessionStore().load_items(live_session, source_id=DEFAULT_TODO_SOURCE_ID)
@@ -1135,6 +1151,126 @@ def test_cancelled_admission_wait_does_not_brick_the_session(monkeypatch) -> Non
             app.state.turn_semaphore.release()  # capacity returns...
             res = await client.post(f"/sessions/{session_id}/messages", json={"message": "hi"})
             assert res.status_code == 200  # ...and the session is usable, not 409-bricked
+
+    asyncio.run(_run())
+
+
+def test_a_mid_turn_job_completion_survives_a_disconnect_rollback(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    """A push-back landing while a turn streams is not undone by that turn's rollback (A4).
+
+    The events stream used to call `complete_awaiting_job` on the live session the moment the
+    push-back arrived — a load-modify-save over `session.state` under a running turn. `run_turn`
+    snapshots that state at turn start and restores it when the client disconnects before the
+    answer, so a completion that landed in between was silently un-completed by an unrelated
+    teardown: the job was done, durably claimed, and the plan showed it open forever. The stream
+    now only *records* the completion; the next turn applies it at turn start, before its own
+    snapshot, where nothing else writes.
+
+    Counterfactual: revert the events route to flipping the todo directly (and drop the
+    turn-start apply) and the final assertion fails — the disconnect's snapshot restore discards
+    the flip.
+    """
+    import contextlib
+
+    import httpx
+    from agent_framework import DEFAULT_TODO_SOURCE_ID, TodoSessionStore
+
+    import chemclaw.api.app as app_module
+    from chemclaw.agent.harness_todo import mark_awaiting_job
+    from chemclaw.agent.session_events import SessionEvent
+    from chemclaw.core.config import settings
+
+    monkeypatch.setattr(settings, "harness_enabled", True)
+
+    async def _fake_stream(session_id: str, **_: object) -> object:
+        yield SessionEvent(session_id=session_id, kind="job_completed", payload={"job_id": "qm-1"})
+
+    monkeypatch.setattr(app_module, "stream_new_events", _fake_stream)
+
+    async def _run() -> None:
+        gate = asyncio.Event()
+        started = asyncio.Event()
+        app = create_app(agent_factory=_gated_agent_factory(gate, started, "park"))
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+            session_id = (await client.post("/sessions")).json()["session_id"]
+            live_session = app.state.live_sessions.get(session_id).session
+            await mark_awaiting_job(live_session, "qm-1", title="Await QM job qm-1")
+
+            turn = asyncio.create_task(
+                client.post(f"/sessions/{session_id}/messages", json={"message": "park"})
+            )
+            await asyncio.wait_for(started.wait(), timeout=5)  # the turn is mid-stream
+            # The job finishes now: its push-back is delivered while the turn is in flight.
+            await client.get(f"/sessions/{session_id}/events")
+            # ...and the client then vanishes, cancelling the turn — the teardown that restores
+            # the pre-turn state snapshot (`chemclaw.api.runner`).
+            turn.cancel()
+            with contextlib.suppress(asyncio.CancelledError, httpx.HTTPError):
+                await turn
+            async with asyncio.timeout(5):
+                while session_id in app.state.active_turns:  # the slot is back
+                    await asyncio.sleep(0.01)
+
+            res = await client.post(f"/sessions/{session_id}/messages", json={"message": "next"})
+            assert res.status_code == 200
+
+        items = await TodoSessionStore().load_items(live_session, source_id=DEFAULT_TODO_SOURCE_ID)
+        assert items[0].is_complete is True, (
+            "the mid-turn job completion was discarded by the disconnect's snapshot restore (A4)"
+        )
+
+    asyncio.run(_run())
+
+
+def test_a_session_with_a_turn_in_flight_is_pinned_against_eviction(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    """Capacity pressure must not evict a mid-turn session and mint a second live handle (A5).
+
+    The live cache is a pure-capacity LRU with no notion of "in use": evicting a session does not
+    stop its running turn — the turn holds the `AgentSession` object directly — it makes the next
+    request rehydrate a brand-new handle over the same durable history, and the two then diverge
+    in `session.state`. So a session whose turn is in flight (an unexpired `active_turns` lease)
+    is pinned, and the cache briefly holds over capacity instead.
+
+    Counterfactual: drop the pin (`_LiveSessions.add` evicting purely by LRU) and the identity
+    assertion fails — the transcript read rehydrates a second handle while the first still
+    streams.
+    """
+    import httpx
+
+    from chemclaw.core.config import settings
+
+    monkeypatch.setattr(settings, "service_max_live_sessions", 1)
+
+    async def _run() -> None:
+        gate = asyncio.Event()
+        started = asyncio.Event()
+        app = create_app(
+            agent_factory=_gated_agent_factory(gate, started, "long"),
+            owner_store=_FakeOwnerStore(),
+            connector_factory=_no_connectors,
+        )
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+            first = (await client.post("/sessions")).json()["session_id"]
+            original = app.state.live_sessions.get(first).session
+            turn = asyncio.create_task(
+                client.post(f"/sessions/{first}/messages", json={"message": "long"})
+            )
+            await asyncio.wait_for(started.wait(), timeout=5)  # the turn is mid-stream
+            # One slot: creating a second session is exactly the pressure that used to evict.
+            await client.post("/sessions")
+            # Touch the first session the way any request would; on the unpinned code this is
+            # the moment a second handle is minted over the same durable id.
+            transcript = await client.get(f"/sessions/{first}/messages")
+            assert transcript.status_code == 200
+            entry = app.state.live_sessions.get(first)
+            assert entry is not None, "the in-flight session was evicted under capacity pressure"
+            assert entry.session is original, (
+                "a second live handle was minted for a session whose turn is still streaming"
+            )
+            gate.set()
+            assert (await turn).status_code == 200
 
     asyncio.run(_run())
 
