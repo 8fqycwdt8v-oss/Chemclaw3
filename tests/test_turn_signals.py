@@ -60,18 +60,24 @@ class _SignallingAgent:
 
 
 def _events(agent: Any) -> list[Any]:
-    """Collect one turn's events, with no connectors.
+    """Collect one turn's events, with no connectors and without the capability announcement.
 
     `connectors=[]` is stated rather than defaulted: omitting it means *every enabled connector*,
     which in a test process is six hosts that are not running — so the turn genuinely degrades and
     now says so (D-139). These tests are about signal ordering, and a turn that dials six dead hosts
     to assert an event list was asserting more than it meant to.
+
+    `capability_degraded` is dropped for exactly the same reason and one more: no Temporal broker
+    runs in a test process either, so every turn here truthfully opens by announcing the durable
+    subsystem is down. That announcement has its own tests; keeping it in this list would mean
+    every signal-ordering assertion doubled as an assertion about an unrelated outage.
     """
 
     async def _collect() -> list[Any]:
         return [
             event
             async for event in run_turn(agent, AgentSession(session_id="s1"), "hi", connectors=[])
+            if event.type != "capability_degraded"
         ]
 
     return asyncio.run(_collect())

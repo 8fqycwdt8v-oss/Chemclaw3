@@ -13,8 +13,8 @@ Three deliberately different shapes of "gap", because they fail differently:
 - **Isolated notes** — knowledge nobody linked to anything. Retrieval reaches these only by a
   literal substring hit, so they are effectively invisible to graph traversal (D-004's reasoning
   path); they are not *missing*, they are unreachable.
-- **Thin areas** — a note type or project with evidence but no distillation above it (runs with no
-  playbook, a project with no report). These are where synthesis is owed.
+- **Thin areas** — a note type or *tag* with evidence but no distillation above it (runs with no
+  playbook, a topic with no report). These are where synthesis is owed.
 - **Hubs** — the notes everything else cites. Useful for the opposite reason: they are where an
   error propagates furthest, so they are what a reviewer should check first.
 """
@@ -33,13 +33,17 @@ class GraphGaps(BaseModel):
     total_notes: int
     isolated_note_ids: list[str] = Field(default_factory=list)
     type_counts: dict[str, int] = Field(default_factory=dict)
-    projects_without_distillation: list[str] = Field(default_factory=list)
+    # Free-text `note.tags`, not projects: there is no project field on `Note` at all. The field
+    # was called `projects_without_distillation`, and the name — not the computation, which is
+    # right — is what let a live run report "27 projects tagged" as a portfolio status. A field
+    # name is an assertion about what the values *are*, and the model has nothing else to go on.
+    tags_without_distillation: list[str] = Field(default_factory=list)
     most_cited: list[tuple[str, int]] = Field(default_factory=list)
     dangling_links: list[str] = Field(default_factory=list)
 
 
-# Note types that *distil* rather than *record*. A project (tag) carrying only recording-type notes
-# has evidence nobody has generalized yet — the concrete thing "what don't we know" should surface.
+# Note types that *distil* rather than *record*. A tag carrying only recording-type notes has
+# evidence nobody has generalized yet — the concrete thing "what don't we know" should surface.
 _DISTILLED_TYPES = frozenset({"playbook", "optimization-campaign", "campaign", "report"})
 
 
@@ -63,18 +67,22 @@ def analyze(graph: nx.DiGraph, notes: list[Note], *, top_n: int = 5) -> GraphGap
             if graph.in_degree(node) == 0 and graph.out_degree(node) == 0
         ),
         type_counts=dict(sorted(by_type.items())),
-        projects_without_distillation=_undistilled_projects(notes),
+        tags_without_distillation=_undistilled_tags(notes),
         most_cited=_hubs(graph, top_n),
         dangling_links=_dangling(graph, notes),
     )
 
 
-def _undistilled_projects(notes: list[Note]) -> list[str]:
+def _undistilled_tags(notes: list[Note]) -> list[str]:
     """Tags that carry recorded evidence but nothing distilled from it.
 
-    A project with runs and no playbook/campaign/report is not a defect — it is a *backlog item for
+    A topic with runs and no playbook/campaign/report is not a defect — it is a *backlog item for
     the synthesis layer*, and naming it is the difference between the memory jobs being trusted and
     merely running.
+
+    Tags, and only tags: this is a set difference over free-text `note.tags`, so on the committed
+    corpus it returns `suzuki`, `palladium`, `pka` and the like. Calling them projects was the
+    whole defect — the computation was always correct about what it measured.
     """
     evidence: set[str] = set()
     distilled: set[str] = set()

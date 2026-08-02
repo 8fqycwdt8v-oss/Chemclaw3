@@ -203,7 +203,10 @@ def test_message_stream_runs_a_turn_and_connects_its_connectors_once() -> None:
                 if line.startswith("data:"):
                     events.append(json.loads(line[len("data:") :].strip()))
 
-    kinds = [e["type"] for e in events]
+    # Without the capability announcement: no Temporal broker runs in a test process, so every
+    # turn truthfully opens by saying the durable subsystem is down. This test is about the turn
+    # streaming at all and its connector opening once, which that announcement is not part of.
+    kinds = [e["type"] for e in events if e["type"] != "capability_degraded"]
     assert kinds == ["token", "token", "answer"]
     assert "".join(e["text"] for e in events if e["type"] == "token") == "hi there"
     # The connector lifecycle is the service's, and it is per *turn*: one connect and one teardown
@@ -248,8 +251,12 @@ def test_a_launched_job_reaches_the_browser_as_an_sse_event() -> None:
     # reason — a tool that ran while the model was producing an update ran before the text it then
     # produced. main's original assertion had token-first, which reported the text ahead of the job
     # that preceded it; the property this test names ("before the answer") holds either way.
-    assert [e["type"] for e in events] == ["job_started", "token", "answer"]
-    assert events[0]["job_id"] == "qm-sse"
+    # Dropping `capability_degraded` first: no Temporal broker runs in a test process, so every
+    # turn truthfully opens by announcing the durable subsystem is down. What this test is about
+    # is that a launched job reaches the browser, and where in the order it does.
+    streamed = [e for e in events if e["type"] != "capability_degraded"]
+    assert [e["type"] for e in streamed] == ["job_started", "token", "answer"]
+    assert streamed[0]["job_id"] == "qm-sse"
 
 
 def _stream_events(  # type: ignore[no-untyped-def]

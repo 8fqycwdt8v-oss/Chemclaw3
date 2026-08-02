@@ -256,15 +256,19 @@ def test_abandoned_turn_still_books_its_tokens() -> None:
                 "hi",
                 actor="u1",
                 budget=budget,
-                # Stated, because this test counts *events* to decide when to abandon: defaulting
+                # Stated, because this test counts updates to decide when to abandon: defaulting
                 # means every enabled connector, none of which is running in a test process, and
-                # the resulting degradation event (D-139) would shift the cut-off by one update.
+                # the resulting degradation event (D-139) is noise in that count.
                 connectors=[],
             )
         )
+        # Tokens, not events. Counting every event coupled the cut-off to how many *non*-token
+        # events a turn happens to open with — the capability announcement alone moved it twice —
+        # so the number of metered updates the assertion below depends on silently changed with
+        # each. The turn's spend is carried by its tokens; count those.
         consumed = 0
         async for _event in stream:
-            consumed += 1
+            consumed += _event.type == "token"
             if consumed == 3:
                 break
         await stream.aclose()  # sse-starlette's send-timeout teardown

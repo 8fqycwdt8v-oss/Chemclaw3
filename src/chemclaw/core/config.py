@@ -691,6 +691,20 @@ class LlmSettings(BaseSettings):
     # behavior change.
     verifier_enabled: bool = False
     verifier_confidence_threshold: float = Field(default=0.7, ge=0, le=1)
+    # The ungrounded-parameter scan over a drafted answer: shapes a chemist would read as
+    # specification — a flow rate, a gradient table, a wavelength, a back pressure, a column brand,
+    # an ICH limit, a polymorph form — marked for review when no tool in the turn produced them.
+    #
+    # Off by default and deliberately a deployment decision. It is a *shape* heuristic, not proof
+    # of grounding: it both misses (an invented number in a shape it does not know) and over-fires
+    # (a chemist's own figure quoted back). An answer marked for review that did not need it costs
+    # trust in every mark after it, which is the failure mode that matters more here.
+    #
+    # The measured case for having it at all: a capability-boundary instruction cut invented
+    # parameter classes from 9 to 1 across the six worst live probes, and a stronger model still
+    # produced a complete branded HPLC method table *while writing* "not a validated method".
+    # Prompting is necessary and demonstrably not sufficient.
+    answer_shape_gate_enabled: bool = False
     # Embedding provider (plan F10-A). Selects how a note/query is embedded: `hash` is a
     # deterministic, offline, dependency-free feature-hash (dev/CI only — token-overlap
     # similarity, NOT neural-semantic); `openai_compatible` calls the internal endpoint's

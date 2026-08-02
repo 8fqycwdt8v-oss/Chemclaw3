@@ -15,12 +15,34 @@ tokens and an answer and nothing else.
 
 import asyncio
 import json
+from collections.abc import Iterator
 from contextlib import AsyncExitStack
 from typing import Any
 
+import pytest
+
+import chemclaw.api.runner as runner
 from chemclaw.api.metrics import METRICS
 from chemclaw.connectors.registry import open_reachable
 from tests.test_service import _client, _FakeAgent
+
+
+@pytest.fixture(autouse=True)
+def _reachable_durable_subsystem(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
+    """Hold the durable subsystem up, so these tests say something about *connectors*.
+
+    The same event now also carries the durable subsystem when Temporal does not answer its health
+    probe, and no broker runs in a test process — so without this every turn here would open by
+    announcing an outage that is not the one under test, and "a healthy turn announces nothing"
+    would be asserting on a turn that is not healthy. The durable half has its own tests in
+    `tests/test_runner.py`.
+    """
+
+    async def _reachable() -> bool:
+        return True
+
+    monkeypatch.setattr(runner, "_durable_subsystem_reachable", _reachable)
+    yield
 
 
 class _DarkMcpTool:
