@@ -1044,7 +1044,7 @@ def create_app(
         claims: SessionTurns | None = app.state.turn_claims
         lease = settings.service_turn_claim_lease_seconds
         if session_id in active_turns:
-            METRICS.increment("chemclaw_turns_conflict_total")
+            METRICS.increment("chemclaw_turns_conflict_total", labels={"scope": "process"})
             raise HTTPException(
                 status_code=409, detail="a turn is already running for this session"
             )
@@ -1170,7 +1170,7 @@ def create_app(
             # exists before the response is handed off. A failed checkout raises `ConnectionError`
             # and is shed as a 503 by `_database_unavailable` — the guard fails closed, retryably.
             if claims is not None and not await claims.claim(session_id, _WORKER_ID, lease):
-                METRICS.increment("chemclaw_turns_conflict_total")
+                METRICS.increment("chemclaw_turns_conflict_total", labels={"scope": "durable"})
                 raise HTTPException(
                     status_code=409, detail="a turn is already running for this session"
                 )

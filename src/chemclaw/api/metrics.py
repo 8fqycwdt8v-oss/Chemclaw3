@@ -222,6 +222,10 @@ _COUNTER_LABELS: dict[str, tuple[str, ...]] = {
     # Bounded by configuration exactly as `profile` is: a connector is a bundle the chart enables,
     # never a name a caller supplies, and the whole shipped fleet is six.
     "chemclaw_job_runtime_seconds_total": ("connector",),
+    # Two sources of conflict, different causes and different operator responses. `process` is a
+    # same-process double-submit (impossible with the LRU's single-session cardinality guarantee,
+    # but tracked for debugging). `durable` is a cross-replica race on the shared session-turn claim.
+    "chemclaw_turns_conflict_total": ("scope",),
 }
 
 # The most label-sets one counter may hold. A label *value* is not bounded by this module — it comes
