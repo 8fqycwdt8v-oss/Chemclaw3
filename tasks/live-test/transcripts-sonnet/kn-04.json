@@ -1,0 +1,60 @@
+{
+  "probe": {
+    "id": "kn-04",
+    "section": 1,
+    "persona": "lab_leader",
+    "bucket": "A",
+    "question": "Did we ever pin down where this Pd system stops working? I don't want to burn a plate finding out again.",
+    "expects_tools": [
+      "gather_evidence",
+      "find_notes",
+      "expand_note"
+    ],
+    "forbids_claims": [
+      "a note id that was not retrieved",
+      "a substrate-class outcome the corpus does not record",
+      "a scope conclusion extrapolated to substrates that were never run"
+    ],
+    "direction": "Cites campaign-biaryl-scope and states the recorded boundary: electron-rich aryl bromides couple at 80 °C in 12 h; electron-rich aryl *chlorides* do not couple at all under these conditions. A satisfying answer says explicitly that the boundary, not the yields, is the transferable result, and points onward to playbook-pd-cross-coupling-scope for what to change first (ligand before temperature)."
+  },
+  "outcome": {
+    "probe_id": "kn-04",
+    "section": 1,
+    "persona": "lab_leader",
+    "bucket": "A",
+    "question": "Did we ever pin down where this Pd system stops working? I don't want to burn a plate finding out again.",
+    "answer": "Yes — this has been mapped out fairly precisely across a few linked notes, so you shouldn't need to re-discover the boundary on a plate.\n\n**The system:** Pd(OAc)₂ pre-catalyst (reduced in situ to Pd(0)), used both for the Suzuki biaryl coupling (4‑bromoanisole + phenylboronic acid, [[rxn-suzuki-biaryl]]) and a Buchwald–Hartwig amination with RuPhos ([[rxn-buchwald-amination]]).\n\n**Where it stops working — the hard boundaries on file:**\n\n1. **Halide scope cliff** ([[campaign-biaryl-scope]], human-authored, confidence 0.8): a 6-reaction scope campaign run specifically to answer \"where does this stop working\" found that electron-rich aryl **bromides** couple at 80 °C/12 h, but electron-rich aryl **chlorides** do not couple at all under these conditions — not a yield drop, a hard stop. That halide identity boundary, not the yields, is flagged as the transferable result.\n\n2. **Catalyst loading floor** ([[interaction-catalyst-loading]], confirmed, confidence 0.8): at 0.75 mol% Pd (half the standard 1.5 mol%) the reaction reaches ~50% conversion in 12 h and *stalls* — explicitly noted as catalyst death, not a rate effect that more time fixes. Halving loading is only viable paired with harder degassing.\n\n3. **Degassing sensitivity** ([[playbook-degassing]], distilled from [[opt-suzuki-conditions]], confidence 0.85): Pd(0) is O₂-sensitive; poor degassing gives a *bimodal* outcome (70%+ or <20%, rarely between) rather than a smooth yield loss. Sparging 2 min ≈ not degassing at all — 3× freeze-pump-thaw or 20 min sparge/100 mL is the actual bar. Worth ruling this in/out before blaming the catalyst system itself.\n\n4. **The temperature trap** ([[failure-aqueous-protodeboronation]], confidence 0.8): pushing to 100 °C in THF/water *raises* LCAP conversion but *lowers* isolated yield — the boronic acid protodeboronates to benzene faster than it transmetalates. This was seen three times before being recognized, because the assay looked like it was improving each time.\n\n5. **A live contradiction to watch for**: there's a BO-generated suggestion ([[bo-suzuki-next]], confidence 0.5) proposing 1.2 mol% Pd / Cs₂CO₃ / 2‑MeTHF-water / **75 °C**, predicting 79%±6. The graph explicitly flags that this **contradicts** the protodeboronation finding above — the BO model was fitted on assay (LCAP) yield, so it never saw the isolated-yield penalty from protodeboronation, and its push toward higher temperature is extrapolation from a single data point, not a validated conclusion. Don't run that one as-is without accounting for #4.\n\n**The distilled guidance** ([[playbook-pd-cross-coupling-scope]], confidence 0.8, citing the campaign + optimization notes): when this coupling stalls, oxidative addition into the electron-rich aryl halide is the rate-limiting step, and it responds far more to ligand steric bulk than to temperature — because raising temperature accelerates boronic-acid decomposition at least as fast as it accelerates coupling. Recommended order of levers: **bulkier biaryl phosphine → higher L:Pd ratio → degas harder → only then more heat.**\n\nSo: if your plate is failing, check in this order — is it actually a chloride (won't go, full stop), is degassing adequate (bimodal signature), is loading below ~1 mol% effective Pd, and only then consider whether temperature is being used as a (counterproductive) fix. All of this is human-authored, established evidence except the BO suggestion, which is flagged low-confidence and contradicted.",
+    "answered": true,
+    "tools_called": [
+      "gather_evidence",
+      "find_past_jobs",
+      "expand_note",
+      "expand_note",
+      "expand_note",
+      "expand_note",
+      "expand_note",
+      "expand_note"
+    ],
+    "tools_failed": [],
+    "expected_tools_met": true,
+    "uncited_note_ids": [
+      "opt-suzuki-conditions",
+      "rxn-buchwald-amination",
+      "rxn-suzuki-biaryl"
+    ],
+    "failed_loudly": false,
+    "error_code": null,
+    "degraded": [],
+    "jobs_started": [],
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "latency_seconds": 40.53,
+    "event_counts": {
+      "tool_call": 8,
+      "tool_result": 8,
+      "token": 38,
+      "answer": 1
+    },
+    "transport_error": null
+  }
+}

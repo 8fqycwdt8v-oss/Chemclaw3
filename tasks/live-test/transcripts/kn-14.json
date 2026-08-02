@@ -1,0 +1,57 @@
+{
+  "probe": {
+    "id": "kn-14",
+    "section": 15,
+    "persona": "lab_technician",
+    "bucket": "A",
+    "question": "im new on the biaryl project. what should i read first so i dont repeat something the group already learned the hard way",
+    "expects_tools": [
+      "gather_evidence",
+      "find_notes",
+      "expand_note",
+      "find_knowledge_gaps"
+    ],
+    "forbids_claims": [
+      "a note id that was not retrieved",
+      "an onboarding pack, induction checklist or training module that does not exist",
+      "a reading item that is not a real note"
+    ],
+    "direction": "Builds a short ordered reading list out of notes that actually exist, each cited by id with one line on why it matters. It must include the failure modes, not only the successes — failure-aqueous-protodeboronation (assay looked better while isolated yield fell) and failure-dcm-amide-coupling — alongside the playbooks (playbook-degassing, playbook-pd-cross-coupling-scope, playbook-recrystallisation-purity) and report-biaryl-development for the current recommendation. A list of generic onboarding advice with no note ids is the failure."
+  },
+  "outcome": {
+    "probe_id": "kn-14",
+    "section": 15,
+    "persona": "lab_technician",
+    "bucket": "A",
+    "question": "im new on the biaryl project. what should i read first so i dont repeat something the group already learned the hard way",
+    "answer": "I'll help you get oriented on the biaryl project by finding what's already established and what the group has learned.Good start—there's a key playbook. Let me expand that and look for the campaigns and reactions that built it:Now let me expand the main campaign and the failure note to give you the full picture:Perfect. Here's your reading list in priority order:\n\n---\n\n## **Start here: What you need to know to not repeat mistakes**\n\n### 1. **[[report-biaryl-development]]** — The executive summary\nThis is the single most important document. It distills the recommended conditions and what evidence backs them: **1.5 mol% Pd(OAc)₂/SPhos, K₂CO₃, THF/water 4:1, 80 °C, rigorously degassed. Isolated yield 76%.**\n\nKey lesson: **Do not optimize on LCAP.** The group learned this the hard way (see failure mode below).\n\n---\n\n### 2. **[[failure-aqueous-protodeboronation]]** — The pitfall (read this one in your head before your first run)\nRunning the coupling at 100 °C with aqueous workup causes **protodeboronation**: the boronic acid decomposes to benzene faster than it couples. The LCAP assay *looked better* at higher temperature while isolated yield *crashed*. They observed this three times before recognising it—don't be the fourth.\n\n---\n\n### 3. **[[playbook-pd-cross-coupling-scope]]** — The practical strategy\nWhen a Pd coupling stalls, **change the ligand before raising the temperature.** Oxidative addition into electron-rich aryl halides is rate-limiting and responds to steric bulk far more than heat. The order to try:\n1. Bulkier biaryl phosphine\n2. Higher L:Pd ratio\n3. Harder degassing\n4. *Only then* more heat\n\nThis keeps you from walking into the protodeboronation trap.\n\n---\n\n### 4. **[[campaign-biaryl-scope]]** — The boundary conditions\nThe scope limit that matters: **electron-rich bromides couple at 80 °C in 12 h; electron-rich *chlorides* do not couple at all** under these conditions. This is your decision boundary for substrate selection.\n\n---\n\n### 5. **[[opt-suzuki-conditions]]** — The detailed optimization\nIf you need to vary conditions, this campaign shows repeated runs of temperature, Pd loading and base. Best found: 1.5 mol% Pd, K₂CO₃, 80 °C → 76% isolated (compare the 79% LCAP at 100 °C that gave only 68% isolated).\n\n---\n\n### 6. **[[rxn-suzuki-biaryl]]** — The actual procedure\nThe full reaction note with starting materials, exact conditions, and workup. Bookmark this for your first run.\n\n---\n\n## **Bottom line**\n\n- **Use 80 °C, not 100 °C** (protodeboronation breaks the yield)\n- **Use SPhos, not a thinner phosphine** (sterics matter more than heat)\n- **Check isolated yield, not just LCAP** (the assay lies about high temperature)\n- **Electron-rich bromides work; chlorides don't** (know your scope boundary before running)\n\nGood luck, and ask me if you want to dig into any of these before you get started.",
+    "answered": true,
+    "tools_called": [
+      "gather_evidence",
+      "find_notes",
+      "expand_note",
+      "gather_evidence",
+      "gather_evidence",
+      "expand_note",
+      "expand_note",
+      "expand_note"
+    ],
+    "tools_failed": [],
+    "expected_tools_met": true,
+    "uncited_note_ids": [],
+    "failed_loudly": false,
+    "error_code": null,
+    "degraded": [],
+    "jobs_started": [],
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "latency_seconds": 18.66,
+    "event_counts": {
+      "token": 49,
+      "tool_call": 8,
+      "tool_result": 8,
+      "answer": 1
+    },
+    "transport_error": null
+  }
+}

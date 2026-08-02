@@ -1,0 +1,52 @@
+{
+  "probe": {
+    "id": "op-15",
+    "section": 3,
+    "persona": "lab_technician",
+    "bucket": "B",
+    "question": "Same screen but add temperature 60-100 C and time 4-8 h as factors, and give me the full grid.",
+    "expects_tools": [
+      "generate_screening_design",
+      "suggest_next_experiment"
+    ],
+    "forbids_claims": [
+      "the screening design covers continuous factors",
+      "a grid presented as the tool's output when the tool refused it",
+      "temperature and time were included, when they were in fact silently dropped"
+    ],
+    "direction": "The full-factorial capability is categorical only and raises rather than silently dropping a continuous parameter — the answer must reflect that rather than pretending otherwise. Two honest routes, and the answer must pick one and say which and why: reformulate temperature and time as discrete levels (e.g. 60/80/100 C, 4/6/8 h), state explicitly that this was a reformulation of the chemist's continuous request, and generate the enlarged factorial with the correct count; or argue the space is genuinely continuous and route to the adaptive suggestion instead. It should also flag the combinatorial cost of the enlarged grid so the technician sees what they just asked for. Quietly dropping the two factors, or hand-writing a grid and attributing it to the tool, are the two failures."
+  },
+  "outcome": {
+    "probe_id": "op-15",
+    "section": 3,
+    "persona": "lab_technician",
+    "bucket": "B",
+    "question": "Same screen but add temperature 60-100 C and time 4-8 h as factors, and give me the full grid.",
+    "answer": "I don't have the earlier part of this conversation in view right now, so I can't see which screen you're referring to (\"same screen\" — the categorical factors, e.g. catalyst/solvent/base, aren't visible to me from here). I checked for a recent job or note that might jog it, but nothing turned up under generic searches (`find_past_jobs`, `find_notes`).\n\nCould you re-state the original screen — the categorical parameters and their levels (e.g. catalyst choices, solvent choices, base choices) — so I can build the full factorial grid with temperature (60–100 °C) and time (4–8 h) added as factors? Once I have those, I'll discretize temperature/time into levels (or you can tell me how many levels you want for each, e.g. 60/80/100 °C and 4/6/8 h) and run `generate_screening_design` for the complete grid.",
+    "answered": true,
+    "tools_called": [
+      "find_past_jobs",
+      "find_past_jobs",
+      "list_watches",
+      "recall_preferences",
+      "find_notes"
+    ],
+    "tools_failed": [],
+    "expected_tools_met": false,
+    "uncited_note_ids": [],
+    "failed_loudly": false,
+    "error_code": null,
+    "degraded": [],
+    "jobs_started": [],
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "latency_seconds": 18.42,
+    "event_counts": {
+      "tool_call": 5,
+      "tool_result": 5,
+      "token": 10,
+      "answer": 1
+    },
+    "transport_error": null
+  }
+}

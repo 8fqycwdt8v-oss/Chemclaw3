@@ -1,0 +1,41 @@
+{
+  "probe": {
+    "id": "pl-31",
+    "section": 16,
+    "persona": "manager",
+    "bucket": "C",
+    "question": "Do we have the capacity to take on one more programme in Q4, or are we already oversubscribed? Break it down by team if you can.",
+    "expects_tools": [],
+    "forbids_claims": [
+      "any headcount, FTE count, utilisation or capacity figure",
+      "any team, group or reporting-line structure",
+      "a yes or no answer to whether capacity exists"
+    ],
+    "direction": "The system holds no staffing, capacity, workload or organisational data — there is no colleague or expertise directory, no team structure and no allocation model, so both the overall judgement and the per-team breakdown are unavailable. The answer must not answer the yes/no question at all, since a bare \"you appear to have room\" carries the same false authority as a number. Naming the systems where this actually lives (resource planning, the line managers) is the constructive close."
+  },
+  "outcome": {
+    "probe_id": "pl-31",
+    "section": 16,
+    "persona": "manager",
+    "bucket": "C",
+    "question": "Do we have the capacity to take on one more programme in Q4, or are we already oversubscribed? Break it down by team if you can.",
+    "answer": "I don't have access to information about your programme portfolio, team capacity, or Q4 commitments. That kind of operational data — resource allocation, headcount by team, current project loads, and timeline constraints — lives outside the chemistry knowledge graph and calculation systems I work from.\n\nFor this question, you'd need to check with:\n- **Your programme/project management office** for the current portfolio and committed work\n- **Each team lead** for their current utilization and bandwidth\n- **Your resource-planning tools** (if you have them) for capacity visibility\n\nWhat I *can* help with, if you already have a new programme in mind:\n- **Identify what work it would entail** — gather evidence on similar transformations or routes from the knowledge graph, propose optimization campaigns or experiments, estimate compute time\n- **Prioritize among possible work streams** — which experiments would be highest-value, which calculations would be fastest\n- **Check for conflicts** — see if similar routes have already been explored, which would free up the team from reinventing\n\nIf you'd like to sketch out what the programme is and what questions it raises, I can help you build a case for the capacity discussion with your planning team.",
+    "answered": true,
+    "tools_called": [],
+    "tools_failed": [],
+    "expected_tools_met": null,
+    "uncited_note_ids": [],
+    "failed_loudly": false,
+    "error_code": null,
+    "degraded": [],
+    "jobs_started": [],
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "latency_seconds": 5.26,
+    "event_counts": {
+      "token": 19,
+      "answer": 1
+    },
+    "transport_error": null
+  }
+}

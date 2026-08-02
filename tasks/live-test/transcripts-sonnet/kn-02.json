@@ -1,0 +1,59 @@
+{
+  "probe": {
+    "id": "kn-02",
+    "section": 1,
+    "persona": "lab_technician",
+    "bucket": "A",
+    "question": "our biaryl couplings keep coming out either 70-odd percent or under 20, with nothing changed on paper. any idea whats going on",
+    "expects_tools": [
+      "gather_evidence",
+      "find_notes",
+      "expand_note"
+    ],
+    "forbids_claims": [
+      "a note id that was not retrieved",
+      "a reagent-lot, instrument or operator cause that is not in the record",
+      "a yield distribution the notes do not report"
+    ],
+    "direction": "Recognises the *bimodal* signature as the diagnostic, not the average, and attributes it to dissolved oxygen killing Pd(0) — the dead black precipitate — citing playbook-degassing by id. States the remedy on file: three freeze-pump-thaw cycles, or sparging 20 minutes per 100 mL, and that two minutes of sparging is measurably the same as not degassing. Naming the mechanism without a note id, or offering a generic troubleshooting list, is a weaker answer."
+  },
+  "outcome": {
+    "probe_id": "kn-02",
+    "section": 1,
+    "persona": "lab_technician",
+    "bucket": "A",
+    "question": "our biaryl couplings keep coming out either 70-odd percent or under 20, with nothing changed on paper. any idea whats going on",
+    "answer": "This looks like a strong match — let me pull the full notes to confirm before answering.This exact bimodal signature is a known, documented failure mode in your record — not a mystery. Here's what the evidence says:\n\n## The pattern matches a known signature: catalyst degassing\n\n**[[playbook-degassing]]** (human-authored, confidence 0.85, distilled from [[opt-suzuki-conditions]]) names this exactly:\n\n> Pd(0) is oxidised by dissolved oxygen and the resulting black precipitate is catalytically dead. The signature is a *bimodal* outcome — nominally identical runs give 70%+ or under 20%, rarely anything between — because it depends on whether the catalyst survived its first minutes.\n\nThat's your yield distribution almost verbatim: 70-odd% or under 20%, nothing in between. The mechanism is that Pd(0) reduced in situ (or the pre-catalyst upon reduction) is highly oxygen-sensitive in its first few minutes; if dissolved O₂ isn't fully purged, some fraction of the catalyst dies immediately as Pd black, and the run either has \"enough\" surviving active catalyst (→ good conversion, ~70%+) or doesn't (→ collapses under 20%). Because this is a threshold/survival effect rather than a graded one, it doesn't show up as a smooth yield spread — it shows up as two clusters, which is exactly what you're describing as \"nothing changed on paper.\"\n\n**Fix stated in the note:** three freeze-pump-thaw cycles, or sparging for 20 minutes per 100 mL. It specifically flags that \"sparging for two minutes is the same as not degassing\" — a short sparge gives a false sense of having degassed while leaving enough O₂ to kill the batch unpredictably, which would produce precisely the \"nothing changed on paper\" experience (the SOP says \"degas,\" the actual O₂ exposure varies run to run).\n\nThis playbook supersedes an older one ([[playbook-degassing-old]]) that recommended the same fix — so this has been learned before in this program.\n\n## One thing to rule out alongside it\n\nThe same campaign, [[opt-suzuki-conditions]], and the linked [[failure-aqueous-protodeboronation]] flag a *second*, unrelated failure mode on this same transformation: at 100 °C in THF/water, LCAP/assay conversion looks fine but isolated yield craters because the boronic acid protodeboronates faster than it transmetalates. That one produces a low *isolated* yield despite good in-process assay — worth checking your low-yield batches' LCAP/assay numbers against isolated yield to make sure you're not looking at two overlapping problems (dead catalyst vs. protodeboronation) rather than one.\n\n## What I'd check first\n1. **How the reaction is actually degassed on the bench** (method and duration) vs. what the SOP says — the failure mode above is specifically that a token sparge *looks* like degassing was done.\n2. **Assay (LCAP) vs. isolated yield** on a few of the low batches — if assay was high and isolated was low, that's protodeboronation, not catalyst death, and points to temperature/aqueous conditions instead.\n3. Whether the low-yield runs correlate with anything about catalyst/solvent handling that day (older opened bottle, longer time between Pd weighing and use, etc.) — consistent with marginal, not systematic, O₂ exposure.\n\nBoth notes are human-authored, reasonably high confidence (0.8–0.85), and directly about this transformation ([[rxn-suzuki-biaryl]]), so this isn't analogy from a different reaction — it's your own program's documented history on this exact coupling.\n\nWant me to pull the [[playbook-pd-cross-coupling-scope]] note too (ligand-vs-temperature guidance) in case the low-yield batches are actually a substrate-scope edge rather than degassing, or check LCAP-vs-isolated for specific batches if you can share the numbers?",
+    "answered": true,
+    "tools_called": [
+      "load_skill",
+      "gather_evidence",
+      "find_notes",
+      "recall_observations",
+      "expand_note",
+      "expand_note",
+      "expand_note"
+    ],
+    "tools_failed": [],
+    "expected_tools_met": true,
+    "uncited_note_ids": [
+      "playbook-degassing-old",
+      "playbook-pd-cross-coupling-scope",
+      "rxn-suzuki-biaryl"
+    ],
+    "failed_loudly": false,
+    "error_code": null,
+    "degraded": [],
+    "jobs_started": [],
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "latency_seconds": 26.57,
+    "event_counts": {
+      "tool_call": 7,
+      "tool_result": 7,
+      "token": 46,
+      "answer": 1
+    },
+    "transport_error": null
+  }
+}

@@ -1,0 +1,54 @@
+{
+  "probe": {
+    "id": "kn-02",
+    "section": 1,
+    "persona": "lab_technician",
+    "bucket": "A",
+    "question": "our biaryl couplings keep coming out either 70-odd percent or under 20, with nothing changed on paper. any idea whats going on",
+    "expects_tools": [
+      "gather_evidence",
+      "find_notes",
+      "expand_note"
+    ],
+    "forbids_claims": [
+      "a note id that was not retrieved",
+      "a reagent-lot, instrument or operator cause that is not in the record",
+      "a yield distribution the notes do not report"
+    ],
+    "direction": "Recognises the *bimodal* signature as the diagnostic, not the average, and attributes it to dissolved oxygen killing Pd(0) — the dead black precipitate — citing playbook-degassing by id. States the remedy on file: three freeze-pump-thaw cycles, or sparging 20 minutes per 100 mL, and that two minutes of sparging is measurably the same as not degassing. Naming the mechanism without a note id, or offering a generic troubleshooting list, is a weaker answer."
+  },
+  "outcome": {
+    "probe_id": "kn-02",
+    "section": 1,
+    "persona": "lab_technician",
+    "bucket": "A",
+    "question": "our biaryl couplings keep coming out either 70-odd percent or under 20, with nothing changed on paper. any idea whats going on",
+    "answer": "I'll search for your biaryl coupling work to see what the record shows about these runs.Good. I found a key note on this: **[[playbook-degassing]]** flags exactly a bimodal distribution — 70%-odd or under 20%. Let me expand that and the optimization campaign to see the full picture.Found it. **[[playbook-degassing]]** — your problem is almost certainly oxygen in solution.\n\nHere's the signature match: your yields are *bimodal* — 70-odd percent or under 20%, nothing in between — because it depends on whether the Pd(0) catalyst survives the first few minutes of reaction. Pd(0) is oxidised to catalytically dead black precipitate by dissolved O₂, and if the reaction is under-degassed, whether the catalyst lives long enough comes down to chance: some runs stay anaerobic, others don't.\n\n**The fix per [[playbook-degassing]]:**\n- **Three freeze-pump-thaw cycles**, or\n- **Sparging for 20 minutes per 100 mL** of reaction mixture\n\nThe key detail: **sparging for two minutes is the same as not degassing.** That is the most likely spot to be cutting corners on paper while the actual procedure drifts.\n\nYour [[opt-suzuki-conditions]] found 1.5 mol% Pd(OAc)₂ and K₂CO₃ at 80 °C gives 76% isolated. That *is* the reliable condition — it just doesn't work unless the reaction mixture is actually anaerobic when you start, and stays that way throughout the run.\n\nThe second failure mode to rule out is also in your notes: [[failure-aqueous-protodeboronation]] shows that if you're running in THF/water (as many Suzuki protocols do), heating to 100 °C accelerates protodeboronation faster than transmetalation, killing yield. If you've drifted to hotter temps to try to fix low yields, that's a separate trap.\n\n**What to check right now:**\n1. Degassing procedure — is it 20 min sparging minimum, or three freeze-pump-thaw cycles per flask? If it says \"sparge for a few minutes,\" extend it.\n2. Are you running this in aqueous conditions? If so, stay at 80 °C max.\n3. After fixing degassing, the yields should cluster around 76%, not bimodal.\n\nDo you want me to look at your recent biaryl entries in the ELN to see if there's a pattern in which ones worked?",
+    "answered": true,
+    "tools_called": [
+      "gather_evidence",
+      "find_notes",
+      "expand_note",
+      "expand_note"
+    ],
+    "tools_failed": [],
+    "expected_tools_met": true,
+    "uncited_note_ids": [
+      "failure-aqueous-protodeboronation"
+    ],
+    "failed_loudly": false,
+    "error_code": null,
+    "degraded": [],
+    "jobs_started": [],
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "latency_seconds": 13.05,
+    "event_counts": {
+      "token": 44,
+      "tool_call": 4,
+      "tool_result": 4,
+      "answer": 1
+    },
+    "transport_error": null
+  }
+}

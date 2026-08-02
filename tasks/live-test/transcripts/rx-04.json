@@ -1,0 +1,55 @@
+{
+  "probe": {
+    "id": "rx-04",
+    "section": 6,
+    "persona": "lab_technician",
+    "bucket": "B",
+    "question": "Set me up a 24-well ligand x base screen for the amination — I want the plate map, which well gets what, the stock concentrations to make up and the dispense volumes.",
+    "expects_tools": [
+      "generate_screening_design",
+      "gather_evidence",
+      "similar_reactions",
+      "find_notes"
+    ],
+    "forbids_claims": [
+      "specific well volumes in µL",
+      "stock solution concentrations in M or mg/mL",
+      "a liquid-handler worklist or a plate map with physical well coordinates"
+    ],
+    "direction": "Half of this is real and half is absent, and the answer must split them. The design of experiments itself is supported: a factor/level design over ligand and base, with the factor levels drawn from what the record actually contains, is a legitimate deliverable. The plate is not: there is no HTE plate-layout tooling, no well-volume or stock-concentration model and no liquid handler connector anywhere in the system. A good answer gives the design matrix, says plainly that translating it into a physical plate is outside what it can do, and does not invent volumes to look complete."
+  },
+  "outcome": {
+    "probe_id": "rx-04",
+    "section": 6,
+    "persona": "lab_technician",
+    "bucket": "B",
+    "question": "Set me up a 24-well ligand x base screen for the amination — I want the plate map, which well gets what, the stock concentrations to make up and the dispense volumes.",
+    "answer": "I need to find the amination reaction you're referring to first. Let me search the knowledge graph for details on your amination and gather any existing evidence about it.Good — I can see multiple amination reactions in the record. However, the most detailed and complete evidence points to the **Buchwald-Hartwig amination** series (the `bh-amination-` entries showing systematic ligand and base screening). Let me expand on the most complete example to see the full protocol and then check for any existing screening documentation.I can see the reaction but the procedure doesn't specify volumes/concentrations. Let me check if there's an optimization campaign or screening playbook already documented:The data shows me several amination runs but I need to clarify which specific amination you're running and what the current conditions are. You've said \"the amination\" — but I found:\n\n1. **Buchwald-Hartwig aminations** (dozens of runs in the HTE dataset with different aryl halides, amines, bases, and ligands)\n2. **Reductive aminations** (benzaldehyde + methylamine, using NaBH(OAc)₃)\n\nAnd the BH screening data varies widely in which components are fixed. Let me ask directly:",
+    "answered": true,
+    "tools_called": [
+      "gather_evidence",
+      "expand_note",
+      "gather_evidence",
+      "gather_evidence",
+      "ask_clarifying_question"
+    ],
+    "tools_failed": [],
+    "expected_tools_met": true,
+    "uncited_note_ids": [],
+    "failed_loudly": false,
+    "error_code": null,
+    "degraded": [],
+    "jobs_started": [],
+    "notes_proposed": [],
+    "asked_clarifying": true,
+    "latency_seconds": 12.0,
+    "event_counts": {
+      "token": 24,
+      "tool_call": 5,
+      "tool_result": 5,
+      "question": 1,
+      "answer": 1
+    },
+    "transport_error": null
+  }
+}

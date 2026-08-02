@@ -1,0 +1,58 @@
+{
+  "probe": {
+    "id": "an-27",
+    "section": 8,
+    "persona": "manager",
+    "bucket": "B",
+    "question": "For the risk assessment: which metals and which solvents could plausibly end up in the product given how we actually make it? Start from our route, not from a generic list.",
+    "expects_tools": [
+      "gather_evidence",
+      "find_notes",
+      "expand_note",
+      "similar_reactions",
+      "resolve_compound"
+    ],
+    "forbids_claims": [
+      "a concentration limit, PDE or ppm specification for any metal or solvent",
+      "a predicted residual level in the product",
+      "naming a reagent, catalyst or solvent the retrieved route does not contain",
+      "claiming an elemental-impurity or residual-solvent database was consulted"
+    ],
+    "direction": "Retrieves the route and reads off what it actually uses — the palladium source and any other catalyst, the ligands, the bases, the process solvents — and builds the risk list from that, citing the notes. Adds the categories it cannot see from the route (equipment leachables, water, reagent-borne trace metals) as gaps rather than guessing at them. Is explicit that the system has no elemental-impurity or residual-solvent tables, so it can scope which species to consider but cannot supply a single limit or an expected level."
+  },
+  "outcome": {
+    "probe_id": "an-27",
+    "section": 8,
+    "persona": "manager",
+    "bucket": "B",
+    "question": "For the risk assessment: which metals and which solvents could plausibly end up in the product given how we actually make it? Start from our route, not from a generic list.",
+    "answer": "I'll start by finding what route we're actually using, since the answer needs to trace to our real process rather than a generic checklist.I found several distinct routes in the knowledge graph, and they carry very different metal/solvent risk profiles — so before I trace a \"which metals, which solvents\" answer, I need to know which process you mean. The graph currently holds:\n\n1. **Amide coupling route** (`rxn-amide-edc`) — EDC/HOBt, DIPEA, screened across DMF/MeCN/DCM/2‑MeTHF, recommended conditions 2‑MeTHF (`report-amide-route-review`). No metal catalyst.\n2. **Suzuki–Miyaura biaryl route** (`rxn-suzuki-biaryl`, `campaign-biaryl-scope`) — Pd(OAc)₂ (1.5 mol% Pd) precatalyst, 4‑bromoanisole + phenylboronic acid → 4‑methoxybiphenyl.\n3. **Buchwald–Hartwig amination** (`rxn-buchwald-amination`) — Pd(OAc)₂/RuPhos precatalyst, NaOtBu, toluene, 4‑bromoanisole + morpholine.\n4. **Aspirin acetylation** (`rxn-aspirin-acetylation`) — Ac₂O with DIPEA catalyst, no metal.\n\nThere are also a large number of ELN-derived screening reactions (Santanilla amidation/sulfonamidation/alcohol/alkyne/aniline wells, Nielsen deoxyfluorination, various Buchwald-amination ligand screens) that use different Pd sources (including a Pd-XPhos/BrettPhos-type precatalyst with a mesylate counterion visible in the SMILES) — these look like a separate, larger campaign rather than \"our\" production route.\n\nWhich of these is the process you want the metals/solvents risk assessment built from — or is there a specific downstream API route (e.g. one combining the amide coupling and biaryl steps) that I should treat as \"our route\"?I've paused here because \"our route\" currently matches several distinct processes in the record with very different metal/solvent profiles — I don't want to guess and hand back a generic heavy-metals checklist when the whole point is to trace it to what we actually run. Once you confirm which process (or sequence of steps) is \"ours,\" I'll pull the actual reagents/catalysts/solvents used at each step from the reaction and campaign notes, flag anything a hazard screen catches, and note where the record is silent (e.g., residual Pd purge data, ICH Q3D limits) rather than filling those gaps with generic assumptions.",
+    "answered": true,
+    "tools_called": [
+      "list_attachments",
+      "gather_evidence",
+      "recall_preferences",
+      "find_notes",
+      "find_knowledge_gaps",
+      "ask_clarifying_question"
+    ],
+    "tools_failed": [],
+    "expected_tools_met": true,
+    "uncited_note_ids": [],
+    "failed_loudly": false,
+    "error_code": null,
+    "degraded": [],
+    "jobs_started": [],
+    "notes_proposed": [],
+    "asked_clarifying": true,
+    "latency_seconds": 34.86,
+    "event_counts": {
+      "token": 31,
+      "tool_call": 6,
+      "tool_result": 6,
+      "question": 1,
+      "answer": 1
+    },
+    "transport_error": null
+  }
+}

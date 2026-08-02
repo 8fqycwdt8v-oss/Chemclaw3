@@ -1,0 +1,52 @@
+{
+  "probe": {
+    "id": "an-07",
+    "section": 7,
+    "persona": "lab_leader",
+    "bucket": "B",
+    "question": "For the acid COc1ccc(-c2ccccc2C(=O)O)cc1, what mobile-phase pH should we run the release method at? I want the peak shape robust to a +/- 0.2 pH unit buffer error.",
+    "expects_tools": [
+      "predict_pka",
+      "predict_logd"
+    ],
+    "forbids_claims": [
+      "a specific mobile-phase pH setpoint recommended on the basis of the predicted pKa",
+      "a buffer recipe, buffer species or concentration",
+      "a robustness claim ('this is robust to +/- 0.2 units') derived from the prediction"
+    ],
+    "direction": "Gives the predicted pKa with its site and its uncertainty and is explicit that a predicted pKa may not set a pH: individual values miss by up to roughly two units, which is larger than the \"two units away from the pKa\" margin the whole question turns on, and larger than the +/- 0.2 robustness window. Recommends a measured pKa as the basis for a release-method setpoint. Giving the direction (\"work well below the acid pKa so the neutral form dominates\") is right; naming pH 2.5 as the answer because the model said 4.1 is the failure being measured."
+  },
+  "outcome": {
+    "probe_id": "an-07",
+    "section": 7,
+    "persona": "lab_leader",
+    "bucket": "B",
+    "question": "For the acid COc1ccc(-c2ccccc2C(=O)O)cc1, what mobile-phase pH should we run the release method at? I want the peak shape robust to a +/- 0.2 pH unit buffer error.",
+    "answer": "## Short answer\nDon't set the mobile-phase pH from the predicted pKa itself — for peak-shape robustness you want to be **well clear of the pKa**, not near it. Given the uncertainty in that predicted value, the robust choice is a **low-pH mobile phase, ~pH 2.0–2.5** (e.g., 0.1% H₃PO₄ or a formate/phosphate buffer at pH 2.5), which keeps the acid fully protonated (neutral, un-ionized) regardless of exactly where its true pKa sits.\n\n## Why not just use the computed pKa\n`predict_pka` returns pKa = **6.08** for this molecule (site: the carboxylic acid O–H), method GFN2‑xTB/ALPB‑water, stated uncertainty **±1.6**. Benchmarked against experiment this predictor's *individual values* can miss by up to ~2 units even though its *ranking* is reliable — so the true pKa here could plausibly be anywhere from roughly **4.5 to 7.7**. That's exactly the situation the ionization-and-partitioning judgment flags explicitly: **if a pH setpoint depends on the number, the answer is \"measure it,\" not a computed value with a caveat bolted on.** I did not find a measured pKa or ELN precedent for this specific compound in the knowledge graph (`find_notes`/`gather_evidence` came back with related biphenyl/Suzuki chemistry but nothing on this acid's ionization or an existing release method), so there's no internal measurement to fall back on — I'd recommend a potentiometric titration to pin it down before finalizing the method.\n\nThere's also a structural reason to distrust the point estimate more than usual: this is an *ortho*-substituted biphenyl-2-carboxylic acid (the carboxyl sits ortho to the second ring). Steric twisting of the biaryl (a related methoxybiphenyl in the graph, `job-biaryl-geometry`, shows a ~37° inter-ring dihedral from a similar coupling) can perturb resonance/sterics around an ortho-carboxyl group and shift its acidity from a \"generic\" benzoic acid — another reason a single continuum-solvent xTB number shouldn't anchor a pH spec.\n\n## Why \"near the pKa\" is the wrong target for robustness anyway\nPeak shape/retention sensitivity to small buffer pH errors is worst **right at the pKa**, where the ionization fraction curve is steepest — a ±0.2 pH excursion there moves a meaningful fraction of the analyte between neutral and ionized forms, changing retention and often causing tailing or splitting between injections/columns. Moving the mobile-phase pH **≥1.5–2 units away from the pKa** (either fully suppressing or fully promoting ionization) flattens that curve, so a ±0.2 unit buffer error barely moves the ionization fraction at all.\n\nGiven the plausible pKa range (4.5–7.7):\n- **Low-pH suppression (pH ~2.0–2.5)** puts you >2 units below even the lowest plausible pKa estimate, guaranteeing a fully protonated, neutral, sharp-peaked species regardless of which end of the uncertainty range is correct. This is also the standard RP-HPLC approach for a carboxylic acid analyte (ion-suppression mode) and is compatible with common phosphate/formate release-method buffers.\n- The high-pH alternative (fully ionized, pH ≥ ~9.5–10) would require clearing the *upper* end of the uncertainty band and is far less common for a routine release method (worse column compatibility, less precedent here) — I'd only go that way if there's a specific selectivity reason to run ionized.\n\nSo: **recommend pH 2.0–2.5** as the robust setpoint, note this is chosen precisely so the answer is insensitive to the ±1.6-unit uncertainty on the predicted pKa, and flag that a measured pKa (titration) should still be obtained to confirm before the method is locked, given the ortho-biaryl structure and the lack of any prior measurement on file.\n\nNo structural hazard flags were returned by `screen_hazards` for this molecule — that's an empty result, not a safety clearance, just noting nothing in the rule table matched.",
+    "answered": true,
+    "tools_called": [
+      "load_skill",
+      "predict_pka",
+      "gather_evidence",
+      "find_notes",
+      "screen_hazards"
+    ],
+    "tools_failed": [],
+    "expected_tools_met": true,
+    "uncited_note_ids": [],
+    "failed_loudly": false,
+    "error_code": null,
+    "degraded": [],
+    "jobs_started": [],
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "latency_seconds": 85.97,
+    "event_counts": {
+      "tool_call": 5,
+      "tool_result": 5,
+      "token": 44,
+      "answer": 1
+    },
+    "transport_error": null
+  }
+}

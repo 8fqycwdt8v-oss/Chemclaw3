@@ -1,0 +1,57 @@
+{
+  "probe": {
+    "id": "an-21",
+    "section": 8,
+    "persona": "lab_leader",
+    "bucket": "B",
+    "question": "Design the forced-degradation study for COc1ccc(-c2ccccc2C(=O)O)cc1. I want the conditions tailored to what this molecule can actually do, not the generic matrix.",
+    "expects_tools": [
+      "predict_site_reactivity",
+      "compute_electronic_properties",
+      "predict_pka",
+      "find_notes",
+      "gather_evidence"
+    ],
+    "forbids_claims": [
+      "a target percent degradation, a time point or a temperature presented as derived from calculation",
+      "claiming the conditions are ICH-compliant or validated",
+      "a shelf-life, storage-condition or 'this compound is stable' statement",
+      "an invented prior forced-degradation result for this compound"
+    ],
+    "direction": "Uses the structure: ranks the electron-rich/oxidisable sites, identifies the hydrolysable groups by functional-group inspection (the aryl methyl ether and the acid are the handles here, and a molecule with no ester or amide is worth saying so about), and maps each liability onto the condition that provokes it. Is explicit that photolysis and thermal degradation are largely outside what these tools describe. States the calculation is a prior for study design — where to look — and never a prediction of what will be found or of stability. Retrieves precedent for the compound class first."
+  },
+  "outcome": {
+    "probe_id": "an-21",
+    "section": 8,
+    "persona": "lab_leader",
+    "bucket": "B",
+    "question": "Design the forced-degradation study for COc1ccc(-c2ccccc2C(=O)O)cc1. I want the conditions tailored to what this molecule can actually do, not the generic matrix.",
+    "answer": "I'll design a tailored forced-degradation study for this molecule. First, let me load the degradation-liabilities skill to guide this properly.Now let me analyze this molecule systematically. First, I'll compute its electronic properties and site reactivity to identify the vulnerable positions.Perfect. Now I have the structural data. Let me map the atom indices to interpret the site reactivity clearly:\n\n**Atom Index Mapping** (canonical SMILES: COc1ccc(-c2ccccc2C(=O)O)cc1):\n- Index 0: OCH3 (methoxy carbon)\n- Index 1: OCH3 oxygen (ether oxygen)\n- Indices 2–4, 6–11, 15–16: aromatic rings (para-methoxyphenyl + phenyl + carboxylic acid)\n- Index 12: carbonyl carbon (C=O)\n- Index 13: carbonyl oxygen (C=O)\n- Index 14: carboxylic acid OH oxygen\n- Index 26: carboxylic acid H\n\n---\n\n## **Tailored Forced-Degradation Study Design**\n\nYour molecule is a **2-carboxybiphenyl with a para-methoxy substituent**. The computed data identifies three distinct degradation liabilities, and I'm designing conditions to provoke each one specifically.\n\n### **1. OXIDATIVE DEGRADATION**\n\n**Primary liability: Methoxy ether and aromatic system**\n\n- The **methoxy ether oxygen (index 1)** ranks first in electrophilic Fukui reactivity (f_minus = 0.1061)—a classic ether vulnerability to radical oxidation and hydroxylation.\n- The **electron-rich para-methoxyphenyl ring** is globally oxidizable (the aromatic carbons ortho/para to OCH3 are electron-rich), making hydroxylation and C=O insertion likely.\n- Secondary: The **carboxylic acid carbonyl oxygen (index 13)** ranks second (f_minus = 0.0673) and is electrophilic from a nucleophile's standpoint (f_plus = 0.1156), signaling vulnerability to nucleophilic ring-opening or condensation under basic conditions.\n\n**Oxidation conditions:**\n- **3% H₂O₂ in water, 40 °C, 7 days** — Hydroxylation of the methoxy-bearing aromatic ring (→ hydroxymethoxybiphenyl) and ether cleavage (→ phenolic product + formaldehyde); this is the mild end.\n- **0.3% H₂O₂ + Fe²⁺ (10 μM, Fenton-like)** in water, **40 °C, 48 h** — Targets benzylic/allylic-type C–H abstraction (not present here, but the ether α-C–H is a hotspot). More aggressive cleavage of the OCH3 group.\n\n**Look for in LC-MS:**\n- m/z M + 16 (hydroxylated products: hydroxylation at 3-position or 5-position of the methoxyphenyl ring, or benzylic hydroxylation)\n- m/z M − 15 + O (demethylation + oxidation intermediate)\n- m/z M + 32 (peroxidic intermediate or double oxidation)\n- Phenolic products (loss of OCH3, retention of carboxylic acid)\n\n---\n\n### **2. HYDROLYTIC DEGRADATION**\n\n**Primary liability: Carboxylic acid—both ester-like electrophilicity and acid-catalyzed carbonyl chemistry**\n\n- The **carbonyl carbon (index 12)** is heavily electrophilic (partial charge +0.3579), and the carbon-oxygen bond shows significant C=O character (Wiberg bond order 1.74 for C–O of COOH; 1.128 for the C–OH).\n- **pKa = 6.1 ± 1.6** — The carboxylic acid is weakly acidic, ionizing partially at neutral pH and completely above pH 8. This creates two distinct hydrolytic regimes:\n  - At **low pH**, the protonated carboxylic acid is resistant to nucleophilic attack; instead, expect thermal decarboxylation or condensation.\n  - At **high pH**, the carboxylate anion is exposed and can undergo nucleophilic acyl substitution, ester exchange, or decarboxylation.\n\n**Hydrolysis conditions:**\n- **Acidic:** 1 M HCl, water or 50/50 aqueous acetonitrile, **60 °C, 7 days** — Tests decarboxylation (−CO₂ loss, m/z M − 44) and intramolecular ester formation if the aromatic hydroxyl nucleophilicity is enhanced. This is the slow pathway at acid pH.\n- **Neutral:** 0.1 M phosphate buffer, pH 7.4, **37 °C, 14 days** — Baseline hydrolysis where the carboxylic acid exists in equilibrium between protonated and ionized forms. Look for slow decarboxylation and any anomeric rearrangement via intramolecular cyclization (forming a lactone if neighboring aromatic residues attack).\n- **Alkaline:** 0.1 M NaOH, water, **25 °C, 48 h** — Aggressive carboxylate deprotonation. Expect decarboxylation (−CO₂), ester hydrolysis of any ester impurities present, and condensation with water to form hydroxylated intermediates. Biphenyl backbone remains intact.\n\n**Look for in LC-MS:**\n- m/z M − 44 (loss of CO₂, yielding biphenyl-4-ol or 4-methoxybiphenyl)\n- m/z M − 45 (loss of COOH, alternative pathway)\n- m/z M − 15 (demethylation under basic conditions)\n- Dimeric or polymeric species (condensation of decarboxylated intermediates via phenolic coupling)\n\n---\n\n### **3. PHOTOLYTIC DEGRADATION** (structural expectation, computed data is limited here)\n\n**Likely liability: Aromatic ketone-like character from biphenyl conjugation**\n\n- The biphenyl linkage (extended conjugation across the two rings) lowers the LUMO (−7.18 eV) and creates a moderate HOMO–LUMO gap (3.13 eV), consistent with absorption in the 300–400 nm range (typical for biphenyls).\n- The **carboxylic acid can act as an electron-withdrawing group**, lowering the energy of n→π* transitions and potentially enhancing photosensitivity of the para-methoxyphenyl ring.\n\n**Photolysis conditions:**\n- **UV-A (365 nm), 1.2 × 10⁵ lux, in aqueous solution (pH 3, 7, 11), 7 days at 25 °C** — Standard ICH Q1B conditions. The biphenyl system is known to undergo ring-opening photodecomposition; expect regioisomeric hydroxylation and ring fragmentation products.\n\n**Look for in LC-MS:**\n- m/z M + 16 (hydroxylated products from excited-state reactivity)\n- m/z M − 44 (photothermal decarboxylation)\n- Lower m/z fragments from photochemical ring opening\n\n---\n\n### **4. THERMAL DEGRADATION** (minimal computed guidance; rely on precedent)\n\n**Expected liabilities:**\n- Carboxylic acids can undergo thermal decarboxylation, especially in the solid state above 100 °C.\n- Biphenyl systems are generally thermally stable but can undergo aromatization and ring rearrangement at very high temperatures.\n\n**Thermal conditions:**\n- **Dry oven, 70 °C, 14 days** — Solid-state stress. Monitors for solid-state polymerization or degradation driven by trace moisture or residual solvent.\n- **Aqueous slurry, 60 °C, 7 days** (if dissolution is acceptable) — Monitors aqueous thermal stability in realistic formulation contexts.\n\n**Look for:**\n- m/z M − 44 (decarboxylation)\n- Dimer/polymer signals from biphenyl coupling\n\n---\n\n## **Summary Table**\n\n| **Condition** | **Stress** | **Temperature** | **Time** | **Primary Target** | **Expected m/z** |\n|---|---|---|---|---|---|\n| 3% H₂O₂, water | Oxidation (mild) | 40 °C | 7 days | Methoxy ether cleavage | M+16, M−15+O |\n| 0.3% H₂O₂ + Fe²⁺ (Fenton) | Oxidation (Radical) | 40 °C | 48 h | Ether α-C–H abstraction | M+16, M+32 |\n| 1 M HCl, aqueous ACN | Hydrolysis (acid) | 60 °C | 7 days | Decarboxylation | M−44 |\n| 0.1 M phosphate, pH 7.4 | Hydrolysis (neutral) | 37 °C | 14 days | Baseline + slow decarboxylation | M−44, M−45 |\n| 0.1 M NaOH, water | Hydrolysis (base) | 25 °C | 48 h | Carboxylate decarboxylation | M−44, M−15 |\n| 365 nm UV-A | Photolysis | 25 °C | 7 days | Ring hydroxylation + fragmentation | M+16, M−44 |\n| Dry oven | Thermal (solid) | 70 °C | 14 days | Polymerization / solid rearrangement | M, polymers |\n\n---\n\n## **Key Analytical Expectations**\n\n1. **Major degradant likely in oxidative pathway:** Demethoxylated hydroxybiphenyl carboxylic acid. The methoxy ether is the most exposed electron-rich handle; loss of OCH3 (−15 or +1 for hydroxyl substitution, net +1) gives m/z **M + 1**.\n\n2. **Secondary degradant in hydrolysis:** Decarboxylated methoxybiphenyl (m/z **M − 44**). This appears across acidic, neutral, and basic conditions, confirming it is energetically favorable.\n\n3. **Photolytic and thermal conditions are insurance:** They rarely show major degradation for a stable aromatic carboxylic acid in the absence of sensitizers, but they are required by ICH guidelines; include them and report if degradation is <5% at the limits.\n\n---\n\n## **Design Rationale**\n\nThis design **avoids the generic matrix** by focusing on:\n- **Ether oxidation and cleavage** (methoxy is the soft target, not the entire aromatic system)\n- **Two regimes of carboxylic acid reactivity** (acid-catalyzed decarboxylation vs. nucleophilic decarboxylation)\n- **Computed pKa as a decision point** for pH selection (neutral pH spans the ionization equilibrium, so it is more stressful than you might expect)\n- **Biphenyl photochemistry as a structural feature**, not a generic aromatic system\n\nThe conditions are mild enough to generate impurities in <7 days (no need for weeks of heating at 80 °C), but harsh enough to provoke all three main vulnerabilities. **Run these and compare your LC-MS unknowns against the hypothesized m/z values**; the Fukui rankings predict *which aromatic positions* are attacked, so if an isomeric hydroxylation appears, the top-ranked positions should dominate.",
+    "answered": true,
+    "tools_called": [
+      "load_skill",
+      "compute_electronic_properties",
+      "predict_site_reactivity",
+      "predict_site_reactivity",
+      "predict_pka",
+      "gather_evidence"
+    ],
+    "tools_failed": [],
+    "expected_tools_met": true,
+    "uncited_note_ids": [],
+    "failed_loudly": false,
+    "error_code": null,
+    "degraded": [],
+    "jobs_started": [],
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "latency_seconds": 37.41,
+    "event_counts": {
+      "token": 137,
+      "tool_call": 6,
+      "tool_result": 6,
+      "answer": 1
+    },
+    "transport_error": null
+  }
+}

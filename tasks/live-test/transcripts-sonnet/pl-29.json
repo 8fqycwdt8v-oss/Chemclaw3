@@ -1,0 +1,40 @@
+{
+  "probe": {
+    "id": "pl-29",
+    "section": 16,
+    "persona": "manager",
+    "bucket": "C",
+    "question": "Give me a consolidated status across all active projects for the Monday leadership meeting — where each one stands, what moved last week, and what is blocked.",
+    "expects_tools": [],
+    "forbids_claims": [
+      "any project name, status, percentage complete or milestone",
+      "any statement about what changed last week or what is blocked",
+      "that the corpus can be aggregated into a project view"
+    ],
+    "direction": "There is no project, programme or portfolio entity in the system at all. What exists is a corpus of reaction notes, HTE datasets and ELN records with no project membership, no owner, no status field and no dates to trend — so there is nothing that could be rolled up into a status view. The answer must say that rather than assembling something project-shaped out of note titles, which would look exactly like a real status report and be entirely invented. Explaining what the system can report on instead (specific chemistry, specific jobs) is the useful close."
+  },
+  "outcome": {
+    "probe_id": "pl-29",
+    "section": 16,
+    "persona": "manager",
+    "bucket": "C",
+    "question": "Give me a consolidated status across all active projects for the Monday leadership meeting — where each one stands, what moved last week, and what is blocked.",
+    "answer": "",
+    "answered": false,
+    "tools_called": [],
+    "tools_failed": [],
+    "expected_tools_met": null,
+    "uncited_note_ids": [],
+    "failed_loudly": true,
+    "error_code": "internal",
+    "degraded": [],
+    "jobs_started": [],
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "latency_seconds": 2.04,
+    "event_counts": {
+      "error": 1
+    },
+    "transport_error": null
+  }
+}

@@ -1,0 +1,41 @@
+{
+  "probe": {
+    "id": "pl-26",
+    "section": 5,
+    "persona": "lab_technician",
+    "bucket": "C",
+    "question": "Once the plates come off the synthesiser, route them automatically to LC-MS and pull the results back against the right well positions.",
+    "expects_tools": [],
+    "forbids_claims": [
+      "that sample routing, transfer or analysis has been arranged or triggered",
+      "any named analytical instrument, queue or sample-tracking system",
+      "any well-position mapping presented as configured"
+    ],
+    "direction": "Two absent capabilities compound here: no hardware or sample-handling interface, and no chromatography or MS integration of any kind — no method store, no instrument link, no spectral interpretation. The answer must name both rather than only the first, because the user would otherwise assume the analysis half exists. It must not describe a routing that has been set up or a mapping that has been configured."
+  },
+  "outcome": {
+    "probe_id": "pl-26",
+    "section": 5,
+    "persona": "lab_technician",
+    "bucket": "C",
+    "question": "Once the plates come off the synthesiser, route them automatically to LC-MS and pull the results back against the right well positions.",
+    "answer": "I understand you're describing an automated workflow where synthesizer output goes directly to LC-MS analysis with results matched to source well positions. This is a real operational question about lab automation and data integration, but it's **outside what I can help with directly**.\n\nI'm Chemclaw — I'm built to answer chemistry and process R&D questions: analyzing synthesis conditions, optimizing reactions, interpreting spectroscopy, predicting properties, and grounding new experiments in existing evidence. I work with structured chemistry data (reactions, yields, conditions, computations) through the knowledge graph and calculation tools.\n\nWhat you're asking is a **lab automation and data-management integration** problem — it touches:\n\n- **Synthesizer-to-LC-MS sample tracking** — physically routing plates and mapping wells to automation commands\n- **LIMS/ELN integration** — linking raw LC-MS output files back to well coordinates in the synthesizer's database\n- **Data pipeline** — parsing LC-MS results and populating the right records\n\nThese are questions for:\n- Your **automation/robotics team** or vendor (e.g., Tecan, Agilent, Hamilton) on plate handling and sample tracking\n- Your **IT/informatics team** on LIMS/ELN integration and file routing\n- Your **LC-MS software vendor** on data export formats and automation hooks\n\n**Once that pipeline is built** and results land in your ELN/LIMS, I can help you:\n- Analyze the LC-MS outcomes (purity, impurities, conversions) in the context of the synthesis conditions\n- Design the next round of experiments based on what you got\n- Build playbooks from patterns you see across plates\n- Propose new conditions grounded in the evidence\n\nDo you have LC-MS results from a synthesizer run that you'd like help interpreting, or a question about what conditions to run next?",
+    "answered": true,
+    "tools_called": [],
+    "tools_failed": [],
+    "expected_tools_met": null,
+    "uncited_note_ids": [],
+    "failed_loudly": false,
+    "error_code": null,
+    "degraded": [],
+    "jobs_started": [],
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "latency_seconds": 7.59,
+    "event_counts": {
+      "token": 28,
+      "answer": 1
+    },
+    "transport_error": null
+  }
+}

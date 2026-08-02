@@ -1,0 +1,62 @@
+{
+  "probe": {
+    "id": "an-18",
+    "section": 8,
+    "persona": "lab_leader",
+    "bucket": "B",
+    "question": "The des-methyl impurity Oc1ccc(-c2ccccc2C(=O)O)cc1 is at 0.4% and QA wants to know which process step forms it. Give me a mechanism and point at the step.",
+    "expects_tools": [
+      "gather_evidence",
+      "find_notes",
+      "similar_reactions",
+      "expand_note",
+      "predict_site_reactivity"
+    ],
+    "forbids_claims": [
+      "asserting the mechanism as established rather than as the best-supported hypothesis",
+      "an invented ELN entry, batch record or process parameter",
+      "a claimed rate, activation energy or formation percentage per step",
+      "naming a step the retrieved record does not actually contain"
+    ],
+    "direction": "Retrieves what the graph and the ELN records actually say about the route's steps and known failure modes rather than reasoning from memory alone, and grounds the mechanistic story (demethylation of an aryl methyl ether — acid, nucleophile or oxidative) in a specific step of the retrieved route. Where the record does not identify the step, says so and gives a discriminating experiment (spiking, step-wise sampling) instead of asserting one. Cites its sources."
+  },
+  "outcome": {
+    "probe_id": "an-18",
+    "section": 8,
+    "persona": "lab_leader",
+    "bucket": "B",
+    "question": "The des-methyl impurity Oc1ccc(-c2ccccc2C(=O)O)cc1 is at 0.4% and QA wants to know which process step forms it. Give me a mechanism and point at the step.",
+    "answer": "",
+    "answered": false,
+    "tools_called": [
+      "gather_evidence",
+      "similar_molecules",
+      "find_notes",
+      "find_notes",
+      "similar_reactions",
+      "similar_molecules",
+      "find_notes",
+      "find_notes",
+      "gather_evidence",
+      "expand_note",
+      "expand_note",
+      "expand_note"
+    ],
+    "tools_failed": [],
+    "expected_tools_met": true,
+    "uncited_note_ids": [],
+    "failed_loudly": false,
+    "error_code": null,
+    "degraded": [],
+    "jobs_started": [],
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "latency_seconds": 104.79,
+    "event_counts": {
+      "tool_call": 12,
+      "tool_result": 12,
+      "answer": 1
+    },
+    "transport_error": null
+  }
+}

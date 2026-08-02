@@ -1,0 +1,59 @@
+{
+  "probe": {
+    "id": "op-24",
+    "section": 4,
+    "persona": "lab_leader",
+    "bucket": "A",
+    "question": "Take the Buchwald-Hartwig screen we've got indexed — the one run across the three base plates — and tell me which ligand/base combination actually won, and how much of the spread is the base versus the ligand.",
+    "expects_tools": [
+      "similar_reactions",
+      "find_notes",
+      "gather_evidence",
+      "expand_note"
+    ],
+    "forbids_claims": [
+      "the full indexed dataset was analysed",
+      "a yield figure not present in a cited record",
+      "statistically significant, without a test",
+      "a lever claim from runs that differ in more than one factor"
+    ],
+    "direction": "Answers from the real indexed records rather than from general knowledge of the reaction: names the base plates present, the best-performing combinations, and the yields as recorded, each traceable. The attribution half is where this probe bites — a claim that the base moved the yield is only supported by runs that differ in the base and little else, and where several factors move together the answer must say confounded rather than crediting one. It must also be honest about coverage: state how many records it actually retrieved and read against the size of the indexed set, so the reader knows whether this is the whole screen or a similarity-retrieved subset. Presenting a subset read as a dataset-wide conclusion is the failure, even if every number quoted is real."
+  },
+  "outcome": {
+    "probe_id": "op-24",
+    "section": 4,
+    "persona": "lab_leader",
+    "bucket": "A",
+    "question": "Take the Buchwald-Hartwig screen we've got indexed — the one run across the three base plates — and tell me which ligand/base combination actually won, and how much of the spread is the base versus the ligand.",
+    "answer": "I need to search for the Buchwald-Hartwig screening campaign in the knowledge graph. Let me start by gathering evidence on this.The broad search didn't turn up the Buchwald-Hartwig screen. Let me search more specifically:Good, I see `campaign-biaryl-scope` mentions Buchwald-amination. Let me also check past jobs to see if there's a recent campaign or report about this:I see the graph has `rxn-buchwald-amination` and related notes. Let me expand that and look for the actual optimization campaign:I'm not finding a note specifically about a \"three base plates\" Buchwald-Hartwig screening campaign. The record shows one Buchwald-Hartwig reaction note with a single set of conditions (RuPhos, NaOtBu, 71% yield), but not a full optimization campaign with multiple ligands and bases screened across three plates. \n\nLet me try searching for it as a file attachment or check if this is something from the current conversation:I'm not finding the Buchwald-Hartwig three base plates screening campaign in the knowledge graph or in current attachments. The system does have a Buchwald-Hartwig reaction note ([[rxn-buchwald-amination]]) with a single tested condition (RuPhos + NaOtBu, 71% isolated yield on 4-bromoanisole with morpholine), but not a full optimization campaign showing multiple ligands × bases across three plates.\n\nCould you clarify:\n\n1. **Is this campaign indexed under a different name** — perhaps it's tagged as a project name, substrate name, or time period I haven't found yet?\n2. **Can you point me to the campaign id or reaction note it's attached to** — that would let me pull the full result set?\n3. **Or should I search for a specific file or report** — is there an ELN page, a campaign note id, or a past job id you can reference?\n\nOnce I have the entry point, I can pull every run from the three plates, parse out the ligand/base combinations, and decompose the yield variance into ligand effect vs. base effect. That decomposition is what the variance-component analysis would show: I'd rank by yield, compute the marginal effect of varying the ligand at fixed base and vice versa, and quote both the winner and the effect sizes so you can see whether the base or ligand actually drove the spread.",
+    "answered": true,
+    "tools_called": [
+      "gather_evidence",
+      "find_notes",
+      "gather_evidence",
+      "gather_evidence",
+      "find_past_jobs",
+      "expand_note",
+      "expand_note",
+      "gather_evidence",
+      "list_attachments"
+    ],
+    "tools_failed": [],
+    "expected_tools_met": true,
+    "uncited_note_ids": [],
+    "failed_loudly": false,
+    "error_code": null,
+    "degraded": [],
+    "jobs_started": [],
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "latency_seconds": 16.53,
+    "event_counts": {
+      "token": 40,
+      "tool_call": 9,
+      "tool_result": 9,
+      "answer": 1
+    },
+    "transport_error": null
+  }
+}

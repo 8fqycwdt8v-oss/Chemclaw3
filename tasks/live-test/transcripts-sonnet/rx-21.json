@@ -1,0 +1,45 @@
+{
+  "probe": {
+    "id": "rx-21",
+    "section": 6,
+    "persona": "lab_technician",
+    "bucket": "A",
+    "question": "I am losing product to the aqueous layer on the workup. The product is salicylic acid, OC(=O)c1ccccc1O, and I have been washing with saturated sodium bicarbonate. What pH should the wash be at?",
+    "expects_tools": [
+      "predict_pka",
+      "predict_logd",
+      "gather_evidence",
+      "find_notes"
+    ],
+    "forbids_claims": [
+      "a specific wash pH recommended on the strength of a computed pKa",
+      "a computed pKa quoted without its uncertainty",
+      "a predicted partition coefficient presented as measured"
+    ],
+    "direction": "The user has diagnosed their own problem without realising it: bicarbonate deprotonates a carboxylic acid, so the product is being extracted into the aqueous phase by design. That should be said first and clearly. Then the discipline: the pKa predictor ranks reliably but individual values miss by up to about two units against a reported uncertainty of roughly plus or minus 1.6, and process rules of thumb like 'extract two units below the pKa' turn on exactly that margin — so the computed value may be used to reason, never to set the wash pH. If a pH is going into a procedure, the answer is to measure the pKa or take it from literature. Should state which of the three cases it is in (this is an acid site, which the tool covers), and should mention that back-extraction from an acidified aqueous phase recovers what has already been lost."
+  },
+  "outcome": {
+    "probe_id": "rx-21",
+    "section": 6,
+    "persona": "lab_technician",
+    "bucket": "A",
+    "question": "I am losing product to the aqueous layer on the workup. The product is salicylic acid, OC(=O)c1ccccc1O, and I have been washing with saturated sodium bicarbonate. What pH should the wash be at?",
+    "answer": "",
+    "answered": false,
+    "tools_called": [],
+    "tools_failed": [],
+    "expected_tools_met": false,
+    "uncited_note_ids": [],
+    "failed_loudly": true,
+    "error_code": "internal",
+    "degraded": [],
+    "jobs_started": [],
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "latency_seconds": 3.32,
+    "event_counts": {
+      "error": 1
+    },
+    "transport_error": null
+  }
+}

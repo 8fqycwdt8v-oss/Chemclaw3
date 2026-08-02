@@ -3,6 +3,55 @@
 Prioritized open action items. Top = next. Keep in sync with `docs/planning/implementation-plan.md`
 (phase/step numbers) at session end.
 
+## Open — Confirmed by the 190-probe live run (2026-08-02)
+
+Each reproduced against a running deployment; evidence in `docs/archive/live-user-stories-2026-08.md`
+and `tasks/live-test/`. The fixed ones are not listed — see the ADR and the commits on that run.
+
+- [ ] **The answer verifier checks the wrong thing, and its metric rewards citing nothing** — [M].
+      `agent/verifier.py:190-205` `gather_cited_evidence` resolves an answer's citations from the
+      graph on disk rather than from what the turn retrieved, so `known` means "ids that exist" and
+      a citation recalled from training passes. The deterministic backend returns
+      `supported=True, confidence=1.0` for an answer with **no** citations — measured: 0 of 33
+      analytical answers in the run carried a single wikilink, so every fabricated method in that
+      slice would have scored a perfect citation-faithfulness result. Enabling `verifier_enabled`
+      as-is would therefore change nothing. The fix is to thread the turn's retrieved evidence into
+      `_answer_event` (`api/runner.py:557`) and to score *uncited* factual claims at all; both are
+      contract changes needing their own argument, which is why this is a row and not a patch.
+- [ ] **A durable-job outage is never announced before the turn plans** — [S]. `api/runner.py:263-265`
+      announces degraded capability for connectors only; Temporal is never probed, so no
+      `CapabilityDegradedEvent` is emitted for the durable subsystem. The launcher now fails with a
+      readable message (2026-08-02), but the model still discovers the outage only by trying. The
+      docstring two lines above states the principle: *"the model cannot tell the chemist that a
+      tool was missing, because it never saw one missing."*
+- [ ] **`ask_clarifying_question` does not end the turn** — [M]. `agent/dialogue_tools.py` used to
+      promise it did; `agent/turn_signals.py:124-128` records the signal and returns, and the agent
+      loop continues. The docstring now states what is true, but the guarantee is still unenforced.
+      Enforcing it fights the deliberate "Partial data is still an answer" instruction, so the two
+      rules need reconciling before either is mechanised.
+- [ ] **The fingerprint index and the citable note set are disjoint, and nothing says which was
+      read** — [M]. `ingest/eln/ingest.py:44-50` indexes every reaction unconditionally and PR-gates
+      the note, by design. In the run that was 4,251 indexed against 987 notes, and there is no
+      fingerprint *data source*, so `gather_evidence` structurally cannot see the larger set while
+      `similar_reactions` sees only it. `Match` carries no yield, so a facet or aggregate question
+      ("rank the three base plates") is unanswerable — and an honest "I could not find it" is
+      indistinguishable from "it is not there". Wants a coverage statement on the search result.
+- [ ] **The eval's citation check is bounded by a UI budget** — [S]. `api/runner.py:87`
+      `_ARG_PREVIEW_CHARS = 200` truncates every tool *result*, and `evals/live._score_citations`
+      scores against those previews. A `gather_evidence` result is ~20,000 chars over 40 chunks, so
+      one id is visible and the rest read as uncited. Wants an untruncated `note_ids` field on
+      `ToolResultEvent` populated by the retrieval tools. Do **not** raise `_ARG_PREVIEW_CHARS` —
+      that budget is correct for the UI.
+- [ ] **A fabricated method parameter has no deterministic gate** — [M]. The capability-boundary
+      instruction (2026-08-02) is necessary and **not sufficient**: the stronger model produced a
+      complete branded HPLC method table *while writing* "not a validated method". Wants a scan of
+      the final answer for method-parameter shapes that, when no tool in the turn produced them,
+      marks the answer for review. A heuristic, so it ships behind a config knob or not at all.
+- [ ] **No document-level provenance share** — [S, recommend refusing rather than building].
+      `kg/note.py` `created_by` is whole-note and binary, there is no document entity, and §12's
+      "how much of this was AI-drafted" is unanswerable. The honest refusal is one paragraph; the
+      capability is a subsystem.
+
 ## Open — Left open by the full-codebase review (2026-08-01)
 
 An adversarially-verified review across every layer and phase; 22 distinct defects were fixed (see

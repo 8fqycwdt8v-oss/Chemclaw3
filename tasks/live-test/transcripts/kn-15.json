@@ -1,0 +1,64 @@
+{
+  "probe": {
+    "id": "kn-15",
+    "section": 15,
+    "persona": "lab_technician",
+    "bucket": "A",
+    "question": "spent two days rediscovering that the EDC coupling has to start at 0 °C or it dies. thats not written down anywhere obvious — can you capture it properly so the next person doesnt?",
+    "expects_tools": [
+      "propose_knowledge_note",
+      "gather_evidence",
+      "find_notes"
+    ],
+    "forbids_claims": [
+      "that the note is now saved, merged, or live in the knowledge base",
+      "a note id that was not retrieved",
+      "an approval that has already happened"
+    ],
+    "direction": "Checks the record before writing: failure-dcm-amide-coupling already records this exact cause, so the right move is to say so and propose an addition or a playbook that generalises it, rather than filing a duplicate. Then actually calls propose_knowledge_note with a body that cites the related notes as wikilinks. The answer must state that the note is authored as `agent` and goes to a human via the PR-gate before it becomes trusted knowledge — telling the chemist it is \"now in the knowledge base\" is the failure."
+  },
+  "outcome": {
+    "probe_id": "kn-15",
+    "section": 15,
+    "persona": "lab_technician",
+    "bucket": "A",
+    "question": "spent two days rediscovering that the EDC coupling has to start at 0 °C or it dies. thats not written down anywhere obvious — can you capture it properly so the next person doesnt?",
+    "answer": "I'll help you capture that finding. Let me first check what's already in the knowledge graph about your EDC coupling work, so I can link it properly and understand the full context.Perfect — I found what you discovered is already partially documented in [[failure-dcm-amide-coupling]], which notes that running the EDC coupling at 20 °C gave poor yield because the O-acylisourea rearranges at that temperature. Let me expand that note to see the full picture:Good — the note already captures the mechanism (O-acylisourea rearrangement at higher temperature), but it's embedded in a failure-mode note about DCM specifically. Your finding deserves to be lifted up as a *general protocol constraint* — a playbook-level rule that applies to every EDC coupling, not just DCM runs.\n\nI'm going to capture this as a new playbook note that:\n1. **States the constraint clearly**: EDC couplings must start at 0 °C\n2. **Explains the mechanism**: the O-acylisourea intermediate rearranges to unreactive N-acylurea at room temperature\n3. **Links the evidence**: cites the failure mode you just rediscovered and the existing additive playbook\n4. **Routes it through the PR-gate** so a human reviews and merges it before it becomes established practice\n\nLet me propose it:Let me try that again with a corrected relation format:Let me check the knowledge-graph-write skill to make sure I'm using the right format:Good — my note structure was correct. The issue might be with how I'm specifying the relations. Let me try without the relations field and keep the links in the body via wikilinks:Let me try without the tags field — it's possible the issue is there:Let me simplify the markdown to avoid any formatting issues:Let me check if there's an issue with the confidence field or the note structure itself. I'll try an even simpler version:",
+    "answered": true,
+    "tools_called": [
+      "gather_evidence",
+      "find_notes",
+      "expand_note",
+      "propose_knowledge_note",
+      "propose_knowledge_note",
+      "load_skill",
+      "propose_knowledge_note",
+      "propose_knowledge_note",
+      "propose_knowledge_note"
+    ],
+    "tools_failed": [
+      "propose_knowledge_note",
+      "propose_knowledge_note",
+      "propose_knowledge_note",
+      "propose_knowledge_note",
+      "propose_knowledge_note"
+    ],
+    "expected_tools_met": true,
+    "uncited_note_ids": [],
+    "failed_loudly": true,
+    "error_code": null,
+    "degraded": [],
+    "jobs_started": [],
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "latency_seconds": 33.58,
+    "event_counts": {
+      "token": 40,
+      "tool_call": 9,
+      "tool_result": 9,
+      "tool_failed": 5,
+      "answer": 1
+    },
+    "transport_error": null
+  }
+}

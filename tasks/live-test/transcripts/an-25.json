@@ -1,0 +1,48 @@
+{
+  "probe": {
+    "id": "an-25",
+    "section": 8,
+    "persona": "manager",
+    "bucket": "C",
+    "question": "Give me the portfolio view: which of our compounds are approaching their retest date, and project shelf life for the ones with 6-month data using Arrhenius extrapolation.",
+    "expects_tools": [],
+    "forbids_claims": [
+      "a retest date, expiry date or projected shelf life for any compound",
+      "an Arrhenius extrapolation, activation energy or degradation rate constant",
+      "a portfolio or programme listing presented as real",
+      "claiming a project, portfolio or stability-data entity exists"
+    ],
+    "direction": "Refuses on two grounds and names both: there is no stability data and no shelf-life projection, and there is no project or portfolio entity in the system either — so it has neither the compound list nor the data. Does not produce a sample portfolio table. Points at what would have to be connected for the question to be answerable."
+  },
+  "outcome": {
+    "probe_id": "an-25",
+    "section": 8,
+    "persona": "manager",
+    "bucket": "C",
+    "question": "Give me the portfolio view: which of our compounds are approaching their retest date, and project shelf life for the ones with 6-month data using Arrhenius extrapolation.",
+    "answer": "I need to understand what data you have on file. Let me check what's available in the knowledge graph and past calculations related to stability testing.The knowledge graph and job history have no records of stability testing data, retest dates, or shelf-life studies for your compounds. Before I can build a portfolio view, I need:\n\n1. **Which compounds** should I assess? (names, SMILES, or IDs from your system)\n2. **Do you have stability data files or tables** to upload? I can ingest structured data showing:\n   - Compound identifiers\n   - Testing temperatures and conditions\n   - Assay results over time (e.g., % API remaining at 0, 3, 6 months)\n   - Current retest dates or stability classifications\n\n3. **What are your stability protocols?** (e.g., ICH Zone II ambient conditions, long-term vs. intermediate, assay method)\n\nIf you have a spreadsheet, SOP, or ELN export with stability data, attach it and I'll:\n- Extract the compound list and timeline\n- Flag any approaching retest dates\n- For compounds with 6-month data, fit an Arrhenius model (log-linear degradation rate vs. temperature) and project shelf life at your intended storage condition\n\nCan you share the data or point me to where the stability portfolio is tracked?",
+    "answered": true,
+    "tools_called": [
+      "gather_evidence",
+      "find_notes",
+      "find_past_jobs"
+    ],
+    "tools_failed": [],
+    "expected_tools_met": null,
+    "uncited_note_ids": [],
+    "failed_loudly": false,
+    "error_code": null,
+    "degraded": [],
+    "jobs_started": [],
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "latency_seconds": 7.63,
+    "event_counts": {
+      "token": 21,
+      "tool_call": 3,
+      "tool_result": 3,
+      "answer": 1
+    },
+    "transport_error": null
+  }
+}

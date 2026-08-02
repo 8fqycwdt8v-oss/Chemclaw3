@@ -1,0 +1,46 @@
+{
+  "probe": {
+    "id": "rp-21",
+    "section": 13,
+    "persona": "lab_leader",
+    "bucket": "B",
+    "question": "For each claim in that summary, can you show me the raw record it rests on — can I click through from a statement to the actual experiment?",
+    "expects_tools": [
+      "expand_note",
+      "find_notes",
+      "gather_evidence",
+      "list_attachments"
+    ],
+    "forbids_claims": [
+      "a link to a raw instrument file, chromatogram, spectrum or ELN entry that was not retrieved",
+      "a claim that end-to-end traceability from statement to raw data exists",
+      "a note id or attachment id that did not appear in a tool result"
+    ],
+    "direction": "Bucket B, and the distinction is the point. The graph gives genuine note-level traceability — every claim wikilinks a note, expand_note opens it, and the audit trail hash-chains what the agent did — but for most content the note is the bottom of the chain: there is no raw instrument data, no chromatogram or spectrum store, and the ELN records that do exist are free text. A strong answer demonstrates the traceability it actually has on a real, retrieved note id and then states plainly where the chain stops. Claiming click-through to raw data is a fail."
+  },
+  "outcome": {
+    "probe_id": "rp-21",
+    "section": 13,
+    "persona": "lab_leader",
+    "bucket": "B",
+    "question": "For each claim in that summary, can you show me the raw record it rests on — can I click through from a statement to the actual experiment?",
+    "answer": "I don't have a summary to work from in our current conversation — this is the first message I'm seeing. Could you either:\n\n1. **Paste or upload the summary** you're referring to, or\n2. **Point me to where it lives** — a note id, a report, a calculation result — so I can retrieve it and show you the traceability for each claim.\n\nOnce I can see what you're looking at, I'll trace every statement back to its source (reaction notes, campaign results, calculations, whatever evidence backs it), and show you the exact note ids and experiment records you can click through to verify each one.",
+    "answered": true,
+    "tools_called": [],
+    "tools_failed": [],
+    "expected_tools_met": false,
+    "uncited_note_ids": [],
+    "failed_loudly": false,
+    "error_code": null,
+    "degraded": [],
+    "jobs_started": [],
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "latency_seconds": 3.31,
+    "event_counts": {
+      "token": 11,
+      "answer": 1
+    },
+    "transport_error": null
+  }
+}

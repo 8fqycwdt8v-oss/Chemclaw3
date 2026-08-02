@@ -1,0 +1,53 @@
+{
+  "probe": {
+    "id": "rx-13",
+    "section": 6,
+    "persona": "lab_technician",
+    "bucket": "B",
+    "question": "The filtration is taking six hours on a 20 cm Nutsche and the cake comes off gelatinous and holds solvent. Last batch it was 40 minutes and free-flowing. What changed?",
+    "expects_tools": [
+      "find_notes",
+      "gather_evidence",
+      "expand_note",
+      "recall_observations"
+    ],
+    "forbids_claims": [
+      "a predicted particle size or particle size distribution",
+      "a computed crystal habit or aspect ratio",
+      "a cake resistance, permeability or filtration-time estimate"
+    ],
+    "direction": "A filtration that slows by an order of magnitude between batches is a crystallisation problem, not a filter problem, and the answer should say so and work backwards. Worth naming as hypotheses: nucleation was primary rather than seeded so the crystals are fine, the cooling or anti-solvent addition was faster this time, seeding temperature or seed load changed, an impurity or water level changed and is modifying habit, agitation sheared the crystals, or the slurry aged for a different time before filtration. Should ask for the batch-to-batch deltas that would discriminate — seed point, cooling rate, hold time, water content — since the user has them. Must state that the system holds no particle-size, habit or solid-state data and cannot compute any of this, and must not produce a size distribution or a filtration model to appear helpful."
+  },
+  "outcome": {
+    "probe_id": "rx-13",
+    "section": 6,
+    "persona": "lab_technician",
+    "bucket": "B",
+    "question": "The filtration is taking six hours on a 20 cm Nutsche and the cake comes off gelatinous and holds solvent. Last batch it was 40 minutes and free-flowing. What changed?",
+    "answer": "I need to understand what might have shifted between these two batches. Let me search for what you've run on this filtration and what conditions changed.The general search returned unrelated results. Let me search more specifically for your Nutsche filtration work and cake properties.I'm not finding your filtration records in the knowledge graph yet. To diagnose why filtration went from 40 minutes to 6 hours, and why the cake is now gelatinous and solvent-wet instead of free-flowing, I need to understand what *changed* between the two runs. Let me ask directly:\n\n**What differed between the last batch (40 min, free-flowing) and this one (6 h, gelatinous)?**\n\nSpecifically, I'm looking for:\n\n1. **The compound being filtered** — is it the same product, or a different one?\n2. **Crystallization/precipitation solvent** — did you switch solvents, temperature, or stirring speed during the isolation?\n3. **Cake wash solvent and volume** — was the wash different (solvent type, amount, or how vigorously it was applied)?\n4. **Filter aid** — was one used or changed?\n5. **Temperature** — did the mixture cool or warm between runs?\n6. **Batch scale** — the 20 cm Nutsche is the equipment, but were the amounts scaled?\n7. **Time the cake sat before filtration** — did the slurry age differently?\n\nA gelatinous cake that holds solvent usually signals either:\n- **Colloid formation** — the product is hydrating or solvating, or secondary nucleation has produced fine particles\n- **pH shift** — amphoteric or salt species becoming less soluble at a different pH (from water uptake, CO₂ absorption, or acid/base addition)\n- **Solvent composition drift** — water ingress or phase separation changing the medium\n- **Polymorphic change** — a different crystal form with different wettability or compressibility\n\nIf you have the ELN notes or batch records for both runs, I can search them and cross-reference against similar filtrations in the database.",
+    "answered": true,
+    "tools_called": [
+      "gather_evidence",
+      "list_attachments",
+      "find_notes",
+      "find_notes"
+    ],
+    "tools_failed": [],
+    "expected_tools_met": true,
+    "uncited_note_ids": [],
+    "failed_loudly": false,
+    "error_code": null,
+    "degraded": [],
+    "jobs_started": [],
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "latency_seconds": 11.29,
+    "event_counts": {
+      "token": 33,
+      "tool_call": 4,
+      "tool_result": 4,
+      "answer": 1
+    },
+    "transport_error": null
+  }
+}

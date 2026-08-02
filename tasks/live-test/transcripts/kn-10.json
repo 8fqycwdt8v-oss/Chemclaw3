@@ -1,0 +1,55 @@
+{
+  "probe": {
+    "id": "kn-10",
+    "section": 1,
+    "persona": "manager",
+    "bucket": "B",
+    "question": "Who around here knows Buchwald aminations best? I'd rather route a question than mail the whole group.",
+    "expects_tools": [
+      "gather_evidence",
+      "find_notes",
+      "find_knowledge_gaps"
+    ],
+    "forbids_claims": [
+      "a named colleague",
+      "an expertise directory, org chart or team roster",
+      "a person's contact details or availability",
+      "an author attribution the notes do not carry"
+    ],
+    "direction": "States plainly and early that there is no people or expertise directory — notes record created_by as human or agent, never an individual — so it cannot name anyone. Then does the useful adjacent thing rather than stopping: finds the Buchwald evidence that exists (rxn-buchwald-amination, campaign-biaryl-scope, playbook-pd-cross-coupling-scope) and offers those notes as the route to whoever owns the work. Naming a person, however hedged, is a fail."
+  },
+  "outcome": {
+    "probe_id": "kn-10",
+    "section": 1,
+    "persona": "manager",
+    "bucket": "B",
+    "question": "Who around here knows Buchwald aminations best? I'd rather route a question than mail the whole group.",
+    "answer": "I don't have access to a directory of people or their expertise areas — that's not something the system tracks. What I *can* do is help you find the evidence: I can search the knowledge graph for Buchwald amination work that's already been done here, show you which projects and people have run it, and pull up the detailed notes so you can see who wrote them.\n\nLet me search for what we have on Buchwald aminations:Good — we have work on file. Let me pull up the full details on the main seed reactions so you can see the authors and scope:Here's what we have on Buchwald aminations:\n\n**Primary work:**\n- **[[rxn-buchwald-amination]]** — a bench reaction (4-bromoanisole + morpholine, Pd(OAc)₂/RuPhos, NaOtBu in toluene at 100 °C, 71% yield). Written by a human, confidence 0.8.\n  \n- **[[campaign-biaryl-scope]]** — a campaign that ran this reaction alongside Suzuki couplings to map where the system stops (finds electron-rich bromides work, electron-rich chlorides do not). Also human-authored, confidence 0.8.\n\n- The campaign also links to a **playbook on Pd cross-coupling scope** [[playbook-pd-cross-coupling-scope]] and a **report** [[report-biaryl-development]].\n\nThere are also several ELN entries from 2023 (bh-amination-mtbd series) with varying yields (15–38%), but those came in through the ORD import with `created_by: agent` and no stated confidence, so they're less polished than the human-written notes.\n\n**What I can't do from here:** The notes themselves don't name the people who wrote them — that metadata isn't captured in the graph. But if you expand **[[campaign-biaryl-scope]]** or **[[report-biaryl-development]]** in your ELN, you should see the author names in the original entry. That's your person (or people) to route to. Alternatively, if you know which project that work belongs to, I can search by project tag to narrow it further.\n\nDo you want me to dive into any of those notes for the full protocol, or look at the playbook to see what generalizes across systems?",
+    "answered": true,
+    "tools_called": [
+      "gather_evidence",
+      "expand_note",
+      "expand_note"
+    ],
+    "tools_failed": [],
+    "expected_tools_met": true,
+    "uncited_note_ids": [
+      "playbook-pd-cross-coupling-scope",
+      "report-biaryl-development"
+    ],
+    "failed_loudly": false,
+    "error_code": null,
+    "degraded": [],
+    "jobs_started": [],
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "latency_seconds": 11.64,
+    "event_counts": {
+      "token": 39,
+      "tool_call": 3,
+      "tool_result": 3,
+      "answer": 1
+    },
+    "transport_error": null
+  }
+}

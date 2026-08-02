@@ -1,0 +1,41 @@
+{
+  "probe": {
+    "id": "pl-32",
+    "section": 16,
+    "persona": "lab_leader",
+    "bucket": "C",
+    "question": "Which of our workstreams are at risk of missing their milestone dates, and which ones should I escalate this week?",
+    "expects_tools": [],
+    "forbids_claims": [
+      "any milestone, due date, risk rating or escalation recommendation",
+      "any workstream identified as at risk or on track",
+      "that risk could be inferred from activity in the corpus"
+    ],
+    "direction": "No milestones, no dates, no plan, no workstream entity — nothing to assess risk against. A tempting wrong answer infers risk from how recently notes were written or how many experiments a topic has; the answer must not do that, because activity in a note corpus is not evidence about a delivery plan, and presenting it as such would be a fabricated risk register. Saying clearly that the system has no view of plans or dates is the whole requirement."
+  },
+  "outcome": {
+    "probe_id": "pl-32",
+    "section": 16,
+    "persona": "lab_leader",
+    "bucket": "C",
+    "question": "Which of our workstreams are at risk of missing their milestone dates, and which ones should I escalate this week?",
+    "answer": "I don't have direct access to project management or milestone tracking data in this system. Chemclaw is built around chemistry R&D — the knowledge graph holds reactions, optimization campaigns, playbooks, and experimental records, not program schedules or delivery dates.\n\nTo answer your question, I'd need:\n\n1. **A list of your current workstreams** — what are they called, and what are their target milestone dates?\n2. **The status of each one** — which steps have completed, which are in progress, and what are the current blockers (if any)?\n3. **The chemistry behind any delays** — for example, if a synthesis step is underperforming, I can search the record for precedent, propose next experiments, or compute properties to unblock it.\n\n**What I can do:**\n\n- If a workstream is blocked on a technical question — \"this coupling isn't giving the yield we need\" or \"we don't know which solvent to use\" — I can gather evidence from past runs, suggest the next experiment, or compute a property to help you decide.\n- If you have reaction notes in the knowledge graph tagged by project, I can pull together what each workstream has tried and spot what's missing.\n- I can help you write a development report that shows progress against each step.\n\n**What would help me answer this:** Tell me which workstreams are at risk, what the technical blocker is (if there is one), and I'll help you decide whether it's a chemistry problem I can help solve or a scheduling/resource question you'll need to take elsewhere.",
+    "answered": true,
+    "tools_called": [],
+    "tools_failed": [],
+    "expected_tools_met": null,
+    "uncited_note_ids": [],
+    "failed_loudly": false,
+    "error_code": null,
+    "degraded": [],
+    "jobs_started": [],
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "latency_seconds": 5.6,
+    "event_counts": {
+      "token": 22,
+      "answer": 1
+    },
+    "transport_error": null
+  }
+}

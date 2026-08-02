@@ -42,6 +42,7 @@ from chemclaw.agent.turn_signals import record_job_started
 from chemclaw.connectors.manifest import JobParamType, JobSpec
 from chemclaw.connectors.queues import bundle_queue
 from chemclaw.core.config import settings
+from chemclaw.core.errors import ChemclawError
 from chemclaw.core.ids import stable_hash
 from chemclaw.core.metrics_bridge import record_metric
 from chemclaw.core.temporal_client import connect
@@ -71,7 +72,7 @@ _PARAM_ANNOTATIONS: dict[JobParamType, Any] = {
 _DETAIL_MAX_CHARS = 200
 
 
-class ConnectorJobError(ValueError):
+class ConnectorJobError(ChemclawError):
     """A declared job cannot be built (a bad `params_model` reference) or launched as asked.
 
     A `ValueError` subclass for the same reason `ConnectorError` is: one `except ValueError` at an
@@ -354,7 +355,20 @@ def build_job_tool(connector: str, job: JobSpec) -> CapabilityTool:
         workflow_id = job_workflow_id(connector, job.name, payload)
         # `require_actor` is the core rule (F4-T3): under Entra, refuse durable work with no user.
         requested_by = require_actor()
-        client = await connect()
+        try:
+            client = await connect()
+        except Exception as exc:  # noqa: BLE001 - any transport fault means the same thing here
+            # An unreachable broker is not a bad argument, and the model has no other way to tell.
+            # In the 2026-08-02 live run this surfaced as MAF's "Error: Function failed.", so the
+            # model read it as malformed input and retried with different SMILES three times before
+            # ending the turn mid-sentence with no number and no explanation. Saying "nothing was
+            # started" is the part that matters: a chemist who thinks a job may be queued will wait
+            # for it.
+            raise ConnectorJobError(
+                f"the durable execution backend is unreachable, so the {job.name!r} job was not "
+                f"started and nothing is queued ({type(exc).__name__}). This is an infrastructure "
+                "outage, not a problem with the request — the same call will work once it is back."
+            ) from exc
         try:
             handle = await client.start_workflow(
                 ConnectorJobWorkflow.run,

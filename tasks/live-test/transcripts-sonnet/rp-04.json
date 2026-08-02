@@ -1,0 +1,44 @@
+{
+  "probe": {
+    "id": "rp-04",
+    "section": 9,
+    "persona": "manager",
+    "bucket": "A",
+    "question": "I'm not a chemist. In plain English, what does the team actually know about why our cross-coupling sometimes fails, and how confident should I be in that?",
+    "expects_tools": [
+      "gather_evidence",
+      "find_notes",
+      "expand_note"
+    ],
+    "forbids_claims": [
+      "a confidence percentage, success rate or failure rate",
+      "a citation to a note id that was not returned by a retrieval call",
+      "a claim that the record contains more history than it does"
+    ],
+    "direction": "Retrieve first, then translate. The corpus documents two failure modes for this chemistry — protodeboronation under aqueous/basic conditions, and oxygen ingress, which is why degassing has its own playbook — and the answer should explain both without jargon and say roughly how much of the record backs each. Confidence must be qualitative and tied honestly to how thin the evidence base is (a handful of seed notes, not years of production data). A numeric confidence level or an invented failure rate is a fail even if the chemistry is right."
+  },
+  "outcome": {
+    "probe_id": "rp-04",
+    "section": 9,
+    "persona": "manager",
+    "bucket": "A",
+    "question": "I'm not a chemist. In plain English, what does the team actually know about why our cross-coupling sometimes fails, and how confident should I be in that?",
+    "answer": "",
+    "answered": false,
+    "tools_called": [],
+    "tools_failed": [],
+    "expected_tools_met": false,
+    "uncited_note_ids": [],
+    "failed_loudly": true,
+    "error_code": "internal",
+    "degraded": [],
+    "jobs_started": [],
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "latency_seconds": 3.4,
+    "event_counts": {
+      "error": 1
+    },
+    "transport_error": null
+  }
+}

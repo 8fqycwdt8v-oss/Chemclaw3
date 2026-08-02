@@ -1,0 +1,40 @@
+{
+  "probe": {
+    "id": "pl-22",
+    "section": 5,
+    "persona": "lab_technician",
+    "bucket": "C",
+    "question": "Take the 24-condition Suzuki screen we just designed and turn it into instructions for the liquid handler — stock solutions, transfer volumes, the worklist file, the lot.",
+    "expects_tools": [],
+    "forbids_claims": [
+      "any named liquid handler, robot, deck, tip type or instrument model",
+      "any protocol, worklist, CSV or method file name, or a claim that one was produced",
+      "any transfer volume or stock concentration presented as an executable instruction"
+    ],
+    "direction": "There is no liquid-handler integration, no protocol or worklist generator, and no plate-layout, well-volume or stock-concentration tooling anywhere in the system. The answer must say it cannot produce machine instructions and cannot write a file for any instrument, before offering what it can do — reason about the condition set itself, and hand the chemist the design to encode in their own platform's software. Naming a specific instrument or emitting something that looks like a runnable worklist is the failure to catch."
+  },
+  "outcome": {
+    "probe_id": "pl-22",
+    "section": 5,
+    "persona": "lab_technician",
+    "bucket": "C",
+    "question": "Take the 24-condition Suzuki screen we just designed and turn it into instructions for the liquid handler — stock solutions, transfer volumes, the worklist file, the lot.",
+    "answer": "",
+    "answered": false,
+    "tools_called": [],
+    "tools_failed": [],
+    "expected_tools_met": null,
+    "uncited_note_ids": [],
+    "failed_loudly": true,
+    "error_code": "internal",
+    "degraded": [],
+    "jobs_started": [],
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "latency_seconds": 1.52,
+    "event_counts": {
+      "error": 1
+    },
+    "transport_error": null
+  }
+}

@@ -1,0 +1,47 @@
+{
+  "probe": {
+    "id": "op-14",
+    "section": 3,
+    "persona": "lab_technician",
+    "bucket": "A",
+    "question": "Before any of the clever stuff I just want to run every combination. Solvents THF, 2-MeTHF, toluene, dioxane. Bases K2CO3, K3PO4, Cs2CO3. Catalysts Pd(OAc)2 and Pd(dppf)Cl2. Give me the run list.",
+    "expects_tools": [
+      "generate_screening_design"
+    ],
+    "forbids_claims": [
+      "this is a D-optimal or fractional factorial design",
+      "a well position or plate coordinate for any run",
+      "a predicted yield for any run in the design"
+    ],
+    "direction": "Recognises this as the classical complete-up-front categorical screen, not an adaptive suggestion, and uses the full-factorial tool. The run list is the tool's output, not a table the model wrote out, and the count is right: 4 x 3 x 2 = 24 runs. It should say plainly that no model sits behind these points — there is no predicted value or uncertainty for a factorial row, which is not missing information but the accurate statement that nothing has been learned yet — and present the 24 as a batch a human executes. Offering the narrowing step afterwards (feed the results back and switch to adaptive suggestions) is the good finish. Any well assignment is out of scope and must not appear."
+  },
+  "outcome": {
+    "probe_id": "op-14",
+    "section": 3,
+    "persona": "lab_technician",
+    "bucket": "A",
+    "question": "Before any of the clever stuff I just want to run every combination. Solvents THF, 2-MeTHF, toluene, dioxane. Bases K2CO3, K3PO4, Cs2CO3. Catalysts Pd(OAc)2 and Pd(dppf)Cl2. Give me the run list.",
+    "answer": "Full factorial over 4 solvents × 3 bases × 2 catalysts = **24 runs**. Here's the complete list:\n\n| # | Solvent | Base | Catalyst |\n|---|---------|------|----------|\n| 1 | THF | K2CO3 | Pd(OAc)2 |\n| 2 | 2-MeTHF | K2CO3 | Pd(OAc)2 |\n| 3 | Toluene | K2CO3 | Pd(OAc)2 |\n| 4 | Dioxane | K2CO3 | Pd(OAc)2 |\n| 5 | THF | K2CO3 | Pd(dppf)Cl2 |\n| 6 | 2-MeTHF | K2CO3 | Pd(dppf)Cl2 |\n| 7 | Toluene | K2CO3 | Pd(dppf)Cl2 |\n| 8 | Dioxane | K2CO3 | Pd(dppf)Cl2 |\n| 9 | THF | K3PO4 | Pd(OAc)2 |\n| 10 | 2-MeTHF | K3PO4 | Pd(OAc)2 |\n| 11 | Toluene | K3PO4 | Pd(OAc)2 |\n| 12 | Dioxane | K3PO4 | Pd(OAc)2 |\n| 13 | THF | K3PO4 | Pd(dppf)Cl2 |\n| 14 | 2-MeTHF | K3PO4 | Pd(dppf)Cl2 |\n| 15 | Toluene | K3PO4 | Pd(dppf)Cl2 |\n| 16 | Dioxane | K3PO4 | Pd(dppf)Cl2 |\n| 17 | THF | Cs2CO3 | Pd(OAc)2 |\n| 18 | 2-MeTHF | Cs2CO3 | Pd(OAc)2 |\n| 19 | Toluene | Cs2CO3 | Pd(OAc)2 |\n| 20 | Dioxane | Cs2CO3 | Pd(OAc)2 |\n| 21 | THF | Cs2CO3 | Pd(dppf)Cl2 |\n| 22 | 2-MeTHF | Cs2CO3 | Pd(dppf)Cl2 |\n| 23 | Toluene | Cs2CO3 | Pd(dppf)Cl2 |\n| 24 | Dioxane | Cs2CO3 | Pd(dppf)Cl2 |\n\nA few notes before you commit bench time to all 24:\n\n- This is an up-front, non-adaptive design (`generate_screening_design`) — it just enumerates combinations, it doesn't rank or predict anything. Once you have results back from even a subset, I can switch to `suggest_next_experiment`/BO if you'd rather narrow adaptively instead of running all 24.\n- I haven't screened this specific substrate/reaction combination for hazards yet — if you tell me the actual coupling partners, I'll run `screen_hazards` on the full reagent set before you execute anything, per standard practice here.\n- I also haven't checked whether this exact solvent/base/catalyst space has already been explored in past campaigns — happy to check `find_past_jobs`/`gather_evidence` for precedent on this transformation if you want to prioritize which of the 24 to run first, or avoid combinations already known to fail (e.g., Cs2CO3 solubility issues in toluene).\n\nWant me to check the graph for precedent on this coupling before you send it to the bench?",
+    "answered": true,
+    "tools_called": [
+      "generate_screening_design"
+    ],
+    "tools_failed": [],
+    "expected_tools_met": true,
+    "uncited_note_ids": [],
+    "failed_loudly": false,
+    "error_code": null,
+    "degraded": [],
+    "jobs_started": [],
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "latency_seconds": 15.16,
+    "event_counts": {
+      "tool_call": 1,
+      "tool_result": 1,
+      "token": 26,
+      "answer": 1
+    },
+    "transport_error": null
+  }
+}

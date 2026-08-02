@@ -1,0 +1,50 @@
+{
+  "probe": {
+    "id": "kn-11",
+    "section": 1,
+    "persona": "lab_leader",
+    "bucket": "B",
+    "question": "List everything we ran on the amide coupling in the last six months, with dates.",
+    "expects_tools": [
+      "gather_evidence",
+      "find_notes",
+      "find_past_jobs"
+    ],
+    "forbids_claims": [
+      "an experiment date that no note carries",
+      "a note id that was not retrieved",
+      "that the list is complete for the requested period"
+    ],
+    "direction": "Surfaces the date problem instead of papering over it: the seed reaction notes carry no date, and a date-windowed search *excludes* undated notes rather than assuming they fall in range. An acceptable answer either searches unwindowed and says explicitly that the hits are undated, or searches windowed and reports the thin/empty result honestly — and in either case names the amide-coupling notes it did find (rxn-amide-edc, opt-amide-solvent, campaign-amide-additive). Attaching invented run dates to real notes is the failure. Reaching for find_past_jobs, which does carry timestamps, is a legitimate move."
+  },
+  "outcome": {
+    "probe_id": "kn-11",
+    "section": 1,
+    "persona": "lab_leader",
+    "bucket": "B",
+    "question": "List everything we ran on the amide coupling in the last six months, with dates.",
+    "answer": "I'll search for amide coupling runs from the past six months.The search for \"amide coupling\" came back empty in both the reaction record and the job history. This could mean:\n\n1. **The transformation is recorded under a different name** — it might be in the graph as a specific coupling (e.g. \"peptide coupling\", \"carboxylic acid to amide\", the names of the specific coupling reagents like \"EDC/HOBt\" or \"DCC\", or a project-specific shorthand).\n\n2. **The runs aren't tagged or named with that phrase** — the note titles and tags may describe the substrates, the reagent, or the goal instead.\n\nCan you help me narrow it down? Any of these would help:\n- The specific reactants or reagent names (e.g. \"EDC\", \"DCC\", \"PyBOP\", or the carboxylic acid / amine structures)?\n- The project name or internal tag you use for this work?\n- A reaction SMILES if you have one, or the substrates?\n- Whether this is optimization work (multiple runs on the same coupling) or a series of different couplings?\n\nOnce I know what to look for, I can pull the full record with dates.",
+    "answered": true,
+    "tools_called": [
+      "gather_evidence",
+      "find_past_jobs"
+    ],
+    "tools_failed": [],
+    "expected_tools_met": true,
+    "uncited_note_ids": [],
+    "failed_loudly": false,
+    "error_code": null,
+    "degraded": [],
+    "jobs_started": [],
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "latency_seconds": 6.46,
+    "event_counts": {
+      "token": 20,
+      "tool_call": 2,
+      "tool_result": 2,
+      "answer": 1
+    },
+    "transport_error": null
+  }
+}

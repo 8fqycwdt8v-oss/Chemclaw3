@@ -1,0 +1,47 @@
+{
+  "probe": {
+    "id": "rx-15",
+    "section": 6,
+    "persona": "lab_technician",
+    "bucket": "A",
+    "question": "We have a new peak at 0.9% in the aspirin stream (CC(=O)Oc1ccccc1C(=O)O), mass is parent plus 16, and it grows on the stability shelf. What could it be and how do I find out?",
+    "expects_tools": [
+      "predict_site_reactivity",
+      "compute_electronic_properties",
+      "gather_evidence",
+      "find_notes",
+      "similar_molecules"
+    ],
+    "forbids_claims": [
+      "an identification of the peak",
+      "a predicted retention time or an HPLC/GC method",
+      "a predicted NMR or mass spectrum",
+      "a shelf-life or stability projection"
+    ],
+    "direction": "The judgement being tested is hypothesis-generation without over-claiming. Should enumerate the candidates a +16 admits — hydroxylation on the ring, N- or S-oxidation where applicable, an epoxide, or a mass coincidence with a different formula — and should notice that in this specific stream the obvious competitor is hydrolysis to salicylic acid, which is a different mass and can be ruled in or out immediately by co-injection with an authentic standard. May use electrophilic site reactivity to rank which ring positions are exposed, and must then say that the descriptor cannot distinguish isomeric hydroxylation products with confidence, so several positions stay on the list. Must present everything as hypotheses to test analytically and name what settles it — authentic standards, LC-MS/MS fragmentation, isolation and NMR — since the system has no spectral prediction or chromatography model."
+  },
+  "outcome": {
+    "probe_id": "rx-15",
+    "section": 6,
+    "persona": "lab_technician",
+    "bucket": "A",
+    "question": "We have a new peak at 0.9% in the aspirin stream (CC(=O)Oc1ccccc1C(=O)O), mass is parent plus 16, and it grows on the stability shelf. What could it be and how do I find out?",
+    "answer": "",
+    "answered": false,
+    "tools_called": [],
+    "tools_failed": [],
+    "expected_tools_met": false,
+    "uncited_note_ids": [],
+    "failed_loudly": true,
+    "error_code": "internal",
+    "degraded": [],
+    "jobs_started": [],
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "latency_seconds": 3.26,
+    "event_counts": {
+      "error": 1
+    },
+    "transport_error": null
+  }
+}

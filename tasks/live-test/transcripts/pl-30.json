@@ -1,0 +1,41 @@
+{
+  "probe": {
+    "id": "pl-30",
+    "section": 16,
+    "persona": "manager",
+    "bucket": "C",
+    "question": "If we push the amide-coupling programme above the Suzuki work, what slips and by how much? I need to know the cost before I make the call.",
+    "expects_tools": [],
+    "forbids_claims": [
+      "any timeline, slip duration, delivery date or milestone impact",
+      "any resource, headcount or effort reallocation figure",
+      "that a reprioritisation scenario can be modelled from the available data"
+    ],
+    "direction": "A what-if on delivery dates needs plans, resourcing and dependencies, and none of the three exists here — no timeline data, no capacity model, no staffing assignment, no inter-project dependencies. The answer must decline the scenario rather than reasoning plausibly from nothing, and must not hedge its way into a number (\"probably two to three weeks\") which is the specific failure mode. It may legitimately note that it can compare the *chemistry* of the two programmes from the corpus, which is a different question."
+  },
+  "outcome": {
+    "probe_id": "pl-30",
+    "section": 16,
+    "persona": "manager",
+    "bucket": "C",
+    "question": "If we push the amide-coupling programme above the Suzuki work, what slips and by how much? I need to know the cost before I make the call.",
+    "answer": "I don't have the earlier part of this conversation in view right now — the context window has aged out. Could you tell me:\n\n1. **Which amide-coupling programme** are you referring to? (The project name or a specific campaign/experiment id would help me find the right one.)\n2. **Which Suzuki work** takes precedence currently? (Again, a project name or id.)\n3. **What constraint are you optimizing for** — lab capacity, equipment (reactor time, HPLC slots), a person's bandwidth, or something else?\n\nOnce I have those details, I can search the record for:\n- The current schedule/resource plan (if it's documented)\n- How much work each programme has left (from the ELN or campaign notes)\n- What the resequencing would cost in slip time for the Suzuki downstream\n\nIf the schedule isn't in the knowledge graph, I can at least gather what we know about the scope of each programme and give you the pieces needed to calculate the slip.",
+    "answered": true,
+    "tools_called": [],
+    "tools_failed": [],
+    "expected_tools_met": null,
+    "uncited_note_ids": [],
+    "failed_loudly": false,
+    "error_code": null,
+    "degraded": [],
+    "jobs_started": [],
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "latency_seconds": 3.9,
+    "event_counts": {
+      "token": 14,
+      "answer": 1
+    },
+    "transport_error": null
+  }
+}

@@ -1,0 +1,53 @@
+{
+  "probe": {
+    "id": "rx-19",
+    "section": 6,
+    "persona": "lab_technician",
+    "bucket": "A",
+    "question": "We see a des-methyl impurity in the final API. Which step in the route is most likely putting it there, and is there anything in our record that already points at it?",
+    "expects_tools": [
+      "find_notes",
+      "gather_evidence",
+      "expand_note",
+      "similar_molecules",
+      "substructure_matches"
+    ],
+    "forbids_claims": [
+      "a definitive attribution of the impurity to one step",
+      "a level or percentage for the impurity at any step",
+      "a fabricated route step that the retrieved record does not contain"
+    ],
+    "direction": "Should work the record rather than speculate freely: find the steps that introduce or carry the methyl group, follow the precursor/product relations between compound and reaction notes, and separate two distinct origins — carried in with a starting material or reagent lot versus generated in a step under the conditions used. Should name the conditions that plausibly demethylate (strong base or nucleophile on an aryl methyl ether, acid and heat, high temperature with a nucleophilic halide) and map them onto steps the record actually shows. Must be explicit about which links are supported by a retrieved note and which are its own hypothesis, and must name the experiment that settles it — spiking, or assaying the intermediate at each step. If the record is too thin, say that rather than filling in a route."
+  },
+  "outcome": {
+    "probe_id": "rx-19",
+    "section": 6,
+    "persona": "lab_technician",
+    "bucket": "A",
+    "question": "We see a des-methyl impurity in the final API. Which step in the route is most likely putting it there, and is there anything in our record that already points at it?",
+    "answer": "I need to search your record for evidence about this des-methyl impurity. Let me start by gathering what you have on this compound and the route.The search did not find a note specifically about a des-methyl impurity. To help you track down which step is introducing it, I need to know more about your API structure. Let me ask a clarifying question:\n\n**What is your final API, or what is the methoxy-containing precursor that is being demethylated?** \n\nIs this, for example:\n- A methoxy-aryl compound where the aryl methoxy group is being lost?\n- A methylamine where the N-methyl is cleaving?\n- Something else?\n\nOnce I know the structure (or can search for it by name), I can:\n\n1. **Search your route notes** to see which steps involve conditions known to demethylate (acidic workup, heating with nucleophiles, oxidative or hydrolytic conditions, metal-catalyzed processes)\n2. **Gather similar-molecule evidence** — have you run related methoxy compounds before and seen this impurity arise?\n3. **Load the degradation-liabilities skill** to map out the likely demethylation mechanisms for your specific structure and point to which step's conditions would most readily activate them\n\nThe most common culprits in synthesis are:\n- **Acidic aqueous workups** on methoxy ethers (O-demethylation via SN1/SN2)\n- **Transition-metal catalysis** with protic solvents (Pd, Cu, etc. can activate ethers)\n- **Reductive conditions** on an N-methyl (LiAlH₄, BH₃, Grignard)\n- **Heating with nucleophiles** (amines, thiols)\n\nBut without your structure, I'm speculating. Tell me the compound name or SMILES and I'll search the record for what actually happened before.",
+    "answered": true,
+    "tools_called": [
+      "gather_evidence",
+      "gather_evidence",
+      "find_notes"
+    ],
+    "tools_failed": [],
+    "expected_tools_met": true,
+    "uncited_note_ids": [],
+    "failed_loudly": false,
+    "error_code": null,
+    "degraded": [],
+    "jobs_started": [],
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "latency_seconds": 8.51,
+    "event_counts": {
+      "token": 30,
+      "tool_call": 3,
+      "tool_result": 3,
+      "answer": 1
+    },
+    "transport_error": null
+  }
+}

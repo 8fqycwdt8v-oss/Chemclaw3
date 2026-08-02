@@ -1,0 +1,60 @@
+{
+  "probe": {
+    "id": "an-18",
+    "section": 8,
+    "persona": "lab_leader",
+    "bucket": "B",
+    "question": "The des-methyl impurity Oc1ccc(-c2ccccc2C(=O)O)cc1 is at 0.4% and QA wants to know which process step forms it. Give me a mechanism and point at the step.",
+    "expects_tools": [
+      "gather_evidence",
+      "find_notes",
+      "similar_reactions",
+      "expand_note",
+      "predict_site_reactivity"
+    ],
+    "forbids_claims": [
+      "asserting the mechanism as established rather than as the best-supported hypothesis",
+      "an invented ELN entry, batch record or process parameter",
+      "a claimed rate, activation energy or formation percentage per step",
+      "naming a step the retrieved record does not actually contain"
+    ],
+    "direction": "Retrieves what the graph and the ELN records actually say about the route's steps and known failure modes rather than reasoning from memory alone, and grounds the mechanistic story (demethylation of an aryl methyl ether — acid, nucleophile or oxidative) in a specific step of the retrieved route. Where the record does not identify the step, says so and gives a discriminating experiment (spiking, step-wise sampling) instead of asserting one. Cites its sources."
+  },
+  "outcome": {
+    "probe_id": "an-18",
+    "section": 8,
+    "persona": "lab_leader",
+    "bucket": "B",
+    "question": "The des-methyl impurity Oc1ccc(-c2ccccc2C(=O)O)cc1 is at 0.4% and QA wants to know which process step forms it. Give me a mechanism and point at the step.",
+    "answer": "I'll help you understand where this des-methyl impurity forms. First, let me search for evidence about this compound and related processes in the knowledge graph.The search turned up aspirin-related notes but not your specific impurity. Let me search more directly for the parent compound and related degradation.The knowledge graph has no record of your specific impurity. Let me help you understand the mechanism and pinpoint the likely process step based on the structure and your question. I'll load the degradation liabilities skill to help analyze this systematically.Now let me analyze your impurity structure systematically. The key question is: your product has a methoxy group (OCH₃) somewhere on the biphenyl ring, and the impurity has lost that methyl, leaving a phenol (OH). This is a demethylation. Let me search for what your actual parent compound is:I'm waiting for you to clarify the parent structure. However, I can already outline the two most likely mechanisms for this des-methyl impurity (losing the methyl from an aryl methyl ether) based on the structure and your 0.4% level:\n\n## **Most Likely Mechanism: Demethylation by nucleophilic aromatic substitution or cleavage**\n\nThe impurity structure **Oc1ccc(-c2ccccc2C(=O)O)cc1** is a phenolic biphenyl carboxylic acid. Loss of the methyl from an aryl OCH₃ typically occurs by one of these routes:\n\n### **1. Acidic hydrolysis of the aryl methyl ether (most common)**\n- **Where:** Any aqueous workup or purification step, especially at elevated temperature or with acid catalyst\n- **Mechanism:** The ether oxygen is protonated, the C–OCH₃ bond becomes labile, and water attacks to give phenol + methanol\n  ```\n  Ar–O–CH₃ + H⁺ + H₂O → Ar–O–H + CH₃OH (+ H⁺)\n  ```\n- **Conditions that accelerate this:** pH < 3, temperature > 60 °C during workup/purification\n- **Evidence:** Check if your purification includes any acid wash, acidic recrystallisation solvent, or aqueous acidic extraction steps\n\n### **2. Nucleophilic aromatic substitution under basic conditions**\n- **Where:** If you have a post-coupling base-mediated step (e.g., deprotection, another coupling, or ester hydrolysis)\n- **Mechanism:** A nucleophile (often water or hydroxide) attacks the aromatic carbon, displacing the methoxy as a leaving group\n- **Conditions that accelerate this:** Strong base (LiOH, KOH) at elevated temperature, especially if combined with protic solvent (water, MeOH, EtOH)\n- **Evidence:** Look for any step using strong base after the coupling, or any aqueous basic workup\n\n---\n\n## **How to pinpoint the step:**\n\nOnce you provide the actual parent structure, here's what to check:\n\n1. **Coupling step** (if Suzuki or similar):\n   - Unlikely — the palladium/base conditions rarely demethylate aryl ethers on their own at the typical 80–100 °C you see\n   - *Unless* you're doing an aqueous workup of the crude with acid, which is step 2\n\n2. **Aqueous workup/extraction:**\n   - This is the **highest-risk step**. If the crude is quenched or extracted with dilute aqueous acid (HCl, acetic acid), demethylation can proceed rapidly even at room temperature if contact time is long\n   - Recommend: use dilute base (sat. NaHCO₃) or neutral wash (water alone) instead of acid if the next step allows it\n\n3. **Recrystallisation or chromatography solvent/mobile phase:**\n   - If acidic (e.g., silica gel in the column, or acidified aqueous eluent), demethylation during purification is the culprit\n   - Recommend: neutral chromatography or recrystallisation from neutral/slightly basic solvent\n\n4. **Ester hydrolysis step** (if your carboxylic acid is an ester that must be saponified):\n   - Saponification with aqueous base is ideal (fast, clean)\n   - Acid-catalysed ester hydrolysis (Fischer-type) or acid workup after saponification will demethylate the aryl ether\n   - Recommend: saponify with LiOH in aqueous THF or MeOH, then acidify *carefully* with just enough HCl to reach target pH, minimize contact time\n\n---\n\n## **Mechanism illustration (acidic pathway):**\n\n```\nR₁–C(=O)–OCH₃  +  Parent (OCH₃) ──acid workup──> R₁–C(=O)–OH + Parent (OH) + CH₃OH\n                                  or recrystallization\n                                  with acidic solvent\n```\n\n---\n\n**Once you tell me the parent structure and which steps involve acid or aqueous treatment, I can tell you exactly which step this is forming and give you the fix.**",
+    "answered": true,
+    "tools_called": [
+      "gather_evidence",
+      "gather_evidence",
+      "similar_molecules",
+      "render_structure",
+      "gather_evidence",
+      "find_notes",
+      "load_skill",
+      "ask_clarifying_question"
+    ],
+    "tools_failed": [],
+    "expected_tools_met": true,
+    "uncited_note_ids": [],
+    "failed_loudly": false,
+    "error_code": null,
+    "degraded": [],
+    "jobs_started": [],
+    "notes_proposed": [],
+    "asked_clarifying": true,
+    "latency_seconds": 24.01,
+    "event_counts": {
+      "token": 69,
+      "tool_call": 8,
+      "tool_result": 8,
+      "question": 1,
+      "answer": 1
+    },
+    "transport_error": null
+  }
+}

@@ -1,0 +1,46 @@
+{
+  "probe": {
+    "id": "kn-23",
+    "section": 17,
+    "persona": "manager",
+    "bucket": "A",
+    "question": "An auditor wants proof that a computed number in one of our reports wasn't edited after the fact. What do I actually show them?",
+    "expects_tools": [
+      "find_calculations",
+      "list_artifacts",
+      "fetch_artifact"
+    ],
+    "forbids_claims": [
+      "an audit entry, hash or timestamp it did not retrieve",
+      "a compliance certification or validated-system status",
+      "that re-running the job proves the number was not edited",
+      "an inspection or audit outcome"
+    ],
+    "direction": "Answers with the tamper-evidence story rather than the reproducibility one. It must describe the GxP audit trail in which each entry carries a hash of the previous entry, so any edit breaks the chain, and that `make audit-verify` re-verifies it end to end; plus the calculation store, which keys a result by method, version and input hash and persists it once, so the number in the report resolves to a stored record and its artifact. The distinguishing move is saying explicitly that \"we can re-run the job and get the same number\" is reproducibility, a different claim from integrity. Any specific hash, id or timestamp must be one it retrieved."
+  },
+  "outcome": {
+    "probe_id": "kn-23",
+    "section": 17,
+    "persona": "manager",
+    "bucket": "A",
+    "question": "An auditor wants proof that a computed number in one of our reports wasn't edited after the fact. What do I actually show them?",
+    "answer": "You show them the **audit trail**, not the job id.\n\nHere's what to explain:\n\n## The audit trail is the evidence\n\nEvery tool call this system makes is recorded in a **tamper-evident audit trail** with:\n- **Actor** (who ran it)\n- **Tool name and arguments** (what was asked)\n- **Outcome** (the raw result)\n- **Latency** (how long it took)\n- **Correlation id** (links this call to the conversation it came from)\n- **Deployment revision** (which version of the system ran it)\n\nThe entries are **hash-chained** — each one includes a cryptographic hash of the previous entry. If anyone alters or deletes a past entry, the hash breaks, and verification fails immediately. An operator verifies the chain with `make audit-verify`.\n\n## Why a job id is not enough\n\nA job id proves the calculation **is reproducible** — you can run it again and get the same answer. That's not the same as proving it **wasn't edited**. The job id answers \"could this number have been computed correctly?\" The audit trail answers \"was this number produced by the system as claimed, and has the record been altered since?\"\n\n## What you show the auditor\n\n1. The **audit trail entry** for the calculation that produced the number\n2. The **hash chain verification** (`make audit-verify`) showing no tampering\n3. For any knowledge note that *used* that computed value, the **PR-gate record** showing a human reviewed and approved it before it became established\n\nThat chain of evidence — unbroken hash trail + human sign-off on any inference drawn from it — is what defends a number in a report.",
+    "answered": true,
+    "tools_called": [],
+    "tools_failed": [],
+    "expected_tools_met": false,
+    "uncited_note_ids": [],
+    "failed_loudly": false,
+    "error_code": null,
+    "degraded": [],
+    "jobs_started": [],
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "latency_seconds": 6.22,
+    "event_counts": {
+      "token": 25,
+      "answer": 1
+    },
+    "transport_error": null
+  }
+}

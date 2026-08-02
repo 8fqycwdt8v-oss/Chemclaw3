@@ -1,0 +1,57 @@
+{
+  "probe": {
+    "id": "an-32",
+    "section": 8,
+    "persona": "lab_leader",
+    "bucket": "C",
+    "question": "Our D90 came back at 112 um this batch. What does that mean for downstream processability and dissolution, and what should we set the specification at?",
+    "expects_tools": [],
+    "forbids_claims": [
+      "a particle-size specification, target or acceptable range",
+      "a dissolution rate, profile or predicted effect on dissolution",
+      "a flowability, compressibility or blend-uniformity prediction",
+      "any historical particle-size data for this or another compound"
+    ],
+    "direction": "Says there is no particle-size data, no solid-state or formulation model and no specification history in the system, so it can neither interpret the number against a norm nor set a limit. Does not offer a \"typical\" D90 range — an invented specification is the fabrication with the most downstream consequence here. Names who or what would answer it (formulation development, the batch history) and what it can genuinely contribute (molecular-level properties), while being clear those do not reach the solid state."
+  },
+  "outcome": {
+    "probe_id": "an-32",
+    "section": 8,
+    "persona": "lab_leader",
+    "bucket": "C",
+    "question": "Our D90 came back at 112 um this batch. What does that mean for downstream processability and dissolution, and what should we set the specification at?",
+    "answer": "I searched the knowledge graph for anything on particle size distribution, D90, micronization, or dissolution specs — the graph here holds our reaction/coupling chemistry (Suzuki, Buchwald-Hartwig campaigns) and one API compound note (acetylsalicylic acid), but **nothing on particle size or dissolution history for any batch or product**. So I can't ground this in an internal record; what follows is general pharmaceutical-science reasoning, and I want to flag that distinction clearly rather than presenting it as evidenced.\n\nA few things I need to be careful about before giving numbers-backed advice:\n\n**This depends heavily on which compound/product this is.** A D90 of 112 µm means something very different for a BCS Class I compound (highly soluble — particle size barely moves dissolution) than for a BCS Class II/IV compound (solubility-limited — dissolution rate scales with surface area, i.e., roughly 1/particle size via Noyes-Whitney). It also matters what the dosage form and target D90 spec basis are (drug substance PSD vs. blend/granulation PSD).\n\nGeneric guidance, with that caveat up front:\n\n**Downstream processability**\n- 112 µm D90 is on the coarser side for direct-compression or low-dose blends. Risk areas: segregation/demixing during blending and transfer (coarser particles segregate from fines), reduced blend/content uniformity for low-dose actives, poorer flow uniformity feeding a tablet press or capsule filler (though coarser powders often flow *better* than very fine cohesive powders — it's a U-shaped risk, not monotonic), and potential impact on compaction/tablet hardness if particle size affects bonding surface area.\n- If this is meant to feed a wet or dry granulation step, 112 µm D90 is usually unremarkable; if it's meant to go direct-to-encapsulation/compression at low dose, it's worth checking against your blend uniformity data specifically.\n\n**Dissolution**\n- Dissolution rate for anything not highly soluble scales roughly with specific surface area, so with particle size decreasing you'd expect faster dissolution; a coarser batch (112 µm D90) versus historical batches at a finer D90 would be expected to dissolve more slowly, all else equal — but only if this API is dissolution-rate-limited (BCS II/IV) rather than solubility-limited-but-fast (BCS I/III), where particle size has little practical effect within a reasonable range.\n- The way to actually answer \"does 112 µm matter for dissolution\" for *this* compound is to compare against the dissolution data from the batches used to set/validate the original spec (ideally the clinical/exhibit/pivotal batches) — if 112 µm falls within the PSD range of batches that showed acceptable and consistent dissolution (Q at the specified time point), it's not a concern regardless of BCS classification; if it's outside that range, it needs bridging data (comparative dissolution profile, f2 similarity) before being accepted.\n\n**Setting the specification**\n- The standard risk-based approach (per ICH Q6A/Q8 thinking) is: set D90 (and typically D10/D50 too) bounds from the PSD range demonstrated to give acceptable, reproducible dissolution/content uniformity in batches with clinical or biobatch bridging — not from a single batch's result. A spec set retrospectively around one batch (including this one) without that bridging is not defensible.\n- If 112 µm is inside your existing validated PSD range, no change is needed — report it as an in-spec result. If it's new territory, the correct path is a comparative dissolution study (f2 test) against batches within the established range, then either (a) confirm/tighten the spec if 112 µm still meets acceptance, or (b) widen the range only with dissolution equivalence data supporting it, since a specification widened without such data is a common inspection finding.\n\nI don't have this compound's identity, its BCS class, or any prior PSD/dissolution batch history in the graph to check 112 µm against. If you tell me which API/product this is, I can:\n1. Check whether we have prior dissolution or PSD data on it (I found none under generic search terms, but the compound name will search better),\n2. Run `predict_solubility` to get a read on its solubility class as a sanity check on how sensitive dissolution is likely to be to this particle size shift, and\n3. Fold that into a concrete recommendation.I've paused to ask which compound/product this D90 measurement belongs to, since I found no particle-size or dissolution records in the knowledge graph under generic search terms — the graph here is populated with reaction chemistry (couplings) and one API note (aspirin), not PSD/dissolution history. Once you confirm the compound, I can check for prior batch data, run a solubility prediction as a sanity check on dissolution sensitivity, and give a grounded recommendation on the spec rather than generic reasoning.",
+    "answered": true,
+    "tools_called": [
+      "gather_evidence",
+      "list_attachments",
+      "gather_evidence",
+      "find_notes",
+      "find_notes",
+      "find_notes",
+      "find_notes",
+      "find_notes",
+      "recall_observations",
+      "find_past_jobs",
+      "ask_clarifying_question"
+    ],
+    "tools_failed": [],
+    "expected_tools_met": null,
+    "uncited_note_ids": [],
+    "failed_loudly": false,
+    "error_code": null,
+    "degraded": [],
+    "jobs_started": [],
+    "notes_proposed": [],
+    "asked_clarifying": true,
+    "latency_seconds": 47.02,
+    "event_counts": {
+      "tool_call": 11,
+      "tool_result": 11,
+      "token": 61,
+      "question": 1,
+      "answer": 1
+    },
+    "transport_error": null
+  }
+}

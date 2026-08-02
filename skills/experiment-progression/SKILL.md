@@ -1,10 +1,13 @@
 ---
 name: experiment-progression
 description: >-
-  Judgment for the daily bench question — "given everything I have run on this step so far, what
-  should I run tomorrow and why?" — answered from the record and the calculators rather than from
-  a surrogate model: read the series in time order, name what each run tested and showed, and
-  propose one experiment with its rationale and a falsifiable expectation.
+  Use when the series is qualitative or mechanistic rather than a factor table — runs that
+  changed several things at once, failed for different reasons, or need a diagnostic before the
+  next real experiment. Read the series in time order, name what each run tested and showed, and
+  propose one experiment with its rationale and a falsifiable expectation, from the record and the
+  calculators rather than a surrogate model. When the runs instead vary the same factors and
+  report a numeric outcome, that is a fitted decision space: use experiment-design and call the
+  optimizer rather than reasoning the next point by hand.
 tools:
   - gather_evidence
   - expand_note

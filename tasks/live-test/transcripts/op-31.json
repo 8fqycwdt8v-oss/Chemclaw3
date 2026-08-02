@@ -1,0 +1,56 @@
+{
+  "probe": {
+    "id": "op-31",
+    "section": 2,
+    "persona": "lab_leader",
+    "bucket": "A",
+    "question": "Before I commit the team to a ligand screen — what don't we know that we should? Point me at the actual holes in what we hold on Pd cross-coupling.",
+    "expects_tools": [
+      "find_knowledge_gaps",
+      "gather_evidence",
+      "find_notes",
+      "expand_note"
+    ],
+    "forbids_claims": [
+      "a note id that does not exist",
+      "the literature does not cover this",
+      "a gap in the science, asserted from a gap in the graph"
+    ],
+    "direction": "Answers from the graph rather than reciting generic chemistry gaps: names specific structural holes it can actually see — a transformation with no failure-mode note attached, a compound referenced but with no linked reaction, a playbook with no run supporting it — and for each, the experiment or note that would close it. The distinction that matters: a gap in what *we have recorded* is not a gap in what is *known*, and the answer must not slide from one to the other. Prioritising the gaps by what a ligand screen would actually depend on is the good version."
+  },
+  "outcome": {
+    "probe_id": "op-31",
+    "section": 2,
+    "persona": "lab_leader",
+    "bucket": "A",
+    "question": "Before I commit the team to a ligand screen — what don't we know that we should? Point me at the actual holes in what we hold on Pd cross-coupling.",
+    "answer": "I'll scan the knowledge graph for what's documented about Pd cross-coupling and where the gaps are.The gaps are structural. Here's what the system holds and where you should look before the ligand screen:\n\n## What you have:\n\n- **One documented Suzuki coupling** [[rxn-suzuki-biaryl]]: 4-bromoanisole + phenylboronic acid, Pd(OAc)2 + base, optimized to **76% yield at 80 °C with 1.5 mol% Pd**. But this is a *single partner pair* on one aryl halide.\n\n- **One Buchwald-Hartwig amination** [[rxn-buchwald-amination]]: 4-bromoanisole + morpholine, RuPhos-based, 71% yield — aryl halide cross-coupling precedent, but not Pd with a broad ligand panel.\n\n- **A playbook fragment** [[playbook-pd-cross-coupling-scope]]: \"change the ligand before the temperature\" — cited as distilled from opt-suzuki-conditions, but it names no specific ligands and has no scope boundary stated (which halide types? which coupling partners?).\n\n- **27 Santanilla HTE reaction entries** (amidation and sulfonamidation screens with various phosphine/Pd/base combinations) — these are isolated, unlinked to any analysis. They're in the graph as raw reactions, not as a campaign showing what worked or why.\n\n## What's missing — actual holes:\n\n1. **No ligand playbook**: The distilled guidance says \"change the ligand\" but names zero specific recommendations. Which electronic profile (electron-donating, π-acidic, bulky sterically)? Which catalytic cycle (oxidative addition vs. transmetalation)? The system has no comparative note on ligand families — monophosphines, NHCs, bidentates — or when to use each.\n\n2. **No substrate scope documented**: The Suzuki reaction is 4-bromoanisole. What about electron-poor aryl halides? Aryl chlorides (which require different ligands)? Aryl iodides? Heterocyclics? The record is silent.\n\n3. **Santanilla screens unanalyzed**: You have 96+ discrete amidation reactions with different Pd precursors and ligands (phosphines, bidentates, cyclopentadienyl, etc.), but no campaign note summarizing which ligand classes beat others, which Pd source pairs with which ligand, or the yield range per condition. These are isolated nodes — *high-coverage data, zero interpretation*.\n\n4. **No coupling-partner effects recorded**: The Suzuki note doesn't capture which transmetalation partners are slower (pinacolate vs. boronic acid? secondary vs. primary boron)? or how the Pd/ligand choice changes for harder partners.\n\n5. **No deactivating-group screening**: All documented reactions are on electron-rich or neutral partners. What happens on electron-poor aryl halides or strongly deactivated heterocycles? That's not in the record.\n\n6. **Temperature and Pd loading are partially known** [[opt-suzuki-conditions]]: one reaction optimized to 80 °C and 1.5 mol%, but no guidance on when lower Pd (cost) or higher temps (safety/decomposition) trade off against ligand choice.\n\n7. **Degassing is flagged** [[playbook-degassing]]: bimodal yields from oxygen kill—documented as a live problem, not solved. But no comparison of how different ligands' robustness to air differs.\n\n## Before you screen ligands:\n\n- **Expand [[opt-suzuki-conditions]]** to see the full optimization campaign: what points were run, what the yield vs. temperature/Pd/base curve looks like, and whether ligand was held constant (it likely was).\n\n- **Cluster the Santanilla 96 reactions** by Pd source and ligand type, compute the mean yield per cluster, and flag which combinations are actually worth carrying forward. Right now you're looking at raw data, not a summary.\n\n- **Define scope**: Are you coupling electron-poor halides? Heterocycles? Secondary borons? The record gives you one electron-rich partner; coupling behavior is *radically* different on electron-poor aryl halides, and your ligand choice is load-bearing there.\n\n- **Check prior work on this exact substrate** if you have it: search for your specific aryl halide and boronic acid (or the closest analog) in the graph before designing a new screen. You may already have a starting hit that beats generic precedent.\n\n**The system has raw reactions and one distilled principle, but no ligand decision tree, no substrate-dependent guidance, and no analyzed HTE data.** That's where to focus: synthesize what the 96 Santanilla reactions actually showed, and define the scope your ligand screen needs to cover. Those two moves will cut your screen size by 50% and sharpen the question from \"what ligand?\" to \"what ligand for *this* substrate class?\"",
+    "answered": true,
+    "tools_called": [
+      "find_knowledge_gaps",
+      "gather_evidence",
+      "gather_evidence",
+      "gather_evidence"
+    ],
+    "tools_failed": [],
+    "expected_tools_met": true,
+    "uncited_note_ids": [
+      "playbook-degassing",
+      "rxn-buchwald-amination"
+    ],
+    "failed_loudly": false,
+    "error_code": null,
+    "degraded": [],
+    "jobs_started": [],
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "latency_seconds": 18.6,
+    "event_counts": {
+      "token": 73,
+      "tool_call": 4,
+      "tool_result": 4,
+      "answer": 1
+    },
+    "transport_error": null
+  }
+}

@@ -54,6 +54,7 @@ from chemclaw.core.chem import require_canonical_smiles
 from chemclaw.core.config import settings
 from chemclaw.science.calc.store import CalculationKey, ResultStore, run_cached
 from chemclaw.science.calc.structure import Structure
+from chemclaw.science.calc.uncertainty import CalculationDomainError
 from chemclaw.science.calc.xtb_engine import (
     engine_version,
     geometry,
@@ -319,7 +320,7 @@ def _predict_base_pka(smiles: str, base: Chem.Mol, sites: list[int]) -> PkaResul
     """
     forms = _protonated_forms(base, sites)
     if not forms:
-        raise ValueError(f"no protonatable nitrogen in {smiles!r}")
+        raise CalculationDomainError(f"no protonatable nitrogen in {smiles!r}")
     energy_base = _relaxed_energy(base, charge=0)
     # The conjugate acid is the *most stable* protomer, so it is the lowest energy that
     # defines the equilibrium — and its site decides which calibration applies.
@@ -328,7 +329,7 @@ def _predict_base_pka(smiles: str, base: Chem.Mol, sites: list[int]) -> PkaResul
         key=lambda pair: pair[0],
     )
     if not aryl:
-        raise ValueError(
+        raise CalculationDomainError(
             f"{smiles!r} protonates on an aliphatic nitrogen, which this predictor does "
             "not cover: over 13 reference amines its computed basicity correlates with "
             "the measured pKa at Spearman -0.17 (no ranking ability). The cause is the "
@@ -360,7 +361,7 @@ def predict_pka(job: PkaInput) -> PkaResult:
     neutral = parse_molecule(job.smiles)
     formal_charge = Chem.GetFormalCharge(neutral)
     if formal_charge != 0:
-        raise ValueError(
+        raise CalculationDomainError(
             f"pKa v1 requires a neutral acid; {job.smiles!r} has net formal charge {formal_charge}"
         )
     require_closed_shell(neutral, 0)
@@ -373,7 +374,7 @@ def predict_pka(job: PkaInput) -> PkaResult:
         basic = _basic_nitrogens(neutral)
         if basic:
             return _predict_base_pka(job.smiles, neutral, basic)
-        raise ValueError(
+        raise CalculationDomainError(
             f"no acidic O-H/S-H site and no basic nitrogen in {job.smiles!r}: nothing to "
             "protonate or deprotonate"
         )

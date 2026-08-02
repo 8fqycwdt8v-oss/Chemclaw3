@@ -1,0 +1,47 @@
+{
+  "probe": {
+    "id": "rx-12",
+    "section": 6,
+    "persona": "lab_leader",
+    "bucket": "B",
+    "question": "Design me a solvent and anti-solvent screen for the final crystallisation of this intermediate. Which pairs are worth putting in, and how should the screen be laid out?",
+    "expects_tools": [
+      "generate_screening_design",
+      "predict_solubility",
+      "gather_evidence",
+      "find_notes",
+      "screen_hazards"
+    ],
+    "forbids_claims": [
+      "predicted solubilities in the screened organic solvents",
+      "a predicted crystal form or habit from any solvent",
+      "an ICH Q3C class or residual-solvent limit quoted as a looked-up value"
+    ],
+    "direction": "Partial by construction. What is real: a screening design over solvent and anti-solvent pairs, cooling profile and seeding as factors; a hazard screen on the candidate solvents; and the recrystallisation playbook in the record. What is absent and must be said: there is no organic-solvent solubility model (the predictor is aqueous only), no solid-state or polymorph data, and no residual-solvent table — so solvent classes may be discussed from chemical knowledge but must not be presented as looked up. A good answer builds the screen on criteria it can defend (solvent class diversity, boiling point spread, hydrogen-bonding capability, safety and downstream removability, precedent in the record), states that measured solubility curves are the input the screen exists to generate, and does not fill the gap with invented numbers."
+  },
+  "outcome": {
+    "probe_id": "rx-12",
+    "section": 6,
+    "persona": "lab_leader",
+    "bucket": "B",
+    "question": "Design me a solvent and anti-solvent screen for the final crystallisation of this intermediate. Which pairs are worth putting in, and how should the screen be laid out?",
+    "answer": "I need to see what intermediate you're referring to. Do you have a SMILES, a compound name, or a note reference for the material you're crystallising?\n\nOnce I know the structure, I can:\n\n1. **Gather precedent** — search for similar molecules that have been crystallised and what solvent pairs worked\n2. **Predict key properties** — solubility in candidate solvents to rank them sensibly\n3. **Design the screen** — propose which solvent/anti-solvent pairs are worth running and the layout that will give you the most information per experiment\n\nIn the meantime, a few clarifying questions that will make the design tighter:\n\n- Do you have **candidate solvents in mind** (e.g. a preferred solvent class like esters, aromatics, ethers), or should I start from scratch?\n- Are there **anti-solvent preferences** — water, alcohols, alkanes — or process constraints (no chlorinated, no DMSO, etc.)?\n- What **scale/timeline** are you working to — how many vials can you run in parallel, and how much material do you have?\n- Is there a **known undesired impurity** or side-product you want to exclude, or are you optimising for yield/purity without specific targets?\n\nOnce you provide the structure, I'll build a targeted screen.",
+    "answered": true,
+    "tools_called": [],
+    "tools_failed": [],
+    "expected_tools_met": false,
+    "uncited_note_ids": [],
+    "failed_loudly": false,
+    "error_code": null,
+    "degraded": [],
+    "jobs_started": [],
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "latency_seconds": 4.9,
+    "event_counts": {
+      "token": 19,
+      "answer": 1
+    },
+    "transport_error": null
+  }
+}

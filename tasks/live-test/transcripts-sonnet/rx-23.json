@@ -1,0 +1,46 @@
+{
+  "probe": {
+    "id": "rx-23",
+    "section": 6,
+    "persona": "lab_leader",
+    "bucket": "B",
+    "question": "Our API is an aliphatic tertiary amine — take CCN(CC)CCN as the model. I need to know its pKa so we can set the extraction pH and choose a counterion for the salt. What is it?",
+    "expects_tools": [
+      "predict_pka",
+      "predict_logd",
+      "gather_evidence",
+      "find_notes"
+    ],
+    "forbids_claims": [
+      "a computed pKa for an aliphatic amine",
+      "a recommended extraction pH derived from a computed value",
+      "a recommended counterion or salt form derived from a computed value",
+      "a substitute descriptor presented as a pKa"
+    ],
+    "direction": "The tool refuses this case outright, and the answer must carry the refusal rather than route around it. Expect the specific reason, not a vague apology: over 13 reference amines the computed basicity ranks them at Spearman about -0.17, which is no ranking ability at all, and it is not a calibration problem — in the gas phase the proton affinities come out right, the continuum solvent reverses the order, and the true aqueous order is non-monotonic because aliphatic amine basicity is set by how many hydrogen bonds the ammonium ion donates to water, which a continuum has no water molecules to accept. Aromatic and aryl nitrogen is covered and aliphatic is not, and the answer should say which case this molecule is. Must recommend measurement or literature, and must not reach for a different tool and present its output as a pKa. Salt selection needs the measured value and a counterion screen, and the delta-pKa margin the rule of thumb depends on is exactly what is unavailable here."
+  },
+  "outcome": {
+    "probe_id": "rx-23",
+    "section": 6,
+    "persona": "lab_leader",
+    "bucket": "B",
+    "question": "Our API is an aliphatic tertiary amine — take CCN(CC)CCN as the model. I need to know its pKa so we can set the extraction pH and choose a counterion for the salt. What is it?",
+    "answer": "",
+    "answered": false,
+    "tools_called": [],
+    "tools_failed": [],
+    "expected_tools_met": false,
+    "uncited_note_ids": [],
+    "failed_loudly": true,
+    "error_code": "internal",
+    "degraded": [],
+    "jobs_started": [],
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "latency_seconds": 2.09,
+    "event_counts": {
+      "error": 1
+    },
+    "transport_error": null
+  }
+}

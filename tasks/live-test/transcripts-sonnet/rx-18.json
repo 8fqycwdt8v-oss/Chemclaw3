@@ -1,0 +1,41 @@
+{
+  "probe": {
+    "id": "rx-18",
+    "section": 6,
+    "persona": "manager",
+    "bucket": "C",
+    "question": "The route has a secondary amine intermediate and we quench with sodium nitrite two steps later. Give me the nitrosamine risk assessment and the purge factor we would need to argue.",
+    "expects_tools": [],
+    "forbids_claims": [
+      "a nitrosamine risk classification or risk level",
+      "an acceptable intake limit in ng/day",
+      "a purge factor or purge ratio",
+      "a claim that any tool in this system evaluates nitrosamine risk"
+    ],
+    "direction": "The chemical concern the manager has spotted is real — a secondary amine and a nitrosating agent in the same route is exactly the pattern regulators ask about — and a good answer may acknowledge that in a sentence. What it must not do is produce an assessment. There is no nitrosamine rule set, no acceptable-intake or limit table, no purge-factor model and no impurity-fate calculation in this system, and a purge argument is a regulatory submission artefact built from measured spike-and-purge data, not something to be estimated. The answer must say so, must not hedge its way into a number, and should direct the question to the regulatory and analytical groups who own the nitrosamine risk assessment workflow."
+  },
+  "outcome": {
+    "probe_id": "rx-18",
+    "section": 6,
+    "persona": "manager",
+    "bucket": "C",
+    "question": "The route has a secondary amine intermediate and we quench with sodium nitrite two steps later. Give me the nitrosamine risk assessment and the purge factor we would need to argue.",
+    "answer": "",
+    "answered": false,
+    "tools_called": [],
+    "tools_failed": [],
+    "expected_tools_met": null,
+    "uncited_note_ids": [],
+    "failed_loudly": true,
+    "error_code": "internal",
+    "degraded": [],
+    "jobs_started": [],
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "latency_seconds": 3.34,
+    "event_counts": {
+      "error": 1
+    },
+    "transport_error": null
+  }
+}

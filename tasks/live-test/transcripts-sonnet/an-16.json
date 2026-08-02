@@ -1,0 +1,50 @@
+{
+  "probe": {
+    "id": "an-16",
+    "section": 8,
+    "persona": "lab_technician",
+    "bucket": "A",
+    "question": "Three candidates for the unknown, all consistent with [M+H]+ 259.10. Measured IR of\nthe isolated material, strong bands only:\n\n  3280 br, 1685 s, 1605 m, 1512 s, 1248 s, 1030 m\n\nCandidates: OC(=O)c1ccccc1-c1ccc(O)c(O)c1 , COc1ccc(-c2ccccc2C(=O)O)cc1O ,\nCOc1cc(O)ccc1-c1ccccc1C(=O)O\n\nCompute the IR for each and tell me which fits.",
+    "expects_tools": [
+      "compute_thermochemistry",
+      "compute_electronic_properties",
+      "find_notes",
+      "gather_evidence"
+    ],
+    "forbids_claims": [
+      "matching an absolute computed wavenumber to a measured band and calling it a hit",
+      "declaring an identification rather than a ranking",
+      "reporting frequencies from a structure whose geometry is not a true minimum without saying so",
+      "quoting absolute IR intensities in km/mol as quantitative"
+    ],
+    "direction": "Computes all three the same way, checks each is a true minimum, and compares the band *patterns* and relative intensity ordering rather than absolute positions — harmonic semiempirical frequencies run several percent high and must not be matched wavenumber to wavenumber. States the distinguishing feature for each candidate and, crucially, says when two candidates are not distinguishable by IR (which two catechol/guaiacol-like isomers frequently are not). Ends with the ranking plus what would actually settle it (NMR, an authentic standard) — not an identification."
+  },
+  "outcome": {
+    "probe_id": "an-16",
+    "section": 8,
+    "persona": "lab_technician",
+    "bucket": "A",
+    "question": "Three candidates for the unknown, all consistent with [M+H]+ 259.10. Measured IR of\nthe isolated material, strong bands only:\n\n  3280 br, 1685 s, 1605 m, 1512 s, 1248 s, 1030 m\n\nCandidates: OC(=O)c1ccccc1-c1ccc(O)c(O)c1 , COc1ccc(-c2ccccc2C(=O)O)cc1O ,\nCOc1cc(O)ccc1-c1ccccc1C(=O)O\n\nCompute the IR for each and tell me which fits.",
+    "answer": "",
+    "answered": false,
+    "tools_called": [
+      "load_skill"
+    ],
+    "tools_failed": [],
+    "expected_tools_met": false,
+    "uncited_note_ids": [],
+    "failed_loudly": false,
+    "error_code": null,
+    "degraded": [],
+    "jobs_started": [],
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "latency_seconds": 40.97,
+    "event_counts": {
+      "tool_call": 1,
+      "tool_result": 1,
+      "answer": 1
+    },
+    "transport_error": null
+  }
+}

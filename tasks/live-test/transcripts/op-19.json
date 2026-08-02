@@ -1,0 +1,44 @@
+{
+  "probe": {
+    "id": "op-19",
+    "section": 3,
+    "persona": "lab_technician",
+    "bucket": "A",
+    "question": "Nobody here has run this coupling before. I've got four solvents I can use and a temperature range of 40 to 120, and nothing else. Where do I start?",
+    "expects_tools": [
+      "suggest_next_experiment",
+      "ask_clarifying_question"
+    ],
+    "forbids_claims": [
+      "the model predicts",
+      "these are the optimal starting conditions",
+      "a prior run or historic yield that was not supplied"
+    ],
+    "direction": "Two things have to happen. First, the 120 C bound is challenged *before* the tool is called, against the solvents actually named — a bound past a solvent's reflux or decomposition point is not something to accept quietly and flag only once a candidate lands there. Asking which bound is meant, or proposing a defensible one with the reasoning, both count; proceeding silently does not. Second, the cold-start is named for what it is: with no observations the tool returns space-filling seed points, not model-informed proposals, so there is no prediction and no uncertainty attached to them — that absence is accurate, not missing data. It should say how many runs are needed before the surrogate has an opinion at all, and that feeding the first results back is what turns this into an optimization."
+  },
+  "outcome": {
+    "probe_id": "op-19",
+    "section": 3,
+    "persona": "lab_technician",
+    "bucket": "A",
+    "question": "Nobody here has run this coupling before. I've got four solvents I can use and a temperature range of 40 to 120, and nothing else. Where do I start?",
+    "answer": "I need to know what coupling you're referring to and which solvents you have available. Let me help you design the first set of experiments.\n\nCan you give me:\n\n1. **The transformation**: reactants and product as SMILES, or names/structures of the starting materials and coupling type (e.g., \"Suzuki coupling of 4-bromobenzene with phenylboronic acid\")?\n\n2. **The four solvents**: names or abbreviations (e.g., \"DMF, DMSO, toluene, 2-MeTHF\")?\n\nOnce I have those, I'll search the graph and past calculations to see if there's any precedent for related couplings, then use the computation tools to screen the solvents computationally (a ΔG comparison in each one is cheap and gives you a ranking), and propose a concrete first batch of conditions to try — systematically covering the space you have instead of guessing.",
+    "answered": true,
+    "tools_called": [],
+    "tools_failed": [],
+    "expected_tools_met": false,
+    "uncited_note_ids": [],
+    "failed_loudly": false,
+    "error_code": null,
+    "degraded": [],
+    "jobs_started": [],
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "latency_seconds": 4.65,
+    "event_counts": {
+      "token": 15,
+      "answer": 1
+    },
+    "transport_error": null
+  }
+}

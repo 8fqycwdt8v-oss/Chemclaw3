@@ -767,3 +767,39 @@ defect I had introduced myself earlier in the same programme.
 **Rule.** Before marking an item done, verify it against the artefact, not against your memory of
 having thought about it: `git diff` the file, or run the test. Writing the fix down is not applying
 it, and a convincing write-up is the easiest thing to mistake for finished work.
+
+
+## A grading failure that defaults to a verdict is indistinguishable from a verdict
+
+I wrote a live-probe harness, ran 190 questions through it, and reported that 46% of answers were
+`unserved` and 36% `fabricated`. Both numbers were wrong, and the cause was in my harness.
+
+The judge was capped at 1024 output tokens. A long reply truncated mid-JSON, `rfind("}")` returned
+-1, and the parse-failure branch returned `verdict="unserved"` — **a real verdict value**. So 65 of
+190 grading crashes were recorded as system failures, indistinguishable in `grades.json` from a
+graded answer, and the bias ran toward hiding `fabricated` (five recovered prefixes showed the judge
+had said `fabricated` before the cut). A fallback that reuses a legitimate value manufactures
+findings and points them at the thing under test.
+
+Two more in the same harness, both the same shape — a check that cannot see what it is checking:
+the judge was passed tool *names* but never tool *results*, so it called verbatim quotations from
+merged notes "fabricated" at rates of 40–67% depending on the slice; and the citation scorer
+compared against a 200-character UI preview of a 20,000-character result, so grounded citations read
+as invented.
+
+And the one that stings most: I declared my own wikilink regex in the eval, stricter than the
+production one in `kg.note`. An answer whose nine `[[**id**]]` citations were *every one of them
+dangling* scored a clean citation record, because "cites nothing" and "every citation grounded" were
+the same result. Two readers for one syntax is how a gate comes to disagree with the thing it gates.
+
+**Rules.**
+1. A verdict that cannot be obtained must be its own value (`ungraded`), never a member of the
+   normal range. If a parse failure can be spelled the same way as a result, it will be.
+2. Before quoting a number a grader produced, check what fraction of its outputs it actually
+   parsed. I reported the distribution before checking, and had to retract it.
+3. A checker must be given the evidence the thing it checks was entitled to use. A judge shown
+   only tool names is guessing, and it guesses "invented".
+4. Never redeclare a pattern the production code already owns — import it. A stricter local copy
+   fails open and looks clean.
+5. When a subagent's analysis contradicts your headline, it is more likely right than the headline:
+   it read the artefacts and you read your own summary. Three of four corrections here came that way.

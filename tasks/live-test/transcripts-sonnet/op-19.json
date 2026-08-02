@@ -1,0 +1,51 @@
+{
+  "probe": {
+    "id": "op-19",
+    "section": 3,
+    "persona": "lab_technician",
+    "bucket": "A",
+    "question": "Nobody here has run this coupling before. I've got four solvents I can use and a temperature range of 40 to 120, and nothing else. Where do I start?",
+    "expects_tools": [
+      "suggest_next_experiment",
+      "ask_clarifying_question"
+    ],
+    "forbids_claims": [
+      "the model predicts",
+      "these are the optimal starting conditions",
+      "a prior run or historic yield that was not supplied"
+    ],
+    "direction": "Two things have to happen. First, the 120 C bound is challenged *before* the tool is called, against the solvents actually named — a bound past a solvent's reflux or decomposition point is not something to accept quietly and flag only once a candidate lands there. Asking which bound is meant, or proposing a defensible one with the reasoning, both count; proceeding silently does not. Second, the cold-start is named for what it is: with no observations the tool returns space-filling seed points, not model-informed proposals, so there is no prediction and no uncertainty attached to them — that absence is accurate, not missing data. It should say how many runs are needed before the surrogate has an opinion at all, and that feeding the first results back is what turns this into an optimization."
+  },
+  "outcome": {
+    "probe_id": "op-19",
+    "section": 3,
+    "persona": "lab_technician",
+    "bucket": "A",
+    "question": "Nobody here has run this coupling before. I've got four solvents I can use and a temperature range of 40 to 120, and nothing else. Where do I start?",
+    "answer": "It sounds like you're referring to a specific coupling and a specific list of four solvents — but I don't have those details in view (if we discussed them earlier in this conversation, that part isn't visible to me right now). Could you confirm:\n\n1. **Which coupling/transformation** this is (reactants, or at least the reaction type — Suzuki, amide coupling, Buchwald amination, etc.)?\n2. **The four solvents** you're limited to?\n\nThat's what I need to build the actual decision space (bounds are already given: 40–120 °C). Once I have those, here's how I'll proceed, since nobody has run this exact coupling before:\n\n- **Check for indirect precedent first** — even with zero direct history, I'll run `similar_reactions` on the reaction SMILES and `gather_evidence`/`find_notes` for the same transformation class (e.g. this graph already has Suzuki biaryl, amide-coupling, and Buchwald amination playbooks/campaigns with solvent and temperature lessons — e.g. `playbook-pd-cross-coupling-scope`, `opt-suzuki-conditions`, `failure-dcm-amide-coupling`) to see if an analogous system gives any starting bias (flagged clearly as analogy, not evidence for *this* reaction).\n- **Frame it as a cold-start Bayesian optimization problem**: solvent as a categorical parameter (with each solvent's SMILES so the model gets real electronic descriptors rather than opaque labels), temperature as continuous 40–120 °C, objective = yield (or whatever output you care about — tell me if it's something else, e.g. impurity level).\n- With **zero runs on file**, `suggest_next_experiment` returns space-filling seed points rather than an optimized guess — I'll present that honestly as a cold start, typically proposing something like one point per solvent spread across the temperature range for round 1.\n- Before recommending anything be run at the bench, I'll run `screen_hazards` on all species (solvents + reactants) and report any flags.\n\nGive me the coupling and the four solvents and I'll build the actual proposal.",
+    "answered": true,
+    "tools_called": [
+      "list_attachments",
+      "recall_preferences",
+      "find_notes",
+      "load_skill"
+    ],
+    "tools_failed": [],
+    "expected_tools_met": false,
+    "uncited_note_ids": [],
+    "failed_loudly": false,
+    "error_code": null,
+    "degraded": [],
+    "jobs_started": [],
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "latency_seconds": 29.93,
+    "event_counts": {
+      "tool_call": 4,
+      "tool_result": 4,
+      "token": 23,
+      "answer": 1
+    },
+    "transport_error": null
+  }
+}

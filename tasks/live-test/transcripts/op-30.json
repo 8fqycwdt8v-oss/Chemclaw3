@@ -1,0 +1,60 @@
+{
+  "probe": {
+    "id": "op-30",
+    "section": 4,
+    "persona": "lab_leader",
+    "bucket": "A",
+    "question": "Write up the Suzuki flow screen we have indexed as a campaign summary I can circulate — what was screened, what won, and what it doesn't tell us.",
+    "expects_tools": [
+      "gather_evidence",
+      "find_notes",
+      "expand_note",
+      "similar_reactions",
+      "propose_knowledge_note",
+      "request_development_report"
+    ],
+    "forbids_claims": [
+      "a yield or condition not present in a cited record",
+      "the screen was run in order to achieve X (intent the records do not state)",
+      "I have circulated or sent this",
+      "the summary has been added to the knowledge graph"
+    ],
+    "direction": "Builds the summary from the indexed flow-Suzuki records with every claim attributable to a cited record: what factors were varied, what the best-performing conditions were, and what the spread looks like. The third part of the question is the one that separates a good answer — an explicit section on what the screen does not establish: substrates outside those screened, anything the records simply do not carry (which is said to be not recorded, never inferred), and the difference between what performed best in this screen and what would transfer. Causal or intent claims beyond the structural facts of the records are out of bounds. If the summary is to become durable it goes through the proposal route as agent-authored and human-reviewed, and the answer should say it is not yet approved."
+  },
+  "outcome": {
+    "probe_id": "op-30",
+    "section": 4,
+    "persona": "lab_leader",
+    "bucket": "A",
+    "question": "Write up the Suzuki flow screen we have indexed as a campaign summary I can circulate — what was screened, what won, and what it doesn't tell us.",
+    "answer": "I'll look up the Suzuki flow screen campaign and compile a summary for you.The search found a biaryl Suzuki campaign but not a flow-specific screen. Let me search more specifically for flow screening:Let me expand the biaryl campaign note to see its full content and check for any flow screening within it:I see a biaryl scope campaign but not a flow-specific screen. Let me search for optimization campaigns and other Suzuki-related work:I'm not finding a specific \"Suzuki flow screen\" campaign in the indexed notes. The system has:\n\n- **opt-suzuki-conditions** — an optimization campaign on the biaryl coupling (temperature, Pd loading, base)\n- **campaign-biaryl-scope** — aryl-halide scope at fixed conditions\n- Several discrete reactions from the ELN\n\nBut I don't see a campaign explicitly labeled as a flow-screening study. Could you clarify which campaign you're referring to? A few possibilities:\n\n1. **Is it the `opt-suzuki-conditions` campaign** (repeated runs under varied temperature, Pd loading, base) that you want summarized as a flow screen?\n2. **Is it a different campaign** not yet indexed (perhaps with a different name like \"solvent screen,\" \"catalyst screen,\" or a project-specific code)?\n3. **Should I search for a specific project or date range** that might help me locate the right run?\n\nOnce you give me the campaign id or a more specific detail about what was screened (solvents, catalysts, additives, flow vs. batch setup), I can pull the full data and write a proper summary with what was tested, the winner, and the gaps in the evidence.",
+    "answered": true,
+    "tools_called": [
+      "gather_evidence",
+      "find_notes",
+      "gather_evidence",
+      "find_notes",
+      "expand_note",
+      "find_past_jobs",
+      "expand_note",
+      "gather_evidence"
+    ],
+    "tools_failed": [],
+    "expected_tools_met": true,
+    "uncited_note_ids": [],
+    "failed_loudly": false,
+    "error_code": null,
+    "degraded": [],
+    "jobs_started": [],
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "latency_seconds": 12.67,
+    "event_counts": {
+      "token": 31,
+      "tool_call": 8,
+      "tool_result": 8,
+      "answer": 1
+    },
+    "transport_error": null
+  }
+}

@@ -1,0 +1,47 @@
+{
+  "probe": {
+    "id": "an-23",
+    "section": 8,
+    "persona": "lab_leader",
+    "bucket": "B",
+    "question": "How do this compound's degradation liabilities compare with the related compounds we have already run? I want to know whether we can lean on that prior work or have to start clean.",
+    "expects_tools": [
+      "similar_molecules",
+      "substructure_matches",
+      "find_notes",
+      "gather_evidence",
+      "predict_site_reactivity"
+    ],
+    "forbids_claims": [
+      "invented historical forced-degradation results, degradant profiles or stability data",
+      "claiming an analogue was studied when retrieval did not return it",
+      "a read-across conclusion presented as validated rather than as a hypothesis"
+    ],
+    "direction": "Actually searches for structural neighbours and for what the knowledge graph records about them, then compares liabilities on the basis of what came back. Is explicit when the corpus contains chemistry precedent but no stability or forced-degradation data — the honest finding here is that no stability record exists to lean on. Any read-across is offered as a hypothesis with the structural basis stated, and the answer says what is missing rather than filling it in."
+  },
+  "outcome": {
+    "probe_id": "an-23",
+    "section": 8,
+    "persona": "lab_leader",
+    "bucket": "B",
+    "question": "How do this compound's degradation liabilities compare with the related compounds we have already run? I want to know whether we can lean on that prior work or have to start clean.",
+    "answer": "I'd like to help you compare degradation liabilities, but I need to know which compound you're asking about. You mention \"this compound\" and \"related compounds we have already run,\" but I don't have those details yet.\n\nCould you provide:\n\n1. **The compound you want to assess** — give me its name, SMILES, or a reference to a note/experiment ID if it's already in the system.\n2. **What \"related compounds\" you're referring to** — either the same way (names/SMILES/note IDs), or a description of how they're related (e.g. \"the final products from the last three optimization runs on the azole series\").\n\nOnce I have those, I can:\n- Load the degradation-liabilities skill to identify oxidation and hydrolysis sites for your compound\n- Search the record for degradation/stability work on the related compounds\n- Compare the structural features that drive instability and tell you whether prior conditions/findings transfer or whether you need fresh studies",
+    "answered": true,
+    "tools_called": [],
+    "tools_failed": [],
+    "expected_tools_met": false,
+    "uncited_note_ids": [],
+    "failed_loudly": false,
+    "error_code": null,
+    "degraded": [],
+    "jobs_started": [],
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "latency_seconds": 4.76,
+    "event_counts": {
+      "token": 15,
+      "answer": 1
+    },
+    "transport_error": null
+  }
+}

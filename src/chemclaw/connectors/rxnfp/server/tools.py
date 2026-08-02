@@ -8,6 +8,7 @@ running the capability by hand. Judgment stays out (G6) — see the `molfp` twin
 
 from mcp.server.fastmcp import FastMCP
 
+from chemclaw.kg.note import note_id_for_reaction
 from chemclaw.science.fingerprints.rxnfp.search import find_similar_reactions, record_for_reaction
 from chemclaw.science.fingerprints.store import FingerprintStore, Match, default_reaction_store
 
@@ -21,9 +22,11 @@ async def similar_reactions(
 ) -> list[Match]:
     """Find stored reactions similar to `reaction_smiles`, most similar first.
 
-    `top_k` and `threshold` (Tanimoto floor) default to the configured values.
+    Each hit's `id` is the reaction's **note id**, so it can be passed straight to `expand_note`
+    for the full recipe. `top_k` and `threshold` (Tanimoto floor) default to the configured values.
     """
-    return await find_similar_reactions(_store, reaction_smiles, top_k, threshold)
+    matches = await find_similar_reactions(_store, reaction_smiles, top_k, threshold)
+    return [match.model_copy(update={"id": note_id_for_reaction(match.id)}) for match in matches]
 
 
 @server.tool()

@@ -74,7 +74,10 @@ structural:
     citation: "Bretherick's Handbook of Reactive Chemical Hazards, 8th ed., diazonium salts"
 
   - id: peroxide
-    smarts: "[OX2][OX2]"
+    # `[OX1-]` as well as `[OX2]`: an inorganic peroxide salt writes its oxygens as
+    # one-coordinate anions (Na2O2 is `[O-][O-].[Na+].[Na+]`), so the two-coordinate-only
+    # pattern screened sodium peroxide clean — a strong solid oxidiser, silent.
+    smarts: "[OX2,OX1-][OX2,OX1-]"
     severity: high
     explanation: >-
       Peroxide linkage: energetic and prone to violent decomposition on heating, friction, or metal
@@ -122,7 +125,11 @@ structural:
     citation: "Bretherick's Handbook of Reactive Chemical Hazards, 8th ed., perchlorates"
 
   - id: hydrazine
-    smarts: "[NX3;H2,H1;!$(NC=O)][NX3;H2,H1;!$(NC=O)]"
+    # H is required on *one* nitrogen, not both. Demanding it on both excluded every
+    # N,N-disubstituted hydrazine — 1,1-dimethylhydrazine (UDMH) among them — which is the
+    # opposite of the intended scope. `!$(N[a])` keeps aryl-diazo/azo systems out, which the
+    # H-on-both requirement had been excluding incidentally.
+    smarts: "[NX3;!$(NC=O);!$(N[a])][NX3;H2,H1;!$(NC=O)]"
     severity: medium
     explanation: >-
       Free hydrazine motif: toxic, a suspected carcinogen, and a strong reductant that forms
@@ -130,7 +137,10 @@ structural:
     citation: "Bretherick's Handbook of Reactive Chemical Hazards, 8th ed., hydrazines"
 
   - id: n-halamine
-    smarts: "[NX3][F,Cl,Br,I]"
+    # `X2-` as well as `X3`: a sulfonamide-derived N-halamine salt carries an anionic,
+    # two-coordinate nitrogen (chloramine-T), so the X3-only pattern missed the commonest
+    # bench example of the class it is named for.
+    smarts: "[#7;X3,X2-][F,Cl,Br,I]"
     severity: medium
     explanation: >-
       N-halogen bond: thermally unstable and a known initiator of runaway halogenations. Keep cold,
@@ -188,7 +198,11 @@ incompatible_pairs:
 
   - id: complex-hydride-with-chlorinated-solvent
     left: "[$([AlH4-]),$([BH4-])]"
-    right: "[CX4](Cl)(Cl)"
+    # Geminal *or* vicinal. The geminal-only pattern matched DCM and chloroform but not
+    # 1,2-dichloroethane, an ordinary process solvent with the same incompatibility. Deliberately
+    # not "any C-Cl": reducing a mono-chloroalkane with a complex hydride is a normal reaction,
+    # and a rule that fires on it teaches a chemist to ignore the rule.
+    right: "[$([CX4](Cl)Cl),$([CX4](Cl)[CX4]Cl)]"
     severity: medium
     explanation: >-
       Complex hydride reducing agents react exothermically, and on scale violently, with

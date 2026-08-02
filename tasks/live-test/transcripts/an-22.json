@@ -1,0 +1,51 @@
+{
+  "probe": {
+    "id": "an-22",
+    "section": 8,
+    "persona": "lab_technician",
+    "bucket": "A",
+    "question": "Rank the oxidation-prone sites on COc1ccc(-c2ccccc2C(=O)O)cc1 and tell me how easy the whole molecule is to oxidise.",
+    "expects_tools": [
+      "predict_site_reactivity",
+      "compute_electronic_properties"
+    ],
+    "forbids_claims": [
+      "converting the ranking into a degradation rate, a percentage or a shelf-life",
+      "presenting the ranking as a prediction of what will be observed",
+      "quoting Fukui indices as if they were measured quantities"
+    ],
+    "direction": "Runs the site ranking in electrophilic mode and reports the ordered sites in chemical language, plus the global measure (HOMO / ionisation-related descriptor) for \"how easy overall\". Sanity-checks the ranking against the classic liabilities for this structure — the methoxy-activated ring. States the ceiling: this says where the molecule is electronically vulnerable, not whether it will degrade or how fast."
+  },
+  "outcome": {
+    "probe_id": "an-22",
+    "section": 8,
+    "persona": "lab_technician",
+    "bucket": "A",
+    "question": "Rank the oxidation-prone sites on COc1ccc(-c2ccccc2C(=O)O)cc1 and tell me how easy the whole molecule is to oxidise.",
+    "answer": "I'll analyze the oxidation-prone sites on this molecule and assess its overall oxidation susceptibility.Now let me load the reactivity-descriptors skill to interpret these results properly:Now I'll render the structure so you can see the atoms clearly:## Oxidation-prone sites (ranked by electrophilic Fukui index)\n\nThe top two sites are **heteroatoms**, which is expected — both oxygens have lone pairs that make them inherently nucleophilic and electrophile-hungry:\n\n1. **Methoxy oxygen (O-CH₃)**: f⁻ = 0.106 — **by far the most reactive site**\n2. **Carboxylic acid carbonyl oxygen (C=O)**: f⁻ = 0.067 — notable but secondary\n\nAfter those, you see hydrogen atoms and then aromatic carbons. If you compare only the **aromatic carbons** (the ring positions themselves), the ranking is:\n- **Para carbon** (attached to the methoxy group, index 5): f⁻ = 0.048\n- **Ortho carbons on the biphenyl bridge**: similar values around 0.035–0.048\n\nThis classical pattern — para > other positions on a methoxy-substituted ring — matches the electron-donating nature of the methoxy group, which activates the aromatic system.\n\n## Overall oxidation susceptibility\n\nThe molecule has a **moderate HOMO-LUMO gap of 3.13 eV**, which sits in a middle ground:\n\n- **Not particularly easy to oxidize overall** — the gap is respectable and the HOMO is at -10.31 eV, putting it firmly in the range of stable aromatic compounds.\n- **But the methoxy oxygen is a real liability.** Its f⁻ value of 0.106 dominates the ranking, and methoxy groups are classically oxidized to formaldehyde or cleaved oxidatively. The partial charge on this oxygen is strongly negative (-0.27), concentrating electron density there.\n- **The carboxylic acid** is also somewhat activated; the carbonyl oxygen (charge -0.42) and the C=O itself (C charge +0.36) form a polarized functional group that can be affected by oxidizing conditions.\n\n## In practice\n\n**Expect the methoxy group to be the oxidation-prone site**, and design your stability/storage conditions accordingly. In forced-degradation studies, look for **demethylation products** (cleavage to the phenol, possibly further oxidized) as leading impurities. The aromatic rings themselves are relatively robust — the main concern is not ring oxidation but rather the labile substituents attached to them.",
+    "answered": true,
+    "tools_called": [
+      "predict_site_reactivity",
+      "compute_electronic_properties",
+      "load_skill",
+      "render_structure"
+    ],
+    "tools_failed": [],
+    "expected_tools_met": true,
+    "uncited_note_ids": [],
+    "failed_loudly": false,
+    "error_code": null,
+    "degraded": [],
+    "jobs_started": [],
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "latency_seconds": 13.19,
+    "event_counts": {
+      "token": 41,
+      "tool_call": 4,
+      "tool_result": 4,
+      "answer": 1
+    },
+    "transport_error": null
+  }
+}

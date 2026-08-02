@@ -55,7 +55,7 @@ inside each connector.
 | `deploy/` | OpenShift delivery: one rootless multi-target image (`Containerfile`, role chosen by `CHEMCLAW_COMPONENT`) and the Helm chart. |
 | `docs/` | The record and the reference — see `docs/README.md` for which parts are maintained. |
 | `examples/` | A runnable walkthrough. Deliberately not shipped in the wheel. |
-| `tasks/` | The working files `CLAUDE.md` requires: `todo.md` and `lessons.md`. |
+| `tasks/` | The working files `CLAUDE.md` requires: `todo.md` and `lessons.md`. Plus `live-test/` — the transcripts and per-slice findings of a live probe run (`chemclaw.evals.live`), kept because the archived report cites them per probe and a finding whose reproduction is not on disk is a claim rather than evidence. Run output, never source: nothing imports it, and a later run overwrites it. |
 | `.github/workflows/` | CI. The **only** place GitHub Actions reads workflows from — see D-146. |
 
 ## Two pairs of names that look like duplicates and are not

@@ -24,8 +24,10 @@ from pathlib import Path
 from typing import Any
 
 from pydantic import ValidationError
+from rdkit import Chem
 
 from chemclaw.core.config import settings
+from chemclaw.core.reagents import resolve_compound_name
 from chemclaw.ingest.eln.adapter import (
     ElnMappingError,
     RawEntry,
@@ -272,14 +274,60 @@ def _outcomes(payload: dict[str, Any]) -> tuple[list[Component], float | None, f
     return products, yield_percent, purity_percent
 
 
-def _smiles(compound: dict[str, Any]) -> str:
-    """Return the compound's SMILES identifier, or raise if none is present."""
+def _identifiers(compound: dict[str, Any]) -> list[tuple[str, str]]:
+    """The compound's `(TYPE, value)` identifier pairs, uppercased and non-empty."""
+    pairs: list[tuple[str, str]] = []
     for identifier in _as_list(compound.get("identifiers")):
-        if isinstance(identifier, dict) and str(identifier.get("type", "")).upper() == "SMILES":
-            value = identifier.get("value")
-            if value:
-                return str(value)
-    raise OrdFormatError(f"compound has no SMILES identifier: {compound!r}")
+        if not isinstance(identifier, dict):
+            continue
+        value = identifier.get("value")
+        if value:
+            pairs.append((str(identifier.get("type", "")).upper(), str(value)))
+    return pairs
+
+
+def _smiles(compound: dict[str, Any]) -> str:
+    """Resolve a compound to SMILES from any identifier ORD allows, or raise.
+
+    ORD's `CompoundIdentifier` is a union — a real submission may carry `INCHI` or only a `NAME`,
+    and requiring `SMILES` discarded whole reactions over one component. Measured against the
+    public corpora: of 10,011 ORD records, **5,761 were refused**, all of them the Perera
+    Suzuki–Miyaura flow set (Science 2018, 359, 429), whose second coupling partner the source
+    spreadsheet publishes only as a `NAME`. That is 57% of a real corpus lost, including the yield
+    data on components that *were* resolvable.
+
+    The order is by decreasing certainty, and every step is an exact lookup:
+
+    1. `SMILES` — the structure, stated.
+    2. `INCHI` — also the structure, in another notation. RDKit is already a dependency and the
+       conversion is exact, so refusing it was never a safety property, only a missing branch.
+    3. `NAME` / `IUPAC_NAME` — resolved through `chemclaw.core.reagents`, the same table
+       `resolve_compound` serves the agent from. It returns `None` on an unknown spelling rather
+       than guessing, which is what keeps this a lookup and not an inference.
+
+    Still raises when nothing resolves. Refusing to invent a structure is the point (a fabricated
+    one propagates silently into a fingerprint index, a similarity hit and eventually a proposed
+    note); what changes is that refusal now follows an actual attempt.
+    """
+    identifiers = _identifiers(compound)
+    for wanted in ("SMILES",):
+        for kind, value in identifiers:
+            if kind == wanted:
+                return value
+
+    for kind, value in identifiers:
+        if kind == "INCHI":
+            mol = Chem.MolFromInchi(value)
+            if mol is not None:
+                return str(Chem.MolToSmiles(mol))
+
+    for kind, value in identifiers:
+        if kind in {"NAME", "IUPAC_NAME"}:
+            resolved = resolve_compound_name(value)
+            if resolved is not None:
+                return resolved.smiles
+
+    raise OrdFormatError(f"compound has no resolvable structure identifier: {compound!r}")
 
 
 def _role(compound: dict[str, Any], default: Role) -> Role:

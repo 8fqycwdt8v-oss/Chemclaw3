@@ -464,3 +464,83 @@ def test_an_ordinary_note_that_merely_names_a_structure_is_still_out_of_scope() 
         body="Azide couplings (`CCCN=[N+]=[N-]`) recur across two projects.",
     )
     assert hazard_problems(mention) == []
+
+
+def test_a_clean_screen_carries_its_disclaimer_into_the_serialized_result() -> None:
+    """The "not a safety assessment" line must survive `model_dump()`, not just exist.
+
+    A bare `property` is dropped by pydantic serialization, so a clean screen reached the model as
+    `{"flags": []}` and the caveat never entered the context window the answer was written from.
+    Asserting on the dumped payload — not on the attribute — is the whole point: reading
+    `result.verdict` in a test passes either way.
+    """
+    dumped = screen_structure("CCO").model_dump()
+    assert "verdict" in dumped, "verdict is not serialized; a clean screen reads as an empty result"
+    assert "not a safety assessment" in dumped["verdict"]
+    assert "safe" not in dumped["verdict"].lower().replace("safety", "")
+
+
+def test_a_flagged_screen_serializes_an_advisory_verdict_too() -> None:
+    """The matched case must say advisory-only in the payload, for the same reason."""
+    dumped = screen_structure("CC(=O)OOC(C)=O").model_dump()
+    assert dumped["flags"], "diacetyl peroxide must raise the peroxide rule"
+    assert "Advisory only" in dumped["verdict"]
+
+
+# --- the four blind spots the 2026-08-02 live run confirmed (REV-4) ---------------------
+
+# Each molecule screened clean before its rule was widened, and each is an ordinary bench
+# reagent for the hazard class its rule is named after. Kept as (name, SMILES, rule) so a
+# future narrowing of any pattern names the compound it would silence.
+_PREVIOUSLY_SILENT = [
+    ("sodium peroxide", "[O-][O-].[Na+].[Na+]", "peroxide"),
+    ("1,1-dimethylhydrazine (UDMH)", "CN(C)N", "hydrazine"),
+    ("chloramine-T", "CC1=CC=C(C=C1)S(=O)(=O)[N-]Cl.[Na+]", "n-halamine"),
+]
+
+
+@pytest.mark.parametrize(("name", "smiles", "rule"), _PREVIOUSLY_SILENT)
+def test_a_previously_silent_hazard_now_fires(name: str, smiles: str, rule: str) -> None:
+    """A textbook member of a covered hazard class must not screen clean.
+
+    Sodium peroxide writes its oxygens as one-coordinate anions, UDMH carries H on only one
+    nitrogen, and chloramine-T's nitrogen is anionic and two-coordinate — each fell outside a
+    pattern written for the neutral, fully-substituted case. A silent rule is the one failure
+    mode this module exists to prevent, because the screen reports it as "nothing matched".
+    """
+    assert rule in {flag.rule_id for flag in screen_structure(smiles).flags}, name
+
+
+def test_a_complex_hydride_fires_against_a_vicinal_dichloride_too() -> None:
+    """1,2-dichloroethane carries the same incompatibility as DCM and was silent.
+
+    The pair rule matched geminal dichlorides only, so an ordinary process solvent paired with
+    LiAlH4 raised nothing.
+    """
+    flags = screen_reaction(["[Li+].[AlH4-]", "ClCCCl"]).flags
+    assert "complex-hydride-with-chlorinated-solvent" in {f.rule_id for f in flags}
+
+
+@pytest.mark.parametrize(
+    ("name", "smiles"),
+    [
+        # Widening a hazard rule until it fires on everything is worse than the gap it closed:
+        # a rule that flags a routine reagent teaches a chemist to skip reading the flags.
+        ("1-chlorobutane", "CCCCCl"),
+        ("benzyl chloride", "ClCc1ccccc1"),
+        ("acetyl chloride", "CC(=O)Cl"),
+        ("epichlorohydrin", "ClCC1CO1"),
+        ("2-chloroethanol", "OCCCl"),
+        ("aniline", "Nc1ccccc1"),
+        ("acetohydrazide", "CC(=O)NN"),
+        ("azobenzene", "c1ccc(cc1)/N=N/c1ccccc1"),
+        ("ethylene glycol", "OCCO"),
+        ("1,4-dioxane", "C1COCCO1"),
+        ("ethyl acetate", "CCOC(C)=O"),
+        ("4-chloroanisole", "COc1ccc(Cl)cc1"),
+    ],
+)
+def test_widening_a_rule_did_not_make_a_routine_reagent_hazardous(name: str, smiles: str) -> None:
+    """None of the widened patterns may fire on an everyday, unremarkable reagent."""
+    widened = {"peroxide", "hydrazine", "n-halamine"}
+    assert widened.isdisjoint({f.rule_id for f in screen_structure(smiles).flags}), name

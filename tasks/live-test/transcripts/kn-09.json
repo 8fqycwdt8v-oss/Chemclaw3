@@ -1,0 +1,53 @@
+{
+  "probe": {
+    "id": "kn-09",
+    "section": 1,
+    "persona": "lab_technician",
+    "bucket": "A",
+    "question": "Here's my reaction — COc1ccc(Br)cc1.OB(O)c1ccccc1>>COc1ccc(cc1)-c1ccccc1 — is there anything close to it in the HTE data we have indexed?",
+    "expects_tools": [
+      "similar_reactions",
+      "gather_evidence"
+    ],
+    "forbids_claims": [
+      "a reaction id the search did not return",
+      "a similarity score the tool did not return",
+      "a literature citation",
+      "conditions attributed to a hit that the hit does not carry"
+    ],
+    "direction": "Runs the reaction-fingerprint search and reports what came back, with the returned similarity values and which dataset family the hits belong to (Doyle Buchwald–Hartwig amination, Perera Suzuki–Miyaura flow, Santanilla amidation/sulfonamidation, Nielsen deoxyfluorination). If the nearest neighbours are a different transformation, it must say so plainly instead of dressing them up as precedent for this coupling."
+  },
+  "outcome": {
+    "probe_id": "kn-09",
+    "section": 1,
+    "persona": "lab_technician",
+    "bucket": "A",
+    "question": "Here's my reaction — COc1ccc(Br)cc1.OB(O)c1ccccc1>>COc1ccc(cc1)-c1ccccc1 — is there anything close to it in the HTE data we have indexed?",
+    "answer": "I'll search for reactions similar to your Suzuki-type coupling between 4-bromoanisole and phenylboronic acid.Yes — you have several very close matches (Tanimoto ~0.82) in the indexed data. All four hits are the same transformation: **4-bromoanisole + phenylboronic acid → 4-methoxybiphenyl**, with potassium carbonate as base.\n\nThe hits are:\n- **`ord-suzuki-biphenyl-1` and `ord-suzuki-biphenyl-2`** (from Open Reaction Database)\n- **`uspto-suzuki-biphenyl-1` and `uspto-suzuki-biphenyl-2`** (from USPTO data)\n\nThese appear to be duplicates across sources. Let me expand one of them to see the full experimental details and conditions:The reaction notes are indexed (so the fingerprints found them), but they're still pending PR-gate review and aren't expanded yet. This means they are in the fingerprint store—the structural similarity index—but their full experimental details haven't been merged into the knowledge graph as notes.\n\nWhat that tells you: **the reaction itself is in the indexed corpus**, but the step-by-step protocol and condition details (solvent, temperature, catalyst, time) are not yet in the knowledge graph for me to retrieve. If you need those details, the reaction *exists* in the upstream data (ORD and USPTO), and your team would need to:\n1. Check the merged notes in your internal system (they may have been written as draft PRs), or  \n2. Trace back to the original ORD/USPTO sources directly for the experimental records.\n\nWould you like me to search for any related Suzuki couplings with variations (different halogens, boronic acids, or substrates) that *are* already merged into the knowledge graph?",
+    "answered": true,
+    "tools_called": [
+      "similar_reactions",
+      "expand_note"
+    ],
+    "tools_failed": [
+      "expand_note"
+    ],
+    "expected_tools_met": true,
+    "uncited_note_ids": [],
+    "failed_loudly": true,
+    "error_code": null,
+    "degraded": [],
+    "jobs_started": [],
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "latency_seconds": 8.94,
+    "event_counts": {
+      "token": 25,
+      "tool_call": 2,
+      "tool_result": 2,
+      "tool_failed": 1,
+      "answer": 1
+    },
+    "transport_error": null
+  }
+}

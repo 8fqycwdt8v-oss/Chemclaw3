@@ -10,7 +10,7 @@ opens); compound cross-links are a later step once compound notes exist.
 """
 
 from chemclaw.ingest.eln.ord import Impurity, OrdReaction, OutcomeClass, ReactionStep
-from chemclaw.kg.note import Note
+from chemclaw.kg.note import Note, note_id_for_reaction
 
 
 def note_from_ord_reaction(reaction: OrdReaction) -> Note:
@@ -23,7 +23,7 @@ def note_from_ord_reaction(reaction: OrdReaction) -> Note:
         f"{_procedure_block(reaction)}"
     )
     return Note(
-        id=f"reaction-{reaction.reaction_id}",
+        id=note_id_for_reaction(reaction.reaction_id),
         type="reaction",
         created_by="agent",
         source=reaction.provenance,

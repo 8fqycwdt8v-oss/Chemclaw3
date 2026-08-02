@@ -1,0 +1,46 @@
+{
+  "probe": {
+    "id": "kn-23",
+    "section": 17,
+    "persona": "manager",
+    "bucket": "A",
+    "question": "An auditor wants proof that a computed number in one of our reports wasn't edited after the fact. What do I actually show them?",
+    "expects_tools": [
+      "find_calculations",
+      "list_artifacts",
+      "fetch_artifact"
+    ],
+    "forbids_claims": [
+      "an audit entry, hash or timestamp it did not retrieve",
+      "a compliance certification or validated-system status",
+      "that re-running the job proves the number was not edited",
+      "an inspection or audit outcome"
+    ],
+    "direction": "Answers with the tamper-evidence story rather than the reproducibility one. It must describe the GxP audit trail in which each entry carries a hash of the previous entry, so any edit breaks the chain, and that `make audit-verify` re-verifies it end to end; plus the calculation store, which keys a result by method, version and input hash and persists it once, so the number in the report resolves to a stored record and its artifact. The distinguishing move is saying explicitly that \"we can re-run the job and get the same number\" is reproducibility, a different claim from integrity. Any specific hash, id or timestamp must be one it retrieved."
+  },
+  "outcome": {
+    "probe_id": "kn-23",
+    "section": 17,
+    "persona": "manager",
+    "bucket": "A",
+    "question": "An auditor wants proof that a computed number in one of our reports wasn't edited after the fact. What do I actually show them?",
+    "answer": "Here's what actually constitutes proof, and what doesn't:\n\n**What to show them: the audit trail, not the job id.**\n\nEvery tool call in this system — including whatever calculation produced the number in your report — is recorded in a tamper-evident audit log: actor, tool, arguments, outcome, latency, correlation id, and the deployment revision that ran it. Each entry is hash-chained to the one before it, so altering or deleting any past entry breaks the chain. An operator verifies this with `make audit-verify`. That verification — \"the chain checks out, nothing between the run and now was altered\" — is the actual answer to \"prove this wasn't edited after the fact.\"\n\n**What a job id proves instead (a different, weaker claim).**\n\nIf you hand the auditor a job id and say \"look, it reproduces,\" that only shows the calculation is *reproducible* — that identical inputs give the same output. It does not show that the number sitting in the report today is the number the run actually produced and hasn't been hand-edited since. Don't substitute one for the other; they answer different questions.\n\n**If the number is cited from a knowledge-graph note**, add one more layer: an agent-authored note only becomes established after it passes the PR-gate, where a human reviews and merges it. So the full defense for a number in a report is:\n1. The audit chain shows the calculation ran as logged and hasn't been altered (verified via `make audit-verify`).\n2. If it's asserted as a note in the graph, show that the note passed human review at the PR-gate rather than being asserted directly.\n\nPractically: point the auditor to your ops/infra team (whoever runs `make audit-verify` for your deployment) to actually run the verification and produce that proof — I don't have a tool that executes it from here.",
+    "answered": true,
+    "tools_called": [],
+    "tools_failed": [],
+    "expected_tools_met": false,
+    "uncited_note_ids": [],
+    "failed_loudly": false,
+    "error_code": null,
+    "degraded": [],
+    "jobs_started": [],
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "latency_seconds": 10.76,
+    "event_counts": {
+      "token": 22,
+      "answer": 1
+    },
+    "transport_error": null
+  }
+}

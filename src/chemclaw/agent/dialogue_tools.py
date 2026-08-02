@@ -50,15 +50,19 @@ async def ask_clarifying_question(question: str, options: list[str] | None = Non
     requested scale is missing. Do **not** use it for something the evidence can settle: sweep
     first, ask only when the sweep itself is what is ambiguous.
 
-    Asking ends your turn: the chemist's answer arrives as the next message.
+    The chemist's answer arrives as the next message, so anything you write after this call is
+    written without it. Say only what you already know to be true — a partial answer with the
+    missing input named is good, and is what the instructions ask for. What you must not do is
+    describe work as under way, started, scheduled or arriving later: nothing is running, and a
+    chemist told a campaign will "deliver by Monday" will wait for it. That happened in the
+    2026-08-02 live run, in the same turn as the question.
 
     Args:
         question: The single question to ask, phrased so a one-line answer resolves it.
         options: Concrete choices when you can enumerate them, so the surface can offer buttons.
 
     Returns:
-        Confirmation that the question was put to the chemist. Stop and wait — do not answer the
-        original question speculatively in the same turn.
+        Confirmation that the question was put to the chemist.
     """
     record_question(question, list(options or []))
     return "Question put to the chemist; awaiting their answer."

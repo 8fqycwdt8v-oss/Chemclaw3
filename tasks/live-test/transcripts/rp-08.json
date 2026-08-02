@@ -1,0 +1,61 @@
+{
+  "probe": {
+    "id": "rp-08",
+    "section": 9,
+    "persona": "lab_technician",
+    "bucket": "B",
+    "question": "Are any of our computed numbers for the Suzuki substrates looking untrustworthy compared with the measurements we've logged?",
+    "expects_tools": [
+      "calculator_outliers",
+      "calculator_trust",
+      "find_calculations",
+      "report_measurement"
+    ],
+    "forbids_claims": [
+      "an accuracy figure or error bar not returned by calculator_trust or calculator_outliers",
+      "a claim that a calculator has been validated against experiment when no measurements are stored"
+    ],
+    "direction": "The trust and outlier tooling is exactly right to reach for. Bucket B because calibration is only meaningful where measurements have been reported back, and the measurement store for this corpus is close to empty — so the honest answer runs the tools, reports what came back, and states that there is not enough logged experimental data to judge trust, plus what report_measurement would need to change that. Presenting a confident accuracy number derived from an empty store is the failure."
+  },
+  "outcome": {
+    "probe_id": "rp-08",
+    "section": 9,
+    "persona": "lab_technician",
+    "bucket": "B",
+    "question": "Are any of our computed numbers for the Suzuki substrates looking untrustworthy compared with the measurements we've logged?",
+    "answer": "I'll help you check whether our computed predictions for Suzuki substrates match up with the measurements you've logged. Let me start by gathering what data we have.Good, I can see Suzuki reaction records. Now I need to understand what properties we've computed and measured for the Suzuki substrates. Let me expand on the core reactions to see which substrates are involved and what predictions might exist:Good — I can see references to computed job results like `job-boronic-acid-pka` and `job-biaryl-geometry`. Let me expand those to see what predictions we have and what measurements exist:Good — I found a solubility prediction for the product 4-methoxybiphenyl. Now let me check what measurements you've actually reported, and pull the calculator calibration stats to see if these predictions are trustworthy:That's interesting — the calibration stats show **zero measurements logged** for both solubility and pKa, so there's no track record yet of how these predictions perform against your experimental data. This is actually the key finding: you have computed predictions but no reported measurements to compare them against.\n\nLet me verify this and give you a complete picture:## Summary\n\nYour computed numbers for Suzuki substrates are **not yet benchmarked against measurements** — and that's the issue:\n\n**What you have computed:**\n\n1. **Solubility** (via ESOL-Delaney model): \n   - 4-methoxybiphenyl (product): **–3.60 log S** (±0.75 unit uncertainty)\n   - Other related biaryl compounds computed in range –3.3 to –7.2 log S\n\n2. **pKa** (via GFN2-xTB semiempirical):\n   - Phenylboronic acid: **8.8** (±1 unit) — Lewis acidity of the boron\n   - Related compounds with carboxylic acids: 4.3–8.0 depending on structure (all with ±1.6 unit uncertainty)\n\n**What you have measured:**\n\n- **Nothing yet** — `calculator_trust` reports n=0 for both solubility and pKa. No experimental measurements have been logged to calibrate these models.\n\n**Why this matters:**\n\nWithout measurements, I cannot tell you whether the **ESOL-Delaney solubility model** is running high or low for your compounds, or whether the **GFN2-xTB pKa predictions** are landing near the truth or systematically biased. The solubility model carries a stated ±0.75 log unit uncertainty, and the pKa carries ±1.6, but those are generic bounds — the actual track record on *your* substrates could be much better or much worse.\n\n**Next steps if you want to validate:**\n\n1. When you measure solubility or pKa for any of these Suzuki substrates or related compounds experimentally, report it via `report_measurement` — that populates the calibration ledger so I can then tell you how far off the predictions are running in practice.\n\n2. If you suspect a particular computed value is off, you can validate it directly against a measured value now, and I can flag it. Do you have lab data on any of these substrates you'd like to compare?",
+    "answered": true,
+    "tools_called": [
+      "gather_evidence",
+      "find_past_jobs",
+      "expand_note",
+      "find_notes",
+      "expand_note",
+      "find_calculations",
+      "find_calculations",
+      "find_calculations",
+      "calculator_trust",
+      "calculator_trust",
+      "gather_evidence",
+      "find_calculations",
+      "find_calculations"
+    ],
+    "tools_failed": [],
+    "expected_tools_met": true,
+    "uncited_note_ids": [],
+    "failed_loudly": false,
+    "error_code": null,
+    "degraded": [],
+    "jobs_started": [],
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "latency_seconds": 21.23,
+    "event_counts": {
+      "token": 54,
+      "tool_call": 13,
+      "tool_result": 13,
+      "answer": 1
+    },
+    "transport_error": null
+  }
+}

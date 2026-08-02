@@ -1,0 +1,60 @@
+{
+  "probe": {
+    "id": "kn-01",
+    "section": 1,
+    "persona": "lab_technician",
+    "bucket": "A",
+    "question": "We've got the 4-bromoanisole + PhB(OH)2 coupling on the plan for next week. Has anyone here run that before, and what conditions did they end up on?",
+    "expects_tools": [
+      "gather_evidence",
+      "find_notes",
+      "expand_note"
+    ],
+    "forbids_claims": [
+      "a note id that was not retrieved",
+      "a yield, catalyst loading or temperature not stated in the retrieved notes",
+      "a literature reference",
+      "a run or campaign that is not in the record"
+    ],
+    "direction": "Cites rxn-suzuki-biaryl by id (and plausibly opt-suzuki-conditions or report-biaryl-development) and gives the conditions actually on file: Pd(OAc)2 at 1.5 mol% Pd, K2CO3 2.0 equiv, THF/water 4:1, 80 °C, 12 h, degassed, 76% isolated. A good answer adds the recorded reason this substrate is awkward — an electron-rich aryl bromide makes oxidative addition the slow step, so it is unusually ligand- and temperature-sensitive. Every number must trace to a cited note."
+  },
+  "outcome": {
+    "probe_id": "kn-01",
+    "section": 1,
+    "persona": "lab_technician",
+    "bucket": "A",
+    "question": "We've got the 4-bromoanisole + PhB(OH)2 coupling on the plan for next week. Has anyone here run that before, and what conditions did they end up on?",
+    "answer": "Yes — this exact coupling (4-bromoanisole + PhB(OH)₂ → 4-methoxybiphenyl) has been run and even optimized here. Here's the record, from most to least authoritative:\n\n**The run itself** — [[rxn-suzuki-biaryl]] (human-authored, confidence 0.85):\n- Pd(OAc)₂ pre-catalyst, 1.5 mol% Pd\n- K₂CO₃ (2.0 equiv)\n- THF/water 4:1\n- 80 °C, 12 h, **rigorously degassed**\n- Isolated yield: 76%\n\nNote: 4-bromoanisole is flagged in the graph as a deliberately electron-rich (deactivated) aryl bromide — oxidative addition is the slow step, so this substrate is more temperature/ligand-sensitive than a typical activated aryl bromide.\n\n**The standing recommendation** — [[report-biaryl-development]] (human, 0.8), a development report built from the reaction, a scope campaign, and an optimization campaign, lands on the *same* conditions with one refinement: **Pd(OAc)₂/SPhos** rather than bare Pd(OAc)₂, same K₂CO₃/THF-water 4:1/80 °C, and explicitly says **\"do not optimize on LCAP.\"**\n\n**Why that caveat matters — [[opt-suzuki-conditions]] / [[failure-aqueous-protodeboronation]]** (human, 0.85/0.8): the campaign tried 100 °C and got a *higher* LCAP (79%) but a *lower* isolated yield (68%) than the 80 °C condition (76%). The gap is protodeboronation of the boronic acid in the aqueous THF system at higher temperature — it was seen three times before anyone caught it, because the assay looked better each time it happened. So 80 °C isn't just \"good enough,\" it's the point past which the boronic acid starts dying faster than it transmetalates.\n\n**One thing to flag, not follow blindly:** there's a BO-generated candidate, [[bo-suzuki-next]] (confidence 0.5, explicitly agent/model-extrapolated, not a run), proposing 1.2 mol% Pd, **Cs₂CO₃**, 2-MeTHF/water 4:1, 75 °C, predicted 79%±6. Its own note says the Cs₂CO₃ swap is \"the model extrapolating from a single observation, so this is an experiment to run, not a conclusion\" — and it's marked as **contradicting** the protodeboronation failure-mode note to the extent it still pushes toward higher effective severity conditions. I would not carry this into next week's run as the baseline; it's a hypothesis worth testing in parallel at most, not a replacement for the established 80 °C/K₂CO₃ condition.\n\n**Bottom line for next week:** run at the established/report-recommended condition — Pd(OAc)₂/SPhos (1.5 mol% Pd), K₂CO₃ (2 equiv), THF/water 4:1, 80 °C, 12 h, thoroughly degassed — and judge success by isolated yield, not LCAP, given the documented assay/isolated-yield gap.\n\nWant me to also check the hazard screen on this combination before you finalize the SOP, or pull the degassing playbook ([[playbook-degassing]]) it references?",
+    "answered": true,
+    "tools_called": [
+      "gather_evidence",
+      "resolve_compound",
+      "resolve_compound",
+      "expand_note",
+      "expand_note",
+      "expand_note",
+      "find_notes",
+      "expand_note",
+      "expand_note"
+    ],
+    "tools_failed": [],
+    "expected_tools_met": true,
+    "uncited_note_ids": [
+      "playbook-degassing"
+    ],
+    "failed_loudly": false,
+    "error_code": null,
+    "degraded": [],
+    "jobs_started": [],
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "latency_seconds": 23.85,
+    "event_counts": {
+      "tool_call": 9,
+      "tool_result": 9,
+      "token": 35,
+      "answer": 1
+    },
+    "transport_error": null
+  }
+}

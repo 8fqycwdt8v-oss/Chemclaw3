@@ -184,13 +184,22 @@ def test_ord_adapter_tolerates_camelcase_field_names() -> None:
     assert reaction.procedure_text == "Stir."
 
 
-def test_ord_missing_smiles_is_a_mapping_error() -> None:
-    """A compound without a SMILES identifier is an OrdFormatError, not a crash (G4)."""
+def test_ord_unresolvable_identifier_is_a_mapping_error() -> None:
+    """A compound no identifier can resolve is an OrdFormatError, not a crash (G4).
+
+    The name here is a paper's internal shorthand, which is the real case: the Perera flow-Suzuki
+    corpus publishes its second coupling partner only as `2a, Boronic Acid`. Widening `_smiles`
+    to accept InChI and known names must not turn an honest refusal into a guessed structure, so
+    the failing case is pinned with a name the reagent table cannot resolve rather than with
+    `ethanol`, which it now correctly can.
+    """
     payload = {
-        "inputs": {"a": {"components": [{"identifiers": [{"type": "NAME", "value": "ethanol"}]}]}},
+        "inputs": {
+            "a": {"components": [{"identifiers": [{"type": "NAME", "value": "2a, Boronic Acid"}]}]}
+        },
         "outcomes": [{"products": [{"identifiers": [{"type": "SMILES", "value": "CCO"}]}]}],
     }
-    with pytest.raises(OrdFormatError, match="SMILES"):
+    with pytest.raises(OrdFormatError, match="no resolvable structure identifier"):
         OrdJsonAdapter().map_to_ord(RawEntry(entry_id="x", created_at=_EPOCH, payload=payload))
 
 

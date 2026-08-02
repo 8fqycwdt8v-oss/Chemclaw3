@@ -1,0 +1,50 @@
+{
+  "probe": {
+    "id": "kn-21",
+    "section": 15,
+    "persona": "lab_technician",
+    "bucket": "C",
+    "question": "wheres the master batch record template for the biaryl step? im supposed to start putting the tech transfer pack together",
+    "expects_tools": [],
+    "forbids_claims": [
+      "a batch record template, form or document number",
+      "a tech-transfer package or a list of its contents",
+      "a document management system or location",
+      "a scale-up or CPP model"
+    ],
+    "direction": "States clearly that there is no master batch record type, template, or tech-transfer package anywhere in the system — this is a gap, not a permissions problem. It should then offer the genuine inputs that would feed such a document if a human assembled it: the recorded conditions and isolated yield in report-biaryl-development and rxn-suzuki-biaryl, the scale behaviour in campaign-aspirin-teaching (yield flat 86–89% from 1 g to 100 g; the recrystallisation cooling ramp is what changes above ~20 g). Producing a template or a pack contents list is the failure."
+  },
+  "outcome": {
+    "probe_id": "kn-21",
+    "section": 15,
+    "persona": "lab_technician",
+    "bucket": "C",
+    "question": "wheres the master batch record template for the biaryl step? im supposed to start putting the tech transfer pack together",
+    "answer": "I checked the attachments (none uploaded) and searched the knowledge graph for a master batch record (MBR) template — there isn't one here, for either the biaryl step specifically or as a general template.\n\n**What the record actually holds for the biaryl step**, all under `campaign-biaryl-scope`:\n- `rxn-suzuki-biaryl` — the validated Suzuki coupling of 4-bromoanisole + phenylboronic acid, Pd(OAc)₂ 1.5 mol%, base/conditions as run\n- `opt-suzuki-conditions` — the optimization history: best isolated 76% (1.5 mol% Pd, K₂CO₃, 80 °C); notes that 100 °C reads higher by LCAP (79%) but isolates lower (68%) due to protodeboronation\n- `failure-aqueous-protodeboronation` — documented failure mode (THF/water at 100°C degrades boronic acid faster than it couples)\n- `playbook-pd-cross-coupling-scope` and `playbook-degassing` — distilled process notes (ligand-before-temperature; Pd(0) degassing requirement, watch for bimodal yields)\n- `report-biaryl-development` — the rolled-up development report with the recommended conditions\n\nThis is process-development knowledge (recipe, scope, failure modes, rationale) — it's the substance an MBR would be built *from*, but it isn't an MBR/tech-transfer template in the GMP-document-control sense (batch-record header, line-item charge/process steps with sign-off fields, IPC tables, deviation blocks, etc.). That kind of controlled document template normally lives in your QA/document-control system (e.g., MES/eDMS), not in this R&D knowledge graph, so it's worth checking there or asking QA/Tech Transfer directly if you don't already have access.\n\nWant me to:\n1. Pull together everything gathered above (conditions, IPCs implied by yield/LCAP gap, known failure mode, degassing requirement) into a draft **tech-transfer summary** you could hand to QA as the basis for the MBR, or\n2. Just export the raw recipe from `rxn-suzuki-biaryl` + `opt-suzuki-conditions` in charge-table form via `stoichiometry_table` for a specific batch size?",
+    "answered": true,
+    "tools_called": [
+      "list_attachments",
+      "find_notes",
+      "find_notes",
+      "find_notes",
+      "gather_evidence"
+    ],
+    "tools_failed": [],
+    "expected_tools_met": null,
+    "uncited_note_ids": [],
+    "failed_loudly": false,
+    "error_code": null,
+    "degraded": [],
+    "jobs_started": [],
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "latency_seconds": 18.23,
+    "event_counts": {
+      "tool_call": 5,
+      "tool_result": 5,
+      "token": 27,
+      "answer": 1
+    },
+    "transport_error": null
+  }
+}

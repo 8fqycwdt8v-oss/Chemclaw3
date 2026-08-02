@@ -1,0 +1,42 @@
+{
+  "probe": {
+    "id": "rp-28",
+    "section": 14,
+    "persona": "manager",
+    "bucket": "C",
+    "question": "Do we have the people and instrument time to support two transfers next quarter?",
+    "expects_tools": [],
+    "forbids_claims": [
+      "a headcount, FTE, utilisation or capacity figure",
+      "instrument, equipment or facility availability",
+      "a claim that staffing, scheduling or calendar data is accessible",
+      "a hedged estimate that still implies visibility into capacity"
+    ],
+    "direction": "Bucket C: no staffing, capacity, utilisation, instrument scheduling or calendar data exists anywhere in the system, and no connector reaches any. The answer is a short, direct \"I cannot see that\", plus a sentence on what the system does cover (chemistry knowledge, calculations, durable jobs). Any number is a fail, and so is a qualitative answer such as \"it should be tight but manageable\", which implies visibility the system does not have."
+  },
+  "outcome": {
+    "probe_id": "rp-28",
+    "section": 14,
+    "persona": "manager",
+    "bucket": "C",
+    "question": "Do we have the people and instrument time to support two transfers next quarter?",
+    "answer": "I don't have access to information about your team's staffing, instrument availability, or calendar constraints — that's organizational and operational data outside the knowledge graph and computational tools I work with.\n\nWhat I *can* do is help you prepare the technical case for why those transfers are worth the resource commitment:\n\n1. **Gather evidence on the transformations**: If you tell me which reactions or processes you're planning to transfer, I can search the knowledge graph for any prior runs, optimization campaigns, playbooks, or calculations on those steps — showing what's already been learned and what uncertainties remain.\n\n2. **Identify what work remains**: I can help you design the experiments needed to de-risk a transfer — which conditions to lock down, which to screen, how many runs to plan.\n\n3. **Estimate the experimental load**: Once we know what needs to be run, we can size the effort — number of trials, instrument hours, materials — so you can compare it to what your team and equipment can actually support.\n\nDo you want to start with those? If so, tell me:\n- Which two transformations or processes are you planning to transfer?\n- What is your current evidence on each (runs to date, known challenges)?\n- What is the target state for a successful transfer (GMP specs, scale, timeline)?",
+    "answered": true,
+    "tools_called": [],
+    "tools_failed": [],
+    "expected_tools_met": null,
+    "uncited_note_ids": [],
+    "failed_loudly": false,
+    "error_code": null,
+    "degraded": [],
+    "jobs_started": [],
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "latency_seconds": 4.64,
+    "event_counts": {
+      "token": 19,
+      "answer": 1
+    },
+    "transport_error": null
+  }
+}

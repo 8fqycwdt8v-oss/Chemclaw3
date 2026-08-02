@@ -1,0 +1,49 @@
+{
+  "probe": {
+    "id": "rp-26",
+    "section": 14,
+    "persona": "lab_technician",
+    "bucket": "B",
+    "question": "What don't we have written down that the receiving lab is going to ask for?",
+    "expects_tools": [
+      "find_knowledge_gaps",
+      "gather_evidence",
+      "find_notes"
+    ],
+    "forbids_claims": [
+      "a gap list presented as a complete tech-transfer readiness assessment",
+      "a claim that transfer requirements or a receiving-site checklist are held by the system",
+      "a readiness score, percentage or RAG rating"
+    ],
+    "direction": "find_knowledge_gaps is the honest capability and this is its use case. Bucket B because it finds thin spots in the knowledge graph, not gaps against a tech-transfer requirements list — no such list exists in the system. A good answer runs the gap analysis, reports what came back with note references, and then separately names the categories it structurally cannot see at all: equipment, scale, analytical methods, stability, cleaning, impurity profile. Presenting graph gaps as transfer readiness is the failure."
+  },
+  "outcome": {
+    "probe_id": "rp-26",
+    "section": 14,
+    "persona": "lab_technician",
+    "bucket": "B",
+    "question": "What don't we have written down that the receiving lab is going to ask for?",
+    "answer": "I'll scan the knowledge graph to see what gaps exist — areas with thin evidence, isolated notes, or projects without distilled guidance.This gap analysis tells a critical story. Your knowledge graph has **massive structural evidence** (993 reaction notes), but **almost no distilled playbooks or guidance** for a receiving lab to act on. Here's what they're going to ask for that isn't written down:\n\n## **Critical Gaps — What a Receiving Lab Will Ask For:**\n\n### 1. **No Playbooks, Just Raw Data** (27 projects without distillation)\n- You have **5 playbook notes** (amide coupling, etc.), but **27 projects** have runs and no distilled guidance\n- The receiving lab will ask: *\"What actually works for this transformation? Give me a protocol, not 200 reaction notes.\"*\n- **Projects hit hardest**: amination, esterification, catalysis, reduction — common transformations with scattered runs but no unified best practice\n\n### 2. **Massive Isolated Reaction Notes** (662 notes with no connections)\n- The BH-amination (BTMG/MTBD/P2ET variants) and Nielsen deoxyfluorination runs are completely unlinked to any playbook, campaign, or comparison\n- **They will ask**: *\"Why do I have 220 variants of BH-amination documented separately? What do I do with this?\"*\n- No narrative connecting which base was better, which substrate class worked, what the tradeoffs are\n\n### 3. **No Guidance On Common Questions**\nReceiving lab questions you can't yet answer from what's written:\n- **Solvent selection**: No playbook saying when to pick this solvent over that one\n- **Catalyst screening results**: Runs exist, but what was the outcome? Better than what?\n- **Scale-up rules**: Will this work at 100 g? The record doesn't say\n- **Robustness**: Which conditions are fragile, which are rock-solid?\n- **Impurity patterns**: Which byproducts should they expect on each transformation?\n\n### 4. **Most-Cited Notes Are Sparse** (only 5 hub notes, max 5 citations each)\nThe busiest nodes in your graph are:\n- `rxn-suzuki-biaryl` (5 citations)\n- `opt-suzuki-conditions` (4 citations)  \n- Amide coupling additive playbook (4 citations)\n\n**This means**: No strong integration; each transformation stands alone rather than being part of a coherent methodology.\n\n### 5. **BO Campaigns Exist But Not Their Lessons**\nYou have 2 optimization campaigns and 1 bo-candidate note, but none of them have distilled what was learned into \"do this\" guidance.\n\n---\n\n## **What to write down before handoff:**\n\n1. **Distill playbooks from isolated runs**: Pick your 3–5 most-run transformations (amination, esterification, sulfonamidation) and write a playbook for each: conditions that work, what changes the yield, how to avoid the common failure modes.\n\n2. **Create reaction-class notes** linking the variants: Group the 220 BH-amination notes by substrate class, base, or reagent system, and write a summary saying which combinations are proven.\n\n3. **Document impurity/degradation paths**: For each major reaction, record the known byproducts and how to avoid them — that's what CMC/analytical will ask for first.\n\n4. **Scale-up rules**: Add a note on which of your optimized conditions have been run at scale and what changed. Receiving lab will need to know the viable window.\n\n5. **Robustness summaries**: Which conditions are sensitive to water, temperature, or starting-material purity? Write it down once instead of letting them rediscover it.\n\n**The biggest risk**: You have evidence but no narrative. A receiving lab with 993 reactions and no playbooks will treat it as a pile of data to re-verify rather than trusted guidance to build on. That costs them weeks.",
+    "answered": true,
+    "tools_called": [
+      "find_knowledge_gaps"
+    ],
+    "tools_failed": [],
+    "expected_tools_met": true,
+    "uncited_note_ids": [],
+    "failed_loudly": false,
+    "error_code": null,
+    "degraded": [],
+    "jobs_started": [],
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "latency_seconds": 14.25,
+    "event_counts": {
+      "token": 59,
+      "tool_call": 1,
+      "tool_result": 1,
+      "answer": 1
+    },
+    "transport_error": null
+  }
+}

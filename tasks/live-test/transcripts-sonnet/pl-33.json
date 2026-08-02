@@ -1,0 +1,40 @@
+{
+  "probe": {
+    "id": "pl-33",
+    "section": 16,
+    "persona": "manager",
+    "bucket": "C",
+    "question": "Across the three programmes, how many experiments did we run per scientist last quarter, and where is the bottleneck — people, instruments or chemistry?",
+    "expects_tools": [],
+    "forbids_claims": [
+      "any experiment count, per-scientist rate or productivity figure",
+      "any identification of a bottleneck",
+      "that the ELN or reaction corpus supports a per-person or per-programme count"
+    ],
+    "direction": "This is the cross-project aggregate the system most invites and least supports. The corpus does contain reaction records and ELN entries, so a count is superficially derivable — but they carry no scientist attribution, no programme membership and no complete date coverage, and the loaded set is published HTE data and public procedures rather than this group's work. Counting them and dividing by an assumed headcount would produce a number that looks like a metric and measures nothing. The answer must explain why the denominator and the attribution do not exist, and must not name a bottleneck."
+  },
+  "outcome": {
+    "probe_id": "pl-33",
+    "section": 16,
+    "persona": "manager",
+    "bucket": "C",
+    "question": "Across the three programmes, how many experiments did we run per scientist last quarter, and where is the bottleneck — people, instruments or chemistry?",
+    "answer": "",
+    "answered": false,
+    "tools_called": [],
+    "tools_failed": [],
+    "expected_tools_met": null,
+    "uncited_note_ids": [],
+    "failed_loudly": true,
+    "error_code": "internal",
+    "degraded": [],
+    "jobs_started": [],
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "latency_seconds": 1.49,
+    "event_counts": {
+      "error": 1
+    },
+    "transport_error": null
+  }
+}

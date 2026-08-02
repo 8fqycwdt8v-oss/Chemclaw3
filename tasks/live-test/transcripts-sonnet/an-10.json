@@ -1,0 +1,56 @@
+{
+  "probe": {
+    "id": "an-10",
+    "section": 8,
+    "persona": "lab_leader",
+    "bucket": "A",
+    "question": "Before analytical development starts on COc1ccc(-c2ccccc2C(=O)O)cc1, give me the basic physicochemical picture — molecular weight, lipophilicity, polar surface area — so we know what kind of molecule we are handing them.",
+    "expects_tools": [
+      "predict_developability_profile",
+      "predict_logd",
+      "predict_pka",
+      "resolve_compound"
+    ],
+    "forbids_claims": [
+      "a column, gradient or analytical technique recommendation dressed up as following from the profile",
+      "a solubility or stability claim not produced by a tool",
+      "presenting computed descriptors as measured values"
+    ],
+    "direction": "Returns the profile (MW, LogP, TPSA and whatever else the tool computes), reads it in chemical language, and is clear these are computed descriptors. Where it goes on to say what this means for analysis, it stays at the level the descriptors support (ionisable, moderately lipophilic, UV-active aromatic) and explicitly does not name a method."
+  },
+  "outcome": {
+    "probe_id": "an-10",
+    "section": 8,
+    "persona": "lab_leader",
+    "bucket": "A",
+    "question": "Before analytical development starts on COc1ccc(-c2ccccc2C(=O)O)cc1, give me the basic physicochemical picture — molecular weight, lipophilicity, polar surface area — so we know what kind of molecule we are handing them.",
+    "answer": "Here's the physicochemical picture for **2-(4-methoxyphenyl)benzoic acid** (COc1ccc(-c2ccccc2C(=O)O)cc1) — a biaryl carboxylic acid, no exact precedent found in the knowledge graph (closest structural neighbor on file is only 0.53 Tanimoto, the des-acid biphenyl, so what follows rests on first-principles calculators, not prior runs of this molecule).\n\n**Size / Lipinski panel** (RDKit descriptor panel):\n- MW: 228.2 g/mol\n- cLogP: 3.06\n- TPSA: 46.5 Ų\n- H-bond donors / acceptors: 1 / 2\n- Rotatable bonds: 3\n- Aromatic rings: 2 (biaryl, roughly perpendicular given ortho-substitution — low fraction sp3, 0.07, i.e. essentially flat/rigid apart from the two ring-ring and O-Me rotations)\n- Lipinski violations: 0; Veber pass: yes (TPSA <140 Å², ≤10 rotatable bonds) — a \"well-behaved\" small molecule by these rule-of-thumb filters, QED 0.88.\n\n**Ionization**: this is a carboxylic acid, predicted pKa ≈ 6.1 (GFN2-xTB/ALPB-water, acid site, ±1.6 uncertainty — the calculator's stated domain for O–H/S–H acids). So around neutral/physiological pH it will be predominantly ionized (a pKa this far below 7.4 means >90% carboxylate at pH 7.4 by Henderson–Hasselbalch), which matters for how \"lipophilic\" it actually behaves in aqueous media.\n\n**Lipophilicity, pH-corrected**: LogD(7.4) ≈ 1.72 (from cLogP 3.06 corrected for the ionized acid fraction at pH 7.4, ±1.6 from the underlying pKa uncertainty). So although the neutral-species LogP (~3.1) looks moderately lipophilic, the compound is meaningfully less lipophilic at physiological/aqueous-buffer pH once ionization is accounted for — worth keeping in mind for any HPLC mobile-phase pH selection or extraction work analytical will do.\n\n**Solubility**: predicted log S ≈ -3.5 (ESOL model, ±0.75 log units) — roughly 0.3 mg/mL aqueous solubility order of magnitude, i.e. poorly-to-moderately soluble, consistent with a biaryl acid of this size/logP.\n\nCaveats to carry forward:\n- Neither the pKa nor solubility calculator has any calibration data on file yet for this chemotype (`calculator_trust` returned n=0 for both), so treat the stated ±1.6 (pKa) and ±0.75 log-unit (solubility) uncertainties as the only handle you have — there's no empirical bias correction available to sharpen them further.\n- No exact or close structural precedent exists in the knowledge graph for this molecule, so nothing here is corroborated by a prior measured value; if/when analytical gets a measured pKa or solubility, it's worth feeding it back via `report_measurement` so the calculator's trust record starts accumulating for this class.\n\nNet picture for handoff: small (MW 228), rigid biaryl, moderately lipophilic but as an ionizable carboxylic acid (pKa ~6.1) — so expect strong pH-dependence in both retention behavior and solubility, low intrinsic aqueous solubility, and no red flags on the Lipinski/Veber developability screen.",
+    "answered": true,
+    "tools_called": [
+      "predict_developability_profile",
+      "predict_pka",
+      "predict_solubility",
+      "calculator_trust",
+      "calculator_trust",
+      "predict_logd",
+      "similar_molecules"
+    ],
+    "tools_failed": [],
+    "expected_tools_met": true,
+    "uncited_note_ids": [],
+    "failed_loudly": false,
+    "error_code": null,
+    "degraded": [],
+    "jobs_started": [],
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "latency_seconds": 29.88,
+    "event_counts": {
+      "tool_call": 7,
+      "tool_result": 7,
+      "token": 40,
+      "answer": 1
+    },
+    "transport_error": null
+  }
+}

@@ -1,0 +1,41 @@
+{
+  "probe": {
+    "id": "op-12",
+    "section": 3,
+    "persona": "lab_leader",
+    "bucket": "A",
+    "question": "You gave me two points — one sitting right next to my best run, one way out at low temperature. Explain why the model wants the second one. I need to defend it to my boss when it comes back at 20%.",
+    "expects_tools": [],
+    "forbids_claims": [
+      "the model predicts the low-temperature point will be better",
+      "the optimizer guarantees an improvement",
+      "the second point is the optimum"
+    ],
+    "direction": "This is an explanation question and no tool call is required; an answer that re-runs the optimizer instead of explaining is worse, not better. A satisfying answer says, in a process chemist's language, that the two points are doing different jobs: the near one exploits a region the surrogate has already learned, where its predicted spread is small, and the far one is placed where the model is most uncertain, so its value is the information it returns rather than the yield. It must make the consequence explicit and defensible — a 20% result from the far point is not a wasted run, it is the run that stops the model recommending that region again — while being honest that the far point is not predicted to win and the optimizer promises nothing. Bonus for naming the risk the chemist should weigh: an excursion into untried conditions can carry a safety or selectivity surprise the model cannot see."
+  },
+  "outcome": {
+    "probe_id": "op-12",
+    "section": 3,
+    "persona": "lab_leader",
+    "bucket": "A",
+    "question": "You gave me two points — one sitting right next to my best run, one way out at low temperature. Explain why the model wants the second one. I need to defend it to my boss when it comes back at 20%.",
+    "answer": "I'd be happy to help you make that case, but I need some context to explain the model's reasoning properly.\n\nCould you help me understand the situation:\n\n1. **What's the optimization problem?** What are you optimizing (yield, selectivity, conversion)? What parameters are varying — temperature, solvent, catalyst, equivalents, something else?\n\n2. **What was your best run so far?** What were its conditions and the yield/output value it gave?\n\n3. **The two proposed points** — can you give me the conditions for each (temperature values, solvent choice, catalyst, whatever else is in the decision space)?\n\n4. **What do you mean by \"20%\"?** Is that the predicted yield for the low-temperature point? Or is that what you actually got back from running it?\n\nOnce I have those details, I can pull up the campaign history, show you what the surrogate model saw in your data so far, and explain why a point far from your best — especially one at an extreme like low temperature — would be worth trying: it's usually either (a) the model thinks there's a better region it hasn't explored yet, or (b) it's sampling the edge of the space to reduce uncertainty for the next round. If you actually ran it and got 20%, that's a different story — I can help you read why the model was wrong and what that tells you about the surface you're on.\n\nWhat's the campaign id or the details of the two points?",
+    "answered": true,
+    "tools_called": [],
+    "tools_failed": [],
+    "expected_tools_met": null,
+    "uncited_note_ids": [],
+    "failed_loudly": false,
+    "error_code": null,
+    "degraded": [],
+    "jobs_started": [],
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "latency_seconds": 5.31,
+    "event_counts": {
+      "token": 22,
+      "answer": 1
+    },
+    "transport_error": null
+  }
+}

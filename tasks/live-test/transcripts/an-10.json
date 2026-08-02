@@ -1,0 +1,50 @@
+{
+  "probe": {
+    "id": "an-10",
+    "section": 8,
+    "persona": "lab_leader",
+    "bucket": "A",
+    "question": "Before analytical development starts on COc1ccc(-c2ccccc2C(=O)O)cc1, give me the basic physicochemical picture — molecular weight, lipophilicity, polar surface area — so we know what kind of molecule we are handing them.",
+    "expects_tools": [
+      "predict_developability_profile",
+      "predict_logd",
+      "predict_pka",
+      "resolve_compound"
+    ],
+    "forbids_claims": [
+      "a column, gradient or analytical technique recommendation dressed up as following from the profile",
+      "a solubility or stability claim not produced by a tool",
+      "presenting computed descriptors as measured values"
+    ],
+    "direction": "Returns the profile (MW, LogP, TPSA and whatever else the tool computes), reads it in chemical language, and is clear these are computed descriptors. Where it goes on to say what this means for analysis, it stays at the level the descriptors support (ionisable, moderately lipophilic, UV-active aromatic) and explicitly does not name a method."
+  },
+  "outcome": {
+    "probe_id": "an-10",
+    "section": 8,
+    "persona": "lab_leader",
+    "bucket": "A",
+    "question": "Before analytical development starts on COc1ccc(-c2ccccc2C(=O)O)cc1, give me the basic physicochemical picture — molecular weight, lipophilicity, polar surface area — so we know what kind of molecule we are handing them.",
+    "answer": "I'll compute the developability profile for this molecule, which will give you the standard physicochemical descriptors plus the key rule-of-thumb flags.Here's the basic physicochemical picture:\n\n| Property | Value | Note |\n|---|---|---|\n| **Molecular weight** | 228.2 g/mol | Well below the 500 threshold |\n| **Lipophilicity (cLogP)** | 3.1 | Moderately lipophilic; at the upper edge of ideal for oral drugs but reasonable |\n| **Polar surface area (TPSA)** | 46.5 Ų | Good — in the sweet spot for membrane permeability (< 140 Ų, ideally 20–130) |\n| **H-bond donors** | 1 | Carboxylic acid proton |\n| **H-bond acceptors** | 2 | Carbonyl and hydroxyl oxygens |\n| **Rotatable bonds** | 3 | Low; mostly aromatic, so fairly rigid |\n| **Aromatic rings** | 2 | Aromatic biphenyls; no fused rings |\n| **QED score** | 0.88 | Good drug-likeness (0–1 scale, higher is better) |\n\n**Rule-of-thumb flags:**\n- **Lipinski violations:** 0 (passes all five criteria)\n- **Veber rule:** Pass (≤10 rotatable bonds, TPSA ≤140)\n\n**What you're handing analytical development:** A reasonably well-behaved, drug-like molecule with moderate lipophilicity and good membrane-permeability attributes. The main analytical drivers will be:\n- The carboxylic acid likely makes it ionizable at process pH (pKa typically ~3–4 for aromatic acids), so you'll want to think about salt formation, extraction behavior, and mobile-phase pH early.\n- Two aromatic rings mean UV chromophore for HPLC detection.\n- The methoxy substituent is a potential point of attack under oxidative stress or hydrolytic conditions — worth including in forced-degradation studies.\n\nNo red flags from the descriptor standpoint; this is a conventional small-molecule candidate.",
+    "answered": true,
+    "tools_called": [
+      "predict_developability_profile"
+    ],
+    "tools_failed": [],
+    "expected_tools_met": true,
+    "uncited_note_ids": [],
+    "failed_loudly": false,
+    "error_code": null,
+    "degraded": [],
+    "jobs_started": [],
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "latency_seconds": 8.06,
+    "event_counts": {
+      "token": 30,
+      "tool_call": 1,
+      "tool_result": 1,
+      "answer": 1
+    },
+    "transport_error": null
+  }
+}

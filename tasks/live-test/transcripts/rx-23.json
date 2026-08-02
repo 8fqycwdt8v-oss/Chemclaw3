@@ -1,0 +1,55 @@
+{
+  "probe": {
+    "id": "rx-23",
+    "section": 6,
+    "persona": "lab_leader",
+    "bucket": "B",
+    "question": "Our API is an aliphatic tertiary amine — take CCN(CC)CCN as the model. I need to know its pKa so we can set the extraction pH and choose a counterion for the salt. What is it?",
+    "expects_tools": [
+      "predict_pka",
+      "predict_logd",
+      "gather_evidence",
+      "find_notes"
+    ],
+    "forbids_claims": [
+      "a computed pKa for an aliphatic amine",
+      "a recommended extraction pH derived from a computed value",
+      "a recommended counterion or salt form derived from a computed value",
+      "a substitute descriptor presented as a pKa"
+    ],
+    "direction": "The tool refuses this case outright, and the answer must carry the refusal rather than route around it. Expect the specific reason, not a vague apology: over 13 reference amines the computed basicity ranks them at Spearman about -0.17, which is no ranking ability at all, and it is not a calibration problem — in the gas phase the proton affinities come out right, the continuum solvent reverses the order, and the true aqueous order is non-monotonic because aliphatic amine basicity is set by how many hydrogen bonds the ammonium ion donates to water, which a continuum has no water molecules to accept. Aromatic and aryl nitrogen is covered and aliphatic is not, and the answer should say which case this molecule is. Must recommend measurement or literature, and must not reach for a different tool and present its output as a pKa. Salt selection needs the measured value and a counterion screen, and the delta-pKa margin the rule of thumb depends on is exactly what is unavailable here."
+  },
+  "outcome": {
+    "probe_id": "rx-23",
+    "section": 6,
+    "persona": "lab_leader",
+    "bucket": "B",
+    "question": "Our API is an aliphatic tertiary amine — take CCN(CC)CCN as the model. I need to know its pKa so we can set the extraction pH and choose a counterion for the salt. What is it?",
+    "answer": "I'll predict the pKa for your aliphatic tertiary amine model. Let me call the pKa predictor:The pKa predictor has refused this calculation. Let me load the ionization-and-partitioning skill to explain why and what you should do instead:**Your API is an aliphatic tertiary amine, and the pKa predictor refuses it.** This is not a bug — it is by design, because the method (GFN2-xTB) is fundamentally unreliable for aliphatic amines.\n\nHere is why: over 13 reference aliphatic amines the predictor ranks them at Spearman ρ = −0.17 (essentially random). The root cause is that aqueous aliphatic amine basicity depends on how many hydrogen bonds the ammonium ion donates to water, which a continuum solvent cannot model — the continuum has no water molecules. So the method cannot recover the true basicity ordering.\n\n**For your extraction pH and salt selection, you must measure the pKa or use a literature value.** A computed prediction would be misleading — individual GFN2-xTB pKa values miss by up to 2.1 units, and that span is exactly the margin on which extraction pH and ΔpKa rules of thumb turn. A plausible-looking prediction could invert your decision.\n\n**What to do:**\n1. **Measure it** in your own lab or commission a vendor pKa determination.\n2. **Check literature values** for your API or close analogues (the SMILES you gave — N,N-diethylethanediamine — is an available amine, so literature pKa values likely exist).\n3. **Once you have a measured pKa**, I can help you set extraction pH (typically 1–2 units below the pKa to protonate the amine) and assess counterion options by comparing their pKa to yours using the ΔpKa rule (aim for ΔpKa > 2–3 for a stable salt).\n\nI can compute other properties if they help — solubility, electronic character, developability profile — but pKa for an aliphatic amine must be measured or retrieved from data you trust.",
+    "answered": true,
+    "tools_called": [
+      "predict_pka",
+      "load_skill"
+    ],
+    "tools_failed": [
+      "predict_pka"
+    ],
+    "expected_tools_met": true,
+    "uncited_note_ids": [],
+    "failed_loudly": true,
+    "error_code": null,
+    "degraded": [],
+    "jobs_started": [],
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "latency_seconds": 14.83,
+    "event_counts": {
+      "token": 34,
+      "tool_call": 2,
+      "tool_failed": 1,
+      "tool_result": 2,
+      "answer": 1
+    },
+    "transport_error": null
+  }
+}

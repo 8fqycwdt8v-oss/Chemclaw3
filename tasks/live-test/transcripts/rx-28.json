@@ -1,0 +1,47 @@
+{
+  "probe": {
+    "id": "rx-28",
+    "section": 11,
+    "persona": "lab_leader",
+    "bucket": "A",
+    "question": "What does this coupling look like on green metrics at 2 kg, and where is the solvent burden coming from?",
+    "expects_tools": [
+      "green_metrics",
+      "stoichiometry_table",
+      "gather_evidence",
+      "screen_hazards",
+      "find_notes"
+    ],
+    "forbids_claims": [
+      "an ICH Q3C class or residual-solvent limit quoted as looked up",
+      "a solvent recovery percentage or recycle rate",
+      "a cost, carbon-footprint or waste-disposal figure"
+    ],
+    "direction": "Should compute the metrics rather than describe them — PMI, E-factor, atom economy over the actual charge — and then read them, which mostly means pointing out that solvent dominates PMI and that at ten volumes the process mass is nearly all THF and water. The judgement layer is the solvent one: the thermodynamic view of a solvent is one input and rarely the deciding one, and the criteria that usually bind first are safety, regulatory class, solubility of substrates, product, base and salts, and everything downstream — crystallisation behaviour, phase separation, distillation and recovery. There is no residual-solvent table in this system, so solvent classes may be discussed from knowledge but must not be presented as looked up. Concrete reduction levers (volumes, aqueous fraction, catalyst loading, telescoping) are a good ending; invented recovery percentages are not."
+  },
+  "outcome": {
+    "probe_id": "rx-28",
+    "section": 11,
+    "persona": "lab_leader",
+    "bucket": "A",
+    "question": "What does this coupling look like on green metrics at 2 kg, and where is the solvent burden coming from?",
+    "answer": "I need more information to answer this. You're asking about a coupling reaction at 2 kg scale, but I don't have:\n\n1. **Which coupling reaction** — you said \"this coupling\" but I don't have access to your recent work or a specific transformation you're referring to. Is there a reaction note, an experiment id, or a name (e.g. \"Suzuki coupling\", \"amide coupling\") you can point me to?\n\n2. **The conditions** — solvent(s), reagents, masses/equivalents, and isolated yield. Even if I find the reaction in the knowledge graph, I need the actual run data to compute the green metrics (E-factor and PMI).\n\nIf you can give me:\n- The reaction (product SMILES or reaction ID), or the name of the step\n- The solvent and its volume at the current scale\n- The reagents and their amounts\n- The isolated product yield (in grams or %)\n\nThen I can call `stoichiometry_table` to scale it to 2 kg, compute the green metrics with `green_metrics`, and trace the solvent burden back to what's actually being charged.\n\nIs there a recent experiment or a note in the system you'd like me to search for first?",
+    "answered": true,
+    "tools_called": [],
+    "tools_failed": [],
+    "expected_tools_met": false,
+    "uncited_note_ids": [],
+    "failed_loudly": false,
+    "error_code": null,
+    "degraded": [],
+    "jobs_started": [],
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "latency_seconds": 5.31,
+    "event_counts": {
+      "token": 18,
+      "answer": 1
+    },
+    "transport_error": null
+  }
+}

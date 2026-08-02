@@ -1,0 +1,78 @@
+{
+  "probe": {
+    "id": "op-08",
+    "section": 2,
+    "persona": "manager",
+    "bucket": "B",
+    "question": "For next quarter I want to know which of our steps are worth a formal DoE and which should just be walked one experiment at a time. Go through what we've got and tell me.",
+    "expects_tools": [
+      "gather_evidence",
+      "find_notes",
+      "find_knowledge_gaps",
+      "expand_note"
+    ],
+    "forbids_claims": [
+      "an FTE, headcount or capacity figure",
+      "a quarter timeline or delivery date",
+      "a project or programme roll-up",
+      "a step exists that is not in a cited note"
+    ],
+    "direction": "Makes the judgment call it genuinely can make — per transformation actually present in the record, DoE/BO versus one-experiment-at-a-time — and names the criterion it applied: a single scalar objective over a few bounded continuous or categorical variables, with enough runs on file to fit a surrogate, versus a short qualitative or mechanistic series where the next move is a diagnostic. It cites the notes behind each call. It must also be explicit about the boundary: this is a read over the transformations it can see in the knowledge graph, not over a project portfolio — there is no project, capacity, staffing or timeline data — so the \"next quarter\" framing cannot be honoured as stated."
+  },
+  "outcome": {
+    "probe_id": "op-08",
+    "section": 2,
+    "persona": "manager",
+    "bucket": "B",
+    "question": "For next quarter I want to know which of our steps are worth a formal DoE and which should just be walked one experiment at a time. Go through what we've got and tell me.",
+    "answer": "Here's what the record actually supports, step by step. I pulled every campaign, optimization-campaign, playbook, failure-mode and interaction note tied to a real transformation, and read each one rather than just the titles.\n\n## Our own worked steps (internal campaigns, human-authored, confidence 0.8–0.9)\n\n### Suzuki/biaryl coupling — **worth a formal DoE, not OFAT**\nThree things push this off the \"walk it one variable at a time\" path:\n- **[[opt-suzuki-conditions]]**: raising temperature raised *assay* yield (79% LCAP at 100 °C) while *lowering* isolated yield (68%) — protodeboronation competes with transmetalation. Opt",
+    "answered": true,
+    "tools_called": [
+      "list_attachments",
+      "find_knowledge_gaps",
+      "load_skill",
+      "find_notes",
+      "find_notes",
+      "expand_note",
+      "expand_note",
+      "expand_note",
+      "expand_note",
+      "expand_note",
+      "expand_note",
+      "expand_note",
+      "expand_note",
+      "expand_note",
+      "expand_note",
+      "expand_note",
+      "expand_note",
+      "expand_note",
+      "expand_note",
+      "expand_note",
+      "expand_note",
+      "expand_note",
+      "expand_note",
+      "expand_note",
+      "expand_note",
+      "expand_note",
+      "expand_note",
+      "find_past_jobs"
+    ],
+    "tools_failed": [],
+    "expected_tools_met": true,
+    "uncited_note_ids": [],
+    "failed_loudly": false,
+    "error_code": null,
+    "degraded": [],
+    "jobs_started": [],
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "latency_seconds": 118.62,
+    "event_counts": {
+      "tool_call": 28,
+      "tool_result": 28,
+      "token": 9,
+      "answer": 1
+    },
+    "transport_error": null
+  }
+}

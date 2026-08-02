@@ -1,0 +1,47 @@
+{
+  "probe": {
+    "id": "rp-22",
+    "section": 13,
+    "persona": "manager",
+    "bucket": "C",
+    "question": "Where are we on the submission package overall — what percentage is complete, and will we make the filing date?",
+    "expects_tools": [],
+    "forbids_claims": [
+      "a completion percentage or fraction",
+      "a filing date, milestone date, or an assessment of whether a date will be met",
+      "a count or status list of package sections or deliverables",
+      "a claim that a project, programme or document-package entity exists"
+    ],
+    "direction": "Bucket C, and firmly so: there is no project entity, no programme, no timeline, no deliverable tracking and no document package anywhere in the system — it holds chemistry knowledge notes, calculations and jobs. Any percentage or date would be invented outright. The right answer says that in a couple of sentences, states what it genuinely can tell a manager (which chemistry evidence exists and where the record is thin), and sends the schedule question to the project management system. Offering find_knowledge_gaps as the nearest useful thing is a plus, not a requirement."
+  },
+  "outcome": {
+    "probe_id": "rp-22",
+    "section": 13,
+    "persona": "manager",
+    "bucket": "C",
+    "question": "Where are we on the submission package overall — what percentage is complete, and will we make the filing date?",
+    "answer": "I don't have a submission package or filing timeline in view right now. Let me search for what's on record to give you the actual status.The search came back empty — there is no submission package status, filing timeline, or progress-tracking note in the current knowledge graph. I cannot see where the submission stands, what sections are complete, or whether the filing date is at risk.\n\nBefore I can answer this, I need:\n\n1. **What is the submission package for?** (A specific product, regulatory pathway, filing type — IND, BLA, NDA, etc.)\n2. **What is the target filing date?**\n3. **What sections or components make up the package?** (Chemistry/manufacturing, nonclinical, clinical data, etc.)\n\nIf you have a document or a note with the current status, please share it or point me to where it lives. Alternatively, if there's a project name or submission id I should search for, let me know that and I can look for what's on file.",
+    "answered": true,
+    "tools_called": [
+      "gather_evidence",
+      "find_notes"
+    ],
+    "tools_failed": [],
+    "expected_tools_met": null,
+    "uncited_note_ids": [],
+    "failed_loudly": false,
+    "error_code": null,
+    "degraded": [],
+    "jobs_started": [],
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "latency_seconds": 6.62,
+    "event_counts": {
+      "token": 17,
+      "tool_call": 2,
+      "tool_result": 2,
+      "answer": 1
+    },
+    "transport_error": null
+  }
+}

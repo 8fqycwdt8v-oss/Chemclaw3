@@ -1,9 +1,14 @@
 ---
 name: experiment-design
 description: >-
-  Judgment for answering "which experiment should I run next?" — turning a vague optimization
-  goal and scattered historic runs into a concrete Bayesian-optimization problem, calling
-  suggest_next_experiment, and presenting the proposal as something a human still runs.
+  Use when the chemist has supplied, or the record holds, two or more runs that vary the same
+  numeric or categorical factors and report a numeric outcome (yield, purity, conversion, ee) —
+  a screen, an optimization series, a factor table. Turns that into a concrete
+  Bayesian-optimization problem, calls suggest_next_experiment or generate_screening_design, and
+  presents the proposal as something a human still runs. Also for explaining why the optimizer
+  chose a point (explore vs exploit) and for judging whether a campaign has plateaued. Applies
+  however the ask is phrased, including "what should I run next/tomorrow" — a clean table of runs
+  is the trigger, not the wording.
 tools:
   - suggest_next_experiment
   - generate_screening_design

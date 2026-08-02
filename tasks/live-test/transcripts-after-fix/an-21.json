@@ -1,0 +1,68 @@
+{
+  "probe": {
+    "id": "an-21",
+    "section": 8,
+    "persona": "lab_leader",
+    "bucket": "B",
+    "question": "Design the forced-degradation study for COc1ccc(-c2ccccc2C(=O)O)cc1. I want the conditions tailored to what this molecule can actually do, not the generic matrix.",
+    "expects_tools": [
+      "predict_site_reactivity",
+      "compute_electronic_properties",
+      "predict_pka",
+      "find_notes",
+      "gather_evidence"
+    ],
+    "forbids_claims": [
+      "a target percent degradation, a time point or a temperature presented as derived from calculation",
+      "claiming the conditions are ICH-compliant or validated",
+      "a shelf-life, storage-condition or 'this compound is stable' statement",
+      "an invented prior forced-degradation result for this compound"
+    ],
+    "direction": "Uses the structure: ranks the electron-rich/oxidisable sites, identifies the hydrolysable groups by functional-group inspection (the aryl methyl ether and the acid are the handles here, and a molecule with no ester or amide is worth saying so about), and maps each liability onto the condition that provokes it. Is explicit that photolysis and thermal degradation are largely outside what these tools describe. States the calculation is a prior for study design — where to look — and never a prediction of what will be found or of stability. Retrieves precedent for the compound class first."
+  },
+  "outcome": {
+    "probe_id": "an-21",
+    "section": 8,
+    "persona": "lab_leader",
+    "bucket": "B",
+    "question": "Design the forced-degradation study for COc1ccc(-c2ccccc2C(=O)O)cc1. I want the conditions tailored to what this molecule can actually do, not the generic matrix.",
+    "answer": "I'll design a tailored forced-degradation study for this methoxybiphenyl carboxylic acid. First, let me load the skill that guides degradation liability analysis, then gather any precedent from the record.Now let me compute the site reactivity and electronic properties for your specific compound to identify the actual liabilities:",
+    "answered": true,
+    "tools_called": [
+      "load_skill",
+      "gather_evidence",
+      "run_skill_script"
+    ],
+    "tool_results": [
+      {
+        "tool": "load_skill",
+        "preview": "---\nname: degradation-liabilities\ndescription: >-\n  Judgment for \"where will this molecule fall apart?\" — identifying likely oxidation and\n  hydrolysis sites, turning them into a forced-degradation st"
+      },
+      {
+        "tool": "gather_evidence",
+        "preview": "[{\"content\": \"<retrieved-note id=\\\"compound-salicylic-acid\\\">\\n2-hydroxybenzoic acid. The phenol that is acetylated to give aspirin, and a hydrolysis product of\\nit \\u2014 which is why an aspirin assa"
+      }
+    ],
+    "tools_failed": [],
+    "expected_tools_met": true,
+    "uncited_note_ids": [],
+    "failed_loudly": true,
+    "error_code": null,
+    "degraded": [
+      ""
+    ],
+    "jobs_started": [],
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "latency_seconds": 7.85,
+    "event_counts": {
+      "capability_degraded": 1,
+      "token": 7,
+      "tool_call": 3,
+      "tool_result": 2,
+      "approval_request": 1,
+      "answer": 1
+    },
+    "transport_error": null
+  }
+}

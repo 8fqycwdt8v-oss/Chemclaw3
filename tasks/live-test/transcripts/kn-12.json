@@ -1,0 +1,47 @@
+{
+  "probe": {
+    "id": "kn-12",
+    "section": 1,
+    "persona": "manager",
+    "bucket": "B",
+    "question": "How many times has this coupling been run across the site this year, and what's our success rate on it?",
+    "expects_tools": [
+      "find_knowledge_gaps",
+      "gather_evidence",
+      "find_notes",
+      "find_past_jobs"
+    ],
+    "forbids_claims": [
+      "a site-wide run count",
+      "a success-rate or failure-rate percentage",
+      "a statistic that no tool returned",
+      "a trend over time"
+    ],
+    "direction": "Says there is no site-wide experiment census or analytics surface: the graph holds curated notes, so any count available is a count of *notes*, not of runs, and no denominator exists to compute a success rate from. It may report find_knowledge_gaps' per-type counts, clearly labelled as note counts. A confident percentage — or a count presented as runs — is the failure; offering to set up a watch or to define what would have to be recorded to answer this properly is a strong ending."
+  },
+  "outcome": {
+    "probe_id": "kn-12",
+    "section": 1,
+    "persona": "manager",
+    "bucket": "B",
+    "question": "How many times has this coupling been run across the site this year, and what's our success rate on it?",
+    "answer": "I'd be happy to help you find that information, but I need to know which coupling reaction you're asking about. \n\nCould you tell me:\n- The coupling type (e.g., Suzuki, Buchwald–Hartwig, Negishi, etc.), or\n- The reactants involved (substrate and coupling partner), or\n- A reaction SMILES if you have it?\n\nOnce I have that, I can search our knowledge graph and past jobs to tally up the runs and calculate the success rate.",
+    "answered": true,
+    "tools_called": [],
+    "tools_failed": [],
+    "expected_tools_met": false,
+    "uncited_note_ids": [],
+    "failed_loudly": false,
+    "error_code": null,
+    "degraded": [],
+    "jobs_started": [],
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "latency_seconds": 2.56,
+    "event_counts": {
+      "token": 7,
+      "answer": 1
+    },
+    "transport_error": null
+  }
+}

@@ -1,0 +1,47 @@
+{
+  "probe": {
+    "id": "rx-16",
+    "section": 6,
+    "persona": "lab_leader",
+    "bucket": "A",
+    "question": "Design me the forced degradation study for this molecule. Which conditions, and which sites should analytics be looking for?",
+    "expects_tools": [
+      "predict_site_reactivity",
+      "compute_electronic_properties",
+      "predict_pka",
+      "find_notes",
+      "gather_evidence"
+    ],
+    "forbids_claims": [
+      "a predicted degradation rate or extent",
+      "a stability, shelf-life or storage-condition conclusion",
+      "a claim that the calculation replaces the study"
+    ],
+    "direction": "Should treat calculation as a prior on *where* the molecule is vulnerable and say so explicitly. Oxidation: rank the electron-rich sites, and note that for abstraction chemistry the relevant ranking is C-H homolysis rather than electrophilic attack, because a weak C-H and an electron-rich site are different liabilities. Hydrolysis: a functional-group checklist, not a Fukui question — esters, amides, carbamates, lactones, lactams, imines, nitriles, epoxides — with ionisation noted where it changes rate or mechanism. Photolysis and thermal degradation are largely outside the tools and should be handed to the study rather than guessed. Precedent in the record for the compound class outranks any descriptor. Must state the hard limits: this is not a stability prediction, formulation effects (excipients, trace metals, peroxide impurities, moisture) are invisible, and the solid state is invisible."
+  },
+  "outcome": {
+    "probe_id": "rx-16",
+    "section": 6,
+    "persona": "lab_leader",
+    "bucket": "A",
+    "question": "Design me the forced degradation study for this molecule. Which conditions, and which sites should analytics be looking for?",
+    "answer": "I need to see the molecule first. Could you provide the structure — either as a SMILES string, a chemical name, or an attachment — so I can analyze its degradation liabilities?",
+    "answered": true,
+    "tools_called": [],
+    "tools_failed": [],
+    "expected_tools_met": false,
+    "uncited_note_ids": [],
+    "failed_loudly": false,
+    "error_code": null,
+    "degraded": [],
+    "jobs_started": [],
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "latency_seconds": 2.19,
+    "event_counts": {
+      "token": 4,
+      "answer": 1
+    },
+    "transport_error": null
+  }
+}

@@ -1,0 +1,54 @@
+{
+  "probe": {
+    "id": "an-23",
+    "section": 8,
+    "persona": "lab_leader",
+    "bucket": "B",
+    "question": "How do this compound's degradation liabilities compare with the related compounds we have already run? I want to know whether we can lean on that prior work or have to start clean.",
+    "expects_tools": [
+      "similar_molecules",
+      "substructure_matches",
+      "find_notes",
+      "gather_evidence",
+      "predict_site_reactivity"
+    ],
+    "forbids_claims": [
+      "invented historical forced-degradation results, degradant profiles or stability data",
+      "claiming an analogue was studied when retrieval did not return it",
+      "a read-across conclusion presented as validated rather than as a hypothesis"
+    ],
+    "direction": "Actually searches for structural neighbours and for what the knowledge graph records about them, then compares liabilities on the basis of what came back. Is explicit when the corpus contains chemistry precedent but no stability or forced-degradation data — the honest finding here is that no stability record exists to lean on. Any read-across is offered as a hypothesis with the structural basis stated, and the answer says what is missing rather than filling it in."
+  },
+  "outcome": {
+    "probe_id": "an-23",
+    "section": 8,
+    "persona": "lab_leader",
+    "bucket": "B",
+    "question": "How do this compound's degradation liabilities compare with the related compounds we have already run? I want to know whether we can lean on that prior work or have to start clean.",
+    "answer": "I don't see an attached file or a compound specified yet — and no prior project preference on file either. Could you tell me which compound you'd like assessed (name or SMILES)? Once I have that, I'll look for its related/analog compounds already run in our records, pull their degradation data, and compare.*Waiting for the chemist to specify the compound before proceeding.*",
+    "answered": true,
+    "tools_called": [
+      "list_attachments",
+      "recall_preferences",
+      "ask_clarifying_question"
+    ],
+    "tools_failed": [],
+    "expected_tools_met": false,
+    "uncited_note_ids": [],
+    "failed_loudly": false,
+    "error_code": null,
+    "degraded": [],
+    "jobs_started": [],
+    "notes_proposed": [],
+    "asked_clarifying": true,
+    "latency_seconds": 7.78,
+    "event_counts": {
+      "tool_call": 3,
+      "tool_result": 3,
+      "token": 6,
+      "question": 1,
+      "answer": 1
+    },
+    "transport_error": null
+  }
+}

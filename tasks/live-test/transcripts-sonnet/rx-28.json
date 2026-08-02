@@ -1,0 +1,46 @@
+{
+  "probe": {
+    "id": "rx-28",
+    "section": 11,
+    "persona": "lab_leader",
+    "bucket": "A",
+    "question": "What does this coupling look like on green metrics at 2 kg, and where is the solvent burden coming from?",
+    "expects_tools": [
+      "green_metrics",
+      "stoichiometry_table",
+      "gather_evidence",
+      "screen_hazards",
+      "find_notes"
+    ],
+    "forbids_claims": [
+      "an ICH Q3C class or residual-solvent limit quoted as looked up",
+      "a solvent recovery percentage or recycle rate",
+      "a cost, carbon-footprint or waste-disposal figure"
+    ],
+    "direction": "Should compute the metrics rather than describe them — PMI, E-factor, atom economy over the actual charge — and then read them, which mostly means pointing out that solvent dominates PMI and that at ten volumes the process mass is nearly all THF and water. The judgement layer is the solvent one: the thermodynamic view of a solvent is one input and rarely the deciding one, and the criteria that usually bind first are safety, regulatory class, solubility of substrates, product, base and salts, and everything downstream — crystallisation behaviour, phase separation, distillation and recovery. There is no residual-solvent table in this system, so solvent classes may be discussed from knowledge but must not be presented as looked up. Concrete reduction levers (volumes, aqueous fraction, catalyst loading, telescoping) are a good ending; invented recovery percentages are not."
+  },
+  "outcome": {
+    "probe_id": "rx-28",
+    "section": 11,
+    "persona": "lab_leader",
+    "bucket": "A",
+    "question": "What does this coupling look like on green metrics at 2 kg, and where is the solvent burden coming from?",
+    "answer": "",
+    "answered": false,
+    "tools_called": [],
+    "tools_failed": [],
+    "expected_tools_met": false,
+    "uncited_note_ids": [],
+    "failed_loudly": true,
+    "error_code": "internal",
+    "degraded": [],
+    "jobs_started": [],
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "latency_seconds": 2.51,
+    "event_counts": {
+      "error": 1
+    },
+    "transport_error": null
+  }
+}

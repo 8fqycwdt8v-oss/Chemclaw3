@@ -1,0 +1,50 @@
+{
+  "probe": {
+    "id": "kn-09",
+    "section": 1,
+    "persona": "lab_technician",
+    "bucket": "A",
+    "question": "Here's my reaction — COc1ccc(Br)cc1.OB(O)c1ccccc1>>COc1ccc(cc1)-c1ccccc1 — is there anything close to it in the HTE data we have indexed?",
+    "expects_tools": [
+      "similar_reactions",
+      "gather_evidence"
+    ],
+    "forbids_claims": [
+      "a reaction id the search did not return",
+      "a similarity score the tool did not return",
+      "a literature citation",
+      "conditions attributed to a hit that the hit does not carry"
+    ],
+    "direction": "Runs the reaction-fingerprint search and reports what came back, with the returned similarity values and which dataset family the hits belong to (Doyle Buchwald–Hartwig amination, Perera Suzuki–Miyaura flow, Santanilla amidation/sulfonamidation, Nielsen deoxyfluorination). If the nearest neighbours are a different transformation, it must say so plainly instead of dressing them up as precedent for this coupling."
+  },
+  "outcome": {
+    "probe_id": "kn-09",
+    "section": 1,
+    "persona": "lab_technician",
+    "bucket": "A",
+    "question": "Here's my reaction — COc1ccc(Br)cc1.OB(O)c1ccccc1>>COc1ccc(cc1)-c1ccccc1 — is there anything close to it in the HTE data we have indexed?",
+    "answer": "Yes — there's good precedent, both in the structural fingerprint index and in the knowledge graph itself.\n\n**Closest structural hits (Tanimoto 0.82, same product/substrates, K₂CO₃ base, P(t-Bu)Ph₂-type ligand):**\n\n| Note | Yield | Purity | Temp | Time | Source |\n|---|---|---|---|---|---|\n| `reaction-ord-suzuki-biphenyl-1` | 90.0% | 98.2% | 82 °C | – | ord:M. Chen |\n| `reaction-ord-suzuki-biphenyl-2` | 92.0% | 97.9% | 82 °C | – | ord:S. Patel |\n| `reaction-uspto-suzuki-biphenyl-1` | 89.5% | 98.2% | 82 °C | 4 h | eln-json (J. Alvarez) |\n| `reaction-uspto-suzuki-biphenyl-2` | 92.5% | 97.8% | 82 °C | 4 h | eln-json (M. Chen) |\n\nAll four are the same transformation (4‑bromoanisole + phenylboronic acid → 4‑methoxybiphenyl) with K₂CO₃ base and a phosphine-ligated Pd catalyst at 82 °C, all giving high yield (~90%) and clean purity (~98%). These are `created_by: agent`-ingested ELN records (from ORD/USPTO extraction), not yet a distilled playbook, but the raw data is consistent across four independent runs.\n\n**Established knowledge-graph precedent for this exact pair:**\n- `rxn-suzuki-biaryl` — the canonical entry for this coupling (Pd(OAc)₂, ~1.5 mol% Pd).\n- `opt-suzuki-conditions` — an optimization series on it: best found 76% isolated at 80 °C/K₂CO₃/1.5 mol% Pd; 100 °C gave 79% by LCAP but only 68% isolated (a conversion/isolated-yield gap worth noting against the HTE hits above, which report much higher isolated yields at 82 °C).\n- `campaign-biaryl-scope` — six couplings mapping aryl-halide scope; finds electron-rich bromides couple fine at 80 °C/12 h.\n- `playbook-pd-cross-coupling-scope` (human-authored, confidence 0.8): when this system stalls, change ligand before temperature — oxidative addition into the electron-rich ring is the slow step.\n- `playbook-degassing`: Pd(0) degassing is load-bearing — poor degassing gives a bimodal yield distribution, which could explain some of the run-to-run yield spread above.\n- **Caution flag**: `failure-aqueous-protodeboronation` (human, confidence 0.8) — running this same coupling at 100 °C in THF/water raises LCAP conversion but *lowers* isolated yield, because PhB(OH)₂ protodeboronates faster than it transmetalates. This directly **contradicts** `bo-suzuki-next`, an agent-generated BO proposal suggesting Cs₂CO₃/2‑MeTHF-water 4:1 at 75 °C (predicted 79% ± 6%) — the graph itself flags this conflict, so I'd weight the human-authored failure note over the unconfirmed BO suggestion if you're near that regime.\n\n**Bottom line:** the HTE-indexed runs (82 °C, K₂CO₃, phosphine/Pd) are your best-yielding precedent (~90–93% isolated, ~98% purity), notably better than the internally-optimized campaign's 76–79%. Worth noting the isolated-vs-LCAP gap seen in `opt-suzuki-conditions` didn't show up in these four HTE entries — if you want, I can pull the full step-by-step procedure from any of the four `reaction-*` notes, or check what ligand these four actually used (the SMILES shows `CC(C)(C)P(c1ccccc1)c1ccccc1`, i.e., tert-butyldiphenylphosphine) against `playbook-pd-cross-coupling-scope`'s ligand guidance.",
+    "answered": true,
+    "tools_called": [
+      "similar_reactions",
+      "gather_evidence"
+    ],
+    "tools_failed": [],
+    "expected_tools_met": true,
+    "uncited_note_ids": [],
+    "failed_loudly": false,
+    "error_code": null,
+    "degraded": [],
+    "jobs_started": [],
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "latency_seconds": 19.99,
+    "event_counts": {
+      "tool_call": 2,
+      "tool_result": 2,
+      "token": 40,
+      "answer": 1
+    },
+    "transport_error": null
+  }
+}

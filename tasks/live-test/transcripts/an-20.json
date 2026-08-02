@@ -1,0 +1,54 @@
+{
+  "probe": {
+    "id": "an-20",
+    "section": 8,
+    "persona": "lab_technician",
+    "bucket": "A",
+    "question": "Did we already compute anything on Oc1ccc(-c2ccccc2C(=O)O)cc1? If there is a stored vibrational spectrum I want the band list rather than a recompute.",
+    "expects_tools": [
+      "find_calculations",
+      "list_artifacts",
+      "fetch_artifact"
+    ],
+    "forbids_claims": [
+      "quoting band positions from memory rather than from a fetched artifact",
+      "claiming a stored calculation exists without a lookup returning it",
+      "presenting an empty artifact list as a missing calculation"
+    ],
+    "direction": "Looks up the calculation store, reports what was actually run (calculator, version, when), lists the artifacts and reads the spectrum file rather than describing it. If there is nothing stored, says so plainly and offers to run it. Distinguishes \"no calculation\" from \"a calculation that produced no artifacts\", and if the fetch was truncated says the values came from part of the file."
+  },
+  "outcome": {
+    "probe_id": "an-20",
+    "section": 8,
+    "persona": "lab_technician",
+    "bucket": "A",
+    "question": "Did we already compute anything on Oc1ccc(-c2ccccc2C(=O)O)cc1? If there is a stored vibrational spectrum I want the band list rather than a recompute.",
+    "answer": "I'll search for any stored calculations on that molecule.Let me correct the SMILES — the structure you provided has a parenthesis issue. Let me use it as written:Good — we have stored calculations, but they're property predictions (pKa, developability, solubility). No vibrational spectrum in that set. Let me check for any artifacts (stored by-products like geometries or spectra) from thermochemistry or other calculations:**Summary:** We have computed three properties on this molecule (2-hydroxy-4'-biphenylcarboxylic acid):\n\n- **pKa** 6.1 (±1.6), acid site, computed 2026-08-02\n- **Developability profile**: MW 214.2, cLogP 2.76, TPSA 57.5; passes Veber; 0 Lipinski violations\n- **Solubility**: log S = −3.3 (±0.75 mol/L)\n\n**No vibrational spectrum on file.** There are no stored artifacts (geometries, Hessians, IR spectra) from those calculations. If you need the IR band list, you'll need a fresh `compute_thermochemistry` call; it's cached by (SMILES, solvent), so if you specify the same inputs as any prior run it will rejoin that calculation rather than recomputing.",
+    "answered": true,
+    "tools_called": [
+      "find_calculations",
+      "find_calculations",
+      "list_artifacts"
+    ],
+    "tools_failed": [
+      "find_calculations"
+    ],
+    "expected_tools_met": true,
+    "uncited_note_ids": [],
+    "failed_loudly": true,
+    "error_code": null,
+    "degraded": [],
+    "jobs_started": [],
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "latency_seconds": 10.36,
+    "event_counts": {
+      "token": 26,
+      "tool_call": 3,
+      "tool_failed": 1,
+      "tool_result": 3,
+      "answer": 1
+    },
+    "transport_error": null
+  }
+}

@@ -1,0 +1,50 @@
+{
+  "probe": {
+    "id": "an-09",
+    "section": 8,
+    "persona": "lab_technician",
+    "bucket": "A",
+    "question": "What is the ionisation state of Nc1ccc(O)cc1C(=O)O across pH 2 to 8? I need to know which species I am actually injecting.",
+    "expects_tools": [
+      "predict_pka",
+      "predict_logd"
+    ],
+    "forbids_claims": [
+      "reporting one pKa as 'the pKa of the compound' when the molecule has more than one site",
+      "constructing a modified structure to get at the basic site and reporting the result as this compound's",
+      "a speciation percentage presented as accurate to better than the model's stated uncertainty"
+    ],
+    "direction": "Recognises this is amphoteric: the tool returns the acid site (the phenol or carboxylic acid) and silently skips the basic aniline nitrogen. Says which site the returned value belongs to, that the other site was not evaluated, and that the compound may be zwitterionic — for which the neutral-form model is the wrong physical picture. Gives the qualitative speciation picture across the range, flags that the exact crossover pH needs measurement, and does not edit the structure to force a second number."
+  },
+  "outcome": {
+    "probe_id": "an-09",
+    "section": 8,
+    "persona": "lab_technician",
+    "bucket": "A",
+    "question": "What is the ionisation state of Nc1ccc(O)cc1C(=O)O across pH 2 to 8? I need to know which species I am actually injecting.",
+    "answer": "I'll help you understand the ionization state of this molecule across pH 2–8. First, let me resolve the structure and then predict its ionization behavior.Excellent. This is **2-aminosalicylic acid** (2-AAS): an **amino-hydroxy-benzoic acid** with three ionizable groups. The prediction shows only one pKa was returned — let me now interpret what this means for your injection conditions.\n\n## The problem: this molecule is **polyprotic** \n\nYour molecule has three ionizable sites:\n1. **Carboxylic acid** (–COOH): pKa ≈ 2–3 (typical)\n2. **Phenolic OH** (Ar–OH): pKa ≈ 10–11 (typical for phenols)\n3. **Aromatic amine** (Ar–NH₂): pKaH ≈ 4–6 (conjugate acid of the base)\n\nThe tool returned **pKa 8.03 ± 1.6** for the \"acid\" site, but this is **anomalous for this structure**. The carboxylic acid should be far more acidic (~2.5), and the phenol should be around 10. Let me load the ionization skill to interpret this honestly.Now I can see the problem clearly. This molecule has **three ionizable groups, not one**, and the tool returned only the carboxylic acid pKa. Let me be precise about what you're actually dealing with:\n\n## Ionization state of 2-aminosalicylic acid (Nc1ccc(O)cc1C(=O)O) across pH 2–8\n\nThis is an **aminophenol carboxylic acid** — three ionizable sites:\n\n| Site | pKa (estimated) | Nature |\n|------|-----------------|---------|\n| **Carboxylic acid** | ~2.5 | Strong acid (C(=O)OH) |\n| **Aromatic amine** (conjugate acid) | ~4.5–5.0 | Aromatic nitrogen; moderate base |\n| **Phenolic OH** | ~10.5 | Weak acid (Ar–OH) |\n\n**What the tool returned:** pKa **8.03 ± 1.6** for an \"acid\" site. This value **does not match the expected carboxylic acid pKa** (~2.5) or the phenol (~10.5), and it is anomalous for this structure. The prediction may be unreliable here because 2-aminosalicylic acid is **amphoteric** — it has both ionizable acidic (–COOH, –OH) and basic (–NH₂) groups. The tool prioritizes the acid site when both are present and does not evaluate the amine.\n\n## Your species across the pH range:\n\n**pH 2:**\n- Carboxylic acid: **fully deprotonated** (pKa ~2.5) → **–COO⁻** \n- Amine: **fully protonated** → **–NH₃⁺**\n- Phenol: **protonated** → **–OH**\n- **Net charge: +1** (zwitterion with +NH₃⁺ and –COO⁻)\n\n**pH 4:**\n- Carboxylic acid: **fully deprotonated** → **–COO⁻**\n- Amine: **~50% protonated** (if pKa ~4.5) → mixture of **–NH₃⁺** and **–NH₂**\n- Phenol: **protonated** → **–OH**\n- **Net charge: 0 to +1** (approaching neutral)\n\n**pH 6:**\n- Carboxylic acid: **fully deprotonated** → **–COO⁻**\n- Amine: **mostly deprotonated** → **–NH₂**\n- Phenol: **protonated** → **–OH**\n- **Net charge: –1** (overall anionic)\n\n**pH 8:**\n- Carboxylic acid: **fully deprotonated** → **–COO⁻**\n- Amine: **fully deprotonated** → **–NH₂**\n- Phenol: **protonated** → **–OH** (still ~99% protonated; pKa ~10.5)\n- **Net charge: –1** (anionic)\n\n## For your injection:\n\n**The species you inject depends entirely on your buffer pH:**\n\n- **pH 2–3**: Zwitterionic or cationic (–NH₃⁺/–COO⁻); mobile anionic carboxylate\n- **pH 4–5**: **Neutral form favoured** (–NH₃⁺/–COO⁻ zwitterion); optimal solubility may lie here\n- **pH 6+**: Anionic (–NH₂/–COO⁻); single negatively charged species\n\n**What you need to measure:** The **actual pKa values** of the carboxylic acid and amine in your intended solvent/buffer system. The GFN2-xTB prediction here is unreliable for setting a pH specification. Look up literature values for 2-aminosalicylic acid (this is a known compound; values exist), or measure them yourself via potentiometric titration if this is a synthesis or a novel analogue.\n\nWhich pH are you working at for your injection? That will determine which species you're actually delivering.",
+    "answered": true,
+    "tools_called": [
+      "predict_pka",
+      "render_structure",
+      "load_skill"
+    ],
+    "tools_failed": [],
+    "expected_tools_met": true,
+    "uncited_note_ids": [],
+    "failed_loudly": false,
+    "error_code": null,
+    "degraded": [],
+    "jobs_started": [],
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "latency_seconds": 20.5,
+    "event_counts": {
+      "token": 63,
+      "tool_call": 3,
+      "tool_result": 3,
+      "answer": 1
+    },
+    "transport_error": null
+  }
+}

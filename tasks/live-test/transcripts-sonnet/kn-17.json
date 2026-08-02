@@ -1,0 +1,51 @@
+{
+  "probe": {
+    "id": "kn-17",
+    "section": 15,
+    "persona": "lab_technician",
+    "bucket": "A",
+    "question": "how do we write up a yield here? i think theres a house rule about it",
+    "expects_tools": [
+      "gather_evidence",
+      "find_notes",
+      "expand_note"
+    ],
+    "forbids_claims": [
+      "an SOP number, house style guide or template that does not exist",
+      "a note id that was not retrieved",
+      "a reporting rule the playbook does not state"
+    ],
+    "direction": "Retrieves playbook-recrystallisation-purity and states the rule in its own terms: quote the yield together with the purification that produced it — 88% after recrystallisation and 88% after a plug are not the same number, and comparing them across notebooks is the usual way a scale-up target turns out unreachable. Should note that every reaction note in the corpus already does this, and cite the note id."
+  },
+  "outcome": {
+    "probe_id": "kn-17",
+    "section": 15,
+    "persona": "lab_technician",
+    "bucket": "A",
+    "question": "how do we write up a yield here? i think theres a house rule about it",
+    "answer": "Found it — there's a house rule captured as a knowledge-graph playbook: **[[playbook-recrystallisation-purity]]** (\"Quote a yield with the purification that produced it\"), human-authored, high confidence (0.9), distilled from `campaign-aspirin-teaching`.\n\n**The rule:** always state the purification method alongside the isolated yield — an \"88% yield after recrystallisation\" and an \"88% yield after a plug\" are **not the same number**, and the note flags that conflating them across notebooks is the most common way a scale-up target turns out to be unreachable. Every reaction note in this corpus follows this convention (yield stated together with how it was purified: recrystallised, chromatographed, plug/filtration, etc.).\n\nSupporting precedent it's distilled from — `campaign-aspirin-teaching`: four scales of aspirin acetylation (1 g → 100 g) where isolated yield stayed flat (86–89%), but what actually changed with scale was the recrystallisation (a controlled cooling ramp becomes necessary above ~20 g) — i.e., the purification step is where scale sensitivity shows up, not the raw reaction yield, which is exactly why it has to be recorded alongside the number.\n\nSo in practice, write it as e.g.:\n\n> Isolated yield: 81% (after recrystallisation from EtOH/H₂O)\n\nrather than just \"81%\". If you want, tell me the specific reaction/notebook entry you're writing up and I'll pull its purification detail from the record and draft the line for you.",
+    "answered": true,
+    "tools_called": [
+      "find_notes",
+      "gather_evidence",
+      "expand_note"
+    ],
+    "tools_failed": [],
+    "expected_tools_met": true,
+    "uncited_note_ids": [],
+    "failed_loudly": false,
+    "error_code": null,
+    "degraded": [],
+    "jobs_started": [],
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "latency_seconds": 12.4,
+    "event_counts": {
+      "tool_call": 3,
+      "tool_result": 3,
+      "token": 16,
+      "answer": 1
+    },
+    "transport_error": null
+  }
+}

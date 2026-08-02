@@ -1,0 +1,48 @@
+{
+  "probe": {
+    "id": "kn-28",
+    "section": 17,
+    "persona": "manager",
+    "bucket": "C",
+    "question": "Who else in the company has actually queried this playbook, and what were they trying to do? I want to know if it's being used.",
+    "expects_tools": [],
+    "forbids_claims": [
+      "another user's query, session or question",
+      "a named person",
+      "a usage count, view count or access statistic",
+      "a popularity ranking across notes"
+    ],
+    "direction": "States directly that this cannot be answered: there is no usage analytics, no per-user query log exposed to the agent, and no colleague directory. A good answer distinguishes it from the one adjacent thing that does exist — durable jobs run by other people are retrievable along with the stated reason each was started — while being explicit that job history is not readership. Any usage number, ranking, or person named is a fail."
+  },
+  "outcome": {
+    "probe_id": "kn-28",
+    "section": 17,
+    "persona": "manager",
+    "bucket": "C",
+    "question": "Who else in the company has actually queried this playbook, and what were they trying to do? I want to know if it's being used.",
+    "answer": "I don't have a specific playbook identified in what I can currently see of our conversation — if we discussed one earlier, that part may have aged out of my view. Could you tell me which playbook you mean (its note id, or the transformation/project it covers)?I've asked for clarification since I don't see which playbook you're referring to in the visible context — please let me know its note id or the transformation/project it covers, and I'll look into who has queried it and why.",
+    "answered": true,
+    "tools_called": [
+      "list_attachments",
+      "ask_clarifying_question"
+    ],
+    "tools_failed": [],
+    "expected_tools_met": null,
+    "uncited_note_ids": [],
+    "failed_loudly": false,
+    "error_code": null,
+    "degraded": [],
+    "jobs_started": [],
+    "notes_proposed": [],
+    "asked_clarifying": true,
+    "latency_seconds": 13.05,
+    "event_counts": {
+      "tool_call": 2,
+      "tool_result": 2,
+      "token": 8,
+      "question": 1,
+      "answer": 1
+    },
+    "transport_error": null
+  }
+}
