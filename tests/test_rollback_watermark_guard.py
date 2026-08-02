@@ -19,8 +19,8 @@ import pytest
 from agent_framework import AgentSession
 
 from chemclaw.api.events import AnswerEvent
-from chemclaw.api.metrics import METRICS
 from chemclaw.api.runner import run_turn
+from chemclaw.core.metrics import METRICS
 
 
 class _SilentAgent:

@@ -3,8 +3,9 @@
 **Responsibility:** the ASGI surface that runs the agent for a real caller — HTTP + SSE, behind
 OIDC. `create_app` (`app.py`) is the factory; `runner.py` owns the per-turn lifecycle (build or
 resolve the agent, open the MCP tool sessions, stream events, close them); `auth.py` is the single
-authorization gate; `events.py` the SSE envelope; `budget.py` and `metrics.py` the per-turn
-accounting.
+authorization gate; `events.py` the SSE envelope; `budget.py` the per-turn cost meter. The
+Prometheus registry the `/metrics` route renders is **not** here — it is `core/metrics.py`, because
+every process has something to count and only one of them is the front door.
 
 ## The boundary against `agent/`
 

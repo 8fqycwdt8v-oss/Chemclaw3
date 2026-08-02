@@ -22,8 +22,8 @@ from typing import Any
 import pytest
 
 import chemclaw.api.runner as runner
-from chemclaw.api.metrics import METRICS
 from chemclaw.connectors.registry import open_reachable
+from chemclaw.core.metrics import METRICS
 from tests.test_service import _client, _FakeAgent
 
 

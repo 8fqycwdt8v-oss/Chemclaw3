@@ -17,7 +17,7 @@ from agent_framework import AgentSession
 from fastapi.testclient import TestClient
 
 from chemclaw.api.app import LiveSession, _LiveSessions, create_app
-from chemclaw.api.metrics import METRICS
+from chemclaw.core.metrics import METRICS
 
 # A minimal ASGI HTTP scope, for the one test that drives the app below `TestClient` (which
 # cannot express "the handler was cancelled and nothing was ever sent").
@@ -221,7 +221,7 @@ def test_a_launched_job_reaches_the_browser_as_an_sse_event() -> None:
     The end-to-end half of D-042: without it the chemist saw nothing between their message and
     the answer, with the first sign of the job arriving only as the completion push-back.
     """
-    from chemclaw.agent.turn_signals import record_job_started
+    from chemclaw.core.turn_signals import record_job_started
 
     class _JobAgent(_FakeAgent):
         def run(  # noqa: D102 - a fake agent's run, documented by its class
@@ -247,7 +247,7 @@ def test_a_launched_job_reaches_the_browser_as_an_sse_event() -> None:
                     events.append(json.loads(line[len("data:") :].strip()))
 
     # Order is chronological: the fake announces the job *before* yielding its text, and the
-    # consolidated sink (agents.turn_signals) drains at the top of each update for exactly that
+    # consolidated sink (core.turn_signals) drains at the top of each update for exactly that
     # reason — a tool that ran while the model was producing an update ran before the text it then
     # produced. main's original assertion had token-first, which reported the text ahead of the job
     # that preceded it; the property this test names ("before the answer") holds either way.

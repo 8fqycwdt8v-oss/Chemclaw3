@@ -19,7 +19,18 @@ failure to
 what is ~80 lines of text formatting. The exposition format is a stable, trivially-generated text
 protocol, and this module is the only place that knows it.
 
-Metrics are process-wide (one registry per pod), because that is the scope a scrape targets.
+Metrics are process-wide (one registry per pod), because that is the scope a scrape targets — and
+that is why this is kernel material rather than front-door material. It imports only the standard
+library, *every* process has something to count (the front door, the background worker, each
+connector worker), and each of those reads it through `core/worker_http.py` or `core/logging.py`'s
+neighbours rather than through anything in `chemclaw.api`. It lived in `chemclaw.api` until the R2
+layering move, which is what forced `core/metrics_bridge.py` and `core/worker_http.py` to import it
+lazily; both are ordinary imports now.
+
+**This is not the eval layer's metrics, and there are three files in that family.**
+`evals/metric.py` is the `@metric` decorator and registry for scored eval criteria;
+`evals/metrics.py` holds the seed criteria themselves. This one counts turns, tokens, jobs and
+refusals for an operator, and shares nothing with them but a word.
 
 This module used to say histograms belonged in the OTel trace pipeline rather than here. That was
 wrong twice over: `api/app.py` never called `configure_telemetry`, so `CHEMCLAW_OTEL_ENABLED`

@@ -21,11 +21,11 @@ from pydantic import BaseModel, ConfigDict, Field
 from temporalio import activity
 
 from chemclaw.agent.audit import make_audit_middleware
-from chemclaw.agent.identity_context import reset_current_identity, set_current_identity
 from chemclaw.agent.tool_authz import enforce_tool_authz
 from chemclaw.connectors.jobs import prepare_job_launch
 from chemclaw.connectors.queues import bundle_queue
 from chemclaw.connectors.registry import find_job, open_reachable
+from chemclaw.core.identity_context import reset_current_identity, set_current_identity
 from chemclaw.durable.registry import durable_activity
 
 logger = logging.getLogger(__name__)

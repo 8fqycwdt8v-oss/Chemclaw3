@@ -190,7 +190,7 @@ class Settings(
                 "the budget tracker (api/budget.py, N× budget), the attachment store "
                 "(agent/attachments.py STORE, upload on worker A invisible to a turn on worker B), "
                 "the session LRU (api/app.py live-session, state/todos drift), and the metrics "
-                "registry (api/metrics.py, a scrape hits one worker, counters under-report ~1/N). "
+                "registry (core/metrics.py, a scrape hits one worker, counters under-report ~1/N). "
                 "Replicas plus Route affinity are the supported way to use more CPU (D-121)."
             )
         if self.service_fleet_max_concurrent_turns:

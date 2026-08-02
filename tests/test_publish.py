@@ -183,7 +183,7 @@ def test_a_lost_knowledge_note_is_counted(monkeypatch: pytest.MonkeyPatch) -> No
     `chemclaw_notes_proposed_total` counts only successes, so with no failure counter "the remote
     is down and every note was lost" and "nobody asked for a note" produce identical exposition.
     """
-    from chemclaw.api.metrics import METRICS
+    from chemclaw.core.metrics import METRICS
 
     monkeypatch.setattr(publish_module, "workflow", _fake_workflow(raises=True))
     before = METRICS.value("chemclaw_notes_publish_failures_total")
@@ -195,7 +195,7 @@ def test_a_lost_knowledge_note_is_counted(monkeypatch: pytest.MonkeyPatch) -> No
 
 def test_a_replayed_failure_is_not_counted_again(monkeypatch: pytest.MonkeyPatch) -> None:
     """Replay re-executes workflow code; counting there would inflate the metric on every replay."""
-    from chemclaw.api.metrics import METRICS
+    from chemclaw.core.metrics import METRICS
 
     monkeypatch.setattr(publish_module, "workflow", _fake_workflow(raises=True, replaying=True))
     before = METRICS.value("chemclaw_notes_publish_failures_total")
@@ -207,7 +207,7 @@ def test_a_replayed_failure_is_not_counted_again(monkeypatch: pytest.MonkeyPatch
 
 def test_a_successful_publish_counts_no_failure(monkeypatch: pytest.MonkeyPatch) -> None:
     """The guard is on the failure path only — a working remote must not move the counter."""
-    from chemclaw.api.metrics import METRICS
+    from chemclaw.core.metrics import METRICS
 
     monkeypatch.setattr(publish_module, "workflow", _fake_workflow(raises=False))
     before = METRICS.value("chemclaw_notes_publish_failures_total")

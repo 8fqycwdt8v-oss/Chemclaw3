@@ -14,14 +14,14 @@ Two gates, one home, so authorization is never scattered across tools and layers
   wired into each tool. Config: `tool_role_gates` (tool → allowed roles) + `tool_authz_default`,
   with the built-in `DEFAULT_WRITE_TOOL_GATES` closing the write tools out of the box.
 
-Both read the turn's ambient identity (`chemclaw.agent.identity_context`) and are active only when
+Both read the turn's ambient identity (`chemclaw.core.identity_context`) and are active only when
 `entra_required` (a real deployment with real Entra roles); in local dev they are open, so the app
 runs without a tenant. Both defer the same role-membership predicate to `_has_required_role`, so the
 two gates can never drift in how "does this user hold an allowed role?" is decided (DRY).
 """
 
-from chemclaw.agent.identity_context import get_current_actor, get_current_roles
 from chemclaw.core.config import settings
+from chemclaw.core.identity_context import get_current_actor, get_current_roles
 
 
 class AuthorizationError(Exception):

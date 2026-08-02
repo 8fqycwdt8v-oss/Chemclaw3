@@ -44,9 +44,9 @@ from pydantic import BaseModel, Field
 from pypdf import PdfReader
 
 from chemclaw.agent.framing import frame_untrusted
-from chemclaw.agent.session_context import get_current_session_id
-from chemclaw.agent.tool_registry import tool
 from chemclaw.core.config import settings
+from chemclaw.core.session_context import get_current_session_id
+from chemclaw.core.tool_registry import tool
 
 logger = logging.getLogger(__name__)
 

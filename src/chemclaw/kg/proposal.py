@@ -27,11 +27,11 @@ from typing import Protocol, runtime_checkable
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from chemclaw.agent.identity_context import get_current_actor, get_current_correlation_id
-from chemclaw.agent.session_context import get_current_session_id
 from chemclaw.core.config import settings
+from chemclaw.core.identity_context import get_current_actor, get_current_correlation_id
 from chemclaw.core.ids import stable_hash
 from chemclaw.core.metrics_bridge import record_metric
+from chemclaw.core.session_context import get_current_session_id
 
 logger = logging.getLogger(__name__)
 

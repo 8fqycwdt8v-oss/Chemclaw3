@@ -19,7 +19,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from chemclaw.api.app import create_app
-from chemclaw.api.metrics import (
+from chemclaw.core.metrics import (
     _COUNTER_LABELS,
     _MAX_SERIES_PER_COUNTER,
     CONTENT_TYPE,
@@ -192,7 +192,7 @@ def test_a_swallowed_audit_sink_failure_is_counted() -> None:
     The bridge imports the registry lazily and tolerates its absence, because the workers import
     `chemclaw.agent.audit` without ever building the front door.
     """
-    from chemclaw.api.metrics import METRICS
+    from chemclaw.core.metrics import METRICS
     from chemclaw.core.metrics_bridge import record_metric
 
     before = METRICS.value("chemclaw_audit_sink_failures_total")

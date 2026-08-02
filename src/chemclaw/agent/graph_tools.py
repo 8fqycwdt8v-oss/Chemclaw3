@@ -17,10 +17,10 @@ from pydantic import BaseModel, Field
 
 from chemclaw.agent.authz import require_actor
 from chemclaw.agent.framing import frame_untrusted
-from chemclaw.agent.tool_registry import tool
-from chemclaw.agent.turn_signals import record_proposal
 from chemclaw.core.config import settings
 from chemclaw.core.errors import ChemclawError
+from chemclaw.core.tool_registry import tool
+from chemclaw.core.turn_signals import record_proposal
 from chemclaw.ingest.eln.compound import compound_dependencies
 from chemclaw.kg.analytics import GraphGaps, analyze
 from chemclaw.kg.git_submitter import default_submitter
@@ -270,7 +270,7 @@ async def propose_knowledge_note(
     reference = await propose_note(
         note, default_submitter(), dependencies=compound_dependencies(note)
     )
-    # Surface the opened branch on the turn's stream (gap RCH-4) — see `agents.turn_signals`.
+    # Surface the opened branch on the turn's stream (gap RCH-4) — see `core.turn_signals`.
     record_proposal(note.id, reference)
     return reference
 

@@ -45,9 +45,9 @@ from mcp.server.fastmcp import FastMCP
 
 from chemclaw.agent.audit import AuditEvent
 from chemclaw.agent.chemclaw_agent import build_agent, connector_tools
-from chemclaw.agent.identity_context import reset_current_identity, set_current_identity
 from chemclaw.connectors.identity import HEADER_ACTOR
 from chemclaw.connectors.registry import discovered, open_reachable
+from chemclaw.core.identity_context import reset_current_identity, set_current_identity
 
 _BUNDLE = """\
 name: governed

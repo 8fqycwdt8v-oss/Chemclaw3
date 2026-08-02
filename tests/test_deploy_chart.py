@@ -863,7 +863,7 @@ def test_the_fleet_ceiling_has_a_runtime_check_config_validation_cannot_do() -> 
     # Self-disabling, or every deployment that declares no ceiling alerts forever.
     assert "max(chemclaw_fleet_turn_ceiling) > 0" in rules
 
-    from chemclaw.api.metrics import METRICS
+    from chemclaw.core.metrics import METRICS
 
     assert "chemclaw_fleet_turn_ceiling" in METRICS.render(), (
         "the alert compares against a gauge the app never exposes"
@@ -1097,7 +1097,7 @@ def test_every_alerted_metric_is_a_metric_the_app_declares() -> None:
     A PromQL expression naming a typo'd or deleted series is silently always-empty — the alert is
     green forever, which reads exactly like "the condition never occurred".
     """
-    from chemclaw.api.metrics import _COUNTERS, _GAUGES, _HISTOGRAMS
+    from chemclaw.core.metrics import _COUNTERS, _GAUGES, _HISTOGRAMS
 
     declared = {*_COUNTERS, *_GAUGES, *_HISTOGRAMS}
     rule = (CHART / "templates" / "prometheusrule.yaml").read_text()

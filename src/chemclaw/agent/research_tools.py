@@ -22,8 +22,8 @@ from itertools import zip_longest
 from typing import Any
 
 from chemclaw.agent.framing import frame_untrusted
-from chemclaw.agent.tool_registry import tool
 from chemclaw.core.config import settings
+from chemclaw.core.tool_registry import tool
 from chemclaw.ingest.sources.registry import active_retrieve_sources
 from chemclaw.retrieval.evidence import EvidenceChunk, SourceRetriever
 from chemclaw.retrieval.hybrid import reciprocal_rank_fusion

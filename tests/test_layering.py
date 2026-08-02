@@ -5,8 +5,9 @@ core modules, the retrieval modules, and the "siblings" a kernel module must not
 parametrized a subprocess check over their product. Those lists drifted from disk — `core` grew
 `tracing`, `metrics_bridge` and `worker_http` after the list was last updated — and drift in an
 *allow-list* is invisible: a module missing from the list is a module never checked, so the kernel
-rule silently stopped covering three files, one of which (`worker_http`) had actually broken it
-(`from chemclaw.api.metrics import ...` at module scope). This version AST-walks every `.py` file
+rule silently stopped covering three files, one of which (`worker_http`) had actually broken it —
+it imported the metrics registry from `chemclaw.api` at module scope, back when the registry lived
+there. This version AST-walks every `.py` file
 under `src/chemclaw` to build the real package→package import graph and checks *that* against a
 small, hand-authored policy of which package may depend on which — a policy is unavoidably
 declared (that is what a layering rule *is*), but the graph it is checked against no longer is.
@@ -14,29 +15,35 @@ declared (that is what a layering rule *is*), but the graph it is checked agains
 **Module scope vs. function scope, and why both are walked.** A static walk sees an import wherever
 it is written, so a `def foo(): from chemclaw.x import y` inside a function reads the same as one at
 the top of the file unless the walk distinguishes them. The codebase leans on that distinction
-deliberately: `core.logging` lazily imports `agent.identity_context` and `connectors.registry`
-*inside* two classes' `__init__`/`filter` methods specifically so `core.logging` — which every
-entrypoint imports first — does not depend on those layers *at import time*, while still being able
-to use them once the process has finished bootstrapping. A rule that only looked at module scope
-would bless that pattern implicitly and then bless an accidental module-scope sibling import
-identically, because both are "not in the module-scope list". So this file checks **both scopes**,
-against **two different policies**: module-scope edges must be in `_ALLOWED_MODULE_EDGES` (the
-package dependency graph the four-layer architecture actually has); function-scope edges may
-additionally use `_ALLOWED_LAZY_EDGES`, each entry a documented, deliberate exception. An import
-guarded by `if TYPE_CHECKING:` is excluded from both graphs — it is never executed and creates no
-runtime edge, so it carries no layering risk (it is what `core.metrics_bridge` uses to name
-`api.metrics.Metrics` in an annotation without importing it at runtime).
+deliberately: `core.logging` lazily imports `connectors.registry` *inside* a filter's `__init__`
+specifically so `core.logging` — which every entrypoint imports first — does not depend on that
+layer *at import time*, while still being able to use it once the process has finished
+bootstrapping. A rule that only looked at module scope would bless that pattern implicitly and then
+bless an accidental module-scope sibling import identically, because both are "not in the
+module-scope list". So this file checks **both scopes**, against **two different policies**:
+module-scope edges must be in `_ALLOWED_MODULE_EDGES` (the package dependency graph the four-layer
+architecture actually has); function-scope edges may additionally use `_ALLOWED_LAZY_EDGES`, each
+entry a documented, deliberate exception. An import guarded by `if TYPE_CHECKING:` is excluded from
+both graphs — it is never executed and creates no runtime edge, so it carries no layering risk.
 
-**Eight package-level cycles are real, not accidental**, each recorded in `_CYCLE_EDGES` with the
-one-line reason a reader needs. Six are "data down, control up" pairs where a registry builds and
+**Six package-level cycles are real, not accidental**, each recorded in `_CYCLE_EDGES` with the
+one-line reason a reader needs. Five are "data down, control up" pairs where a registry builds and
 launches a durable job and the job's workflow module imports the registry's own manifest/template
 types back: `templates↔durable`, `templates↔agent`, `connectors↔durable`, `agent↔durable`,
-`agent↔connectors`, `agent↔kg`. **Two more turned up in the walk that no prior note named**:
-`kg↔science` (the D-080 hazard gate needs `kg.Note` from `science`, and `kg.validate` needs the
-hazard screen back from `science`) and `api↔connectors` (the front door health-checks/discovers the
-connector registry; a connector's own HTTP surface reuses the front door's stdlib-only metrics
-registry rather than a second implementation). All eight are declared, not hidden, and each
-direction is checked independently — the reason for A→B does not excuse B→A.
+`agent↔connectors`. The sixth turned up in the walk that no prior note named: `kg↔science` (the
+D-080 hazard gate needs `kg.Note` from `science`, and `kg.validate` needs the hazard screen back
+from `science`). All six are declared, not hidden, and each direction is checked independently —
+the reason for A→B does not excuse B→A.
+
+**Three of the nine cycles this file declared a phase ago were made of one or two imports each**,
+and R2 deleted all three by moving the code rather than excusing the edge: `kg.proposal` reached
+into `chemclaw.agent` for the turn's ambient actor/session/correlation id, `connectors.server`
+reached into `chemclaw.api` for the metrics registry, and `durable.audit_verify` reached into
+`chemclaw.cli` for the hash-chain check. The primitives now live in `chemclaw.core` (which every
+package already depends on) and the chain check in `chemclaw.durable`, so `kg -> agent`,
+`connectors -> api` and `durable -> cli` are gone from the graph *and* from the policy — those
+imports are now forbidden rather than merely unused. `cli -> durable` survives as an ordinary
+downward edge and is declared in `_ALLOWED_MODULE_EDGES` rather than here.
 
 **`chemclaw.cli` is not a special case**, even though it carries no cycle. A previous version of
 this file excluded `cli` from the sibling list on the premise that "nothing imports it". That was
@@ -53,12 +60,12 @@ into, not a cycle.
 **The kernel rule stays a runtime check, driven by the derived module list.** A static walk cannot
 see a *transitive* import — module A importing module B which happens, at runtime, to import
 module C — so `chemclaw.core imports no sibling` (the rule this file exists to protect; see
-`core/README.md`) is additionally checked by importing each of `chemclaw.core`'s 15 modules
-(computed from disk, not listed) in a clean interpreter and asserting no forbidden sibling shows up
-in `sys.modules`. The former per-(module, sibling) parametrization spawned 12 × 11 = 132
-subprocesses for this rule alone (138 with the retrieval rule); one subprocess per module, checking
-every forbidden sibling in that single process, needs only 15 (+ 6 for retrieval = 21 total). See
-`--durations=0` for the wall-clock this bought back.
+`core/README.md`) is additionally checked by importing each of `chemclaw.core`'s modules (computed
+from disk, not listed) in a clean interpreter and asserting no forbidden sibling shows up in
+`sys.modules`. The former per-(module, sibling) parametrization spawned 12 × 11 = 132 subprocesses
+for this rule alone; one subprocess per module, checking every forbidden sibling in that single
+process, needs one per core module plus one per retrieval module. See `--durations=0` for the
+wall-clock this bought back.
 """
 
 from __future__ import annotations
@@ -214,7 +221,7 @@ _FUNCTION_SCOPE_EDGES = _edges(in_function=True)
 # packages instead of a list of files that has to be kept in step with the filesystem.
 # ---------------------------------------------------------------------------------------------
 
-# The eight package-level cycles, each direction with the one-line reason it exists. Declaring them
+# The six package-level cycles, each direction with the one-line reason it exists. Declaring them
 # here (rather than only in the flat set below) is what makes them visible to a reader instead of
 # indistinguishable from every other allowed edge.
 _CYCLE_EDGES: dict[Edge, str] = {
@@ -244,20 +251,10 @@ _CYCLE_EDGES: dict[Edge, str] = {
     ("chemclaw.connectors", "chemclaw.agent"): (
         "connector jobs and identity plumbing authorize against agent's authz/identity context"
     ),
-    ("chemclaw.agent", "chemclaw.kg"): ("graph/memory tools read and propose notes via kg"),
-    ("chemclaw.kg", "chemclaw.agent"): (
-        "a proposal records the actor/session/correlation id of who proposed it"
-    ),
     ("chemclaw.kg", "chemclaw.science"): (
         "the D-080 hazard gate (kg.validate) screens a note using science's hazard-screening logic"
     ),
     ("chemclaw.science", "chemclaw.kg"): ("the hazard-note helper parses kg's own Note type"),
-    ("chemclaw.api", "chemclaw.connectors"): (
-        "the front door health-checks and discovers tools from the connector registry"
-    ),
-    ("chemclaw.connectors", "chemclaw.api"): (
-        "a connector's own HTTP surface reuses the front door's stdlib-only metrics registry"
-    ),
 }
 
 # The full declared graph: every module-scope edge the codebase is allowed to have. `core` has no
@@ -268,12 +265,18 @@ _ALLOWED_MODULE_EDGES: set[Edge] = {
     ("chemclaw.agent", "chemclaw.core"),
     ("chemclaw.agent", "chemclaw.durable"),
     ("chemclaw.agent", "chemclaw.ingest"),
+    # Half of an `agent <-> kg` cycle until R2: `kg.proposal` reached up for the ambient actor,
+    # session and correlation id. Those are `core.identity_context`/`core.session_context` now, so
+    # `kg -> agent` is gone from the graph and from this policy — kg may no longer import agent.
     ("chemclaw.agent", "chemclaw.kg"),
     ("chemclaw.agent", "chemclaw.memory"),
     ("chemclaw.agent", "chemclaw.retrieval"),
     ("chemclaw.agent", "chemclaw.science"),
     ("chemclaw.agent", "chemclaw.templates"),
     ("chemclaw.api", "chemclaw.agent"),
+    # Half of an `api <-> connectors` cycle until R2, when the metrics registry a connector's own
+    # HTTP surface reached back up for became `core.metrics`. What is left is an ordinary
+    # downward edge, so it is declared here and no longer in `_CYCLE_EDGES`.
     ("chemclaw.api", "chemclaw.connectors"),
     ("chemclaw.api", "chemclaw.core"),
     ("chemclaw.api", "chemclaw.durable"),
@@ -296,7 +299,6 @@ _ALLOWED_MODULE_EDGES: set[Edge] = {
     ("chemclaw.cli", "chemclaw.science"),
     ("chemclaw.cli", "chemclaw.templates"),
     ("chemclaw.connectors", "chemclaw.agent"),
-    ("chemclaw.connectors", "chemclaw.api"),
     ("chemclaw.connectors", "chemclaw.core"),
     ("chemclaw.connectors", "chemclaw.durable"),
     ("chemclaw.connectors", "chemclaw.kg"),
@@ -321,7 +323,6 @@ _ALLOWED_MODULE_EDGES: set[Edge] = {
     ("chemclaw.ingest", "chemclaw.kg"),
     ("chemclaw.ingest", "chemclaw.retrieval"),
     ("chemclaw.ingest", "chemclaw.science"),
-    ("chemclaw.kg", "chemclaw.agent"),
     ("chemclaw.kg", "chemclaw.core"),
     ("chemclaw.kg", "chemclaw.science"),
     ("chemclaw.memory", "chemclaw.core"),
@@ -341,19 +342,17 @@ _ALLOWED_MODULE_EDGES: set[Edge] = {
 # Function-scope-only exceptions: a documented, deliberate lazy import of a package that may not be
 # imported at module scope. Each is a real edge in `_FUNCTION_SCOPE_EDGES` that is *not* in
 # `_ALLOWED_MODULE_EDGES` above - that asymmetry is the point, not a gap.
+#
+# **There is exactly one left, and that is the measurement R2 exists to produce.** `core -> api`
+# was the metrics registry and `core -> agent` was `logging.ContextFilter`'s ambient-identity
+# getters; both of those imports now resolve inside `chemclaw.core` and register as no edge at all.
+# What remains is the connector registry, which is a real capability layer rather than a primitive
+# that was merely filed one package too high, so it is not a move that would retire this entry.
 _ALLOWED_LAZY_EDGES: dict[Edge, str] = {
-    ("chemclaw.core", "chemclaw.agent"): (
-        "logging.ContextFilter binds identity getters lazily so core.logging - imported by every "
-        "entrypoint first - does not depend on agent at import time (see its docstring)"
-    ),
     ("chemclaw.core", "chemclaw.connectors"): (
-        "logging's redaction filter resolves connector bearer-token env names lazily for the same "
-        "reason: core.logging must not hard-depend on the connector registry at import time"
-    ),
-    ("chemclaw.core", "chemclaw.api"): (
-        "metrics_bridge/worker_http record into the front door's stdlib-only metrics registry from "
-        "any process; imported lazily so a process that never touches api still boots without it "
-        "(api.metrics moves into core in a later work package, retiring this exception)"
+        "logging's redaction filter resolves connector bearer-token env names lazily so "
+        "core.logging - imported by every entrypoint first - must not hard-depend on the connector "
+        "registry at import time (see its docstring)"
     ),
 }
 

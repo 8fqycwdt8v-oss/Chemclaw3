@@ -14,9 +14,9 @@ from temporalio.exceptions import WorkflowAlreadyStartedError
 from temporalio.service import RPCError
 
 from chemclaw.agent.authz import require_actor
-from chemclaw.agent.turn_signals import record_approval_request
 from chemclaw.core.config import settings
 from chemclaw.core.temporal_client import connect
+from chemclaw.core.turn_signals import record_approval_request
 from chemclaw.durable.interaction_approval import InteractionApprovalWorkflow, InteractionCandidate
 
 

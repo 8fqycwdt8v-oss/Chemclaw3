@@ -5,11 +5,11 @@ so the only process anything could observe or probe was the chat service.
 
 **Metrics went nowhere.** `deploy/` scraped the front door and nothing else, on the stated reasoning
 that recording a metric elsewhere "is a no-op — there is no registry and no HTTP surface in those
-processes". Half of that was never true: `core/metrics_bridge.py` imports the registry lazily and
-the import *succeeds* in every process, because `api/metrics.py` is stdlib-only. So the background
-worker and every connector worker have been incrementing counters into a live registry that nothing
-could read. Every durable job launched, every note proposed from a workflow, every audit-sink
-failure inside a background activity: recorded, and invisible.
+processes". Half of that was never true: the registry (`core/metrics.py`) is a stdlib-only module
+singleton, so it exists in every process that imports it. So the background worker and every
+connector worker have been incrementing counters into a live registry that nothing could read.
+Every durable job launched, every note proposed from a workflow, every audit-sink failure inside a
+background activity: recorded, and invisible.
 
 **"Liveness is the Temporal poll itself"** was asserted in three chart templates and enforced
 nowhere. A worker whose poll loop has died holds its process open, so Kubernetes reports `Running`,
@@ -47,6 +47,7 @@ from starlette.responses import JSONResponse, PlainTextResponse, Response
 from starlette.routing import Route
 
 from chemclaw.core.config import settings
+from chemclaw.core.metrics import CONTENT_TYPE, METRICS
 
 logger = logging.getLogger(__name__)
 
@@ -85,16 +86,7 @@ def _build_app(component: str, ready: Callable[[], bool]) -> Starlette:
         )
 
     async def metrics(_request: Request) -> Response:
-        """Prometheus exposition for this process.
-
-        Imported here, not at module scope: `chemclaw.core` imports no sibling
-        (`core/README.md`), and `api.metrics` is a sibling until a later work package moves it to
-        `chemclaw.core.metrics` and this lazy import is deleted along with the reason for it.
-        Safe to defer like `core.metrics_bridge` does - `api.metrics` is stdlib-only, so nothing
-        heavy rides in on this call.
-        """
-        from chemclaw.api.metrics import CONTENT_TYPE, METRICS
-
+        """Prometheus exposition for this process."""
         return PlainTextResponse(METRICS.render(), media_type=CONTENT_TYPE)
 
     return Starlette(

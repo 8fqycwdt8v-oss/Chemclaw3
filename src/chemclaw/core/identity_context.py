@@ -1,12 +1,11 @@
 """The ambient authenticated identity for the current turn (plan Phase F4-T5).
 
-Like the session id (`chemclaw.agent.session_context`), the authenticated user's Entra `oid` and
-app roles
-are ambient to a turn, not tool arguments: the front-door runner stamps them from the request's
-validated `Principal`, and audit, the authorization gate, and job-attribution read them here. A
-`contextvar` is the right carrier — task-local, so concurrent turns never cross identities — and it
-defaults to "no identity" off the request path (tests, the classic non-service caller), where the
-static audit actor and the dev-mode allowances apply.
+Like the session id (`chemclaw.core.session_context`), the authenticated user's Entra `oid` and
+app roles are ambient to a turn, not tool arguments: the front-door runner stamps them from the
+request's validated `Principal`, and audit, the authorization gate, and job-attribution read them
+here. A `contextvar` is the right carrier — task-local, so concurrent turns never cross identities
+— and it defaults to "no identity" off the request path (tests, the classic non-service caller),
+where the static audit actor and the dev-mode allowances apply.
 
 The turn's **correlation id** rides here for the same reason and with the same consumer. It used
 to be bound once inside `build_agent`, and agents are cached per profile for the process's whole
@@ -15,9 +14,11 @@ what a correlation id is for: the audit trail could not separate two chemists' t
 "show me everything that happened in this conversation" returned the pod's entire history. It is
 per-turn state, so it belongs in a task-local like the actor, not on a cached object.
 
-Kept in `agent/` (not `api/`) as plain `str`/`frozenset` values so `chemclaw.agent.audit` and
-`chemclaw.agent.authz` can read it without importing the front door (which would invert the
-layering).
+**Plain `str`/`frozenset` values and nothing but `contextvars`**, which is what makes this kernel
+material: seven packages read the turn's actor — audit, the authz gate, the PR-gate, connector
+identity headers, template activities, the CLI, and `core.logging`'s own `ContextFilter`. It sat
+in `chemclaw.agent` until the R2 layering move, where it was the single import that put `kg` and
+`connectors` above the conversation layer and forced `core/logging.py` to reach for it lazily.
 """
 
 from contextvars import ContextVar

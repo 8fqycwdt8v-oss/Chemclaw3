@@ -23,8 +23,8 @@ from agent_framework import FunctionInvocationContext, function_middleware
 
 from chemclaw.agent.authz import AuthorizationError, authorize_tool, side_effecting_tools
 from chemclaw.agent.turn_flags import is_dry_run
-from chemclaw.agent.turn_signals import record_tool_failure
 from chemclaw.core.errors import ChemclawError
+from chemclaw.core.turn_signals import record_tool_failure
 
 # How much of a failure message reaches the trace. Long enough for a chemist to recognise the
 # problem, short enough that an unexpected exception's text cannot flood the stream.

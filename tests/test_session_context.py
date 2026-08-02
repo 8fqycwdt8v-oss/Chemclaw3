@@ -15,14 +15,14 @@ from typing import Any
 from agent_framework import AgentSession
 
 import chemclaw.connectors.jobs as connector_jobs
-from chemclaw.agent.session_context import (
+from chemclaw.api.runner import run_turn
+from chemclaw.connectors.jobs import build_job_tool, job_workflow_id
+from chemclaw.connectors.manifest import JobSpec
+from chemclaw.core.session_context import (
     get_current_session_id,
     reset_current_session_id,
     set_current_session_id,
 )
-from chemclaw.api.runner import run_turn
-from chemclaw.connectors.jobs import build_job_tool, job_workflow_id
-from chemclaw.connectors.manifest import JobSpec
 
 _SPEC = JobSpec.model_validate(
     {

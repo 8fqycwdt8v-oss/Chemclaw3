@@ -24,9 +24,9 @@ from psycopg.rows import TupleRow
 from pydantic import BaseModel, Field
 
 from chemclaw.agent.authz import require_actor
-from chemclaw.agent.tool_registry import tool
 from chemclaw.core import db
 from chemclaw.core.config import settings
+from chemclaw.core.tool_registry import tool
 
 logger = logging.getLogger(__name__)
 

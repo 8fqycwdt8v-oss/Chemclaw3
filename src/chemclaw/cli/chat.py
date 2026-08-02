@@ -9,7 +9,7 @@ turn-taking chat (or a single scripted question) against a live model.
 Identity is the one thing that differs from production. Entra-ID auth (F4, D-043) is a front-door
 OIDC flow — it validates a browser-obtained token — and this is a terminal tool with no such token
 to resolve a real principal from. Rather than pretend, the CLI runs only in explicit **admin mode**
-(`--admin`): it bypasses auth and stamps the ambient identity (`chemclaw.agent.identity_context`,
+(`--admin`): it bypasses auth and stamps the ambient identity (`chemclaw.core.identity_context`,
 same seam
 the front door stamps per turn) with the configured admin actor (`settings.cli_admin_actor`) and
 every role named in `settings.skill_role_gates`, so admin keeps seeing every skill regardless of how
@@ -31,9 +31,9 @@ from typing import Any
 from chemclaw.agent.audit import AuditSink
 from chemclaw.agent.audit_store import PostgresAuditSink
 from chemclaw.agent.chemclaw_agent import build_agent, connector_tools
-from chemclaw.agent.identity_context import reset_current_identity, set_current_identity
 from chemclaw.connectors.registry import open_reachable
 from chemclaw.core.config import settings
+from chemclaw.core.identity_context import reset_current_identity, set_current_identity
 from chemclaw.core.logging import configure_logging
 
 _EXIT_WORDS = {"exit", "quit", ":q"}
@@ -113,7 +113,7 @@ async def converse(
 async def _run(args: argparse.Namespace) -> None:
     """Resolve identity, build the agent, open its MCP subprocesses, and dispatch.
 
-    Identity is stamped ambient (`chemclaw.agent.identity_context`) for the whole session — a CLI
+    Identity is stamped ambient (`chemclaw.core.identity_context`) for the whole session — a CLI
     run is
     one actor throughout, unlike the multi-user front door, which stamps it per turn (F2/F4) —
     and reset on exit. The connectors are connected once for the whole CLI session and torn down on

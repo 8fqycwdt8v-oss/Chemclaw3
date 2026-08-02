@@ -29,7 +29,7 @@ work for that reason and re-created on the connector side the "written, imported
 from a hand-maintained list, never runs" failure this registry exists to prevent (D-118).
 `tests/test_workflow_registry.py` now asserts the import boundary directly.
 
-The shape deliberately mirrors `chemclaw.agent.tool_registry`: a dict per queue keyed by the name
+The shape deliberately mirrors `chemclaw.core.tool_registry`: a dict per queue keyed by the name
 Temporal will advertise, insertion-ordered, with a duplicate guard. The one difference is
 that re-registering the *same* definition is allowed, because Temporal's workflow sandbox
 re-imports workflow modules and would otherwise trip the guard on every workflow task.
@@ -92,7 +92,7 @@ def durable_workflow(queue: Queue) -> Callable[[_WorkflowT], _WorkflowT]:
     """Register a `@workflow.defn` class on `queue`. Apply above `workflow.defn`.
 
     Returns the class unchanged, so the registered object is exactly what Temporal was
-    given — the same identity rule `chemclaw.agent.tool_registry.tool` follows.
+    given — the same identity rule `chemclaw.core.tool_registry.tool` follows.
     """
 
     def register(cls: _WorkflowT) -> _WorkflowT:

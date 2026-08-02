@@ -2,7 +2,7 @@
 
 Proves the RBAC seam: with no gates every skill is visible (today's behavior); a gated skill is
 hidden from a caller (the ambient identity) holding none of its roles and shown to one holding a
-role; ungated skills are unaffected. Roles come from `chemclaw.agent.identity_context`, so the
+role; ungated skills are unaffected. Roles come from `chemclaw.core.identity_context`, so the
 front door
 never threads identity through `build_agent`.
 """
@@ -13,9 +13,9 @@ from typing import cast
 from agent_framework import FileSkillsSource, SkillsSourceContext
 from agent_framework._agents import SupportsAgentRun
 
-from chemclaw.agent.identity_context import reset_current_identity, set_current_identity
 from chemclaw.agent.skill_access import RoleScopedSkillsSource
 from chemclaw.core.config import settings
+from chemclaw.core.identity_context import reset_current_identity, set_current_identity
 
 
 def _skill_names(

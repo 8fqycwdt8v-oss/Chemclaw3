@@ -22,7 +22,7 @@ from fastapi.testclient import TestClient
 
 from chemclaw.api.app import create_app
 from chemclaw.api.auth import Principal, require_principal
-from chemclaw.api.metrics import METRICS
+from chemclaw.core.metrics import METRICS
 from chemclaw.kg.note import Note
 from chemclaw.kg.pr_gate import propose_note
 from chemclaw.kg.proposal import (

@@ -23,14 +23,14 @@ import asyncio
 import httpx
 import pytest
 
-from chemclaw.agent.identity_context import (
+from chemclaw.agent.turn_flags import reset_dry_run, set_dry_run
+from chemclaw.core.identity_context import (
     reset_current_correlation_id,
     reset_current_identity,
     set_current_correlation_id,
     set_current_identity,
 )
-from chemclaw.agent.session_context import reset_current_session_id, set_current_session_id
-from chemclaw.agent.turn_flags import reset_dry_run, set_dry_run
+from chemclaw.core.session_context import reset_current_session_id, set_current_session_id
 from chemclaw.connectors.identity import (
     HEADER_ACTOR,
     HEADER_CORRELATION,
@@ -44,6 +44,13 @@ from chemclaw.connectors.identity import (
     turn_identity_hook,
 )
 from chemclaw.connectors.manifest import BearerAuth, NoAuth
+from chemclaw.core.identity_context import (
+    reset_current_correlation_id,
+    reset_current_identity,
+    set_current_correlation_id,
+    set_current_identity,
+)
+from chemclaw.core.session_context import reset_current_session_id, set_current_session_id
 from chemclaw.core.tracing import trace_headers
 
 

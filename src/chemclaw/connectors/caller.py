@@ -9,7 +9,7 @@ had no way to stamp it with the conversation that asked for it, which is the gap
 record worth little: rows nobody can trace back to a chemist or a turn.
 
 So the middleware now binds them into task-local contextvars a tool body can read, exactly as
-`chemclaw.agent.identity_context` does on the core side and for the same reason: a tool has no
+`chemclaw.core.identity_context` does on the core side and for the same reason: a tool has no
 request object, and a connector process serves every user, so anything bound at import time would
 be shared across them.
 

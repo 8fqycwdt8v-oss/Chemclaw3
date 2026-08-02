@@ -13,8 +13,8 @@ reader (`chemclaw.agent.tool_authz`, `chemclaw.connectors.identity`) has no busi
 This module now keeps only its tool.
 """
 
-from chemclaw.agent.tool_registry import tool
-from chemclaw.agent.turn_signals import record_question
+from chemclaw.core.tool_registry import tool
+from chemclaw.core.turn_signals import record_question
 
 
 @tool

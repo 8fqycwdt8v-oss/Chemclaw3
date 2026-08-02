@@ -117,7 +117,7 @@ def _drive_mw(
 
 def test_ambient_identity_overrides_the_static_actor() -> None:
     """The turn's authenticated Entra user is the recorded actor, over the build default (F4)."""
-    from chemclaw.agent.identity_context import reset_current_identity, set_current_identity
+    from chemclaw.core.identity_context import reset_current_identity, set_current_identity
 
     sink = _RecordingSink()
     mw = make_audit_middleware(correlation_id="conv-9", actor="unknown", sink=sink)

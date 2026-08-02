@@ -96,11 +96,11 @@ def test_a_connector_call_carries_the_standard_header_as_well_as_the_custom_one(
     on and survives where no collector is configured; `traceparent` is what makes a connector's
     spans children of this turn rather than an orphan trace.
     """
-    from chemclaw.agent.identity_context import (
+    from chemclaw.connectors.identity import HEADER_CORRELATION, turn_headers
+    from chemclaw.core.identity_context import (
         reset_current_correlation_id,
         set_current_correlation_id,
     )
-    from chemclaw.connectors.identity import HEADER_CORRELATION, turn_headers
     from chemclaw.core.tracing import TRACEPARENT, start_span
 
     token = set_current_correlation_id("cid-1")

@@ -20,8 +20,8 @@ from chemclaw.agent.authz import (
     expensive_actions,
     require_actor,
 )
-from chemclaw.agent.identity_context import reset_current_identity, set_current_identity
 from chemclaw.core.config import settings
+from chemclaw.core.identity_context import reset_current_identity, set_current_identity
 
 
 def _privileged_env(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -185,7 +185,7 @@ def test_every_advertised_tool_is_classified_write_or_read() -> None:
     """
     from chemclaw.agent.authz import side_effecting_tools
     from chemclaw.agent.chemclaw_agent import build_agent
-    from chemclaw.agent.tool_registry import registered_tool_names
+    from chemclaw.core.tool_registry import registered_tool_names
 
     build_agent(chat_client=object())
     advertised = set(registered_tool_names())

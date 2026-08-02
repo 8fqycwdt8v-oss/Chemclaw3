@@ -22,10 +22,10 @@ from pydantic import BaseModel, ValidationError
 from temporalio.exceptions import WorkflowAlreadyStartedError
 
 from chemclaw.agent.authz import AuthorizationError, side_effecting_tools
-from chemclaw.agent.identity_context import reset_current_identity, set_current_identity
 from chemclaw.agent.tool_authz import DryRunRefusal, refuse_writes_on_dry_run
 from chemclaw.agent.turn_flags import reset_dry_run, set_dry_run
-from chemclaw.agent.turn_signals import JobSignal, begin_turn, drain, end_turn
+from chemclaw.core.identity_context import reset_current_identity, set_current_identity
+from chemclaw.core.turn_signals import JobSignal, begin_turn, drain, end_turn
 from chemclaw.connectors.jobs import (
     ConnectorJobError,
     build_job_tool,
@@ -34,6 +34,8 @@ from chemclaw.connectors.jobs import (
 )
 from chemclaw.connectors.manifest import JobSpec
 from chemclaw.connectors.registry import enabled
+from chemclaw.core.identity_context import reset_current_identity, set_current_identity
+from chemclaw.core.turn_signals import JobSignal, begin_turn, drain, end_turn
 from chemclaw.durable.connector_job import ConnectorJobInput
 
 _SPEC = JobSpec.model_validate(
@@ -322,7 +324,7 @@ def test_a_fresh_start_blocks_the_harness_plan_on_the_job(
     from agent_framework import AgentSession
 
     from chemclaw.agent.harness_todo import complete_awaiting_job
-    from chemclaw.agent.session_context import reset_current_session, set_current_session
+    from chemclaw.agent.live_session import reset_current_session, set_current_session
 
     monkeypatch.setattr("chemclaw.core.config.settings.harness_enabled", True)
     tool = build_job_tool("calc", _SPEC)
@@ -341,7 +343,7 @@ def test_a_duplicate_launch_leaves_the_harness_plan_alone(monkeypatch: pytest.Mo
     from agent_framework import AgentSession
 
     from chemclaw.agent.harness_todo import complete_awaiting_job
-    from chemclaw.agent.session_context import reset_current_session, set_current_session
+    from chemclaw.agent.live_session import reset_current_session, set_current_session
 
     fake = _FakeClient(error=WorkflowAlreadyStartedError("dup", "wf", run_id=None))
 
@@ -367,7 +369,7 @@ def test_the_classic_agent_never_writes_to_a_todo_list_nobody_reads(
     from agent_framework import AgentSession
 
     from chemclaw.agent.harness_todo import complete_awaiting_job
-    from chemclaw.agent.session_context import reset_current_session, set_current_session
+    from chemclaw.agent.live_session import reset_current_session, set_current_session
 
     monkeypatch.setattr("chemclaw.core.config.settings.harness_enabled", False)
     tool = build_job_tool("calc", _SPEC)

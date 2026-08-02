@@ -42,14 +42,14 @@ from collections.abc import Awaitable, Callable, Generator
 
 import httpx
 
-from chemclaw.agent.identity_context import (
+from chemclaw.agent.turn_flags import is_dry_run
+from chemclaw.connectors.manifest import BearerAuth, ConnectorAuth, NoAuth
+from chemclaw.core.identity_context import (
     get_current_actor,
     get_current_correlation_id,
     get_current_roles,
 )
-from chemclaw.agent.session_context import get_current_session_id
-from chemclaw.agent.turn_flags import is_dry_run
-from chemclaw.connectors.manifest import BearerAuth, ConnectorAuth, NoAuth
+from chemclaw.core.session_context import get_current_session_id
 from chemclaw.core.tracing import trace_headers
 
 # The header contract, as constants so the connector-side reader and this writer cannot drift.

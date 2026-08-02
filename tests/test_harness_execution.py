@@ -251,7 +251,7 @@ def test_a_capped_loop_says_so_and_a_completed_one_does_not(
     # Watched from out here, not inside the run: `asyncio.run` copies the context into its task, so
     # a flag *set* in there would never be seen out here — which is why the watch holds a mutable
     # record rather than rebinding the contextvar (`chemclaw.agent.loop_cap`, same reason as
-    # `agent.turn_signals`).
+    # `core.turn_signals`).
     token = begin_loop_watch()
     try:
         _run_turn(capped_agent, "do a task", capped_agent.create_session())

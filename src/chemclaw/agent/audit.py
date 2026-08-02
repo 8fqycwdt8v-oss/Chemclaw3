@@ -37,10 +37,10 @@ from typing import Protocol, runtime_checkable
 from agent_framework import FunctionInvocationContext, function_middleware
 from pydantic import BaseModel
 
-from chemclaw.agent.identity_context import get_current_actor, get_current_correlation_id
-from chemclaw.agent.session_context import get_current_session_id
 from chemclaw.core.config import settings
+from chemclaw.core.identity_context import get_current_actor, get_current_correlation_id
 from chemclaw.core.metrics_bridge import record_metric
+from chemclaw.core.session_context import get_current_session_id
 from chemclaw.core.tracing import start_span
 
 logger = logging.getLogger(__name__)
@@ -161,7 +161,7 @@ def make_audit_middleware(
     """Build the tool-audit middleware bound to one conversation's identity.
 
     `correlation_id` and `actor` are both *fallbacks*, used only when the call has no ambient one
-    (`chemclaw.agent.identity_context`): the turn's real Entra user takes precedence per call
+    (`chemclaw.core.identity_context`): the turn's real Entra user takes precedence per call
     (F4-T5), and
     so does the turn's correlation id. The id has to work that way because agents are cached per
     profile for the process's lifetime — an id bound here would be shared by every turn from every

@@ -7,7 +7,7 @@ opened a knowledge PR was never told: the reference went into the model's contex
 "human signs off" line existed only in a git host's UI.
 
 The runner only sees the model's streamed updates, so tools hand these facts over out of band
-through `chemclaw.agent.turn_signals` (a contextvar, task-local like the ambient session/identity).
+through `chemclaw.core.turn_signals` (a contextvar, task-local like the ambient session/identity).
 These
 tests drive the real runner with a fake agent whose "tool" records a signal, and assert the events
 come out interleaved in order.
@@ -20,15 +20,15 @@ from typing import Any
 import pytest
 from agent_framework import AgentSession
 
-from chemclaw.agent.turn_signals import (
+from chemclaw.api.runner import run_turn
+from chemclaw.core.config import settings
+from chemclaw.core.turn_signals import (
     begin_turn,
     drain,
     end_turn,
     record_job_started,
     record_proposal,
 )
-from chemclaw.api.runner import run_turn
-from chemclaw.core.config import settings
 
 
 class _SignallingAgent:
@@ -214,8 +214,8 @@ def test_an_approval_signal_carries_the_holds_handle_to_the_stream() -> None:
     approval arrived renderable but unanswerable — and `service/static/app.js` returns early on an
     empty handle, so the Yes/No control never rendered at all.
     """
-    from chemclaw.agent.turn_signals import record_approval_request
     from chemclaw.api.runner import _signal_event
+    from chemclaw.core.turn_signals import record_approval_request
 
     token = begin_turn()
     try:

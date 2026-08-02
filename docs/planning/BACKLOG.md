@@ -32,7 +32,7 @@ Each reproduced against a running deployment; evidence in `docs/archive/live-use
 and `tasks/live-test/`. The fixed ones are not listed — see the ADR and the commits on that run.
 
 - [ ] **`ask_clarifying_question` does not end the turn** — [M]. `agent/dialogue_tools.py` used to
-      promise it did; `agent/turn_signals.py:124-128` records the signal and returns, and the agent
+      promise it did; `core/turn_signals.py:129-133` records the signal and returns, and the agent
       loop continues. The docstring now states what is true, but the guarantee is still unenforced.
       Enforcing it fights the deliberate "Partial data is still an answer" instruction, so the two
       rules need reconciling before either is mechanised.

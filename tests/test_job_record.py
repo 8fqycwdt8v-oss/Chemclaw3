@@ -167,7 +167,7 @@ def test_the_null_sink_keeps_nothing_and_says_so() -> None:
 def _counted(monkeypatch: pytest.MonkeyPatch) -> list[tuple[str, float, dict[str, str]]]:
     """Capture what `record_job` books on the consumption counter instead of a live registry.
 
-    Patched at the bridge rather than at `chemclaw.api.metrics.METRICS`, because the bridge
+    Patched at the bridge rather than at `chemclaw.core.metrics.METRICS`, because the bridge
     swallows every exception — a stub that raised, or a registry that rejected the name, would be
     silently indistinguishable from an increment that never happened, which is the exact property
     these two tests are trying to tell apart.

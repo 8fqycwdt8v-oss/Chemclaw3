@@ -12,9 +12,9 @@ moment of ranking, which is the distinction the human gate exists to preserve. K
 distinct call is what makes the separation structural rather than a naming convention.
 """
 
-from chemclaw.agent.tool_registry import tool
-from chemclaw.agent.turn_signals import record_proposal
 from chemclaw.core.config import settings
+from chemclaw.core.tool_registry import tool
+from chemclaw.core.turn_signals import record_proposal
 from chemclaw.kg.git_submitter import default_submitter
 from chemclaw.memory.interaction import propose_confirmed_answer
 from chemclaw.memory.observations import Observation, open_observations
