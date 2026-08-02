@@ -76,9 +76,9 @@ STAMPED_HEADERS = (
     HEADER_DRY_RUN,
 )
 
-# The port an origin means when the URL does not spell one out, so `http://h/mcp` and
-# `http://h:80/mcp` compare equal — the same normalization httpx's own `_same_origin` does before
-# it strips `Authorization`.
+# The port an origin means when the URL does not spell one out, so a plain `http` host and the
+# same host written with an explicit `:80` compare equal — the same normalization httpx's own
+# `_same_origin` does before it strips `Authorization`.
 _DEFAULT_PORTS = {"http": 80, "https": 443}
 
 
@@ -172,7 +172,8 @@ def turn_identity_hook(endpoint_url: str) -> Callable[[httpx.Request], Awaitable
     **Bound to the endpoint's origin, and it strips rather than merely skips.** A request hook runs
     on *every* hop of a redirect chain (httpx `_send_handling_redirects`), and httpx builds the
     redirected request from the previous request's headers — dropping only `Authorization`, and
-    only cross-origin. So a connector answering `302 https://attacker/` would otherwise have
+    only cross-origin. So a connector answering `302` toward an origin an attacker controls would
+    otherwise have
     harvested the caller's Entra object id and full role set, on every turn, from a header set that
     carries identity and nothing else strips. Declining to *re-add* them on a foreign origin is not
     enough, because the copied originals arrive anyway; the hook therefore removes them. The client

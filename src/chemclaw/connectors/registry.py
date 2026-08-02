@@ -211,12 +211,12 @@ def connector_http_client(connector: str, endpoint: HttpEndpoint) -> httpx.Async
     An httpx request hook runs on every hop and httpx carries the previous request's headers into
     the redirected one, stripping `Authorization` alone — so a connector (or anything that can bind
     its Service port; all shipped manifests declare `auth: mode: none`) could answer the MCP POST
-    with `302 https://attacker/` and collect the caller's Entra object id and full role set once per
-    turn. MCP streamable-HTTP needs no redirect for any real flow: `FastMCP.streamable_http_app`
-    serves the endpoint as an exact Starlette `Route`, so neither the per-bundle Service address nor
-    the dev composite's `/<name>/mcp` mount ever answers 3xx — proven by the transport tests, which
-    complete the handshake and a tool call over this client. `turn_identity_hook` strips the headers
-    on a foreign origin as the second layer.
+    with a `302` toward an origin it controls and collect the caller's Entra object id and full role
+    set once per turn. MCP streamable-HTTP needs no redirect for any real flow:
+    `FastMCP.streamable_http_app` serves the endpoint as an exact Starlette `Route`, so neither the
+    per-bundle Service address nor the dev composite's `/<name>/mcp` mount ever answers 3xx — proven
+    by the transport tests, which complete the handshake and a tool call over this client.
+    `turn_identity_hook` strips the headers on a foreign origin as the second layer.
 
     Args:
         connector: The bundle's name, for the deployment URL override and the credential error.
