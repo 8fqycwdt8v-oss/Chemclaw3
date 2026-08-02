@@ -25,13 +25,6 @@ left unfixed rather than scope-crept into an unrelated commit. See
       different class and a different fix. This is the plan's named anti-pattern — prose asserting
       a guard that nothing enforces — so the fix is the registration above **plus** deleting the
       claim, not rewording it.
-- [ ] **`tests/test_repo_map.py` false-fails inside a git worktree** — [XS]. Its `has_content`
-      helper tests `part.startswith(".")` across the *absolute* path, so any checkout under a
-      dot-directory makes `_tracked_directories` return `set()` and four tests fail on path location
-      alone, independent of file content. Harmless in CI, but background agents run in worktrees
-      under `.claude/worktrees/`, so it false-fails for exactly the parallel-agent workflow the
-      refactor plan depends on — three separate R0 agents each hit it and had to rule it out.
-      Fix: resolve the check relative to the repo root rather than over the absolute path.
 
 ## Open — Confirmed by the 190-probe live run (2026-08-02)
 
