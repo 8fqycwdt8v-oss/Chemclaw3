@@ -120,13 +120,21 @@ jobs:
         # `syft` rather than a hand-rolled `pip list`: the image carries an OS package set (git,
         # rsync) and two downloaded binaries (xtb, crest) that no Python-level inventory can see,
         # and those are exactly the components a Python-level scan would miss.
+        env:
+          SYFT_VERSION: v1.35.0
         run: |
           set -euo pipefail
           digest=$(docker image inspect chemclaw:ci --format '{{ index .RepoDigests 0 }}' 2>/dev/null \
             || docker image inspect chemclaw:ci --format '{{ .Id }}')
           echo "image id/digest: ${digest}"
           echo "${digest}" > sbom-image-digest.txt
-          curl -sSfL https://raw.githubusercontent.com/anchore/syft/v1.9.2/install.sh \
+          # Pinned, and the pin is verified to resolve before it is used: `v1.9.2` does not exist
+          # as a syft tag, and installing from a 404 failed this job with a bare `curl: (22)`
+          # that named neither the tag nor the reason. `-f` alone turns a bad pin into an opaque
+          # exit 22, so the check below says which tag is wrong.
+          curl -sSfI "https://raw.githubusercontent.com/anchore/syft/${SYFT_VERSION}/install.sh" \
+            >/dev/null || { echo "syft pin ${SYFT_VERSION} does not resolve - fix SYFT_VERSION"; exit 1; }
+          curl -sSfL "https://raw.githubusercontent.com/anchore/syft/${SYFT_VERSION}/install.sh" \
             | sh -s -- -b /usr/local/bin
           # Both outputs from ONE scan, each written to a file. Two things were wrong with
           # `syft ... -o table | head -40`: it re-scanned the image (~3 minutes for a second copy
