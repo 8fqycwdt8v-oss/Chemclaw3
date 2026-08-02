@@ -1040,7 +1040,7 @@ class ServiceSettings(BaseSettings):
     # limit. Eviction costs that caller one free burst and costs the process nothing.
     service_rate_limit_max_principals: int = Field(default=10_000, gt=0)
     # Hard ceiling on a request body, refused with 413 *before* anything reads it
-    # (`api/app._BodySizeLimit`). `attachment_max_bytes` was the only size check and it runs inside
+    # (`core.asgi.BodySizeLimit`). `attachment_max_bytes` was the only size check and it runs inside
     # `parse_attachment` — by then Starlette's multipart parser has already written the whole body
     # to a spooled temp file (RAM to 1 MB, then the pod's ephemeral disk), so a 5 GB upload was
     # ingested in full and then refused. Above `attachment_max_bytes` because a multipart envelope
@@ -1697,6 +1697,16 @@ class ConnectorSettings(BaseSettings):
     # and two equal defaults made the ceiling the tighter of the two on the path the deployment
     # actually runs.
     connector_job_timeout_seconds: float = Field(default=90_000.0, gt=0)
+
+    # Hard ceiling on a connector's request body, refused with 413 before anything reads it
+    # (`connectors.server.connector_app`, `core.asgi.BodySizeLimit`). A connector's own setting
+    # rather than reusing `service_max_request_bytes`: that one is sized for the front door's
+    # multipart attachment upload, a shape a connector's `/mcp` never carries — every request there
+    # is one MCP JSON-RPC call, whose arguments are chemistry-sized (a SMILES string, a job spec, a
+    # batch of candidates), not a file. A smaller default follows from that difference in what a
+    # legitimate request looks like, not from copying the front door's number. 0 disables, matching
+    # the front door's knob.
+    connector_max_request_bytes: int = Field(default=1_000_000, ge=0)
 
     # Bound on the record write every finished connector job performs (D-157). Small: it is one
     # upsert of a row the job has already earned, and a database that cannot take it in this long

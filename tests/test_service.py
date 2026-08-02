@@ -429,6 +429,40 @@ def test_a_session_is_owner_scoped() -> None:
     assert ok.status_code == 200  # the owner still gets in
 
 
+def test_null_owner_session_is_unreachable_once_entra_is_required(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A NULL-owner session must not become everyone's once identity enforcement turns on (Sec-3).
+
+    `session_owners.owner` is nullable by design (a dev/system session with no Entra oid is still
+    reattachable) and `entra_required=True` never *mints* a new NULL row — but a row written while
+    the deployment ran in dev mode survives a later flip to enforcement. Reverting
+    `_owner_authorizes` to the old `owner is not None and owner != principal.oid` check makes this
+    test fail (a stranger reads the session), proving the fix is load-bearing.
+    """
+    from chemclaw.api.auth import Principal, require_principal
+    from chemclaw.core.config import settings
+
+    app = create_app(agent_factory=lambda _profile: _FakeAgent())
+    stranger = Principal(oid="stranger", upn="stranger@corp", roles=frozenset())
+    app.dependency_overrides[require_principal] = lambda: stranger
+    client = TestClient(app)
+
+    session_id = "null-owner-session"
+    app.state.live_sessions.add(
+        session_id, _FakeAgent().create_session(session_id=session_id), None, None
+    )
+
+    # Dev-mode default (unchanged): an owner-less session degrades open, as documented.
+    res = client.post(f"/sessions/{session_id}/messages", json={"message": "hi"})
+    assert res.status_code == 200
+
+    monkeypatch.setattr(settings, "entra_required", True)
+    res = client.post(f"/sessions/{session_id}/messages", json={"message": "hi"})
+    assert res.status_code == 404
+    assert client.get(f"/sessions/{session_id}/events").status_code == 404
+
+
 def test_job_pushback_streams_completed_events(monkeypatch) -> None:  # type: ignore[no-untyped-def]
     """The events endpoint streams a finished job's push-back to the session (F3-T3)."""
     import chemclaw.api.app as app_module
@@ -820,6 +854,38 @@ def test_rehydration_is_owner_scoped() -> None:
     )
     res = client.post(f"/sessions/{session_id}/messages", json={"message": "x"})
     assert res.status_code == 404  # not the owner → no reattach, no existence leak
+
+
+def test_null_owner_rehydration_is_blocked_once_entra_is_required(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The durable-rehydration path applies the same NULL-owner rule as the live-cache path (Sec-3).
+
+    A NULL owner recorded in the durable table (dev-mode write, surviving into enforcement) must
+    404 on reattach once `entra_required` is on, exactly as the live-cache miss above does.
+    """
+    from chemclaw.api.auth import Principal, require_principal
+    from chemclaw.core.config import settings
+
+    owners = _FakeOwnerStore()
+    session_id = "null-owner-durable"
+    owners.owners[session_id] = None
+    owners.profiles[session_id] = None
+    owners.created[session_id] = datetime(2026, 1, 1, tzinfo=UTC)
+
+    app = create_app(agent_factory=lambda _profile: _FakeAgent(), owner_store=owners)
+    stranger = Principal(oid="stranger", upn="stranger@corp", roles=frozenset())
+    app.dependency_overrides[require_principal] = lambda: stranger
+    client = TestClient(app)
+
+    # Dev-mode default (unchanged): rehydration reattaches an owner-less durable session.
+    res = client.post(f"/sessions/{session_id}/messages", json={"message": "hi"})
+    assert res.status_code == 200
+
+    app.state.live_sessions = _LiveSessions(settings.service_max_live_sessions)  # force rehydration
+    monkeypatch.setattr(settings, "entra_required", True)
+    res = client.post(f"/sessions/{session_id}/messages", json={"message": "hi"})
+    assert res.status_code == 404
 
 
 def test_no_rehydration_without_durable_store() -> None:

@@ -319,6 +319,35 @@ def test_a_redirecting_connector_cannot_harvest_the_turn_identity() -> None:
     assert harvested == [], harvested
 
 
+def test_oversized_body_is_rejected_before_the_mcp_handler_runs(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A connector's `/mcp` refuses an oversized body with 413 before anything reads it (Sec-5).
+
+    `connector_app` used to install only `CallerLogMiddleware` — no cap at all — so an unbounded
+    body reached the MCP transport (and would reach it even with bearer auth on, since the body is
+    consumed before auth is evaluated). This proves the shared `chemclaw.core.asgi.BodySizeLimit`
+    now runs in front of the connector, over its own `connector_max_request_bytes` setting, exactly
+    as it runs in front of the front door over `service_max_request_bytes`.
+    """
+    from mcp.server.fastmcp import FastMCP
+
+    from chemclaw.core.config import settings
+
+    # Small enough that a real MCP handshake body would trip it too — the point is that the limit
+    # is enforced by the middleware, not by whatever the handler underneath would have done with a
+    # body this size.
+    monkeypatch.setattr(settings, "connector_max_request_bytes", 10)
+    server = FastMCP("body-limit-probe")
+    app = connector_app(server, name="body-limit-probe")
+    port = _free_port()
+
+    headers = {"content-type": "application/json", "accept": "application/json, text/event-stream"}
+    with _Server(app, port):
+        response = httpx.post(f"http://127.0.0.1:{port}/mcp", content=b"x" * 1000, headers=headers)
+    assert response.status_code == 413
+
+
 def test_an_unreachable_connector_costs_its_tools_not_the_turn() -> None:
     """The degrade posture, at the layer it has to live in (`chemclaw.connectors.transport`).
 

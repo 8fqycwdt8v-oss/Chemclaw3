@@ -108,6 +108,14 @@ _SECRET_SETTINGS = (
     "audit_anchor_secret",
 )
 
+# The git push credential for the knowledge-sync sidecar (`deploy/knowledge-sync.sh`). It has no
+# `Settings` field — nothing in this process reads it as config, only the sidecar script does —
+# but `_helpers.tpl` ranges over every secret key for every component, so it sits in this process's
+# environment regardless. A `Settings` field would be a config seam for a value nothing here
+# configures; reading the one environment variable a redaction inventory actually needs is simpler
+# than inventing one.
+_KNOWLEDGE_REPO_TOKEN_ENV = "CHEMCLAW_KNOWLEDGE_REPO_TOKEN"
+
 # Below this length a "secret" is more likely to be a placeholder, an empty default, or a string
 # that occurs in ordinary prose — redacting it would corrupt every line containing that substring.
 _MIN_REDACTABLE = 8
@@ -115,11 +123,17 @@ _MIN_REDACTABLE = 8
 _REDACTED = "***"
 
 
-def _secret_values() -> tuple[str, ...]:
+def _secret_values(connector_token_envs: tuple[str, ...] = ()) -> tuple[str, ...]:
     """The distinct secret values this process actually holds, longest first.
 
     Longest first so a DSN is redacted before the password inside it — replacing the shorter one
     first would leave a mangled DSN whose remaining half still names the host and user.
+
+    `connector_token_envs` is `SecretRedactingFilter`'s resolved list of per-connector bearer-token
+    variable names (`manifest.auth.token_env`) — passed in rather than looked up here, so this
+    function stays free of the lazy `connectors` import that resolving them requires (see the
+    filter's `__init__`). Read fresh from `os.environ` on every call, exactly like the `Settings`
+    values below: none of these are expected to rotate mid-process, but nothing here assumes it.
     """
     values = set()
     for name in _SECRET_SETTINGS:
@@ -134,6 +148,10 @@ def _secret_values() -> tuple[str, ...]:
                     password = userinfo.split(":", 1)[1]
                     if len(password) >= _MIN_REDACTABLE:
                         values.add(password)
+    for env_name in (_KNOWLEDGE_REPO_TOKEN_ENV, *connector_token_envs):
+        value = os.environ.get(env_name, "")
+        if len(value) >= _MIN_REDACTABLE:
+            values.add(value)
     return tuple(sorted(values, key=len, reverse=True))
 
 
@@ -145,11 +163,50 @@ class SecretRedactingFilter(logging.Filter):
     message so a secret passed as a `%s` argument is caught too — `logger.info("dsn=%s", dsn)`
     keeps the secret in `record.args` until formatting, which is exactly how one escapes a filter
     that only inspects `record.msg`.
+
+    `_SECRET_SETTINGS` is the inventory this class's own module docstring calls out as "visible in
+    review" — and two real credentials the process holds sat outside it structurally: the
+    knowledge-sync git token (no `Settings` field; `_secret_values` reads it directly) and each
+    connector's bearer token, resolved from `manifest.endpoint.auth.token_env` per enabled HTTP
+    connector. The latter needs `chemclaw.connectors`, which `core` may not import at module scope
+    (`tests/test_layering.py`) — the same constraint `ContextFilter.__init__` already solved for
+    `chemclaw.agent`, and for the same reason: resolved **once, here in `__init__`**, a safe,
+    single process entrypoint, never from `filter()`, which runs on every record and could be
+    reached while another module is mid-import.
     """
+
+    def __init__(self) -> None:
+        """Resolve the connector bearer-token variable names once, tolerating discovery failure.
+
+        A broken connector manifest is a real misconfiguration and every other consumer of
+        `connectors.registry.enabled()` fails loudly on it — but that failure belongs to whichever
+        of those consumers hits it first, not to logging setup. So this degrades to redacting
+        nothing *extra* rather than blocking `configure_logging()`, and says so at WARNING: a
+        redaction inventory that quietly stopped covering connectors would be a worse outcome than
+        a boot that proceeds without them.
+        """
+        super().__init__()
+        self._connector_token_envs: tuple[str, ...] = ()
+        try:
+            from chemclaw.connectors.manifest import BearerAuth, HttpEndpoint
+            from chemclaw.connectors.registry import enabled
+
+            self._connector_token_envs = tuple(
+                manifest.endpoint.auth.token_env
+                for manifest in enabled()
+                if isinstance(manifest.endpoint, HttpEndpoint)
+                and isinstance(manifest.endpoint.auth, BearerAuth)
+            )
+        except Exception:
+            logging.getLogger(__name__).warning(
+                "could not resolve connector bearer-token env names for log redaction; "
+                "connector credentials will not be scrubbed from log lines this process",
+                exc_info=True,
+            )
 
     def filter(self, record: logging.LogRecord) -> bool:
         """Redact in place and always keep the record."""
-        secrets = _secret_values()
+        secrets = _secret_values(self._connector_token_envs)
         if not secrets:
             return True
         message = record.getMessage()

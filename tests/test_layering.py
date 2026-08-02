@@ -34,6 +34,7 @@ _RETRIEVAL_MODULES = [
 
 _CORE_MODULES = [
     "chemclaw.core",
+    "chemclaw.core.asgi",
     "chemclaw.core.chem",
     "chemclaw.core.config",
     "chemclaw.core.db",

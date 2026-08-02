@@ -196,9 +196,11 @@ half-written.
 - **Request bounds** (D-2026-08-01-a-cheap-request-is-still-a-request): uvicorn is launched with
   `--limit-concurrency`, `--timeout-keep-alive` and `--h11-max-incomplete-event-size` (all from
   `CHEMCLAW_SERVICE_*` settings, none of which the app can impose on itself); an ASGI middleware
-  refuses a body over `CHEMCLAW_SERVICE_MAX_REQUEST_BYTES` with 413 before it is read; and a
-  per-principal token bucket refuses with 429, on in the chart and off in code. Tuning and
-  symptoms: `docs/guides/runbook.md` §(xii).
+  (`chemclaw.core.asgi.BodySizeLimit`) refuses a body over `CHEMCLAW_SERVICE_MAX_REQUEST_BYTES`
+  with 413 before it is read; and a per-principal token bucket refuses with 429, on in the chart
+  and off in code. Every connector server installs the same middleware over its own, smaller
+  `CHEMCLAW_CONNECTOR_MAX_REQUEST_BYTES` — its `/mcp` carries one JSON-RPC call, never a file
+  upload. Tuning and symptoms: `docs/guides/runbook.md` §(xii).
 
 ## Draining a pod (D-2026-08-01-a-drain-is-not-a-kill-with-extra-steps)
 

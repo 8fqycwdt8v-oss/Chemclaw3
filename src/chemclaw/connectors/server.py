@@ -39,6 +39,8 @@ from chemclaw.connectors.identity import (
     HEADER_SESSION,
 )
 from chemclaw.core import db
+from chemclaw.core.asgi import BodySizeLimit
+from chemclaw.core.config import settings
 from chemclaw.core.tracing import continue_trace
 
 logger = logging.getLogger(__name__)
@@ -125,6 +127,12 @@ def connector_app(server: FastMCP, *, name: str) -> FastAPI:
 
     app = FastAPI(title=f"chemclaw-connector-{name}", lifespan=lifespan)
     app.add_middleware(CallerLogMiddleware, connector=name)
+    # Added *after* `CallerLogMiddleware`: Starlette wraps in add-order with the most recently
+    # added outermost, so this one now sits outside it and refuses an oversized body before any
+    # handler — including the logging middleware's own `dispatch` — ever reads it (Sec-5: `/mcp`
+    # had no cap at all, unlike the front door's `_add_body_size_limit`).
+    if settings.connector_max_request_bytes:
+        app.add_middleware(BodySizeLimit, max_bytes=settings.connector_max_request_bytes)
 
     @app.get("/healthz")
     async def healthz() -> dict[str, str]:

@@ -287,6 +287,51 @@ def test_configure_logging_installs_both_filters_on_the_handler() -> None:
         assert ContextFilter in kinds and SecretRedactingFilter in kinds
 
 
+def test_the_knowledge_repo_token_is_redacted_though_it_has_no_settings_field(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The git push credential is in every pod's env (`_helpers.tpl`) but names no `Settings` field.
+
+    `_SECRET_SETTINGS` is read through `getattr(settings, name, ...)`, so nothing there can ever
+    see a credential that is not config — this one is consumed only by
+    `deploy/knowledge-sync.sh`. A bare `repr(os.environ)` in a traceback would log it in the clear
+    (Sec-6) unless the filter reads the environment variable directly, which is what this proves.
+    """
+    token = "ghp_knowledge-repo-push-credential-0123456789"
+    monkeypatch.setenv("CHEMCLAW_KNOWLEDGE_REPO_TOKEN", token)
+    assert token not in _rendered(_record("git push failed: %s", token))
+
+
+def test_a_connector_bearer_token_is_redacted(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A per-connector bearer token is resolvable but was never enumerated (Sec-6).
+
+    `_EnvBearerAuth` reads `os.environ[token_env]` per request; the variable *name* is
+    manifest-declared, so the filter can enumerate every enabled connector's `token_env` and
+    redact whatever value sits behind it, the same way it redacts a `Settings`-held secret.
+    """
+    from types import SimpleNamespace
+
+    from chemclaw.connectors.manifest import BearerAuth, HttpEndpoint
+    from chemclaw.core.logging import SecretRedactingFilter
+
+    token_env = "CHEMCLAW_TEST_CONNECTOR_BEARER_TOKEN"
+    token = "sk-connector-live-0123456789abcdef"
+    monkeypatch.setenv(token_env, token)
+    endpoint = HttpEndpoint(
+        url="http://127.0.0.1:1/mcp",
+        auth=BearerAuth(token_env=token_env),
+        tools=["echo"],
+        read_only=["echo"],
+    )
+    fake_manifest = SimpleNamespace(endpoint=endpoint)
+    monkeypatch.setattr("chemclaw.connectors.registry.enabled", lambda: [fake_manifest])
+
+    record = _record("connector call failed: %s", token)
+    # Constructed fresh here, so it picks up the patched `enabled()` rather than the real registry.
+    SecretRedactingFilter().filter(record)
+    assert token not in record.getMessage()
+
+
 def test_every_named_secret_is_a_real_settings_field() -> None:
     """The credential inventory names fields that exist, so a rename cannot silently disarm it.
 
