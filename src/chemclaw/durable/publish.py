@@ -51,6 +51,7 @@ _BAD_DATA_TYPES = [
     "DataSourceError",
     "TemplateError",
     "UnresolvedReference",
+    "ProfileError",
     # A BoFire/botorch surrogate fit or acquisition step failed on the given observations
     # (Science-4, `chemclaw.science.bo.engine`). Deterministic in the data: the same duplicate
     # or degenerate points collapse the same kernel on a retry, so this is bad-data, not transient.
@@ -59,6 +60,17 @@ _BAD_DATA_TYPES = [
     # (D-135). Emphatically not transient: a retry re-reads the same bytes from the same image
     # layer and reaches the same conclusion, and the fix is a rebuild.
     "VendoredDatasetError",
+    # `AuthorizationError` (`chemclaw.agent.authz`) and its subclasses are NOT `ChemclawError`/
+    # `ValueError` — an authorization refusal is a policy decision, not bad data, and reparenting it
+    # would make `chemclaw.agent.tool_authz.surface_domain_errors` swallow it ahead of
+    # `surface_authorization_denials` (see the class docstring). They are listed here by their own
+    # exact names instead: `chemclaw.durable.template_activities.authorize_job_step` raises
+    # `AuthorizationError` crossing a real activity boundary, and a refusal never changes on retry,
+    # so it must still fail fast there. `tests/test_publish.py` walks this hierarchy the same way it
+    # walks `ChemclawError`'s so a future subclass cannot go unregistered unnoticed.
+    "AuthorizationError",
+    "DryRunRefusal",
+    "PlanNotApprovedError",
 ]
 
 # Bad data is non-retryable by type; `maximum_attempts` bounds the *transient* retries

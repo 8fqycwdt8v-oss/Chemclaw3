@@ -125,9 +125,14 @@ async def authorize_job_step(step: JobStepInput) -> ResolvedJob:
     The pre-flight is `chemclaw.connectors.jobs.prepare_job_launch`, shared with the chat launcher
     rather than reimplemented, so the two cannot drift; the identity is stamped from the step first,
     so `authorize_trigger` decides against the person who asked rather than against nobody. A
-    refusal raises `AuthorizationError` — a `ValueError`, which `BAD_DATA_RETRY` lists
-    non-retryable — so an unentitled step fails on its first attempt naming the reason instead of
-    retrying an authorization decision that will never change.
+    refusal raises `AuthorizationError` — a plain `Exception`, not a `ValueError`
+    (`chemclaw.agent.authz` explains why it is deliberately kept out of the `ChemclawError`
+    hierarchy). Across an activity boundary it arrives as an `ActivityError` whose
+    `ApplicationError.type` is the exact string `"AuthorizationError"` — Temporal matches
+    `non_retryable_error_types` by that name, not by `isinstance`, so the `ValueError` question does
+    not decide this either way. What does is that `"AuthorizationError"` is itself listed by name
+    in `BAD_DATA_RETRY` (`chemclaw.durable.publish`), so an unentitled step fails on its first
+    attempt naming the reason instead of retrying an authorization decision that will never change.
 
     Everything below about resolving off the workflow thread is unchanged (REV-13), and it is why
     the authorization belongs here too: this is the last place before the child starts that can

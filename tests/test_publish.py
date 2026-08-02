@@ -19,6 +19,8 @@ from temporalio.converter import DefaultFailureConverter, DefaultPayloadConverte
 from temporalio.exceptions import ActivityError, ApplicationError
 
 import chemclaw.durable.publish as publish_module
+from chemclaw.agent.authz import AuthorizationError
+from chemclaw.agent.profile_discovery import ProfileError
 from chemclaw.connectors.registry import ConnectorError
 from chemclaw.core.config import settings
 from chemclaw.core.errors import ChemclawError
@@ -26,6 +28,17 @@ from chemclaw.durable.publish import BAD_DATA_RETRY, note_publish_retry, publish
 from chemclaw.ingest.sources.registry import DataSourceError
 from chemclaw.templates.registry import TemplateError
 from chemclaw.templates.resolve import UnresolvedReference
+
+
+def _import_first_party_tree() -> None:
+    """Import every module under `chemclaw` so every subclass of an error base is defined.
+
+    Shared by both completeness walks below (`ChemclawError`'s and `AuthorizationError`'s): a
+    subclass declared in a module nobody has imported yet is invisible to `__subclasses__()`.
+    """
+    package = importlib.import_module("chemclaw")
+    for module_info in pkgutil.walk_packages(package.__path__, prefix="chemclaw."):
+        importlib.import_module(module_info.name)
 
 
 def test_bad_data_retry_is_bounded() -> None:
@@ -58,13 +71,9 @@ def test_every_chemclaw_error_subclass_is_listed_non_retryable() -> None:
     walks every first-party module so all subclasses are defined, then asserts none is
     missing from the policy (the drift this base class was created to eliminate).
     """
-    # One package since D-148; `walk_packages` reaches every module under it, so a new
-    # subclass anywhere in the tree is still defined by the time the assertion runs.
-    first_party = ["chemclaw"]
-    for package_name in first_party:
-        package = importlib.import_module(package_name)
-        for module_info in pkgutil.walk_packages(package.__path__, prefix=f"{package_name}."):
-            importlib.import_module(module_info.name)
+    # `walk_packages` reaches every module under `chemclaw` (D-148), so a new subclass anywhere
+    # in the tree is still defined by the time the assertion runs.
+    _import_first_party_tree()
 
     def names(cls: type) -> set[str]:
         return {cls.__name__}.union(*(names(sub) for sub in cls.__subclasses__()), set())
@@ -73,11 +82,37 @@ def test_every_chemclaw_error_subclass_is_listed_non_retryable() -> None:
     assert not missing, f"ChemclawError subclasses not registered in _BAD_DATA_TYPES: {missing}"
 
 
+def test_every_authorization_error_subclass_is_listed_non_retryable() -> None:
+    """The same completeness walk, rooted at `AuthorizationError` instead of `ChemclawError`.
+
+    `AuthorizationError` is deliberately not a `ChemclawError` (an authorization refusal is not
+    "bad data" — see its docstring in `chemclaw.agent.authz`), so the walk above never visits it or
+    its subclasses (`DryRunRefusal`, `PlanNotApprovedError`). Without a walk of its own, a new
+    subclass could cross an activity boundary unregistered and retry forever, exactly the drift
+    `ChemclawError`'s walk exists to catch.
+    """
+
+    def names(cls: type) -> set[str]:
+        return {cls.__name__}.union(*(names(sub) for sub in cls.__subclasses__()), set())
+
+    _import_first_party_tree()
+    missing = names(AuthorizationError) - set(BAD_DATA_RETRY.non_retryable_error_types or [])
+    assert not missing, f"AuthorizationError subclasses not registered: {missing}"
+
+
 @pytest.mark.parametrize(
-    "error_cls", [ConnectorError, DataSourceError, TemplateError, UnresolvedReference]
+    "error_cls",
+    [
+        ConnectorError,
+        DataSourceError,
+        TemplateError,
+        UnresolvedReference,
+        ProfileError,
+        AuthorizationError,
+    ],
 )
 def test_bad_data_class_crosses_an_activity_boundary_as_non_retryable(
-    error_cls: type[ChemclawError],
+    error_cls: type[Exception],
 ) -> None:
     """The real classification Temporal applies, not the isinstance mismatch (R5).
 
@@ -86,9 +121,15 @@ def test_bad_data_class_crosses_an_activity_boundary_as_non_retryable(
     derives from `ChemclawError` (hence `ValueError`) but is missing from `_BAD_DATA_TYPES` by its
     *own* name would still retry `activity_max_attempts` times with transient backoff before
     failing, exactly as `ConnectorError` did before it and its three siblings were reparented and
-    registered. This drives the real SDK converter (no server needed) rather than asserting on the
-    class hierarchy, so it catches the isinstance/name mismatch the docstring in
-    `template_activities.authorize_job_step` used to get wrong.
+    registered, and exactly as `ProfileError` did before this test covered it.
+
+    `AuthorizationError` is the sharper case: it is not a `ChemclawError`/`ValueError` at all (see
+    its docstring for why reparenting it would be wrong), yet the same name-matching mechanism
+    still applies — Temporal never looks at `isinstance`, so a plain `Exception` registered by name
+    is classified non-retryable exactly like a `ChemclawError` subclass would be. This drives the
+    real SDK converter (no server needed) rather than asserting on the class hierarchy, so it
+    catches the isinstance/name mismatch the docstring in `template_activities.authorize_job_step`
+    used to get wrong.
     """
     converter = DefaultFailureConverter()
     payload_converter = DefaultPayloadConverter()
