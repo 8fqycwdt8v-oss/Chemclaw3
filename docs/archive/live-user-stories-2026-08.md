@@ -114,10 +114,30 @@ impurities and residual solvents, instrument/scheduling/automation, project and 
 requiring the gap to be stated first, and forbidding a specific parameter from being emitted as
 though it came from the record.
 
-**And a prompt is demonstrably not sufficient.** The Sonnet control fixed `an-05` and largely fixed
-`an-07`, but its `an-02` still produced a complete branded method table *while simultaneously
-writing* "nothing on file" and "not a validated method". Honesty framing did not suppress the
-artefact. The remaining work is a **deterministic output gate**: a scan of the final answer for
+**Measured after the fix, on the six worst probes.** Same corpus, same model, same questions; the
+scan is the regex table that produced the fabrication counts above, so before and after are scored
+identically.
+
+| | before | after |
+| --- | ---: | ---: |
+| probes inventing ≥1 method-parameter class | **4 / 6** | **1 / 6** |
+| parameter classes invented in total | **9** | **1** |
+| answers citing a note no tool returned | — | **0 / 6** |
+
+`an-05` — the transfer whose flow rate was 8.6× low and injection volume 15× high — now invents
+nothing at all. The single residual is `an-01`'s *"UV at the wavelength where your aromatic compound
+absorbs (likely 250–280 nm for a biaryl)"*: hedged and chemically ordinary, but the instruction asks
+for background knowledge to be **labelled** as such and "likely … for a biaryl" is only half a label.
+
+**And the instruction's other half is not landing.** It says to name the gap *"first and plainly —
+before anything else"*. `an-01` opens with *"I'll help you develop a reversed-phase impurity
+method"* and reaches its limits much later. So the boundary text suppresses invented **numbers**
+well and does not yet change the **shape** of the answer.
+
+**A prompt is therefore necessary and not sufficient.** The Sonnet control is the sharper evidence:
+it fixed `an-05` and largely fixed `an-07`, but its `an-02` still produced a complete branded method
+table *while simultaneously writing* "nothing on file" and "not a validated method". Honesty framing
+did not suppress the artefact. The remaining work is a **deterministic output gate**: a scan of the final answer for
 method-parameter shapes (`\d+\s*mL/min`, `\d+–\d+\s*%\s*B`, `\d{3}\s*nm`, `\d+\s*psi`, column
 brands, `µg/day`, `ppm`) that, when no tool in the turn produced them, strips them or forces the
 boundary sentence. The scan that produced the table above is that gate; it is about twenty lines
