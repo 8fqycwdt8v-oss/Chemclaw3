@@ -6,6 +6,11 @@ are the ones that matter most: the argv boundary, and that the backend never rea
 cache key as "auto".
 """
 
+import os
+import subprocess
+import sys
+import time
+from contextlib import suppress
 from pathlib import Path
 
 import numpy as np
@@ -35,6 +40,121 @@ def test_a_value_that_could_be_read_as_a_flag_is_rejected() -> None:
     with pytest.raises(ValueError, match="may not start with"):
         xtb_cli._safe("--define-a-flag", "solvent")
     assert xtb_cli._safe("water", "solvent") == "water"
+
+
+# A grandchild that records its own pid, then heartbeats until killed — standing in for one of
+# CREST's forked metadynamics workers (its own module docstring: "forks worker subprocesses for
+# parallel metadynamics/optimization steps"). No `start_new_session` of its own, so by POSIX
+# default it joins whichever process group its parent (the "leaf" below) is already in — exactly
+# the shape a real worker fork takes.
+_GRANDCHILD_SOURCE = """
+import os
+import sys
+import time
+
+pid_path, heartbeat_path = sys.argv[1], sys.argv[2]
+with open(pid_path, "w") as handle:
+    handle.write(str(os.getpid()))
+while True:
+    with open(heartbeat_path, "a") as handle:
+        handle.write("x")
+    time.sleep(0.05)
+"""
+
+# The direct child a subprocess helper actually tracks: forks the grandchild above, then hangs —
+# standing in for a stuck xtb/CREST invocation that never returns within its budget.
+_LEAF_SOURCE = """
+import subprocess
+import sys
+import time
+
+pid_path, heartbeat_path, grandchild_script = sys.argv[1], sys.argv[2], sys.argv[3]
+subprocess.Popen([sys.executable, grandchild_script, pid_path, heartbeat_path])
+time.sleep(3600)
+"""
+
+
+def _spawn_leaf_and_grandchild(tmp_path: Path) -> list[str]:
+    """Write the leaf/grandchild scripts and return the argv that runs the leaf."""
+    leaf = tmp_path / "leaf.py"
+    grandchild = tmp_path / "grandchild.py"
+    leaf.write_text(_LEAF_SOURCE)
+    grandchild.write_text(_GRANDCHILD_SOURCE)
+    pid_file = tmp_path / "grandchild.pid"
+    heartbeat = tmp_path / "heartbeat"
+    return [sys.executable, str(leaf), str(pid_file), str(heartbeat), str(grandchild)]
+
+
+def _wait_for_grandchild_pid(tmp_path: Path) -> int:
+    """Block until the grandchild records its pid, or fail — it always should within seconds."""
+    pid_file = tmp_path / "grandchild.pid"
+    deadline = time.monotonic() + 10.0
+    while time.monotonic() < deadline:
+        if pid_file.exists() and pid_file.read_text():
+            return int(pid_file.read_text())
+        time.sleep(0.05)
+    raise AssertionError("the grandchild never recorded its pid")
+
+
+def _is_alive(pid: int) -> bool:
+    """Whether `pid` still exists, via the zero-signal probe (raises iff the process is gone)."""
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    return True
+
+
+def test_run_isolated_kills_the_whole_process_group(tmp_path: Path) -> None:
+    """Science-1: a timeout kills every process the run forked, not only the tracked leaf.
+
+    The naive `subprocess.run(argv, timeout=...)` this replaced kills exactly one PID on a
+    timeout (`Popen.kill()` on the process it is tracking) and leaves everything that PID forked
+    running — this is the grandchild-outlives-a-naive-kill case named in the review, reproduced
+    with a plain script rather than the real (unavailable-in-this-sandbox) `xtb`/`crest` binaries.
+    """
+    argv = _spawn_leaf_and_grandchild(tmp_path)
+    env = {"PATH": os.environ.get("PATH", "")}
+    with pytest.raises(subprocess.TimeoutExpired):
+        xtb_cli.run_isolated(argv, cwd=tmp_path, env=env, timeout=1.0)
+
+    grandchild_pid = _wait_for_grandchild_pid(tmp_path)
+    # The kill is asynchronous (SIGKILL delivery + reaping), so give the OS a moment; the
+    # grandchild heartbeats every 50ms, so a live one would keep writing well past this.
+    deadline = time.monotonic() + 5.0
+    while _is_alive(grandchild_pid) and time.monotonic() < deadline:
+        time.sleep(0.1)
+    assert not _is_alive(grandchild_pid), (
+        "the grandchild survived run_isolated's timeout — the process group was not killed"
+    )
+
+
+def test_a_single_pid_kill_orphans_the_grandchild(tmp_path: Path) -> None:
+    """Contrast case: the exact pre-fix shape leaves the grandchild running.
+
+    Same leaf/grandchild pair as the test above, through plain `subprocess.run(timeout=...)` with
+    no group handling at all — the shape `xtb_cli.run`/`crest_cli.run` used before Science-1. This
+    is what proves the fix changed something rather than merely adding an inert kwarg: without it,
+    the grandchild is still alive after the same wait the fixed path kills it within.
+    """
+    argv = _spawn_leaf_and_grandchild(tmp_path)
+    env = {"PATH": os.environ.get("PATH", "")}
+    grandchild_pid = None
+    try:
+        with pytest.raises(subprocess.TimeoutExpired):
+            subprocess.run(  # noqa: S603 — fixed argv, no shell, test fixture
+                argv, cwd=tmp_path, env=env, capture_output=True, text=True, timeout=1.0
+            )
+        grandchild_pid = _wait_for_grandchild_pid(tmp_path)
+        time.sleep(1.0)  # the same order of wait the test above gives the fixed path to succeed
+        assert _is_alive(grandchild_pid), (
+            "the grandchild did not survive a single-PID kill — the fixture no longer "
+            "demonstrates the vulnerability Science-1 fixes"
+        )
+    finally:
+        if grandchild_pid is not None:
+            with suppress(ProcessLookupError):
+                os.kill(grandchild_pid, 9)
 
 
 def test_capture_keeps_a_tasks_by_products_and_skips_an_oversized_one(

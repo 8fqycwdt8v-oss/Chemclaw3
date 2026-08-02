@@ -613,14 +613,20 @@ class CalculatorSettings(BaseSettings):
 class BoSettings(BaseSettings):
     """Durable BoFire BO campaigns (plan step 1d.4).
 
-    Grouped because these three knobs shape one thing: how a Bayesian-optimization campaign runs
-    durably — its per-round activity budget, reproducibility seed, and the round ceiling that
-    protects Temporal's event-history limit.
+    Grouped because these four knobs shape one thing: how a Bayesian-optimization campaign runs
+    durably — its per-round activity budget and heartbeat, reproducibility seed, and the round
+    ceiling that protects Temporal's event-history limit.
     """
 
     # A single round (BoFire propose + evaluate) can be slow, so activities get a generous
     # start-to-close budget.
     bo_activity_timeout_seconds: float = Field(default=300.0, gt=0)
+    # How long a BO activity may go without a heartbeat before Temporal declares the worker dead
+    # and retries (Conn-F2). Comfortably shorter than `bo_activity_timeout_seconds` so a dead
+    # worker is noticed well before the full start-to-close budget — the same discipline
+    # `xtb_job_heartbeat_timeout_seconds` applies to calc's durable jobs, sized down for a
+    # per-round budget an order of magnitude smaller.
+    bo_activity_heartbeat_timeout_seconds: float = Field(default=60.0, gt=0)
     # Seed for BoFire's random design + SOBO strategies, so a campaign is reproducible
     # (deterministic seeding + proposals) rather than flaky run-to-run.
     bo_seed: int = 42
