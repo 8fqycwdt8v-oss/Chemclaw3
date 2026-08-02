@@ -1,0 +1,45 @@
+{
+  "probe": {
+    "id": "rx-25",
+    "section": 6,
+    "persona": "manager",
+    "bucket": "A",
+    "question": "Across the chemistry we have on record, which steps ended up needing a column and which crystallised cleanly? I want to know how much chromatography we are carrying into development.",
+    "expects_tools": [
+      "find_notes",
+      "gather_evidence",
+      "expand_note",
+      "find_knowledge_gaps"
+    ],
+    "forbids_claims": [
+      "a count or percentage across a project portfolio",
+      "a claim to have surveyed all of the organisation's chemistry",
+      "a purification method for a step the record does not state one for"
+    ],
+    "direction": "Should answer from the record and be exact about how big the record is. The corpus is a few dozen hand-authored seed notes plus published HTE data and a small set of free-text ELN records — it is not a portfolio, and there is no project, programme or portfolio entity in this system at all. A good answer reports what the retrieved reaction notes actually say about isolation and purification, says how many notes that covers, and names the steps where the record is silent rather than inferring. The manager-facing judgement being tested is whether it lets 'what we have on record' be read as 'what we do', and it should say plainly that this cannot support a development-load estimate. Flagging the gap as something worth capturing going forward is a good ending."
+  },
+  "outcome": {
+    "probe_id": "rx-25",
+    "section": 6,
+    "persona": "manager",
+    "bucket": "A",
+    "question": "Across the chemistry we have on record, which steps ended up needing a column and which crystallised cleanly? I want to know how much chromatography we are carrying into development.",
+    "answer": "",
+    "answered": false,
+    "tools_called": [],
+    "tools_failed": [],
+    "expected_tools_met": false,
+    "uncited_note_ids": [],
+    "failed_loudly": true,
+    "error_code": "internal",
+    "degraded": [],
+    "jobs_started": [],
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "latency_seconds": 2.85,
+    "event_counts": {
+      "error": 1
+    },
+    "transport_error": null
+  }
+}

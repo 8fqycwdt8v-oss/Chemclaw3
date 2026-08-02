@@ -34,7 +34,12 @@ from chemclaw.evals.probe import Probe
 
 logger = logging.getLogger(__name__)
 
-Verdict = Literal["served", "partial", "unserved", "fabricated"]
+# `ungraded` is not a grade — it is the absence of one, and it exists because the first version of
+# this module did not have it. A truncated or unparseable judge reply fell through to `unserved`,
+# so a *grading crash* was recorded as a *system failure*, indistinguishable in the output from a
+# real one. That mislabelled 65 of 190 probes in the first run and inflated the headline
+# unserved rate from at most 22 to 87. A verdict that cannot be obtained must be visibly missing.
+Verdict = Literal["served", "partial", "unserved", "fabricated", "ungraded"]
 
 _SYSTEM = """You grade one answer from a chemistry R&D assistant against the direction its asker \
 would have found satisfying. You are strict, terse, and you never reward fluent prose that lacks \
@@ -71,9 +76,19 @@ class Judgement(BaseModel):
 
 
 def _prompt(probe: Probe, outcome: ProbeOutcome) -> str:
-    """The grading payload: the ask, the bar, the forbidden list, and what came back."""
+    """The grading payload: the ask, the bar, the forbidden list, and what came back.
+
+    The tool *results* are here, not just the tool names, and that is the difference between a
+    judge that can tell a retrieved number from an invented one and a judge that guesses. The
+    first version passed names alone and called verbatim quotations from merged notes
+    "fabricated" at a 40% false-positive rate — it had no way to see that the number was in the
+    evidence. `uncited_note_ids` is passed for the same reason: it is the mechanical answer to the
+    citation question, and the judge should defer to it rather than re-derive it from prose.
+    """
     forbidden = "\n".join(f"  - {claim}" for claim in probe.forbids_claims) or "  (none)"
     tools = ", ".join(outcome.tools_called) or "(none)"
+    evidence = "\n".join(f"  [{p.tool}] {p.preview}" for p in outcome.tool_results) or "  (none)"
+    uncited = ", ".join(outcome.uncited_note_ids) or "(none detected)"
     return (
         f"BUCKET: {probe.bucket}\n"
         f"PERSONA: {probe.persona}\n"
@@ -81,6 +96,10 @@ def _prompt(probe: Probe, outcome: ProbeOutcome) -> str:
         f"DIRECTION (what a satisfying answer looks like):\n{probe.direction}\n\n"
         f"MUST NOT ASSERT:\n{forbidden}\n\n"
         f"TOOLS THE SYSTEM ACTUALLY CALLED: {tools}\n\n"
+        f"WHAT THOSE TOOLS RETURNED (evidence the answer was entitled to use; previews are\n"
+        f"truncated, so absence here is NOT proof a number was invented):\n{evidence}\n\n"
+        f"NOTE IDS CITED THAT NO TOOL RETURNED (mechanically checked; trust this over your own\n"
+        f"reading): {uncited}\n\n"
         f"ANSWER TO GRADE:\n{outcome.answer or '(no answer was produced)'}"
     )
 
@@ -97,23 +116,47 @@ async def judge_outcome(probe: Probe, outcome: ProbeOutcome) -> Judgement:
     client = AsyncAnthropic()
     response = await client.messages.create(
         model=settings.live_probe_judge_model,
-        max_tokens=1024,
+        # Generous on purpose. At 1024 the judge ran out of budget mid-JSON on long answers, the
+        # closing brace was never emitted, and the parse failure below was recorded as a verdict
+        # of `unserved` — a grading crash reported as a system failure, on 65 of 190 probes.
+        max_tokens=settings.live_probe_judge_max_tokens,
         system=_SYSTEM,
         messages=[{"role": "user", "content": _prompt(probe, outcome)}],
     )
     text = "".join(block.text for block in response.content if block.type == "text").strip()
-    # The judge is told to return JSON only, but a model that wraps it in a fence or a sentence
-    # must not cost the probe its grade — the run is long and re-grading is not free.
+    if response.stop_reason == "max_tokens":
+        logger.warning("judge hit the token ceiling on %s", probe.id)
+        return Judgement(
+            probe_id=probe.id, verdict="ungraded", reason="judge reply hit the token ceiling"
+        )
+    # The judge is told to return JSON only; a fence or a preamble must not cost the probe its
+    # grade. But an unparseable reply is the *absence* of a verdict, never a bad one.
     start, end = text.find("{"), text.rfind("}")
     if start == -1 or end == -1:
         logger.warning("judge returned no JSON object for %s: %s", probe.id, text[:200])
         return Judgement(
-            probe_id=probe.id, verdict="unserved", reason=f"unparseable judge: {text[:200]}"
+            probe_id=probe.id, verdict="ungraded", reason=f"unparseable judge: {text[:200]}"
         )
-    payload = json.loads(text[start : end + 1])
+    try:
+        payload = json.loads(text[start : end + 1])
+    except json.JSONDecodeError as exc:
+        return Judgement(probe_id=probe.id, verdict="ungraded", reason=f"judge JSON error: {exc}")
     return Judgement(
         probe_id=probe.id,
-        verdict=payload.get("verdict", "unserved"),
-        reason=str(payload.get("reason", ""))[:600],
+        verdict=payload.get("verdict", "ungraded"),
+        reason=str(payload.get("reason", "")),
         fabricated_claims=[str(c) for c in payload.get("fabricated_claims", [])][:10],
+    )
+
+
+def judgement_from_transcript(payload: dict[str, object]) -> tuple[Probe, ProbeOutcome]:
+    """Rehydrate one stored transcript so it can be re-graded without re-running the probe.
+
+    Re-grading has to be possible offline. The first run's verdicts were wrong for a reason that
+    had nothing to do with the system under test, and re-asking 190 live questions to correct a
+    grader bug would have changed the thing being measured as well as the measurement.
+    """
+    return (
+        Probe.model_validate(payload["probe"]),
+        ProbeOutcome.model_validate(payload["outcome"]),
     )

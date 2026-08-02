@@ -1,0 +1,45 @@
+{
+  "probe": {
+    "id": "rp-25",
+    "section": 14,
+    "persona": "lab_leader",
+    "bucket": "A",
+    "question": "Before I brief the receiving team, summarise the three things most likely to go wrong with this coupling — and for each one tell me whether that's from our data or from general chemistry.",
+    "expects_tools": [
+      "gather_evidence",
+      "find_notes",
+      "find_knowledge_gaps",
+      "expand_note"
+    ],
+    "forbids_claims": [
+      "a failure mode attributed to the record with no retrieved note behind it",
+      "a frequency, probability or rate for any failure mode",
+      "a note id that did not appear in a tool result"
+    ],
+    "direction": "The evidence-versus-analogy split is the graded behaviour, and the user has asked for it explicitly. Two items are documented and citable in the corpus: aqueous protodeboronation and the oxygen/degassing requirement. A third will most likely be general chemistry — catalyst loading, water content, order of addition — and must be labelled as such rather than dressed up as a record finding. Any frequency claim (\"fails about one run in five\") is invented and a fail. Saying that only two are evidenced and the third is judgement is a better answer than three items that all look sourced."
+  },
+  "outcome": {
+    "probe_id": "rp-25",
+    "section": 14,
+    "persona": "lab_leader",
+    "bucket": "A",
+    "question": "Before I brief the receiving team, summarise the three things most likely to go wrong with this coupling — and for each one tell me whether that's from our data or from general chemistry.",
+    "answer": "",
+    "answered": false,
+    "tools_called": [],
+    "tools_failed": [],
+    "expected_tools_met": false,
+    "uncited_note_ids": [],
+    "failed_loudly": true,
+    "error_code": "internal",
+    "degraded": [],
+    "jobs_started": [],
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "latency_seconds": 1.1,
+    "event_counts": {
+      "error": 1
+    },
+    "transport_error": null
+  }
+}

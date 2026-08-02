@@ -1,0 +1,66 @@
+{
+  "probe": {
+    "id": "op-26",
+    "section": 4,
+    "persona": "lab_leader",
+    "bucket": "B",
+    "question": "Design me a 96-well HTE campaign for the amidation — factor set, number of wells, and which conditions go where, ready to hand to the automation team.",
+    "expects_tools": [
+      "generate_screening_design",
+      "similar_reactions",
+      "gather_evidence"
+    ],
+    "forbids_claims": [
+      "A1 through H12 assigned as follows",
+      "a well coordinate for any condition",
+      "ready to import into the automation worklist",
+      "the plate has been designed"
+    ],
+    "direction": "Delivers the half it genuinely can and refuses the half it cannot, without blurring them. Deliverable: a factor set argued from the indexed amidation records — which coupling agents, bases and solvents are worth carrying, and why those — and the complete factorial run list with its exact count, reconciled against 96 (what to cut if it overshoots, what to add or replicate if it undershoots). Not deliverable: which condition goes in which well, stock concentrations, volumes. There is no plate-layout tooling, so the answer must say so and stop rather than filling the plate. The good version hands the automation team a condition list and names the boundary explicitly as the point where their own software takes over."
+  },
+  "outcome": {
+    "probe_id": "op-26",
+    "section": 4,
+    "persona": "lab_leader",
+    "bucket": "B",
+    "question": "Design me a 96-well HTE campaign for the amidation — factor set, number of wells, and which conditions go where, ready to hand to the automation team.",
+    "answer": "",
+    "answered": false,
+    "tools_called": [
+      "list_attachments",
+      "gather_evidence",
+      "recall_preferences",
+      "find_notes",
+      "find_notes",
+      "expand_note",
+      "expand_note",
+      "expand_note",
+      "expand_note",
+      "expand_note",
+      "expand_note",
+      "expand_note",
+      "expand_note",
+      "expand_note",
+      "find_past_jobs",
+      "ask_clarifying_question"
+    ],
+    "tools_failed": [],
+    "expected_tools_met": true,
+    "uncited_note_ids": [],
+    "failed_loudly": true,
+    "error_code": "internal",
+    "degraded": [],
+    "jobs_started": [],
+    "notes_proposed": [],
+    "asked_clarifying": true,
+    "latency_seconds": 58.89,
+    "event_counts": {
+      "tool_call": 16,
+      "tool_result": 16,
+      "token": 3,
+      "question": 1,
+      "error": 1
+    },
+    "transport_error": null
+  }
+}

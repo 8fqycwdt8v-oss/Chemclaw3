@@ -22,7 +22,7 @@ from pathlib import Path
 
 from chemclaw.core.config import settings
 from chemclaw.evals.live import ProbeOutcome, load_probes, run_probes
-from chemclaw.evals.live_judge import Judgement, judge_outcome
+from chemclaw.evals.live_judge import Judgement, judge_outcome, judgement_from_transcript
 from chemclaw.evals.probe import Probe
 
 logger = logging.getLogger(__name__)
@@ -38,7 +38,7 @@ def _summary(probes: list[Probe], outcomes: list[ProbeOutcome], grades: list[Jud
     lines.append("## Verdicts\n")
     lines.append("| verdict | count | share |")
     lines.append("| --- | ---: | ---: |")
-    for verdict in ("served", "partial", "unserved", "fabricated"):
+    for verdict in ("served", "partial", "unserved", "fabricated", "ungraded"):
         count = verdicts.get(verdict, 0)
         lines.append(f"| {verdict} | {count} | {count / max(len(grades), 1):.0%} |")
 
@@ -71,15 +71,16 @@ def _summary(probes: list[Probe], outcomes: list[ProbeOutcome], grades: list[Jud
         lines.append(f"| median turn | {latencies[len(latencies) // 2]:.1f} s |")
 
     lines.append("\n## By bucket\n")
-    lines.append("| bucket | probes | served | partial | unserved | fabricated |")
-    lines.append("| --- | ---: | ---: | ---: | ---: | ---: |")
+    lines.append("| bucket | probes | served | partial | unserved | fabricated | ungraded |")
+    lines.append("| --- | ---: | ---: | ---: | ---: | ---: | ---: |")
     grade_by_id = {g.probe_id: g for g in grades}
     for bucket in ("A", "B", "C"):
         ids = [p.id for p in probes if p.bucket == bucket]
         counts = Counter(grade_by_id[i].verdict for i in ids if i in grade_by_id)
         lines.append(
             f"| {bucket} | {len(ids)} | {counts.get('served', 0)} | {counts.get('partial', 0)} "
-            f"| {counts.get('unserved', 0)} | {counts.get('fabricated', 0)} |"
+            f"| {counts.get('unserved', 0)} | {counts.get('fabricated', 0)} "
+            f"| {counts.get('ungraded', 0)} |"
         )
 
     fabricated = [g for g in grades if g.verdict == "fabricated"]
@@ -102,7 +103,44 @@ def _summary(probes: list[Probe], outcomes: list[ProbeOutcome], grades: list[Jud
     return "\n".join(lines) + "\n"
 
 
+def _load_transcripts(directory: Path) -> tuple[list[Probe], list[ProbeOutcome]]:
+    """Every stored transcript in `directory`, as the probe/outcome pair that produced it."""
+    probes: list[Probe] = []
+    outcomes: list[ProbeOutcome] = []
+    for path in sorted(directory.glob("*.json")):
+        probe, outcome = judgement_from_transcript(json.loads(path.read_text(encoding="utf-8")))
+        probes.append(probe)
+        outcomes.append(outcome)
+    return probes, outcomes
+
+
 async def _main(args: argparse.Namespace) -> int:
+    if args.regrade:
+        # Re-grade without re-asking. The first run's verdicts were wrong for a reason that had
+        # nothing to do with the system under test — a grader token ceiling — and re-running 190
+        # live questions to fix a grader bug would have changed the subject as well as the
+        # measurement.
+        directory = Path(args.transcript_dir or settings.live_probe_transcript_dir)
+        probes, outcomes = _load_transcripts(directory)
+        logger.info("re-grading %d stored transcripts from %s", len(outcomes), directory)
+        by_id = {p.id: p for p in probes}
+        semaphore = asyncio.Semaphore(settings.live_probe_concurrency)
+
+        async def regrade(outcome: ProbeOutcome) -> Judgement:
+            async with semaphore:
+                return await judge_outcome(by_id[outcome.probe_id], outcome)
+
+        regraded: list[Judgement] = list(await asyncio.gather(*(regrade(o) for o in outcomes)))
+        report = _summary(probes, outcomes, regraded)
+        print(report)
+        out = directory.parent
+        (out / "summary.md").write_text(report, encoding="utf-8")
+        (out / "grades.json").write_text(
+            json.dumps([g.model_dump() for g in regraded], indent=2, ensure_ascii=False),
+            encoding="utf-8",
+        )
+        return 0
+
     probes = load_probes(args.probe_dir)
     if args.only:
         wanted = set(args.only.split(","))
@@ -151,6 +189,11 @@ def main() -> int:
     parser.add_argument("--limit", type=int, default=0, help="run at most N probes")
     parser.add_argument(
         "--no-judge", action="store_true", help="skip grading (mechanical signals only)"
+    )
+    parser.add_argument(
+        "--regrade",
+        action="store_true",
+        help="re-grade stored transcripts without re-running any probe",
     )
     return asyncio.run(_main(parser.parse_args()))
 

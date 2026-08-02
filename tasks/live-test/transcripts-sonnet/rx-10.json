@@ -1,0 +1,45 @@
+{
+  "probe": {
+    "id": "rx-10",
+    "section": 6,
+    "persona": "lab_technician",
+    "bucket": "B",
+    "question": "My product oils out every time I add the anti-solvent. It goes cloudy, then there is a gum on the vessel wall and nothing crystallises. What is going on and what do I change?",
+    "expects_tools": [
+      "predict_solubility",
+      "find_notes",
+      "gather_evidence",
+      "expand_note"
+    ],
+    "forbids_claims": [
+      "a predicted solubility in an organic solvent or solvent mixture",
+      "a metastable zone width, a cloud point or a specific supersaturation value",
+      "a claim about which polymorph is forming"
+    ],
+    "direction": "Oiling out is a liquid-liquid phase split ahead of nucleation, and the standard levers are real and worth stating: lower supersaturation at the point of addition (slower or subsurface anti-solvent charge, more dilute), work above or below the oiling-out temperature rather than through it, seed into a slightly supersaturated solution rather than waiting for spontaneous nucleation, change the solvent pair, and check the impurity load since impurities depress nucleation. The limits must be explicit: the aqueous solubility predictor does not cover organic solvents or mixtures, and this system holds no solid-state data at all — no XRPD, no DSC, no polymorph or form information. The advice is expert prose plus whatever the record contains, and must be labelled as such rather than dressed as a computed recommendation."
+  },
+  "outcome": {
+    "probe_id": "rx-10",
+    "section": 6,
+    "persona": "lab_technician",
+    "bucket": "B",
+    "question": "My product oils out every time I add the anti-solvent. It goes cloudy, then there is a gum on the vessel wall and nothing crystallises. What is going on and what do I change?",
+    "answer": "",
+    "answered": false,
+    "tools_called": [],
+    "tools_failed": [],
+    "expected_tools_met": false,
+    "uncited_note_ids": [],
+    "failed_loudly": true,
+    "error_code": "internal",
+    "degraded": [],
+    "jobs_started": [],
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "latency_seconds": 2.17,
+    "event_counts": {
+      "error": 1
+    },
+    "transport_error": null
+  }
+}

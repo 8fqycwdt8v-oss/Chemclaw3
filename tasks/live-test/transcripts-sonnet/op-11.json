@@ -1,0 +1,66 @@
+{
+  "probe": {
+    "id": "op-11",
+    "section": 3,
+    "persona": "lab_technician",
+    "bucket": "A",
+    "question": "Buchwald screen, 4-bromoanisole + morpholine, NaOtBu 1.4 eq, toluene, 100 C, 8 h.\nXPhos 44%, SPhos 51%, RuPhos 71%, BINAP 23%.\nWhat ligand next, and why that one instead of just running RuPhos again?",
+    "expects_tools": [
+      "suggest_next_experiment",
+      "compute_electronic_properties"
+    ],
+    "forbids_claims": [
+      "the descriptors capture the ligands' steric bulk or bite angle",
+      "RuPhos is the global optimum",
+      "the model has data on a ligand that was never run",
+      "a yield for an untried ligand stated as known"
+    ],
+    "direction": "Treats ligand as a categorical parameter and — this is the crux — featurizes it, supplying a structure per category so the surrogate sees electronic descriptors instead of four opaque labels. It must say why: without descriptors the model's belief about a ligand nobody ran is just the average of the ones that were run, so it could never recommend a new one. It then proposes at least one untried ligand and answers the \"why not RuPhos again\" question in explore/exploit terms — re-running the best is exploitation of a region already learned, while the proposal buys information where the model is least certain. Two limits must be stated: the descriptors are electronic only, so two ligands differing mainly in bulk look similar to the model, and a wrong SMILES silently describes a different molecule."
+  },
+  "outcome": {
+    "probe_id": "op-11",
+    "section": 3,
+    "persona": "lab_technician",
+    "bucket": "A",
+    "question": "Buchwald screen, 4-bromoanisole + morpholine, NaOtBu 1.4 eq, toluene, 100 C, 8 h.\nXPhos 44%, SPhos 51%, RuPhos 71%, BINAP 23%.\nWhat ligand next, and why that one instead of just running RuPhos again?",
+    "answer": "",
+    "answered": false,
+    "tools_called": [
+      "gather_evidence",
+      "find_past_jobs",
+      "expand_note",
+      "expand_note",
+      "resolve_compound",
+      "resolve_compound",
+      "load_skill",
+      "find_notes",
+      "find_notes",
+      "resolve_compound",
+      "resolve_compound",
+      "resolve_compound",
+      "resolve_compound",
+      "find_notes",
+      "find_notes",
+      "find_notes",
+      "screen_hazards",
+      "expand_note",
+      "expand_note"
+    ],
+    "tools_failed": [],
+    "expected_tools_met": false,
+    "uncited_note_ids": [],
+    "failed_loudly": false,
+    "error_code": null,
+    "degraded": [],
+    "jobs_started": [],
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "latency_seconds": 140.13,
+    "event_counts": {
+      "tool_call": 19,
+      "tool_result": 19,
+      "answer": 1
+    },
+    "transport_error": null
+  }
+}

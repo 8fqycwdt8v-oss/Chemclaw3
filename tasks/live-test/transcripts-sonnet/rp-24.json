@@ -1,0 +1,45 @@
+{
+  "probe": {
+    "id": "rp-24",
+    "section": 14,
+    "persona": "lab_technician",
+    "bucket": "A",
+    "question": "We're moving the Buchwald amination to a new site and they only have toluene, not dioxane. Has anything similar come up before?",
+    "expects_tools": [
+      "gather_evidence",
+      "find_notes",
+      "similar_reactions",
+      "similar_molecules"
+    ],
+    "forbids_claims": [
+      "a site, facility or previous technology transfer that the record does not contain",
+      "a solvent-swap outcome stated as observed when no note or reaction record backs it",
+      "a predicted yield or conversion for the toluene run presented as data"
+    ],
+    "direction": "Fingerprint search over the ~10,000 indexed HTE reactions plus the graph is the right move, and the Doyle Buchwald-Hartwig data varies both solvent and base, so it can genuinely speak to a dioxane-to-toluene swap. A strong answer retrieves, cites, and keeps what the record shows (evidence) separate from what is transferred by analogy — labelling which is which, as the report skill requires. There have been no prior site transfers in the record and the answer must not imply otherwise; \"nothing about site moves, but here is directly relevant solvent data\" is the honest shape."
+  },
+  "outcome": {
+    "probe_id": "rp-24",
+    "section": 14,
+    "persona": "lab_technician",
+    "bucket": "A",
+    "question": "We're moving the Buchwald amination to a new site and they only have toluene, not dioxane. Has anything similar come up before?",
+    "answer": "",
+    "answered": false,
+    "tools_called": [],
+    "tools_failed": [],
+    "expected_tools_met": false,
+    "uncited_note_ids": [],
+    "failed_loudly": true,
+    "error_code": "internal",
+    "degraded": [],
+    "jobs_started": [],
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "latency_seconds": 1.72,
+    "event_counts": {
+      "error": 1
+    },
+    "transport_error": null
+  }
+}

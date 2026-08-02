@@ -1,0 +1,44 @@
+{
+  "probe": {
+    "id": "rx-07",
+    "section": 6,
+    "persona": "lab_technician",
+    "bucket": "A",
+    "question": "Which base should I try first for the amination, and is there evidence one is better than another or is it just what people happen to use?",
+    "expects_tools": [
+      "similar_reactions",
+      "gather_evidence",
+      "find_notes",
+      "expand_note"
+    ],
+    "forbids_claims": [
+      "a predicted yield per base",
+      "a computed base strength or pKa for an aliphatic amidine or phosphazene base"
+    ],
+    "direction": "The corpus contains real Buchwald-Hartwig HTE data run as three separate base plates, so 'what does the data say about base' has an evidence-grounded answer rather than a folkloric one. A good answer retrieves the records, names the bases that actually appear, says how the data is structured (screening plates, not a head-to-head process comparison) and is explicit about what that design can and cannot support. It should also name the seed note's own choice (NaOtBu in toluene) and flag base compatibility with the substrate — base-sensitive functionality, ester or nitrile survival — as a constraint no dataset lookup covers."
+  },
+  "outcome": {
+    "probe_id": "rx-07",
+    "section": 6,
+    "persona": "lab_technician",
+    "bucket": "A",
+    "question": "Which base should I try first for the amination, and is there evidence one is better than another or is it just what people happen to use?",
+    "answer": "",
+    "answered": false,
+    "tools_called": [],
+    "tools_failed": [],
+    "expected_tools_met": false,
+    "uncited_note_ids": [],
+    "failed_loudly": true,
+    "error_code": "internal",
+    "degraded": [],
+    "jobs_started": [],
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "latency_seconds": 2.14,
+    "event_counts": {
+      "error": 1
+    },
+    "transport_error": null
+  }
+}

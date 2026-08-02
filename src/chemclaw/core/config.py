@@ -1414,6 +1414,10 @@ class EvalSettings(BaseSettings):
     # stronger model than the agent under test: grading is where model quality buys the most,
     # and it is one call per probe against the agent's many.
     live_probe_judge_model: str = "claude-sonnet-5"
+    # The judge's own output ceiling. It must clear a verdict plus a reason plus a claims array
+    # comfortably: at 1024 the reply was truncated mid-JSON on long answers and the parse failure
+    # was recorded as a verdict of `unserved`, mislabelling 65 of 190 probes in the first run.
+    live_probe_judge_max_tokens: int = Field(default=4096, gt=0)
     # Minimum share of the pinned hazard rules that must still fire on their reference molecules
     # (`hazard_flag_recall`, D-080). 1.0: the rule table is small enough that one
     # silently-broken SMARTS means a whole hazard class goes unflagged, which the screen reports

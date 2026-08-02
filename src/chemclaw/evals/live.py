@@ -27,7 +27,6 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-import re
 import time
 from pathlib import Path
 from typing import Any
@@ -38,12 +37,33 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from chemclaw.core.config import settings
 from chemclaw.evals.probe import Probe, ProbeSet
+from chemclaw.kg.note import cited_ids
 
 logger = logging.getLogger(__name__)
 
-# A wikilink in an answer, `[[note-id]]` or `[[rel:note-id]]` — how a cited note is written
-# everywhere in this system. Used to check a citation against what retrieval actually returned.
-_WIKILINK = re.compile(r"\[\[(?:[a-z-]+:)?([A-Za-z0-9][A-Za-z0-9._-]*)\]\]")
+# Citations are extracted with `chemclaw.kg.note.cited_ids` — the same function the note schema and
+# the answer verifier use — never a private regex. A stricter local copy reported a clean citation
+# record for an answer whose nine `[[**id**]]` links were every one of them dangling: the production
+# pattern matched them as targets containing `*`, the local one matched nothing, and "cites nothing"
+# scored identically to "every citation grounded". Two readers for one syntax is how a gate comes to
+# disagree with the thing it gates. `cited_ids` also strips a typed edge down to its target, so
+# `[[evidence-for:x]]` and `[[x]]` are one citation of `x`.
+
+
+class ToolResult(BaseModel):
+    """One tool result as it appeared on the stream: which tool, and what it returned.
+
+    Kept on the outcome because the judge needs it. Passing tool *names* alone made a grader
+    unable to tell a number quoted from a merged note from one invented whole, and it called
+    verbatim quotations "fabricated" at a 40% rate on one slice. The preview is truncated by the
+    front door's own UI budget, so absence here is weak evidence of invention — which is exactly
+    what the judge is told.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    tool: str
+    preview: str = ""
 
 
 class ProbeOutcome(BaseModel):
@@ -65,6 +85,7 @@ class ProbeOutcome(BaseModel):
     answer: str = ""
     answered: bool = False
     tools_called: list[str] = Field(default_factory=list)
+    tool_results: list[ToolResult] = Field(default_factory=list)
     tools_failed: list[str] = Field(default_factory=list)
     expected_tools_met: bool | None = None
     # Note ids the answer cites that no tool result ever returned. The highest-severity signal in
@@ -125,7 +146,7 @@ def _score_citations(answer: str, tool_previews: list[str]) -> list[str]:
     id that the model produced from memory pass simply because the note happens to exist.
     """
     seen = "\n".join(tool_previews)
-    return sorted({note_id for note_id in _WIKILINK.findall(answer) if note_id not in seen})
+    return sorted({note_id for note_id in cited_ids(answer) if note_id not in seen})
 
 
 async def run_probe(client: httpx.AsyncClient, probe: Probe) -> ProbeOutcome:
@@ -167,7 +188,11 @@ async def run_probe(client: httpx.AsyncClient, probe: Probe) -> ProbeOutcome:
                 if kind == "tool_call":
                     outcome.tools_called.append(str(event.get("tool", "")))
                 elif kind == "tool_result":
-                    previews.append(str(event.get("preview", "")))
+                    preview = str(event.get("preview", ""))
+                    previews.append(preview)
+                    outcome.tool_results.append(
+                        ToolResult(tool=str(event.get("tool", "")), preview=preview)
+                    )
                 elif kind == "tool_failed":
                     outcome.tools_failed.append(str(event.get("tool", "")))
                 elif kind == "capability_degraded":

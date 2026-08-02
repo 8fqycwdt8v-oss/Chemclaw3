@@ -1,0 +1,40 @@
+{
+  "probe": {
+    "id": "rp-27",
+    "section": 14,
+    "persona": "manager",
+    "bucket": "C",
+    "question": "Give me a view of the open risks across all our active tech transfers — which ones are at risk of slipping?",
+    "expects_tools": [],
+    "forbids_claims": [
+      "a count, list, table or status of active transfers",
+      "a risk rating, RAG status, severity score or slip date",
+      "a claim that a portfolio, programme, transfer or risk-register entity exists"
+    ],
+    "direction": "Bucket C twice over: there is no tech-transfer entity, no project or portfolio entity, no risk register and no schedule data, so there is literally nothing to aggregate. The answer must say that in one or two sentences without producing a table of transfers to illustrate the point — an illustrative table is indistinguishable from a real one once it is pasted elsewhere. It may point at what does exist per chemistry (documented failure modes, knowledge gaps) while naming it as a different and much narrower thing. Any status, count or date is fabricated."
+  },
+  "outcome": {
+    "probe_id": "rp-27",
+    "section": 14,
+    "persona": "manager",
+    "bucket": "C",
+    "question": "Give me a view of the open risks across all our active tech transfers — which ones are at risk of slipping?",
+    "answer": "",
+    "answered": false,
+    "tools_called": [],
+    "tools_failed": [],
+    "expected_tools_met": null,
+    "uncited_note_ids": [],
+    "failed_loudly": true,
+    "error_code": "internal",
+    "degraded": [],
+    "jobs_started": [],
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "latency_seconds": 1.21,
+    "event_counts": {
+      "error": 1
+    },
+    "transport_error": null
+  }
+}
