@@ -9,16 +9,17 @@ molecule helpers (`chem`, `reagents`), and the Temporal client factory.
 `connectors` — nothing. Everything else builds on it, so a single edge the other way would make the
 dependency graph a cycle and the four layers a suggestion. `tests/test_layering.py` runs each
 kernel module in a clean interpreter and asserts each sibling is absent from `sys.modules`
-afterwards: 11 modules × 12 siblings, so an accidental import fails as a named test rather than as a
-slow import at startup.
+afterwards — the module list is derived from disk, not maintained by hand, so an accidental import
+fails as a named test rather than as a slow import at startup.
 
-`config.py` is the one `pydantic-settings` source for the whole system — every URL, path, threshold,
+`config/` is the one `pydantic-settings` source for the whole system — every URL, path, threshold,
 timeout and model name, `CHEMCLAW_`-prefixed and `extra="forbid"`. There is deliberately no second
 config system anywhere, including in-cluster: the Helm `ConfigMap` keys mirror these field names
 exactly.
 
-It is also by some distance the largest file here (~1700 lines, 21 `Settings` classes). That is a
-consequence of the rule, not a violation of it: one settings object means one file's worth of
-fields, and splitting it into a package would buy browsability at the cost of the single import
-seam (`from chemclaw.core.config import settings`, in 118 places) that makes the rule enforceable.
-Considered and declined in D-156.
+It is a package of one module per domain section (the D-072 mixins), with the flat `Settings`
+class composed — and the cross-section startup rules enforced — in its `__init__.py`. D-156
+declined to fold that split into a restructure that was otherwise a set of moves, and noted it was
+cheap whenever wanted because the import seam does not move; it was taken later, on exactly that
+argument. One settings object, one import (`from chemclaw.core.config import settings`) — the seam
+every call site uses, unchanged from the single-file era.

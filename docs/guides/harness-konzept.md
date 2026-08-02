@@ -198,7 +198,7 @@ PR-Gate, das *nach* der Wissensproduktion greift (siehe §6).
 
 ## 8. Config & Leitplanken (keine Magic Numbers, G3)
 
-Alles über **eine** `pydantic-settings`-Quelle (`src/chemclaw/core/config.py`), ENV-überschreibbar.
+Alles über **eine** `pydantic-settings`-Quelle (`src/chemclaw/core/config/`), ENV-überschreibbar.
 **Implementiert** sind bewusst nur die *tatsächlich konsumierten* Felder (config.py-Disziplin:
 keine „für später"-Settings):
 

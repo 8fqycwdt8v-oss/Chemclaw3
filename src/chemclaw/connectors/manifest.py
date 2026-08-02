@@ -31,7 +31,7 @@ tool stay in core by rule, and each is a rule rather than a backlog item:
 
 Two shapes vary by kind and are therefore discriminated unions: the transport a connector is
 reached over, and how we authenticate to it. They are unions *here*, in the manifest, rather than
-in `core/config.py` — which is the whole point, and is now the rule rather than this
+in `core/config/` — which is the whole point, and is now the rule rather than this
 file's preference: config says which attached things exist and where, a manifest says what
 each one is
 (D-118, D-120). The two config-side unions this docstring used to cite as precedent,

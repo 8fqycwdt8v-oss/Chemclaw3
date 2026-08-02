@@ -26,7 +26,7 @@ does not read this file, so the row survived. Fingerprints deploy as `connector-
 ## Config & secrets (F6-T2 / F6-T6)
 
 - **Non-secret** config is the Helm `values.yaml` `config:` block → a `ConfigMap` → `CHEMCLAW_*` env.
-  Keys mirror `src/chemclaw/core/config.py`'s `Settings` **exactly** — there is no second config
+  Keys mirror `src/chemclaw/core/config/`'s `Settings` **exactly** — there is no second config
   system in-cluster.
 - **Plain secrets are the exceptions, not the model.** Each is a credential for a system that does
   not speak Entra, and the set is `values.yaml`'s `secrets.keys` — declared there with the argument

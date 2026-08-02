@@ -248,7 +248,7 @@ def test_the_sync_never_deletes_what_it_is_about_to_replace() -> None:
 def test_the_image_carries_the_revision_it_was_built_from() -> None:
     """`deployment_revision` must be settable by a build, or AG-14 reads as met while being unmet.
 
-    `core/config.py` has always said the F6 image build injects the revision, and until REV-17
+    `core/config/` has always said the F6 image build injects the revision, and until REV-17
     no build did: nothing in the Containerfile, the chart or CI set `CHEMCLAW_DEPLOYMENT_REVISION`,
     so every audit record in every deployment carried the literal `"unknown"`. The whole point of
     the field is tying a past agent result to the exact prompt/skill/config version that produced
