@@ -17,7 +17,6 @@ This is the `make skill-validate` gate: it exits non-zero listing the problems, 
 drift like `kg-validate` catches note drift. Read-only; touches nothing.
 """
 
-import sys
 from pathlib import Path
 
 import frontmatter
@@ -122,7 +121,7 @@ def _enable_list_problems(found_names: set[str]) -> list[str]:
     ]
 
 
-def main() -> None:
+def main() -> int:
     """Validate every skill; print problems and exit non-zero if any (the CI gate)."""
     # The same dirs `build_agent` discovers from: the configured tree plus every enabled connector
     # bundle's own `skills/`, so a bundled skill is validated exactly like a shipped one.
@@ -131,9 +130,10 @@ def main() -> None:
         print("SKILL.md validation failed:")
         for problem in problems:
             print(f"  - {problem}")
-        sys.exit(1)
+        return 1
     print("SKILL.md validation passed.")
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

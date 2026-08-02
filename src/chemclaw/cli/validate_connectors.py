@@ -24,7 +24,6 @@ Read-only; touches nothing.
 """
 
 import inspect
-import sys
 from pathlib import Path
 from typing import Any
 
@@ -154,6 +153,22 @@ def _job_problems(manifest: ConnectorManifest) -> list[str]:
     return problems
 
 
+def _connector_urls_problems(discovered_names: set[str]) -> list[str]:
+    """Check that every key in `connector_urls` names a discovered bundle (rule 5).
+
+    A typo'd key is silently ignored by `_endpoint_url`, falling back to the manifest's
+    dev-loopback default, which is unreachable in a cluster. The symptom is a WARNING plus a
+    degraded `/readyz`, identical to a transient outage — so a configuration bug presents as an
+    infrastructure problem. This check forces any configured URL to name a real bundle.
+    """
+    return [
+        f"settings.connector_urls names unknown connector {key!r}; "
+        f"discovered connectors: {sorted(discovered_names)}"
+        for key in sorted(settings.connector_urls)
+        if key not in discovered_names
+    ]
+
+
 def validate_connectors() -> list[str]:
     """Return one problem string per violation across every discovered bundle (empty = all good).
 
@@ -166,10 +181,13 @@ def validate_connectors() -> list[str]:
     except ConnectorError as exc:
         return [str(exc)]
     problems: list[str] = []
+    discovered_names = {manifest.name for bundle, manifest in found.values()}
     for bundle, manifest in found.values():
         problems.extend(_bundle_content_problems(bundle, manifest))
         problems.extend(_tool_surface_problems(manifest))
         problems.extend(_job_problems(manifest))
+    # Check that connector_urls configuration is valid (rule 5).
+    problems.extend(_connector_urls_problems(discovered_names))
     try:
         # Two properties of the enabled *set*, not of any one manifest: `connectors_enabled` naming
         # a bundle that exists (rule 1), and no two enabled connectors claiming one job name (rule
@@ -184,16 +202,17 @@ def validate_connectors() -> list[str]:
     return problems
 
 
-def main() -> None:
+def main() -> int:
     """Validate every connector bundle; print problems and exit non-zero if any (the CI gate)."""
     problems = validate_connectors()
     if problems:
         print("connector validation failed:")
         for problem in problems:
             print(f"  - {problem}")
-        sys.exit(1)
+        return 1
     print("connector validation passed.")
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

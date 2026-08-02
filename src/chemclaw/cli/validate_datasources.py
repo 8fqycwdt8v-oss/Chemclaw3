@@ -27,7 +27,6 @@ Read-only; touches nothing.
 """
 
 import inspect
-import sys
 
 from chemclaw.core.config import settings
 from chemclaw.ingest.sources.registry import DataSourceError, discovered, resolve_half
@@ -80,16 +79,17 @@ def validate_datasources() -> list[str]:
     return problems
 
 
-def main() -> None:
+def main() -> int:
     """Validate every manifest; print problems and exit non-zero if any (the CI gate)."""
     problems = validate_datasources()
     if problems:
         print("data source validation failed:")
         for problem in problems:
             print(f"  - {problem}")
-        sys.exit(1)
+        return 1
     print("data source validation passed.")
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

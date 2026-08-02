@@ -15,8 +15,6 @@ checks a per-file schema cannot make, because both are about the rest of the sys
 Read-only; touches nothing.
 """
 
-import sys
-
 from chemclaw.agent.profiles import registered_profile_names
 from chemclaw.connectors.registry import enabled as enabled_connectors
 from chemclaw.templates.manifest import AgentStep, JobStep, Template, ToolStep
@@ -89,16 +87,17 @@ def validate_templates() -> list[str]:
     return problems
 
 
-def main() -> None:
+def main() -> int:
     """Validate every template; print problems and exit non-zero if any (the CI gate)."""
     problems = validate_templates()
     if problems:
         print("template validation failed:")
         for problem in problems:
             print(f"  - {problem}")
-        sys.exit(1)
+        return 1
     print("template validation passed.")
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())
