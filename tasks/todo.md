@@ -30,14 +30,19 @@ restructure.
 
 ## R1 — Turn armed guards into tests + ops one-liners
 
-- [ ] **R1.1 [Sonnet]** R3 rewrite `test_layering.py` as a derived allow-list (folds in the 3
+- [x] **R1.0 [self]** `test_repo_map.py` judged files by absolute path, so any checkout under a
+      dot-directory found 0 directories and every assertion degenerated. Blocked every worktree agent.
+- [x] **R1.6 [Sonnet]** Register `ProfileError` + `AuthorizationError` (and two subclasses the new
+      completeness walk found) in `_BAD_DATA_TYPES`; delete the false retry claim.
+
+- [x] **R1.1 [Sonnet]** R3 rewrite `test_layering.py` as a derived allow-list (folds in the 3
       missing core modules + the false "nothing imports cli" premise).
-- [ ] **R1.2 [Sonnet]** H1 `CurrentUser` alias + route-coverage test (prereq for the decomposition).
-- [ ] **R1.3 [Haiku]** Ops one-liners: F5 pipefail, F1 port, F6 `.PHONY`, F9 concurrency, F10
+- [x] **R1.2 [Sonnet]** H1 `CurrentUser` alias + route-coverage test (prereq for the decomposition).
+- [x] **R1.3 [Haiku]** Ops one-liners: F5 pipefail, F1 port, F6 `.PHONY`, F9 concurrency, F10
       permissions, F11 uv cache, F12 syft pin, F13 helm pin, F7 dedupe deps-audit, F8 `make ci`.
-- [ ] **R1.4 [Haiku]** Core-4 entrypoint-default parity test; H3 refuse `workers>1`; H6 conflict
+- [x] **R1.4 [Haiku]** Core-4 entrypoint-default parity test; H3 refuse `workers>1`; H6 conflict
       scope label; Test-5 relax `test_deferred_register` threshold.
-- [ ] **R1.5 [Sonnet]** Test-1 three untested Postgres classes; Science-5 safety validator/eager-load.
+- [x] **R1.5 [Sonnet]** Test-1 three untested Postgres classes; Science-5 safety validator/eager-load.
 
 ## R2 — Structural moves (serial)
 

@@ -56,7 +56,11 @@ def _rows() -> list[list[str]]:
 def test_the_register_has_rows_to_check() -> None:
     """Guard the guard: a parse that silently matched nothing would pass every test below."""
     rows = _rows()
-    assert len(rows) > 15
+    assert len(rows) > 0, (
+        "the register is empty; this test would silently pass if the file contained no rows. "
+        "As the refactor pays down the backlog, the row count will legitimately drop below "
+        "previous thresholds — this guard's real purpose is to reject the degenerate empty case."
+    )
     assert all(len(cells) == 3 for cells in rows), "every row is item | why | trigger"
 
 

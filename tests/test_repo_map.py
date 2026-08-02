@@ -55,8 +55,15 @@ def _tracked_directories(parent: Path) -> set[str]:
     """
 
     def has_content(directory: Path) -> bool:
+        # Judge each file by its path *below* `directory`, never by its absolute path. `rglob`
+        # yields absolute paths, so testing every part meant one dot-segment anywhere above the
+        # repo — `/home/u/.local/src/chemclaw`, or the `.claude/worktrees/<id>/` checkout every
+        # background agent runs in — marked every file hidden, emptied every directory, and failed
+        # this suite on where the clone sits rather than on what it contains. The guard is about
+        # caches and husks *inside* the tree; the directory's own name is filtered below.
         return any(
-            path.is_file() and not any(part.startswith((".", "__")) for part in path.parts)
+            path.is_file()
+            and not any(part.startswith((".", "__")) for part in path.relative_to(directory).parts)
             for path in directory.rglob("*")
         )
 
@@ -70,6 +77,31 @@ def _tracked_directories(parent: Path) -> set[str]:
 def _mapped_names() -> set[str]:
     """Every directory `ARCHITECTURE.md` claims exists, from either of its two tables."""
     return set(_ROW.findall(_ARCHITECTURE.read_text(encoding="utf-8")))
+
+
+def test_directories_are_found_from_a_checkout_under_a_dot_directory(tmp_path: Path) -> None:
+    """Where the clone sits must not change what this suite sees.
+
+    `_tracked_directories` walks with `rglob`, which yields absolute paths, so judging the
+    hidden/cache filter on every part meant a single dot-segment *above* the repo emptied every
+    directory: `_tracked_directories` returned `set()`, and the guards in the tests below turned
+    a real map error into "no subpackages found". That is not hypothetical — every background
+    agent works in a `.claude/worktrees/<id>/` checkout, where all four tests in this file failed
+    on path location alone while CI stayed green.
+
+    A fixture tree under a dot-named parent is the whole proof: the same content must be found
+    there as anywhere else, and a genuinely hidden child inside it must still be ignored.
+    """
+    root = tmp_path / ".agent-worktree" / "repo"
+    (root / "pkg").mkdir(parents=True)
+    (root / "pkg" / "mod.py").write_text("", encoding="utf-8")
+    (root / "cached" / "__pycache__").mkdir(parents=True)
+    (root / "cached" / "__pycache__" / "mod.pyc").write_text("", encoding="utf-8")
+
+    found = _tracked_directories(root)
+
+    assert "pkg" in found, "a real directory vanished because the checkout sits under a dot-path"
+    assert "cached" not in found, "a directory holding only caches must still count as empty"
 
 
 def test_every_subpackage_has_a_readme() -> None:

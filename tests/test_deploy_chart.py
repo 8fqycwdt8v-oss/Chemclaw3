@@ -904,17 +904,42 @@ def test_the_front_door_is_launched_with_transport_bounds() -> None:
     Every value comes from a setting rather than a literal in the script, for the usual reason and
     for a second one: these are the only knobs an operator must tune against the *connection* count,
     and buried in a shell script is where they would never be found.
+
+    The bash fallback values (the `:-N` defaults in the entrypoint) must match the Python `Settings`
+    field defaults so that neither side can drift from the other. They currently agree; this test
+    is a regression guard, not a discovery (verify by changing one side and watching it fail).
     """
     entrypoint = (DEPLOY / "entrypoint.sh").read_text()
-    for flag, setting in (
-        ("--limit-concurrency", "CHEMCLAW_SERVICE_MAX_CONNECTIONS"),
-        ("--timeout-keep-alive", "CHEMCLAW_SERVICE_KEEPALIVE_SECONDS"),
-        ("--h11-max-incomplete-event-size", "CHEMCLAW_SERVICE_MAX_HEADER_BYTES"),
-    ):
-        assert flag in entrypoint, f"uvicorn is launched without {flag}"
-        assert setting in entrypoint, f"{flag} is a literal rather than reading {setting}"
+    # Mapping: env var name → (flag name, Settings field name)
+    checks = [
+        ("CHEMCLAW_SERVICE_PORT", "--port", "service_port"),
+        ("CHEMCLAW_SERVICE_MAX_CONNECTIONS", "--limit-concurrency", "service_max_connections"),
+        ("CHEMCLAW_SERVICE_KEEPALIVE_SECONDS", "--timeout-keep-alive", "service_keepalive_seconds"),
+        (
+            "CHEMCLAW_SERVICE_MAX_HEADER_BYTES",
+            "--h11-max-incomplete-event-size",
+            "service_max_header_bytes",
+        ),
+    ]
 
     from chemclaw.core.config import settings
+
+    for env_var, flag, field_name in checks:
+        assert flag in entrypoint, f"uvicorn is launched without {flag}"
+        assert env_var in entrypoint, f"{flag} is a literal rather than reading {env_var}"
+
+        # Extract the bash fallback value: find `${ENV_VAR:-N}` and extract N
+        pattern = rf"\$\{{{env_var}:-(\d+)\}}"
+        match = re.search(pattern, entrypoint)
+        assert match, f"{env_var} fallback not found in entrypoint.sh"
+        bash_value = int(match.group(1))
+
+        # Compare with the Python default
+        python_value = getattr(settings, field_name)
+        assert bash_value == python_value, (
+            f"{env_var} bash fallback {bash_value} disagrees with "
+            f"settings.{field_name} {python_value}"
+        )
 
     assert settings.service_max_connections > settings.service_max_concurrent_turns, (
         "the connection ceiling is at or below the turn cap, so a connection merely *waiting* for "
@@ -979,10 +1004,10 @@ def test_the_supply_chain_has_a_gate_that_can_fail() -> None:
     rather than guessing at it.
     """
     image_workflow = (DEPLOY.parent / ".github" / "workflows" / "image.yml").read_text()
-    assert "pip-audit" in image_workflow, "no dependency scan"
+    assert "make deps-audit" in image_workflow, "no dependency scan in workflow"
     assert "syft" in image_workflow and "upload-artifact" in image_workflow, "no retained SBOM"
-    assert "deps-audit:" in (DEPLOY.parent / "Makefile").read_text(), (
-        "CI runs a scan a developer cannot run locally"
+    assert "pip-audit" in (DEPLOY.parent / "Makefile").read_text(), (
+        "deps-audit target must invoke pip-audit"
     )
     # The *image* scan is deliberately not asserted here, and the reason is in `BACKLOG.md`: it
     # ran, it found three real classes of problem now fixed in `deploy/Containerfile`, and it then

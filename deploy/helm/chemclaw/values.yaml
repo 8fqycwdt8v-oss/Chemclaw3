@@ -195,10 +195,11 @@ migrateJob:
 resources:
   service:
     # Raised from 1 CPU. The front door does real CPU work off its event loop now (RDKit, cache-key
-    # hashing and token validation run in worker threads), and CHEMCLAW_SERVICE_UVICORN_WORKERS can
-    # add processes on top — both are pointless against a 1-CPU limit, which was the ceiling a load
-    # test hit. The request stays modest so scheduling density is unchanged; only the burst headroom
-    # grows.
+    # hashing and token validation run in worker threads), which is pointless against a 1-CPU limit
+    # — the ceiling a load test hit. Adding processes is not the lever: CHEMCLAW_SERVICE_UVICORN_WORKERS
+    # is refused above 1 (five per-process guarantees break across processes), so more front-door
+    # CPU means more replicas. The request stays modest so scheduling density is unchanged; only the
+    # burst headroom grows.
     requests: { cpu: "500m", memory: "512Mi" }
     limits: { cpu: "2", memory: "1Gi" }
   # The default for every worker Deployment, core's and a bundle's. A bundle that needs different

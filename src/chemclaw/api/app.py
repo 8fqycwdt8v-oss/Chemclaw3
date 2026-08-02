@@ -28,7 +28,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Protocol
 
-from fastapi import Depends, FastAPI, HTTPException, UploadFile
+from fastapi import FastAPI, HTTPException, UploadFile
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, field_validator
 from sse_starlette.sse import EventSourceResponse
@@ -66,8 +66,9 @@ from chemclaw.agent.plan_approval_store import ApprovalStore, plan_approval_stor
 from chemclaw.agent.profile_discovery import load_profiles
 from chemclaw.agent.profiles import get_profile
 from chemclaw.agent.session_events import stream_new_events
-from chemclaw.api.auth import Principal, require_principal
+from chemclaw.api.auth import Principal
 from chemclaw.api.budget import BudgetExceeded, BudgetTracker
+from chemclaw.api.deps import CurrentUser
 from chemclaw.api.events import ErrorEvent, JobCompletedEvent, QueuedEvent
 from chemclaw.api.metrics import CONTENT_TYPE, METRICS
 from chemclaw.api.runner import run_turn
@@ -929,8 +930,8 @@ def create_app(
 
     @app.post("/sessions")
     async def create_session(
+        principal: CurrentUser,
         body: SessionIn | None = None,
-        principal: Principal = Depends(require_principal),
     ) -> SessionOut:
         """Start a new conversation session and return its id (requires an authenticated user).
 
@@ -963,7 +964,7 @@ def create_app(
 
     @app.get("/sessions")
     async def list_sessions(
-        principal: Principal = Depends(require_principal),
+        principal: CurrentUser,
     ) -> list[SessionSummary]:
         """The caller's own sessions, newest first — the conversation list.
 
@@ -990,7 +991,7 @@ def create_app(
     @app.get("/sessions/{session_id}/messages")
     async def get_messages(
         session_id: str,
-        principal: Principal = Depends(require_principal),
+        principal: CurrentUser,
     ) -> list[TranscriptMessage]:
         """One session's stored transcript, in order — what a client reads back after a reload.
 
@@ -1015,7 +1016,7 @@ def create_app(
     async def post_message(
         session_id: str,
         body: MessageIn,
-        principal: Principal = Depends(require_principal),
+        principal: CurrentUser,
     ) -> EventSourceResponse:
         """Run one turn for the session and stream its events as SSE.
 
@@ -1044,7 +1045,7 @@ def create_app(
         claims: SessionTurns | None = app.state.turn_claims
         lease = settings.service_turn_claim_lease_seconds
         if session_id in active_turns:
-            METRICS.increment("chemclaw_turns_conflict_total")
+            METRICS.increment("chemclaw_turns_conflict_total", labels={"scope": "process"})
             raise HTTPException(
                 status_code=409, detail="a turn is already running for this session"
             )
@@ -1170,7 +1171,7 @@ def create_app(
             # exists before the response is handed off. A failed checkout raises `ConnectionError`
             # and is shed as a 503 by `_database_unavailable` — the guard fails closed, retryably.
             if claims is not None and not await claims.claim(session_id, _WORKER_ID, lease):
-                METRICS.increment("chemclaw_turns_conflict_total")
+                METRICS.increment("chemclaw_turns_conflict_total", labels={"scope": "durable"})
                 raise HTTPException(
                     status_code=409, detail="a turn is already running for this session"
                 )
@@ -1191,7 +1192,7 @@ def create_app(
     @app.get("/sessions/{session_id}/events")
     async def session_events(
         session_id: str,
-        principal: Principal = Depends(require_principal),
+        principal: CurrentUser,
     ) -> EventSourceResponse:
         """Stream async job push-back for the session (F3-T3): a finished job wakes the chat.
 
@@ -1274,7 +1275,7 @@ def create_app(
     async def upload_attachment(
         session_id: str,
         file: UploadFile,
-        principal: Principal = Depends(require_principal),
+        principal: CurrentUser,
     ) -> AttachmentSummary:
         """Attach a working file to a conversation (gap AGT-3).
 
@@ -1312,7 +1313,7 @@ def create_app(
     @app.post("/events/knowledge-merged", status_code=202)
     async def knowledge_merged(
         request: Request,
-        principal: Principal = Depends(require_principal),
+        principal: CurrentUser,
     ) -> dict[str, str]:
         """Tell the deployment a note merged, so freshness stops being bounded by a timer (SCH-6).
 
@@ -1370,7 +1371,7 @@ def create_app(
 
     @app.get("/schedules")
     async def schedules(
-        principal: Principal = Depends(require_principal),
+        principal: CurrentUser,
     ) -> list[ScheduleHealth]:
         """Health of every periodic job: when it last ran, and whether it succeeded (gap SCH-4).
 
@@ -1386,7 +1387,7 @@ def create_app(
 
     @app.get("/approvals")
     async def list_approvals(
-        principal: Principal = Depends(require_principal),
+        principal: CurrentUser,
     ) -> list[PendingApproval]:
         """The caller's open approval holds — the review queue (gap RCH-3).
 
@@ -1403,7 +1404,7 @@ def create_app(
     @app.get("/approvals/{approval_id}")
     async def get_approval(
         approval_id: str,
-        principal: Principal = Depends(require_principal),
+        principal: CurrentUser,
     ) -> ApprovalStatusOut:
         """One hold's current state (`pending`/`approved`/`rejected`/`expired`)."""
         await _owned_approval(approval_id, principal)
@@ -1418,7 +1419,7 @@ def create_app(
     async def decide(
         approval_id: str,
         body: ApprovalDecisionIn,
-        principal: Principal = Depends(require_principal),
+        principal: CurrentUser,
     ) -> Response:
         """Deliver the human Yes/No to a pending hold — the button click, finally wired.
 
@@ -1465,9 +1466,9 @@ def create_app(
 
     @app.get("/proposals")
     async def list_note_proposals(
+        principal: CurrentUser,
         state: str = "",
         before_id: int = 0,
-        principal: Principal = Depends(require_principal),
     ) -> list[ProposalSummary]:
         """The PR-gate's queue: what has been proposed, and what became of it.
 
@@ -1508,7 +1509,7 @@ def create_app(
     @app.get("/proposals/{proposal_id}")
     async def get_note_proposal(
         proposal_id: int,
-        principal: Principal = Depends(require_principal),
+        principal: CurrentUser,
     ) -> ProposalDetail:
         """One proposal with the note exactly as it would land in the tree."""
         proposal = await _visible_proposal(proposal_id, principal)
@@ -1523,7 +1524,7 @@ def create_app(
     async def decide_note_proposal(
         proposal_id: int,
         body: ProposalDecisionIn,
-        principal: Principal = Depends(require_principal),
+        principal: CurrentUser,
     ) -> Response:
         """Record the human sign-off — or, for the first time, the refusal.
 
@@ -1551,7 +1552,7 @@ def create_app(
 
     @app.get("/profiles")
     async def profiles(
-        principal: Principal = Depends(require_principal),
+        principal: CurrentUser,
     ) -> list[str]:
         """The specialized agents a session may be started as.
 
@@ -1563,9 +1564,9 @@ def create_app(
 
     @app.get("/jobs")
     async def list_jobs(
+        principal: CurrentUser,
         text: str = "",
         connector: str = "",
-        principal: Principal = Depends(require_principal),
     ) -> list[JobRecordSummary]:
         """Durable runs this system has finished, newest first — what ran, and why.
 
@@ -1584,7 +1585,7 @@ def create_app(
     @app.get("/jobs/{job_id}")
     async def get_job(
         job_id: str,
-        principal: Principal = Depends(require_principal),
+        principal: CurrentUser,
     ) -> DurableJobStatus:
         """One job's status and, once finished, its result.
 
@@ -1601,7 +1602,7 @@ def create_app(
     @app.delete("/jobs/{job_id}", status_code=202)
     async def cancel_durable_job(
         job_id: str,
-        principal: Principal = Depends(require_principal),
+        principal: CurrentUser,
     ) -> dict[str, str]:
         """Ask Temporal to stop a running job — an operator action, not an owner's.
 
@@ -1632,7 +1633,7 @@ def create_app(
     @app.get("/sessions/{session_id}/plan")
     async def get_plan(
         session_id: str,
-        principal: Principal = Depends(require_principal),
+        principal: CurrentUser,
     ) -> PlanStatusOut:
         """The plan awaiting a decision, with the hash a client must post back to approve it.
 
@@ -1673,7 +1674,7 @@ def create_app(
     async def decide_plan(
         session_id: str,
         body: PlanDecisionIn,
-        principal: Principal = Depends(require_principal),
+        principal: CurrentUser,
     ) -> Response:
         """Approve (or reject) a harness plan — the pre-execution GxP gate, finally enforced.
 

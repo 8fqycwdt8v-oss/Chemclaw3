@@ -36,16 +36,19 @@ from pydantic import ValidationError
 from chemclaw.agent.profiles import AgentProfile, register_profile, registered_profile_names
 from chemclaw.connectors.registry import profiles_dirs as connector_profiles_dirs
 from chemclaw.core.config import settings
+from chemclaw.core.errors import ChemclawError
 
 logger = logging.getLogger(__name__)
 
 
-class ProfileError(ValueError):
+class ProfileError(ChemclawError):
     """A profile file is malformed, or two of them claim the same name.
 
-    A `ValueError` subclass for the same reason `ConnectorError` is: this is a "this deployment
-    is misconfigured" failure, and one `except ValueError` at an entry point catches all of
-    them.
+    A `ChemclawError` (so a `ValueError`) for the same reason `ConnectorError` is one: this is a
+    "this deployment is misconfigured" failure surfaced at startup, so one `except ValueError` at
+    an entry point catches all of them. Also registered in
+    `chemclaw.durable.publish._BAD_DATA_TYPES` by its own class name, since Temporal matches
+    non-retryable types by exact name, not isinstance.
     """
 
 

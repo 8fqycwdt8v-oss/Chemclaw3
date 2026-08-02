@@ -2054,15 +2054,16 @@ class Settings(
         worth writing down is worth failing on. (Counted in the list below, not in this sentence —
         a number in prose beside a list is a number that goes stale.)
 
+        - **`service_uvicorn_workers > 1` silently breaks five per-process guarantees.** Until
+          those have a shared story (shared rate limiter, shared budget tracker, shared attachment
+          store, shared session LRU, shared metrics scrape), the knob is a foot-gun that offers no
+          operator response path. Replicas plus Route affinity remain the supported way to use more
+          CPU (entrypoint.sh comment, lines 13-20).
         - **A fleet admitting more concurrent turns than its declared ceiling.** The admission cap
           is per-process by design (SCALE-1), which makes `replicas × uvicorn workers × cap` the
           number the shared LLM endpoint actually sees — and nothing stated it, so raising the
           per-process cap multiplied fleet demand invisibly. Only checked once an operator declares
           the ceiling their endpoint can serve; undeclared, there is nothing to check against.
-        - **`session_store="memory"` with more than one uvicorn worker.** Each process would hold
-          its own conversation history and its own turn guard, so two turns on one session would
-          interleave into different threads. The durable turn claim (D-121) is what makes multiple
-          workers safe, and it exists only on the Postgres path.
         - **Mid-turn resume outliving the turn.** A resume wait longer than the turn deadline can
           never complete; it just burns the turn's remaining time holding an admission permit.
         - **Budgets enabled with every cap at zero.** `0` means unlimited for each cap, so this is
@@ -2079,10 +2080,15 @@ class Settings(
           "does anything in this deployment write `note_index`", and `note_reindex_enabled` is the
           third way that happens — the scheduled rebuild, which needs no retrieve source at all.
         """
-        if self.session_store == "memory" and self.service_uvicorn_workers > 1:
+        if self.service_uvicorn_workers > 1:
             raise ValueError(
-                "session_store='memory' cannot serve service_uvicorn_workers>1: each process would "
-                "keep its own history and turn guard. Use session_store='postgres' (D-121)."
+                "service_uvicorn_workers>1 silently breaks five per-process guarantees until they "
+                "have a shared story: the rate limiter (api/rate_limit.py, N× configured rate), "
+                "the budget tracker (api/budget.py, N× budget), the attachment store "
+                "(agent/attachments.py STORE, upload on worker A invisible to a turn on worker B), "
+                "the session LRU (api/app.py live-session, state/todos drift), and the metrics "
+                "registry (api/metrics.py, a scrape hits one worker, counters under-report ~1/N). "
+                "Replicas plus Route affinity are the supported way to use more CPU (D-121)."
             )
         if self.service_fleet_max_concurrent_turns:
             admitted = (

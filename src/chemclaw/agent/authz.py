@@ -25,7 +25,28 @@ from chemclaw.core.config import settings
 
 
 class AuthorizationError(Exception):
-    """The current user is not entitled to trigger the requested action."""
+    """The current user is not entitled to trigger the requested action.
+
+    Deliberately **not** a `ChemclawError` (hence not a `ValueError`): `ChemclawError`'s contract is
+    "this input/data is invalid", and an authorization refusal says nothing about the data — the
+    identical call succeeds for a different user with the identical arguments. Reparenting it here
+    would also silently change what a chemist reads, not just the class hierarchy:
+    `chemclaw.agent.tool_authz.surface_domain_errors` catches `ChemclawError` and answers
+    `f"Error: {exc}"`, and it sits *inside* `surface_authorization_denials` in the real middleware
+    chain (`chemclaw.agent.chemclaw_agent`) — meaning it would catch every `AuthorizationError`
+    first and turn it into an `"Error: ..."`, never letting `surface_authorization_denials` answer
+    its intended `"Refused: ..."`. The two middlewares exist specifically to keep those two
+    messages apart.
+
+    Still registered by exact class name in `chemclaw.durable.publish._BAD_DATA_TYPES`: Temporal
+    matches `non_retryable_error_types` by that name, not by `isinstance`, so this class needs no
+    `ValueError` ancestry to be non-retryable there — `chemclaw.durable.template_activities.
+    authorize_job_step` raises it crossing a real activity boundary, and an authorization refusal
+    never changes on retry, so it must fail fast there too. `DryRunRefusal` and
+    `PlanNotApprovedError` are registered by their own names for the same reason, and
+    `tests/test_publish.py` walks this hierarchy exactly as it walks `ChemclawError`'s, so a future
+    subclass cannot go unregistered unnoticed.
+    """
 
 
 # The write/side-effect tools gated to `entra_privileged_role_set` when the operator has NOT
