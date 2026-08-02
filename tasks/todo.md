@@ -17,15 +17,15 @@ restructure.
 
 - [x] **R0.1 [Fable]** A1 failed-watermark-read → full history wipe (`runner.py`/`session_store.py`);
       A2 answered turn rolled back on slow verifier; H2 verifier timeout. +disconnect-during-answer test.
-- [ ] **R0.2 [Fable]** Sec-1 forgeable injection envelope: nonce delimiter, frame `list_attachments`,
+- [x] **R0.2 [Fable]** Sec-1 forgeable injection envelope: nonce delimiter, frame `list_attachments`,
       sanitize upload filename (`agent/framing.py`, `agent/attachments.py`).
-- [ ] **R0.3 [Opus]** Sec-2 connector redirect identity leak — `follow_redirects=False` / host-guard
+- [x] **R0.3 [Opus]** Sec-2 connector redirect identity leak — `follow_redirects=False` / host-guard
       the stamp hook (`connectors/registry.py`).
-- [ ] **R0.4 [Sonnet]** Sec-3 NULL-owner → 404 under `entra_required`; Sec-4 `git add … --`;
+- [x] **R0.4 [Sonnet]** Sec-3 NULL-owner → 404 under `entra_required`; Sec-4 `git add … --`;
       Sec-5 connector body cap; Sec-6 redaction resolver for the two held tokens.
-- [ ] **R0.5 [Sonnet]** Science-1 process-group kill helper (xtb/crest); Science-4 BO error
+- [x] **R0.5 [Sonnet]** Science-1 process-group kill helper (xtb/crest); Science-4 BO error
       translation; Conn-F2 BO activity heartbeats.
-- [ ] **R0.6 [Sonnet]** Ingest-1 ord_adapter isinstance guards (execution-verified crash);
+- [x] **R0.6 [Sonnet]** Ingest-1 ord_adapter isinstance guards (execution-verified crash);
       R5 reparent 4 error classes to `ChemclawError` + `_BAD_DATA_TYPES`; R7 evals `asyncio.run`.
 
 ## R1 — Turn armed guards into tests + ops one-liners

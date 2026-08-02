@@ -3,6 +3,36 @@
 Prioritized open action items. Top = next. Keep in sync with `docs/planning/implementation-plan.md`
 (phase/step numbers) at session end.
 
+## Open — Found while implementing R0 of the refactor plan (2026-08-02)
+
+Each was found by an implementation agent working a *different* task, verified, and deliberately
+left unfixed rather than scope-crept into an unrelated commit. See
+`docs/planning/refactor-hardening-plan.md`.
+
+- [ ] **Two more error classes bypass the non-retryable registry** — [XS]. R0.6 reparented
+      `ConnectorError`, `DataSourceError`, `TemplateError` and `UnresolvedReference` to
+      `ChemclawError` and registered their names in `durable/publish.py::_BAD_DATA_TYPES`, because
+      Temporal matches `non_retryable_error_types` by exact class-name string. Two classes have the
+      identical gap and were outside that ticket: `agent/profile_discovery.py::ProfileError(ValueError)`
+      and `agent/authz.py::AuthorizationError(Exception)` — neither derives from `ChemclawError`, so
+      neither is caught by `tests/test_publish.py`'s completeness walk, and neither is registered.
+      Bad data on those paths burns all `activity_max_attempts` before failing.
+- [ ] **A second false retry claim in the same docstring block** — [XS, fix with the row above].
+      `durable/template_activities.py` (~line 128) states `AuthorizationError` is "a `ValueError`
+      which `BAD_DATA_RETRY` lists non-retryable". It is a bare `Exception`, registered nowhere.
+      R0.6 corrected the *adjacent* paragraph making the same false claim about `ConnectorError`
+      (measured against Temporal's `DefaultFailureConverter`) and left this one, which is a
+      different class and a different fix. This is the plan's named anti-pattern — prose asserting
+      a guard that nothing enforces — so the fix is the registration above **plus** deleting the
+      claim, not rewording it.
+- [ ] **`tests/test_repo_map.py` false-fails inside a git worktree** — [XS]. Its `has_content`
+      helper tests `part.startswith(".")` across the *absolute* path, so any checkout under a
+      dot-directory makes `_tracked_directories` return `set()` and four tests fail on path location
+      alone, independent of file content. Harmless in CI, but background agents run in worktrees
+      under `.claude/worktrees/`, so it false-fails for exactly the parallel-agent workflow the
+      refactor plan depends on — three separate R0 agents each hit it and had to rule it out.
+      Fix: resolve the check relative to the repo root rather than over the absolute path.
+
 ## Open — Confirmed by the 190-probe live run (2026-08-02)
 
 Each reproduced against a running deployment; evidence in `docs/archive/live-user-stories-2026-08.md`
