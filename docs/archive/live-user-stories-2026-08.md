@@ -256,8 +256,13 @@ only on caller-supplied arguments; `job_record.py:146` takes no actor at all. Th
 | --- | --- |
 | The live probe harness, 190-probe corpus, 14 tests, ADR — **closes AG-13**, deferral row deleted in the same commit | `make lint type` clean; the corpus is gated against `available_tool_names()`, the same declaration-vs-surface check `skill-validate` uses |
 | ORD compounds resolve from InChI or a known name, not SMILES alone | measured: +1 record of 10,011. The 5,760 Perera rows stay refused **correctly** — that paper publishes its second coupling partner only as the shorthand "2a, Boronic Acid", so there is no structure to recover; pinned as its own test |
-| The capability-boundary instruction | untested against a live run — the credit ran out. **Do not assume it works** |
+| The capability-boundary instruction, later widened with calorimetry/heat transfer, criticality (CPP, PAR, MBR) and `predict_solubility`'s aqueous-only domain | untested against a live run. **Do not assume it works** — the stronger model fabricated a method table while writing "not a validated method" |
 | Judge token ceiling, `ungraded` verdict, tool results in the grading prompt, shared `cited_ids` extractor, offline `--regrade` mode | 14 tests pass; the re-grade itself did not run |
+| **Infrastructure failures now say what broke.** `ConnectorJobError` and `GitSubmitError` are `ChemclawError`s; six `predict_pka`/`predict_logd` refusals raise `CalculationDomainError`; an unreachable Temporal broker says *nothing was started* | three tests drive the real raise sites through the real middleware and assert the message the **model** receives — verified failing with the tests present and only the source reverted |
+| **Four hazard rules widened**: `peroxide` (Na₂O₂), `hydrazine` (UDMH), `n-halamine` (chloramine-T), `complex-hydride-with-chlorinated-solvent` (1,2-DCE) | each validated on a must-fire *and* a must-stay-quiet panel; twelve routine reagents pinned unflagged; `eval-strict` green with `hazard_flag_recall` at its 1.0 gate, 0 regressions |
+| **A search hit is openable.** `similar_reactions` returned the index key while everything else prefixed `reaction-`; `note_id_for_reaction` is now the one definition, used at all three sites | the test asserts the two ends agree rather than asserting a literal |
+| **Skill routing by data shape, not phrasing** — `experiment-design` triggers on ≥2 runs varying the same factors with a numeric outcome; `experiment-progression` on a qualitative series | untested live; the reason `suggest_next_experiment` saw 0 calls in 190 probes |
+| **The safety skill names its four blind classes** — mutagenicity, ICH M7, nitrosamines, elemental impurities and residual solvents, with why a *correct* recalled limit is worse than a wrong one | `skill-validate` green |
 
 ---
 
