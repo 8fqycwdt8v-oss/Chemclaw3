@@ -16,6 +16,7 @@ from chemclaw.agent.session_store import (
     PostgresHistoryProvider,
     SessionOwnerStore,
     SessionTurnClaims,
+    _crossed_new_compaction_bucket,
 )
 from chemclaw.core import db
 from chemclaw.core.config import settings
@@ -348,6 +349,46 @@ def test_a_crashed_workers_claim_ages_out_and_a_refresh_holds_it() -> None:
         await claims.release(session_id, "other")
 
     asyncio.run(_run())
+
+
+# --- R4.2: `_compact` replans only on a fresh floor-bucket crossing, not every turn above it ----
+
+
+def test_below_the_floor_never_crosses() -> None:
+    """Neither count sits at or past the floor: no replan, whatever the two counts are."""
+    assert _crossed_new_compaction_bucket(5, 9, floor=12) is False
+
+
+def test_first_time_reaching_the_floor_crosses() -> None:
+    """The turn whose insert pushes the count from under the floor to at/over it must replan."""
+    assert _crossed_new_compaction_bucket(195, 200, floor=200) is True
+
+
+def test_staying_in_the_same_bucket_above_the_floor_does_not_cross() -> None:
+    """This is the defect: growing from 201 to 202 must not repeat the full read + replan."""
+    assert _crossed_new_compaction_bucket(201, 202, floor=200) is False
+
+
+def test_growing_into_the_next_bucket_crosses_again() -> None:
+    """Once the count reaches the *next* multiple of the floor, it is due again."""
+    assert _crossed_new_compaction_bucket(399, 400, floor=200) is True
+
+
+def test_a_multi_message_turn_that_skips_straight_past_a_bucket_still_crosses() -> None:
+    """A multi-row turn can jump the count clean over a boundary; it must still trigger.
+
+    Bucket membership is what matters, not landing exactly on a multiple.
+    """
+    assert _crossed_new_compaction_bucket(190, 210, floor=200) is True
+
+
+def test_a_negative_before_count_clamps_rather_than_crashing() -> None:
+    """`inserted` could in principle exceed `count` under a racing write.
+
+    Must not raise or go negative through the bucket math.
+    """
+    assert _crossed_new_compaction_bucket(-5, 200, floor=200) is True  # bucket 0 -> bucket 1
+    assert _crossed_new_compaction_bucket(-5, 50, floor=200) is False  # both still bucket 0
 
 
 # --- D-151: the stored history stops growing without bound -------------------------------------

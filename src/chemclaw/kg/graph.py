@@ -79,6 +79,29 @@ def _dir_fingerprint(notes_dir: Path) -> _Fingerprint:
     return frozenset(entries)
 
 
+def note_file_fingerprints(notes_dir: Path) -> dict[str, str]:
+    """A cheap per-note change signal: `note id -> "mtime_ns:size"`, stat-only (no read/parse).
+
+    Same stat-only scan `_dir_fingerprint` does for the whole-tree cache (KM-14), but keyed per note
+    id (the file's stem — `note.type/note.id.md` is the one filename shape a note is written under,
+    `chemclaw.kg.pr_gate.NoteFile`) rather than folded into one aggregate. A single fingerprint can
+    only answer "did anything change"; this answers "which ones", which is what an incremental
+    rebuild needs — `chemclaw.retrieval.vector_index.reindex_notes` re-embeds a note only when its
+    entry here differs from what was stored at the last index run, instead of the whole corpus on
+    every scheduled pass (D-2026-08-02-embed-only-what-changed).
+    """
+    fingerprints: dict[str, str] = {}
+    for path in notes_dir.rglob("*.md"):
+        try:
+            stat = path.stat()
+        except OSError:
+            # Vanished between listing and stat: it simply has no entry, which correctly reads as
+            # "changed" (in either direction) to a caller diffing against a stored fingerprint.
+            continue
+        fingerprints[path.stem] = f"{stat.st_mtime_ns}:{stat.st_size}"
+    return fingerprints
+
+
 def _parse_notes(notes_dir: Path) -> list[Note]:
     """Parse every note under `notes_dir` (recursively), skipping non-note and invalid files."""
     notes = []
