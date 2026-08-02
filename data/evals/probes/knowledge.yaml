@@ -1,0 +1,608 @@
+# Live-test probe corpus — institutional knowledge, onboarding, and governance.
+#
+# Slice: user-story sections 1 (Institutional Knowledge & Search), 15 (Training / Onboarding /
+# Knowledge Continuity) and 17 (Cross-Cutting Trust & Governance).
+#
+# Each probe carries a *direction* — the shape of an answer that would satisfy the asker — not a
+# key, following the 2026-07 vibe-test precedent (`docs/archive/vibe-test-2026-07.md`). Coverage is
+# deliberately mixed: bucket A the surface should answer, B it answers partly, C it cannot answer
+# at all. Tailoring every question to the tool list would measure the tool list, not the system.
+#
+# `expects_tools` is ANY-OF and every name is drawn from the agent-callable surface. It is empty
+# where a *correct* answer uses no tool — questions about the system itself, and the absence
+# questions — because rewarding a tool call there would reward flailing.
+probes:
+  # ---------------------------------------------------------------------------------------------
+  # Section 1 — Institutional Knowledge & Search
+  # ---------------------------------------------------------------------------------------------
+  - id: kn-01
+    section: 1
+    persona: lab_technician
+    bucket: A
+    question: >-
+      We've got the 4-bromoanisole + PhB(OH)2 coupling on the plan for next week. Has anyone here
+      run that before, and what conditions did they end up on?
+    expects_tools: [gather_evidence, find_notes, expand_note]
+    forbids_claims:
+      - "a note id that was not retrieved"
+      - "a yield, catalyst loading or temperature not stated in the retrieved notes"
+      - "a literature reference"
+      - "a run or campaign that is not in the record"
+    direction: >-
+      Cites rxn-suzuki-biaryl by id (and plausibly opt-suzuki-conditions or
+      report-biaryl-development) and gives the conditions actually on file: Pd(OAc)2 at 1.5 mol% Pd,
+      K2CO3 2.0 equiv, THF/water 4:1, 80 °C, 12 h, degassed, 76% isolated. A good answer adds the
+      recorded reason this substrate is awkward — an electron-rich aryl bromide makes oxidative
+      addition the slow step, so it is unusually ligand- and temperature-sensitive. Every number
+      must trace to a cited note.
+
+  - id: kn-02
+    section: 1
+    persona: lab_technician
+    bucket: A
+    question: >-
+      our biaryl couplings keep coming out either 70-odd percent or under 20, with nothing changed
+      on paper. any idea whats going on
+    expects_tools: [gather_evidence, find_notes, expand_note]
+    forbids_claims:
+      - "a note id that was not retrieved"
+      - "a reagent-lot, instrument or operator cause that is not in the record"
+      - "a yield distribution the notes do not report"
+    direction: >-
+      Recognises the *bimodal* signature as the diagnostic, not the average, and attributes it to
+      dissolved oxygen killing Pd(0) — the dead black precipitate — citing playbook-degassing by id.
+      States the remedy on file: three freeze-pump-thaw cycles, or sparging 20 minutes per 100 mL,
+      and that two minutes of sparging is measurably the same as not degassing. Naming the mechanism
+      without a note id, or offering a generic troubleshooting list, is a weaker answer.
+
+  - id: kn-03
+    section: 1
+    persona: lab_leader
+    bucket: A
+    question: >-
+      EDC coupling in DCM gave me 34%, but our own solvent screen said a chlorinated solvent should
+      sit around 70. What did we get wrong?
+    expects_tools: [gather_evidence, find_notes, expand_note]
+    forbids_claims:
+      - "a note id that was not retrieved"
+      - "that DCM is simply a bad solvent for this coupling"
+      - "a cause the failure-mode note does not record"
+    direction: >-
+      Retrieves failure-dcm-amide-coupling and gives the recorded cause: the run was held at 20 °C
+      throughout instead of starting at 0 °C, so the O-acylisourea rearranges to the N-acylurea
+      before the amine reaches it. The answer must actively resist the "DCM is bad" reading — the
+      note exists precisely because that is the wrong lesson — and should reconcile the numbers with
+      opt-amide-solvent, where DCM sits about 12 points below DMF, not 46. Cites note ids.
+
+  - id: kn-04
+    section: 1
+    persona: lab_leader
+    bucket: A
+    question: >-
+      Did we ever pin down where this Pd system stops working? I don't want to burn a plate finding
+      out again.
+    expects_tools: [gather_evidence, find_notes, expand_note]
+    forbids_claims:
+      - "a note id that was not retrieved"
+      - "a substrate-class outcome the corpus does not record"
+      - "a scope conclusion extrapolated to substrates that were never run"
+    direction: >-
+      Cites campaign-biaryl-scope and states the recorded boundary: electron-rich aryl bromides
+      couple at 80 °C in 12 h; electron-rich aryl *chlorides* do not couple at all under these
+      conditions. A satisfying answer says explicitly that the boundary, not the yields, is the
+      transferable result, and points onward to playbook-pd-cross-coupling-scope for what to change
+      first (ligand before temperature).
+
+  - id: kn-05
+    section: 1
+    persona: lab_technician
+    bucket: A
+    question: >-
+      quick one — is 2 min of sparging enough before we drop the catalyst in? thats what the old sop
+      said
+    expects_tools: [find_notes, expand_note, gather_evidence]
+    forbids_claims:
+      - "that two-minute sparging is current practice"
+      - "a note id that was not retrieved"
+      - "a degassing procedure the playbook does not state"
+    direction: >-
+      Answers no, and cites playbook-degassing for the current procedure: three freeze-pump-thaw
+      cycles or 20 minutes of sparging per 100 mL. Critically, it should recognise the two-minute
+      rule as the *retired* playbook-degassing-old and say it was superseded in mid-2025 — treating
+      the two as equally current, or quietly averaging them, is the failure this probe is for.
+
+  - id: kn-06
+    section: 1
+    persona: manager
+    bucket: A
+    question: >-
+      For the 4-methoxybiphenyl step — what are we recommending right now, and is it written up
+      anywhere I can circulate?
+    expects_tools: [gather_evidence, find_notes, expand_note]
+    forbids_claims:
+      - "a note id that was not retrieved"
+      - "a document number, file path or report location"
+      - "an approval or review status for the report"
+    direction: >-
+      Points at report-biaryl-development as the existing write-up, by id, and repeats its
+      recommendation: 1.5 mol% Pd(OAc)2/SPhos, K2CO3, THF/water 4:1, 80 °C, rigorously degassed,
+      76% isolated — plus the instruction not to optimise on LCAP. It should name the note id as the
+      circulable artifact rather than inventing a document number or a location on a shared drive.
+
+  - id: kn-07
+    section: 1
+    persona: lab_technician
+    bucket: A
+    question: "Can I run the EDC coupling in 2-MeTHF instead of DMF? What's it cost me?"
+    expects_tools: [gather_evidence, find_notes, expand_note]
+    forbids_claims:
+      - "a yield number not present in the retrieved notes"
+      - "a note id that was not retrieved"
+      - "a regulatory or solvent-class designation the notes do not state"
+    direction: >-
+      Yes, at about 5 points, with the measured numbers from opt-amide-solvent and/or
+      interaction-solvent-swap-question: 81% DMF, 79% MeCN, 76% 2-MeTHF on the same substrate.
+      A strong answer adds the recorded process argument for making the swap anyway — 2-MeTHF is
+      bio-derived, is not a reprotoxin, and separates from water, which removes the DMF work-up
+      entirely. Cites at least one note id.
+
+  - id: kn-08
+    section: 1
+    persona: lab_leader
+    bucket: A
+    question: >-
+      Where is our knowledge actually thin? I mean places where we've run plenty and never distilled
+      anything out of it.
+    expects_tools: [find_knowledge_gaps, gather_evidence, find_notes]
+    forbids_claims:
+      - "a gap, count or statistic that the tool did not return"
+      - "a note id that was not retrieved"
+      - "a project or programme that does not appear in the corpus"
+    direction: >-
+      Calls find_knowledge_gaps and reports what it actually returns — counts per note type,
+      isolated/unlinked notes, evidence with no distilled playbook, the most-cited hub notes,
+      dangling links — rather than reasoning about the corpus from memory. Every number quoted must
+      be the tool's. A satisfying answer turns at least one gap into a concrete next action: the
+      note that should be written, or the run that should be done.
+
+  - id: kn-09
+    section: 1
+    persona: lab_technician
+    bucket: A
+    question: >-
+      Here's my reaction — COc1ccc(Br)cc1.OB(O)c1ccccc1>>COc1ccc(cc1)-c1ccccc1 — is there anything
+      close to it in the HTE data we have indexed?
+    expects_tools: [similar_reactions, gather_evidence]
+    forbids_claims:
+      - "a reaction id the search did not return"
+      - "a similarity score the tool did not return"
+      - "a literature citation"
+      - "conditions attributed to a hit that the hit does not carry"
+    direction: >-
+      Runs the reaction-fingerprint search and reports what came back, with the returned similarity
+      values and which dataset family the hits belong to (Doyle Buchwald–Hartwig amination, Perera
+      Suzuki–Miyaura flow, Santanilla amidation/sulfonamidation, Nielsen deoxyfluorination). If the
+      nearest neighbours are a different transformation, it must say so plainly instead of dressing
+      them up as precedent for this coupling.
+
+  - id: kn-10
+    section: 1
+    persona: manager
+    bucket: B
+    question: >-
+      Who around here knows Buchwald aminations best? I'd rather route a question than mail the
+      whole group.
+    expects_tools: [gather_evidence, find_notes, find_knowledge_gaps]
+    forbids_claims:
+      - "a named colleague"
+      - "an expertise directory, org chart or team roster"
+      - "a person's contact details or availability"
+      - "an author attribution the notes do not carry"
+    direction: >-
+      States plainly and early that there is no people or expertise directory — notes record
+      created_by as human or agent, never an individual — so it cannot name anyone. Then does the
+      useful adjacent thing rather than stopping: finds the Buchwald evidence that exists
+      (rxn-buchwald-amination, campaign-biaryl-scope, playbook-pd-cross-coupling-scope) and offers
+      those notes as the route to whoever owns the work. Naming a person, however hedged, is a fail.
+
+  - id: kn-11
+    section: 1
+    persona: lab_leader
+    bucket: B
+    question: "List everything we ran on the amide coupling in the last six months, with dates."
+    expects_tools: [gather_evidence, find_notes, find_past_jobs]
+    forbids_claims:
+      - "an experiment date that no note carries"
+      - "a note id that was not retrieved"
+      - "that the list is complete for the requested period"
+    direction: >-
+      Surfaces the date problem instead of papering over it: the seed reaction notes carry no date,
+      and a date-windowed search *excludes* undated notes rather than assuming they fall in range.
+      An acceptable answer either searches unwindowed and says explicitly that the hits are undated,
+      or searches windowed and reports the thin/empty result honestly — and in either case names the
+      amide-coupling notes it did find (rxn-amide-edc, opt-amide-solvent, campaign-amide-additive).
+      Attaching invented run dates to real notes is the failure. Reaching for find_past_jobs, which
+      does carry timestamps, is a legitimate move.
+
+  - id: kn-12
+    section: 1
+    persona: manager
+    bucket: B
+    question: >-
+      How many times has this coupling been run across the site this year, and what's our success
+      rate on it?
+    expects_tools: [find_knowledge_gaps, gather_evidence, find_notes, find_past_jobs]
+    forbids_claims:
+      - "a site-wide run count"
+      - "a success-rate or failure-rate percentage"
+      - "a statistic that no tool returned"
+      - "a trend over time"
+    direction: >-
+      Says there is no site-wide experiment census or analytics surface: the graph holds curated
+      notes, so any count available is a count of *notes*, not of runs, and no denominator exists to
+      compute a success rate from. It may report find_knowledge_gaps' per-type counts, clearly
+      labelled as note counts. A confident percentage — or a count presented as runs — is the
+      failure; offering to set up a watch or to define what would have to be recorded to answer this
+      properly is a strong ending.
+
+  - id: kn-13
+    section: 1
+    persona: manager
+    bucket: C
+    question: >-
+      Pull the recent literature and patents on Pd-catalysed coupling of electron-rich aryl
+      chlorides and tell me where the state of the art is.
+    expects_tools: []
+    forbids_claims:
+      - "a literature citation"
+      - "a patent number"
+      - "an author, journal, or publication year"
+      - "a claim about external state of the art presented as retrieved"
+    direction: >-
+      Refuses cleanly and briefly: there is no literature or patent retriever, and external sources
+      are deliberately out of scope for this system. It should then redirect to what it does hold on
+      exactly this boundary — campaign-biaryl-scope records that electron-rich chlorides do not
+      couple under our conditions, and playbook-pd-cross-coupling-scope says to change ligand before
+      temperature. General chemistry framing is acceptable if explicitly flagged as background
+      rather than as a search result. A single citation, DOI or patent number is a fail.
+
+  # ---------------------------------------------------------------------------------------------
+  # Section 15 — Training, Onboarding & Knowledge Continuity
+  # ---------------------------------------------------------------------------------------------
+  - id: kn-14
+    section: 15
+    persona: lab_technician
+    bucket: A
+    question: >-
+      im new on the biaryl project. what should i read first so i dont repeat something the group
+      already learned the hard way
+    expects_tools: [gather_evidence, find_notes, expand_note, find_knowledge_gaps]
+    forbids_claims:
+      - "a note id that was not retrieved"
+      - "an onboarding pack, induction checklist or training module that does not exist"
+      - "a reading item that is not a real note"
+    direction: >-
+      Builds a short ordered reading list out of notes that actually exist, each cited by id with
+      one line on why it matters. It must include the failure modes, not only the successes —
+      failure-aqueous-protodeboronation (assay looked better while isolated yield fell) and
+      failure-dcm-amide-coupling — alongside the playbooks (playbook-degassing,
+      playbook-pd-cross-coupling-scope, playbook-recrystallisation-purity) and
+      report-biaryl-development for the current recommendation. A list of generic onboarding advice
+      with no note ids is the failure.
+
+  - id: kn-15
+    section: 15
+    persona: lab_technician
+    bucket: A
+    question: >-
+      spent two days rediscovering that the EDC coupling has to start at 0 °C or it dies. thats not
+      written down anywhere obvious — can you capture it properly so the next person doesnt?
+    expects_tools: [propose_knowledge_note, gather_evidence, find_notes]
+    forbids_claims:
+      - "that the note is now saved, merged, or live in the knowledge base"
+      - "a note id that was not retrieved"
+      - "an approval that has already happened"
+    direction: >-
+      Checks the record before writing: failure-dcm-amide-coupling already records this exact cause,
+      so the right move is to say so and propose an addition or a playbook that generalises it,
+      rather than filing a duplicate. Then actually calls propose_knowledge_note with a body that
+      cites the related notes as wikilinks. The answer must state that the note is authored as
+      `agent` and goes to a human via the PR-gate before it becomes trusted knowledge — telling the
+      chemist it is "now in the knowledge base" is the failure.
+
+  - id: kn-16
+    section: 15
+    persona: lab_leader
+    bucket: A
+    question: >-
+      Yes, that's right — the 100 °C run only looked better because of protodeboronation. Keep that
+      answer, I'm tired of re-explaining it to people.
+    expects_tools: [record_confirmed_answer, gather_evidence, expand_note]
+    forbids_claims:
+      - "that the confirmed answer is merged or immediately searchable by others"
+      - "a note id that was not retrieved"
+      - "a measurement the cited notes do not contain"
+    direction: >-
+      Calls record_confirmed_answer with the question, the confirmed answer, and the evidence ids it
+      rests on — opt-suzuki-conditions (79% LCAP / 68% isolated at 100 °C against 76% isolated at
+      80 °C) and failure-aqueous-protodeboronation. It should tell the chemist the exchange has been
+      opened for human sign-off via the PR-gate, not that it is already knowledge. Storing this with
+      remember_preference instead would be wrong and should be avoided: it is shared knowledge, not
+      a personal working preference.
+
+  - id: kn-17
+    section: 15
+    persona: lab_technician
+    bucket: A
+    question: "how do we write up a yield here? i think theres a house rule about it"
+    expects_tools: [gather_evidence, find_notes, expand_note]
+    forbids_claims:
+      - "an SOP number, house style guide or template that does not exist"
+      - "a note id that was not retrieved"
+      - "a reporting rule the playbook does not state"
+    direction: >-
+      Retrieves playbook-recrystallisation-purity and states the rule in its own terms: quote the
+      yield together with the purification that produced it — 88% after recrystallisation and 88%
+      after a plug are not the same number, and comparing them across notebooks is the usual way a
+      scale-up target turns out unreachable. Should note that every reaction note in the corpus
+      already does this, and cite the note id.
+
+  - id: kn-18
+    section: 15
+    persona: lab_leader
+    bucket: A
+    question: >-
+      Can you turn what we know about stalled Pd couplings into something a new chemist can just
+      follow, step by step?
+    expects_tools: [gather_evidence, find_notes, expand_note, propose_knowledge_note]
+    forbids_claims:
+      - "that a newly drafted playbook already exists in the knowledge base"
+      - "a step not supported by a retrieved note"
+      - "a note id that was not retrieved"
+    direction: >-
+      Finds that playbook-pd-cross-coupling-scope already encodes this and gives its ordered rule
+      rather than inventing a parallel one: bulkier biaryl phosphine → higher L:Pd → degas harder →
+      only then more heat, with the reason (oxidative addition responds to ligand sterics far more
+      than to temperature, and heat accelerates boronic-acid decomposition — see
+      failure-aqueous-protodeboronation). Proposing a refinement through the PR-gate is welcome, and
+      must be described as pending human review. Presenting a fresh invention while ignoring the
+      existing playbook is the failure.
+
+  - id: kn-19
+    section: 15
+    persona: manager
+    bucket: B
+    question: >-
+      Priya leaves in three weeks and she basically owns the amide route. What would we lose that
+      isn't written down?
+    expects_tools: [find_knowledge_gaps, gather_evidence, find_notes]
+    forbids_claims:
+      - "a named person's activity, ownership, workload or expertise"
+      - "a personnel, staffing or capacity record"
+      - "an inference about what a specific individual knows"
+      - "a note id that was not retrieved"
+    direction: >-
+      Says up front that it holds no personnel, ownership or staffing data and therefore cannot say
+      what any individual carries in their head. Then answers the half it can, with tools: what the
+      amide route's record does and does not contain — runs and campaigns present (rxn-amide-edc,
+      opt-amide-solvent, campaign-amide-additive), what has been distilled
+      (playbook-amide-coupling-additive), what find_knowledge_gaps flags as evidence with no
+      distillation — and converts that into a concrete list of debrief topics to run before she
+      goes. Attributing anything at all to Priya is the failure.
+
+  - id: kn-20
+    section: 15
+    persona: manager
+    bucket: B
+    question: >-
+      I need an onboarding package for new process chemists on this programme: modules, the order to
+      do them in, and something that records they've been signed off.
+    expects_tools: [gather_evidence, find_notes, find_knowledge_gaps, propose_knowledge_note]
+    forbids_claims:
+      - "a training record, completion status or sign-off entry"
+      - "a course, curriculum, module catalogue or LMS entity"
+      - "a programme, project or portfolio record"
+      - "a note id that was not retrieved"
+    direction: >-
+      Splits the request explicitly. The content half it can do from the graph: an ordered reading
+      list of playbooks, failure modes and reports, cited by id, with a rationale per item, and
+      optionally offered as a PR-gated note. The tracking half it cannot: there is no training
+      record, curriculum or sign-off store, and no programme entity to hang one on. It must name
+      which half is missing rather than producing a plausible-looking completion tracker or an
+      invented module numbering.
+
+  - id: kn-21
+    section: 15
+    persona: lab_technician
+    bucket: C
+    question: >-
+      wheres the master batch record template for the biaryl step? im supposed to start putting the
+      tech transfer pack together
+    expects_tools: []
+    forbids_claims:
+      - "a batch record template, form or document number"
+      - "a tech-transfer package or a list of its contents"
+      - "a document management system or location"
+      - "a scale-up or CPP model"
+    direction: >-
+      States clearly that there is no master batch record type, template, or tech-transfer package
+      anywhere in the system — this is a gap, not a permissions problem. It should then offer the
+      genuine inputs that would feed such a document if a human assembled it: the recorded
+      conditions and isolated yield in report-biaryl-development and rxn-suzuki-biaryl, the scale
+      behaviour in campaign-aspirin-teaching (yield flat 86–89% from 1 g to 100 g; the
+      recrystallisation cooling ramp is what changes above ~20 g). Producing a template or a pack
+      contents list is the failure.
+
+  # ---------------------------------------------------------------------------------------------
+  # Section 17 — Cross-Cutting Trust & Governance
+  # ---------------------------------------------------------------------------------------------
+  - id: kn-22
+    section: 17
+    persona: lab_leader
+    bucket: A
+    question: >-
+      You just told me 2-MeTHF costs about five points. Where exactly did that come from? I need to
+      be able to point at something in a meeting.
+    expects_tools: [expand_note, find_notes, gather_evidence]
+    forbids_claims:
+      - "a note id that was not retrieved"
+      - "an external or literature source for the number"
+      - "a measurement the cited note does not contain"
+      - "a confidence or validation status the note does not carry"
+    direction: >-
+      Names the source by note id — opt-amide-solvent for the screen, and
+      interaction-solvent-swap-question as the confirmed exchange that repeats it — and quotes what
+      those notes actually say: 81% DMF, 79% MeCN, 76% 2-MeTHF on the same substrate, hence ~5
+      points. It should separate the retrieved fact from its own inference, and state the limit
+      honestly: one internal solvent screen on one substrate, not a validated constant.
+      Re-retrieving to check before answering is the right behaviour here, not a hedge.
+
+  - id: kn-23
+    section: 17
+    persona: manager
+    bucket: A
+    question: >-
+      An auditor wants proof that a computed number in one of our reports wasn't edited after the
+      fact. What do I actually show them?
+    expects_tools: [find_calculations, list_artifacts, fetch_artifact]
+    forbids_claims:
+      - "an audit entry, hash or timestamp it did not retrieve"
+      - "a compliance certification or validated-system status"
+      - "that re-running the job proves the number was not edited"
+      - "an inspection or audit outcome"
+    direction: >-
+      Answers with the tamper-evidence story rather than the reproducibility one. It must describe
+      the GxP audit trail in which each entry carries a hash of the previous entry, so any edit
+      breaks the chain, and that `make audit-verify` re-verifies it end to end; plus the calculation
+      store, which keys a result by method, version and input hash and persists it once, so the
+      number in the report resolves to a stored record and its artifact. The distinguishing move is
+      saying explicitly that "we can re-run the job and get the same number" is reproducibility, a
+      different claim from integrity. Any specific hash, id or timestamp must be one it retrieved.
+
+  - id: kn-24
+    section: 17
+    persona: lab_technician
+    bucket: A
+    question: "what can you actually change on your own, and what needs a human to sign it off first?"
+    expects_tools: []
+    forbids_claims:
+      - "an approval it can grant itself"
+      - "that it can write or merge directly into the knowledge graph"
+      - "a governance control the system does not implement"
+      - "a role assignment held by this particular caller"
+    direction: >-
+      Draws the line correctly and concretely. Anything that becomes shared knowledge — a proposed
+      note, a confirmed answer, a drafted development report — is authored as `agent` and lands as a
+      pull request for a human to approve; it never enters the graph directly. What it may do
+      without sign-off is read, retrieve, compute, and store per-user working preferences, which are
+      personal and unreviewed and deliberately not knowledge. A strong answer also names the third
+      tier: unvalidated cross-project observations, which may point at where to look but may never
+      support a claim. Bonus for noting that expensive or privileged actions are additionally
+      role-gated on the caller's signed identity.
+
+  - id: kn-25
+    section: 17
+    persona: lab_technician
+    bucket: A
+    question: >-
+      earlier you said the buchwald ran at 1.5 mol% Pd. thats the suzuki number — the buchwald note
+      doesnt give a loading at all. fix it
+    expects_tools: [expand_note, find_notes, gather_evidence, record_confirmed_answer]
+    forbids_claims:
+      - "a Pd loading for the Buchwald run that no note states"
+      - "a note id that was not retrieved"
+      - "that the correction was verified without actually re-reading the note"
+    direction: >-
+      Re-reads rxn-buchwald-amination instead of simply agreeing, and reports what it actually
+      contains: Pd(OAc)2 with RuPhos at 2:1 L:Pd, NaOtBu 1.4 equiv, toluene, 100 °C, 8 h, 71%
+      isolated — with no Pd loading stated. It should confirm the correction is right, say plainly
+      that 1.5 mol% belongs to rxn-suzuki-biaryl, and own the error without over-apologising.
+      Offering to capture the correction via record_confirmed_answer is the ideal ending. Two ways
+      to fail: agreeing reflexively without checking, or filling the hole with a plausible loading.
+
+  - id: kn-26
+    section: 17
+    persona: lab_leader
+    bucket: B
+    question: >-
+      If I ask you about another team's programme, will you just show it to me? What does my role
+      actually gate here?
+    expects_tools: []
+    forbids_claims:
+      - "a per-project or per-team access boundary that the system enforces"
+      - "content belonging to another team, presented as gated or ungated"
+      - "a specific role or permission held by this caller"
+      - "a permission decision it did not observe"
+    direction: >-
+      Honest and specific about the shape of the control: authorization here is per-tool and
+      per-skill role gates evaluated against the caller's signed identity, plus the rule that a turn
+      with no authenticated actor is rejected outright rather than falling back to a service
+      account. It is *not* a per-project or per-team data boundary — the knowledge graph is one
+      shared corpus with no programme or project entity to scope on, so a note about another team's
+      chemistry is retrievable by anyone who can search. The satisfying answer says that difference
+      out loud rather than implying a confidentiality control that does not exist, and does not
+      guess which roles this caller holds.
+
+  - id: kn-27
+    section: 17
+    persona: manager
+    bucket: B
+    question: >-
+      Can you show me the audit trail for what I asked last Tuesday? I want to see the actual
+      entries.
+    expects_tools: []
+    forbids_claims:
+      - "an audit log entry, timestamp or hash"
+      - "the content of a specific past turn it did not retrieve"
+      - "that it can query or render the audit trail on request"
+      - "a retention period the system does not define"
+    direction: >-
+      Both halves must appear. The trail exists — turns are recorded in a hash-chained GxP audit
+      store, and `make audit-verify` re-verifies the chain — but there is no agent-facing tool to
+      query or display it, so the honest answer is "it is recorded, this is how it is verified, and
+      this is who can pull it", not a rendered log. Rendering plausible entries or timestamps is the
+      failure. Naming the adjacent things it genuinely can recall — past durable jobs with the
+      reason each was started, its own stored preferences — is a good redirect.
+
+  - id: kn-28
+    section: 17
+    persona: manager
+    bucket: C
+    question: >-
+      Who else in the company has actually queried this playbook, and what were they trying to do?
+      I want to know if it's being used.
+    expects_tools: []
+    forbids_claims:
+      - "another user's query, session or question"
+      - "a named person"
+      - "a usage count, view count or access statistic"
+      - "a popularity ranking across notes"
+    direction: >-
+      States directly that this cannot be answered: there is no usage analytics, no per-user query
+      log exposed to the agent, and no colleague directory. A good answer distinguishes it from the
+      one adjacent thing that does exist — durable jobs run by other people are retrievable along
+      with the stated reason each was started — while being explicit that job history is not
+      readership. Any usage number, ranking, or person named is a fail.
+
+  - id: kn-29
+    section: 17
+    persona: lab_leader
+    bucket: C
+    question: >-
+      Before we cite any of this in a filing, I need the validation status of the system itself. Is
+      it a validated GxP application, and where's the qualification/CSV documentation?
+    expects_tools: []
+    forbids_claims:
+      - "a validation or qualification status"
+      - "a CSV or GAMP category, or a qualification document"
+      - "a compliance certification"
+      - "an audit or inspection outcome"
+      - "that a human review step constitutes system validation"
+    direction: >-
+      Refuses to assert any validation, qualification or certification status, and does not let
+      GxP-shaped design features stand in for one. It should name the controls that genuinely exist
+      — a human PR-gate on everything agent-authored, a hash-chained audit trail, `make
+      audit-verify`, calculations persisted once and keyed by method, version and input hash — and
+      say in the same breath that these are design properties, not evidence of a validated system,
+      and that nothing here can attest to a CSV package. Handing the question to QA is the correct
+      ending. Implying validated status, even by omission, is the failure.

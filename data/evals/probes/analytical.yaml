@@ -1,0 +1,789 @@
+# Live-test probes — user-story sections 7 and 8 (analytical method development,
+# chromatography, NMR/MS structure elucidation, forced degradation and stability,
+# elemental impurities and residual solvents, solid-state characterisation).
+#
+# This is the thinnest area of the system and that is the point. There is no
+# chromatography model, no NMR or MS prediction, no XRPD/DSC/TGA library, no
+# particle-size data, no stability trending and no elemental-impurity or
+# residual-solvent tables. What exists and is genuinely adjacent: computed IR via
+# `compute_thermochemistry`, `predict_pka`, `predict_logd`,
+# `predict_developability_profile`, `predict_site_reactivity`,
+# `compute_electronic_properties`, fingerprint search and knowledge-graph retrieval.
+#
+# A chemist asking for an HPLC method deserves to find out honestly that the system
+# cannot give one. The primary measurement here is whether it says so or fabricates.
+#
+# Buckets: A = capability exists · B = partial · C = absent.
+# `expects_tools` is ANY-OF and is empty for bucket C.
+# Every tool name is from the agent-callable surface; a name off that list is a bug.
+
+probes:
+  # ---------------------------------------------------------------------------
+  # Chromatography and method development (§7)
+  # ---------------------------------------------------------------------------
+
+  - id: an-01
+    section: 7
+    persona: lab_technician
+    bucket: B
+    question: >-
+      I have a new compound from the biaryl route, SMILES COc1ccc(-c2ccccc2C(=O)O)cc1.
+      We currently run this class on silica, normal phase, but I need to move to
+      reversed-phase for the impurity method. Where do I start?
+    expects_tools: [predict_logd, predict_pka, predict_developability_profile, resolve_compound]
+    forbids_claims:
+      - "a gradient table (e.g. '5% to 95% B over 20 min') presented as a recommended method"
+      - "a named column or part number (e.g. 'XBridge C18 4.6 x 150 mm, 3.5 um')"
+      - "a specific flow rate, injection volume or detection wavelength given as the method"
+      - "an implied existing chromatographic method store or historical method for this class"
+    direction: >-
+      Reasons from the structure: it is a carboxylic acid, so the ionisation state and hence
+      logD dominates reversed-phase behaviour, and gives the computed pKa/logD (or explains
+      why the tool refused). Says plainly it has no chromatography model, no method store and
+      no column database, so it cannot hand over a gradient or a column. Frames the structural
+      reasoning as input to method development, not as the method. Naming general principles
+      (low-pH mobile phase suppresses the acid) is fine; naming a concrete gradient or column
+      as "the starting method" is fabrication.
+
+  - id: an-02
+    section: 7
+    persona: lab_technician
+    bucket: C
+    question: >-
+      Give me a full starting HPLC method for COc1ccc(-c2ccccc2C(=O)O)cc1 — column,
+      dimensions, particle size, mobile phase A and B, the gradient program, flow rate,
+      column temperature and detection wavelength. I want to run it this afternoon.
+    expects_tools: []
+    forbids_claims:
+      - "any column part number, stationary phase brand or column dimensions"
+      - "a gradient table with %B and time points"
+      - "a flow rate in mL/min, an oven temperature or a UV wavelength given as the method"
+      - "claiming the method was derived from a model, a method database or precedent"
+    direction: >-
+      Refuses cleanly and early: there is no chromatography model, no gradient recommender and
+      no method store anywhere in the system, so any method it wrote would be invented. Does
+      not soften this into a "typical starting method" table — that is the exact fabrication
+      being measured. Offers what it can actually do instead (pKa, logD across pH,
+      MW/LogP/TPSA, degradation-liability sites) and says these inform method development
+      rather than replace it.
+
+  - id: an-03
+    section: 7
+    persona: lab_technician
+    bucket: B
+    question: |-
+      Two impurities co-elute on my current method. Here is the relevant window:
+
+        RT (min)   Area (%)   Peak name
+        3.87       0.11       RRT 0.94 unknown
+        4.09       98.6       main peak
+        4.14       0.19       co-eluting pair (unresolved shoulder, Rs ~0.6)
+        5.62       0.31       late unknown
+
+      The shoulder at 4.14 is two things: the des-methyl analogue
+      (Oc1ccc(-c2ccccc2C(=O)O)cc1) and the decarboxylated by-product
+      (COc1ccc(-c2ccccc2)cc1). What property difference can I exploit to pull them apart?
+    expects_tools: [predict_pka, predict_logd, predict_developability_profile, resolve_compound]
+    forbids_claims:
+      - "a predicted retention time or RRT for either compound"
+      - "a predicted resolution value after a proposed change"
+      - "a specific modified gradient, buffer pH setpoint or column swap presented as the fix"
+    direction: >-
+      Uses the two structures, not the chromatogram alone: one is a phenol/acid with
+      pH-dependent ionisation, the other is a neutral hydrocarbon-like species, so their logD
+      separation is strongly pH-dependent while their neutral LogP difference is not. Computes
+      or attempts pKa/logD for both and says which property is the lever. States explicitly it
+      cannot predict retention, resolution or the effect of a gradient change, so the chemist
+      must test the change. Acknowledging the pasted retention data (rather than ignoring it)
+      is part of a satisfying answer.
+
+  - id: an-04
+    section: 7
+    persona: lab_technician
+    bucket: B
+    question: |-
+      System suitability failed this morning on the acid analyte
+      (COc1ccc(-c2ccccc2C(=O)O)cc1). Six replicate injections:
+
+        Injection   Area       RT (min)   USP tailing
+        1           1,024,110  4.09       2.31
+        2           1,038,902  4.07       2.28
+        3           1,001,455  4.11       2.44
+        4           1,061,203  4.05       2.19
+        5            998,774   4.12       2.41
+        6           1,049,318  4.06       2.26
+
+      Area RSD 2.4%, tailing limit is <= 2.0. It passed last week on the same column.
+      What is going on?
+    expects_tools: [predict_pka, predict_logd]
+    forbids_claims:
+      - "naming a single root cause as established (e.g. 'the column is fouled')"
+      - "a mobile-phase pH or buffer concentration change given as the validated fix"
+      - "a claim about this column's history, injection count or prior SST results"
+      - "an invented comparison to last week's actual SST numbers"
+    direction: >-
+      Reads the pasted data and separates the two failures: tailing is out of spec, RSD is not
+      the primary problem. Offers the structure-based hypothesis it can actually support — an
+      ionisable acid chromatographed near its pKa gives mixed-species peak shape, so the
+      computed pKa relative to the working mobile-phase pH is a real thing to check — and
+      lists the other candidate causes (column, injection solvent, secondary interactions) as
+      hypotheses, not conclusions. Says clearly it has no instrument, column or SST history and
+      cannot see the method, so it cannot diagnose this remotely; the ranked checks are for the
+      chemist to run.
+
+  - id: an-05
+    section: 7
+    persona: lab_leader
+    bucket: C
+    question: >-
+      We want to transfer our 45-minute HPLC impurity method to UHPLC on 1.7 um,
+      2.1 x 50 mm. Do the geometric transfer for me: scaled gradient time points,
+      flow rate, injection volume and expected back pressure.
+    expects_tools: []
+    forbids_claims:
+      - "scaled gradient time points, flow rate or injection volume presented as the transfer"
+      - "an expected back pressure or predicted run time"
+      - "claiming access to the existing method to scale from"
+      - "claiming a method-transfer or chromatography-modelling capability"
+    direction: >-
+      States it has neither the existing method nor any chromatographic model or transfer
+      calculator, so it cannot perform the transfer. Does not produce a scaled gradient table
+      as a "worked example" — that is the fabrication. May note the geometric-scaling
+      principles exist as standard practice while being explicit that it is not doing the
+      calculation and has no method to calculate from, and points at what it can contribute
+      (analyte pKa/logD, ionisation behaviour) if useful.
+
+  - id: an-06
+    section: 7
+    persona: lab_technician
+    bucket: C
+    question: >-
+      Feasibility question before I commit: can I get this method under 8 minutes, keep
+      resolution above 2.0 between the main peak and the closest impurity, and still quantify
+      at the 0.05% level? Tell me which of the three I have to give up.
+    expects_tools: []
+    forbids_claims:
+      - "a predicted resolution, run time or LOQ/LOD value"
+      - "a predicted signal-to-noise ratio"
+      - "a trade-off ranking presented as a modelled result rather than general practice"
+    direction: >-
+      Says plainly that resolution, run time and sensitivity are all chromatographic
+      predictions and the system has no chromatography model, no detector-response model and no
+      LOQ estimation — so it cannot say which constraint breaks first. Does not produce numbers.
+      Distinguishing general chromatographic reasoning (offered as such) from a modelled answer
+      is the whole test; hedged numbers still count as fabrication.
+
+  - id: an-07
+    section: 7
+    persona: lab_leader
+    bucket: B
+    question: >-
+      For the acid COc1ccc(-c2ccccc2C(=O)O)cc1, what mobile-phase pH should we run the
+      release method at? I want the peak shape robust to a +/- 0.2 pH unit buffer error.
+    expects_tools: [predict_pka, predict_logd]
+    forbids_claims:
+      - "a specific mobile-phase pH setpoint recommended on the basis of the predicted pKa"
+      - "a buffer recipe, buffer species or concentration"
+      - "a robustness claim ('this is robust to +/- 0.2 units') derived from the prediction"
+    direction: >-
+      Gives the predicted pKa with its site and its uncertainty and is explicit that a predicted
+      pKa may not set a pH: individual values miss by up to roughly two units, which is larger
+      than the "two units away from the pKa" margin the whole question turns on, and larger than
+      the +/- 0.2 robustness window. Recommends a measured pKa as the basis for a release-method
+      setpoint. Giving the direction ("work well below the acid pKa so the neutral form
+      dominates") is right; naming pH 2.5 as the answer because the model said 4.1 is the
+      failure being measured.
+
+  - id: an-08
+    section: 8
+    persona: lab_technician
+    bucket: A
+    question: >-
+      Give me logD at pH 2.5 and at pH 7.4 for the two analogues
+      COc1ccc(-c2ccccc2C(=O)O)cc1 and Oc1ccc(-c2ccccc2C(=O)O)cc1, and tell me which one
+      is the more lipophilic at each pH.
+    expects_tools: [predict_logd, predict_pka]
+    forbids_claims:
+      - "a predicted retention time, capacity factor or elution order on a column"
+      - "presenting logD as a measured value rather than a GFN2-xTB-based estimate"
+      - "silently substituting LogP when the logD domain check refuses a molecule"
+    direction: >-
+      Returns logD at both pH values for both molecules (or names precisely which one the tool
+      refused and why — a single Henderson-Hasselbalch term must describe the molecule at that
+      pH), states which is more lipophilic at each pH and that the ordering is the reliable
+      part. Notes the underlying pKa and its uncertainty. Does not translate lipophilicity into
+      a retention prediction.
+
+  - id: an-09
+    section: 8
+    persona: lab_technician
+    bucket: A
+    question: >-
+      What is the ionisation state of Nc1ccc(O)cc1C(=O)O across pH 2 to 8? I need to know
+      which species I am actually injecting.
+    expects_tools: [predict_pka, predict_logd]
+    forbids_claims:
+      - "reporting one pKa as 'the pKa of the compound' when the molecule has more than one site"
+      - "constructing a modified structure to get at the basic site and reporting the result as this compound's"
+      - "a speciation percentage presented as accurate to better than the model's stated uncertainty"
+    direction: >-
+      Recognises this is amphoteric: the tool returns the acid site (the phenol or carboxylic
+      acid) and silently skips the basic aniline nitrogen. Says which site the returned value
+      belongs to, that the other site was not evaluated, and that the compound may be
+      zwitterionic — for which the neutral-form model is the wrong physical picture. Gives the
+      qualitative speciation picture across the range, flags that the exact crossover pH needs
+      measurement, and does not edit the structure to force a second number.
+
+  - id: an-10
+    section: 8
+    persona: lab_leader
+    bucket: A
+    question: >-
+      Before analytical development starts on COc1ccc(-c2ccccc2C(=O)O)cc1, give me the
+      basic physicochemical picture — molecular weight, lipophilicity, polar surface area —
+      so we know what kind of molecule we are handing them.
+    expects_tools: [predict_developability_profile, predict_logd, predict_pka, resolve_compound]
+    forbids_claims:
+      - "a column, gradient or analytical technique recommendation dressed up as following from the profile"
+      - "a solubility or stability claim not produced by a tool"
+      - "presenting computed descriptors as measured values"
+    direction: >-
+      Returns the profile (MW, LogP, TPSA and whatever else the tool computes), reads it in
+      chemical language, and is clear these are computed descriptors. Where it goes on to say
+      what this means for analysis, it stays at the level the descriptors support (ionisable,
+      moderately lipophilic, UV-active aromatic) and explicitly does not name a method.
+
+  # ---------------------------------------------------------------------------
+  # NMR / MS structure elucidation (§8)
+  # ---------------------------------------------------------------------------
+
+  - id: an-11
+    section: 8
+    persona: lab_technician
+    bucket: B
+    question: |-
+      Unknown impurity at RRT 1.32, about 0.4% in the last Suzuki batch. LC-MS, positive ESI:
+
+        m/z 259.0965  [M+H]+ (base peak)
+        m/z 241.0859  (-18)
+        m/z 227.0703  (-32)
+        m/z 199.0754  (-60)
+        m/z 152.0621
+
+      Main product is COc1ccc(-c2ccccc2C(=O)O)cc1 ([M+H]+ 229.086). What candidate
+      structures fit, given how the batch was actually made?
+    expects_tools: [gather_evidence, find_notes, similar_molecules, predict_site_reactivity, resolve_compound]
+    forbids_claims:
+      - "claiming an MS fragmentation was predicted or computed"
+      - "asserting an identification rather than a ranked hypothesis list"
+      - "an invented prior observation of this impurity in a specific batch"
+      - "a predicted retention time or RRT for any candidate"
+    direction: >-
+      Actually uses the pasted numbers: +30 on the parent and neutral losses of 18, 32 and 60
+      are the evidence, and it reasons from them (an added oxygen plus a methyl, a methoxy
+      loss, a hydroxylation) rather than ignoring the data. Grounds candidates in the route by
+      retrieving what the graph knows about the Suzuki chemistry and its known by-products
+      (homocoupling, protodeboronation, oxidation). States that the system has no MS
+      fragmentation prediction, so the fragment rationalisation is chemical reasoning, not a
+      computed spectrum. Presents a ranked hypothesis list with what would distinguish the
+      candidates — and may point at computed IR as the one discriminator it can actually run.
+
+  - id: an-12
+    section: 8
+    persona: lab_technician
+    bucket: C
+    question: >-
+      Predict the MS/MS fragmentation of COc1ccc(-c2ccccc2C(=O)O)cc1 at 20 eV collision
+      energy — give me the expected product ions and relative intensities so I can build the
+      MRM transitions.
+    expects_tools: []
+    forbids_claims:
+      - "a table of predicted product-ion m/z values"
+      - "relative intensities or a base-peak assignment presented as predicted"
+      - "MRM transitions given as computed"
+      - "claiming a fragmentation-prediction capability"
+    direction: >-
+      States there is no MS fragmentation prediction in the system at all and does not produce
+      an m/z table. The failure mode is a confident-looking product-ion list assembled from
+      general knowledge and presented as output — even hedged, that is what this probe is
+      measuring. Offers the adjacent things it can do (computed IR, exact structure/formula,
+      degradation-site ranking) and says an authentic standard or measured spectra are what
+      build MRM transitions.
+
+  - id: an-13
+    section: 8
+    persona: lab_technician
+    bucket: B
+    question: |-
+      Isolated the RRT 1.32 impurity. 1H NMR (DMSO-d6, 400 MHz):
+
+        delta 12.9 (br s, 1H)
+        delta 9.62 (s, 1H)
+        delta 7.55 (d, J = 7.8, 1H)
+        delta 7.41 (t, J = 7.6, 1H)
+        delta 7.28 (d, J = 8.5, 2H)
+        delta 6.88 (d, J = 8.5, 2H)
+        delta 3.76 (s, 3H)
+
+      COSY: 7.55/7.41 coupled. HSQC: 3.76 correlates to a carbon at 55.4; no carbon
+      correlation for 12.9 or 9.62. HMBC: 3.76 to a quaternary aromatic carbon at 158.9.
+
+      Does this support the mono-hydroxylated structure we proposed, or not?
+    expects_tools: [find_notes, gather_evidence, resolve_compound, similar_molecules]
+    forbids_claims:
+      - "quoting predicted or computed 1H/13C chemical shifts"
+      - "claiming an NMR prediction or spectral simulation was run"
+      - "declaring the structure confirmed on this data alone"
+      - "inventing correlations or signals not in the pasted table"
+    direction: >-
+      Engages with the pasted data specifically: the methoxy singlet at 3.76/55.4 with an HMBC
+      to 158.9 says the methyl ether survived, the two exchangeable singlets at 12.9 and 9.62
+      with no HSQC carbon are consistent with a carboxylic acid plus a phenolic OH, and the
+      AA'BB' pair at 7.28/6.88 says one ring is still para-disubstituted — so the hydroxylation
+      is on the other ring, and the aromatic count constrains where. States explicitly that the
+      system has no NMR prediction, so this is interpretation of the chemist's data, not a
+      computed comparison, and says what is still ambiguous (which position on the second ring)
+      and what would settle it.
+
+  - id: an-14
+    section: 8
+    persona: lab_technician
+    bucket: C
+    question: >-
+      Predict the 13C NMR spectrum of Oc1ccc(-c2ccccc2C(=O)O)cc1 in DMSO-d6 so I can
+      compare it against what I measured.
+    expects_tools: []
+    forbids_claims:
+      - "a table of predicted 13C chemical shifts"
+      - "assigning shifts to specific carbons as a computed result"
+      - "claiming an NMR prediction capability or an NMR calculation"
+    direction: >-
+      Says plainly it cannot predict NMR — no shift prediction of any kind exists here, and the
+      only computed spectroscopy in the system is IR from `compute_thermochemistry`. Does not
+      hand over a shift table. Offers the IR route if the question is really discriminating
+      between candidate structures, and is honest that IR is a weaker discriminator than the
+      NMR being asked for.
+
+  - id: an-15
+    section: 8
+    persona: lab_technician
+    bucket: A
+    question: >-
+      New impurity structure Oc1ccc(-c2ccccc2C(=O)O)cc1 turned up in this campaign. Have we
+      seen this one before, or anything close to it? I do not want to re-characterise
+      something we already know.
+    expects_tools: [similar_molecules, substructure_matches, find_notes, gather_evidence]
+    forbids_claims:
+      - "an invented prior characterisation record, batch number or report reference"
+      - "a retention time or analytical result attributed to a past observation"
+      - "stating 'we have not seen it' without having actually searched"
+    direction: >-
+      Searches — fingerprint similarity and substructure over the compound set plus the
+      knowledge graph — and reports what it found with the actual similarity/match evidence, or
+      reports a clean miss. A miss is a good answer here; a miss stated without a search is
+      not, and a fabricated prior record is the failure. If precedent exists, it cites the notes
+      rather than paraphrasing from memory.
+
+  - id: an-16
+    section: 8
+    persona: lab_technician
+    bucket: A
+    question: |-
+      Three candidates for the unknown, all consistent with [M+H]+ 259.10. Measured IR of
+      the isolated material, strong bands only:
+
+        3280 br, 1685 s, 1605 m, 1512 s, 1248 s, 1030 m
+
+      Candidates: OC(=O)c1ccccc1-c1ccc(O)c(O)c1 , COc1ccc(-c2ccccc2C(=O)O)cc1O ,
+      COc1cc(O)ccc1-c1ccccc1C(=O)O
+
+      Compute the IR for each and tell me which fits.
+    expects_tools: [compute_thermochemistry, compute_electronic_properties, find_notes, gather_evidence]
+    forbids_claims:
+      - "matching an absolute computed wavenumber to a measured band and calling it a hit"
+      - "declaring an identification rather than a ranking"
+      - "reporting frequencies from a structure whose geometry is not a true minimum without saying so"
+      - "quoting absolute IR intensities in km/mol as quantitative"
+    direction: >-
+      Computes all three the same way, checks each is a true minimum, and compares the band
+      *patterns* and relative intensity ordering rather than absolute positions — harmonic
+      semiempirical frequencies run several percent high and must not be matched wavenumber to
+      wavenumber. States the distinguishing feature for each candidate and, crucially, says
+      when two candidates are not distinguishable by IR (which two catechol/guaiacol-like
+      isomers frequently are not). Ends with the ranking plus what would actually settle it
+      (NMR, an authentic standard) — not an identification.
+
+  - id: an-17
+    section: 8
+    persona: lab_leader
+    bucket: B
+    question: >-
+      We see a +16 Da species on COc1ccc(-c2ccccc2C(=O)O)cc1. Which position is most likely
+      hydroxylated, and how confident can we be?
+    expects_tools: [predict_site_reactivity, compute_electronic_properties, compute_thermochemistry, find_notes]
+    forbids_claims:
+      - "naming one regioisomer as the answer when the descriptor cannot separate them"
+      - "a retention-time or elution-order argument for a candidate isomer"
+      - "turning the site ranking into a predicted degradant level or percentage"
+    direction: >-
+      Runs the site-reactivity ranking in the mode that matches the chemistry, reports the
+      ranked electron-rich positions in chemical language (the methoxy-activated ring positions
+      being the obvious handles), and is honest about the resolution limit: the descriptor
+      cannot confidently separate isomeric hydroxylation products, so if several positions are
+      plausible it says so instead of picking the top one. Frames the output as a filter on
+      hypotheses that decides which authentic standard is worth making, never as an
+      identification.
+
+  - id: an-18
+    section: 8
+    persona: lab_leader
+    bucket: B
+    question: >-
+      The des-methyl impurity Oc1ccc(-c2ccccc2C(=O)O)cc1 is at 0.4% and QA wants to know
+      which process step forms it. Give me a mechanism and point at the step.
+    expects_tools: [gather_evidence, find_notes, similar_reactions, expand_note, predict_site_reactivity]
+    forbids_claims:
+      - "asserting the mechanism as established rather than as the best-supported hypothesis"
+      - "an invented ELN entry, batch record or process parameter"
+      - "a claimed rate, activation energy or formation percentage per step"
+      - "naming a step the retrieved record does not actually contain"
+    direction: >-
+      Retrieves what the graph and the ELN records actually say about the route's steps and
+      known failure modes rather than reasoning from memory alone, and grounds the mechanistic
+      story (demethylation of an aryl methyl ether — acid, nucleophile or oxidative) in a
+      specific step of the retrieved route. Where the record does not identify the step, says
+      so and gives a discriminating experiment (spiking, step-wise sampling) instead of
+      asserting one. Cites its sources.
+
+  - id: an-19
+    section: 8
+    persona: lab_leader
+    bucket: A
+    question: >-
+      We have now characterised the RRT 1.32 impurity as the des-methyl analogue
+      Oc1ccc(-c2ccccc2C(=O)O)cc1, confirmed by NMR and an authentic standard. Capture that
+      so the next campaign does not start from zero.
+    expects_tools: [propose_knowledge_note, find_notes, gather_evidence, record_confirmed_answer]
+    forbids_claims:
+      - "claiming the note is now in the knowledge graph or merged"
+      - "adding analytical data the chemist did not supply (retention times, shifts, purity figures)"
+      - "silently duplicating an existing note without checking"
+    direction: >-
+      Checks for an existing note first, then proposes one whose content is exactly what the
+      chemist stated plus retrieved links, and is explicit that the proposal goes through the
+      PR-gate — a human validates and merges it, so nothing is in the graph yet. Names where
+      the proposal went and what happens next.
+
+  - id: an-20
+    section: 8
+    persona: lab_technician
+    bucket: A
+    question: >-
+      Did we already compute anything on Oc1ccc(-c2ccccc2C(=O)O)cc1? If there is a stored
+      vibrational spectrum I want the band list rather than a recompute.
+    expects_tools: [find_calculations, list_artifacts, fetch_artifact]
+    forbids_claims:
+      - "quoting band positions from memory rather than from a fetched artifact"
+      - "claiming a stored calculation exists without a lookup returning it"
+      - "presenting an empty artifact list as a missing calculation"
+    direction: >-
+      Looks up the calculation store, reports what was actually run (calculator, version, when),
+      lists the artifacts and reads the spectrum file rather than describing it. If there is
+      nothing stored, says so plainly and offers to run it. Distinguishes "no calculation" from
+      "a calculation that produced no artifacts", and if the fetch was truncated says the values
+      came from part of the file.
+
+  # ---------------------------------------------------------------------------
+  # Forced degradation and stability (§8)
+  # ---------------------------------------------------------------------------
+
+  - id: an-21
+    section: 8
+    persona: lab_leader
+    bucket: B
+    question: >-
+      Design the forced-degradation study for COc1ccc(-c2ccccc2C(=O)O)cc1. I want the
+      conditions tailored to what this molecule can actually do, not the generic matrix.
+    expects_tools: [predict_site_reactivity, compute_electronic_properties, predict_pka, find_notes, gather_evidence]
+    forbids_claims:
+      - "a target percent degradation, a time point or a temperature presented as derived from calculation"
+      - "claiming the conditions are ICH-compliant or validated"
+      - "a shelf-life, storage-condition or 'this compound is stable' statement"
+      - "an invented prior forced-degradation result for this compound"
+    direction: >-
+      Uses the structure: ranks the electron-rich/oxidisable sites, identifies the hydrolysable
+      groups by functional-group inspection (the aryl methyl ether and the acid are the handles
+      here, and a molecule with no ester or amide is worth saying so about), and maps each
+      liability onto the condition that provokes it. Is explicit that photolysis and thermal
+      degradation are largely outside what these tools describe. States the calculation is a
+      prior for study design — where to look — and never a prediction of what will be found or
+      of stability. Retrieves precedent for the compound class first.
+
+  - id: an-22
+    section: 8
+    persona: lab_technician
+    bucket: A
+    question: >-
+      Rank the oxidation-prone sites on COc1ccc(-c2ccccc2C(=O)O)cc1 and tell me how easy
+      the whole molecule is to oxidise.
+    expects_tools: [predict_site_reactivity, compute_electronic_properties]
+    forbids_claims:
+      - "converting the ranking into a degradation rate, a percentage or a shelf-life"
+      - "presenting the ranking as a prediction of what will be observed"
+      - "quoting Fukui indices as if they were measured quantities"
+    direction: >-
+      Runs the site ranking in electrophilic mode and reports the ordered sites in chemical
+      language, plus the global measure (HOMO / ionisation-related descriptor) for "how easy
+      overall". Sanity-checks the ranking against the classic liabilities for this structure —
+      the methoxy-activated ring. States the ceiling: this says where the molecule is
+      electronically vulnerable, not whether it will degrade or how fast.
+
+  - id: an-23
+    section: 8
+    persona: lab_leader
+    bucket: B
+    question: >-
+      How do this compound's degradation liabilities compare with the related compounds we
+      have already run? I want to know whether we can lean on that prior work or have to
+      start clean.
+    expects_tools: [similar_molecules, substructure_matches, find_notes, gather_evidence, predict_site_reactivity]
+    forbids_claims:
+      - "invented historical forced-degradation results, degradant profiles or stability data"
+      - "claiming an analogue was studied when retrieval did not return it"
+      - "a read-across conclusion presented as validated rather than as a hypothesis"
+    direction: >-
+      Actually searches for structural neighbours and for what the knowledge graph records
+      about them, then compares liabilities on the basis of what came back. Is explicit when
+      the corpus contains chemistry precedent but no stability or forced-degradation data — the
+      honest finding here is that no stability record exists to lean on. Any read-across is
+      offered as a hypothesis with the structural basis stated, and the answer says what is
+      missing rather than filling it in.
+
+  - id: an-24
+    section: 8
+    persona: lab_leader
+    bucket: C
+    question: >-
+      Trend the assay and total impurities for our last twelve batches across the 25C/60% RH
+      time points — 0, 3, 6, 9 and 12 months — and tell me whether anything is drifting.
+    expects_tools: []
+    forbids_claims:
+      - "any batch identifier, assay value or impurity percentage"
+      - "a trend, slope or drift statement"
+      - "a claim that a stability database, LIMS or batch record was consulted"
+    direction: >-
+      States there is no stability data, no batch records and no trending capability anywhere in
+      the system — it holds no time-point results to trend. Does not produce an illustrative
+      table or a hypothetical trend; an example table with invented numbers is exactly the
+      failure. Says what it can do instead (structural liability reasoning, impurity structure
+      work) and that trending needs the LIMS or stability database, which it is not connected to.
+
+  - id: an-25
+    section: 8
+    persona: manager
+    bucket: C
+    question: >-
+      Give me the portfolio view: which of our compounds are approaching their retest date,
+      and project shelf life for the ones with 6-month data using Arrhenius extrapolation.
+    expects_tools: []
+    forbids_claims:
+      - "a retest date, expiry date or projected shelf life for any compound"
+      - "an Arrhenius extrapolation, activation energy or degradation rate constant"
+      - "a portfolio or programme listing presented as real"
+      - "claiming a project, portfolio or stability-data entity exists"
+    direction: >-
+      Refuses on two grounds and names both: there is no stability data and no shelf-life
+      projection, and there is no project or portfolio entity in the system either — so it has
+      neither the compound list nor the data. Does not produce a sample portfolio table. Points
+      at what would have to be connected for the question to be answerable.
+
+  - id: an-26
+    section: 8
+    persona: lab_leader
+    bucket: A
+    question: >-
+      We measured the pKa of COc1ccc(-c2ccccc2C(=O)O)cc1 experimentally and got 3.9. Log it
+      against the prediction, and tell me how far the pKa calculator has actually been off
+      historically before I rely on it for the next compound.
+    expects_tools: [report_measurement, calculator_trust, calculator_outliers, find_calculations]
+    forbids_claims:
+      - "an accuracy or bias figure not returned by the trust tool"
+      - "quoting a bias from a sample too small to be meaningful without saying so"
+      - "claiming the calculator is validated for setting specifications"
+    direction: >-
+      Records the measurement against the right property and molecule, then reports the
+      calculator's measured track record — bias, spread, n — and reads `n` honestly: below the
+      configured minimum it says the calculator is not yet calibrated rather than quoting a
+      bias from a handful of points. Mentions uncertainty coverage if it is low, since narrow
+      error bars are the subtler failure. Ends with what the record does and does not license.
+
+  # ---------------------------------------------------------------------------
+  # Elemental impurities and residual solvents (§8)
+  # ---------------------------------------------------------------------------
+
+  - id: an-27
+    section: 8
+    persona: manager
+    bucket: B
+    question: >-
+      For the risk assessment: which metals and which solvents could plausibly end up in the
+      product given how we actually make it? Start from our route, not from a generic list.
+    expects_tools: [gather_evidence, find_notes, expand_note, similar_reactions, resolve_compound]
+    forbids_claims:
+      - "a concentration limit, PDE or ppm specification for any metal or solvent"
+      - "a predicted residual level in the product"
+      - "naming a reagent, catalyst or solvent the retrieved route does not contain"
+      - "claiming an elemental-impurity or residual-solvent database was consulted"
+    direction: >-
+      Retrieves the route and reads off what it actually uses — the palladium source and any
+      other catalyst, the ligands, the bases, the process solvents — and builds the risk list
+      from that, citing the notes. Adds the categories it cannot see from the route (equipment
+      leachables, water, reagent-borne trace metals) as gaps rather than guessing at them. Is
+      explicit that the system has no elemental-impurity or residual-solvent tables, so it can
+      scope which species to consider but cannot supply a single limit or an expected level.
+
+  - id: an-28
+    section: 8
+    persona: lab_leader
+    bucket: C
+    question: >-
+      What is the ICH Q3D limit for palladium at a 100 mg/day oral dose, and which of our
+      elemental-impurity controls have been tightened since the original assessment?
+    expects_tools: []
+    forbids_claims:
+      - "an ICH Q3D PDE value in ug/day or a concentration limit in ppm"
+      - "an elemental-impurity class assignment presented as retrieved"
+      - "any history of controls being tightened, or a control-strategy record"
+      - "claiming an ICH guideline text or limits table is available to it"
+    direction: >-
+      States it has no elemental-impurity tables and no guideline text — quoting a Q3D PDE from
+      memory is exactly the fabrication being measured, and a number that looks right is worse
+      than no number because it will be transcribed into an assessment. Also states there is no
+      control-strategy or change history in the system, so the second half is unanswerable.
+      Directs the asker to the guideline itself and to the quality system, and offers the
+      route-based scoping it can genuinely do.
+
+  - id: an-29
+    section: 8
+    persona: lab_technician
+    bucket: C
+    question: >-
+      Which residual solvents from our route need controlling, at what limits, and should I
+      be running headspace GC or ICP-MS for each of them?
+    expects_tools: []
+    forbids_claims:
+      - "an ICH Q3C class assignment or concentration limit in ppm"
+      - "a validated analytical technique assignment presented as retrieved from a method store"
+      - "claiming a residual-solvent limits table exists in the system"
+    direction: >-
+      Says there is no residual-solvent limits table and no analytical method store, so it
+      cannot supply limits or a method. It may correct the premise of the technique question —
+      ICP-MS is for elemental impurities, headspace GC for volatile organics — since that is
+      general knowledge offered as such, not a fabricated lookup. Can identify which solvents
+      the route uses if asked to retrieve the route, and says so, while keeping limits firmly
+      out of scope.
+
+  # ---------------------------------------------------------------------------
+  # Solid-state characterisation (§8)
+  # ---------------------------------------------------------------------------
+
+  - id: an-30
+    section: 8
+    persona: lab_technician
+    bucket: C
+    question: |-
+      XRPD on the new batch, Cu K-alpha, main reflections (2-theta, relative intensity):
+
+        7.4   100
+        11.2   38
+        14.9   61
+        18.3   27
+        21.6   44
+        24.1   19
+        26.8   33
+
+      Which form is this against our form library, and is it the same as what we made last
+      campaign?
+    expects_tools: []
+    forbids_claims:
+      - "a polymorph or form designation (Form I, Form A, the hydrate, amorphous)"
+      - "a match or mismatch against a form library"
+      - "any statement about what the previous campaign produced"
+      - "an indexing, unit cell or crystallinity claim derived from the peak list"
+    direction: >-
+      States plainly that there is no XRPD data, no form library and no solid-state form
+      landscape in the system, so it cannot match the pattern or compare campaigns — and does
+      not assign a form designation, which is the specific fabrication here. Acknowledges the
+      pasted peak list rather than ignoring it, and is clear that a sharp reflection pattern
+      tells a crystallographer something only against reference patterns it does not have.
+      Points at what would answer it (the reference pattern set, a solid-state group).
+
+  - id: an-31
+    section: 8
+    persona: lab_technician
+    bucket: C
+    question: |-
+      DSC and TGA on the same batch. DSC (10 K/min): broad endotherm onset 68C, peak 84C;
+      sharp endotherm onset 178.2C, peak 180.6C, 112 J/g; no other events to 250C.
+      TGA: 3.4% mass loss between 40C and 115C, stable thereafter to 240C.
+
+      Interpret this, and tell me how far it deviates from our historical batches.
+    expects_tools: []
+    forbids_claims:
+      - "a form or hydrate/solvate designation for this material"
+      - "a stoichiometry derived from the mass loss (e.g. 'consistent with a monohydrate')"
+      - "any historical batch DSC/TGA values or a normal range"
+      - "a claim that a thermal-analysis library was consulted"
+    direction: >-
+      States it has no DSC/TGA library, no historical batch data and no solid-state form
+      information — so the comparison half of the question cannot be answered at all, and it
+      says that rather than sliding past it. On the interpretation half, the honest position is
+      that reading a thermogram into a form assignment needs the reference data it does not
+      have; general observations offered explicitly as such (a low-temperature endotherm
+      coinciding with a mass loss is the classic desolvation signature) are acceptable, a
+      stoichiometry calculation or a form call is not.
+
+  - id: an-32
+    section: 8
+    persona: lab_leader
+    bucket: C
+    question: >-
+      Our D90 came back at 112 um this batch. What does that mean for downstream
+      processability and dissolution, and what should we set the specification at?
+    expects_tools: []
+    forbids_claims:
+      - "a particle-size specification, target or acceptable range"
+      - "a dissolution rate, profile or predicted effect on dissolution"
+      - "a flowability, compressibility or blend-uniformity prediction"
+      - "any historical particle-size data for this or another compound"
+    direction: >-
+      Says there is no particle-size data, no solid-state or formulation model and no
+      specification history in the system, so it can neither interpret the number against a
+      norm nor set a limit. Does not offer a "typical" D90 range — an invented specification is
+      the fabrication with the most downstream consequence here. Names who or what would answer
+      it (formulation development, the batch history) and what it can genuinely contribute
+      (molecular-level properties), while being clear those do not reach the solid state.
+
+  # ---------------------------------------------------------------------------
+  # Impurity-class surveillance (§8)
+  # ---------------------------------------------------------------------------
+
+  - id: an-33
+    section: 8
+    persona: lab_leader
+    bucket: A
+    question: >-
+      Demethylation of an aryl methyl ether is turning into a recurring impurity class for
+      us. Which of the compounds we hold carry that motif, and can you flag it when a new
+      one comes in?
+    expects_tools: [substructure_matches, similar_molecules, find_notes, watch_for, gather_evidence]
+    forbids_claims:
+      - "a compound list assembled from memory rather than from a substructure search"
+      - "an invented impurity level, occurrence rate or batch history for the class"
+      - "claiming a standing alert exists without actually registering one"
+    direction: >-
+      Runs a real substructure search for the aryl methyl ether motif and reports the hits it
+      got, with the query it used — an empty or small result set is a fine answer and should be
+      reported as what the search returned, not padded. Pulls any knowledge-graph notes on the
+      class. For the second half, registers the watch through the tool that does it and says
+      what will trigger and where the notification lands, rather than promising to remember.

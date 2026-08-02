@@ -1391,6 +1391,29 @@ class EvalSettings(BaseSettings):
     # independent.
     eval_drift_timeout_seconds: float = Field(default=300.0, gt=0)
     eval_baseline_path: str = "data/evals/baseline.json"
+    # Live probes (AG-13): questions asked of a *running* system over the HTTP/SSE front door,
+    # against a real model. Their own directory, not `eval_case_dir`: a probe is an input to a
+    # conversation that has not happened yet, while an eval case is output already produced —
+    # the two are scored by different machinery and must not be loaded by one another's reader.
+    live_probe_dir: str = "data/evals/probes"
+    # Where the front door is, for the probe runner. Separate from `service_host`/`service_port`
+    # (which bind a server) because the runner is a *client* and is routinely pointed at a
+    # deployment it did not start.
+    live_probe_base_url: str = "http://127.0.0.1:8000"
+    # One turn's ceiling. Generous: a probe that triggers an inline calculation legitimately
+    # waits, and cutting it short would record a system timeout as a model failure.
+    live_probe_timeout_seconds: float = Field(default=300.0, gt=0)
+    # Concurrent probes in flight. Bounded because every probe shares one front door, one
+    # Postgres and one upstream model account; the point of the run is the system's behaviour,
+    # not its rate limit.
+    live_probe_concurrency: int = Field(default=4, ge=1)
+    # Where transcripts land. Every probe writes one file: the full event stream is the evidence
+    # a finding cites, and a finding whose reproduction is not on disk is prose.
+    live_probe_transcript_dir: str = "tasks/live-test/transcripts"
+    # The judge that grades an answer against its probe's `direction`. Deliberately a different,
+    # stronger model than the agent under test: grading is where model quality buys the most,
+    # and it is one call per probe against the agent's many.
+    live_probe_judge_model: str = "claude-sonnet-5"
     # Minimum share of the pinned hazard rules that must still fire on their reference molecules
     # (`hazard_flag_recall`, D-080). 1.0: the rule table is small enough that one
     # silently-broken SMARTS means a whole hazard class goes unflagged, which the screen reports
