@@ -3,7 +3,7 @@
 **Why a table and not a label.** Spend was already measured — `chemclaw_tokens_total` and its four
 siblings, labelled `profile`. That answers "what is this deployment spending" and cannot answer
 "what did this team spend last quarter", and the gap is structural rather than an oversight in the
-label set: `api/metrics` caps a counter at 64 label series and refuses beyond (D-152), because a
+label set: `core/metrics` caps a counter at 64 label series and refuses beyond (D-152), because a
 label value is attacker-influenced and an unbounded map keyed on one is the memory leak this
 codebase has already fixed three times. An Entra `oid` is exactly such a key — minting tokens for
 many oids is the way around any per-principal limit. Attribution needs unbounded cardinality and

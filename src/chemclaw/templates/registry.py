@@ -23,13 +23,13 @@ from temporalio.common import WorkflowIDReusePolicy
 from temporalio.exceptions import WorkflowAlreadyStartedError
 
 from chemclaw.agent.authz import require_actor
-from chemclaw.agent.identity_context import get_current_roles
-from chemclaw.agent.session_context import get_current_session_id
-from chemclaw.agent.tool_registry import CapabilityTool
 from chemclaw.core.config import settings
 from chemclaw.core.errors import ChemclawError
+from chemclaw.core.identity_context import get_current_roles
 from chemclaw.core.ids import stable_hash
+from chemclaw.core.session_context import get_current_session_id
 from chemclaw.core.temporal_client import connect
+from chemclaw.core.tool_registry import CapabilityTool
 from chemclaw.durable.template_job import TemplateRunInput, TemplateWorkflow
 from chemclaw.templates.manifest import InputType, Template
 
@@ -206,7 +206,7 @@ def build_template_tool(template: Template) -> CapabilityTool:
             )
         except WorkflowAlreadyStartedError:
             return workflow_id
-        from chemclaw.agent.turn_signals import record_job_started
+        from chemclaw.core.turn_signals import record_job_started
 
         record_job_started(handle.id, f"template:{template.name}")
         return handle.id

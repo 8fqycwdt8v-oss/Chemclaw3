@@ -21,7 +21,7 @@
 # **Where the publish lands, and why it is inside the submitter's clone.** Every reader resolves
 # `settings.knowledge_path`, which is `note_repo_dir / knowledge_dir` and nothing else — one
 # property, deliberately, so "where notes are written" and "where notes are read" cannot be two
-# answers (`core/config.py`, and `kg/git_submitter.py::_return_to_base`, which returns the checkout
+# answers (`core/config/`, and `kg/git_submitter.py::_return_to_base`, which returns the checkout
 # to the base branch precisely *because* readers share it). Publishing anywhere else does not fail;
 # it silently answers with no evidence, because a missing note is not an error. So the publish
 # target is `${CHEMCLAW_NOTE_REPO_DIR}/${CHEMCLAW_KNOWLEDGE_DIR}` — the directory the application

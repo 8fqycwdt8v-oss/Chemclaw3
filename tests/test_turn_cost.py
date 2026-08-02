@@ -12,7 +12,7 @@ node-hours"*. Half of that is a real gap and half is not, and the tests below se
   DFT run incremented it identically.
 
 The one design decision worth a test of its own is why this is a table rather than an `actor` label:
-`api/metrics` refuses a counter past 64 label series on purpose, because the value is
+`core/metrics` refuses a counter past 64 label series on purpose, because the value is
 attacker-influenced. That refusal is the reason for the table, so it is asserted here rather than
 described.
 """
@@ -28,8 +28,8 @@ from chemclaw.agent.turn_cost import (
     default_turn_cost_sink,
     record_turn_cost,
 )
-from chemclaw.api.metrics import METRICS, Metrics
 from chemclaw.core.config import settings
+from chemclaw.core.metrics import METRICS, Metrics
 
 
 class _RecordingSink:

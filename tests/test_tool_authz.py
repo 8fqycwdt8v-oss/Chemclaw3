@@ -15,16 +15,16 @@ import pytest
 from agent_framework import FunctionInvocationContext
 
 from chemclaw.agent.authz import AuthorizationError, authorize_tool
-from chemclaw.agent.identity_context import reset_current_identity, set_current_identity
 from chemclaw.agent.tool_authz import (
     announce_tool_failures,
     enforce_tool_authz,
     surface_authorization_denials,
     surface_domain_errors,
 )
-from chemclaw.agent.turn_signals import Signal, ToolFailureSignal, begin_turn, drain, end_turn
 from chemclaw.core.config import settings
 from chemclaw.core.errors import ChemclawError
+from chemclaw.core.identity_context import reset_current_identity, set_current_identity
+from chemclaw.core.turn_signals import Signal, ToolFailureSignal, begin_turn, drain, end_turn
 
 
 def _enforced(monkeypatch: pytest.MonkeyPatch, **overrides: object) -> None:

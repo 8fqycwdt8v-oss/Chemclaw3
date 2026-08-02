@@ -36,6 +36,8 @@ import os
 from typing import Any
 
 from chemclaw.core.config import settings
+from chemclaw.core.identity_context import get_current_actor, get_current_correlation_id
+from chemclaw.core.session_context import get_current_session_id
 
 
 def configure_logging() -> None:
@@ -231,19 +233,19 @@ class ContextFilter(logging.Filter):
     path closes that into a loop — the import trips a restriction, the restriction logs, the log
     re-enters this filter, which imports again into a now half-initialised module. That is not a
     hypothetical: it deadlocked the workflow worker until the test run's global timeout fired.
-    Construction happens at a process entrypoint (`configure_logging`), where an import is safe.
 
-    The import stays inside the function rather than at module scope because `agent.*` imports
-    `core.*` and not the other way round; at module scope, `core.logging` — which every entrypoint
-    imports first — would depend on the agent layer.
+    The getters themselves are imported at module scope, which is the strongest form of the same
+    guarantee: they are resolved before this class can be constructed, let alone run. That was not
+    available until the R2 layering move — `identity_context` and `session_context` lived in
+    `chemclaw.agent`, so importing them here would have made `core.logging`, which every entrypoint
+    imports first, depend on the conversation layer. They are stdlib-only kernel neighbours now.
+    `RedactionFilter` above still resolves the connector registry lazily, because that one is a
+    real sibling and the rule holds for it.
     """
 
     def __init__(self) -> None:
-        """Bind the ambient-identity getters so `filter` never has to import."""
+        """Bind the ambient-identity getters so `filter` never has to resolve a name."""
         super().__init__()
-        from chemclaw.agent.identity_context import get_current_actor, get_current_correlation_id
-        from chemclaw.agent.session_context import get_current_session_id
-
         self._actor = get_current_actor
         self._correlation_id = get_current_correlation_id
         self._session_id = get_current_session_id

@@ -35,7 +35,6 @@ import httpx
 import yaml
 from pydantic import ValidationError
 
-from chemclaw.agent.tool_registry import CapabilityTool
 from chemclaw.connectors.identity import auth_for, turn_identity_hook
 from chemclaw.connectors.jobs import build_job_tool
 from chemclaw.connectors.manifest import (
@@ -49,6 +48,7 @@ from chemclaw.connectors.transport import DegradingHttpConnector, DegradingStdio
 from chemclaw.core.config import settings
 from chemclaw.core.errors import ChemclawError
 from chemclaw.core.metrics_bridge import record_metric
+from chemclaw.core.tool_registry import CapabilityTool
 
 logger = logging.getLogger(__name__)
 

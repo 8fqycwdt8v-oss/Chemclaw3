@@ -20,13 +20,9 @@ from typing import Any
 import pytest
 from agent_framework import AgentSession
 
-from chemclaw.agent.dialogue_tools import (
-    ask_clarifying_question,
-    is_dry_run,
-    reset_dry_run,
-    set_dry_run,
-)
+from chemclaw.agent.dialogue_tools import ask_clarifying_question
 from chemclaw.agent.tool_authz import DryRunRefusal, refuse_writes_on_dry_run
+from chemclaw.agent.turn_flags import is_dry_run, reset_dry_run, set_dry_run
 from chemclaw.api.runner import run_turn
 
 

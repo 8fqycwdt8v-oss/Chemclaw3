@@ -22,7 +22,7 @@ Useful targets: `make eval` (score the versioned metric case-set),
 `make eln-validate` (validate ELN exports), `make kg-validate` (knowledge-graph
 schema + link check). See the `Makefile` for the full list.
 
-Every environment value comes from `src/chemclaw/core/config.py` (see `.env.example`);
+Every environment value comes from `src/chemclaw/core/config/` (see `.env.example`);
 there is no second config source.
 
 ## Running the assistant

@@ -36,11 +36,11 @@ from temporalio.exceptions import WorkflowAlreadyStartedError
 from temporalio.service import RPCError
 
 from chemclaw.agent.authz import authorize_trigger, require_actor
-from chemclaw.agent.tool_registry import tool
-from chemclaw.agent.turn_signals import record_job_started
 from chemclaw.core.config import settings
 from chemclaw.core.ids import stable_hash
 from chemclaw.core.temporal_client import connect
+from chemclaw.core.tool_registry import tool
+from chemclaw.core.turn_signals import record_job_started
 from chemclaw.durable.connector_job import ConnectorJobResult
 from chemclaw.durable.job_record import JobRecordSummary, lookup_job_record, search_job_records
 from chemclaw.durable.note_index import NoteReindexWorkflow

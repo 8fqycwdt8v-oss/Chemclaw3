@@ -1,7 +1,7 @@
 # Operations runbook (admin)
 
 How a system/admin configures and troubleshoots Chemclaw. Everything environment-dependent
-comes from the one config source (`src/chemclaw/core/config.py`, every field mirrored in `.env.example`,
+comes from the one config source (`src/chemclaw/core/config/`, every field mirrored in `.env.example`,
 overridable as `CHEMCLAW_<FIELD>`); this runbook covers the four recurring admin tasks.
 
 ## Prerequisites

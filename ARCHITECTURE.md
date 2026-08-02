@@ -26,7 +26,7 @@ generates enters the graph through a **PR-gate**, so a human signs off before it
 
 | Subpackage | Layer | What it is |
 | --- | --- | --- |
-| `core/` | — | The shared kernel: config, database, HTTP, ids, logging, errors, embeddings, the Temporal client. Everything imports it; it imports no sibling, and `test_layering.py` proves that. |
+| `core/` | — | The shared kernel: config, database, HTTP, ids, logging, errors, embeddings, the Temporal client, the process metrics registry, and the ambient-turn primitives every layer stamps or reads (identity, session id, turn signals, the capability-tool registry). Everything imports it; it imports no sibling, and `test_layering.py` proves that. |
 | `agent/` | 1 (MAF) | Conversation orchestration: the agent, its tool surface, sessions, identity, authorization, the plan/execute harness. |
 | `api/` | 1 (MAF) | The FastAPI + SSE front door that serves `agent/` over HTTP, behind OIDC. |
 | `durable/` | 2 (Temporal) | Workflows, activities, and the `background-jobs` worker that hosts them. |
@@ -58,7 +58,7 @@ inside each connector.
 | `tasks/` | The working files `CLAUDE.md` requires: `todo.md` and `lessons.md`. Plus `live-test/` — the transcripts and per-slice findings of a live probe run (`chemclaw.evals.live`), kept because the archived report cites them per probe and a finding whose reproduction is not on disk is a claim rather than evidence. Run output, never source: nothing imports it, and a later run overwrites it. |
 | `.github/workflows/` | CI. The **only** place GitHub Actions reads workflows from — see D-146. |
 
-## Two pairs of names that look like duplicates and are not
+## Names that look like duplicates and are not
 
 **`science/calc/` vs `connectors/calc/`** (and `bo`, `safety`, `fingerprints` likewise). The first
 is the engine: pure computation, importable and testable with no orchestration stack. The second is
@@ -76,6 +76,13 @@ along this same line and deleted the package.
 global skill belongs to no single capability. Both are discovered by one mechanism —
 `CHEMCLAW_SKILLS_DIR` is a `PATH`-style list, and the connector registry appends each enabled
 bundle's directory — so the split is about ownership, not lookup.
+
+**`core/metrics.py` vs `evals/metric.py` vs `evals/metrics.py`.** Three files, one word, no
+relationship. `core/metrics.py` is the Prometheus registry an operator scrapes — turns, tokens,
+jobs, refusals — process-wide because that is the scope a scrape targets. `evals/metric.py` is the
+`@metric` decorator and registry for scored eval criteria, and `evals/metrics.py` holds the seed
+criteria themselves. The collision predates the R2 move that brought the first into `core/`; it is
+recorded here rather than resolved by a rename, because both names are right in their own package.
 
 ## Why two runtime directories are not in `data/`
 

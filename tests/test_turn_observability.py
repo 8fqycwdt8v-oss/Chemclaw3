@@ -15,9 +15,9 @@ from typing import Any
 import pytest
 from agent_framework import AgentSession
 
-from chemclaw.agent.identity_context import get_current_correlation_id
-from chemclaw.api.metrics import METRICS, Metrics
 from chemclaw.api.runner import run_turn
+from chemclaw.core.identity_context import get_current_correlation_id
+from chemclaw.core.metrics import METRICS, Metrics
 
 
 class _SilentAgent:

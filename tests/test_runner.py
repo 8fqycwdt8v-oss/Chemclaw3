@@ -23,7 +23,6 @@ import chemclaw.agent.verifier as verifier
 import chemclaw.api.runner as runner
 from chemclaw.agent.harness_todo import complete_awaiting_job, mark_awaiting_job
 from chemclaw.agent.loop_cap import observe_loop_cap
-from chemclaw.agent.turn_signals import record_job_started
 from chemclaw.agent.verifier import ClaimCheck, VerificationResult
 from chemclaw.api.events import (
     AnswerEvent,
@@ -36,6 +35,7 @@ from chemclaw.api.events import (
     ToolResultEvent,
 )
 from chemclaw.core.config import settings
+from chemclaw.core.turn_signals import record_job_started
 
 
 class _Update:

@@ -1,0 +1,99 @@
+"""The connector seam: which capability bundles this deployment runs, and how it reaches them.
+
+One domain section of the composed ChemClaw `Settings`. The package `__init__.py` flattens
+every section into the one config object and owns the env prefix, the `.env` loading and the
+cross-section validators; fields, env names and defaults are exactly as they were when all
+sections shared a single module (D-072 mixins, split per D-156).
+"""
+
+import os
+
+from pydantic import Field
+from pydantic_settings import BaseSettings
+
+from chemclaw.core.config.shipped import _shipped
+
+
+class ConnectorSettings(BaseSettings):
+    """The connector seam: which capability bundles this deployment runs, and how it reaches them.
+
+    Its own section because a connector is the one mechanism for adding *any* capability — the
+    MCP tools a FastAPI server serves, the durable jobs a Temporal worker runs, and the skills
+    and agent profiles that come with them (`connectors/`,
+    `docs/archive/plans/connector-plan.md`). It replaces the old `mcp_servers` list, which could
+    only describe the first of those four.
+    """
+
+    # Where connector bundles are discovered: one or more directories, OS-path-separator
+    # delimited like `PATH` (and like `skills_dir`), so an operator can add a private bundle
+    # directory without code changes. A bundle is any subdirectory containing `connector.yaml`.
+    # Read it through the `connectors_dirs` property, never raw. Earlier directories win a name
+    # collision, so a private bundle can override a shipped one.
+    connectors_dir: str = Field(default_factory=lambda: _shipped("connectors"))
+
+    # Which discovered connectors are actually enabled — discovery is not enablement. Empty (the
+    # default) means every discovered bundle, so a fresh checkout runs the full shipped surface.
+    # A non-empty pathsep list narrows to exactly those names *in that order* (tool order is
+    # part of the prompt, so it is configuration, not chance). A name here that no bundle
+    # provides is a startup error rather than a capability that silently stops working.
+    connectors_enabled: str = ""
+
+    # Per-connector endpoint override, by connector name. A bundle's manifest ships a working
+    # dev default (a loopback URL); a cluster's address belongs to the deployment, so Helm sets
+    # this instead of patching a file in the repo. ENV override is JSON, e.g.
+    # CHEMCLAW_CONNECTOR_URLS='{"molfp":"http://chemclaw-connector-molfp:8080/mcp"}'.
+    connector_urls: dict[str, str] = Field(default_factory=dict)
+
+    # What an unreachable enabled connector means. Default (`false`) is *degrade loudly*: the
+    # service still starts, the failure is logged, reported by `/readyz` and counted by the
+    # `chemclaw_connectors_unhealthy` gauge, and that connector's tools are simply not
+    # reachable. `true` is fail-fast for a deployment where serving with a silently reduced tool
+    # surface is worse than not serving at all (the GxP posture).
+    connectors_required: bool = False
+
+    # Bound on the startup health probe of one connector. Small: this runs before the service is
+    # ready, and a blackholed host must not delay readiness by more than a couple of seconds.
+    connector_health_timeout_seconds: float = Field(default=2.0, gt=0)
+
+    # Whole-run ceiling for one connector job's child workflow (`ConnectorJobWorkflow`).
+    # Generous, because a connector job is by definition the long-running kind, but bounded so a
+    # wedged connector workflow eventually fails instead of pinning a run forever. Deliberately
+    # one global ceiling rather than a per-manifest field: a bundle in the repo must not be able
+    # to grant itself unlimited runtime — that is a deployment's call.
+    #
+    # It is a ceiling over the *whole* child, so it must exceed the longest activity that child
+    # runs — the QM poll, budgeted by `hpc_run_timeout_seconds`/`hpc_mock_run_seconds` — plus the
+    # activities around it. `_the_job_ceiling_covers_the_poll_it_bounds` enforces that; raise this
+    # whenever you raise the poll budget. The default is the 24h `hpc_run_timeout_seconds` plus an
+    # hour, rather than equal to it: the shipped chart selects `hpc_launch_interface="nextflow"`,
+    # and two equal defaults made the ceiling the tighter of the two on the path the deployment
+    # actually runs.
+    connector_job_timeout_seconds: float = Field(default=90_000.0, gt=0)
+
+    # Hard ceiling on a connector's request body, refused with 413 before anything reads it
+    # (`connectors.server.connector_app`, `core.asgi.BodySizeLimit`). A connector's own setting
+    # rather than reusing `service_max_request_bytes`: that one is sized for the front door's
+    # multipart attachment upload, a shape a connector's `/mcp` never carries — every request there
+    # is one MCP JSON-RPC call, whose arguments are chemistry-sized (a SMILES string, a job spec, a
+    # batch of candidates), not a file. A smaller default follows from that difference in what a
+    # legitimate request looks like, not from copying the front door's number. 0 disables, matching
+    # the front door's knob.
+    connector_max_request_bytes: int = Field(default=1_000_000, ge=0)
+
+    # Bound on the record write every finished connector job performs (D-157). Small: it is one
+    # upsert of a row the job has already earned, and a database that cannot take it in this long
+    # is down — in which case the retries, and then the log line, are the right outcome.
+    job_record_timeout_seconds: float = Field(default=30.0, gt=0)
+    # How many past runs `find_past_jobs` returns by default. Bounded because the results land in
+    # the model's context: enough to recognise the campaign being looked for, not a table dump.
+    job_record_search_limit: int = Field(default=20, ge=1)
+
+    @property
+    def connectors_dirs(self) -> list[str]:
+        """The connector bundle directories, split on the OS path separator (like `PATH`)."""
+        return [d for d in self.connectors_dir.split(os.pathsep) if d]
+
+    @property
+    def connectors_enabled_list(self) -> list[str]:
+        """The explicitly enabled connector names; empty means "every discovered bundle"."""
+        return [c for c in self.connectors_enabled.split(os.pathsep) if c]

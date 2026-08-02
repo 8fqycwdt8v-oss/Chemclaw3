@@ -217,11 +217,11 @@ def test_a_connector_job_runs_its_own_workflow_and_core_does_the_rest(
             async with core, connector:
                 # The session is ambient, never a model-supplied argument (F3-T3), so the tool
                 # picks up which chat to wake exactly as it does mid-turn.
-                from chemclaw.agent.identity_context import (
+                from chemclaw.core.identity_context import (
                     reset_current_identity,
                     set_current_identity,
                 )
-                from chemclaw.agent.session_context import (
+                from chemclaw.core.session_context import (
                     reset_current_session_id,
                     set_current_session_id,
                 )

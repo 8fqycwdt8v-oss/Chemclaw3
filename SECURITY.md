@@ -27,7 +27,7 @@ pre-Phase-6 "no auth" world. For the design rationale see `docs/reference/archit
 - **Role-scoped skills.** `agents/skill_access.py::RoleScopedSkillsSource` hides a gated skill
   (`skill_role_gates`: skill → allowed roles) from a caller holding none of its roles (D-052).
 - **Ambient identity, one carrier.** The runner stamps the validated identity into
-  `src/chemclaw/agent/identity_context.py` (a task-local `contextvar`); audit, the authz gate, job attribution,
+  `src/chemclaw/core/identity_context.py` (a task-local `contextvar`); audit, the authz gate, job attribution,
   and skill scoping all read it there, so concurrent turns never cross identities.
 - **GxP audit trail.** `src/chemclaw/agent/audit.py` logs every agent tool call once (correlation id, actor,
   truncated args, outcome, latency) via a single middleware, with an optional append-only Postgres

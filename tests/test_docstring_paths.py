@@ -2,7 +2,7 @@
 
 Prose is how this codebase navigates: a module opens by naming the two or three modules a reader
 has to hold alongside it (`durable/artifact_eviction.py` cites the pruner it must not duplicate,
-`agent/turn_signals.py` cites the event types it feeds). That only works while the names resolve.
+`core/turn_signals.py` cites the event types it feeds). That only works while the names resolve.
 
 D-148 renamed five packages and moved modules between them, and the ~1200 imports were carried
 along by tools that understand imports. The pointers inside docstrings are not imports, so nothing

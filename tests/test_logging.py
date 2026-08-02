@@ -170,7 +170,7 @@ def test_every_line_carries_what_joins_it_to_the_audit_trail() -> None:
     All three were live in the process — audit, authorization and the connector headers read them —
     and none reached the line, so a WARNING could not be tied to the turn that caused it.
     """
-    from chemclaw.agent.identity_context import (
+    from chemclaw.core.identity_context import (
         reset_current_correlation_id,
         set_current_correlation_id,
     )

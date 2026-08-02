@@ -28,8 +28,6 @@ import pytest
 import uvicorn
 from fastapi import FastAPI
 
-from chemclaw.agent.identity_context import reset_current_identity, set_current_identity
-from chemclaw.agent.session_context import reset_current_session_id, set_current_session_id
 from chemclaw.connectors.identity import (
     HEADER_ACTOR,
     HEADER_ROLES,
@@ -39,6 +37,8 @@ from chemclaw.connectors.manifest import HttpEndpoint
 from chemclaw.connectors.registry import connector_http_client, discovered
 from chemclaw.connectors.server import connector_app
 from chemclaw.connectors.transport import DegradingHttpConnector
+from chemclaw.core.identity_context import reset_current_identity, set_current_identity
+from chemclaw.core.session_context import reset_current_session_id, set_current_session_id
 
 # Every discovered bundle that ships a local HTTP server, as `(name, manifest)`. Parametrizing
 # over discovery rather than a hardcoded list means a new bundle is covered on the day it is

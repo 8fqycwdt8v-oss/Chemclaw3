@@ -56,10 +56,10 @@ from psycopg.rows import TupleRow
 from psycopg.types.json import Jsonb
 
 from chemclaw.agent.history_compaction import plan_compaction
-from chemclaw.agent.identity_context import get_current_correlation_id
 from chemclaw.agent.message_pairing import strip_call_ids, unmatched_call_ids
 from chemclaw.core import db
 from chemclaw.core.config import settings
+from chemclaw.core.identity_context import get_current_correlation_id
 from chemclaw.core.metrics_bridge import record_metric
 
 log = logging.getLogger(__name__)

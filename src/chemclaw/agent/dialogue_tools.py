@@ -1,44 +1,20 @@
-"""Letting the agent ask instead of guess, and letting a chemist ask what *would* happen.
+"""Letting the agent ask instead of guess.
 
-Two interaction capabilities that had no expression in the tool surface:
+**AGT-5.** `_INSTRUCTIONS` tells the agent to "say plainly when the data is silent", but there was
+no contract for it to *ask*. An ambiguous question ("what did we get on the Suzuki?") therefore
+produced a best-guess sweep across every matching campaign — worse *and* more expensive than
+asking which one was meant. `ApprovalRequestEvent` was structurally close but semantically wrong:
+an approval is a yes/no on something already decided.
 
-- **AGT-5.** `_INSTRUCTIONS` tells the agent to "say plainly when the data is silent", but there was
-  no contract for it to *ask*. An ambiguous question ("what did we get on the Suzuki?") therefore
-  produced a best-guess sweep across every matching campaign — worse *and* more expensive than
-  asking which one was meant. `ApprovalRequestEvent` was structurally close but semantically wrong:
-  an approval is a yes/no on something already decided.
-
-- **IDEA-4.** Every expensive path is idempotent and cached, but there was no way to ask "what
-  would this cost, what would you do" without doing it. For a system whose production-default
-  autonomy is `plan_only`, an explicit dry run is the natural product primitive — and a cheap
-  safety valve in front of the durable job launchers.
+The dry-run turn flag (IDEA-4) used to live here too, since it started as a sibling interaction
+primitive; it moved to `chemclaw.agent.turn_flags` because this module's import has a side effect
+— registering `ask_clarifying_question` into the model-facing tool registry — that a plain flag
+reader (`chemclaw.agent.tool_authz`, `chemclaw.connectors.identity`) has no business triggering.
+This module now keeps only its tool.
 """
 
-from contextvars import ContextVar
-
-from chemclaw.agent.tool_registry import tool
-from chemclaw.agent.turn_signals import record_question
-
-# Whether the turn in flight is a dry run. A contextvar for the same reason the ambient session and
-# identity are: it must be per-turn, it must not be a model-supplied tool argument (the model must
-# not be able to turn a real run into a dry one or vice versa), and it must default to "off" for
-# every non-request caller.
-_dry_run: ContextVar[bool] = ContextVar("chemclaw_dry_run", default=False)
-
-
-def set_dry_run(enabled: bool) -> object:
-    """Mark the current turn as a dry run; returns a token for `reset_dry_run`."""
-    return _dry_run.set(enabled)
-
-
-def reset_dry_run(token: object) -> None:
-    """Clear the dry-run flag at turn teardown."""
-    _dry_run.reset(token)  # type: ignore[arg-type]
-
-
-def is_dry_run() -> bool:
-    """Whether the turn in flight is a dry run (False off the request path)."""
-    return _dry_run.get()
+from chemclaw.core.tool_registry import tool
+from chemclaw.core.turn_signals import record_question
 
 
 @tool

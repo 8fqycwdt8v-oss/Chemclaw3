@@ -37,7 +37,7 @@ from chemclaw.durable.publish import BAD_DATA_RETRY
 
 # The well-known system push-back channel a drift alert lands on (a `session_events` "session" an
 # operator surface tails). A fixed internal id, not a tunable threshold — analogous to the schedule
-# ids in `cli/schedules.py` — so it is a constant here, not a config knob.
+# ids in `durable/schedules.py` — so it is a constant here, not a config knob.
 DRIFT_ALERT_CHANNEL = "system-eval-drift"
 
 logger = logging.getLogger(__name__)

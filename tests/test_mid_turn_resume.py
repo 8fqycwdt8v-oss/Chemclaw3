@@ -19,9 +19,9 @@ from agent_framework import AgentSession
 
 from chemclaw.agent.job_results import await_job_results
 from chemclaw.agent.session_events import claim_unconsumed, record_session_event
-from chemclaw.agent.turn_signals import record_job_started
 from chemclaw.api.runner import run_turn
 from chemclaw.core.config import settings
+from chemclaw.core.turn_signals import record_job_started
 from tests.pg import migrated_db_or_skip
 
 

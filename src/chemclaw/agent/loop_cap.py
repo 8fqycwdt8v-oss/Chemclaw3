@@ -25,7 +25,7 @@ recorded and the turn reports no cap. That is the honest reading rather than a h
 never got to want another iteration was not stopped from taking one.
 
 The carrier is a contextvar holding a *mutable* record, for the reasons
-`chemclaw.agent.turn_signals` gives for its buffer: it is task-local (concurrent turns cannot see
+`chemclaw.core.turn_signals` gives for its buffer: it is task-local (concurrent turns cannot see
 each other's loops), it is empty off the request path (CLI, tests, the classic agent), and it is
 mutated rather than rebound — so the decision is visible to the runner even when the agent's stream
 is driven from a task of its own.

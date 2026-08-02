@@ -1,0 +1,59 @@
+"""Temporal — durable execution of long scientific jobs (plan Phase 1).
+
+One domain section of the composed ChemClaw `Settings`. The package `__init__.py` flattens
+every section into the one config object and owns the env prefix, the `.env` loading and the
+cross-section validators; fields, env names and defaults are exactly as they were when all
+sections shared a single module (D-072 mixins, split per D-156).
+"""
+
+from typing import Self
+
+from pydantic import Field, model_validator
+from pydantic_settings import BaseSettings
+
+
+class TemporalSettings(BaseSettings):
+    """Temporal — durable execution of long scientific jobs (plan Phase 1).
+
+    Grouped because everything here shapes how the app reaches and uses the one Temporal cluster:
+    the frontend endpoint, transport security, the two task queues from the architecture, and
+    the shared activity retry bound.
+    """
+
+    # `address` is the frontend gRPC endpoint; `namespace` isolates a team's jobs.
+    temporal_address: str = "localhost:7233"
+    temporal_namespace: str = "default"
+    # Securing the Temporal transport (plan F4-T6, §7.2): one of the two non-Entra bridges.
+    # Identity rides *inside* the workflow payload (`requested_by`, F4-T3), never the transport
+    # — so the transport is authenticated with mTLS (client cert/key + server-root CA, paths to
+    # PEM files) or a Temporal Cloud API key, not with a user token. All empty in local dev (a
+    # plaintext dev broker); a deployment sets the mTLS trio or the API key.
+    temporal_tls_cert: str = ""
+    temporal_tls_key: str = ""
+    temporal_tls_ca: str = ""
+    temporal_api_key: str = ""
+
+    # Core's own task queue: the light background jobs (sync, re-index, reports, and the
+    # connector-job wrapper). A name is config so a deployment can shard or rename it without
+    # touching worker code (D-006). There is no second core queue any more — the heavy `hpc-jobs`
+    # queue went with the QM job into `connectors/qm/`, whose worker derives its queue from the
+    # bundle name (`connectors.queues.bundle_queue`, D-118).
+    background_task_queue: str = "background-jobs"
+
+    # Bound on retries for ordinary activities under the shared bad-data retry policy
+    # (`workflows.publish.BAD_DATA_RETRY`). Bad data is non-retryable by type; this caps the
+    # *transient* retries so an unclassified deterministic failure (a bug, not a network blip)
+    # gives up instead of pinning a worker with unlimited retries.
+    activity_max_attempts: int = Field(default=5, ge=1)
+
+    @model_validator(mode="after")
+    def _temporal_mtls_is_complete(self) -> Self:
+        """A Temporal client cert without its key (or vice versa) is a silent half-config.
+
+        mTLS needs both the client cert and its private key; a server-root CA alone (server-auth
+        only) is fine. Rejecting cert-xor-key at startup beats a confusing handshake failure
+        later.
+        """
+        if bool(self.temporal_tls_cert) != bool(self.temporal_tls_key):
+            raise ValueError("temporal_tls_cert and temporal_tls_key must be set together")
+        return self

@@ -245,3 +245,4 @@ and is kept only for reservations that were in flight when this changed.
 | [D-2026-08-02-grounding-is-what-this-turn-saw](D-2026-08-02-grounding-is-what-this-turn-saw.md) | Grounding is what this turn saw |
 | [D-2026-08-02-shipped-is-not-reachable](D-2026-08-02-shipped-is-not-reachable.md) | Shipped is not reachable |
 | [D-2026-08-02-the-fraction-lives-where-bofire-will-fractionate](D-2026-08-02-the-fraction-lives-where-bofire-will-fractionate.md) | The fraction lives where BoFire will fractionate |
+| [D-2026-08-02-the-seam-does-not-move](D-2026-08-02-the-seam-does-not-move.md) | `core/config` becomes a package, the import seam stays |

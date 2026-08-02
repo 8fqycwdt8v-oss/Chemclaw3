@@ -7,14 +7,19 @@ a job started. The same is true of a PR-gate proposal: `propose_note` opens a br
 reference to the model, so the chemist never learns their contribution landed (the GxP "human signs
 off" line lived only in a git host's UI, disconnected from the conversation that produced it).
 
-A contextvar is the right carrier, for exactly the reasons `chemclaw.agent.session_context` gives:
-it is
-task-local (concurrent turns cannot see each other's signals), it defaults to empty off the request
-path, and it keeps the information out of the *model-facing* tool signature — the model must not be
-able to fabricate "a job started" or "a note was proposed".
+A contextvar is the right carrier, for exactly the reasons `chemclaw.core.session_context` gives:
+it is task-local (concurrent turns cannot see each other's signals), it defaults to empty off the
+request path, and it keeps the information out of the *model-facing* tool signature — the model must
+not be able to fabricate "a job started" or "a note was proposed".
 
 The runner drains this after each streamed update, so signals surface in the order they happened,
 interleaved with the tokens and tool calls around them.
+
+**In `core/` rather than `agent/`, since the R2 layering move**: this is a contextvar over five
+pydantic records, it imports nothing first-party, and both ends of it sit outside the conversation
+layer — a connector job or a template step records the signal, and the front-door runner drains it.
+The event types it feeds still live in `api/events.py`; nothing here imports them, and that
+one-way relationship is what lets the recording side stay ignorant of the transport.
 
 **One sink, not one per kind.** A second mechanism carrying job ids only (`job_events`, a
 Replit-only addition, D-091) was built independently and folded in here rather than kept beside

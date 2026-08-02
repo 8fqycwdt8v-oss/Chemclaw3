@@ -16,6 +16,13 @@ are collected*, never how they are gated — the safety rubric is untouched.
 
 Registration happens on import, so the caller that assembles the toolset imports the tool-bearing
 modules for their side effect (exactly as `evals/__init__.py` seeds the metric registry).
+
+**In `core/` rather than `agent/`, since the R2 layering move**, for the reason a name-keyed dict
+over `Callable` has no layer of its own: this file imports `typing` and `collections.abc` and
+nothing else, while its users are spread across `agent` (the hand-written tools), `connectors` (the
+generated job launchers) and `templates` (template tools). Filing the registry under the
+conversation layer meant those last two had to import `chemclaw.agent` in order to declare a
+function — a dependency on orchestration to name a callable.
 """
 
 from collections.abc import Callable

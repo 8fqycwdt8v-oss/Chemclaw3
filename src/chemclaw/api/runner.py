@@ -25,36 +25,15 @@ from typing import Any
 from agent_framework import AgentSession
 
 from chemclaw.agent.chemclaw_agent import connector_tools
-from chemclaw.agent.dialogue_tools import reset_dry_run, set_dry_run
 from chemclaw.agent.framing import frame_untrusted
 from chemclaw.agent.harness_todo import todo_titles
-from chemclaw.agent.identity_context import (
-    reset_current_correlation_id,
-    reset_current_identity,
-    set_current_correlation_id,
-    set_current_identity,
-)
 from chemclaw.agent.job_results import await_job_results
+from chemclaw.agent.live_session import reset_current_session, set_current_session
 from chemclaw.agent.loop_cap import begin_loop_watch, end_loop_watch, loop_hit_cap
 from chemclaw.agent.plan_gate import consume_turn_approval, gate_applies
 from chemclaw.agent.profiles import get_profile
-from chemclaw.agent.session_context import (
-    reset_current_session,
-    reset_current_session_id,
-    set_current_session,
-    set_current_session_id,
-)
 from chemclaw.agent.turn_cost import TurnCost, record_turn_cost
-from chemclaw.agent.turn_signals import (
-    ApprovalSignal,
-    JobSignal,
-    QuestionSignal,
-    Signal,
-    ToolFailureSignal,
-    begin_turn,
-    drain,
-    end_turn,
-)
+from chemclaw.agent.turn_flags import reset_dry_run, set_dry_run
 from chemclaw.agent.verifier import ungrounded_parameter_shapes, verify_turn_answer
 from chemclaw.api.budget import BudgetTracker
 from chemclaw.api.events import (
@@ -73,12 +52,32 @@ from chemclaw.api.events import (
     ToolFailedEvent,
     ToolResultEvent,
 )
-from chemclaw.api.metrics import METRICS
 from chemclaw.connectors.registry import open_reachable
 from chemclaw.core.config import settings
 from chemclaw.core.errors import ChemclawError
+from chemclaw.core.identity_context import (
+    reset_current_correlation_id,
+    reset_current_identity,
+    set_current_correlation_id,
+    set_current_identity,
+)
+from chemclaw.core.metrics import METRICS
+from chemclaw.core.session_context import (
+    reset_current_session_id,
+    set_current_session_id,
+)
 from chemclaw.core.temporal_client import connect
 from chemclaw.core.tracing import start_span
+from chemclaw.core.turn_signals import (
+    ApprovalSignal,
+    JobSignal,
+    QuestionSignal,
+    Signal,
+    ToolFailureSignal,
+    begin_turn,
+    drain,
+    end_turn,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -559,7 +558,7 @@ async def run_turn(
         # the same label set and the sum over the family is the deployment's whole spend.
         spend_labels = {"profile": profile or "default"}
         # The same numbers, booked a second time against the identity the metric cannot carry. Not a
-        # duplicate: `api/metrics` refuses a counter past 64 label series (D-152) because a label
+        # duplicate: `core/metrics` refuses a counter past 64 label series (D-152) because a label
         # value is attacker-influenced, and an Entra oid is exactly such a key — so per-actor spend
         # needs a table, and the fleet-wide rate needs a counter. Booked here rather than on the
         # success path so a turn torn down by a disconnect is billed too: that is the runaway this
@@ -583,7 +582,7 @@ async def run_turn(
             METRICS.increment("chemclaw_tokens_total", float(turn_usage.total), spend_labels)
         # Published separately from the total because they are priced separately (REV-10). Each is
         # guarded so a provider that reports none of them leaves its counter untouched rather than
-        # publishing a fabricated zero — the same rule `api.metrics` applies to gauges.
+        # publishing a fabricated zero — the same rule `core.metrics` applies to gauges.
         for name, value in (
             ("chemclaw_input_tokens_total", turn_usage.input),
             ("chemclaw_output_tokens_total", turn_usage.output),
@@ -704,7 +703,7 @@ async def _answer_event(answer: str, tool_outputs: Sequence[str]) -> AnswerEvent
             # WARNING because this is the signal an operator tunes the gate on — how often it
             # fires, and on what — and the matched text is in the message so a false positive is
             # diagnosable without reading the transcript. A counter would be the better home for
-            # the rate, but `api/metrics` refuses an undeclared name and declaring one is a
+            # the rate, but `core/metrics` refuses an undeclared name and declaring one is a
             # cross-package edit this change does not own.
             logger.warning(
                 "answer marked for review: parameter shape(s) no tool in this turn produced (%s)",

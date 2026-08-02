@@ -5,9 +5,9 @@ Two findings that turned out to be one missing thing.
 **Metrics went nowhere.** The chart scraped the front door alone, on the reasoning — written into
 `metrics_bridge.py`'s docstring, the ServiceMonitor's comment and a chart test's assertion — that
 recording a metric outside the front door "is a no-op: there is no registry and no HTTP surface in
-those processes". The first half was never true. `api/metrics.py` is stdlib-only, so the bridge's
-lazy import succeeds in every process and the background worker and six connector workers have been
-incrementing a live registry that nothing could read.
+those processes". The first half was never true. `core/metrics.py` is a stdlib-only module
+singleton, so the registry exists in every process that imports it, and the background worker and
+six connector workers have been incrementing a live registry that nothing could read.
 
 **Probes did not exist.** "Liveness is the Temporal poll itself" was asserted in three chart
 templates and enforced nowhere: a worker whose poll loop died kept its process open, so Kubernetes

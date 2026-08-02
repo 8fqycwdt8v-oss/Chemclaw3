@@ -9,14 +9,14 @@ same audit+authz middleware. See `docs/archive/audit/10-config-extensibility.md`
 import pytest
 
 from chemclaw.agent.chemclaw_agent import _capability_tools, build_agent
-from chemclaw.agent.tool_registry import (
+from chemclaw.connectors.registry import enabled
+from chemclaw.core.tool_registry import (
     _REGISTRY,
     register_tool,
     registered_tool_names,
     registered_tools,
     tool,
 )
-from chemclaw.connectors.registry import enabled
 from chemclaw.templates.registry import template_tool_names
 
 # Every in-process capability tool, spelled out: the registry must reproduce this set, no more and

@@ -184,7 +184,7 @@ Chemiker: *"Wie ist die zu erwartende Regioselektivität für die späte C–H-F
   laufen als **Pre-Deploy-Helm-Hook-Job** (`python -m calc.migrate`, D-034), bevor ein App-Container
   startet.
 - **Eine Config-Quelle**: die `values.yaml`-`config:`-Sektion → ein `ConfigMap` → `CHEMCLAW_*`-Env,
-  Schlüssel identisch zu `Settings` in `src/chemclaw/core/config.py`. Kein zweites Config-System im Cluster.
+  Schlüssel identisch zu `Settings` in `src/chemclaw/core/config/`. Kein zweites Config-System im Cluster.
 - **Klartext-Secrets sind die Ausnahme, nicht das Modell** (F6-T6): jedes ist eine Credential für
   ein System, das kein Entra spricht. Die Menge steht in `values.yaml` unter `secrets.keys` und ist
   in `tests/test_helm_chart.py` gepinnt — hier bewusst keine Zahl, weil genau diese Zahl schon

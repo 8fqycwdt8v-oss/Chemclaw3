@@ -1,6 +1,6 @@
 """The two counters that were declared and never incremented (REV-19, D-136).
 
-`chemclaw_jobs_started_total` and `chemclaw_notes_proposed_total` were in `api/metrics.py`'s
+`chemclaw_jobs_started_total` and `chemclaw_notes_proposed_total` were in `core/metrics.py`'s
 declaration table and written by nothing, so every scrape reported a flat `0`. That is worse than
 omitting them: the module's gauge path explicitly refuses to emit an unbound gauge because "a
 fabricated zero would be indistinguishable from a genuinely idle service", and these counters had
@@ -14,7 +14,7 @@ that some function *was called* would have passed against a counter nobody ever 
 import asyncio
 from types import SimpleNamespace
 
-from chemclaw.api.metrics import METRICS
+from chemclaw.core.metrics import METRICS
 from chemclaw.kg.note import Note
 from chemclaw.kg.pr_gate import NoteSubmission, propose_note
 
@@ -78,12 +78,13 @@ def test_a_rejected_human_note_does_not_move_the_counter() -> None:
     assert METRICS.value("chemclaw_notes_proposed_total") == before
 
 
-def test_the_bridge_tolerates_a_registry_that_cannot_be_imported() -> None:
-    """A worker process has no front door; recording a metric there must be a no-op, not a crash.
+def test_the_bridge_tolerates_an_update_that_raises() -> None:
+    """A metrics bug must cost the metric, never the operation being counted.
 
-    The bridge is imported by `connectors` and `kg`, which Temporal workers load without ever
-    building `service`. Passing an update that would fail against a real registry proves the
-    swallow works without asserting on the swallow's internals.
+    `Metrics.increment` raises `KeyError` on an undeclared counter name or a label set that does
+    not match the declaration — strictness that is right for the registry and fatal on a request
+    path. The swallow is what makes the ~10 call sites across six packages safe, and it is asserted
+    by passing an update that genuinely raises rather than by reaching into the swallow.
     """
     from chemclaw.core.metrics_bridge import record_metric
 
@@ -131,14 +132,14 @@ def test_the_priced_token_dimensions_are_published_separately() -> None:
 def test_a_provider_reporting_no_cache_counts_leaves_those_counters_alone() -> None:
     """A fabricated zero is indistinguishable from a genuinely uncached deployment.
 
-    The same rule `chemclaw.api.metrics` states for gauges — it refuses to emit an unbound one
+    The same rule `chemclaw.core.metrics` states for gauges — it refuses to emit an unbound one
     because
     "a fabricated zero would be indistinguishable from a genuinely idle service" — and the exact
     failure REV-19 found in the counters. An `openai_compatible` endpoint that reports no cache
     fields must leave those two counters untouched, not publish 0.
     """
-    from chemclaw.api.metrics import METRICS
     from chemclaw.api.runner import _usage_tokens
+    from chemclaw.core.metrics import METRICS
 
     update = SimpleNamespace(
         contents=[SimpleNamespace(usage_details={"input_token_count": 7, "output_token_count": 3})]

@@ -10,10 +10,10 @@ import asyncio
 
 from chemclaw.agent.audit import AuditEvent
 from chemclaw.agent.audit_store import PostgresAuditSink, chain_hash
-from chemclaw.cli.verify_audit_chain import ChainCheck, ChainRow, check_chain, verify_chain
 from chemclaw.core.config import settings
 from chemclaw.core.db import connect
 from chemclaw.core.ids import stable_hash
+from chemclaw.durable.audit_chain import ChainCheck, ChainRow, check_chain, verify_chain
 from tests.pg import migrated_db_or_skip
 
 _DEFAULT_ACTOR = "u-1"

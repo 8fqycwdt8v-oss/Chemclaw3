@@ -3,6 +3,31 @@
 Prioritized open action items. Top = next. Keep in sync with `docs/planning/implementation-plan.md`
 (phase/step numbers) at session end.
 
+## Open — Found while implementing R2 of the refactor plan (2026-08-02)
+
+- [ ] **The suite is order-dependent: one test file leaks connector state into the next** — [M].
+      `tests/test_connector_job_workflow.py` leaves connector discovery/registry state behind, so
+      running it before `tests/test_agent.py` fails three tests there
+      (`test_agent_advertises_the_domain_tools`,
+      `test_fingerprint_search_is_reached_through_connectors_not_in_process_tools`,
+      `test_instructions_only_name_available_tools`) and three in `tests/test_prose_contract.py`,
+      all with the connector tool names missing. **Reproduced on an unmodified base tree** (`git
+      archive HEAD` into a temp dir, same venv) during R2.A, so it predates the refactor. Every
+      affected file passes alone and in any order excluding that one. It survives today only
+      because the default collection order happens to be benign — which means a future rename or
+      a `-p xdist` run turns it into a mystery failure. Fix: give the file an autouse fixture that
+      restores `connectors.registry.discovered.cache_clear()` (and whatever else it dirties), and
+      consider `-p no:randomly` vs. deliberately randomising order to keep this honest.
+
+- [ ] **`chemclaw.core -> chemclaw.connectors` is the last lazy kernel edge** — [S, may be
+      "won't fix"]. R2.A took `core`'s lazy sibling edges from three to one. The survivor is
+      `core/logging.py`'s redaction filter resolving each connector's bearer-token env-var name so
+      the value can be redacted from logs (Sec-6, R0.4). Unlike the three that went, this is not a
+      misfiled primitive — the connector registry is a real capability layer — so no move retires
+      it. Either accept it permanently and say so in `core/README.md`, or invert it: have the
+      registry *push* its token env-var names into a `core`-owned redaction inventory at startup,
+      so `core` reads a list it owns instead of importing the registry.
+
 ## Open — Found while implementing R0 of the refactor plan (2026-08-02)
 
 Each was found by an implementation agent working a *different* task, verified, and deliberately
@@ -32,7 +57,7 @@ Each reproduced against a running deployment; evidence in `docs/archive/live-use
 and `tasks/live-test/`. The fixed ones are not listed — see the ADR and the commits on that run.
 
 - [ ] **`ask_clarifying_question` does not end the turn** — [M]. `agent/dialogue_tools.py` used to
-      promise it did; `agent/turn_signals.py:124-128` records the signal and returns, and the agent
+      promise it did; `core/turn_signals.py:129-133` records the signal and returns, and the agent
       loop continues. The docstring now states what is true, but the guarantee is still unenforced.
       Enforcing it fights the deliberate "Partial data is still an answer" instruction, so the two
       rules need reconciling before either is mechanised.

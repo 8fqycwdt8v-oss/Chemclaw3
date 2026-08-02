@@ -66,9 +66,9 @@ from chemclaw.agent.tool_authz import (
     surface_authorization_denials,
     surface_domain_errors,
 )
-from chemclaw.agent.tool_registry import register_tool, registered_tool_names, registered_tools
 from chemclaw.connectors.registry import connector_tool_names, job_tools, mcp_tools, skills_dirs
 from chemclaw.core.config import settings
+from chemclaw.core.tool_registry import register_tool, registered_tool_names, registered_tools
 from chemclaw.templates.registry import template_tool_names, template_tools
 
 _INSTRUCTIONS = (
@@ -263,7 +263,7 @@ def build_agent(
     # They are then narrowed twice, both only ever removing: `settings.skills_enabled` picks
     # which discovered skills this deployment turns on (empty = all, today's behavior), then
     # `settings.skill_role_gates` hides gated ones from callers lacking the roles, against the
-    # turn's ambient identity (`agents.identity_context`; an empty gate map shows every skill).
+    # turn's ambient identity (`core.identity_context`; an empty gate map shows every skill).
     skills = SkillsProvider(
         RoleScopedSkillsSource(
             EnabledSkillsSource(
@@ -493,7 +493,7 @@ def _capability_tools(profile: AgentProfile | None = None) -> list[Any]:
 
     Three sources, none of which requires an edit here to grow:
 
-    - the capability-tool registry (`chemclaw.agent.tool_registry`), populated by the `@tool`
+    - the capability-tool registry (`chemclaw.core.tool_registry`), populated by the `@tool`
     decorators
       when their modules are imported above — the conversation-plumbing tools that read or write
       the turn's own state and therefore cannot live in another process;

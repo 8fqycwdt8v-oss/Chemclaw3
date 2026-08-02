@@ -10,7 +10,7 @@ place. The QM launcher was the last of the four to go (D-118); this is now the *
 durable capability is launched from a conversation.
 
 The generated tool is a *first-class* tool, not a special case. It is registered through the
-same `chemclaw.agent.tool_registry.register_tool` a hand-written tool uses, keyed by the manifest's
+same `chemclaw.core.tool_registry.register_tool` a hand-written tool uses, keyed by the manifest's
 `name`, which is what makes every existing mechanism apply to it untouched: the audit middleware
 wraps it, the per-tool authorization gate addresses it by that name (`tool_role_gates`, and the
 built-in `DEFAULT_WRITE_TOOL_GATES` for a job that writes), a profile can narrow it away, and
@@ -35,17 +35,18 @@ from temporalio.exceptions import WorkflowAlreadyStartedError
 
 from chemclaw.agent.authz import authorize_trigger, require_actor
 from chemclaw.agent.harness_todo import mark_awaiting_job
-from chemclaw.agent.identity_context import get_current_correlation_id
-from chemclaw.agent.session_context import get_current_session, get_current_session_id
-from chemclaw.agent.tool_registry import CapabilityTool
-from chemclaw.agent.turn_signals import record_job_started
+from chemclaw.agent.live_session import get_current_session
 from chemclaw.connectors.manifest import JobParamType, JobSpec
 from chemclaw.connectors.queues import bundle_queue
 from chemclaw.core.config import settings
 from chemclaw.core.errors import ChemclawError
+from chemclaw.core.identity_context import get_current_correlation_id
 from chemclaw.core.ids import stable_hash
 from chemclaw.core.metrics_bridge import record_metric
+from chemclaw.core.session_context import get_current_session_id
 from chemclaw.core.temporal_client import connect
+from chemclaw.core.tool_registry import CapabilityTool
+from chemclaw.core.turn_signals import record_job_started
 from chemclaw.durable.connector_job import (
     ConnectorJobInput,
     ConnectorJobResult,

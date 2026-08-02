@@ -433,7 +433,7 @@ def test_the_shipped_config_schedules_the_audit_chain_check(
     Asserted on the built schedule list rather than on the flag, because the flag is one branch
     away from a schedule that is planned but never applied.
     """
-    from chemclaw.cli import schedules as schedules_module
+    from chemclaw.durable import schedules as schedules_module
 
     chart = _settings_from_chart(monkeypatch)
     assert chart.session_store == "postgres", "no durable audit sink; the precondition changed"
@@ -467,8 +467,8 @@ def test_the_chart_states_its_privileged_roles_rather_than_omitting_them(
     declared-expensive job is refused — because either half alone is a fact about nothing.
     """
     from chemclaw.agent.authz import AuthorizationError, authorize_trigger
-    from chemclaw.agent.identity_context import reset_current_identity, set_current_identity
     from chemclaw.connectors.registry import enabled
+    from chemclaw.core.identity_context import reset_current_identity, set_current_identity
 
     key = "CHEMCLAW_ENTRA_PRIVILEGED_ROLES"
     assert key in _VALUES["config"], (

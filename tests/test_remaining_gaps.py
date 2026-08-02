@@ -145,7 +145,7 @@ def test_the_attachment_tools_frame_file_text_as_data() -> None:
     """
     from chemclaw.agent.attachments import STORE, list_attachments, read_attachment
     from chemclaw.agent.framing import ENVELOPE_TAG
-    from chemclaw.agent.session_context import (
+    from chemclaw.core.session_context import (
         reset_current_session_id,
         set_current_session_id,
     )

@@ -587,8 +587,8 @@ def test_a_disconnect_during_a_slow_job_result_wait_keeps_the_committed_exchange
     (Once the resume's *second* `agent.run` starts the exchange is genuinely incomplete again and
     the rollback re-arms — that is the `run_complete = False` around `_resume`.)
     """
-    from chemclaw.agent.turn_signals import record_job_started
     from chemclaw.core.config import settings
+    from chemclaw.core.turn_signals import record_job_started
 
     monkeypatch.setattr(settings, "mid_turn_resume_enabled", True)
     history = _RecordingHistory()

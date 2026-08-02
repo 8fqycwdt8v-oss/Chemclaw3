@@ -15,8 +15,8 @@ from temporalio.worker import Worker
 import chemclaw.agent.interaction_tools as interaction_tools
 import chemclaw.durable.interaction_approval as approval
 from chemclaw.agent.interaction_tools import approval_status, decide_approval, start_approval
-from chemclaw.agent.turn_signals import ApprovalSignal, begin_turn, drain, end_turn
 from chemclaw.core.config import settings
+from chemclaw.core.turn_signals import ApprovalSignal, begin_turn, drain, end_turn
 from chemclaw.durable.interaction_approval import (
     InteractionApprovalWorkflow,
     InteractionCandidate,

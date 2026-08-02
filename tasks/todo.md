@@ -46,11 +46,15 @@ restructure.
 
 ## R2 — Structural moves (serial)
 
-- [ ] **R2.1 [Opus]** R1 move `api/metrics.py` → `core/metrics.py`; delete `metrics_bridge` hack.
-- [ ] **R2.2 [Opus]** R2 move ambient-context primitives → `core/` (identity_context, tool_registry,
+- [x] **R2.1 [Opus]** R1 move `api/metrics.py` → `core/metrics.py`. The plan said "delete the
+      `metrics_bridge` hack"; that was **half wrong** and was not done — `record_metric`'s `try`
+      wraps `update(METRICS)`, not just the import, so deleting it would have let a typo'd counter
+      name propagate into ~10 callers' request paths. The lazy *import* went; the defensive
+      *swallow* stayed.
+- [x] **R2.2 [Opus]** R2 move ambient-context primitives → `core/` (identity_context, tool_registry,
       turn_signals, session-id half).
-- [ ] **R2.3 [Sonnet]** R4 move cli library halves → `durable/` (shims in cli); S6 dry-run ContextVar.
-- [ ] **R2.4 [Fable]** R6 split `core/config.py` → `core/config/` package, import path unchanged.
+- [x] **R2.3 [Sonnet]** R4 move cli library halves → `durable/` (shims in cli); S6 dry-run ContextVar.
+- [x] **R2.4 [Fable]** R6 split `core/config.py` → `core/config/` package, import path unchanged.
 
 ## R3 — Decompose the two hot files (after R1.2 + R2)
 

@@ -49,8 +49,8 @@ from chemclaw.agent.harness_mode import (
     revoke_execute,
     session_mode,
 )
+from chemclaw.agent.live_session import get_current_session
 from chemclaw.agent.plan_approval_store import plan_approval_store
-from chemclaw.agent.session_context import get_current_session
 from chemclaw.core.config import settings
 
 logger = logging.getLogger(__name__)

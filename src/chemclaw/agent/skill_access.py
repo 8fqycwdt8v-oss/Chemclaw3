@@ -12,7 +12,7 @@ skills by the caller's Entra app-roles: a *gated* skill (named in `settings.skil
 mapping skill name → allowed roles) is hidden from a caller who holds none of its roles. A skill
 with no gate is visible to everyone, so an empty gate map reproduces today's behavior.
 
-The caller's roles are the turn's **ambient identity** (`chemclaw.agent.identity_context`), stamped
+The caller's roles are the turn's **ambient identity** (`chemclaw.core.identity_context`), stamped
 by
 the front door from the validated `Principal` — the same source
 `chemclaw.agent.audit`/`chemclaw.agent.authz`
@@ -27,7 +27,7 @@ from collections.abc import Iterable, Mapping
 
 from agent_framework import Skill, SkillsSource, SkillsSourceContext
 
-from chemclaw.agent.identity_context import get_current_roles
+from chemclaw.core.identity_context import get_current_roles
 
 
 class EnabledSkillsSource(SkillsSource):

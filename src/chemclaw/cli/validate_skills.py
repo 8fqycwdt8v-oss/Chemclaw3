@@ -6,7 +6,7 @@ directory name that disagrees with the declared `name`, silently breaks discover
 
 Beyond that shape check, this gate closes the loop between a skill's *judgment* and the
 *capabilities* it is written about: a skill may declare the tools it teaches, and those are checked
-against the live tool surface (`chemclaw.agent.tool_registry`, plus every tool an enabled connector
+against the live tool surface (`chemclaw.core.tool_registry`, plus every tool an enabled connector
 advertises). That catches the drift the frontmatter check cannot see — a skill still instructing the
 model to call a tool that was renamed or removed — which otherwise survives as plausible, stale
 prose. The

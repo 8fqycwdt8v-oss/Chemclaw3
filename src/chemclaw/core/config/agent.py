@@ -1,0 +1,145 @@
+"""The MAF conversational agent: model, skills, capabilities, compaction, harness.
+
+One domain section of the composed ChemClaw `Settings`. The package `__init__.py` flattens
+every section into the one config object and owns the env prefix, the `.env` loading and the
+cross-section validators; fields, env names and defaults are exactly as they were when all
+sections shared a single module (D-072 mixins, split per D-156).
+"""
+
+import os
+from typing import Literal
+
+from pydantic import Field
+from pydantic_settings import BaseSettings
+
+
+class AgentSettings(BaseSettings):
+    """The MAF conversational agent: model, skills, capabilities, compaction, harness.
+
+    Grouped because everything here shapes how `build_agent` assembles one agent — which model
+    orchestrates, which skills and MCP capability servers attach, how the conversation context
+    is compacted, and whether the autonomous plan/execute harness (Phase F1) wraps it.
+    """
+
+    # MAF agent (plan step 1.5). `agent_model` is the orchestration model name
+    # (ENV-overridable); the provider's API key is read by the chat client from its own env var
+    # (e.g. ANTHROPIC_API_KEY), not stored here. `skills_dir` is where the agent discovers
+    # SKILL.md files — one or more directories, delimited by the OS path separator (like PATH),
+    # so an admin can add a second (e.g. team-private) skills directory without code changes.
+    # Read it through the `skills_dirs` property, never raw.
+    agent_model: str = "claude-sonnet-5"
+    skills_dir: str = "skills"
+    # Which discovered skills are actually advertised — discovery is not enablement. Empty (the
+    # default) means every skill found under `skills_dir` is active, i.e. today's behavior. A
+    # non-empty pathsep list narrows to exactly those names, so a deployment can ship the whole
+    # skills tree and turn on the subset it has validated, without deleting folders. This only
+    # *attenuates*: it cannot advertise a skill that no directory provides, and the role gates
+    # below still apply on top. `make skill-validate` reports a name here that no dir provides.
+    skills_enabled: str = ""
+    # Role-scoped skill visibility (plan step 6.2): map a skill name to the Entra app-roles
+    # allowed to see it. A skill not listed is ungated (advertised to everyone); a listed skill
+    # is hidden from a caller (the turn's ambient identity) holding none of its roles. Empty
+    # default = every skill visible (today's behavior). ENV override is JSON, e.g.
+    # CHEMCLAW_SKILL_ROLE_GATES='{"deep-research": ["process-chemist"]}'.
+    skill_role_gates: dict[str, list[str]] = Field(default_factory=dict)
+    # Conversation context management (MAF compaction). The agent keeps a session thread and
+    # composes tool calls that return large payloads (evidence sweeps, full ELN recipes), so a
+    # long chat would grow unbounded. Compaction runs only when the included context exceeds
+    # `agent_context_token_budget` (measured with a char/4 estimator — no external tokenizer),
+    # then reclaims tokens cheapest-first: collapse stale tool-result dumps to a short trace
+    # (keeping the newest `agent_keep_last_tool_groups` verbatim), then drop older conversation
+    # turns beyond `agent_keep_last_conversation_groups`. System instructions/skills are always
+    # kept. No LLM summarizer — deterministic and credential-free.
+    agent_context_token_budget: int = Field(default=100_000, ge=1)
+    agent_keep_last_tool_groups: int = Field(default=2, ge=0)
+    agent_keep_last_conversation_groups: int = Field(default=12, ge=1)
+    # Apply that same policy to the *stored* history, not only to the model's context (D-151).
+    # MAF's after-run compaction cannot reach `PostgresHistoryProvider` — it reads a session-state
+    # slot the durable provider deliberately never writes — so under `session_store="postgres"` the
+    # rows accumulated forever and every turn re-read all of them. This runs the identical strategy
+    # against the table after a turn is stored.
+    #
+    # Off by default, matching `retention_enabled`: a `DELETE` on conversation history is a policy a
+    # deployment states, never one it inherits on upgrade. Deliberately reuses the budget above
+    # rather than taking its own — durable deletion is strictly more destructive than context
+    # exclusion, so it must never be the more aggressive of the two.
+    agent_durable_compaction_enabled: bool = False
+    # Short sessions never pay the extra read: a pass is only worth doing once there is something to
+    # reclaim, and this is far below where the token budget starts excluding anything.
+    agent_durable_compaction_min_rows: int = Field(default=200, ge=1)
+
+    # Local testing CLI (`agents.cli`). The CLI is a developer affordance for driving the agent
+    # from a terminal; the production ingress is Teams/Copilot with native Entra-ID SSO
+    # (architektur.md §7), not this. Because Entra enforcement defaults off in dev
+    # (`entra_required=False`), the CLI can only run in explicit `--admin` mode, which bypasses
+    # auth for testing and attributes the audit trail to this actor. It is a config value (not a
+    # hardcoded string) so a deployment can label its test runs — e.g. a machine name — rather
+    # than a generic "admin".
+    cli_admin_actor: str = "admin@localhost"
+
+    # MAF Agent Harness (plan Phase F1) — the autonomous plan/execute backbone (the
+    # Claude-Code-like experience). When `harness_enabled`, `build_agent` wires MAF's
+    # `create_harness_agent` (todo list + plan/execute mode + a bounded completion loop) over
+    # the *same* tools/skills/audit/ compaction as the classic agent, with MAF's generic
+    # batteries (file memory/access, web search, shell) OFF — capability comes from our MCP
+    # servers and tools, not the harness's built-ins. Off by default so today's classic
+    # single-turn agent stays the safe fallback against the harness's `[Experimental]` API.
+    # `harness_autonomy` picks the starting mode: `plan_only` (default, the pharma-safe one)
+    # starts in plan mode and presents a plan for human approval before any execution — the
+    # pre-execution GxP gate — and only loops once approval switches it to execute; `execute`
+    # starts looping through the todo list immediately. `harness_max_loop_iterations` caps the
+    # loop so a stuck plan aborts instead of spinning (the runaway guard).
+    harness_enabled: bool = False
+    harness_autonomy: Literal["plan_only", "execute"] = "plan_only"
+    harness_max_loop_iterations: int = Field(default=25, ge=1)
+
+    # Where profiles are discovered (`agents.profile_discovery`): one or more directories,
+    # OS-path-separator delimited like `PATH` and like `skills_dir`. A profile selects *across*
+    # capabilities, so a shared tree is its common home; a profile genuinely about one
+    # capability lives in that connector's bundle instead and is found there.
+    profiles_dir: str = "data/profiles"
+
+    # Where deterministic step templates are discovered (`data/templates/`). A template fixes the
+    # order of a procedure and runs it as a durable workflow, where a profile configures an agent
+    # and leaves the order to the model. `src/chemclaw/templates/README.md` says which one a task
+    # wants.
+    templates_dir: str = "data/templates"
+    # Which discovered templates are enabled; empty (the default) means every one found.
+    templates_enabled: str = ""
+    # Per-step wall clock for a template run. Generous because an `agent` step is a model turn and
+    # a `tool` step may be a real calculation, but bounded so one wedged step cannot pin a run.
+    template_step_timeout_seconds: float = Field(default=900.0, gt=0)
+
+    @property
+    def templates_dirs(self) -> list[str]:
+        """The template dirs, split on the OS path separator (like `PATH`), blanks dropped."""
+        return [d for d in self.templates_dir.split(os.pathsep) if d]
+
+    @property
+    def templates_enabled_list(self) -> list[str]:
+        """The explicitly enabled template names; empty means "every discovered template"."""
+        return [t for t in self.templates_enabled.split(os.pathsep) if t]
+
+    @property
+    def profiles_dirs(self) -> list[str]:
+        """The profile directories, split on the OS path separator (like `PATH`), blanks dropped."""
+        return [d for d in self.profiles_dir.split(os.pathsep) if d]
+
+    @property
+    def skills_dirs(self) -> list[str]:
+        """The skills directories, split on the OS path separator (like PATH), empties dropped.
+
+        `FileSkillsSource` takes a list of directories; keeping the config a single delimited
+        string (rather than a JSON list) means an admin sets `CHEMCLAW_SKILLS_DIR=skills:/opt/
+        team-skills` the same way they set `PATH`, no JSON quoting.
+        """
+        return [d for d in self.skills_dir.split(os.pathsep) if d]
+
+    @property
+    def skills_enabled_list(self) -> list[str]:
+        """The explicitly enabled skill names; empty means "every discovered skill" (the default).
+
+        A bare-key set, so it uses the delimited-string idiom (like `skills_dir`/`data_sources`)
+        rather than JSON — these are names, not config-carrying objects.
+        """
+        return [s for s in self.skills_enabled.split(os.pathsep) if s]
