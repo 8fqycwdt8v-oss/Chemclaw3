@@ -212,3 +212,34 @@ def test_probe_files_carry_nothing_but_probes() -> None:
         payload = yaml.safe_load(path.read_text(encoding="utf-8"))
         assert set(payload) == {"probes"}, f"{path.name} has unexpected top-level keys"
         ProbeSet.model_validate(payload)
+
+
+def test_a_run_that_graded_nothing_writes_no_grades_file(tmp_path: Path) -> None:
+    """`--no-judge` must not replace real verdicts with an empty list.
+
+    It did: the outputs were written to the transcript directory's *parent*, so a six-probe
+    `--no-judge` run overwrote a 190-probe run's `grades.json` with `[]`, and the file survived
+    only because it had been committed. An empty grades file is indistinguishable from a run in
+    which every single answer failed.
+    """
+    from chemclaw.cli.live_probes import _write_outputs
+
+    _write_outputs(tmp_path / "transcripts", "# report\n", [])
+    assert (tmp_path / "transcripts" / "summary.md").exists()
+    assert not (tmp_path / "transcripts" / "grades.json").exists()
+
+
+def test_outputs_land_beside_their_own_transcripts(tmp_path: Path) -> None:
+    """Two runs into different transcript directories must not overwrite each other."""
+    from chemclaw.cli.live_probes import _write_outputs
+    from chemclaw.evals.live_judge import Judgement
+
+    one = Judgement(probe_id="a-01", verdict="served")
+    _write_outputs(tmp_path / "before", "# before\n", [one])
+    _write_outputs(tmp_path / "after", "# after\n", [one])
+
+    assert (tmp_path / "before" / "summary.md").read_text(encoding="utf-8") == "# before\n"
+    assert (tmp_path / "after" / "summary.md").read_text(encoding="utf-8") == "# after\n"
+    # The shared parent must hold neither, which is what made the collision possible.
+    assert not (tmp_path / "summary.md").exists()
+    assert not (tmp_path / "grades.json").exists()
