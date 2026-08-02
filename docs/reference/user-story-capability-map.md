@@ -112,18 +112,25 @@ resolved these peaks" — the same shape as the `reaction` note that already exi
 `memory/progression.py` for time-ordering and condition diffing. Eight of the nineteen analytical
 stories turn on it.
 
-**`project` is the one to be careful about.** It looks like a field and is a migration:
-`Note` has no project field at all, `OrdReaction.project` never reaches the graph because
-`ingest/eln/note.py` writes no tags, and `kg/analytics.py`'s `projects_without_distillation`
-therefore counts *topic tags* (`playbook`, `solvent`, `suzuki`) rather than projects. Measured on the
-committed corpus: 6 of 993 reaction notes carry any tag. A correctly-computed field with a
-misleading name produced a fabricated status report in the live run.
+**`project` is the one to be careful about.** It looks like a field and is a migration: `Note` has
+no project field at all. When this audit was written `OrdReaction.project` never reached the graph
+either, because `ingest/eln/note.py` wrote no tags — measured on the committed corpus, 6 of 993
+reaction notes carried any tag — and `kg/analytics.py` reported a set difference over free-text
+tags (`playbook`, `solvent`, `suzuki`) under the name `projects_without_distillation`, which is how
+a correctly-computed field produced a fabricated portfolio status report in the live run.
+
+Both halves of that are fixed (D-2026-08-02-shipped-is-not-reachable, and the rename to
+`tags_without_distillation`), and neither fix makes `project` a field. That is the intent: the ELN
+note builder now writes the project as a *tag*, so the migration has real data to migrate and
+`gather_evidence(tag=…)` works on the largest note class before the schema changes.
 
 ---
 
 ## Cheapest real wins
 
-Each is days, and each is backed by machinery that already exists.
+Each is days, and each is backed by machinery that already exists. **All six have since shipped**
+— see the "what changed" note at the end of this document. They are kept here as written, because
+the argument for each is the reason the next six should be chosen the same way.
 
 1. **ICH Q3C / Q3D limit tables behind a lookup tool** (`S`). Serves 8.14 and 8.16 outright,
    improves 8.15, and closes 8.10's remaining gap. Published static tables, no schema change, no
@@ -204,3 +211,25 @@ output gate already on the backlog.
   requirement, not a capability gap, and marked as such. Roughly 90% of the credited analytical
   machinery is inline MCP tooling needing no broker.
 - **Sizes are engineering judgement**, not estimates from a plan.
+
+---
+
+## What changed after this audit (2026-08-02)
+
+The verdicts above are the state the audit found. The audit was then worked, in three waves, and
+the rows below are what moved. **The verdict tables are deliberately not rewritten** — this
+document's value is the reasoning that produced each verdict, and editing them in place would leave
+no record of what an audit is worth.
+
+| shipped | ADR | stories it moves |
+| --- | --- | --- |
+| `resume_campaign`; impurity structures indexed; ELN notes tagged with their project; a `record_failure` write tool through the PR-gate; conflict/confidence/provenance rendered in reports; scale on the reaction note; purity, major impurity and area% on the campaign table | D-2026-08-02-shipped-is-not-reachable | 1.2, 1.3, 3.2, 3.5, 6.3, 6.6, 8.8, 11.2, 12.4, 13.2, 13.5, 17.5 |
+| The verifier scored against the turn's own tool results; an uncited answer is unverified; a deterministic ungrounded-parameter scan (off by default); the durable-subsystem outage announced before the turn plans; the access boundary stated instead of implied; `projects_without_distillation` renamed | D-2026-08-02-grounding-is-what-this-turn-saw | 17.1, 17.4, 17.5 |
+| ICH Q3C/Q3D limit tables behind a lookup; a cited genotoxicity structural-alert table | D-2026-08-02-a-limit-is-data-a-classification-is-a-model | 8.10, 8.14, 8.15, 8.16 |
+| Volumes and densities for `stoichiometry_table` | D-2026-08-02-a-solvent-charge-is-a-volume | 6.9, 6.10 |
+| Reduced (fractional) screening designs | D-2026-08-02-the-fraction-lives-where-bofire-will-fractionate | 4.1, 4.4 |
+
+**Two things did not change, and they are the two that matter most.** `project`, `method`,
+`document` and `near-miss` are still not entities, so the 30 `MISSING-ENTITY` rows are still 30.
+And the honesty work is **argued, not re-measured** — the shape gate ships off by default and the
+46% has not been re-run with it on (`docs/planning/BACKLOG.md`).

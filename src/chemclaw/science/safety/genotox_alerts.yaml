@@ -1,0 +1,138 @@
+# Genotoxicity structural alerts — DNA-reactive motifs. Data, not code, like `rules.yaml`.
+#
+# **A separate file from `rules.yaml`, deliberately.** `rules.yaml` answers a process-safety
+# question — "is this safe to run today" — and its flags gate a procedure note through
+# `kg-validate`. This file answers a regulatory-toxicology question: "will this need a control
+# strategy". A chemist asking the two wants different answers, the controls that follow are
+# different, and merging them into one flag list is how a hazard screen gets reported as an ICH M7
+# assessment. It would also break the process-safety screen outright: nitrobenzene is an ordinary
+# reagent that `rules.yaml` is right to leave alone and this table is right to flag.
+#
+# **The line this table does not cross.** A structural alert is a *motif*. An ICH M7 class, a purge
+# factor, and an acceptable-intake limit are outputs of a model — two complementary (Q)SARs plus an
+# Ames corpus and expert review — and this system has none of them. So no row here carries a class,
+# a limit or a purge factor, and `screen_genotoxic_alerts` says on every result that a flag is an
+# alert requiring expert assessment and not a classification. In the live run the absence of this
+# table did not produce silence; it produced an invented ICH M7 class and an invented worked purge
+# factor. Shipping alerts without the disclaimer would make that easier, not harder.
+#
+# Adding an alert: keep the SMARTS as specific as the motif allows, cite the alert set it comes
+# from, and add a molecule to `tests/test_safety.py` that must match plus one that must not. Write
+# the explanation as what the motif *is*; the assessment is not this file's to make.
+
+structural:
+  - id: n-nitroso
+    # N-nitroso on a nitrogen: covers N-nitrosamines and N-nitrosamides. Not a nitro group (whose
+    # nitrogen is three-coordinate) and not a C-nitroso compound.
+    smarts: "[NX3][NX2]=[OX1]"
+    motif: N-nitroso group (N-nitrosamine / N-nitrosamide)
+    explanation: >-
+      An N-nitroso group is present. This is the motif behind the sartan, ranitidine and metformin
+      recalls, and it is the reason a nitrosamine question is asked at all. Whether this compound
+      is a mutagenic impurity, what intake would be acceptable, and whether a purge argument holds
+      are all expert assessments that need analytical evidence and a (Q)SAR pair; none of them
+      follow from this flag.
+    citation: "Ashby & Tennant, Mutat. Res. 1988, 204, 17 (structural alerts for DNA reactivity); ICH M7(R2), 2023 (alerts require expert review)"
+
+  - id: aromatic-nitro
+    smarts: "[c][$([NX3](=[OX1])=[OX1]),$([NX3+](=[OX1])[OX1-])]"
+    motif: Nitroaromatic
+    explanation: >-
+      A nitro group on an aromatic ring. Nitroaromatics are a classic DNA-reactivity alert via
+      nitroreduction to the nitrenium ion. Very many are Ames-negative in practice — an alert on a
+      routine nitration substrate is expected and is not by itself a finding.
+    citation: "Benigni & Bossa, Chem. Rev. 2011, 111, 2507 (structural alerts for mutagenicity)"
+
+  - id: primary-aromatic-amine
+    # A free NH2 on an aromatic carbon. Anilides are excluded: an acylated nitrogen is not the
+    # alert, and including them would fire on most amide couplings in the corpus.
+    smarts: "[NX3;H2;!$(NC=O);!$(NS(=O)=O)][c]"
+    motif: Primary aromatic amine
+    explanation: >-
+      A free primary amine on an aromatic ring — the aniline alert, via N-hydroxylation to a
+      reactive nitrenium ion. It is also the substrate class most exposed to nitrosation, so a
+      process that also uses a nitrosating agent deserves the pair rule below as well.
+    citation: "Benigni & Bossa, Chem. Rev. 2011, 111, 2507"
+
+  - id: aromatic-azo
+    smarts: "[c][NX2]=[NX2][c]"
+    motif: Aromatic azo compound
+    explanation: >-
+      An aryl-azo-aryl linkage. Azo reduction releases the two aromatic amines, so the alert is
+      inherited from whatever those amines are.
+    citation: "Benigni & Bossa, Chem. Rev. 2011, 111, 2507"
+
+  - id: epoxide
+    smarts: "[OX2r3]1[#6r3][#6r3]1"
+    motif: Epoxide
+    explanation: >-
+      A three-membered oxygen ring — a direct-acting alkylating agent toward DNA bases. In a
+      process this is most often an intermediate or a by-product of an oxidation rather than the
+      target.
+    citation: "Ashby & Tennant, Mutat. Res. 1988, 204, 17"
+
+  - id: aziridine
+    smarts: "[NX3r3]1[#6r3][#6r3]1"
+    motif: Aziridine
+    explanation: >-
+      A three-membered nitrogen ring — a direct-acting alkylating agent, and the motif of the
+      classical aziridine cytotoxics.
+    citation: "Ashby & Tennant, Mutat. Res. 1988, 204, 17"
+
+  - id: alkyl-halide
+    # Primary or secondary sp3 carbon bearing Cl/Br/I. A tertiary halide (no H) and an aryl halide
+    # are both excluded: neither is the mono-functional alkylating motif, and firing on every aryl
+    # chloride would flag most cross-couplings in the corpus and teach a reader to skip the list.
+    smarts: "[CX4;H1,H2,H3][Cl,Br,I]"
+    motif: Mono-functional alkyl halide
+    explanation: >-
+      A primary or secondary alkyl halide — a potential alkylating agent, and one of the most
+      common potential mutagenic impurity classes in a synthesis (alkylating reagents, residual
+      halogenated intermediates, chloroalkane solvent adducts).
+    citation: "Benigni & Bossa, Chem. Rev. 2011, 111, 2507; ICH M7(R2), 2023"
+
+  - id: alkyl-sulfonate-or-sulfate-ester
+    # S bearing two double-bonded oxygens and an O-C: covers mesylates, tosylates, besylates and
+    # dialkyl sulfates in one pattern, since the alert is the leaving-group ester, not what is on
+    # the other side of the sulfur.
+    smarts: "[CX4][OX2][SX4](=[OX1])=[OX1]"
+    motif: Alkyl sulfonate or sulfate ester
+    explanation: >-
+      An alkyl ester of a sulfonic or sulfuric acid — a direct-acting alkylating agent. The
+      textbook route to one is unintentional: a sulfonic-acid salt formation run in an alcohol
+      solvent, which is why this alert matters in salt selection and not only in a reagent list.
+    citation: "Benigni & Bossa, Chem. Rev. 2011, 111, 2507; ICH M7(R2), 2023"
+
+  - id: michael-acceptor
+    smarts: "[CX3]=[CX3][CX3]=[OX1]"
+    motif: alpha,beta-Unsaturated carbonyl (Michael acceptor)
+    explanation: >-
+      An activated alkene conjugated to a carbonyl — a soft electrophile that can alkylate
+      nucleophilic DNA bases. Acrylates, acrylamides, enones and vinyl sulfones all match; the
+      alert is common enough in ordinary chemistry that it is a prompt to assess, never a finding.
+    citation: "Benigni & Bossa, Chem. Rev. 2011, 111, 2507"
+
+# Pairs checked across a reaction's components: an alert about a *formation route* rather than
+# about a structure that is present. Each fires when one component matches `left` and a different
+# component matches `right`.
+formation_pairs:
+  - id: nitrosatable-amine-with-nitrosating-agent
+    # Secondary or tertiary amine with only carbon and hydrogen on the nitrogen: no heteroatom
+    # neighbour (which would make it a hydrazine, hydroxylamine or nitroso compound already), no
+    # double bond, and not an amide or sulfonamide nitrogen. Aromatic ring nitrogens (pyridine,
+    # N-methylpyrrole) are excluded by SMARTS aliphatic `N` on their own.
+    left: "[NX3;H0,H1;!$(N[!#6;!#1]);!$(N=*);!$(NC=[O,S,N]);!$(NS(=O)=O)]"
+    # Nitrite salts and nitrous acid, alkyl nitrites, and nitrosyl halides. Deliberately not a
+    # nitro group (three-coordinate N) and not an existing N-nitrosamine (whose nitroso nitrogen
+    # carries a nitrogen, not an oxygen or a halide).
+    right: "[$([NX2](=[OX1])[OX2,OX1-]),$([NX2](=[OX1])[F,Cl,Br,I])]"
+    motif: Nitrosamine formation route
+    explanation: >-
+      A nitrosatable secondary or tertiary amine and a nitrosating agent are present in the same
+      reaction — the conditions under which N-nitrosamines form. This flags the *route*, not a
+      product: it does not say a nitrosamine is present, it assigns no class, and it carries no
+      acceptable intake and no purge factor. Establishing whether a control strategy is needed
+      takes analytical evidence and an expert assessment. Note also that the pair rule can only
+      see components given to it together, so a nitrosating agent introduced two steps later is
+      invisible here — pass the whole route, not one step.
+    citation: "ICH M7(R2), 2023, Assessment and Control of DNA Reactive (Mutagenic) Impurities; EMA nitrosamine Article 5(3) referral outcome, 2020"

@@ -40,6 +40,7 @@ DEFAULT_WRITE_TOOL_GATES: frozenset[str] = frozenset(
         "compute_dft_energy",  # launches a durable HPC/DFT run
         "propose_knowledge_note",  # pushes a branch to the knowledge repo
         "record_confirmed_answer",  # pushes a branch to the knowledge repo
+        "record_failure",  # pushes a branch to the knowledge repo, and retires a merged claim
         "index_molecule",  # mutates the fingerprint index
         "index_reaction",  # mutates the fingerprint index
     }

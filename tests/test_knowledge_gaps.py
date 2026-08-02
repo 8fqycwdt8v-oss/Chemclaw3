@@ -38,11 +38,22 @@ def _write(directory: Path, note: Note) -> None:
 
 @pytest.fixture
 def corpus(tmp_path: Path) -> Path:
-    """A small graph: two linked reactions, one orphan, one project with no distillation."""
-    _write(tmp_path, Note(id="reaction-a", type="reaction", tags=["proj-x"], body="see [[hub]]"))
-    _write(tmp_path, Note(id="reaction-b", type="reaction", tags=["proj-y"], body="see [[hub]]"))
-    _write(tmp_path, Note(id="hub", type="playbook", tags=["proj-y"], body="the rule"))
-    _write(tmp_path, Note(id="orphan", type="reaction", tags=["proj-x"], body="nothing links here"))
+    """A small graph: two linked reactions, one orphan, one *tag* with no distillation.
+
+    The tags are topic tags (`amide-coupling`, `suzuki`) because that is what the corpus actually
+    holds — `Note` has no project field — and a fixture that says `proj-x` invites the reader to
+    believe the gap query knows about projects.
+    """
+    _write(
+        tmp_path,
+        Note(id="reaction-a", type="reaction", tags=["amide-coupling"], body="see [[hub]]"),
+    )
+    _write(tmp_path, Note(id="reaction-b", type="reaction", tags=["suzuki"], body="see [[hub]]"))
+    _write(tmp_path, Note(id="hub", type="playbook", tags=["suzuki"], body="the rule"))
+    _write(
+        tmp_path,
+        Note(id="orphan", type="reaction", tags=["amide-coupling"], body="nothing links here"),
+    )
     return tmp_path
 
 
@@ -56,13 +67,28 @@ def test_unreachable_notes_are_named(corpus: Path) -> None:
     assert gaps.total_notes == 4
 
 
-def test_a_project_with_evidence_but_no_distillation_is_surfaced(corpus: Path) -> None:
+def test_a_tag_with_evidence_but_no_distillation_is_surfaced(corpus: Path) -> None:
     """The concrete "what don't we know" answer: where synthesis is owed.
 
-    proj-x has reactions and nothing distilled from them; proj-y has a playbook, so it is done.
+    `amide-coupling` has reactions and nothing distilled from them; `suzuki` has a playbook.
     """
     gaps = analyze(build_graph(corpus), load_notes(corpus))
-    assert gaps.projects_without_distillation == ["proj-x"]
+    assert gaps.tags_without_distillation == ["amide-coupling"]
+
+
+def test_the_gap_query_never_calls_a_tag_a_project(corpus: Path) -> None:
+    """The field named these free-text tags "projects" and the model believed the field.
+
+    A live run turned this list into a confident portfolio status — "27 projects tagged" — from a
+    computation that is a set difference over `note.tags` and has no project concept anywhere near
+    it (`Note` carries no project field). The computation was never wrong; the name asserted
+    something false, and a field name is all the model has to go on. Asserted over the serialized
+    payload because that, not the Python attribute, is what reaches the agent via
+    `find_knowledge_gaps`.
+    """
+    payload = analyze(build_graph(corpus), load_notes(corpus)).model_dump()
+    assert not [key for key in payload if "project" in key]
+    assert payload["tags_without_distillation"] == ["amide-coupling"]
 
 
 def test_hubs_are_ranked_so_a_reviewer_knows_where_an_error_propagates(corpus: Path) -> None:

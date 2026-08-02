@@ -11,6 +11,7 @@ description: >-
   is the trigger, not the wording.
 tools:
   - suggest_next_experiment
+  - resume_campaign
   - generate_screening_design
   - propose_knowledge_note
 ---
@@ -97,6 +98,21 @@ was wrong.
   `bo-candidate` is a different thing and is not yours to write: it is what a *durable* campaign
   (`start_optimization_campaign`) mints for itself when a round completes.
 
+## Picking a campaign back up
+
+When the chemist returns with a result — "the 85 °C run in toluene gave 71%" — or asks where an
+optimization got to, **call `resume_campaign(campaign_id)` before framing anything**. It returns
+the decision space as it was last framed, the observations the previous suggestion rested on, and
+the candidates it proposed. Append the new result to those observations and call
+`suggest_next_experiment` with the *returned* `problem`, so the campaign continues rather than
+restarting on whatever fragments survived in the conversation. Re-typing the space from memory is
+how a campaign silently forks: the id is a hash of the space, so one bound written differently is
+a different campaign with no history.
+
+If the id does not resolve, the tool raises. That is nearly always the space having changed since —
+a widened range, a ligand added — which makes it a *new* campaign, not a lost one. Say so plainly,
+and ask for a fresh suggestion over the current space; do not guess at an id.
+
 ## One shot vs. a campaign
 
 `suggest_next_experiment` is the single, human-in-the-loop suggestion: it answers "what should I
@@ -120,8 +136,25 @@ campaign, run that search: a near-identical campaign that already ran is evidenc
 `suggest_next_experiment` and `start_optimization_campaign` both propose points *adaptively*, one
 batch at a time. Sometimes the real ask is the classical, complete-up-front design instead —
 "give me every combination of these catalyst/solvent/base choices to screen" before narrowing to
-BO. That is `generate_screening_design(problem)`: a full-factorial design over the problem's
+BO. That is `generate_screening_design(problem)`: a factorial design over the problem's
 *categorical* parameters only. It raises if `problem` names a continuous parameter (temperature,
 equivalents) rather than silently dropping it — reformulate a continuous factor as discrete levels
 (e.g. "low"/"high") to include it, or use the adaptive tools instead if the space is genuinely
 continuous. Present the returned runs as a batch a human executes, exactly like a BO suggestion.
+
+**Size the grid against the chemist's budget before you present it.** Multiply the level counts:
+seven two-level factors is 128 runs, which does not fit a 96-well plate, and handing over a design
+the chemist cannot execute is not an answer. When it does not fit, pass `n_generators` — each
+generator halves the design (128 → 64 → 32 → 16). Two rules on doing that:
+
+- **Only when the budget requires it.** A full grid that fits is always the better design; a
+  fraction buys runs by confounding effects.
+- **Never present it as complete.** The return carries a `resolution` and a one-line `summary`
+  saying which effects are now confounded — resolution III means an effect you attribute to one
+  factor may belong to a pair of the others, IV means the main effects are clean but two-factor
+  interactions are not. Repeat that sentence to the chemist alongside the run list. A reduced
+  design shown as "here is your screen" is the failure mode; it looks exactly like a smaller
+  complete one.
+
+A reduced design needs every factor to have exactly two levels. A three-level factor is refused,
+not quietly crossed in full — pick the two levels that matter, or run the full grid.

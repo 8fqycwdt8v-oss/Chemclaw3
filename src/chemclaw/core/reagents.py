@@ -149,6 +149,52 @@ _RAW_SYNONYMS: dict[str, tuple[str, str]] = {
 }
 
 
+# Ambient densities in g/mL (20–25 °C), keyed by one spelling from the solvent block above.
+#
+# Why a second table rather than a field on the first: a density is only meaningful for a substance
+# that *can* be charged by volume, which is a much smaller set than the reagent table.
+#
+# **It says "can be", and that is not the same as "is", which this comment used to get wrong.** It
+# claimed the table let `density_of` answer "is this a solvent?" and `stoichiometry_table` acted on
+# that, refusing any reagent with a density. Ten of the entries below are routinely charged by
+# molar equivalent *as reagents*: acetic acid at 1.5 equiv, water in a hydrolysis, methanol in an
+# esterification, DMSO as the Swern oxidant, DMF as the Vilsmeier formylating agent. Having a
+# density is a fact about a substance; being charged by volume is a fact about one experiment, and
+# only the chemist knows which they meant. `density_of` answers the first question only.
+#
+# The cost of not having these was measured. `stoichiometry_table` took only molar equivalents, so
+# "THF/water 4:1 at 10 volumes" could not be expressed at all; a live run passed 40 and 10 as
+# equivalents instead and the principal solvent came out 2.17x wrong, with the answer then
+# certifying the figures as self-consistent. The size of the error is whatever the basis's
+# molecular weight makes it — the same substitution on a Boc2O basis reproduces at 1.86x — which is
+# why no amount of care with the equivalents figure fixes it. Solvent mass also dominates E-factor
+# and PMI, which `green_metrics` is computed from, so the same gap flattered every green metric.
+_RAW_DENSITIES: dict[str, float] = {
+    "thf": 0.889,
+    "2-methf": 0.854,
+    "dmf": 0.944,
+    "dmso": 1.100,
+    "dcm": 1.326,
+    "mecn": 0.786,
+    "etoac": 0.902,
+    "meoh": 0.792,
+    "etoh": 0.789,
+    "ipa": 0.786,
+    "toluene": 0.867,
+    "dioxane": 1.034,
+    "dme": 0.868,
+    "nmp": 1.028,
+    "dmac": 0.937,
+    "heptane": 0.684,
+    "hexane": 0.659,
+    "water": 0.998,
+    "et2o": 0.713,
+    "mtbe": 0.740,
+    "acetone": 0.791,
+    "acoh": 1.049,
+}
+
+
 def _normalize(name: str) -> str:
     """Fold a written name to its lookup key: case, whitespace, and separator punctuation."""
     folded = name.strip().lower()
@@ -213,6 +259,25 @@ def _index_by_compound() -> dict[str, _Compound]:
 _BY_COMPOUND = _index_by_compound()
 
 
+def _index_densities() -> dict[str, float]:
+    """Re-key the density table on canonical SMILES, failing at import on a key that is not a name.
+
+    Loud rather than lenient for the same reason `_build_table` is: a density keyed to a spelling
+    the identity table does not know would be a silently dead entry, and the symptom downstream is
+    a solvent charge that cannot be computed at all rather than an obviously missing row here.
+    """
+    densities: dict[str, float] = {}
+    for key, density in _RAW_DENSITIES.items():
+        entry = _TABLE.get(_normalize(key))
+        if entry is None:  # pragma: no cover - a table typo, caught at import
+            raise ValueError(f"density table key {key!r} is not a known reagent name")
+        densities[entry[0]] = density
+    return densities
+
+
+_DENSITY_BY_STRUCTURE = _index_densities()
+
+
 class ResolvedCompound(BaseModel):
     """One resolved identity: the canonical structure plus the name it was recognised as."""
 
@@ -274,6 +339,22 @@ def display_name(smiles: str) -> str | None:
         return exact
     compound = _BY_COMPOUND.get(require_standard_smiles(canonical))
     return compound.display if compound is not None else None
+
+
+def density_of(name: str) -> float | None:
+    """Ambient density in g/mL for a known bulk solvent, or `None` — never an estimate.
+
+    Takes whatever the chemist wrote (a name, an abbreviation, or a SMILES) and resolves it the
+    same way every other entry point does, so `THF`, `tetrahydrofuran` and `C1CCOC1` agree.
+
+    `None` is the load-bearing answer, and it means two things a caller must keep apart: the name
+    is unknown, or it is a known substance that is not charged by volume. Either way the caller
+    must refuse to convert a volume into a mass rather than assume 1 g/mL — a guessed density is a
+    weighing error that looks like an answer, and for the solvent it silently rewrites the E-factor
+    and PMI computed from it.
+    """
+    match = resolve_compound_name(name)
+    return None if match is None else _DENSITY_BY_STRUCTURE.get(match.smiles)
 
 
 def synonyms_of(smiles: str) -> list[str]:

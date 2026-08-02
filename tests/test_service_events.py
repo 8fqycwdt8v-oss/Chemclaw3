@@ -72,7 +72,10 @@ def test_run_turn_emits_toolcall_tokens_then_answer() -> None:
     async def _collect() -> list[Event]:
         return [event async for event in run_turn(agent, session, "hello", connectors=[])]
 
-    events = asyncio.run(_collect())
+    # Without the capability announcement: no Temporal broker runs in a test process, so every
+    # turn here truthfully opens by saying the durable subsystem is down. This test is about the
+    # trace/answer ordering, which that announcement is not part of.
+    events = [e for e in asyncio.run(_collect()) if e.type != "capability_degraded"]
     kinds = [e.type for e in events]
     assert kinds == ["tool_call", "token", "token", "answer"]
     assert isinstance(events[0], ToolCallEvent)
@@ -106,7 +109,7 @@ def test_run_turn_reports_failure_as_error_event() -> None:
     async def _collect() -> list[Event]:
         return [event async for event in run_turn(agent, session, "hello", connectors=[])]
 
-    events = asyncio.run(_collect())
+    events = [e for e in asyncio.run(_collect()) if e.type != "capability_degraded"]
     assert [e.type for e in events] == ["error"]
     assert isinstance(events[0], ErrorEvent)
     assert "could not be completed" in events[0].message

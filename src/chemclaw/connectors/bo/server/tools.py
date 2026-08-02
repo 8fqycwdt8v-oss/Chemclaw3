@@ -8,6 +8,11 @@ runs off the event loop; the durable `BoCampaignWorkflow` remains the path for a
 closed loop that evaluates its own objective over many rounds. This tool is the one-shot
 human-in-the-loop suggestion.
 
+`resume_campaign` is the read side of that: every suggestion is recorded against the campaign its
+decision space defines, and until it existed nothing could read one back, so the `campaign_id` the
+suggestion tool tells the agent to quote was a handle onto a store with no reader and the
+ask→observe→ask loop could not cross a session.
+
 Layer discipline (G6): this is read-only *capability*. The judgment — how to turn a vague
 "optimize the reaction" into a concrete problem, which historic runs are comparable enough to
 seed it, and how to present a suggestion a human must still run — lives in the bundled
@@ -27,7 +32,11 @@ from mcp.server.fastmcp import FastMCP
 from pydantic import BaseModel, Field
 
 from chemclaw.connectors.caller import caller_provenance
-from chemclaw.science.bo.campaign_record import record_suggestion
+from chemclaw.science.bo.campaign_record import (
+    CampaignThread,
+    read_campaign_thread,
+    record_suggestion,
+)
 from chemclaw.science.bo.engine import factorial_design, initial_candidates, propose_candidates
 from chemclaw.science.bo.featurize import featurize_problem
 from chemclaw.science.bo.problem import Candidate, Observation, OptimizationProblem, ScreeningDesign
@@ -65,6 +74,19 @@ async def suggest_next_experiment(
     objective); it returns the point(s) a surrogate model expects to be most informative. With
     no observations yet it returns space-filling seed points instead (a model needs data first).
     These are *proposals a human runs* — surface them, do not treat them as results.
+
+    **One objective, no constraints.** `problem` carries exactly one `objective`, and there is no
+    field for a constraint of any kind — they are not partially supported, they are
+    unrepresentable. If the chemist named several objectives (yield *and* selectivity, cost *and*
+    throughput), pick the one they led with, say which one you optimized, and never present the
+    result as a trade-off or a Pareto front: nothing here computed one. Speak to the other
+    objectives, if at all, as a separate qualitative reading of the evidence you cited. A limit the
+    chemist stated ("keep the temperature under 80 °C", "no more than 2 equivalents") has to be
+    built into the parameter bounds or the category list, because the optimizer will not honour it
+    otherwise.
+
+    **Continuing an earlier campaign?** Call `resume_campaign(campaign_id)` first to recover the
+    decision space and the runs it already has, then add the new results and call this tool.
 
     Build `problem` and `observations` from evidence you have gathered (e.g. past runs of the
     transformation via similar_reactions / an optimization-campaign note), so the suggestion
@@ -138,13 +160,54 @@ async def suggest_next_experiment(
 
 
 @server.tool()
-async def generate_screening_design(problem: OptimizationProblem) -> ScreeningDesign:
-    """Generate a full-factorial screening design over categorical conditions.
+async def resume_campaign(campaign_id: str) -> CampaignThread:
+    """Pick up a Bayesian-optimization campaign started in an earlier turn or session.
+
+    Use this whenever a chemist refers back to an optimization already under way — "here is the
+    result of the run you suggested", "where did we get to on the amination screen" — and you have
+    the `campaign_id` from a previous `suggest_next_experiment` answer. It returns the decision
+    space as it was framed, the runs the last suggestion rested on, and the candidates that
+    suggestion proposed, so the next ask builds on the campaign's real history instead of on
+    whatever survived in the conversation.
+
+    The normal follow-up is: resume, append the chemist's new result to `observations`, then call
+    `suggest_next_experiment` with the returned `problem` and the extended observation list.
+
+    A campaign id is a **hash of the decision space**, not a serial number. So an id that does not
+    resolve almost always means the space has changed since — a widened bound, an added or swapped
+    option — and the new space is a different campaign with no history yet. This tool raises in
+    that case rather than quietly answering from nothing; treat the error as "this is a new
+    campaign", say so, and ask for a fresh suggestion.
+
+    Args:
+        campaign_id: The id quoted in an earlier `suggest_next_experiment` answer.
+
+    Returns:
+        The campaign's objective and direction, its decision space, the observations behind its
+        latest suggestion, and the candidates that suggestion proposed.
+    """
+    return await read_campaign_thread(campaign_id)
+
+
+@server.tool()
+async def generate_screening_design(
+    problem: OptimizationProblem, n_generators: int = 0
+) -> ScreeningDesign:
+    """Generate a factorial screening design over categorical conditions — full grid or reduced.
 
     Use this for the *other* classical DoE question — "run every combination of these discrete
     choices" — e.g. every catalyst x solvent x base combination before narrowing to a BO campaign,
     or a robustness matrix of discrete method parameters. This is a complete, up-front design a
     human runs as a batch; it does not adapt to results the way `suggest_next_experiment` does.
+
+    **When the full grid does not fit the plate, reduce it.** `n_generators` halves the run count
+    per generator: seven two-level factors are 128 runs at 0, then 64, 32, 16 — so a screen that
+    could not be run at all becomes one that fits 96 wells. Reduce only when the chemist's budget
+    demands it, and never quietly: the returned design carries a `resolution` and a `summary`
+    saying exactly which combinations were given up and which effects are confounded as a result.
+    **Repeat that summary to the chemist.** A fractional design presented as if it were the whole
+    screen is the failure this field exists to prevent. Every factor must have exactly two levels
+    for a reduced design; a three-level factor is refused rather than crossed in full.
 
     Only categorical parameters are supported: a continuous parameter (temperature, equivalents)
     raises rather than being silently ignored from the design. Discretize it into levels first
@@ -155,8 +218,13 @@ async def generate_screening_design(problem: OptimizationProblem) -> ScreeningDe
         problem: The decision variables (categorical only) and the objective (its direction is
             not used by a screening design, but the same `OptimizationProblem` shape is reused so
             observations from the screen can seed a follow-up `suggest_next_experiment` campaign).
+        n_generators: 0 (default) for every combination. Each step above 0 halves the design and
+            requires every factor to have exactly two levels.
 
     Returns:
-        Every combination of the categorical levels, one dict of parameter name to value per run.
+        The runs to perform, plus `resolution` and a `summary` stating whether the design is
+        exhaustive or a stated fraction of the grid.
     """
-    return await asyncio.to_thread(factorial_design, OptimizationProblem.model_validate(problem))
+    return await asyncio.to_thread(
+        factorial_design, OptimizationProblem.model_validate(problem), n_generators
+    )

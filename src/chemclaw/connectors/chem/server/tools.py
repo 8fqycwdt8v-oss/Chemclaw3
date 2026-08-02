@@ -28,6 +28,7 @@ releases the GIL for the heavy passes, so the threads are real parallelism on a 
 """
 
 import asyncio
+from typing import Literal
 
 from mcp.server.fastmcp import FastMCP
 from pydantic import BaseModel, Field
@@ -37,20 +38,33 @@ from rdkit.Chem.Draw import rdMolDraw2D
 
 from chemclaw.core.chem import InvalidSmilesError, require_canonical_smiles
 from chemclaw.core.config import settings
-from chemclaw.core.reagents import ResolvedCompound, resolve_compound_name
+from chemclaw.core.reagents import ResolvedCompound, density_of, resolve_compound_name
 
 server = FastMCP("chem")
 
 
 class ChargeRow(BaseModel):
-    """One row of a charge table: what to weigh out for a given species."""
+    """One row of a charge table: what to weigh or measure out for a given species.
+
+    Solvents share the row shape rather than living in a second list, and that is deliberate:
+    `green_metrics`' own docstring points at "`stoichiometry_table`, whose `mass_g` column is
+    exactly this input", and a separate list would invite the model to pass the reagent masses
+    alone — which is precisely how E-factor and PMI get flattered on the term that dominates them.
+    Every row therefore carries a real mass and real moles, however the charge was expressed.
+    """
 
     name: str
     smiles: str
+    # Which quantity the chemist actually specified for this species, so a reader can see whether
+    # a number was given or derived. Solvent moles and equivalents are always derived.
+    role: Literal["basis", "reagent", "solvent"]
     equivalents: float
     molecular_weight: float
     moles_mmol: float
     mass_g: float
+    # Populated for solvents only — a reagent charged by mass has no volume to measure out.
+    density_g_per_ml: float | None = None
+    volume_ml: float | None = None
 
 
 class ChargeTable(BaseModel):
@@ -87,36 +101,73 @@ async def resolve_compound(name: str) -> ResolvedCompound | None:
 
 @server.tool()
 async def stoichiometry_table(
-    basis: str, basis_mass_g: float, reagents: list[str], equivalents: list[float]
+    basis: str,
+    basis_mass_g: float,
+    reagents: list[str],
+    equivalents: list[float],
+    solvents: list[str] | None = None,
+    volumes: list[float] | None = None,
 ) -> ChargeTable:
-    """Build a charge table: what to weigh out for a batch, scaled to the limiting reagent.
+    """Build a charge table: what to weigh and measure out for a batch, scaled to the basis.
 
-    Answers the everyday bench question — "for 250 g of the starting material at 1.2 equiv of base,
-    what do I charge?" — deterministically, from molecular weights.
+    Answers the everyday bench question — "for 250 g of the starting material at 1.2 equiv of base
+    in 10 volumes of THF, what do I charge?" — deterministically, from molecular weights and
+    densities.
+
+    **A charge expressed in volumes goes in `solvents`/`volumes`.** Expressing "THF/water 4:1 at 10
+    volumes" as molar equivalents is not a rounding error: done once on a 2 kg basis it put the
+    principal solvent out by a factor of 2.17, and the answer then certified the figures as
+    self-consistent. Converting volumes yourself is the mistake this argument pair exists to remove.
+
+    **A substance is not owned by one of the two paths, and the tool does not police which you
+    use.** Acetic acid at 1.5 equiv, water in a hydrolysis, methanol in an esterification, DMSO as
+    the Swern oxidant and DMF as the Vilsmeier reagent are all charged by molar equivalent and all
+    have a density on file. Only the chemist knows which reading was meant, so pass the charge in
+    the units it was *specified* in and the table reports which those were on each row's `role`.
 
     Args:
         basis: The limiting reagent (name or SMILES); its mass sets the scale.
         basis_mass_g: How much of the limiting reagent is charged, in grams.
-        reagents: The other species to scale (names or SMILES), in order.
+        reagents: The other species charged by molar equivalent (names or SMILES), in order.
         equivalents: Molar equivalents for each entry of `reagents`, same order and length.
+        solvents: The species charged by volume (names or SMILES), in order.
+        volumes: Process "volumes" for each entry of `solvents` — millilitres per gram of basis,
+            same order and length. A 4:1 THF/water mixture at 10 total volumes is `[8.0, 2.0]`.
 
     Returns:
-        One row per species with its molar amount and the mass to weigh out. Species that cannot
-        be resolved are listed in `unresolved` and carry no row — never a guessed mass.
+        One row per species with its molar amount and the mass to weigh out, and for solvents the
+        density and the volume to measure. Reagent names that cannot be resolved are listed in
+        `unresolved` and carry no row — never a guessed mass. A solvent that cannot be resolved, or
+        whose density is not on file, is an error instead: a silently dropped solvent looks like a
+        complete table while flattering every mass metric derived from it.
     """
     if len(reagents) != len(equivalents):
         raise ValueError(
             f"{len(reagents)} reagents but {len(equivalents)} equivalents; they must match"
         )
+    charged_solvents, charged_volumes = solvents or [], volumes or []
+    if len(charged_solvents) != len(charged_volumes):
+        raise ValueError(
+            f"{len(charged_solvents)} solvents but {len(charged_volumes)} volumes; they must match"
+        )
     if basis_mass_g <= 0:
         raise ValueError("basis_mass_g must be positive")
+    if any(volume <= 0 for volume in charged_volumes):
+        raise ValueError("every entry of volumes must be positive")
     # One offload for the whole table rather than one per species: a 10-reagent charge table is
     # 11 RDKit parses, and hopping to a worker thread per parse would cost more than it saves.
-    return await asyncio.to_thread(_charge_table, basis, basis_mass_g, reagents, equivalents)
+    return await asyncio.to_thread(
+        _charge_table, basis, basis_mass_g, reagents, equivalents, charged_solvents, charged_volumes
+    )
 
 
 def _charge_table(
-    basis: str, basis_mass_g: float, reagents: list[str], equivalents: list[float]
+    basis: str,
+    basis_mass_g: float,
+    reagents: list[str],
+    equivalents: list[float],
+    solvents: list[str],
+    volumes: list[float],
 ) -> ChargeTable:
     """The charge table's RDKit-bound body, run in a worker thread (arguments already validated)."""
     anchor = resolve_compound_name(basis)
@@ -129,6 +180,7 @@ def _charge_table(
         ChargeRow(
             name=anchor.name,
             smiles=anchor.smiles,
+            role="basis",
             equivalents=1.0,
             molecular_weight=anchor_mw,
             moles_mmol=basis_mmol,
@@ -146,13 +198,53 @@ def _charge_table(
             ChargeRow(
                 name=match.name,
                 smiles=match.smiles,
+                role="reagent",
                 equivalents=equiv,
                 molecular_weight=weight,
                 moles_mmol=mmol,
                 mass_g=mmol * weight / 1000.0,
             )
         )
+    for solvent, solvent_volumes in zip(solvents, volumes, strict=True):
+        table.rows.append(
+            _solvent_row(solvent, solvent_volumes, basis_mass_g, basis_mmol),
+        )
     return table
+
+
+def _solvent_row(solvent: str, volumes: float, basis_mass_g: float, basis_mmol: float) -> ChargeRow:
+    """One solvent charge, converted from volumes to a real mass — or an honest refusal.
+
+    Both refusals are errors rather than an `unresolved` entry, unlike an unrecognised reagent. The
+    asymmetry is deliberate: a chemist reads a charge list line by line and sees a missing reagent,
+    whereas a missing solvent leaves a table that looks complete and quietly halves the E-factor
+    and PMI computed from its masses. Neither a zero nor a guessed 1 g/mL is an acceptable stand-in.
+    """
+    match = resolve_compound_name(solvent)
+    if match is None:
+        raise ValueError(f"could not resolve the solvent {solvent!r}")
+    density = density_of(solvent)
+    if density is None:
+        raise ValueError(
+            f"no density on file for {match.name!r}, so its volume cannot be converted to a mass — "
+            "convert the volume to molar equivalents yourself and pass it in `reagents`, or add "
+            "its density to the reagent table"
+        )
+    volume_ml = volumes * basis_mass_g
+    mass_g = volume_ml * density
+    weight = _molecular_weight(match.smiles)
+    mmol = mass_g / weight * 1000.0
+    return ChargeRow(
+        name=match.name,
+        smiles=match.smiles,
+        role="solvent",
+        equivalents=mmol / basis_mmol,
+        molecular_weight=weight,
+        moles_mmol=mmol,
+        mass_g=mass_g,
+        density_g_per_ml=density,
+        volume_ml=volume_ml,
+    )
 
 
 class GreenMetrics(BaseModel):
@@ -178,7 +270,9 @@ async def green_metrics(input_masses_g: list[float], product_mass_g: float) -> G
 
     Args:
         input_masses_g: Every charged species' mass in grams — reagents, catalyst, and solvent.
-            Omitting solvent is the usual way these numbers get flattered; include it.
+            Omitting solvent is the usual way these numbers get flattered; include it. Take the
+            `mass_g` of *every* row of the charge table, including the `solvent` ones, which is
+            why they share one list there.
         product_mass_g: Isolated product mass in grams. Must be positive.
 
     Returns:

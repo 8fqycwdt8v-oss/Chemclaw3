@@ -103,3 +103,22 @@ def test_accepts_observations_json_encoded_as_a_string() -> None:
     assert len(candidates) == 1
     temperature = candidates[0].params["temperature"]
     assert isinstance(temperature, float) and 20.0 <= temperature <= 120.0
+
+
+def test_the_tool_the_model_sees_states_that_one_objective_is_all_there_is() -> None:
+    """`OptimizationProblem` holds one `Objective` and has no constraint field at all.
+
+    Neither is partially supported: both are unrepresentable. The module docstring and the
+    `experiment-design` skill said so; the *tool description* — the text the model receives with
+    every call, whether or not the skill is loaded — did not, and a live probe was graded
+    `fabricated` for answering that it had optimized "both objectives".
+
+    Asserted against the served MCP description rather than the Python docstring, because that is
+    what actually travels to the model.
+    """
+    from chemclaw.connectors.bo.server.tools import server
+
+    tools = {tool.name: (tool.description or "") for tool in asyncio.run(server.list_tools())}
+    description = tools["suggest_next_experiment"]
+    assert "One objective, no constraints" in description
+    assert "Pareto" in description

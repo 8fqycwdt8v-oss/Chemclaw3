@@ -18,10 +18,14 @@ could only be prose, which meant `chemclaw.kg.conflicts` could not find it and a
 serve
 the refuted note with no indication anything was wrong. The relation is what makes the feedback
 loop close.
+
+`close_refuted_note` is the *optional* second half, and it is optional because `valid_to` means
+something narrower than "this note is wrong" — see its docstring for the measurement.
 """
 
 from datetime import date
 
+from chemclaw.core.errors import ChemclawError
 from chemclaw.core.ids import stable_hash
 from chemclaw.kg.note import Note, Relation
 
@@ -82,3 +86,64 @@ def failure_note(
         relations=[Relation(rel="contradicts", to=refutes, confidence=confidence)],
         body=body,
     )
+
+
+def close_refuted_note(note: Note, failure_id: str, held_until: date) -> Note:
+    """Copy `note` with its validity closed on `held_until` and a line naming the refutation.
+
+    The amendment that turns a failure report into a *correction*: without it the refuted claim
+    keeps reading as current fact and every future query serves it (flagged, but served).
+    `valid_to` is the only retirement the schema has — the note is never edited away or deleted,
+    it stays in Git, stays reachable by explicit id, and only leaves current-evidence sweeps via
+    `Note.is_current` (KM-7).
+
+    **Why this is a separate, opt-in step rather than something `failure_note` always does.**
+    `valid_to` is a *valid-time* bound: it asserts the claim was true up to that date. Measured on
+    a `playbook` note refuted by a `failure_note`:
+
+    - left open — `find_conflicts` reports the disagreement both in a corpus scan *and* at
+      retrieval time, so `retrieval.retrievers._conflict_index` flags every chunk of the refuted
+      note with the failure note's id;
+    - closed with `valid_to` — the note drops out of retrieval entirely (correct: nothing serves
+      it any more), the retrieval-time conflict scan therefore reports nothing, and
+      `is_current(<a date inside the window>)` still answers **True**.
+
+    That last line is the whole reason for the choice. "This held until March and then the process
+    changed" is exactly what the field says, and closing it is right. "This was never true" has
+    **no representation in this schema** — closing such a note would record a period during which
+    the system claims the wrong answer was valid, which is a fresh false statement in the one place
+    (a time-scoped query) the bi-temporal fields exist to answer honestly. For that case the caller
+    leaves the note open and lets the `contradicts` edge do the work: the claim stays visible and
+    arrives permanently marked as disputed, which is the truthful record.
+
+    Args:
+        note: The already-merged note being retired. Its own `valid_to` must still be open — a
+            re-close would either extend a closed note's validity or append this line twice, the
+            idempotence trap `memory.supersede` guards the same way.
+        failure_id: The id of the `failure-mode` note reporting this, cited as a `[[wikilink]]`.
+            Safe to link because both files ride in **one** PR-gate submission, so the target
+            exists in the same commit that adds the citation and `kg-validate` sees a resolvable
+            link (unlike `memory.supersede`, whose replacement is a separate proposal).
+        held_until: The last date on which the claim did hold — the chemist's, not today's.
+
+    Returns:
+        An amended copy, ready to ride alongside the failure note in one submission so a human
+        reviews the refutation and the retirement as the single decision they actually are.
+
+    Raises:
+        ChemclawError: When `held_until` predates the note's own `valid_from`, which is a window
+            the schema rejects outright. Reported here, with both dates, rather than clamped: the
+            date came from a person, and silently moving it would file a retirement they did not
+            ask for.
+    """
+    if note.valid_from is not None and held_until < note.valid_from:
+        raise ChemclawError(
+            f"cannot retire {note.id} on {held_until.isoformat()}: it only became valid on "
+            f"{note.valid_from.isoformat()}, so that window ends before it starts"
+        )
+    body = (
+        f"{note.body.rstrip()}\n\n"
+        f"Refuted by [[{failure_id}]]: this held until {held_until.isoformat()} and no longer "
+        "does. Kept for the record; excluded from current-evidence retrieval.\n"
+    )
+    return note.model_copy(update={"valid_to": held_until, "body": body})

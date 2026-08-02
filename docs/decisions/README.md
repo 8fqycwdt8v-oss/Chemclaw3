@@ -239,4 +239,9 @@ and is kept only for reservations that were in flight when this changed.
 | [D-2026-08-01-the-count-lives-in-the-test-not-in-the-prose](D-2026-08-01-the-count-lives-in-the-test-not-in-the-prose.md) | The count lives in the test, not in the prose |
 | [D-2026-08-01-trust-travels-on-the-value-line](D-2026-08-01-trust-travels-on-the-value-line.md) | Trust travels on the value line |
 | [D-2026-08-01-unknown-is-not-fine](D-2026-08-01-unknown-is-not-fine.md) | "Unknown" is not "fine": one shape for how much to trust a number |
+| [D-2026-08-02-a-limit-is-data-a-classification-is-a-model](D-2026-08-02-a-limit-is-data-a-classification-is-a-model.md) | A limit is data; a classification is a model |
 | [D-2026-08-02-a-probe-is-a-question-you-have-not-asked-yet](D-2026-08-02-a-probe-is-a-question-you-have-not-asked-yet.md) | A probe is a question you have not asked yet |
+| [D-2026-08-02-a-solvent-charge-is-a-volume](D-2026-08-02-a-solvent-charge-is-a-volume.md) | A solvent charge is a volume |
+| [D-2026-08-02-grounding-is-what-this-turn-saw](D-2026-08-02-grounding-is-what-this-turn-saw.md) | Grounding is what this turn saw |
+| [D-2026-08-02-shipped-is-not-reachable](D-2026-08-02-shipped-is-not-reachable.md) | Shipped is not reachable |
+| [D-2026-08-02-the-fraction-lives-where-bofire-will-fractionate](D-2026-08-02-the-fraction-lives-where-bofire-will-fractionate.md) | The fraction lives where BoFire will fractionate |

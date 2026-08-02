@@ -1,8 +1,9 @@
 # `chemclaw.science` — the domain engines
 
 **Responsibility:** the actual computation. `calc` is the physics (xTB/GFN2, conformers, pKa,
-solubility, thermochemistry, the calculation cache), `bo` the BoFire optimizer, `safety` the hazard
-screen, `fingerprints` ECFP4/DRFP and Tanimoto search.
+solubility, thermochemistry, the calculation cache), `bo` the BoFire optimizer, `safety` the three
+cited reference tables (the process-safety hazard screen, the genotoxicity structural alerts, and
+the ICH Q3C/Q3D impurity limits), `fingerprints` ECFP4/DRFP and Tanimoto search.
 
 **None of these import Temporal, MCP, FastAPI or `chemclaw.agent`.** That is the whole point: an
 engine is importable and testable on its own, so a chemist can check the numbers without an

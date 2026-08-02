@@ -55,7 +55,7 @@ from chemclaw.agent.turn_signals import (
     drain,
     end_turn,
 )
-from chemclaw.agent.verifier import verify_turn_answer
+from chemclaw.agent.verifier import ungrounded_parameter_shapes, verify_turn_answer
 from chemclaw.api.budget import BudgetTracker
 from chemclaw.api.events import (
     AnswerEvent,
@@ -77,6 +77,7 @@ from chemclaw.api.metrics import METRICS
 from chemclaw.connectors.registry import open_reachable
 from chemclaw.core.config import settings
 from chemclaw.core.errors import ChemclawError
+from chemclaw.core.temporal_client import connect
 from chemclaw.core.tracing import start_span
 
 logger = logging.getLogger(__name__)
@@ -85,6 +86,14 @@ logger = logging.getLogger(__name__)
 # was called without streaming a whole evidence payload to the UI (mirrors the audit trail
 # truncation).
 _ARG_PREVIEW_CHARS = 200
+
+# What the durable subsystem is called when its outage is announced. `CapabilityDegradedEvent`
+# carries a list of *connector* names today, and this is not a connector — it is the whole durable
+# execution layer, so every connector's jobs are down with it. It rides in the same list because
+# what a surface does with the name is identical (say this capability is missing this turn), and a
+# second event type for one more unreachable capability would be a contract change for no
+# additional meaning. The name is prefixed so it cannot be mistaken for a bundle in the registry.
+_DURABLE_SUBSYSTEM = "durable-jobs (Temporal)"
 
 
 def _classify(error: BaseException) -> tuple[ErrorCode, bool]:
@@ -261,6 +270,15 @@ async def run_turn(
             # the chemist that a tool was missing, because it never saw one missing — it answers
             # from the surface it was handed. Only this layer knows the surface was short.
             unreachable = await open_reachable(stack, turn_connectors)
+            # The durable subsystem is announced the same way and for the same reason. It was not,
+            # and connectors were: Temporal was never probed, so a turn whose every durable
+            # launcher was going to fail planned exactly like a turn that could run one. Measured
+            # in the 190-probe live run: 0 of 7 durable launchers ran, and the model repeatedly
+            # read the launch failure as bad input from the chemist and re-asked for parameters it
+            # already had. Before the first token, so the model plans against the surface it will
+            # actually get rather than discovering the outage by calling into it.
+            if not await _durable_subsystem_reachable():
+                unreachable = [*unreachable, _DURABLE_SUBSYSTEM]
             if unreachable:
                 yield CapabilityDegradedEvent(connectors=unreachable)
             stream = agent.run(
@@ -310,7 +328,9 @@ async def run_turn(
                     timeout_seconds=settings.mid_turn_resume_timeout_seconds,
                 )
                 if results:
-                    async for event in _resume(agent, session, results, turn_connectors):
+                    async for event in _resume(
+                        agent, session, results, turn_connectors, tool_trace
+                    ):
                         if isinstance(event, TokenEvent):
                             answer_parts.append(event.text)
                         yield event
@@ -350,7 +370,7 @@ async def run_turn(
                 retryable=False,
                 correlation_id=correlation_id,
             )
-        answer = await _answer_event("".join(answer_parts))
+        answer = await _answer_event("".join(answer_parts), tool_trace.outputs)
         # **Before the yield, not after it.** `agent.run` has ended by now, so the history provider
         # has already committed this turn's rows and they are a complete, paired exchange — there is
         # nothing half-written left to undo. The cancellation that reaches a finished turn is
@@ -530,6 +550,43 @@ async def run_turn(
             reset_current_identity(identity_token)
 
 
+async def _durable_subsystem_reachable() -> bool:
+    """Is Temporal answering right now? — the per-turn probe behind the durable outage announcement.
+
+    Announced rather than discovered: every long or expensive capability in the system is a
+    workflow, so an unreachable broker removes all of them at once, and the only thing that knows
+    it before the turn starts is this layer. Without the probe the model met the outage as a tool
+    failure mid-answer and, in the live run, read it as its own bad input.
+
+    `check_health` rather than `connect` alone, because `connect` caches this process's client for
+    its lifetime (`core.temporal_client`): once one turn has connected, every later turn would get
+    the cached handle back instantly and call a broker that has since died reachable. The health
+    RPC is what actually goes to the wire each turn, and `retry=False` keeps it a *probe* — the
+    SDK's default retry would turn one unreachable broker into a per-turn backoff loop.
+
+    Bounded by `connector_health_timeout_seconds`, the same budget the connector sweep uses: this
+    is the same kind of thing on the same hot path — a reachability check whose cost is paid by
+    every turn — and one probe budget that both honour is easier to reason about (and to raise on a
+    slow network) than two knobs that can disagree. A hang here would otherwise delay every turn's
+    first token by however long the broker takes to not answer.
+
+    Never raises: a probe that fails the turn it was meant to describe is worse than no probe, so
+    every failure means "not reachable" and the turn proceeds with the outage announced.
+    """
+    try:
+        client = await asyncio.wait_for(connect(), settings.connector_health_timeout_seconds)
+        return await asyncio.wait_for(
+            client.service_client.check_health(retry=False),
+            settings.connector_health_timeout_seconds,
+        )
+    except Exception:
+        # DEBUG, not WARNING: `open_reachable` already logs and counts a degraded turn, and an
+        # outage this probe finds is reported to the chemist on the stream — logging it at
+        # attention level once per turn would bury the connector sweep's own signal under it.
+        logger.debug("the durable subsystem did not answer its health probe", exc_info=True)
+        return False
+
+
 async def _current_plan(session: AgentSession) -> list[str] | None:
     """The harness's current todo list for this session, or None when there is no plan to show.
 
@@ -554,29 +611,60 @@ async def _current_plan(session: AgentSession) -> list[str] | None:
         return None
 
 
-async def _answer_event(answer: str) -> AnswerEvent:
-    """Assemble the turn's final `AnswerEvent`, scoring it when verification is enabled (F10-B).
+async def _answer_event(answer: str, tool_outputs: Sequence[str]) -> AnswerEvent:
+    """Assemble the turn's final `AnswerEvent`, scoring it against what this turn retrieved (F10-B).
 
-    When `verifier_enabled`, the assembled answer is checked for citation faithfulness against
-    the notes it cites, the aggregate confidence + any unsupported claims are stamped on the
-    event, and `review_required` is set when `confidence < verifier_confidence_threshold` — the
-    routing signal a surface (or a future D-032 hold) uses to flag a low-confidence answer for
-    review rather than presenting it as authoritative. When disabled (the default) this is
-    today's plain answer. A verifier failure must never sink the turn — it degrades to the
-    unscored answer.
+    Two independent checks, each behind its own knob and each able to set `review_required` — the
+    one routing signal a surface (or a future D-032 hold) reads to flag an answer rather than
+    present it as authoritative. There is deliberately no second flag: a reviewer needs to know
+    *that* an answer wants a look, and `unsupported_claims` carries *why*, whichever check spoke.
+
+    - `verifier_enabled`: citation faithfulness against `tool_outputs`, stamping the aggregate
+      confidence and flagging below `verifier_confidence_threshold`.
+    - `answer_shape_gate_enabled`: the deterministic scan for method parameters no tool in this
+      turn produced. It flags outright rather than moving a confidence, because it is not a measure
+      of anything — it either found an ungrounded shape or it did not. Off by default and a
+      deployment decision rather than a default-on behaviour, because it is a shape heuristic that
+      both misses and over-fires (see `ungrounded_parameter_shapes`), and an answer marked for
+      review that did not need it costs a chemist trust in every mark that follows.
+
+    `tool_outputs` is what the turn's tools actually returned, untruncated, and it is the whole
+    point of both checks. Verification used to re-resolve the answer's citations from the graph on
+    disk, which asked whether a cited note exists rather than whether this turn saw it.
+
+    Neither check may sink the turn: a verifier failure degrades to the unscored answer.
     """
-    if not settings.verifier_enabled:
-        return AnswerEvent(text=answer)
-    try:
-        result = await verify_turn_answer(answer)
-    except Exception:
-        logger.exception("answer verification failed; returning the unscored answer")
-        return AnswerEvent(text=answer)
+    confidence: float | None = None
+    unsupported: list[str] = []
+    review = False
+    if settings.verifier_enabled:
+        try:
+            result = await verify_turn_answer(answer, tool_outputs)
+        except Exception:
+            logger.exception("answer verification failed; returning the unscored answer")
+        else:
+            confidence = result.confidence
+            unsupported = [claim.text for claim in result.unsupported]
+            review = result.confidence < settings.verifier_confidence_threshold
+    if settings.answer_shape_gate_enabled:
+        shapes = ungrounded_parameter_shapes(answer, tool_outputs)
+        if shapes:
+            # WARNING because this is the signal an operator tunes the gate on — how often it
+            # fires, and on what — and the matched text is in the message so a false positive is
+            # diagnosable without reading the transcript. A counter would be the better home for
+            # the rate, but `api/metrics` refuses an undeclared name and declaring one is a
+            # cross-package edit this change does not own.
+            logger.warning(
+                "answer marked for review: parameter shape(s) no tool in this turn produced (%s)",
+                "; ".join(shapes),
+            )
+            unsupported = [*unsupported, *shapes]
+            review = True
     return AnswerEvent(
         text=answer,
-        confidence=result.confidence,
-        unsupported_claims=[claim.text for claim in result.unsupported],
-        review_required=result.confidence < settings.verifier_confidence_threshold,
+        confidence=confidence,
+        unsupported_claims=unsupported,
+        review_required=review,
     )
 
 
@@ -585,6 +673,7 @@ async def _resume(
     session: Any,
     results: dict[str, dict[str, Any]],
     connectors: Sequence[Any],
+    tool_trace: "_ToolCallTrace",
 ) -> AsyncIterator[Event]:
     """Continue the turn with completed job results, streaming the continuation's events.
 
@@ -599,13 +688,16 @@ async def _resume(
     connector
     for
     no reason.
+
+    The turn's `tool_trace` is passed through for the same reason and one more: a tool the resume
+    calls is part of this turn's evidence, so its result has to reach the answer verifier along
+    with the rest. A trace of its own would have collected them into an object nobody reads.
     """
     summary = "\n".join(f"- {job_id}: {payload}" for job_id, payload in results.items())
     message = (
         "The durable job(s) you started have completed. Their results follow as data; continue "
         "your answer using them.\n" + frame_untrusted(summary, note_id="job-results")
     )
-    tool_trace = _ToolCallTrace()
     async for update in agent.run(message, stream=True, session=session, tools=connectors or None):
         for signal in drain():
             yield _signal_event(signal)
@@ -749,6 +841,14 @@ class _ToolCallTrace:
         # The name of every call already announced, kept so its result can be reported under the
         # same name. Bounded by the calls in one turn, which the loop cap already bounds.
         self._issued: dict[str, str] = {}
+        # What this turn's tools returned, in full, in the order they came back — the evidence the
+        # answer verifier and the parameter-shape gate check the answer against. Kept here rather
+        # than read back off the emitted `ToolResultEvent`s because those carry a 200-character
+        # *preview*: a `gather_evidence` result is ~20,000 characters over 40 chunks, so scoring
+        # against the preview would call 39 of its 40 citations fabricated. The budget is right for
+        # the UI and wrong for a grounding check, so the two read different things from one place.
+        # Bounded by the calls in one turn, like `_issued`, and never leaves the process.
+        self.outputs: list[str] = []
 
     def feed(self, update: Any) -> list[Event]:
         """Take one streamed update; return the calls it issued and the results it returned."""
@@ -773,9 +873,11 @@ class _ToolCallTrace:
                 # None` and not falsiness — an empty string is a real fragment of the argument
                 # stream, and treating it as the end flushed the call before its arguments had
                 # arrived, which is how this reached a second live run still empty.
-                result = _result_event(content, self._issued.get(key) or self._names.get(key, key))
-                if result is not None:
-                    results.append(result)
+                text = _result_text(content)
+                if text is not None:
+                    self.outputs.append(text)
+                    tool = self._issued.get(key) or self._names.get(key, key)
+                    results.append(ToolResultEvent(tool=tool, preview=text[:_ARG_PREVIEW_CHARS]))
                 continue
             if name and arguments:
                 # The name and the complete arguments in one content: the call arrived whole
@@ -839,13 +941,17 @@ def _arguments_complete(fragments: list[str] | None) -> bool:
     return True
 
 
-def _result_event(content: Any, tool: str) -> ToolResultEvent | None:
-    """Render a function-result content as a `ToolResultEvent`, or None when it carries nothing.
+def _result_text(content: Any, /) -> str | None:
+    """What a function-result content returned, in full, or None when it carries nothing.
 
     Duck-typed over the attribute the framework version happens to use, for the same reason the
     call side is: the concrete content class is not a stable export. A result that is empty or
-    unreadable yields None rather than an event announcing nothing — the trace should not claim a
-    value it does not have.
+    unreadable yields None rather than a value the trace does not have — the trace should not claim
+    one, and the verifier must not treat "nothing came back" as evidence.
+
+    Untruncated on purpose. The caller truncates for the wire (`_ARG_PREVIEW_CHARS`, the UI's
+    budget) and keeps the whole text for grounding, which are different jobs with different right
+    answers; returning the preview here would silently make the second one impossible.
 
     Failures are deliberately not reported here. A raised call already surfaces as
     `ToolFailedEvent` through the tool middleware, which has the exception and its message; a
@@ -855,8 +961,7 @@ def _result_event(content: Any, tool: str) -> ToolResultEvent | None:
         value = getattr(content, attribute, None)
         if value is None or value == "":
             continue
-        preview = value if isinstance(value, str) else str(value)
-        return ToolResultEvent(tool=tool, preview=preview[:_ARG_PREVIEW_CHARS])
+        return value if isinstance(value, str) else str(value)
     return None
 
 

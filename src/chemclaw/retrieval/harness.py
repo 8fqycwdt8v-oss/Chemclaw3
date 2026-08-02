@@ -135,6 +135,15 @@ def report_note(report: Report) -> Note:
     Each section shows its memory layer and lists its evidence, every chunk wikilinking its
     source note; an unsupported section says so explicitly. The draft is agent-authored and
     goes through the PR-gate for a chemist to validate before it counts as reliable (D-005).
+
+    A bullet also carries the provenance its chunk *actually* holds, but only where that
+    provenance is informative — a conflict, a stated confidence, an agent-authored source note.
+    The three fields were populated by the retrievers (D-160) and dropped here, and dropping
+    `conflicts_with` was the expensive one: `kg.conflicts` exists precisely so retrieval flags
+    notes that disagree instead of returning both silently, and a report is the one output where
+    two agreeing-looking bullets are most likely to be read as two independent confirmations.
+    The rest is rendered only when set, because a line of empty metadata under every bullet
+    would bury the one bullet that carries a warning.
     """
     lines = [f"# {report.title}\n"]
     for section in report.sections:
@@ -148,7 +157,27 @@ def report_note(report: Report) -> Note:
             lines.append("_No supporting data found; section left unsupported._\n")
             continue
         for chunk in section.evidence:
-            lines.append(f"- {chunk.content} ([[{chunk.source_note_id}]], via {chunk.retriever})")
+            provenance = [f"[[{chunk.source_note_id}]]", f"via {chunk.retriever}"]
+            if chunk.created_by == "agent":
+                # "How much of this was AI-drafted?" — a distilled agent note and a human-merged
+                # one are indistinguishable in the body text, and only one of them was signed off
+                # on its own merits at the PR-gate.
+                provenance.append("agent-authored")
+            if chunk.confidence is not None:
+                # Stated uncertainty, as opposed to the unset default. This number already reached
+                # the chunk as `score`, where it only orders truncation — being ranked lower is not
+                # the same as the reader being *told* the note is unsure.
+                provenance.append(f"confidence {chunk.confidence:.2f}")
+            lines.append(f"- {chunk.content} ({', '.join(provenance)})")
+            if chunk.conflicts_with:
+                # The conflicting ids stay plain text, not `[[wikilinks]]`: the report *warns
+                # about* those notes, it does not rest on them, and linking would add them to the
+                # report's own citations — the same reason `_excerpt` strips a note's links.
+                lines.append(
+                    f"  - **Conflicts with {', '.join(chunk.conflicts_with)}** — these notes "
+                    "disagree; do not read this and a conflicting note as two independent "
+                    "confirmations."
+                )
         lines.append("")
     return Note(
         id=_report_id(report.title),

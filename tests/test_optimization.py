@@ -8,7 +8,7 @@ git).
 
 import asyncio
 
-from chemclaw.ingest.eln.ord import Component, OrdReaction, Role
+from chemclaw.ingest.eln.ord import Component, Impurity, OrdReaction, Role
 from chemclaw.memory.jobs import synthesize_optimization_campaigns
 from chemclaw.memory.optimization import (
     OptimizationCampaign,
@@ -105,3 +105,131 @@ def test_clustering_drops_degenerate_reactions() -> None:
     fingerprints = reaction_fingerprints([_ester("run-1", 80, 85), degenerate])
     assert "degenerate" not in fingerprints
     assert cluster_by_similarity(fingerprints, 0.7) == [["run-1"]]
+
+
+# --- the outcome-quality columns ------------------------------------------------------
+
+
+def _headers(body: str) -> list[str]:
+    """The campaign table's column headers, as a reader of the rendered note would see them."""
+    header = next(line for line in body.splitlines() if line.startswith("| Run |"))
+    return [cell.strip() for cell in header.strip("|").split("|")]
+
+
+def _row(body: str, reaction_id: str) -> list[str]:
+    """One run's rendered row cells."""
+    line = next(
+        line for line in body.splitlines() if line.startswith(f"| [[reaction-{reaction_id}]] |")
+    )
+    return [cell.strip() for cell in line.strip("|").split("|")]
+
+
+def _note(runs: list[OrdReaction]) -> str:
+    """The campaign note body for these runs — the artifact built for side-by-side reading."""
+    return optimization_campaign_note(
+        "optimization-abc",
+        OptimizationCampaign(reaction_ids=[r.reaction_id for r in runs]),
+        {r.reaction_id: r for r in runs},
+    ).body
+
+
+def test_the_table_compares_purity_and_the_impurity_profile() -> None:
+    """A process campaign optimizes the impurity yield hides; the table has to carry it.
+
+    Yield alone cannot separate these two runs — the second is worse on yield and far better on
+    the impurity that decides whether the batch is shippable.
+    """
+    runs = [
+        _ester("run-1", 80, 85).model_copy(
+            update={
+                "purity_percent": 91.0,
+                "impurities": [Impurity(name="des-ethyl", area_percent=6.2)],
+            }
+        ),
+        _ester("run-2", 60, 78).model_copy(
+            update={
+                "purity_percent": 99.1,
+                "impurities": [Impurity(name="des-ethyl", area_percent=0.3)],
+            }
+        ),
+    ]
+    body = _note(runs)
+    assert _headers(body) == [
+        "Run",
+        "Performed",
+        "Temp (°C)",
+        "Time (h)",
+        "Yield (%)",
+        "Purity (%)",
+        "Major impurity",
+        "Impurity area (%)",
+        "Changed vs previous",
+    ]
+    assert _row(body, "run-1")[5:8] == ["91", "des-ethyl", "6.2"]
+    assert _row(body, "run-2")[5:8] == ["99.1", "des-ethyl", "0.3"]
+
+
+def test_a_campaign_that_recorded_no_quality_data_keeps_a_clean_table() -> None:
+    """Sparsity is handled by dropping the column, not by a row of dashes or of "None".
+
+    A column nobody filled costs width in every row and invites the reader to conclude the
+    impurity was measured and found absent. When no run in the campaign recorded any of the three,
+    the table is exactly the one it was before they existed.
+    """
+    body = _note([_ester("run-1", 80, 85), _ester("run-2", 100, 92)])
+    assert _headers(body) == [
+        "Run",
+        "Performed",
+        "Temp (°C)",
+        "Time (h)",
+        "Yield (%)",
+        "Changed vs previous",
+    ]
+    assert len(_row(body, "run-1")) == 6
+    assert "None" not in body
+
+
+def test_a_column_survives_for_the_one_run_that_recorded_it() -> None:
+    """Partial data keeps the column: a run with no number reads as "not measured here"."""
+    runs = [
+        _ester("run-1", 80, 85).model_copy(update={"purity_percent": 99.4}),
+        _ester("run-2", 100, 92),
+    ]
+    body = _note(runs)
+    assert "Purity (%)" in _headers(body)
+    assert "Major impurity" not in _headers(body)
+    assert _row(body, "run-1")[5] == "99.4"
+    assert _row(body, "run-2")[5] == "—"
+
+
+def test_the_major_impurity_is_the_largest_by_area_not_the_first_listed() -> None:
+    """The one a chemist chases, not the one the export happened to print first."""
+    runs = [
+        _ester("run-1", 80, 85).model_copy(
+            update={
+                "impurities": [
+                    Impurity(name="RRT 0.71", area_percent=0.4),
+                    Impurity(name="des-ethyl", area_percent=5.8),
+                ]
+            }
+        ),
+        _ester("run-2", 100, 92),
+    ]
+    body = _note(runs)
+    assert _row(body, "run-1")[5:7] == ["des-ethyl", "5.8"]
+
+
+def test_several_unranked_impurities_name_no_major_one() -> None:
+    """With no area% the list is unranked, and naming a "major" impurity would be a fabrication.
+
+    A single recorded impurity is the exception that needs no ranking — the record names one, so
+    calling it the major one adds no claim.
+    """
+    two_unranked = _ester("run-1", 80, 85).model_copy(
+        update={"impurities": [Impurity(name="RRT 0.71"), Impurity(name="RRT 1.24")]}
+    )
+    lone = _ester("run-2", 100, 92).model_copy(update={"impurities": [Impurity(name="des-ethyl")]})
+    body = _note([two_unranked, lone])
+    assert _row(body, "run-1")[5] == "—"
+    assert _row(body, "run-2")[5] == "des-ethyl"
+    assert "Impurity area (%)" not in _headers(body)  # nobody recorded one

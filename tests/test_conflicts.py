@@ -13,9 +13,10 @@ from datetime import date
 import pytest
 
 from chemclaw.core.config import settings
+from chemclaw.core.errors import ChemclawError
 from chemclaw.kg.conflicts import Conflict, conflicts_by_note, find_conflicts
 from chemclaw.kg.note import Note, Relation
-from chemclaw.memory.failure import failure_note
+from chemclaw.memory.failure import close_refuted_note, failure_note
 
 
 def _note(note_id: str, **kwargs: object) -> Note:
@@ -192,3 +193,34 @@ def test_a_failure_note_is_not_current_before_it_was_observed() -> None:
     assert reported.valid_from == date(2026, 3, 1)
     assert not reported.is_current(date(2026, 1, 1))
     assert reported.is_current(date(2026, 6, 1))
+
+
+def test_retiring_the_refuted_note_ends_the_flag_and_keeps_the_history() -> None:
+    """Why `close_refuted_note` is opt-in, measured rather than argued.
+
+    Closing the refuted note is the right move for a claim that *stopped* being true and the wrong
+    one for a claim that never was, and the difference is observable in two places at once:
+
+    - the note keeps answering `is_current` **True** inside its old window, i.e. `valid_to` states
+      that the claim did hold up to that date — a fresh false statement about a never-true claim;
+    - the retrieval-time conflict scan then reports nothing, because a note nothing serves needs no
+      flag. Leave it open and the disagreement is on every retrieval instead.
+    """
+    claim = _note("playbook-x", type="playbook", valid_from=date(2024, 1, 1))
+    reported = failure_note("playbook-x", "half the yield", reported_by="a@example.com")
+    today = date.today()
+
+    assert len(find_conflicts([claim, reported], as_of=today)) == 1
+
+    retired = close_refuted_note(claim, reported.id, date(2025, 1, 1))
+    assert find_conflicts([retired, reported], as_of=today) == []
+    assert retired.is_current(date(2024, 6, 1))  # the claim's own history is preserved…
+    assert not retired.is_current(today)  # …and it is out of current evidence
+    assert reported.id in retired.outgoing_links()  # the old note points at what ended it
+
+
+def test_a_backwards_retirement_window_is_refused_with_both_dates() -> None:
+    """The schema rejects `valid_to < valid_from`; saying so beats a `ValidationError`."""
+    claim = _note("playbook-x", type="playbook", valid_from=date(2026, 5, 1))
+    with pytest.raises(ChemclawError, match="only became valid on 2026-05-01"):
+        close_refuted_note(claim, "failure-abc", date(2026, 3, 1))

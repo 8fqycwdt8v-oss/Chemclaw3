@@ -196,7 +196,13 @@ async def run_probe(client: httpx.AsyncClient, probe: Probe) -> ProbeOutcome:
                 elif kind == "tool_failed":
                     outcome.tools_failed.append(str(event.get("tool", "")))
                 elif kind == "capability_degraded":
-                    outcome.degraded.append(str(event.get("capability", event.get("name", ""))))
+                    # The event's field is `connectors`, a list. It was read as a scalar
+                    # `capability`/`name`, neither of which the event has ever carried, so every
+                    # degraded turn recorded one empty string — enough to make `failed_loudly`
+                    # true while naming nothing. Harmless while only an unreachable bundle raised
+                    # the event; the per-turn Temporal probe now raises it on any deployment
+                    # without a broker, which is every offline run.
+                    outcome.degraded.extend(str(name) for name in event.get("connectors", []))
                 elif kind == "job_started":
                     outcome.jobs_started.append(str(event.get("job_id", event.get("job", ""))))
                 elif kind == "note_proposed":

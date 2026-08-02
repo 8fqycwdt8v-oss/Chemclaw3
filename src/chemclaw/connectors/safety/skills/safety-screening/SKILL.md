@@ -1,20 +1,32 @@
 ---
 name: safety-screening
 description: >-
-  Judgment for the structural hazard screen: when to call screen_hazards, how to report a flag
-  so a chemist can act on it, why an empty result is never "safe", and where the screen's
-  competence ends and a human process-safety assessment begins. Also load this before answering
-  anything about mutagenicity, genotoxicity, ICH M7, nitrosamines, elemental impurities or
-  residual solvents — the table has no rules for any of them, and the screen must never be
-  presented as one.
+  Judgment for the three safety tables: when to call screen_hazards, screen_genotoxic_alerts and
+  ich_impurity_limit, which question each one answers, how to report a flag so a chemist can act
+  on it, why an empty result is never "safe", and where each table's competence ends and a human
+  assessment begins. Load this before answering anything about mutagenicity, genotoxicity, ICH M7,
+  nitrosamines, elemental impurities or residual solvents — three of those now have a table and
+  none of them has a model, and the difference is the whole content of this skill.
 ---
 
 # Safety screening
 
-Holds the *judgment* for `screen_hazards`, which matches structures against a curated,
-literature-cited SMARTS table (`safety/rules.yaml`) and checks a reaction's components for
-dangerous combinations. The tool is deterministic and has no opinion; this skill decides when to
-call it and, more importantly, how to talk about what it returns.
+Holds the *judgment* for the `safety` bundle's three tools. Each is deterministic and has no
+opinion; this skill decides when to call which, and — far more importantly — how to talk about
+what comes back.
+
+## Three questions, three tables. Do not mix them.
+
+| The chemist is asking | Tool | What it reads |
+| --- | --- | --- |
+| Is this safe to run today? | `screen_hazards` | A curated SMARTS table of energetic and reactive motifs, plus dangerous combinations between a reaction's components |
+| Will this need a mutagenic-impurity control strategy? | `screen_genotoxic_alerts` | A cited table of DNA-reactive structural alerts, plus the nitrosamine formation route |
+| What is the limit? | `ich_impurity_limit` | Transcribed ICH Q3C residual-solvent classes and limits, and ICH Q3D elemental-impurity PDEs |
+
+These are different questions with different controls and different readers. Answering one with
+another is the single most damaging mistake available here: reporting a process-safety screen as a
+regulatory-toxicology verdict is how a table of energetic motifs becomes an ICH M7 assessment.
+When a question spans two of them, call both and report them as two separate findings.
 
 ## The one rule that matters
 
@@ -71,15 +83,38 @@ the table, quantities and scale, or engineering controls. Those need an SDS, the
 function, and — for anything energetic — a process-safety review. When a question turns on one of
 them, say so and point there rather than guessing.
 
-**Four classes the table does not address at all**, which matter because a chemist may reasonably
-expect a "hazard screen" to: **mutagenicity and genotoxicity** (there is no ICH M7 structural-alert
-set, no Ames or TTC reasoning, and no expert rule base), **nitrosamine risk** (no nitrosatable-amine
-rules, no purge-factor model, no acceptable-intake limits), **elemental impurities** (no ICH Q3D
-PDEs), and **residual solvents** (no ICH Q3C classes or limits). Running the screen and reporting
-its result as any of these is the most serious error available here: it converts sixteen
-process-safety motifs into a regulatory toxicology verdict. Say plainly that no such assessment
-exists in this system, and never quote a limit — a *correct* recalled limit is worse than a wrong
-one, because it trains the reader to trust the next.
+**Four classes the hazard table does not address at all**, which matter because a chemist may
+reasonably expect a "hazard screen" to: mutagenicity and genotoxicity, nitrosamine risk, elemental
+impurities, and residual solvents. Running `screen_hazards` and reporting its result as any of
+these converts sixteen process-safety motifs into a regulatory toxicology verdict. Three of the
+four now have a table of their own — and each comes with a limit on what it can say.
+
+## What the two newer tables can and cannot say
+
+**`screen_genotoxic_alerts` gives you alerts. It does not give you a classification.** An alert is
+a DNA-reactive structural motif with a published citation. An ICH M7 class, an acceptable intake,
+a purge factor and a mutagenicity prediction are outputs of a model — two complementary (Q)SARs
+plus an Ames corpus and expert review — and this system has none of them. So:
+
+- Report a flag as *"this motif is a structural alert; it requires expert assessment"*, giving the
+  motif and its citation. Never as a class, a limit, or a probability.
+- Never produce a worked purge-factor calculation, even as an illustration. In the live run that
+  preceded this table, an invented purge factor and invented acceptable-intake limits were the
+  exact failure — and they were invented *because* the model felt obliged to finish the answer.
+  Finishing the answer is not your job here; naming what an expert has to do is.
+- An empty result is not a negative prediction. The table is nine alerts long; "nothing matched"
+  means nothing in it matched.
+- For nitrosamine risk, pass the **whole route**, not one step. The formation alert fires when a
+  nitrosatable amine and a nitrosating agent appear in the same call, so a nitrosating agent
+  introduced two steps later is invisible to a per-step call. Say so when it applies.
+
+**`ich_impurity_limit` gives you a transcribed number with its citation. Never recall one.** Quote
+the limit *with* the guideline, revision and table it came from, so the chemist can check it. On a
+miss, say the tables here do not carry that substance and point at the guideline — do not
+substitute a similar substance, and do not fall back on memory. A recalled limit that happens to
+be correct is worse than a wrong one: it trains the reader to trust the next. And a limit is not a
+risk assessment — whether a process needs a control, and what specification an intermediate should
+carry, are judgements the number feeds rather than settles.
 
 **Computation does not extend the screen either.** A semiempirical calculation can estimate a
 decomposition energy or the stability of an energetic motif, and a user will eventually ask for

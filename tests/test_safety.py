@@ -4,6 +4,14 @@ Three things must hold for an advisory safety screen to be worth having: the rul
 examples of the motifs they name, they stay quiet on ordinary chemistry (a screen that cries
 wolf is switched off), and nothing anywhere renders "no match" as "safe". The rule table is
 data, so these tests pin its behavior with named molecules rather than mocking the matcher.
+
+The last two sections cover the package's other two cited tables, which answer *different*
+questions and must keep answering them separately: the genotoxicity structural alerts
+(`science/safety/genotox.py`) and the transcribed ICH Q3C/Q3D limits
+(`science/safety/ich.py`). Both are here rather than in modules of their own because the
+property that matters most about them is how they relate to the hazard screen — that a
+genotoxicity alert is not a process-safety flag, and that neither is a classification — and
+that is only assertable with all three in one place.
 """
 
 import asyncio
@@ -15,6 +23,8 @@ import pytest
 from chemclaw.connectors.safety.server.tools import screen_hazards
 from chemclaw.core.config import settings
 from chemclaw.kg.note import Note
+from chemclaw.science.safety.genotox import screen_genotoxic_alerts
+from chemclaw.science.safety.ich import impurity_limit
 from chemclaw.science.safety.notes import hazard_problems, structures_in
 from chemclaw.science.safety.screen import (
     SafetyRulesError,
@@ -544,3 +554,250 @@ def test_widening_a_rule_did_not_make_a_routine_reagent_hazardous(name: str, smi
     """None of the widened patterns may fire on an everyday, unremarkable reagent."""
     widened = {"peroxide", "hydrazine", "n-halamine"}
     assert widened.isdisjoint({f.rule_id for f in screen_structure(smiles).flags}), name
+
+
+# --- the genotoxicity alert table -----------------------------------------------------
+
+
+# One published example per alert, plus the molecule each alert must *not* fire on. The
+# negative half is what keeps a widened pattern from turning the list into noise: a table
+# that flags every cross-coupling is a table a chemist stops reading.
+_ALERTS = {
+    "n-nitroso": ("CN(C)N=O", "CN(C)C=O"),  # NDMA vs DMF
+    "aromatic-nitro": ("O=[N+]([O-])c1ccccc1", "C[N+](=O)[O-]"),  # nitrobenzene vs nitromethane
+    "primary-aromatic-amine": ("Nc1ccccc1", "CC(=O)Nc1ccccc1"),  # aniline vs acetanilide
+    "aromatic-azo": ("c1ccccc1N=Nc1ccccc1", "CCN=NCC"),  # azobenzene vs an aliphatic azo
+    "epoxide": ("C1CO1", "C1CCOC1"),  # ethylene oxide vs THF
+    "aziridine": ("C1CN1", "C1CCNC1"),  # aziridine vs pyrrolidine
+    "alkyl-halide": ("CI", "CC(C)(C)Cl"),  # methyl iodide vs a tertiary chloride
+    "alkyl-sulfonate-or-sulfate-ester": ("COS(C)(=O)=O", "CS(=O)(=O)O"),  # MeOMs vs MsOH
+    "michael-acceptor": ("NC(=O)C=C", "CCC(N)=O"),  # acrylamide vs propionamide
+}
+
+
+@pytest.mark.parametrize(("alert_id", "pair"), sorted(_ALERTS.items()))
+def test_each_alert_fires_on_its_example_and_stays_quiet_on_its_counterexample(
+    alert_id: str, pair: tuple[str, str]
+) -> None:
+    """Every alert matches a published example of its motif and not the near miss beside it."""
+    hit, miss = pair
+    assert alert_id in {a.alert_id for a in screen_genotoxic_alerts([hit]).alerts}
+    assert alert_id not in {a.alert_id for a in screen_genotoxic_alerts([miss]).alerts}
+
+
+def test_a_nitrosating_agent_meeting_an_amine_flags_the_formation_route() -> None:
+    """The nitrosamine question the run fabricated: an amine plus a nitrosating agent.
+
+    Neither component is an alert on its own — DIPEA is an everyday base and sodium nitrite is an
+    everyday reagent — so this is only visible across a component list, which is why it is a pair
+    rule rather than a structural one.
+    """
+    together = screen_genotoxic_alerts(["CCN(C(C)C)C(C)C", "[Na+].[O-]N=O"])
+    assert [a.alert_id for a in together.alerts] == ["nitrosatable-amine-with-nitrosating-agent"]
+    assert screen_genotoxic_alerts(["CCN(C(C)C)C(C)C"]).alerts == []
+    assert screen_genotoxic_alerts(["[Na+].[O-]N=O"]).alerts == []
+
+
+def test_an_amide_is_not_treated_as_a_nitrosatable_amine() -> None:
+    """DMF with sodium nitrite must stay quiet — an amide nitrogen is not the risk motif.
+
+    The pair rule's value depends on it firing where nitrosation is plausible. Matching every
+    nitrogen would fire on most reactions in the corpus and be ignored within a week.
+    """
+    assert screen_genotoxic_alerts(["CN(C)C=O", "[Na+].[O-]N=O"]).alerts == []
+
+
+def test_every_alert_carries_a_citation_and_the_motif_it_names() -> None:
+    """A flag a chemist cannot trace is a flag they must take on trust — which is the failure."""
+    for alert in screen_genotoxic_alerts(["CN(C)N=O", "Nc1ccccc1"]).alerts:
+        assert alert.citation.strip() and alert.motif.strip()
+        assert alert.explanation.strip()
+
+
+@pytest.mark.parametrize("smiles", [["CN(C)N=O"], ["CCO"]])
+def test_the_result_says_a_flag_is_an_alert_and_not_a_classification(smiles: list[str]) -> None:
+    """The disclaimer rides in the payload, on a hit *and* on a miss, not only in a docstring.
+
+    `ScreenResult.verdict` was made a `computed_field` for exactly this reason: a plain property
+    is not serialized, so the caveat never reached the model that had to write the answer. The
+    four things this system cannot produce are named individually, because "expert assessment
+    required" on its own did not stop the live run inventing an ICH M7 class and a worked purge
+    factor.
+    """
+    rendered = screen_genotoxic_alerts(smiles).model_dump()
+    verdict = rendered["verdict"]
+    assert "ICH M7" in verdict and "purge factor" in verdict and "acceptable intake" in verdict
+    assert "expert assessment" in verdict
+
+
+def test_a_clean_alert_screen_is_not_reported_as_a_negative_prediction() -> None:
+    """An empty result is nine patterns not matching, not a (Q)SAR calling the compound clean."""
+    verdict = screen_genotoxic_alerts(["CCO"]).verdict
+    assert "not a negative mutagenicity prediction" in verdict
+
+
+def test_the_two_screens_stay_separate() -> None:
+    """The genotoxicity table must not leak into the process-safety screen, or vice versa.
+
+    This is the conflation the split exists to prevent, and it is testable in both directions.
+    Nitrobenzene is the case that proves it: an ordinary reagent the hazard table is right to pass
+    and the alert table is right to flag. Merging them would also make every nitration procedure
+    trip `kg-validate`'s `## Hazards` gate, which is a regulatory question answered by a
+    process-safety gate.
+    """
+    assert screen_structure("O=[N+]([O-])c1ccccc1").flags == []
+    assert [a.alert_id for a in screen_genotoxic_alerts(["O=[N+]([O-])c1ccccc1"]).alerts] == [
+        "aromatic-nitro"
+    ]
+    # And the other way: an organic azide is a process-safety flag with no genotoxicity alert.
+    assert "organic-azide" in {f.rule_id for f in screen_structure("CCCN=[N+]=[N-]").flags}
+    assert screen_genotoxic_alerts(["CCCN=[N+]=[N-]"]).alerts == []
+
+
+def test_the_alert_screen_is_advertised_to_the_agent() -> None:
+    """A tool nothing advertises would never be called — the gap this table exists to close."""
+    from chemclaw.connectors.registry import connector_tool_names
+
+    assert "screen_genotoxic_alerts" in connector_tool_names()
+
+
+def test_an_unparseable_component_stops_the_alert_screen() -> None:
+    """A component that cannot be parsed must not silently screen as "no alerts"."""
+    with pytest.raises(SafetyRulesError, match="unparseable SMILES"):
+        screen_genotoxic_alerts(["not-a-molecule"])
+
+
+# --- the ICH Q3C / Q3D reference tables -----------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("query", "substance", "basis", "value", "unit"),
+    [
+        # The exact lookup the live run answered from training instead.
+        ("Pd", "Palladium (Pd)", "oral PDE", 100.0, "µg/day"),
+        ("palladium", "Palladium (Pd)", "parenteral PDE", 10.0, "µg/day"),
+        ("THF", "Tetrahydrofuran", "PDE", 7.2, "mg/day"),
+        ("tetrahydrofuran", "Tetrahydrofuran", "concentration limit", 720.0, "ppm"),
+        ("C1CCOC1", "Tetrahydrofuran", "PDE", 7.2, "mg/day"),  # resolved from a structure
+        ("DMF", "N,N-Dimethylformamide", "PDE", 8.8, "mg/day"),
+        ("2-MeTHF", "2-Methyltetrahydrofuran", "PDE", 5.0, "mg/day"),
+        ("benzene", "Benzene", "concentration limit", 2.0, "ppm"),  # Class 1: a limit, no PDE
+        # Class 3, reached via an abbreviation. Its basis is *not* "PDE": Q3C assigns Class 3 no
+        # solvent-specific PDE, so quoting one under that label would attribute a number to the
+        # guideline that it does not contain.
+        (
+            "IPA",
+            "2-Propanol",
+            "Class 3 general limit — Q3C assigns no solvent-specific PDE; 50 mg/day or more "
+            "is acceptable without justification",
+            50.0,
+            "mg/day",
+        ),
+    ],
+)
+def test_a_transcribed_limit_comes_back_with_its_number(
+    query: str, substance: str, basis: str, value: float, unit: str
+) -> None:
+    """The number is read off a committed table, and the same substance answers to every spelling.
+
+    A SMILES and an abbreviation both resolve through the identity table, so a chemist does not
+    have to know the guideline's own spelling to reach its row.
+    """
+    limit = impurity_limit(query).limit
+    assert limit is not None and limit.substance == substance
+    assert {(entry.basis, entry.value, entry.unit) for entry in limit.limits} >= {
+        (basis, value, unit)
+    }
+
+
+def test_every_limit_names_the_guideline_its_revision_and_its_table() -> None:
+    """A number without provenance is a recalled number wearing a citation's clothes.
+
+    The whole point of transcribing these tables is that someone can open the source document at
+    the right page; a citation naming only "ICH" would not let them.
+    """
+    solvent = impurity_limit("THF").limit
+    element = impurity_limit("Pd").limit
+    assert solvent is not None and element is not None
+    assert solvent.citation == (
+        "ICH Q3C(R9), Impurities: Guideline for Residual Solvents, ICH Step 4 (2024), Table 2"
+    )
+    assert element.citation == (
+        "ICH Q3D(R2), Guideline for Elemental Impurities, ICH Step 4 (2022), Table A.2.1"
+    )
+
+
+def test_the_solvent_classes_are_carried_not_inferred() -> None:
+    """Class membership is the other half of the Q3C answer, and no limit implies it."""
+    assert impurity_limit("benzene").limit.limit_class == "Class 1"  # type: ignore[union-attr]
+    assert impurity_limit("DCM").limit.limit_class == "Class 2"  # type: ignore[union-attr]
+    assert impurity_limit("DMSO").limit.limit_class == "Class 3"  # type: ignore[union-attr]
+
+
+@pytest.mark.parametrize("query", ["nickel", "Ni", "tert-butyl alcohol", "water", "unobtainium"])
+def test_a_miss_is_a_miss_and_says_what_it_does_not_mean(query: str) -> None:
+    """The load-bearing half: an untranscribed substance returns nothing, and explains the nothing.
+
+    Nickel and `tert`-butyl alcohol are the sharp cases — both are genuinely in a guideline, and
+    both were left out of the transcription because their values could not be verified against the
+    source. A miss that read as "no limit exists" would be worse than the fabrication this replaces.
+    """
+    lookup = impurity_limit(query)
+    assert lookup.limit is None
+    assert "not that no limit exists" in lookup.verdict
+    assert "do not state one from memory" in lookup.verdict
+
+
+def test_the_miss_verdict_is_serialized_not_merely_a_property() -> None:
+    """The sentence has to reach the model writing the answer, which reads the payload."""
+    assert "not that no limit exists" in impurity_limit("unobtainium").model_dump()["verdict"]
+
+
+def test_every_class_2_concentration_limit_agrees_with_its_pde() -> None:
+    """The guideline's own ppm = PDE x 100 identity at a 10 g daily dose, over the whole table.
+
+    A transcription's characteristic failure is a mistyped digit, and this is the one internal
+    consistency check the table supports — it catches a transposed PDE or ppm without needing the
+    source document open.
+
+    **Class 2 only, and read off the file rather than a hand-written name list.** The list was
+    seven names and the docstring said "every row", which is the gap a reviewer is entitled to
+    assume is not there. Class 3 is excluded because the identity is *tautological* for it: both
+    of its numbers are the one general 50 mg/day statement, so agreeing proves nothing about a
+    transcription. Twenty-five of the sixty-two rows are Class 3, so including them would have
+    inflated the check's apparent coverage by more than a third while adding no evidence.
+    """
+    from chemclaw.science.safety.ich import _index
+
+    # De-duplicated by substance: the index is keyed by every synonym, so a row with three
+    # spellings would otherwise be checked three times and inflate the count below.
+    class_2 = {
+        limit.substance: limit
+        for limit in _index().values()
+        if limit.limit_class == "Class 2" and limit.guideline.startswith("ICH Q3C")
+    }.values()
+    assert len(class_2) >= 25, "the Class 2 block is the bulk of Q3C; this is checking the table"
+    for limit in class_2:
+        by_basis = {entry.basis: entry.value for entry in limit.limits}
+        assert by_basis["concentration limit"] == pytest.approx(by_basis["PDE"] * 100.0), (
+            limit.substance
+        )
+
+
+def test_the_limit_lookup_is_advertised_to_the_agent() -> None:
+    """Unadvertised, the model would go on reciting the number it already recites."""
+    from chemclaw.connectors.registry import connector_tool_names
+
+    assert "ich_impurity_limit" in connector_tool_names()
+
+
+@pytest.mark.parametrize("abbreviation", ["EDC", "DMA", "TCE"])
+def test_an_ambiguous_abbreviation_is_a_miss_not_a_confident_wrong_row(abbreviation: str) -> None:
+    """Three abbreviations that name more than one substance must not resolve to either.
+
+    `EDC` is ethylene dichloride in Q3C and the carbodiimide coupling reagent at the bench — and
+    the second is in the identity table, so a chemist asking about their coupling reagent would
+    have been handed a Class 1 limit of 5 ppm with a genuine ICH citation on it. A wrong row is
+    worse than the miss it replaces precisely because the citation makes it checkable-looking.
+    """
+    assert impurity_limit(abbreviation).limit is None

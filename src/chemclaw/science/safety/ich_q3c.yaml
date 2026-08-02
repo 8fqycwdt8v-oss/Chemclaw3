@@ -1,0 +1,358 @@
+# ICH Q3C residual-solvent classes and limits — a transcription, not a model.
+#
+# Data, not code, for the same reason `rules.yaml` is: a number a regulatory-affairs or
+# process-safety reader can check against the source document in a pull request. The difference
+# from `rules.yaml` is *who owns it*. A site extends the hazard rule table with its own knowledge;
+# nobody has their own Q3C. These values are fixed by the published guideline, which is why the
+# path to this file is not a configuration knob (see `science/safety/ich.py`).
+#
+# Provenance: transcribed from ICH Q3C(R9), "Impurities: Guideline for Residual Solvents",
+# ICH Step 4 / minor revision, 2024 — Table 1 (Class 1), Table 2 (Class 2), Table 3 (Class 3).
+#
+# **The revision label is the one field nobody has checked against the source**, and it is on every
+# row's citation, so if "R9 / 2024" is wrong the whole file cites the wrong document while every
+# number in it is right. An adversarial review verified all 62 values and could not verify this;
+# it is a backlog row rather than a silent assumption. Check it against the ICH site and correct
+# `guideline:` below in a pull request — one line, and it does not touch a single figure.
+# Concentration limits for Class 2 are the guideline's own Option 1 figures, computed from the PDE
+# at a 10 g/day maximum daily dose (ppm = PDE in mg/day x 100); every row below satisfies that
+# identity, which is the cheapest check a reviewer can run over the whole table.
+#
+# **Deliberately not transcribed**, and why. `tert`-butyl alcohol has a PDE assigned by Q3C(R8) that
+# the transcriber could not verify against the source document. It is omitted rather than guessed:
+# a lookup miss is honest and says "check the guideline", while a wrong PDE is exactly the failure
+# this file exists to end. Add it in a pull request with the source page in the description.
+#
+# Water is not here because Q3C does not cover it — a miss is the correct answer for water.
+#
+# Adding a row: give the guideline's own spelling as `name`, add whatever a chemist actually types
+# as `synonyms` (the lookup also resolves abbreviations and SMILES through `core/reagents.py`,
+# so a synonym is only needed where that table's preferred name differs from the guideline's), and
+# keep the ppm/PDE identity above intact.
+#
+# **An ambiguous abbreviation is not a synonym.** `EDC` (ethylene dichloride, but also the
+# carbodiimide in the reagent table), `DMA` (dimethylacetamide, dimethylamine, dimethylaniline) and
+# `TCE` (three different chlorinated solvents) are deliberately absent: a confidently wrong row
+# arrives with a real citation attached, which is worse than the miss it replaces.
+
+guideline: "ICH Q3C(R9), Impurities: Guideline for Residual Solvents, ICH Step 4 (2024)"
+
+classes:
+  "1":
+    table: Table 1
+    meaning: >-
+      Class 1 — solvents to be avoided: known human carcinogens, strongly suspected human
+      carcinogens, and environmental hazards. Use only where strongly justified by a
+      risk-benefit assessment.
+  "2":
+    table: Table 2
+    meaning: >-
+      Class 2 — solvents to be limited: non-genotoxic animal carcinogens, or agents of other
+      irreversible toxicity such as neurotoxicity or teratogenicity.
+  "3":
+    # Table 3 is a *list of names* with no numeric column. The two figures below are the
+    # guideline's general Class 3 statement, and they are a floor ("50 mg or more per day"), not a
+    # per-solvent assignment — so they are labelled as such on every row rather than being quoted
+    # as though Q3C had assigned this solvent a PDE.
+    table: Table 3 (the Class 3 solvent list; the figures are the general Class 3 statement)
+    meaning: >-
+      Class 3 — solvents with low toxic potential: no health-based exposure limit is needed, and
+      50 mg/day or less (5000 ppm at a 10 g daily dose) is acceptable without justification.
+    pde_basis: Class 3 general limit — Q3C assigns no solvent-specific PDE; 50 mg/day or more
+      is acceptable without justification
+    concentration_basis: Class 3 general limit at a 10 g daily dose — not a solvent-specific value
+
+solvents:
+  # --- Class 1 (Table 1): concentration limit only, no PDE ------------------------------------
+  - name: Benzene
+    solvent_class: "1"
+    concentration_limit_ppm: 2
+    concern: Carcinogen
+  - name: Carbon tetrachloride
+    synonyms: [tetrachloromethane]
+    solvent_class: "1"
+    concentration_limit_ppm: 4
+    concern: Toxic and environmental hazard
+  - name: 1,2-Dichloroethane
+    synonyms: ["ethylene dichloride"]
+    solvent_class: "1"
+    concentration_limit_ppm: 5
+    concern: Toxic
+  - name: 1,1-Dichloroethene
+    synonyms: ["1,1-dichloroethylene", "vinylidene chloride"]
+    solvent_class: "1"
+    concentration_limit_ppm: 8
+    concern: Toxic
+  - name: 1,1,1-Trichloroethane
+    solvent_class: "1"
+    concentration_limit_ppm: 1500
+    concern: Environmental hazard
+
+  # --- Class 2 (Table 2): PDE in mg/day, concentration limit in ppm ----------------------------
+  - name: Acetonitrile
+    synonyms: [MeCN, ACN]
+    solvent_class: "2"
+    pde_mg_per_day: 4.1
+    concentration_limit_ppm: 410
+  - name: Chlorobenzene
+    solvent_class: "2"
+    pde_mg_per_day: 3.6
+    concentration_limit_ppm: 360
+  - name: Chloroform
+    synonyms: [trichloromethane]
+    solvent_class: "2"
+    pde_mg_per_day: 0.6
+    concentration_limit_ppm: 60
+  - name: Cumene
+    synonyms: [isopropylbenzene]
+    solvent_class: "2"
+    pde_mg_per_day: 0.7
+    concentration_limit_ppm: 70
+  - name: Cyclohexane
+    solvent_class: "2"
+    pde_mg_per_day: 38.8
+    concentration_limit_ppm: 3880
+  - name: Cyclopentyl methyl ether
+    synonyms: [CPME]
+    solvent_class: "2"
+    pde_mg_per_day: 15.0
+    concentration_limit_ppm: 1500
+  - name: 1,2-Dichloroethene
+    synonyms: ["1,2-dichloroethylene"]
+    solvent_class: "2"
+    pde_mg_per_day: 18.7
+    concentration_limit_ppm: 1870
+  - name: Dichloromethane
+    synonyms: [DCM, methylene chloride]
+    solvent_class: "2"
+    pde_mg_per_day: 6.0
+    concentration_limit_ppm: 600
+  - name: 1,2-Dimethoxyethane
+    synonyms: [DME, glyme]
+    solvent_class: "2"
+    pde_mg_per_day: 1.0
+    concentration_limit_ppm: 100
+  - name: N,N-Dimethylacetamide
+    synonyms: [DMAc]
+    solvent_class: "2"
+    pde_mg_per_day: 10.9
+    concentration_limit_ppm: 1090
+  - name: N,N-Dimethylformamide
+    synonyms: [DMF]
+    solvent_class: "2"
+    pde_mg_per_day: 8.8
+    concentration_limit_ppm: 880
+  - name: 1,4-Dioxane
+    synonyms: [dioxane]
+    solvent_class: "2"
+    pde_mg_per_day: 3.8
+    concentration_limit_ppm: 380
+  - name: 2-Ethoxyethanol
+    solvent_class: "2"
+    pde_mg_per_day: 1.6
+    concentration_limit_ppm: 160
+  - name: Ethyleneglycol
+    synonyms: [ethylene glycol]
+    solvent_class: "2"
+    pde_mg_per_day: 6.2
+    concentration_limit_ppm: 620
+  - name: Formamide
+    solvent_class: "2"
+    pde_mg_per_day: 2.2
+    concentration_limit_ppm: 220
+  - name: Hexane
+    synonyms: [n-hexane]
+    solvent_class: "2"
+    pde_mg_per_day: 2.9
+    concentration_limit_ppm: 290
+  - name: Methanol
+    synonyms: [MeOH]
+    solvent_class: "2"
+    pde_mg_per_day: 30.0
+    concentration_limit_ppm: 3000
+  - name: 2-Methoxyethanol
+    solvent_class: "2"
+    pde_mg_per_day: 0.5
+    concentration_limit_ppm: 50
+  - name: Methylbutyl ketone
+    synonyms: [2-hexanone, methyl n-butyl ketone]
+    solvent_class: "2"
+    pde_mg_per_day: 0.5
+    concentration_limit_ppm: 50
+  - name: Methylcyclohexane
+    solvent_class: "2"
+    pde_mg_per_day: 11.8
+    concentration_limit_ppm: 1180
+  - name: Methylisobutylketone
+    synonyms: ["MIBK", "4-methyl-2-pentanone"]
+    solvent_class: "2"
+    pde_mg_per_day: 45.0
+    concentration_limit_ppm: 4500
+  - name: 2-Methyltetrahydrofuran
+    synonyms: [2-MeTHF]
+    solvent_class: "2"
+    pde_mg_per_day: 5.0
+    concentration_limit_ppm: 500
+  - name: N-Methylpyrrolidone
+    synonyms: ["NMP", "N-methyl-2-pyrrolidone"]
+    solvent_class: "2"
+    pde_mg_per_day: 5.3
+    concentration_limit_ppm: 530
+  - name: Nitromethane
+    solvent_class: "2"
+    pde_mg_per_day: 0.5
+    concentration_limit_ppm: 50
+  - name: Pyridine
+    solvent_class: "2"
+    pde_mg_per_day: 2.0
+    concentration_limit_ppm: 200
+  - name: Sulfolane
+    solvent_class: "2"
+    pde_mg_per_day: 1.6
+    concentration_limit_ppm: 160
+  - name: Tetrahydrofuran
+    synonyms: [THF]
+    solvent_class: "2"
+    pde_mg_per_day: 7.2
+    concentration_limit_ppm: 720
+  - name: Tetralin
+    synonyms: ["1,2,3,4-tetrahydronaphthalene"]
+    solvent_class: "2"
+    pde_mg_per_day: 1.0
+    concentration_limit_ppm: 100
+  - name: Toluene
+    synonyms: [PhMe]
+    solvent_class: "2"
+    pde_mg_per_day: 8.9
+    concentration_limit_ppm: 890
+  - name: Trichloroethylene
+    synonyms: [trichloroethene]
+    solvent_class: "2"
+    pde_mg_per_day: 0.8
+    concentration_limit_ppm: 80
+  - name: Triethylamine
+    synonyms: [TEA, Et3N]
+    solvent_class: "2"
+    pde_mg_per_day: 6.4
+    concentration_limit_ppm: 640
+  - name: Xylene
+    synonyms: [xylenes]
+    solvent_class: "2"
+    pde_mg_per_day: 21.7
+    concentration_limit_ppm: 2170
+
+  # --- Class 3 (Table 3): 50 mg/day (5000 ppm) is acceptable without further justification ------
+  - name: Acetic acid
+    synonyms: [AcOH]
+    solvent_class: "3"
+    pde_mg_per_day: 50.0
+    concentration_limit_ppm: 5000
+  - name: Acetone
+    solvent_class: "3"
+    pde_mg_per_day: 50.0
+    concentration_limit_ppm: 5000
+  - name: Anisole
+    solvent_class: "3"
+    pde_mg_per_day: 50.0
+    concentration_limit_ppm: 5000
+  - name: 1-Butanol
+    synonyms: [n-butanol]
+    solvent_class: "3"
+    pde_mg_per_day: 50.0
+    concentration_limit_ppm: 5000
+  - name: 2-Butanol
+    synonyms: [sec-butanol]
+    solvent_class: "3"
+    pde_mg_per_day: 50.0
+    concentration_limit_ppm: 5000
+  - name: Butyl acetate
+    solvent_class: "3"
+    pde_mg_per_day: 50.0
+    concentration_limit_ppm: 5000
+  - name: tert-Butylmethyl ether
+    synonyms: [MTBE, methyl tert-butyl ether]
+    solvent_class: "3"
+    pde_mg_per_day: 50.0
+    concentration_limit_ppm: 5000
+  - name: Dimethyl sulfoxide
+    synonyms: [DMSO]
+    solvent_class: "3"
+    pde_mg_per_day: 50.0
+    concentration_limit_ppm: 5000
+  - name: Ethanol
+    synonyms: [EtOH]
+    solvent_class: "3"
+    pde_mg_per_day: 50.0
+    concentration_limit_ppm: 5000
+  - name: Ethyl acetate
+    synonyms: [EtOAc]
+    solvent_class: "3"
+    pde_mg_per_day: 50.0
+    concentration_limit_ppm: 5000
+  - name: Ethyl ether
+    synonyms: [diethyl ether, Et2O]
+    solvent_class: "3"
+    pde_mg_per_day: 50.0
+    concentration_limit_ppm: 5000
+  - name: Ethyl formate
+    solvent_class: "3"
+    pde_mg_per_day: 50.0
+    concentration_limit_ppm: 5000
+  - name: Formic acid
+    solvent_class: "3"
+    pde_mg_per_day: 50.0
+    concentration_limit_ppm: 5000
+  - name: Heptane
+    synonyms: [n-heptane]
+    solvent_class: "3"
+    pde_mg_per_day: 50.0
+    concentration_limit_ppm: 5000
+  - name: Isobutyl acetate
+    solvent_class: "3"
+    pde_mg_per_day: 50.0
+    concentration_limit_ppm: 5000
+  - name: Isopropyl acetate
+    solvent_class: "3"
+    pde_mg_per_day: 50.0
+    concentration_limit_ppm: 5000
+  - name: Methyl acetate
+    solvent_class: "3"
+    pde_mg_per_day: 50.0
+    concentration_limit_ppm: 5000
+  - name: 3-Methyl-1-butanol
+    synonyms: [isoamyl alcohol]
+    solvent_class: "3"
+    pde_mg_per_day: 50.0
+    concentration_limit_ppm: 5000
+  - name: Methylethyl ketone
+    synonyms: ["MEK", "2-butanone"]
+    solvent_class: "3"
+    pde_mg_per_day: 50.0
+    concentration_limit_ppm: 5000
+  - name: 2-Methyl-1-propanol
+    synonyms: [isobutanol]
+    solvent_class: "3"
+    pde_mg_per_day: 50.0
+    concentration_limit_ppm: 5000
+  - name: Pentane
+    solvent_class: "3"
+    pde_mg_per_day: 50.0
+    concentration_limit_ppm: 5000
+  - name: 1-Pentanol
+    solvent_class: "3"
+    pde_mg_per_day: 50.0
+    concentration_limit_ppm: 5000
+  - name: 1-Propanol
+    synonyms: [n-propanol]
+    solvent_class: "3"
+    pde_mg_per_day: 50.0
+    concentration_limit_ppm: 5000
+  - name: 2-Propanol
+    synonyms: [isopropanol, IPA, isopropyl alcohol]
+    solvent_class: "3"
+    pde_mg_per_day: 50.0
+    concentration_limit_ppm: 5000
+  - name: Propyl acetate
+    solvent_class: "3"
+    pde_mg_per_day: 50.0
+    concentration_limit_ppm: 5000

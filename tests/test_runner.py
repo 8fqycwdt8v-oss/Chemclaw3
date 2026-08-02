@@ -2,15 +2,24 @@
 
 Proves the runner stamps the verifier's confidence + unsupported claims on the final `AnswerEvent`
 when verification is on, emits today's plain answer when it is off, and never lets a verifier
-failure sink the turn. The verifier is faked here (it has its own offline tests) so no model runs.
+failure sink the turn. The verifier is faked in those tests (it has its own offline tests) so no
+model runs.
+
+It is *not* faked in the grounding tests further down, and that is deliberate: what they prove is
+which evidence the runner hands the verifier — the turn's own tool results rather than the graph
+on disk — which a fake verifier cannot show. Beside them sit the two other per-turn honesty
+checks the same assembly point owns: the ungrounded-parameter scan, and the durable subsystem's
+reachability probe that lets the model plan against the surface it will actually get.
 """
 
 import asyncio
+import time
 from typing import Any
 
 import pytest
 from agent_framework import AgentSession
 
+import chemclaw.agent.verifier as verifier
 import chemclaw.api.runner as runner
 from chemclaw.agent.harness_todo import complete_awaiting_job, mark_awaiting_job
 from chemclaw.agent.loop_cap import observe_loop_cap
@@ -18,6 +27,7 @@ from chemclaw.agent.turn_signals import record_job_started
 from chemclaw.agent.verifier import ClaimCheck, VerificationResult
 from chemclaw.api.events import (
     AnswerEvent,
+    CapabilityDegradedEvent,
     ErrorEvent,
     Event,
     JobStartedEvent,
@@ -85,7 +95,7 @@ def test_low_confidence_answer_is_flagged(monkeypatch: pytest.MonkeyPatch) -> No
     monkeypatch.setattr(settings, "verifier_enabled", True)
     monkeypatch.setattr(settings, "verifier_confidence_threshold", 0.7)
 
-    async def _fake_verify(answer: str, **_: Any) -> VerificationResult:
+    async def _fake_verify(answer: str, *_: Any, **__: Any) -> VerificationResult:
         return VerificationResult(
             claims=[ClaimCheck(text="Yield was 90%", supported=False)], confidence=0.2
         )
@@ -104,7 +114,7 @@ def test_high_confidence_answer_is_not_flagged(monkeypatch: pytest.MonkeyPatch) 
     monkeypatch.setattr(settings, "verifier_enabled", True)
     monkeypatch.setattr(settings, "verifier_confidence_threshold", 0.7)
 
-    async def _fake_verify(answer: str, **_: Any) -> VerificationResult:
+    async def _fake_verify(answer: str, *_: Any, **__: Any) -> VerificationResult:
         return VerificationResult(claims=[], confidence=1.0)
 
     monkeypatch.setattr(runner, "verify_turn_answer", _fake_verify)
@@ -120,7 +130,7 @@ def test_confidence_exactly_at_threshold_is_not_flagged(monkeypatch: pytest.Monk
     monkeypatch.setattr(settings, "verifier_enabled", True)
     monkeypatch.setattr(settings, "verifier_confidence_threshold", 0.7)
 
-    async def _fake_verify(answer: str, **_: Any) -> VerificationResult:
+    async def _fake_verify(answer: str, *_: Any, **__: Any) -> VerificationResult:
         return VerificationResult(claims=[], confidence=0.7)
 
     monkeypatch.setattr(runner, "verify_turn_answer", _fake_verify)
@@ -297,7 +307,7 @@ def test_verifier_failure_degrades_to_plain_answer(monkeypatch: pytest.MonkeyPat
 
     monkeypatch.setattr(settings, "verifier_enabled", True)
 
-    async def _boom(answer: str, **_: Any) -> VerificationResult:
+    async def _boom(answer: str, *_: Any, **__: Any) -> VerificationResult:
         raise RuntimeError("verifier down")
 
     monkeypatch.setattr(runner, "verify_turn_answer", _boom)
@@ -474,3 +484,260 @@ def test_a_call_delivered_whole_is_reported_without_waiting_for_the_next_update(
     )
     assert (event.tool, event.arguments) == ("find_notes", '{"query": "amide"}')
     assert trace.flush() == []  # nothing left open, so nothing is emitted twice
+
+
+class _CitingAgent:
+    """Answers with a citation, optionally after a tool that returned it.
+
+    `tool_result` is the whole point: it is what makes the citation grounded *in this turn*, which
+    is a different question from whether the note exists.
+    """
+
+    mcp_tools: list[object] = []
+
+    def __init__(self, answer: str, *, tool_result: str | None = None) -> None:
+        self._answer = answer
+        self._tool_result = tool_result
+
+    def run(  # noqa: D102 - a fake agent's run, documented by its class
+        self,
+        message: str,
+        *,
+        stream: bool,
+        session: AgentSession,
+        **_run_options: Any,
+    ) -> Any:
+        async def _gen() -> Any:
+            if self._tool_result is not None:
+                yield _update(_CallContent(name="find_notes", call_id="c1", arguments={"q": "x"}))
+                yield _update(_CallContent(call_id="c1", result=self._tool_result))
+            yield _Update(text=self._answer)
+
+        return _gen()
+
+
+def _offline_verification(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Verification on, judge unreachable — so the offline citation gate produces the verdict.
+
+    `_answer_event` verifies only when `verifier_enabled`, and that same flag is what routes
+    `verify_answer` to the LLM judge, so the deterministic gate cannot be reached through the
+    runner without a judge that does not answer. Which is the realistic shape anyway: no model
+    endpoint is configured in a test process, and the documented behaviour is that an unreachable
+    judge degrades to the offline check rather than leaving the answer unscored.
+    """
+    monkeypatch.setattr(settings, "verifier_enabled", True)
+    monkeypatch.setattr(settings, "verifier_confidence_threshold", 0.7)
+
+    class _Unreachable:
+        async def get_response(self, *_args: Any, **_kwargs: Any) -> Any:
+            raise RuntimeError("no verifier endpoint in a test process")
+
+    monkeypatch.setattr(verifier, "_default_client", _Unreachable)
+
+
+def _verified_answer(agent: Any) -> AnswerEvent:
+    async def _collect() -> list[Any]:
+        session = AgentSession(session_id="s-cite")
+        return [event async for event in runner.run_turn(agent, session, "q", connectors=[])]
+
+    return _answer(asyncio.run(_collect()))
+
+
+def test_a_citation_the_turn_never_retrieved_is_unsupported_though_the_note_exists(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The verifier scores against what the turn saw, never against what happens to be on disk.
+
+    `compound-thf` is a real note in this repo's graph and the turn calls no tool at all, so the
+    naive implementation — re-resolving the answer's citations from `knowledge_path` — gives the
+    *wrong* answer here: it certifies a citation the turn never obtained, at confidence 1.0 and
+    `review_required=False`. That is exactly the case the gate exists for, and re-retrieval made
+    it unfailable, because `known` meant "note ids that exist" rather than "note ids this turn
+    saw". `evals.live._score_citations` has scored it the correct way from the start.
+    """
+    assert (settings.knowledge_path / "compound" / "compound-thf.md").exists(), (
+        "the fixture depends on this note being real — a naive implementation must pass it"
+    )
+    _offline_verification(monkeypatch)
+    answer = _verified_answer(_CitingAgent("THF was the solvent [[compound-thf]]."))
+    assert answer.confidence == 0.0
+    assert answer.unsupported_claims == ["THF was the solvent [[compound-thf]]."]
+    assert answer.review_required is True
+
+
+def test_the_same_citation_is_supported_when_a_tool_in_the_turn_returned_it(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The control for the test above: grounding it in a tool result is what makes it pass."""
+    _offline_verification(monkeypatch)
+    answer = _verified_answer(
+        _CitingAgent(
+            "THF was the solvent [[compound-thf]].",
+            tool_result="find_notes: [[compound-thf]] — tetrahydrofuran, ethereal solvent",
+        )
+    )
+    assert answer.confidence == 1.0
+    assert answer.review_required is False
+
+
+def test_a_tool_result_grounds_the_answer_past_the_uis_preview_budget(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Grounding reads the whole tool result; only the wire carries the 200-character preview.
+
+    A `gather_evidence` result is ~20,000 characters over ~40 chunks, so scoring against
+    `ToolResultEvent.preview` would call 39 of its 40 citations fabricated. The budget is right
+    for the UI trace and wrong for a grounding check, so the two read different things.
+
+    The cited note deliberately does *not* exist on disk, so the tool result is the only thing
+    that can ground it: an implementation that re-resolved from the graph, and one that read the
+    truncated preview, both call this answer fabricated.
+    """
+    note_id = "reaction-only-this-turn-saw-it"
+    assert not list(settings.knowledge_path.rglob(f"{note_id}.md")), "the note must not exist"
+    _offline_verification(monkeypatch)
+    buried = "filler chunk. " * 40 + f"[[{note_id}]]"
+    assert len(buried) > runner._ARG_PREVIEW_CHARS
+    answer = _verified_answer(
+        _CitingAgent(f"The solvent was screened [[{note_id}]].", tool_result=buried)
+    )
+    assert answer.confidence == 1.0
+    assert answer.review_required is False
+
+
+_METHOD_ANSWER = "Use a Kinetex C18 column at 1.0 mL/min with detection at 254 nm."
+
+
+def test_an_ungrounded_method_parameter_marks_the_answer_for_review(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The gate the live run asked for: a branded method no tool in the turn produced is flagged.
+
+    Verification stays off here, so `review_required` can only have come from the shape scan — the
+    two checks are independent knobs and either one may raise the flag. The matched text rides on
+    `unsupported_claims`, because "this answer wants a look" without saying at what is not
+    something a reviewer can act on.
+    """
+    monkeypatch.setattr(settings, "verifier_enabled", False)
+    monkeypatch.setattr(settings, "answer_shape_gate_enabled", True)
+    answer = _verified_answer(_CitingAgent(_METHOD_ANSWER))
+    assert answer.review_required is True
+    assert answer.unsupported_claims == [
+        "flow rate: 1.0 mL/min",
+        "wavelength: 254 nm",
+        "column brand: Kinetex",
+    ]
+    assert answer.confidence is None  # nothing was *scored*; the scan is not a measurement
+
+
+def test_the_shape_gate_is_off_unless_the_deployment_asks_for_it(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Default-off, because a heuristic that fires on a legitimate answer is worse than none."""
+    monkeypatch.setattr(settings, "verifier_enabled", False)
+    assert settings.answer_shape_gate_enabled is False, "the gate must be off unless asked for"
+    answer = _verified_answer(_CitingAgent(_METHOD_ANSWER))
+    assert answer.review_required is False
+    assert answer.unsupported_claims == []
+
+
+class _Broker:
+    """A stand-in Temporal client whose health RPC answers however the test needs."""
+
+    def __init__(self, healthy: bool) -> None:
+        self.service_client = self
+        self._healthy = healthy
+        self.probes = 0
+
+    async def check_health(self, *, retry: bool = True) -> bool:
+        self.probes += 1
+        assert retry is False, "a per-turn probe must not enter the SDK's retry loop"
+        return self._healthy
+
+
+def _degraded(events: list[Any]) -> list[str]:
+    return [name for e in events if isinstance(e, CapabilityDegradedEvent) for name in e.connectors]
+
+
+def _turn_events(**overrides: Any) -> list[Any]:
+    async def _collect() -> list[Any]:
+        session = AgentSession(session_id="s-probe")
+        return [
+            event
+            async for event in runner.run_turn(
+                _FakeAgent(), session, "q", connectors=[], **overrides
+            )
+        ]
+
+    return asyncio.run(_collect())
+
+
+def test_a_durable_outage_is_announced_before_the_first_token(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The model must meet the outage in its context, not in a tool failure halfway through.
+
+    Every long or expensive capability is a workflow, so an unreachable broker removes all of them
+    at once — and in the 190-probe live run 0 of 7 durable launchers ran while the model read the
+    failures as its own bad input and re-asked for parameters it already had. Announced first, in
+    the same event connectors use, because a surface does the same thing with either name.
+    """
+
+    async def _unreachable() -> Any:
+        raise RuntimeError("Failed client connect: tcp connect error")
+
+    monkeypatch.setattr(runner, "connect", _unreachable)
+    events = _turn_events()
+    assert _degraded(events) == [runner._DURABLE_SUBSYSTEM]
+    kinds = [e.type for e in events]
+    assert kinds.index("capability_degraded") < kinds.index("token")
+
+
+def test_a_reachable_broker_announces_nothing(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The control: a healthy turn is byte-for-byte the turn it was, with no announcement."""
+    broker = _Broker(healthy=True)
+
+    async def _reachable() -> Any:
+        return broker
+
+    monkeypatch.setattr(runner, "connect", _reachable)
+    events = _turn_events()
+    assert _degraded(events) == []
+    assert broker.probes == 1, "probed once per turn, not once per update"
+
+
+def test_a_broker_that_answers_the_health_rpc_falsely_is_degraded(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`connect` succeeding is not reachability: the client is cached for the process's life.
+
+    Once one turn has connected, every later turn gets that cached handle back instantly — so a
+    broker that has since died would look reachable forever if the probe stopped at `connect`.
+    The health RPC is what actually goes to the wire each turn.
+    """
+
+    async def _reachable() -> Any:
+        return _Broker(healthy=False)
+
+    monkeypatch.setattr(runner, "connect", _reachable)
+    assert _degraded(_turn_events()) == [runner._DURABLE_SUBSYSTEM]
+
+
+def test_a_hanging_broker_does_not_hold_up_the_turn(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Bounded by the same probe budget the connector sweep uses, so one dead host costs one turn.
+
+    Unbounded, a broker that accepts the connection and never answers would stall every turn's
+    first token for as long as it stayed silent — which is worse than the outage being probed for.
+    """
+
+    async def _hangs() -> Any:
+        await asyncio.sleep(30)
+        raise AssertionError("the probe was not bounded")  # pragma: no cover
+
+    monkeypatch.setattr(runner, "connect", _hangs)
+    monkeypatch.setattr(settings, "connector_health_timeout_seconds", 0.05)
+    started = time.perf_counter()
+    events = _turn_events()
+    elapsed = time.perf_counter() - started
+    assert _degraded(events) == [runner._DURABLE_SUBSYSTEM]
+    assert elapsed < 5, f"the probe was not bounded: the turn took {elapsed:.1f}s"

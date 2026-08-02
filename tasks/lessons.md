@@ -803,3 +803,87 @@ the same result. Two readers for one syntax is how a gate comes to disagree with
    fails open and looks clean.
 5. When a subagent's analysis contradicts your headline, it is more likely right than the headline:
    it read the artefacts and you read your own summary. Three of four corrections here came that way.
+
+## 2026-08-02 — Six teams, one tree: what the parallel implementation pass taught
+
+**A code audit is evidence about what the author read, not about what runs.** The roadmap said
+threading `n_generators` through `factorial_design` was a one-line change — the parameter exists on
+the imported BoFire class, the docstring even explains it. Team B ran it: 128 runs at
+`n_generators=0`, 128 at 1, 128 at 2. BoFire fractionates only the *continuous* half of a domain and
+crosses the categorical half in full, and `factorial_design` is all-categorical by its own refusal.
+The parameter was inert on the only domain shape that reaches it. This is the second time in one
+session that a measurement beat a documented claim — the first was the solvent-domination fix that
+two docstrings, an ADR and a closed backlog row asserted, and that changed the similarity by zero to
+the fourth decimal.
+
+**Rule: a plan item that says "just thread X through" gets X measured before an agent is told to
+thread it.** One script, thirty seconds; the alternative is an agent implementing a no-op elegantly.
+
+**`git stash push src/` is a shared-tree hazard, and it is the *converse* of the earlier one.**
+Earlier this session I stashed everything to prove a test failed without its fix, which took the
+test with the source and proved nothing. The brief for the six teams therefore said "stash only
+`src/`". With six agents in one working tree, that reverts *every* team's source, not the stasher's
+— three teams hit it independently. The two that got it right did per-file `git checkout --` on
+their own paths, or a detached worktree.
+
+**Rule: "revert the source to prove the test fails" needs a scope that matches the writer, not the
+repo.** Per-file checkout when the tree is shared; a worktree when the change is broad.
+
+**A one-caller helper written to dodge a cross-team dependency must be collapsed at integration.**
+Team E could not add the config field it needed (another team owned `core/config.py`), so it wrote
+`_shape_gate_enabled()` and left a comment saying to point it at `settings` once the field existed.
+That comment is the reason it got collapsed instead of surviving as permanent scaffolding.
+
+**Rule: when an agent reports "I needed something outside my paths and worked around it", the
+workaround is an integration TODO with a name, not a delivered design.**
+
+**Ownership by file, not by feature, is what made six concurrent agents work at all.** Several items
+from different waves land in the same module. Cutting teams by wave would have put two agents in
+`api/runner.py`; cutting by file put all three answer-path items in one serialized agent and left
+the other five genuinely disjoint. The waves survived as the *PR* boundary, not the work boundary —
+and where a team's items straddled two waves (BO: one wake-up, one new capability), the PR boundary
+bent rather than splitting a file across commits.
+
+## 2026-08-02 — The adversarial pass, and the two things it caught that I had signed off
+
+The reviewer owned no code and read the diff. It found two merge-blockers in work I had already
+run the full gate on, and both were the same species: **a change whose test was edited to fit it.**
+
+**`stoichiometry_table` rejected correct calls.** The reasoning was "a substance with a density is
+a solvent, so charging it by molar equivalent is the error we just fixed". Ten entries in the
+density table are routinely charged by equivalent as reagents — AcOH at 1.5 eq, water in a
+hydrolysis, MeOH in an esterification, DMSO as the Swern oxidant, DMF as the Vilsmeier reagent —
+and because `density_of` resolves SMILES, there was no spelling left that could charge water by
+moles at all. **The existing test that would have caught it was rewritten to the new signature**,
+silently turning 1.0 equivalent of water (18.0 g) into 2.552 equivalents (45.91 g). It asserted
+only thread identity, so it passed. My ADR then asserted "there is no reading under which it was
+right", which the reviewer refuted in four lines of output.
+
+**Rule: when a change requires editing an existing test, that edit is the finding.** Diff the
+*values* the old test asserted against the new ones and say out loud why they differ. "Updated the
+call to the new signature" is a sentence that hides a behaviour change every time.
+
+**Rule: before enforcing a predicate, check the predicate is the one you mean.** "Has a density"
+and "is charged by volume" differ by one being a fact about a substance and the other a fact about
+an experiment. A rejection is a much stronger claim than a conversion and needs the stronger
+evidence.
+
+**The substring hole.** `turn_evidence` grounded a citation with `note_id in output`. Note ids are
+not prefix-free, and the *committed corpus* carries `playbook-degassing` and
+`playbook-degassing-old` — so a turn that retrieved only the retired note certified a citation to
+the current one at confidence 1.0. That is the exact failure the function exists to catch, in the
+commit that added it.
+
+**Rule: an identifier match is a token match. Never `in`.** And when a check is about ids, go
+looking in the real corpus for a prefix pair before claiming the check works.
+
+**And the near-miss in my own verification.** Proving the fixes, I made a git worktree at the
+pre-fix commit, copied the new tests in, ran them — and all seven **passed**. Not because the tests
+were wrong: pytest resolved `chemclaw` through the editable install pointing at the *main* tree, so
+I was running new tests against new source in a directory that looked like old source. `PYTHONPATH`
+set to the worktree's `src/` flipped six of seven to failing, which is the real result.
+
+**Rule: when proving a test fails without its fix, print the module's `__file__` first.** A
+worktree, a container, a `sys.path` entry and an editable install all give you a directory that
+lies about which code is running. The check costs one line and is the difference between evidence
+and theatre — this is the third variant of the same trap in one session.
