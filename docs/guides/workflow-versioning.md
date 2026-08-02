@@ -71,7 +71,7 @@ Make draining an **explicit deploy step**, not an assumption:
 1. Pause the Temporal Schedules that start new runs (`src/chemclaw/cli/schedules.py` ids; the ELN sync,
    memory jobs, and eval drift are schedule-driven).
 2. Wait until the affected workflow types have no open executions
-   (Temporal UI at `:8080` → Workflows → filter by type, status Running).
+   (Temporal UI at `:8081` → Workflows → filter by type, status Running).
 3. Deploy the new image and roll the workers.
 4. Resume the Schedules.
 

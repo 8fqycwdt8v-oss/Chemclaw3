@@ -18,6 +18,13 @@ on:
     branches: ["**"]
   pull_request:
 
+permissions:
+  contents: read
+
+concurrency:
+  group: "${{ github.workflow }}-${{ github.ref }}"
+  cancel-in-progress: true
+
 jobs:
   check:
     runs-on: ubuntu-latest
@@ -57,6 +64,7 @@ jobs:
         uses: astral-sh/setup-uv@v5
         with:
           python-version: "3.11"
+          enable-cache: true
 
       - name: Sync dependencies
         run: uv sync
@@ -121,6 +129,8 @@ jobs:
       # a red check.
       - name: Install Helm
         uses: azure/setup-helm@v4
+        with:
+          version: "v3.13.0"
 
       - name: Install kubeconform
         run: |

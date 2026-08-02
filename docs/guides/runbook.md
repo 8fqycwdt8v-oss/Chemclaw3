@@ -7,7 +7,7 @@ overridable as `CHEMCLAW_<FIELD>`); this runbook covers the four recurring admin
 ## Prerequisites
 
 - Local dev stack: `make up` starts Temporal (dev server + UI) and Postgres/pgvector;
-  `make down` stops it. The **Temporal Web UI is at http://localhost:8080** — the first place
+  `make down` stops it. The **Temporal Web UI is at http://localhost:8081** — the first place
   to look at a running/failed job's event history. Frontend gRPC is `localhost:7233`.
 - The full gate before calling any change done: `make check` (ruff + `mypy --strict` + pytest).
 
@@ -24,7 +24,7 @@ overridable as `CHEMCLAW_<FIELD>`); this runbook covers the four recurring admin
 - **Changing workflow code:** a control-flow change deployed while a run is in flight fails that run
   on replay. Follow `docs/guides/workflow-versioning.md` (patch-gate or drain) for any release touching a
   `@workflow.defn` body.
-- **A stuck/failed job:** open the Temporal UI (:8080) → the workflow → event history; cross-check
+- **A stuck/failed job:** open the Temporal UI (:8081) → the workflow → event history; cross-check
   the worker's stderr logs. A worker not picking up jobs is usually the wrong queue/namespace —
   the startup log line shows exactly what it connected to.
 - **Database down:** connections fail fast with `ConnectionError: Postgres unreachable at

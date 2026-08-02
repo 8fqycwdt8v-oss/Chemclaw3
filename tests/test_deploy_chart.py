@@ -999,10 +999,10 @@ def test_the_supply_chain_has_a_gate_that_can_fail() -> None:
     rather than guessing at it.
     """
     image_workflow = (DEPLOY.parent / ".github" / "workflows" / "image.yml").read_text()
-    assert "pip-audit" in image_workflow, "no dependency scan"
+    assert "make deps-audit" in image_workflow, "no dependency scan in workflow"
     assert "syft" in image_workflow and "upload-artifact" in image_workflow, "no retained SBOM"
-    assert "deps-audit:" in (DEPLOY.parent / "Makefile").read_text(), (
-        "CI runs a scan a developer cannot run locally"
+    assert "pip-audit" in (DEPLOY.parent / "Makefile").read_text(), (
+        "deps-audit target must invoke pip-audit"
     )
     # The *image* scan is deliberately not asserted here, and the reason is in `BACKLOG.md`: it
     # ran, it found three real classes of problem now fixed in `deploy/Containerfile`, and it then

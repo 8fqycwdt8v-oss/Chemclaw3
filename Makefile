@@ -6,9 +6,18 @@
 # 1.29; override (`make helm-validate KUBE_VERSION=1.30.0`) when the target cluster moves.
 KUBE_VERSION ?= 1.29.0
 
+# Enforce exit-on-error and pipefail for all recipes: a failing command in a pipeline does not
+# pass silently when followed by a successful command. This is critical for the helm-validate
+# target: if `helm template` fails and emits empty output, `kubeconform` would otherwise see no
+# documents, print a clean summary, and exit 0 — masking a broken chart. Without this, CI would
+# report the chart valid when it is not. (.SHELLFLAGS applies to all recipes; assignment is
+# necessary because Make has no built-in way to set them).
+SHELL := bash
+.SHELLFLAGS := -eu -o pipefail -c
+
 .DEFAULT_GOAL := help
 
-.PHONY: help install lint type test cov check chat db-migrate schedules-apply kg-validate eval eval-strict eval-baseline eln-validate skill-validate connector-validate datasource-validate template-validate connectors prose-validate helm-validate audit-verify explain reindex up down
+.PHONY: help install lint type test cov check ci chat db-migrate schedules-apply kg-validate eval eval-strict eval-baseline eln-validate skill-validate connector-validate datasource-validate template-validate connectors prose-validate helm-validate audit-verify explain reindex up down deps-audit
 
 help:  ## List every target with its one-line description (the default).
 	@# Reads the `## ` comments beside each target, so a new target documents itself the day it is
@@ -33,7 +42,9 @@ test:  ## Run the test suite.
 cov:  ## Run the test suite with coverage (first-party packages; report missing lines).
 	uv run pytest --cov --cov-report=term-missing
 
-check: lint type test  ## The full gate CLAUDE.md requires green before a step is "done".
+check: lint type test  ## The fast inner-loop gate: lint + type + test (no coverage floor).
+
+ci: lint type cov kg-validate eval-strict eln-validate skill-validate connector-validate datasource-validate template-validate prose-validate helm-validate  ## The full pre-push gate: lint + type + coverage + all validators (what CI runs).
 
 chat:  ## Chat with the agent from the terminal (admin/testing mode; needs ANTHROPIC_API_KEY).
 	uv run chemclaw --admin

@@ -22,6 +22,14 @@ on:
     branches: ["main"]
   pull_request:
 
+permissions:
+  contents: read
+  actions: write
+
+concurrency:
+  group: "${{ github.workflow }}-${{ github.ref }}"
+  cancel-in-progress: true
+
 jobs:
   image:
     runs-on: ubuntu-latest
@@ -31,6 +39,8 @@ jobs:
 
       - name: Install uv
         uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
 
       - name: Audit the dependency closure for known vulnerabilities
         # The supply chain had no gate of any kind: no dependency scan, no SBOM, no image scan.
@@ -42,10 +52,7 @@ jobs:
         # failure mode being fixed here is a control that exists and reports to no one. A finding
         # that genuinely cannot be fixed is an explicit `--ignore-vuln` with a reason beside it,
         # which is a decision in the diff rather than a red badge everyone learns to skip.
-        run: |
-          set -euo pipefail
-          uv export --no-hashes --no-dev --format requirements-txt > /tmp/requirements.txt
-          uvx pip-audit --no-deps --disable-pip -r /tmp/requirements.txt
+        run: make deps-audit
 
       - name: Build the multi-target image (rootless)
         # `CHEMCLAW_REVISION` is what makes `deployment_revision` — the audit trail's "which
@@ -119,7 +126,7 @@ jobs:
             || docker image inspect chemclaw:ci --format '{{ .Id }}')
           echo "image id/digest: ${digest}"
           echo "${digest}" > sbom-image-digest.txt
-          curl -sSfL https://raw.githubusercontent.com/anchore/syft/main/install.sh \
+          curl -sSfL https://raw.githubusercontent.com/anchore/syft/v1.9.2/install.sh \
             | sh -s -- -b /usr/local/bin
           # Both outputs from ONE scan, each written to a file. Two things were wrong with
           # `syft ... -o table | head -40`: it re-scanned the image (~3 minutes for a second copy
