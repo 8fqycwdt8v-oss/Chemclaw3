@@ -464,3 +464,24 @@ def test_an_ordinary_note_that_merely_names_a_structure_is_still_out_of_scope() 
         body="Azide couplings (`CCCN=[N+]=[N-]`) recur across two projects.",
     )
     assert hazard_problems(mention) == []
+
+
+def test_a_clean_screen_carries_its_disclaimer_into_the_serialized_result() -> None:
+    """The "not a safety assessment" line must survive `model_dump()`, not just exist.
+
+    A bare `property` is dropped by pydantic serialization, so a clean screen reached the model as
+    `{"flags": []}` and the caveat never entered the context window the answer was written from.
+    Asserting on the dumped payload — not on the attribute — is the whole point: reading
+    `result.verdict` in a test passes either way.
+    """
+    dumped = screen_structure("CCO").model_dump()
+    assert "verdict" in dumped, "verdict is not serialized; a clean screen reads as an empty result"
+    assert "not a safety assessment" in dumped["verdict"]
+    assert "safe" not in dumped["verdict"].lower().replace("safety", "")
+
+
+def test_a_flagged_screen_serializes_an_advisory_verdict_too() -> None:
+    """The matched case must say advisory-only in the payload, for the same reason."""
+    dumped = screen_structure("CC(=O)OOC(C)=O").model_dump()
+    assert dumped["flags"], "diacetyl peroxide must raise the peroxide rule"
+    assert "Advisory only" in dumped["verdict"]

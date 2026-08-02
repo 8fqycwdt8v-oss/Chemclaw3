@@ -23,7 +23,7 @@ from pathlib import Path
 from typing import Literal
 
 import yaml
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, computed_field
 from rdkit import Chem
 
 from chemclaw.core.config import settings
@@ -67,9 +67,22 @@ class ScreenResult(BaseModel):
         """The most serious severity present, or None when nothing matched."""
         return self.flags[0].severity if self.flags else None
 
+    @computed_field  # type: ignore[prop-decorator]
     @property
     def verdict(self) -> str:
-        """A one-line summary for a human — never the word "safe" (see the module docstring)."""
+        """A one-line summary for a human — never the word "safe" (see the module docstring).
+
+        `computed_field`, not a bare `property`, and the difference is the whole point of the
+        sentence. A plain property is not serialized: `model_dump()` on a clean screen returned
+        exactly `{"flags": []}`, so the disclaimer had **zero** production callers and never
+        reached the model that had to write the answer. A live run then showed a chemist saying
+        they wanted to sign a risk assessment being told "no hazards detected" six times — the
+        precise phrasing the `safety-screening` skill forbids in bold.
+
+        The tool docstring already said all of this. A docstring is read once when the tool is
+        defined; the result payload is what is in the context window when the answer is written,
+        and only one of those two was carrying the caveat.
+        """
         if not self.flags:
             return "No rule in the hazard table matched. This is not a safety assessment."
         return (
