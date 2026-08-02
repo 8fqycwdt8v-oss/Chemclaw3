@@ -158,7 +158,7 @@ async def approvable_plan_hash(session: AgentSession) -> str | None:
     that with no emptiness check (the CLI's `/approve` already refused).
 
     Worse, it did not stay spent, because the consumed marker used to live in `session.state` —
-    which an LRU eviction or a pod roll drops (`chemclaw.api.app._rehydrate_session` rebuilds the
+    which an LRU eviction or a pod roll drops (`chemclaw.api.deps._rehydrate_session` rebuilds the
     handle over the durable history alone) — while the `plan_approvals` row was durable. A
     rehydrated session had lost its todo state too, so it proposed the empty plan again, hashed to
     the same global constant, and found a live approval waiting. Consumption is durable now

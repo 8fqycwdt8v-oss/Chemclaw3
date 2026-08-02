@@ -146,7 +146,7 @@ async def complete_awaiting_job(
 
     A no-op (returns `False`) when no open todo is waiting on this job id — e.g. the harness was
     not enabled for the turn that submitted it, or the live session was evicted from the front
-    door's in-process cache (`chemclaw.api.app._LiveSessions`) before the job finished.
+    door's in-process cache (`chemclaw.api.state._LiveSessions`) before the job finished.
     Already-complete
     todos are never matched, so a duplicate push-back for the same job id cannot reopen or
     re-complete one.
