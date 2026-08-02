@@ -46,7 +46,6 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse, PlainTextResponse, Response
 from starlette.routing import Route
 
-from chemclaw.api.metrics import CONTENT_TYPE, METRICS
 from chemclaw.core.config import settings
 
 logger = logging.getLogger(__name__)
@@ -86,7 +85,16 @@ def _build_app(component: str, ready: Callable[[], bool]) -> Starlette:
         )
 
     async def metrics(_request: Request) -> Response:
-        """Prometheus exposition for this process."""
+        """Prometheus exposition for this process.
+
+        Imported here, not at module scope: `chemclaw.core` imports no sibling
+        (`core/README.md`), and `api.metrics` is a sibling until a later work package moves it to
+        `chemclaw.core.metrics` and this lazy import is deleted along with the reason for it.
+        Safe to defer like `core.metrics_bridge` does - `api.metrics` is stdlib-only, so nothing
+        heavy rides in on this call.
+        """
+        from chemclaw.api.metrics import CONTENT_TYPE, METRICS
+
         return PlainTextResponse(METRICS.render(), media_type=CONTENT_TYPE)
 
     return Starlette(
