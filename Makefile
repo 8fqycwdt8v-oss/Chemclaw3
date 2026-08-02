@@ -17,7 +17,7 @@ SHELL := bash
 
 .DEFAULT_GOAL := help
 
-.PHONY: help install lint type test cov check ci chat db-migrate schedules-apply kg-validate eval eval-strict eval-baseline eln-validate skill-validate connector-validate datasource-validate template-validate connectors prose-validate helm-validate audit-verify explain reindex up down deps-audit
+.PHONY: help install lint type test cov check ci chat db-migrate schedules-apply kg-validate eval eval-strict eval-baseline eln-validate skill-validate connector-validate datasource-validate template-validate connectors prose-validate safety-validate helm-validate audit-verify explain reindex up down deps-audit
 
 help:  ## List every target with its one-line description (the default).
 	@# Reads the `## ` comments beside each target, so a new target documents itself the day it is
@@ -44,7 +44,7 @@ cov:  ## Run the test suite with coverage (first-party packages; report missing 
 
 check: lint type test  ## The fast inner-loop gate: lint + type + test (no coverage floor).
 
-ci: lint type cov kg-validate eval-strict eln-validate skill-validate connector-validate datasource-validate template-validate prose-validate helm-validate  ## The full pre-push gate: lint + type + coverage + all validators (what CI runs).
+ci: lint type cov kg-validate eval-strict eln-validate skill-validate connector-validate datasource-validate template-validate prose-validate safety-validate helm-validate  ## The full pre-push gate: lint + type + coverage + all validators (what CI runs).
 
 chat:  ## Chat with the agent from the terminal (admin/testing mode; needs ANTHROPIC_API_KEY).
 	uv run chemclaw --admin
@@ -87,6 +87,9 @@ connectors:  ## Run every enabled local connector's FastAPI app in one dev proce
 
 prose-validate:  ## Check the agent's prose only names tools that exist (gap IDEA-7).
 	uv run python -m chemclaw.cli.validate_prose_contract
+
+safety-validate:  ## Force-compile the safety rule/alert tables (catches a bad table at deploy, not on first use).
+	uv run python -m chemclaw.cli.validate_safety
 
 helm-validate:  ## Render the Helm chart and validate it against the Kubernetes schemas.
 	@# `-ignore-missing-schemas` is required, not a relaxation of convenience: the chart renders an

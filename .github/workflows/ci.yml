@@ -113,6 +113,12 @@ jobs:
       - name: Validate the agent's prose contract
         run: make prose-validate
 
+      # Both safety tables are lazy (@lru_cache, first-request compile) so a malformed YAML or an
+      # unparseable SMARTS would otherwise surface on the first live hazard question rather than
+      # here (Science-5). Forcing the compile in CI turns that into a build failure instead.
+      - name: Validate the safety tables
+        run: make safety-validate
+
   # The deployment gate (DA-10/D-2). The Helm chart is the one artifact no test can exercise
   # offline, and a broken chart is only discovered at `helm install` — in production, on the worst
   # day. Rendering it against the Kubernetes schemas needs no cluster and no credentials. A separate
