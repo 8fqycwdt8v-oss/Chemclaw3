@@ -5,18 +5,22 @@ either because it is correct or because it stopped checking, and those look iden
 outside. So each test here asserts one *rejection*, against a manifest built in the test rather than
 a shipped one — the shipped bundles are covered by the gate itself being green.
 
-The two checks below are the ones no per-file schema can make, which is the whole reason the script
+The checks below are the ones no per-file schema can make, which is the whole reason the script
 exists on top of pydantic's own validation:
 
 - a job that cannot be *built* (an unresolvable `params_model`), because that failure would
   otherwise surface the first time a chemist called the tool;
 - an `inline_wait_seconds` at or beyond the turn timeout, which needs the deployment's config and so
-  is invisible to the manifest that declares it.
+  is invisible to the manifest that declares it;
+- a `connector_urls` key that names a non-existent bundle, silently falling back to the manifest's
+  dev-loopback default which is unreachable in a cluster.
 """
+
+from unittest import mock
 
 import pytest
 
-from chemclaw.cli.validate_connectors import _job_problems
+from chemclaw.cli.validate_connectors import _connector_urls_problems, _job_problems
 from chemclaw.connectors.manifest import ConnectorManifest
 from chemclaw.core.config import settings
 
@@ -90,3 +94,36 @@ def test_a_nonpositive_wait_is_refused_by_the_manifest_itself(budget: int) -> No
     """
     with pytest.raises(ValueError, match="inline_wait_seconds"):
         _manifest(inline_wait_seconds=budget)
+
+
+def test_a_connector_urls_key_that_names_no_bundle_is_reported() -> None:
+    """A typo'd URL override is silently ignored, falling back to an unreachable dev default.
+
+    The symptom (a WARNING plus degraded /readyz) is indistinguishable from a transient outage,
+    so this validator forces misconfigured keys to surface as a configuration error in CI rather
+    than as an infrastructure problem in production.
+    """
+    discovered_names = {"calc", "qm", "bo"}
+    with mock.patch("chemclaw.cli.validate_connectors.settings") as mock_settings:
+        mock_settings.connector_urls = {"calc": "http://override:8000", "typo_bundle": "http://foo"}
+        problems = _connector_urls_problems(discovered_names)
+    assert any("typo_bundle" in problem for problem in problems)
+    assert len(problems) == 1
+
+
+def test_connector_urls_keys_that_name_real_bundles_are_accepted() -> None:
+    """The passing case: all configured URLs name discovered bundles."""
+    discovered_names = {"calc", "qm", "bo"}
+    with mock.patch("chemclaw.cli.validate_connectors.settings") as mock_settings:
+        mock_settings.connector_urls = {"calc": "http://override:8000", "qm": "http://hpc:9999"}
+        problems = _connector_urls_problems(discovered_names)
+    assert problems == []
+
+
+def test_empty_connector_urls_is_accepted() -> None:
+    """No overrides configured: the check passes trivially."""
+    discovered_names = {"calc", "qm", "bo"}
+    with mock.patch("chemclaw.cli.validate_connectors.settings") as mock_settings:
+        mock_settings.connector_urls = {}
+        problems = _connector_urls_problems(discovered_names)
+    assert problems == []

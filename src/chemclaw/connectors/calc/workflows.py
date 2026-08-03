@@ -27,7 +27,7 @@ from temporalio import workflow
 # re-import isolation (the standard Temporal pattern).
 with workflow.unsafe.imports_passed_through():
     from chemclaw.connectors.calc.activities import run_xtb_calculation
-    from chemclaw.connectors.calc.specs import XtbJobInput, XtbJobSpec
+    from chemclaw.connectors.calc.specs import XtbJobSpec
     from chemclaw.core.config import settings
     from chemclaw.durable.connector_job import ConnectorJobResult
 
@@ -52,7 +52,7 @@ class CalcJobWorkflow:
         """
         result = await workflow.execute_activity(
             run_xtb_calculation,
-            XtbJobInput(spec=spec),
+            spec,
             start_to_close_timeout=timedelta(seconds=settings.xtb_job_timeout_seconds),
             # The activity heartbeats between species and scan points. Without a heartbeat timeout
             # those heartbeats do nothing for failure detection, and a worker that dies mid-job

@@ -54,8 +54,32 @@ not exist, and ADR ids with no file — none of which any gate could see.
    which is what the fix does — so the rule accepts a label an ADR defines, derived by scanning
    them, and still rejects an invented one.
 7. Every `CHEMCLAW_*` **config key** must be a field on `Settings`. Nothing was broken here — this
-   rule is prophylactic, and that is its value: 60 keys across eight documents are currently correct
-   and nothing was keeping them that way.
+   rule is prophylactic, and that is its value: every key the operator corpus names is currently
+   correct and nothing was keeping it that way. (The count of keys checked is not written here on
+   purpose — it would only go stale the way `.env.example:3` did; if it matters, it is a `len()`
+   in a test, not a number in this docstring.)
+
+**`Makefile` and `.env.example` join the operator corpus for the same reason (F17).** Both are
+operator-facing — a contributor reads them before either document above — and both were outside
+the gate rules 5-7 exist to run: `.env.example:3` named the pre-split, bare-filename `config.py`
+and no check saw it, which is exactly the shape rule 5 exists to catch. Two things make them
+different from a `.md` file rather than one more glob entry:
+
+   - **A `Makefile` recipe command's backtick is shell command substitution, not a code span**, so
+     the file cannot be read whole the way `_operator_sources` reads everything else — a future
+     recipe using `` `helm template …` `` would be misread as a path/ADR/key candidate. What is
+     excluded is exactly that: a real recipe command line (`_makefile_prose`), not every line that
+     is not a bare `#` comment — a target's trailing `## help text` is Make syntax the shell never
+     sees, and it is where a real citation already lives (`explain: ## ... (D-166)`), so excluding
+     it too would trade one blind spot for another.
+   - **`.env.example` has no such split** — it is comments and `KEY=VALUE` throughout, with no
+     third kind of line to exclude — so it is read whole.
+
+Rule 5 itself is unchanged: it still only checks backticked spans containing a `/`, and widening it
+to bare filenames is deliberately not how `` `config.py` `` was fixed — that would make
+`` `SKILL.md` `` used as a noun fail too. The fix for that miss is the prose change (spelling the
+path with a `/`, `core/config/fingerprints.py`); the fix for it having *stayed* missed for two
+documents is this wider corpus.
 
 **Why the rules are split by corpus rather than merged.** Rule 2 (every bare `snake_case` token must
 be an agent tool) is safe over skills because that prose talks about tools and almost nothing else.
@@ -154,6 +178,34 @@ _OPERATOR_DOCS = (
 # own backlog row, with the count, so the remainder is visible rather than quietly out of scope.
 _OPERATOR_DOC_GLOBS = ("docs/guides/*.md", "docs/reference/*.md")
 
+# Two more operator documents, handled outside `_OPERATOR_DOCS`'s uniform "read the whole file"
+# path because neither is prose the way a `.md` file is (F17). Their absence is exactly how the
+# `.env.example:3` `config.py` staleness survived a gate built to catch precisely that: the
+# corpus above never looked at either file.
+_MAKEFILE = "Makefile"
+_ENV_EXAMPLE = ".env.example"
+# A Makefile recipe command is the only line shape that can run a backtick as shell command
+# substitution, so it is the only thing excluded — not "every line that isn't a `#` comment".
+# That distinction matters: a target's trailing `## help text` (e.g. `explain: ## ... (D-166)`)
+# and a bare `#`/`@#` comment are both Make-level syntax the shell never sees (shell treats
+# everything after an unquoted `#` as inert too, same as a recipe's `@# ...` line), so both are
+# safe prose exactly like a `.md` code span — only a real recipe command line is not. Make
+# requires a literal tab to start a recipe line (verified with `cat -A` against this repo's
+# Makefile); a tab immediately followed by `#`/`@#` is still a comment, so the lookahead excludes
+# it from what counts as a "recipe" for this purpose.
+_MAKEFILE_RECIPE = re.compile(r"^\t(?!@?#)")
+
+
+def _makefile_prose(text: str) -> str:
+    """The Makefile's non-recipe lines, joined — the part safe to scan as prose.
+
+    Excludes only an actual shell command; every comment (top-level, a recipe's `@#`, or a
+    target's trailing `## ...`) and every non-recipe line (targets, `.PHONY`, variables) passes
+    through, since none of it is ever handed to a shell.
+    """
+    return "\n".join(line for line in text.splitlines() if not _MAKEFILE_RECIPE.match(line))
+
+
 # A backticked path. Requires a `/`, so a bare filename used as a noun (`SKILL.md`, or a
 # `connector.yaml`)
 # is not read as a reference to one particular file. Placeholder spellings (`sources/<name>/`,
@@ -192,15 +244,28 @@ def _prose_sources() -> dict[str, str]:
 
 
 def _operator_sources() -> dict[str, str]:
-    """The operator-facing documents: the ones a human runs this system from."""
+    """The operator-facing documents: the ones a human runs this system from.
+
+    `Makefile` and `.env.example` join the corpus here rather than in `_OPERATOR_DOCS`, because
+    neither can be read whole like a `.md` file: only the `Makefile`'s non-recipe lines are prose
+    (`_makefile_prose`), and `.env.example` has no such split — it is comments plus `KEY=VALUE`
+    throughout, so it is read in full.
+    """
     paths = [_ROOT / name for name in _OPERATOR_DOCS]
     for pattern in _OPERATOR_DOC_GLOBS:
         paths.extend(sorted(_ROOT.glob(pattern)))
-    return {
+    sources = {
         str(path.relative_to(_ROOT)): path.read_text(encoding="utf-8")
         for path in paths
         if path.is_file()
     }
+    makefile = _ROOT / _MAKEFILE
+    if makefile.is_file():
+        sources[_MAKEFILE] = _makefile_prose(makefile.read_text(encoding="utf-8"))
+    env_example = _ROOT / _ENV_EXAMPLE
+    if env_example.is_file():
+        sources[_ENV_EXAMPLE] = env_example.read_text(encoding="utf-8")
+    return sources
 
 
 def _decision_files() -> list[Path]:

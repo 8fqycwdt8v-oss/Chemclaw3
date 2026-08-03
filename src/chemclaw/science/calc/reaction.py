@@ -65,11 +65,9 @@ from chemclaw.science.calc.conformers import ConformerSpec, run_cached_ensemble
 from chemclaw.science.calc.progress import Progress, no_progress
 from chemclaw.science.calc.store import ResultStore
 from chemclaw.science.calc.structure import structure_from_smiles
-from chemclaw.science.calc.xtb_engine import parse_molecule
+from chemclaw.science.calc.xtb_engine import HARTREE_TO_KCAL, parse_molecule
 from chemclaw.science.calc.xtb_opt import OptSpec, run_cached_optimization
 from chemclaw.science.calc.xtb_thermo import ThermoSpec, relax_to_minimum
-
-_HARTREE_TO_KCAL = 627.5094740631
 
 # How far the ladder is climbed per species. `quick` optimizes and differences electronic
 # energies; `standard` adds a Hessian and gives enthalpies and free energies; `thorough`
@@ -285,7 +283,7 @@ async def _species_energy(
     )
     minimum, thermo, cached = await relax_to_minimum(store, structure, opt_spec, spec)
     # The conformational entropy is a free-energy term only: it changes G, never H.
-    gibbs = thermo.gibbs_free_energy_hartree + ensemble_correction / _HARTREE_TO_KCAL
+    gibbs = thermo.gibbs_free_energy_hartree + ensemble_correction / HARTREE_TO_KCAL
     return SpeciesEnergy(
         smiles=smiles,
         role=role,
@@ -312,7 +310,7 @@ def _difference(species: list[SpeciesEnergy], attribute: str) -> float | None:
         if value is None:
             return None
         total += value if entry.role == "product" else -value
-    return total * _HARTREE_TO_KCAL
+    return total * HARTREE_TO_KCAL
 
 
 async def compute_reaction_energy(
@@ -407,7 +405,7 @@ async def compute_reaction_energy(
             "stand as reported"
         )
     # Electronic energies are always present, so this delta is never optional.
-    delta_e = _HARTREE_TO_KCAL * sum(
+    delta_e = HARTREE_TO_KCAL * sum(
         entry.electronic_energy_hartree * (1 if entry.role == "product" else -1)
         for entry in species
     )

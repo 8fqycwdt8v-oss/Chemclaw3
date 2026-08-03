@@ -294,3 +294,40 @@ def test_ttl_zero_restores_scan_every_query(
     assert {n.id for n in graph.load_notes(tmp_path)} == {"a"}
     (tmp_path / "b.md").write_text(_note("b", []), encoding="utf-8")
     assert {n.id for n in graph.load_notes(tmp_path)} == {"a", "b"}  # visible at once
+
+
+# --- note_file_fingerprints: the per-note stat signal an incremental reindex diffs against ------
+
+
+def test_note_file_fingerprints_keyed_by_id_and_stable_when_untouched(tmp_path: Path) -> None:
+    """One entry per note, keyed by id; re-scanning an untouched file gives the same fingerprint."""
+    (tmp_path / "a.md").write_text(_note("a", []), encoding="utf-8")
+    (tmp_path / "b.md").write_text(_note("b", []), encoding="utf-8")
+    first = graph.note_file_fingerprints(tmp_path)
+    assert set(first) == {"a", "b"}
+    second = graph.note_file_fingerprints(tmp_path)
+    assert second == first  # nothing touched the files between scans
+
+
+def test_note_file_fingerprints_changes_when_a_note_is_edited(tmp_path: Path) -> None:
+    """Editing one note's content changes only its own fingerprint, not its siblings'."""
+    (tmp_path / "a.md").write_text(_note("a", []), encoding="utf-8")
+    (tmp_path / "b.md").write_text(_note("b", []), encoding="utf-8")
+    before = graph.note_file_fingerprints(tmp_path)
+
+    time.sleep(0.01)  # guarantee a distinct mtime on filesystems with coarse resolution
+    (tmp_path / "a.md").write_text(_note("a", ["b"]), encoding="utf-8")
+    after = graph.note_file_fingerprints(tmp_path)
+
+    assert after["a"] != before["a"]
+    assert after["b"] == before["b"]
+
+
+def test_note_file_fingerprints_drops_a_deleted_note(tmp_path: Path) -> None:
+    """A note removed from disk simply has no entry — the diff a caller needs to see it as gone."""
+    (tmp_path / "a.md").write_text(_note("a", []), encoding="utf-8")
+    (tmp_path / "b.md").write_text(_note("b", []), encoding="utf-8")
+    assert set(graph.note_file_fingerprints(tmp_path)) == {"a", "b"}
+
+    (tmp_path / "b.md").unlink()
+    assert set(graph.note_file_fingerprints(tmp_path)) == {"a"}

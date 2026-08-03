@@ -24,8 +24,8 @@ approved, whichever backend answered.
 **Both halves of the control are durable, and for a while only one was.** A decision row here
 survived anything; the marker recording that the row had been *spent* lived in `session.state`
 (`harness_mode._CONSUMED_STATE_KEY`), which an LRU eviction or a pod roll drops —
-`chemclaw.api.app._rehydrate_session` rebuilds the session handle over the durable history alone. So
-a session that reconstructed a byte-identical todo list after an eviction hashed to the same plan
+`chemclaw.api.deps._rehydrate_session` rebuilds the session handle over the durable history alone.
+So a session that reconstructed a byte-identical todo list after an eviction hashed to the same plan
 and met its own already-spent approval looking fresh: an authorization revived by an infrastructure
 event rather than by a person, outside the one-turn limit D-167 states.
 

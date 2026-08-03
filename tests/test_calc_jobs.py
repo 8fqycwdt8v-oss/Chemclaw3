@@ -29,8 +29,6 @@ from chemclaw.connectors.calc.results import XtbJobResult
 from chemclaw.connectors.calc.specs import (
     ReactionJobSpec,
     SolventScreenJobSpec,
-    XtbJobInput,
-    xtb_job_key,
 )
 from chemclaw.science.calc.store import InMemoryStore
 
@@ -68,7 +66,7 @@ def _durable_context(monkeypatch: pytest.MonkeyPatch, store: InMemoryStore) -> I
 
 def _run(spec: ReactionJobSpec | SolventScreenJobSpec) -> XtbJobResult:
     """Run one durable xTB job to completion, as its worker would."""
-    return asyncio.run(activities.run_xtb_calculation(XtbJobInput(spec=spec)))
+    return asyncio.run(activities.run_xtb_calculation(spec))
 
 
 def test_a_reaction_job_that_states_its_symmetry_numbers_gets_a_free_energy() -> None:
@@ -123,17 +121,3 @@ def test_a_solvent_screen_threads_the_same_map_through_every_solvent() -> None:
     assert [effect.solvent for effect in comparison.effects].count(None) == 1
     assert all(effect.delta_g_kcal is not None for effect in comparison.effects)
     assert not [w for w in comparison.warnings if "symmetry number" in w]
-
-
-def test_the_symmetry_numbers_are_part_of_a_jobs_identity() -> None:
-    """Two jobs differing only in sigma are different calculations, so they need different keys.
-
-    `xtb_job_key` hashes the spec so that submitting the same request twice returns the existing
-    run. A field the key does not see would make a correctly-stated re-run return the earlier
-    run's withheld ΔG — the deduplication turning into a wrong answer.
-    """
-    stated = XtbJobInput(
-        spec=ReactionJobSpec(reactants=_REACTANTS, products=_PRODUCTS, symmetry_numbers=_SIGMAS)
-    )
-    omitted = XtbJobInput(spec=ReactionJobSpec(reactants=_REACTANTS, products=_PRODUCTS))
-    assert xtb_job_key(stated) != xtb_job_key(omitted)

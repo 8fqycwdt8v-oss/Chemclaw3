@@ -15,10 +15,9 @@ deployment opts in.
 """
 
 import threading
-from collections import OrderedDict
-from collections.abc import Callable
 from dataclasses import dataclass
 
+from chemclaw.core.bounded import BoundedLru
 from chemclaw.core.config import settings
 
 
@@ -43,38 +42,21 @@ def _over(cap: int, used: int) -> bool:
     return cap > 0 and used >= cap
 
 
-class _BoundedCounters:
-    """An LRU-bounded map of scope key → `_Counter`, so the tracker cannot grow forever.
+def _book(counters: BoundedLru[str, _Counter], key: str, tokens: int) -> None:
+    """Add one turn and its (non-negative) tokens to `key`, evicting the LRU past capacity.
 
-    The tracker lives for the pod's whole lifetime; without a bound every session/user ever seen
-    keeps a counter (a slow memory leak in the long-lived front door). Past capacity the
-    least-recently-active scope is evicted — its budget resets, which is the documented best-effort
-    trade (same as the restart reset); the durable rolling-window quota stays deferred. Capacity is
-    read per call so the config stays live/env-overridable.
+    The map itself is `chemclaw.core.bounded.BoundedLru` (S2) — the tracker lives for the pod's
+    whole lifetime, and without a bound every session/user ever seen would keep a counter (a slow
+    memory leak in the long-lived front door). Eviction resets that scope's budget, which is the
+    documented best-effort trade (same as the restart reset); the durable rolling-window quota
+    stays deferred. Capacity is a live config read, so the caps stay ENV-overridable.
     """
-
-    def __init__(self, capacity: Callable[[], int]) -> None:
-        """Create the map with `capacity` returning the current entry cap (config-backed)."""
-        self._capacity = capacity
-        self._entries: OrderedDict[str, _Counter] = OrderedDict()
-
-    def get(self, key: str) -> _Counter | None:
-        """Return the counter for `key` (marking it recently active), or None if untracked."""
-        counter = self._entries.get(key)
-        if counter is not None:
-            self._entries.move_to_end(key)
-        return counter
-
-    def book(self, key: str, tokens: int) -> None:
-        """Add one turn and its (non-negative) tokens to `key`, evicting the LRU past capacity."""
-        counter = self._entries.get(key)
-        if counter is None:
-            counter = self._entries[key] = _Counter()
-        self._entries.move_to_end(key)
-        counter.turns += 1
-        counter.tokens += max(tokens, 0)
-        while len(self._entries) > self._capacity():
-            self._entries.popitem(last=False)
+    counter = counters.get(key)
+    if counter is None:
+        counter = _Counter()
+    counter.turns += 1
+    counter.tokens += max(tokens, 0)
+    counters.put(key, counter)
 
 
 class BudgetTracker:
@@ -92,8 +74,12 @@ class BudgetTracker:
 
     def __init__(self) -> None:
         """Start with empty, LRU-bounded per-session and per-user counters."""
-        self._sessions = _BoundedCounters(lambda: settings.service_max_live_sessions)
-        self._users = _BoundedCounters(lambda: settings.budget_max_tracked_users)
+        self._sessions: BoundedLru[str, _Counter] = BoundedLru(
+            lambda: settings.service_max_live_sessions
+        )
+        self._users: BoundedLru[str, _Counter] = BoundedLru(
+            lambda: settings.budget_max_tracked_users
+        )
         self._lock = threading.Lock()
 
     def check(self, session_id: str, user: str | None) -> None:
@@ -138,6 +124,6 @@ class BudgetTracker:
         if not settings.budget_enabled:
             return
         with self._lock:
-            self._sessions.book(session_id, tokens)
+            _book(self._sessions, session_id, tokens)
             if user is not None:
-                self._users.book(user, tokens)
+                _book(self._users, user, tokens)

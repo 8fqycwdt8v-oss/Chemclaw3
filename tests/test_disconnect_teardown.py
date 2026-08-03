@@ -276,9 +276,90 @@ def test_the_session_accepts_a_new_turn_immediately_after_a_disconnect() -> None
                     break
                 await asyncio.sleep(0.01)
 
-            assert app.state.active_turns == set(), "the in-process turn slot leaked"
+            assert app.state.active_turns == {}, "the in-process turn slot leaked"
             status = await _post_turn_and_vanish(app, session_id)
             assert status != 409, "the session refused its owner's next turn after a disconnect"
+            assert status == 200
+
+    asyncio.run(_drive())
+
+
+async def _post_turn_and_vanish_before_first_byte(app: Any, session_id: str) -> None:
+    """POST a turn whose client is gone before the response's first byte is ever accepted.
+
+    The one teardown window neither `finally` covers: the route returns the streaming response
+    (`handed_off=True`, so `post_message`'s own finally stands down), but the socket never accepts
+    `http.response.start` — the send below blocks forever, exactly like a peer that vanished
+    without closing cleanly — and the disconnect arrives first. sse-starlette's disconnect
+    listener then cancels its task group while `_stream_response` is still suspended in that
+    send, **before the first `__anext__`**, so the turn's async generator is never started and
+    an unstarted generator runs no `finally` at all. Deterministic rather than raced: the send
+    genuinely cannot complete, so cancellation can only land pre-iteration.
+    """
+    body = json.dumps({"message": "hello"}).encode()
+    delivered = False
+
+    async def _receive() -> MutableMapping[str, Any]:
+        nonlocal delivered
+        if not delivered:
+            delivered = True
+            return {"type": "http.request", "body": body, "more_body": False}
+        return {"type": "http.disconnect"}
+
+    async def _send(message: MutableMapping[str, Any]) -> None:
+        if message["type"] == "http.response.start":
+            await asyncio.Event().wait()  # the wire never accepts the first byte
+
+    await app(_scope("POST", f"/sessions/{session_id}/messages"), _receive, _send)
+
+
+def test_a_client_gone_before_the_stream_starts_does_not_wedge_the_session(
+    monkeypatch: Any,
+) -> None:
+    """The in-process turn guard is a lease: the one release-less window cannot 409 forever (A3).
+
+    Both release sites are `finally` blocks — the generator's own, and `post_message`'s
+    pre-handoff one — and a client gone after handoff but before the generator's first advance
+    runs neither. With a bare set that entry was permanent: the session answered 409 for the
+    pod's whole lifetime. With the deadline map the entry leaks identically (asserted below,
+    proving the window is real) and then *expires*, so the session's next turn is admitted.
+
+    Counterfactual: revert `active_turns` to a latch (claim without a deadline, or a membership
+    test that ignores the deadline) and the final POST answers 409, not 200.
+    """
+    from chemclaw.core.config import settings
+
+    monkeypatch.setattr(settings, "service_turn_timeout_seconds", 0.2)
+    monkeypatch.setattr(settings, "service_turn_admission_timeout_seconds", 0.2)
+    app = create_app(
+        agent_factory=lambda _profile: _StreamingAgent(),
+        connector_factory=lambda _profile: [],
+    )
+
+    async def _drive() -> None:
+        async with app.router.lifespan_context(app):
+            _status, payload = await _request(app, "POST", "/sessions", {})
+            session_id = json.loads(payload)["session_id"]
+            await _post_turn_and_vanish_before_first_byte(app, session_id)
+
+            # The leak is real: no finally ran, so nothing released the slot. (If this fails,
+            # the reproduction no longer reproduces the window and the test proves nothing.)
+            assert session_id in app.state.active_turns, "the generator ran a finally after all"
+
+            # Within the lease the guard still guards: the entry is indistinguishable from a
+            # live turn, so a duplicate submit is refused.
+            status, _ = await _request(
+                app, "POST", f"/sessions/{session_id}/messages", {"message": "again"}
+            )
+            assert status == 409
+
+            # Past the lease (turn timeout + admission timeout), the entry is dead weight and
+            # must not refuse the session's owner.
+            await asyncio.sleep(0.5)
+            status, _ = await _request(
+                app, "POST", f"/sessions/{session_id}/messages", {"message": "recovered"}
+            )
+            assert status != 409, "the leaked in-process turn entry never expired (A3)"
             assert status == 200
 
     asyncio.run(_drive())

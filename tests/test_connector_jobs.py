@@ -297,6 +297,53 @@ def test_a_duplicate_submit_returns_the_existing_id_rather_than_erroring(
     assert signals == []
 
 
+def test_a_generic_start_workflow_failure_is_framed_not_raised_raw(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The gap one call after `connect()`: a launch fault must not reach MAF as a raw exception.
+
+    `connect()` succeeding and `start_workflow` then failing (an unregistered task queue, a
+    transient RPC timeout, a bad payload) is exactly the "Error: Function failed." symptom the
+    `connect()` framing was written to prevent, one call later. Unlike a `connect()` failure, this
+    cannot promise nothing started — so the message says only what it knows, and points at
+    `get_durable_job_status` rather than overclaiming.
+    """
+    fake = _FakeClient(error=RuntimeError("task queue has no registered worker"))
+
+    async def _connect() -> _FakeClient:
+        return fake
+
+    monkeypatch.setattr("chemclaw.connectors.jobs.connect", _connect)
+    tool = build_job_tool("calc", _SPEC)
+    with pytest.raises(ConnectorJobError, match="could not be confirmed as started") as excinfo:
+        _launch(tool, smiles="CCO")
+    message = str(excinfo.value)
+    assert "run_calculation" in message
+    assert "get_durable_job_status" in message
+    assert "RuntimeError" in message
+
+
+def test_a_duplicate_submit_is_unaffected_by_the_generic_failure_framing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`WorkflowAlreadyStartedError` must still resolve to the existing id, not the new framing.
+
+    The generic `except Exception` added alongside it must sit *after* this one, or the
+    idempotent-relaunch contract silently becomes an error.
+    """
+    fake = _FakeClient(
+        error=WorkflowAlreadyStartedError("already", "CalculationWorkflow", run_id=None)
+    )
+
+    async def _connect() -> _FakeClient:
+        return fake
+
+    monkeypatch.setattr("chemclaw.connectors.jobs.connect", _connect)
+    tool = build_job_tool("calc", _SPEC)
+    job_id = _launch(tool, smiles="CCO")
+    assert job_id == job_workflow_id("calc", "run_calculation", {"smiles": "CCO"})
+
+
 def test_a_fresh_start_is_announced_to_the_streaming_turn(client: _FakeClient) -> None:
     """The launch reaches the UI immediately instead of silence until the push-back (D-042)."""
     tool = build_job_tool("calc", _SPEC)

@@ -11,8 +11,8 @@ Every first-party module lives under this package, grouped by the four architect
 - `science` — the pure-computation engines (`calc`, `bo`, `safety`) the connectors wrap.
 - `kg`, `ingest`, `retrieval`, `memory` — layer 4: the Markdown knowledge graph, what feeds it,
   and what reads back out of it.
-- `mcp`, `templates`, `evals`, `cli` — the standalone MCP servers, the step templates, the eval
-  harness, and the terminal entrypoints.
+- `templates`, `evals`, `cli` — the step templates, the eval harness, and the terminal
+  entrypoints.
 
 Layer 3 (Agent Skills) is `SKILL.md` files, not code: the global ones in `skills/` at the
 repository root, the bundled ones inside each connector.

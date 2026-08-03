@@ -85,18 +85,19 @@ def build_composite() -> tuple[FastAPI, dict[str, str]]:
     return composite, urls
 
 
-def main() -> None:
+def main() -> int:
     """Serve every enabled local connector on one port, printing the override core needs."""
     configure_logging()
     composite, urls = build_composite()
     if not urls:
         print("no enabled connector ships a local server — nothing to run", file=sys.stderr)
-        sys.exit(1)
+        return 1
     print(f"serving {len(urls)} connector(s) on http://{DEV_HOST}:{DEV_PORT}")
     print("point core at them with:")
     print(f"  CHEMCLAW_CONNECTOR_URLS='{json.dumps(urls, separators=(',', ':'))}'")
     uvicorn.run(composite, host=DEV_HOST, port=DEV_PORT, log_level=settings.log_level.lower())
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

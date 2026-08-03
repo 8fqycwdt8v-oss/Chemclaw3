@@ -117,6 +117,20 @@ _OWNER_LIST = (
 )
 
 
+def _crossed_new_compaction_bucket(count_before: int, count_after: int, floor: int) -> bool:
+    """Whether this turn's insert pushed the row count into a new `floor`-sized bucket.
+
+    Buckets are `count // floor`: 0 below the floor, 1 from `floor` to `2*floor - 1`, and so on. The
+    gate for `_compact`'s expensive path (`SELECT` the whole history + `plan_compaction` over it) —
+    without it, every turn once the session is past the floor repeated that full read-and-replan,
+    forever, at a cost proportional to the *entire* stored history, for a session that stays open.
+    Purely a function of two counts, so nothing needs to be persisted between calls to know whether
+    the previous turn already tried: `count_before` is always this call's own `count_after` minus
+    what it just inserted, both freshly read, never a cached belief about an earlier turn.
+    """
+    return count_after >= floor and max(count_before, 0) // floor != count_after // floor
+
+
 def _session_dsn(dsn: str | None) -> str:
     """Resolve a session-layer DSN: the caller's, else `session_store_dsn`, else `postgres_dsn`.
 
@@ -301,17 +315,24 @@ class PostgresHistoryProvider(HistoryProvider):
                 await cur.executemany(_INSERT, rows)
             await conn.commit()
         if settings.agent_durable_compaction_enabled:
-            await self._compact(session_id, watermark)
+            await self._compact(session_id, watermark, inserted=len(rows))
 
-    async def _compact(self, session_id: str, watermark: int) -> None:
+    async def _compact(self, session_id: str, watermark: int, inserted: int) -> None:
         """Apply the context compaction policy to the *stored* history (D-151).
 
         MAF's `CompactionProvider.after_run` cannot do this: it reads
         `session.state[source_id]["messages"]`, the slot `InMemoryHistoryProvider` writes and this
         provider deliberately does not. So the rows grew forever and every turn re-read all of them.
         This runs the identical strategy — `chemclaw.agent.chemclaw_agent.compaction_strategy`,
-        the same one
-        that bounds the model's context — against the table.
+        the same one that bounds the model's context — against the table.
+
+        Only past the floor *and* only on the turn that crosses into a new floor-sized bucket
+        (`_crossed_new_compaction_bucket`) — not on every turn spent above it. Before this, a
+        session that stayed above the floor issued a full `SELECT` of its entire history plus a
+        `plan_compaction` pass over all of it on *every* `save_messages` call, on top of the read
+        MAF already performed before the model call. `inserted` (how many rows this call just
+        appended) is all that costs: it turns the one `COUNT` already needed into "did this insert
+        cross a bucket boundary", with no extra query and nothing persisted between calls.
 
         `watermark` protects the turn just written. The composed strategy's fallback can exclude
         *every* message when a single payload is oversized, and a turn that deleted the rows it had
@@ -325,31 +346,41 @@ class PostgresHistoryProvider(HistoryProvider):
         # import this module without ever building an agent).
         from chemclaw.agent.chemclaw_agent import compaction_strategy
 
+        floor = settings.agent_durable_compaction_min_rows
         try:
             async with self._connection() as conn:
                 async with conn.cursor() as cur:
                     await cur.execute(_COUNT, (session_id,))
                     counted = await cur.fetchone()
-                    if (
-                        counted is None
-                        or int(counted[0]) < settings.agent_durable_compaction_min_rows
-                    ):
-                        return
+                count = 0 if counted is None else int(counted[0])
+                if not _crossed_new_compaction_bucket(count - inserted, count, floor):
+                    return
+                async with conn.cursor() as cur:
                     await cur.execute(_SELECT_WITH_ID, (session_id,))
                     stored = [
                         (int(row[0]), Message.from_dict(row[1])) for row in await cur.fetchall()
                     ]
-                strategy, _ = compaction_strategy()
-                plan = await plan_compaction(
-                    stored,
-                    strategy=strategy,
-                    protected={row_id for row_id, _ in stored if row_id > watermark},
-                )
-                if plan.is_empty():
-                    return
+            # The connection is released here (the `async with self._connection()` block above has
+            # already exited) — before `plan_compaction`'s CPU work runs, so it never pins a pooled
+            # connection while every other request on the same pod waits on the same bounded pool.
+            strategy, _ = compaction_strategy()
+            plan = await plan_compaction(
+                stored,
+                strategy=strategy,
+                protected={row_id for row_id, _ in stored if row_id > watermark},
+            )
+            if plan.is_empty():
+                return
+            async with self._connection() as conn:
                 async with conn.cursor() as cur:
-                    for row_id, message in plan.rewrites:
-                        await cur.execute(_UPDATE_MESSAGE, (Jsonb(message.to_dict()), row_id))
+                    if plan.rewrites:
+                        await cur.executemany(
+                            _UPDATE_MESSAGE,
+                            [
+                                (Jsonb(message.to_dict()), row_id)
+                                for row_id, message in plan.rewrites
+                            ],
+                        )
                     if plan.deletes:
                         await cur.execute(_DELETE_IDS, (session_id, sorted(plan.deletes)))
                 await conn.commit()

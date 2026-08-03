@@ -30,7 +30,7 @@ from pydantic import BaseModel, Field
 from chemclaw.core import db
 from chemclaw.core.config import settings
 from chemclaw.core.embeddings import embed_texts
-from chemclaw.kg.graph import load_notes
+from chemclaw.kg.graph import load_notes, note_file_fingerprints
 from chemclaw.kg.note import Note
 
 # Lexical tokenizer for the in-memory backend (lowercase alphanumeric runs) — the offline proxy of
@@ -39,11 +39,19 @@ _TOKEN = re.compile(r"[a-z0-9]+")
 
 
 class NoteRecord(BaseModel):
-    """One indexed note: its id, the text that was embedded/tokenized, and its dense embedding."""
+    """One indexed note: its id, the text that was embedded/tokenized, and its dense embedding.
+
+    `fingerprint` is the stat signature (`chemclaw.kg.graph.note_file_fingerprints`) the note's file
+    had when this record was embedded — empty when the caller does not track one (every offline test
+    that builds a `NoteRecord` directly). `reindex_notes` is the only writer that fills it in for
+    real, and it is what makes an incremental rebuild possible: a note whose fingerprint has not
+    moved needs no fresh embedding call.
+    """
 
     note_id: str = Field(min_length=1)
     text: str
     embedding: list[float]
+    fingerprint: str = ""
 
 
 class IndexHit(BaseModel):
@@ -68,6 +76,15 @@ class NoteIndex(Protocol):
 
     async def upsert(self, records: list[NoteRecord]) -> None:
         """Insert or replace index rows by note id."""
+        ...
+
+    async def fingerprints(self) -> dict[str, str]:
+        """The stored `note_id -> fingerprint` for every indexed note (empty fingerprint omitted).
+
+        What `reindex_notes` diffs the current on-disk fingerprints against to decide which notes
+        need a fresh embedding call — an unindexed or never-fingerprinted note simply has no entry,
+        which reads as "changed" exactly like a real mismatch would.
+        """
         ...
 
     async def search_dense(
@@ -114,6 +131,10 @@ class InMemoryNoteIndex:
         """Insert or replace each record by note id."""
         for record in records:
             self._records[record.note_id] = record
+
+    async def fingerprints(self) -> dict[str, str]:
+        """Stored fingerprints, empty ones omitted (a caller who never set one looks new)."""
+        return {r.note_id: r.fingerprint for r in self._records.values() if r.fingerprint}
 
     async def search_dense(
         self, query_embedding: list[float], top_k: int, within: set[str] | None = None
@@ -169,11 +190,12 @@ class PostgresNoteIndex:
         self._dsn = dsn if dsn is not None else settings.postgres_dsn
         width = settings.embedding_dim
         self._upsert = (
-            "INSERT INTO note_index (note_id, embedding, lexeme, updated_at) "
+            "INSERT INTO note_index (note_id, embedding, lexeme, fingerprint, updated_at) "
             f"VALUES (%(id)s, %(emb)s::vector({width}), "
-            "to_tsvector('english', %(text)s), now()) "
+            "to_tsvector('english', %(text)s), %(fp)s, now()) "
             "ON CONFLICT (note_id) DO UPDATE SET "
-            "embedding = EXCLUDED.embedding, lexeme = EXCLUDED.lexeme, updated_at = now()"
+            "embedding = EXCLUDED.embedding, lexeme = EXCLUDED.lexeme, "
+            "fingerprint = EXCLUDED.fingerprint, updated_at = now()"
         )
         # The `> 0` floor mirrors the InMemory reference (`score > 0.0`): a zero/near-zero or
         # negatively-correlated note is not a hit. Without it pgvector returns the top-k nearest
@@ -215,7 +237,7 @@ class PostgresNoteIndex:
             yield conn
 
     async def upsert(self, records: list[NoteRecord]) -> None:
-        """Insert or replace each record (embedding + tsvector) by note id."""
+        """Insert or replace each record (embedding + tsvector + fingerprint) by note id."""
         if not records:
             return
         async with self._connection() as conn:
@@ -226,9 +248,24 @@ class PostgresNoteIndex:
                         "id": record.note_id,
                         "emb": _vector_literal(record.embedding),
                         "text": record.text,
+                        "fp": record.fingerprint or None,
                     },
                 )
             await conn.commit()
+
+    async def fingerprints(self) -> dict[str, str]:
+        """Stored fingerprints for every row that has one.
+
+        NULL (a row written before this column, or by a `--full` rebuild) is left out — either way
+        it is "unknown", which reads as changed to `reindex_notes`, never as a stale match.
+        """
+        async with self._connection() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(
+                    "SELECT note_id, fingerprint FROM note_index WHERE fingerprint IS NOT NULL"
+                )
+                rows = await cur.fetchall()
+        return {r[0]: r[1] for r in rows}
 
     async def search_dense(
         self, query_embedding: list[float], top_k: int, within: set[str] | None = None
@@ -264,32 +301,70 @@ def default_note_index() -> PostgresNoteIndex:
     return PostgresNoteIndex()
 
 
-async def reindex_notes(index: NoteIndex, notes_dir: str | None = None) -> int:
-    """(Re)build `index` from the notes on disk; return how many notes were indexed.
+async def reindex_notes(
+    index: NoteIndex, notes_dir: str | None = None, *, full: bool = False
+) -> int:
+    """(Re)build `index` from the notes on disk; return how many notes were (re-)embedded.
 
-    Embeds each note's `note_text` and upserts it. Idempotent (upsert by id), so it is safe to run
-    on a schedule or after a merge. Notes deleted from disk leave a harmless stale row — the
-    retrievers drop any hit whose note no longer loads — so a full teardown is never required.
+    Incremental by default (D-2026-08-02-embed-only-what-changed): a note whose file fingerprint
+    (`chemclaw.kg.graph.note_file_fingerprints`, stat-only — no read/parse) matches what `index`
+    already has stored is left alone, so a scheduled run against an unchanged corpus embeds nothing.
+    Before this, every run — hourly by default (`durable/note_index.py`) — re-embedded every note in
+    the knowledge graph regardless of whether anything had changed, one LLM-endpoint call per note
+    per hour forever.
+
+    `full=True` re-embeds every note unconditionally (the CLI's `--full`), for recovery from a
+    corrupted index or a change to the embedding model/dimension the fingerprint cannot see (that
+    staleness — detecting a model change — is the separately tracked backlog item; this is not it).
+
+    Idempotent either way (upsert by id), so it is safe to run on a schedule or after a merge. Notes
+    deleted from disk leave a harmless stale row — the retrievers drop any hit whose note no longer
+    loads — so a full teardown is never required.
     """
     directory = Path(notes_dir) if notes_dir is not None else settings.knowledge_path
     notes = await asyncio.to_thread(load_notes, directory) if directory.exists() else []
     if not notes:
         return 0
-    texts = [note_text(note) for note in notes]
+    current_fingerprints = await asyncio.to_thread(note_file_fingerprints, directory)
+    stored_fingerprints = {} if full else await index.fingerprints()
+    changed = [
+        note
+        for note in notes
+        if current_fingerprints.get(note.id) != stored_fingerprints.get(note.id)
+    ]
+    if not changed:
+        return 0
+    texts = [note_text(note) for note in changed]
     # embed_texts may call the endpoint (openai_compatible) — offload so the event loop is free.
     embeddings = await asyncio.to_thread(embed_texts, texts)
     records = [
-        NoteRecord(note_id=note.id, text=text, embedding=embedding)
-        for note, text, embedding in zip(notes, texts, embeddings, strict=True)
+        NoteRecord(
+            note_id=note.id,
+            text=text,
+            embedding=embedding,
+            fingerprint=current_fingerprints.get(note.id, ""),
+        )
+        for note, text, embedding in zip(changed, texts, embeddings, strict=True)
     ]
     await index.upsert(records)
     return len(records)
 
 
-def main() -> int:
-    """CLI: rebuild the durable note index from the knowledge graph; print the count."""
-    count = asyncio.run(reindex_notes(default_note_index()))
-    print(f"indexed {count} note(s) into note_index")
+def main(argv: list[str] | None = None) -> int:
+    """CLI: rebuild the durable note index from the knowledge graph; print the count.
+
+    Incremental by default; `--full` re-embeds every note regardless of its stored fingerprint
+    (recovery from a corrupted index, or after an embedding model/dimension change).
+    """
+    import argparse
+
+    parser = argparse.ArgumentParser(description=main.__doc__)
+    parser.add_argument(
+        "--full", action="store_true", help="re-embed every note, ignoring stored fingerprints"
+    )
+    args = parser.parse_args(argv)
+    count = asyncio.run(reindex_notes(default_note_index(), full=args.full))
+    print(f"indexed {count} note(s) into note_index" + (" (full rebuild)" if args.full else ""))
     return 0
 
 

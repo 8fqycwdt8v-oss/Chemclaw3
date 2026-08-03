@@ -559,7 +559,7 @@ def test_a_disconnect_during_a_slow_verifier_keeps_the_committed_exchange(
         await asyncio.sleep(3600)
         raise AssertionError("unreachable")  # pragma: no cover
 
-    monkeypatch.setattr("chemclaw.api.runner.verify_turn_answer", _stalling_verify)
+    monkeypatch.setattr("chemclaw.api.runner_answer.verify_turn_answer", _stalling_verify)
 
     async def _drive() -> None:
         agent = _AnsweringAgent(history)

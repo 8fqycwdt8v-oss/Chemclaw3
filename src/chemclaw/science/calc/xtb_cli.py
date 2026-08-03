@@ -72,12 +72,9 @@ from pydantic import BaseModel
 from chemclaw.core.config import settings
 from chemclaw.science.calc.artifacts import too_large
 from chemclaw.science.calc.structure import Structure
+from chemclaw.science.calc.xtb_engine import ANGSTROM_TO_BOHR
 
 logger = logging.getLogger(__name__)
-
-# Hartree/Bohr^2 -> Hartree/Angstrom^2 for the Hessian; the square of the coordinate
-# conversion, applied in the opposite direction (see `calc.xtb_engine`).
-_ANGSTROM_TO_BOHR = 1.8897259886
 
 # GFN parametrization name -> the flags that select it. `GFN-FF` is a force field: no
 # orbitals, no charges worth reading, but it optimizes a 118-atom molecule in under a
@@ -286,7 +283,7 @@ def _read_hessian(path: Path, size: int) -> np.ndarray:
     if len(numbers) != size * size:
         raise CliError(f"hessian has {len(numbers)} entries, expected {size * size}")
     # xtb writes Hartree/Bohr^2; this layer works in Angstrom.
-    return np.array(numbers).reshape(size, size) * _ANGSTROM_TO_BOHR**2
+    return np.array(numbers).reshape(size, size) * ANGSTROM_TO_BOHR**2
 
 
 def _read_vibspectrum(path: Path) -> list[tuple[float, float]]:

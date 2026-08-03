@@ -411,6 +411,21 @@ def build_job_tool(connector: str, job: JobSpec) -> CapabilityTool:
             # the matching `job_completed` event, and the surface would show a row that stays
             # "running" forever.
             return workflow_id
+        except Exception as exc:  # noqa: BLE001 - any launch fault means the same thing here
+            # `connect()` above already handles the broker being unreachable; this is the
+            # remaining gap the 2026-08-02 incident exposed one call later — a task queue with no
+            # worker registered, a transient RPC timeout, a payload serialization error — all of
+            # which reached MAF raw as "Error: Function failed." and reproduced the exact retry
+            # storm the `connect()` framing exists to prevent. Unlike that case, a connected client
+            # may have reached the server before failing, so this cannot promise nothing started —
+            # it says only what it actually knows: most likely nothing did, but check before
+            # relaunching a job that writes.
+            raise ConnectorJobError(
+                f"the {job.name!r} job could not be confirmed as started ({type(exc).__name__}); "
+                "most likely nothing was queued, but this call cannot promise that either way. "
+                f"Check `get_durable_job_status({workflow_id!r})` before relaunching, and if it "
+                "truly did not start, the same call will work once the fault clears."
+            ) from exc
         if job.inline_wait_seconds is not None:
             finished = await _await_briefly(handle, job.inline_wait_seconds)
             if finished is not None:

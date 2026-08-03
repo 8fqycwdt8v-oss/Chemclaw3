@@ -7,17 +7,33 @@ those settings, and it reverts cleanly via monkeypatch after each test.
 `FakeSubmitter` is the one PR-gate test double: every test that exercises a
 "propose a note" path imports it (`from tests.conftest import FakeSubmitter`)
 instead of redefining an identical fake per file (DRY).
+
+`_fresh_discovery_caches` clears the connector and template `@cache`d discovery seams around
+every test; see its docstring for why that has to be autouse rather than a per-file convention.
+
+`_free_port` is the one "ask the OS for an unused loopback port" helper, shared by every test
+that starts a real server instead of being redefined per file (Rule of Three).
 """
 
 import asyncio
+import socket
 from collections.abc import Iterator
 
 import psycopg
 import pytest
 
+from chemclaw.connectors.registry import discovered as _connectors_discovered
 from chemclaw.core.config import settings
 from chemclaw.kg.pr_gate import NoteSubmission
+from chemclaw.templates.registry import discovered as _templates_discovered
 from tests.pg import create_test_schema, drop_test_schema, schema_dsn
+
+
+def _free_port() -> int:
+    """An unused localhost port, so concurrent test runs cannot collide on a fixed one."""
+    with socket.socket() as sock:
+        sock.bind(("127.0.0.1", 0))
+        return int(sock.getsockname()[1])
 
 
 class FakeSubmitter:
@@ -72,6 +88,28 @@ def fast_mock(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(settings, "hpc_mock_submit_seconds", 0.0)
     monkeypatch.setattr(settings, "hpc_mock_run_seconds", 0.02)
     monkeypatch.setattr(settings, "hpc_poll_interval_seconds", 0.01)
+
+
+@pytest.fixture(autouse=True)
+def _fresh_discovery_caches() -> Iterator[None]:
+    """Clear the connector and template `@cache`d discovery registries around every test.
+
+    `chemclaw.connectors.registry.discovered` and `chemclaw.templates.registry.discovered` are
+    `@cache`d for production, where the bundle/template layout is fixed for the process's life.
+    Most of the suite calls them expecting the real, on-disk default; a handful of tests repoint
+    `connectors_dir` / `templates_dir` at a `tmp_path` fixture bundle instead. `monkeypatch`
+    restores the setting afterwards, but it has no idea a `functools.cache` sits downstream, so a
+    test that forgot to clear it left the *next* test reading a stale or `tmp_path`-only result —
+    order-dependent failures in `test_agent.py` and `test_prose_contract.py` traced to exactly
+    this (`docs/planning/BACKLOG.md`). Clearing both directions, autouse, turns "remember to clear
+    the cache" from a per-file convention every new test has to rediscover into an invariant nothing
+    can forget — and it is cheap: clearing an empty `functools.cache` is O(1).
+    """
+    _connectors_discovered.cache_clear()
+    _templates_discovered.cache_clear()
+    yield
+    _connectors_discovered.cache_clear()
+    _templates_discovered.cache_clear()
 
 
 @pytest.fixture(autouse=True)

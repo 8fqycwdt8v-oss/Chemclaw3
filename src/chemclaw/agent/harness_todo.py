@@ -4,10 +4,16 @@ When the harness's execute-mode loop calls a fire-and-forget tool like `compute_
 todo the model was working cannot simply stay open — `todos_remaining` would keep re-invoking the
 model every loop iteration with nothing new to report, and the model has no way to tell "the job is
 still running" from "this was forgotten". `mark_awaiting_job` records, directly in the harness's
-own `TodoProvider` state, that a todo is blocked on a specific job id; `complete_awaiting_job`
-flips it once the job's push-back event arrives (`chemclaw.agent.session_events`), so the *next*
-turn's
-`todos_remaining` check sees it as done instead of stuck open forever.
+own `TodoProvider` state, that a todo is blocked on a specific job id; when the job's push-back
+event arrives (`chemclaw.agent.session_events`) the front door records it via
+`defer_job_completion`, and the *next* turn flips the todo at its start via
+`apply_deferred_completions` — so `todos_remaining` sees it as done instead of stuck open forever.
+Deferred rather than applied by the push-back stream directly, because the stream runs
+concurrently with whatever turn the session has in flight: `complete_awaiting_job` is a
+load-modify-save over `session.state`, and a flip landing mid-turn both races the turn's own
+writes and is silently discarded when a disconnect teardown restores the turn's pre-turn state
+snapshot (`chemclaw.api.runner`). Turn start is the one moment nothing else writes the session's
+state, and it runs *before* the snapshot is taken, so the flip survives any later rollback.
 
 This closes exactly the gap `docs/planning/BACKLOG.md` names ("flipping the harness `awaiting` todo
 on completion — needs MAF TodoProvider store mutation"). It does not attempt to resume the *same*
@@ -25,9 +31,49 @@ might get wrong.
 
 from agent_framework import DEFAULT_TODO_SOURCE_ID, AgentSession, TodoItem, TodoSessionStore
 
+from chemclaw.core.config import settings
+
 _AWAITING_PREFIX = "awaiting-job:"
 
 _store = TodoSessionStore()
+
+# Completions recorded by the push-back stream, waiting for their session's next turn to apply
+# them (`session_id` → `[(job_id, reason), …]`). In-process on purpose: the notification itself
+# was already durably claimed from `session_events` before it lands here, so nothing durable is
+# lost on a restart — only the todo flip, whose absence `complete_awaiting_job` already documents
+# as a safe no-op. Bounded below by the live-session cap, because this map's population is
+# exactly the front door's live sessions and that is the bound the deployment already tunes.
+_pending_completions: dict[str, list[tuple[str, str]]] = {}
+
+
+def defer_job_completion(session_id: str, job_id: str, *, reason: str) -> None:
+    """Record that `job_id` finished, for the session's *next* turn to apply at its start.
+
+    Called by the front door's push-back stream instead of `complete_awaiting_job`, which it must
+    not call: a flip applied mid-turn races the running turn's own state writes and is silently
+    un-done when a disconnect restores that turn's pre-turn snapshot (see the module docstring).
+    Keyed by session id rather than gated on a live cache entry, so a completion recorded for an
+    evicted session still applies when the session is rehydrated for its next turn.
+    """
+    _pending_completions.setdefault(session_id, []).append((job_id, reason))
+    while len(_pending_completions) > settings.service_max_live_sessions:
+        oldest = next((sid for sid in _pending_completions if sid != session_id), None)
+        if oldest is None:
+            break
+        del _pending_completions[oldest]
+
+
+async def apply_deferred_completions(session: AgentSession) -> None:
+    """Flip every todo whose awaited job completed since this session's last turn.
+
+    The turn runner calls this at turn start, before it snapshots `session.state` — the one
+    moment nothing else writes the session's state, and the placement that makes the flip part
+    of the snapshot a disconnect would restore. Draining pops the session's entry, so a duplicate
+    turn start cannot re-apply anything; a completion whose todo no longer exists is the same
+    safe no-op it always was (`complete_awaiting_job` returns False).
+    """
+    for job_id, reason in _pending_completions.pop(session.session_id, []):
+        await complete_awaiting_job(session, job_id, reason=reason)
 
 
 def _awaiting_marker(job_id: str) -> str:
@@ -100,7 +146,7 @@ async def complete_awaiting_job(
 
     A no-op (returns `False`) when no open todo is waiting on this job id — e.g. the harness was
     not enabled for the turn that submitted it, or the live session was evicted from the front
-    door's in-process cache (`chemclaw.api.app._LiveSessions`) before the job finished.
+    door's in-process cache (`chemclaw.api.state._LiveSessions`) before the job finished.
     Already-complete
     todos are never matched, so a duplicate push-back for the same job id cannot reopen or
     re-complete one.

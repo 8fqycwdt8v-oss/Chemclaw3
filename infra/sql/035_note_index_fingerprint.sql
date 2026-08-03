@@ -1,0 +1,12 @@
+-- Per-note stat fingerprint on the derived note index (R4.2, D-2026-08-02-embed-only-what-changed).
+-- `reindex_notes` used to re-embed every note on every run — the scheduled hourly rebuild
+-- (`durable/note_index.py`) paid one embedding call per note, per hour, forever, for a corpus that
+-- is almost entirely unchanged between runs. This column is the durable half of the fix: it holds
+-- the "mtime_ns:size" fingerprint (`chemclaw.kg.graph.note_file_fingerprints`) each row was embedded
+-- from, so the next run can diff the current filesystem fingerprint against the stored one and skip
+-- re-embedding a note whose file has not changed.
+--
+-- NULL for any row written before this migration (or by `--full`, which does not touch it) reads as
+-- "unknown" and is always treated as changed — a one-time re-embed of the existing corpus after
+-- upgrade, never a stale skip. Applied by `make db-migrate`.
+ALTER TABLE note_index ADD COLUMN IF NOT EXISTS fingerprint TEXT;

@@ -3,53 +3,54 @@
 Prioritized open action items. Top = next. Keep in sync with `docs/planning/implementation-plan.md`
 (phase/step numbers) at session end.
 
-## Open — Found while implementing R2 of the refactor plan (2026-08-02)
+## Open — Found while closing the refactor (R5.3, 2026-08-03)
 
-- [ ] **The suite is order-dependent: one test file leaks connector state into the next** — [M].
-      `tests/test_connector_job_workflow.py` leaves connector discovery/registry state behind, so
-      running it before `tests/test_agent.py` fails three tests there
-      (`test_agent_advertises_the_domain_tools`,
-      `test_fingerprint_search_is_reached_through_connectors_not_in_process_tools`,
-      `test_instructions_only_name_available_tools`) and three in `tests/test_prose_contract.py`,
-      all with the connector tool names missing. **Reproduced on an unmodified base tree** (`git
-      archive HEAD` into a temp dir, same venv) during R2.A, so it predates the refactor. Every
-      affected file passes alone and in any order excluding that one. It survives today only
-      because the default collection order happens to be benign — which means a future rename or
-      a `-p xdist` run turns it into a mystery failure. Fix: give the file an autouse fixture that
-      restores `connectors.registry.discovered.cache_clear()` (and whatever else it dirties), and
-      consider `-p no:randomly` vs. deliberately randomising order to keep this honest.
+- [ ] **The two slowest pKa tests fail when the suite runs on a loaded box** — [S]. On a quiet
+      machine the suite is green in ~312 s (2852 passed, 127 skipped, measured twice on
+      2026-08-03). With concurrent heavy processes on the same box the same suite took 1330 s
+      (4.25×) and failed exactly two tests:
+      `test_pka.py::test_predicted_pkah_ranks_aromatic_bases_correctly` and
+      `::test_in_sample_pkah_errors_are_far_below_the_acid_calibrations` — the file's two slowest
+      (11.8 s / 11.2 s alone, 3× the next), both green 27/27 in isolation. The failure text was
+      not captured (the observing run piped through `tail`), so the cause is *unconfirmed*: the
+      180 s signal-based per-test timeout in `pyproject.toml` is the obvious suspect at 4× slowdown,
+      but stating that as the mechanism would be exactly the prose-over-measurement claim this repo
+      keeps catching. To close: reproduce under load with output captured, read the actual failure,
+      then either raise/architect around the timeout or fix whatever it actually is. Until then the
+      operational rule stands (`tasks/lessons.md` 2026-08-03): never run the gate while other
+      processes load the box.
 
-- [ ] **`chemclaw.core -> chemclaw.connectors` is the last lazy kernel edge** — [S, may be
-      "won't fix"]. R2.A took `core`'s lazy sibling edges from three to one. The survivor is
-      `core/logging.py`'s redaction filter resolving each connector's bearer-token env-var name so
-      the value can be redacted from logs (Sec-6, R0.4). Unlike the three that went, this is not a
-      misfiled primitive — the connector registry is a real capability layer — so no move retires
-      it. Either accept it permanently and say so in `core/README.md`, or invert it: have the
-      registry *push* its token env-var names into a `core`-owned redaction inventory at startup,
-      so `core` reads a list it owns instead of importing the registry.
+## Done — Found while implementing R2 of the refactor plan (2026-08-02; closed 2026-08-03)
 
-## Open — Found while implementing R0 of the refactor plan (2026-08-02)
+- [x] **`chemclaw.core -> chemclaw.connectors` is the last lazy kernel edge** — closed by taking
+      the row's first option: accepted permanently, and said so where the row asked.
+      `core/README.md` states the kernel rule with its "exactly one declared lazy exception", and
+      `tests/test_layering.py::_ALLOWED_LAZY_EDGES` declares the edge with the reason (the
+      connector registry is a real capability layer, not a misfiled primitive, so no move retires
+      it — the same argument against the inversion, which would trade one declared edge for a
+      startup-ordering contract between two layers). The R5.3 import-graph diff against `39f9135`
+      confirmed it is the *only* core→sibling edge at any scope
+      (D-2026-08-03-the-refactor-closes-what-it-measured).
+
+## Done — Found while implementing R0 of the refactor plan (2026-08-02; closed by R1.6, `ca562d7`)
 
 Each was found by an implementation agent working a *different* task, verified, and deliberately
 left unfixed rather than scope-crept into an unrelated commit. See
-`docs/planning/refactor-hardening-plan.md`.
+`docs/planning/refactor-hardening-plan.md`. Both rows were closed by R1.6 and re-verified against
+the shipped tree in R5.3.
 
-- [ ] **Two more error classes bypass the non-retryable registry** — [XS]. R0.6 reparented
-      `ConnectorError`, `DataSourceError`, `TemplateError` and `UnresolvedReference` to
-      `ChemclawError` and registered their names in `durable/publish.py::_BAD_DATA_TYPES`, because
-      Temporal matches `non_retryable_error_types` by exact class-name string. Two classes have the
-      identical gap and were outside that ticket: `agent/profile_discovery.py::ProfileError(ValueError)`
-      and `agent/authz.py::AuthorizationError(Exception)` — neither derives from `ChemclawError`, so
-      neither is caught by `tests/test_publish.py`'s completeness walk, and neither is registered.
-      Bad data on those paths burns all `activity_max_attempts` before failing.
-- [ ] **A second false retry claim in the same docstring block** — [XS, fix with the row above].
-      `durable/template_activities.py` (~line 128) states `AuthorizationError` is "a `ValueError`
-      which `BAD_DATA_RETRY` lists non-retryable". It is a bare `Exception`, registered nowhere.
-      R0.6 corrected the *adjacent* paragraph making the same false claim about `ConnectorError`
-      (measured against Temporal's `DefaultFailureConverter`) and left this one, which is a
-      different class and a different fix. This is the plan's named anti-pattern — prose asserting
-      a guard that nothing enforces — so the fix is the registration above **plus** deleting the
-      claim, not rewording it.
+- [x] **Two more error classes bypass the non-retryable registry** — closed. `ProfileError` and
+      `AuthorizationError` are registered in `durable/publish.py::_BAD_DATA_TYPES` (lines 54 and
+      71 as of R5.3). `AuthorizationError` is deliberately *not* reparented to `ChemclawError` —
+      that would have made `surface_domain_errors` swallow authorization refusals ahead of
+      `surface_authorization_denials` — so it is listed by exact name, and
+      `tests/test_publish.py` walks its hierarchy the same way it walks `ChemclawError`'s so a
+      future subclass cannot go unregistered unnoticed.
+- [x] **A second false retry claim in the same docstring block** — closed with the row above, the
+      way the row demanded: the false "a `ValueError` which `BAD_DATA_RETRY` lists non-retryable"
+      claim is deleted, and `durable/template_activities.py`'s docstring now states the true
+      mechanism (Temporal matches `non_retryable_error_types` by the exact string
+      `"AuthorizationError"`, which `BAD_DATA_RETRY` lists by name).
 
 ## Open — Confirmed by the 190-probe live run (2026-08-02)
 
@@ -98,15 +99,6 @@ and `tasks/live-test/`. The fixed ones are not listed — see the ADR and the co
 An adversarially-verified review across every layer and phase; 22 distinct defects were fixed (see
 the `D-2026-08-01-*` ADRs). These are what the fixes uncovered and deliberately did not close.
 
-- [ ] **REV-1 [Medium] — a `similar_reactions` query is not standardized the way its index is.**
-  `drfp_bitstring` takes a bare reaction string with no roles or components, so a query naming a
-  salt, a charged species or another tautomer scores against rows built from the standardized form.
-  Plain canonicalization is bits-neutral (RDKit parses both spellings to one mol), so this only
-  bites where standardization does real work — which is now a much larger surface, since inorganic
-  salts, metal complexes and organometallics no longer collapse onto a fragment
-  (D-2026-08-01-a-reagent-is-not-its-largest-fragment). Fix: standardize per `.`-separated species
-  inside `drfp_bitstring`. No `definition` bump needed — it makes queries match the index rather
-  than changing the index.
 - [ ] **REV-2 [Medium] — a solvate collapses onto whichever fragment is larger.**
   `standard_smiles("CCN.C1CCOC1")` returns THF: `FragmentParent` keeps the largest fragment and
   both are organic, so the ethylamine is discarded. Different mechanism from the counterion rule
@@ -489,16 +481,6 @@ QM path. The rows below are what survives that merge, narrowed to say so.
       out and every species standardized — and that pair scores 1.0. `reaction_smiles` stays as the
       record form a note renders; reagents stay on the left. `drfp:b2048:agents-excluded:std4`
       retires rows built under either earlier token.
-- [ ] **A `similar_reactions` query is not standardized the way the index is** — [S], opened by the
-      row above. The index now goes through `standard_smiles` per species; a query string is
-      fingerprinted exactly as the caller wrote it, because `drfp_bitstring` takes a string and has
-      no roles or components to work from. Plain canonicalization is bits-neutral (RDKit parses
-      both spellings to one mol), so this only bites where standardization does real work — a
-      query naming a salt, a charged species or the other tautomer scores against rows built from
-      the stripped, neutral, canonical-tautomer form. Fix is to standardize per `.`-separated
-      species inside `drfp_bitstring`, which makes index and query symmetric with no definition
-      bump, since the rows are already built that way.
-
 **Operations.**
 
 - [x] **No backup, restore or DR anywhere** — the GxP trap is closed by

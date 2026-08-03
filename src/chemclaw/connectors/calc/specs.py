@@ -25,9 +25,6 @@ from typing import Annotated, Literal
 
 from pydantic import BaseModel, Field
 
-from chemclaw.core.config import settings
-from chemclaw.core.ids import stable_hash
-
 # What a caller has to be told about `symmetry_numbers` to supply it correctly, written once
 # because the two reaction-shaped specs advertise the identical contract. It is the *only* field
 # here carrying a description, and deliberately so: every other one is self-evident from its name
@@ -112,31 +109,3 @@ XtbJobSpec = Annotated[
     ReactionJobSpec | SolventScreenJobSpec | ScanJobSpec | EnsembleJobSpec | ComplexJobSpec,
     Field(discriminator="kind"),
 ]
-
-
-class XtbJobInput(BaseModel):
-    """A request to run an expensive xTB task as a durable job (xTB plan X3/X4).
-
-    The same shape as `QMJobInput` for the fields that are about *who asked* rather than
-    *what to compute*: `requested_by` for the audit trail, `session_id` for the
-    completion push-back, both stamped from the turn's ambient context at submit and
-    never supplied by the model. Excluded from `xtb_job_key` for the same reason —
-    identical science dedupes across users and sessions (D-011).
-    """
-
-    spec: XtbJobSpec
-    requested_by: str = settings.service_actor_id
-    session_id: str | None = None
-
-
-def xtb_job_key(job: XtbJobInput) -> str:
-    """Stable identity of an xTB job: its spec alone.
-
-    Note what this key is *not*: it is not the calculation cache key. Each species,
-    optimization and Hessian inside the job is separately content-addressed by
-    `chemclaw.science.calc.xtb_spec`, so two different jobs sharing a species still share that
-    work. This
-    key exists only to make submit idempotent — the same request while it is running, or
-    after it finished, returns the existing job rather than starting a second one.
-    """
-    return stable_hash(job.spec.model_dump())

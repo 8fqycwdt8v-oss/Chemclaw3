@@ -26,8 +26,6 @@ the public API exercises the exact code path a real hazard question takes and va
 table, not just the rules that happen to match the probe molecule.
 """
 
-import sys
-
 from chemclaw.core.errors import ChemclawError
 from chemclaw.science.safety.genotox import screen_genotoxic_alerts
 from chemclaw.science.safety.screen import screen_reaction
@@ -51,16 +49,17 @@ def validate_safety() -> list[str]:
     return problems
 
 
-def main() -> None:
+def main() -> int:
     """Validate both safety tables; print problems and exit non-zero if either fails to compile."""
     problems = validate_safety()
     if problems:
         print("safety table validation failed:")
         for problem in problems:
             print(f"  - {problem}")
-        sys.exit(1)
+        return 1
     print("safety table validation passed.")
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

@@ -1,7 +1,7 @@
 """The runaway-cost guard: turn/token budgets and usage metering (budget #3).
 
 Proves the missing ceiling above the per-turn loop cap — `BudgetTracker` counts turns and meters
-tokens per session and per user and refuses a turn past a cap, `_usage_tokens` reads MAF's usage
+tokens per session and per user and refuses a turn past a cap, `usage_tokens` reads MAF's usage
 content, and the whole thing is a no-op when `budget_enabled` is off (today's default behavior).
 """
 
@@ -10,7 +10,7 @@ from types import SimpleNamespace
 import pytest
 
 from chemclaw.api.budget import BudgetExceeded, BudgetTracker
-from chemclaw.api.runner import _usage_tokens
+from chemclaw.api.runner_usage import usage_tokens
 from chemclaw.core.config import settings
 
 
@@ -94,7 +94,7 @@ def test_anonymous_user_only_hits_session_caps(
 
 
 def test_usage_tokens_reads_maf_usage_content() -> None:
-    """`_usage_tokens` sums the usage content's tokens, preferring total, else input+output.
+    """`usage_tokens` sums the usage content's tokens, preferring total, else input+output.
 
     The budget guard meters `total`, so this is the number that refuses a turn — unchanged by the
     priced split (REV-10), which only changed what is *published*.
@@ -103,13 +103,13 @@ def test_usage_tokens_reads_maf_usage_content() -> None:
     split = SimpleNamespace(usage_details={"input_token_count": 10, "output_token_count": 5})
     plain = SimpleNamespace(name="tool", arguments="{}")  # a non-usage content
     update = SimpleNamespace(contents=[total, split, plain])
-    assert _usage_tokens(update).total == 42 + 15
+    assert usage_tokens(update).total == 42 + 15
 
 
 def test_usage_tokens_zero_without_usage() -> None:
     """An update with no usage content meters 0 (the fake-agent / no-usage-provider path)."""
-    assert _usage_tokens(SimpleNamespace(contents=[SimpleNamespace(text="hi")])).total == 0
-    assert _usage_tokens(SimpleNamespace()).total == 0
+    assert usage_tokens(SimpleNamespace(contents=[SimpleNamespace(text="hi")])).total == 0
+    assert usage_tokens(SimpleNamespace()).total == 0
 
 
 def test_session_counters_are_bounded_by_live_session_cap(

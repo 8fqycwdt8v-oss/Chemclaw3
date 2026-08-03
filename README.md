@@ -10,13 +10,25 @@ historical (see `CLAUDE.md`).
 
 ## Quickstart
 
+Prerequisites: Python `>=3.11`, [`uv`](https://docs.astral.sh/uv/), and Docker (with the
+`docker compose` CLI) for `make up`.
+
 ```sh
 uv sync                 # install runtime + dev dependencies
+uv run pre-commit install  # ruff check/format + mypy --strict on every commit
 cp .env.example .env    # optional — defaults match the dev stack
 make up                 # Temporal dev cluster + Postgres/pgvector (docker-compose)
 make db-migrate         # apply infra/sql migrations
-make check              # lint + mypy --strict + tests
+make check              # fast inner loop: lint + mypy --strict + tests
 ```
+
+`make check` is the inner loop, not the gate: it skips coverage and the nine validators
+(`kg-validate`, `eln-validate`, `skill-validate`, `connector-validate`, `datasource-validate`,
+`template-validate`, `prose-validate`, `safety-validate`, `helm-validate`). Run `make ci` before
+pushing — it is exactly what CI runs and is what `pre-commit` does not cover.
+
+`make up` binds Postgres on `5432`, the Temporal frontend gRPC on `7233`, and the Temporal Web UI
+on `8081` (see `infra/docker-compose.yml`).
 
 Useful targets: `make eval` (score the versioned metric case-set),
 `make eln-validate` (validate ELN exports), `make kg-validate` (knowledge-graph

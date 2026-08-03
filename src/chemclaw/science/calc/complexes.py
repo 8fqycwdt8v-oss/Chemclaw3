@@ -40,10 +40,9 @@ from chemclaw.science.calc import crest_cli
 from chemclaw.science.calc.crest_cli import CrestEffort
 from chemclaw.science.calc.store import CalculationKey, ResultStore, run_cached
 from chemclaw.science.calc.structure import Structure, structure_from_smiles
+from chemclaw.science.calc.xtb_engine import HARTREE_TO_KCAL
 from chemclaw.science.calc.xtb_opt import OptSpec, optimize_structure
 from chemclaw.science.calc.xtb_spec import CrestSpec, backend_version
-
-_HARTREE_TO_KCAL = 627.5094740631
 
 
 class ComplexSpec(CrestSpec):
@@ -199,7 +198,7 @@ def compute_interaction(spec: ComplexSpec, smiles_a: str, smiles_b: str) -> Inte
         smiles_b=smiles_b,
         method=spec.method,
         solvent=spec.solvent,
-        interaction_energy_kcal=round((bound.energy_hartree - separated) * _HARTREE_TO_KCAL, 2),
+        interaction_energy_kcal=round((bound.energy_hartree - separated) * HARTREE_TO_KCAL, 2),
         complex_energy_hartree=bound.energy_hartree,
         monomer_energies_hartree=[monomer.energy_hartree for monomer in monomers],
         binding_modes=len(modes),

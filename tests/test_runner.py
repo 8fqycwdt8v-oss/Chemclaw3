@@ -21,6 +21,8 @@ from agent_framework import AgentSession
 
 import chemclaw.agent.verifier as verifier
 import chemclaw.api.runner as runner
+import chemclaw.api.runner_answer as runner_answer
+import chemclaw.api.runner_trace as runner_trace
 from chemclaw.agent.harness_todo import complete_awaiting_job, mark_awaiting_job
 from chemclaw.agent.loop_cap import observe_loop_cap
 from chemclaw.agent.verifier import ClaimCheck, VerificationResult
@@ -100,7 +102,7 @@ def test_low_confidence_answer_is_flagged(monkeypatch: pytest.MonkeyPatch) -> No
             claims=[ClaimCheck(text="Yield was 90%", supported=False)], confidence=0.2
         )
 
-    monkeypatch.setattr(runner, "verify_turn_answer", _fake_verify)
+    monkeypatch.setattr(runner_answer, "verify_turn_answer", _fake_verify)
     answer = _answer(_run_turn())
     assert answer.confidence == 0.2
     assert answer.unsupported_claims == ["Yield was 90%"]
@@ -117,7 +119,7 @@ def test_high_confidence_answer_is_not_flagged(monkeypatch: pytest.MonkeyPatch) 
     async def _fake_verify(answer: str, *_: Any, **__: Any) -> VerificationResult:
         return VerificationResult(claims=[], confidence=1.0)
 
-    monkeypatch.setattr(runner, "verify_turn_answer", _fake_verify)
+    monkeypatch.setattr(runner_answer, "verify_turn_answer", _fake_verify)
     answer = _answer(_run_turn())
     assert answer.confidence == 1.0
     assert answer.review_required is False  # 1.0 >= 0.7 threshold
@@ -133,7 +135,7 @@ def test_confidence_exactly_at_threshold_is_not_flagged(monkeypatch: pytest.Monk
     async def _fake_verify(answer: str, *_: Any, **__: Any) -> VerificationResult:
         return VerificationResult(claims=[], confidence=0.7)
 
-    monkeypatch.setattr(runner, "verify_turn_answer", _fake_verify)
+    monkeypatch.setattr(runner_answer, "verify_turn_answer", _fake_verify)
     answer = _answer(_run_turn())
     assert answer.confidence == 0.7
     assert answer.review_required is False  # meeting the threshold is acceptable, not sub-threshold
@@ -310,7 +312,7 @@ def test_verifier_failure_degrades_to_plain_answer(monkeypatch: pytest.MonkeyPat
     async def _boom(answer: str, *_: Any, **__: Any) -> VerificationResult:
         raise RuntimeError("verifier down")
 
-    monkeypatch.setattr(runner, "verify_turn_answer", _boom)
+    monkeypatch.setattr(runner_answer, "verify_turn_answer", _boom)
     answer = _answer(_run_turn())
     assert answer.text == "Yield was 90% [[reaction-a]]."
     assert answer.confidence is None and answer.unsupported_claims == []
@@ -368,7 +370,7 @@ def test_a_streamed_tool_call_reports_the_arguments_it_was_called_with() -> None
     The call is announced on the update that *closes* the argument JSON, not on a later one —
     see the timing test below for why that difference is the whole of D-159.
     """
-    trace = runner._ToolCallTrace()
+    trace = runner_trace.ToolCallTrace()
     assert trace.feed(_update(_CallContent(name="add", call_id="c1", arguments={}))) == []
     # The provider opens the argument stream with an *empty* fragment before the first characters
     # arrive. Reading that as "nothing more is coming" closed the call early and shipped an empty
@@ -393,7 +395,7 @@ def test_a_call_is_announced_before_its_result_is_seen() -> None:
     Asserting on order rather than on wall-clock: the call event must be produced by the update
     that ends the arguments, with the result update producing a *different* event afterwards.
     """
-    trace = runner._ToolCallTrace()
+    trace = runner_trace.ToolCallTrace()
     trace.feed(_update(_CallContent(name="predict_pka", call_id="p1", arguments={})))
 
     issued = _one_call(
@@ -408,7 +410,7 @@ def test_a_call_is_announced_before_its_result_is_seen() -> None:
 
 def test_a_result_is_reported_even_though_its_content_carries_no_name() -> None:
     """The result content has only a `call_id`, so the name has to be remembered from the call."""
-    trace = runner._ToolCallTrace()
+    trace = runner_trace.ToolCallTrace()
     trace.feed(_update(_CallContent(name="compute_xtb_energy", call_id="x", arguments={})))
     trace.feed(_update(_CallContent(call_id="x", arguments='{"smiles": "CCO"}')))
     result = _one_result(trace.feed(_update(_CallContent(call_id="x", result="-154.5 Hartree"))))
@@ -417,7 +419,7 @@ def test_a_result_is_reported_even_though_its_content_carries_no_name() -> None:
 
 def test_an_empty_result_reports_nothing_rather_than_an_empty_value() -> None:
     """A trace that shows a value it does not have is worse than one that shows none."""
-    trace = runner._ToolCallTrace()
+    trace = runner_trace.ToolCallTrace()
     trace.feed(_update(_CallContent(name="t", call_id="e", arguments={})))
     trace.feed(_update(_CallContent(call_id="e", arguments="{}")))
     assert trace.feed(_update(_CallContent(call_id="e", result=""))) == []
@@ -431,7 +433,7 @@ def test_arguments_that_never_parse_still_fall_back_to_the_update_went_by_rule()
     format it does not recognise would leave the call open forever. The old rule stays underneath
     it, so such a call is announced at the previous, later moment rather than never.
     """
-    trace = runner._ToolCallTrace()
+    trace = runner_trace.ToolCallTrace()
     trace.feed(_update(_CallContent(name="odd_tool", call_id="c9", arguments={})))
     assert trace.feed(_update(_CallContent(call_id="c9", arguments="smiles=CCO"))) == []
     event = _one_call(trace.feed(_update(_CallContent(call_id="c9"))))
@@ -440,7 +442,7 @@ def test_arguments_that_never_parse_still_fall_back_to_the_update_went_by_rule()
 
 def test_a_call_whose_arguments_end_the_stream_is_still_reported() -> None:
     """Nothing follows the last update, so the flush is what keeps the final call from vanishing."""
-    trace = runner._ToolCallTrace()
+    trace = runner_trace.ToolCallTrace()
     trace.feed(_update(_CallContent(name="screen_hazards", call_id="c9", arguments={})))
     assert trace.feed(_update(_CallContent(call_id="c9", arguments='{"smiles":'))) == []
     event = _one_call(trace.flush())
@@ -449,7 +451,7 @@ def test_a_call_whose_arguments_end_the_stream_is_still_reported() -> None:
 
 def test_two_interleaved_calls_keep_their_own_arguments() -> None:
     """Parallel tool calls share the stream; the `call_id` is what keeps them apart."""
-    trace = runner._ToolCallTrace()
+    trace = runner_trace.ToolCallTrace()
     trace.feed(
         _update(
             _CallContent(name="predict_pka", call_id="a", arguments={}),
@@ -476,7 +478,7 @@ def test_a_call_delivered_whole_is_reported_without_waiting_for_the_next_update(
     Holding it back until an update went by would push the trace entry behind the text the model
     produces next, which reads as the tool having run after the sentence that describes it.
     """
-    trace = runner._ToolCallTrace()
+    trace = runner_trace.ToolCallTrace()
     event = _one_call(
         trace.feed(
             _update(_CallContent(name="find_notes", call_id="z", arguments={"query": "amide"}))
@@ -519,7 +521,7 @@ class _CitingAgent:
 def _offline_verification(monkeypatch: pytest.MonkeyPatch) -> None:
     """Verification on, judge unreachable — so the offline citation gate produces the verdict.
 
-    `_answer_event` verifies only when `verifier_enabled`, and that same flag is what routes
+    `build_answer_event` verifies only when `verifier_enabled`, and that same flag is what routes
     `verify_answer` to the LLM judge, so the deterministic gate cannot be reached through the
     runner without a judge that does not answer. Which is the realistic shape anyway: no model
     endpoint is configured in a test process, and the documented behaviour is that an unreachable
@@ -597,7 +599,7 @@ def test_a_tool_result_grounds_the_answer_past_the_uis_preview_budget(
     assert not list(settings.knowledge_path.rglob(f"{note_id}.md")), "the note must not exist"
     _offline_verification(monkeypatch)
     buried = "filler chunk. " * 40 + f"[[{note_id}]]"
-    assert len(buried) > runner._ARG_PREVIEW_CHARS
+    assert len(buried) > runner_trace._ARG_PREVIEW_CHARS
     answer = _verified_answer(
         _CitingAgent(f"The solvent was screened [[{note_id}]].", tool_result=buried)
     )

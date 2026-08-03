@@ -923,3 +923,42 @@ and reparenting `AuthorizationError` under `ChemclawError` — which I asked for
 could, silently turning "Refused: …" into "Error: …". Registering the name without reparenting was
 the right fix, and the agent traced the middleware ordering to prove it. **Rule:** a plan's proposed
 remedy is a hypothesis; write the prompt so disproving it is a success condition, not a deviation.
+
+## 2026-08-03 — Closing the refactor: what the orchestration itself cost
+
+**A worktree agent's base commit is whatever the harness had lying around, not your branch tip.**
+One Wave-1 agent was silently cut from a base missing two whole phases of merged work and built on
+it without noticing — nothing in its own view looked wrong, because a stale tree is internally
+consistent. The fix that held afterwards was a mandatory first step in every agent brief: fetch,
+compare `HEAD` against the named tip, rebase if behind, and confirm by checking for concrete markers
+(a file, a symbol) that the phases you depend on are present. **Rule:** never let a worktree agent
+start work before it has *proven* its base, by marker, not by `git log` looking plausible — and put
+that proof in the brief as step zero, because an agent that skips it reports success from the wrong
+universe.
+
+**Never run the test gate while other processes load the box.** The same suite, same commit, same
+day: 312 s and green on a quiet machine; 1330 s (4.25×) and two failures with parallel agents
+building beside it. The two failures were the two slowest tests in `test_pka.py` (11.8 s / 11.2 s
+alone) — the tests with the least headroom are the ones a slowdown converts into false findings,
+and they pass 27/27 in isolation. **Rule:** the gate run that decides anything runs alone; a red
+test observed under load is an *observation about load* until reproduced quiet. (The failure text
+from the loaded run was lost to a `| tail` — capture to a file first, the same lesson `pipefail`
+taught from the other side.)
+
+**All three Wave-1 agents independently parked themselves waiting on a background `make test` and
+had to be resumed by hand to commit.** Same shape three times in one wave: work finished, gate
+started in the background, agent idle until poked — the commit, the one artifact the orchestrator
+needed, held hostage to a verification that could have followed it. **Rule:** brief agents to
+commit first, then verify — a commit is cheap to amend or revert if the gate fails, but an
+uncommitted finished change is invisible to the orchestrator and blocks the whole wave on a timer
+nobody is watching. More generally: any long-running verification goes *after* the state that
+matters is durable.
+
+**"Zero test files changed" and "no assertion changed" are different claims — verify the one that
+was made.** R5.3's re-verification found the runner split (3dbb009) touched four test files, all
+mechanical re-points of import paths for helpers whose names went public — while its own commit
+message claimed exactly that ("import re-points only, no assertion changed") and was accurate. The
+false stronger claim ("zero test changes") existed only in a later retelling. **Rule:** when
+relaying a verification claim, quote the artifact's own wording rather than strengthening it;
+"behavior-preserving" hardens into "byte-identical" over two retellings and then fails an audit
+that the original claim would have passed.

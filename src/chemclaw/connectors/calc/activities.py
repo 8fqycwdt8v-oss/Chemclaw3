@@ -35,7 +35,7 @@ from chemclaw.connectors.calc.specs import (
     ReactionJobSpec,
     ScanJobSpec,
     SolventScreenJobSpec,
-    XtbJobInput,
+    XtbJobSpec,
 )
 from chemclaw.connectors.queues import bundle_queue
 from chemclaw.core.config import settings
@@ -61,7 +61,7 @@ from chemclaw.science.calc.xtb_scan import ScanSpec, run_cached_scan
 
 @durable_activity(bundle_queue("calc"))
 @activity.defn
-async def run_xtb_calculation(job: XtbJobInput) -> XtbJobResult:
+async def run_xtb_calculation(spec: XtbJobSpec) -> XtbJobResult:
     """Run one durable xTB task and return its typed result.
 
     Dispatches on the spec's `kind`. The `summary` field is written here rather than by
@@ -70,7 +70,6 @@ async def run_xtb_calculation(job: XtbJobInput) -> XtbJobResult:
     how the two drift apart.
     """
     store = default_store()
-    spec = job.spec
     activity.heartbeat(f"starting {spec.kind}")
     if isinstance(spec, ReactionJobSpec):
         reaction = await compute_reaction_energy(

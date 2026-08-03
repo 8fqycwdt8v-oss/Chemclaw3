@@ -25,7 +25,7 @@ from typing import Any
 import pytest
 
 from chemclaw.connectors.calc import activities
-from chemclaw.connectors.calc.specs import EnsembleJobSpec, XtbJobInput
+from chemclaw.connectors.calc.specs import EnsembleJobSpec
 from chemclaw.core.config import settings
 from chemclaw.science.calc.conformers import Conformer, ConformerEnsemble
 from chemclaw.science.calc.structure import structure_from_smiles
@@ -71,8 +71,8 @@ def test_an_ensemble_job_heartbeats_through_the_configured_xtb_timeout(
 
     monkeypatch.setattr(activities, "run_cached_ensemble", _slow_ensemble)
 
-    job = XtbJobInput(spec=EnsembleJobSpec(smiles="C"))
-    result = asyncio.run(activities.run_xtb_calculation(job))
+    spec = EnsembleJobSpec(smiles="C")
+    result = asyncio.run(activities.run_xtb_calculation(spec))
 
     assert result.ensemble is not None
     # The first beat is `run_xtb_calculation`'s own "starting {kind}" line; what proves the

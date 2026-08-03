@@ -30,8 +30,8 @@ row about the autoscaler defeating the admission guard covers the same ground fo
 
 import logging
 import time
-from collections import OrderedDict
 
+from chemclaw.core.bounded import BoundedLru
 from chemclaw.core.config import settings
 from chemclaw.core.metrics_bridge import record_metric
 
@@ -64,7 +64,8 @@ class RequestLimiter:
     The bound is not incidental. A map keyed by caller identity is the classic unbounded-growth
     bug — this codebase has fixed it three times, most recently for metric label series (D-152) —
     and here the key is attacker-influenced, since minting tokens for many `oid`s is exactly what
-    someone working around a per-principal limit would do. So it is an LRU: past the cap the
+    someone working around a per-principal limit would do. So it is an LRU
+    (`chemclaw.core.bounded.BoundedLru`, the shared fix for this bug class — S2): past the cap the
     least-recently-seen principal is evicted and starts fresh, which costs that caller one free
     burst and costs the process nothing.
     """
@@ -73,8 +74,7 @@ class RequestLimiter:
         """Configure the refill rate, the ceiling, and how many principals to remember."""
         self._rate = per_minute / 60.0
         self._burst = burst
-        self._max_principals = max_principals
-        self._buckets: OrderedDict[str, _Bucket] = OrderedDict()
+        self._buckets: BoundedLru[str, _Bucket] = BoundedLru(max_principals)
 
     def check(self, principal_id: str, *, now: float | None = None) -> None:
         """Spend one token for `principal_id`, or raise `RateLimited`.
@@ -86,23 +86,16 @@ class RequestLimiter:
         that never elapsed, and a step forwards would refuse requests that should have passed.
         """
         moment = time.monotonic() if now is None else now
-        bucket = self._buckets.get(principal_id)
+        bucket = self._buckets.get(principal_id)  # marks the principal recently seen
         if bucket is None:
             bucket = _Bucket(self._burst, moment)
-            self._buckets[principal_id] = bucket
-            self._evict_oldest()
+            self._buckets.put(principal_id, bucket)  # inserting evicts past the cap
         else:
-            self._buckets.move_to_end(principal_id)
             bucket.tokens = min(self._burst, bucket.tokens + (moment - bucket.at) * self._rate)
             bucket.at = moment
         if bucket.tokens < 1.0:
             raise RateLimited((1.0 - bucket.tokens) / self._rate)
         bucket.tokens -= 1.0
-
-    def _evict_oldest(self) -> None:
-        """Drop least-recently-seen principals down to the cap (see the class docstring)."""
-        while len(self._buckets) > self._max_principals:
-            self._buckets.popitem(last=False)
 
 
 _limiter: RequestLimiter | None = None

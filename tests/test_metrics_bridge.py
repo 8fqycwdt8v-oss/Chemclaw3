@@ -99,10 +99,10 @@ def test_the_priced_token_dimensions_are_published_separately() -> None:
     not published *identical* `chemclaw_tokens_total` while their bills differed several-fold. MAF
     has reported all four dimensions since the beginning; nothing read past the sum.
 
-    Driven through `_usage_tokens` on a MAF-shaped update rather than by calling the counters
+    Driven through `usage_tokens` on a MAF-shaped update rather than by calling the counters
     directly, because the defect was in the reading, not the publishing.
     """
-    from chemclaw.api.runner import _usage_tokens
+    from chemclaw.api.runner_usage import usage_tokens
 
     update = SimpleNamespace(
         contents=[
@@ -117,7 +117,7 @@ def test_the_priced_token_dimensions_are_published_separately() -> None:
             )
         ]
     )
-    usage = _usage_tokens(update)
+    usage = usage_tokens(update)
 
     assert (usage.input, usage.output) == (100, 20)
     # The two that were never read at all. Without them, the 900 cheap tokens above are invisible
@@ -138,13 +138,13 @@ def test_a_provider_reporting_no_cache_counts_leaves_those_counters_alone() -> N
     failure REV-19 found in the counters. An `openai_compatible` endpoint that reports no cache
     fields must leave those two counters untouched, not publish 0.
     """
-    from chemclaw.api.runner import _usage_tokens
+    from chemclaw.api.runner_usage import usage_tokens
     from chemclaw.core.metrics import METRICS
 
     update = SimpleNamespace(
         contents=[SimpleNamespace(usage_details={"input_token_count": 7, "output_token_count": 3})]
     )
-    usage = _usage_tokens(update)
+    usage = usage_tokens(update)
     assert (usage.cache_read, usage.cache_write) == (0, 0)
 
     before = METRICS.value("chemclaw_cache_read_tokens_total")

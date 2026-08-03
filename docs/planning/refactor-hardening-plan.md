@@ -110,7 +110,12 @@ code. Sec-N are security; A/H/S/P are api+agent; R-N are architecture; F-N are o
 - **A3 [Med/S]** turn cleanup lives only in the SSE generator body, which may never start → the
   in-process `active_turns` entry never expires → a permanent 409 for that session (the durable claim
   self-heals; the in-process one has no lease). Fix: make the in-process guard a deadline lease like
-  the durable one.
+  the durable one. **Premise corrected in execution (R3.1): there were two release sites, not one** —
+  the SSE generator's `finally` and `post_message`'s, mutually exclusive via a `handed_off` flag —
+  and the surviving leak was the narrower window that runs neither: a client gone after the
+  streaming response is handed off but before its generator is first advanced, so no `finally` ever
+  runs. The lease fix shipped as planned; `api/state.py::_claim_turn_slot`'s docstring records the
+  corrected mechanics.
 - **A4 [Med/M]** the push-back stream mutates live session state concurrently with a turn
   (`api/app.py:1219-1224` + `agent/harness_todo.py:108-121`); a disconnect's `state_snapshot` restore
   can discard a job completion. Fix: record completions durably, apply at turn start.
@@ -141,8 +146,17 @@ code. Sec-N are security; A/H/S/P are api+agent; R-N are architecture; F-N are o
   survives because every closure reads `app.state` and the tests reach `app.state` — **no test
   changes**. Full target layout is in the API+agent agent report.
 - **S2 [M]** five hand-rolled bounded-LRU maps (`api/app.py`, `budget.py`, `rate_limit.py`,
-  `metrics.py`, `attachments.py`) → one `core/bounded.py::BoundedLru`. **S3 [S]** three copies of
-  "unknown-or-not-yours → the same 404" → one helper. **S6 [XS]** the dry-run ContextVar misfiled in
+  `metrics.py`, `attachments.py`) → one `core/bounded.py::BoundedLru`. **Corrected in execution
+  (R3.3): four, not five** — `core/metrics.py`'s label-series cap is refuse-new (past 64 series a
+  new key is dropped and logged once), and folding it into an evict-oldest LRU would convert
+  cardinality protection into series churn, so it stays its own mechanism. The four callers are
+  `api/state.py` (where the `api/app.py` map now lives after the decomposition), `api/budget.py`,
+  `api/rate_limit.py` and `agent/attachments.py`. **S3 [S]** three copies of
+  "unknown-or-not-yours → the same 404" → one helper. **Corrected in execution: two, not three** —
+  `api/deps.py::_visible_proposal` encodes a reviewer-may-see-any allowance (via `_is_reviewer`,
+  a role check) that sessions and approval holds have no analogue for; folding it into
+  `_refuse_unless_owner` would either grant reviewers session access or lose them proposal access.
+  Its docstring argues this at the site. **S6 [XS]** the dry-run ContextVar misfiled in
   `dialogue_tools` (so `connectors/` imports a tool module for a turn flag) → beside the other turn
   ambients. **S7 [XS]** a private `_session_connection` imported across modules → make it a named seam.
 - **P1 [S]** past the compaction floor, every turn does `COUNT` + full `SELECT` + a complete re-plan
@@ -155,6 +169,11 @@ code. Sec-N are security; A/H/S/P are api+agent; R-N are architecture; F-N are o
 - **R1 [S]** move `api/metrics.py` → `core/metrics.py` (414 lines, stdlib-only, kernel material).
   Fixes the real layering break (`core/worker_http.py:49` imports `chemclaw.api`), lets the
   `metrics_bridge` lazy hack be deleted, and resolves the `api/metrics` vs `evals/metrics` name clash.
+  **Corrected in execution (R2.1): `metrics_bridge` was kept, deliberately.** Its `try` wraps
+  `update(METRICS)` — the *update*, not the import — so it guards the 11 `record_metric` call sites
+  across six packages from a typo'd counter name (`core/metrics.py` raises `KeyError` on an
+  undeclared name by design) propagating into a caller's request path. Only the lazy *import*
+  was deletable, and went; the module's own docstring now records what it always actually was.
 - **R2 [M]** move the ambient-context primitives `agent/{identity_context,tool_registry,turn_signals}.py`
   + the id-half of `agent/session_context.py` → `core/` (three of four have zero first-party deps;
   imported by up to seven packages). Deletes the `kg→agent` and `core→agent` edges and the two
@@ -218,13 +237,19 @@ code. Sec-N are security; A/H/S/P are api+agent; R-N are architecture; F-N are o
   files `main() -> None` + `sys.exit`); standardize on the testable form.
 - **Test-1 [High/M]** three Postgres persistence classes have zero direct tests
   (`PostgresArtifactStore`, `PostgresCampaignStore`, `PostgresTurnCostSink`) — D-011 territory.
-  **Test-2 [Med/S]** `test_layering.py` spawns 121 subprocesses where 11 suffice.
+  **Test-2 [Med/S]** `test_layering.py` spawns 121 subprocesses where 11 suffice. **Corrected in
+  execution (R1.1): both numbers were wrong.** The real prior count was 132 (a 12-module × 11-sibling
+  parametrization), and the shipped fix is neither number but a derived shape: one subprocess per
+  core module plus one per retrieval module, each checking every forbidden sibling in that single
+  process, with the module lists derived from disk (`tests/test_layering.py`'s docstring records
+  the arithmetic).
   **Test-3/4/5 [Low]** `_free_port` ×3 → conftest; parametrize four invalid-SMILES tests;
   `test_deferred_register.py:59` `> 15` false-fails when the backlog is paid down.
 - **Ops-F5 [High/XS]** `Makefile:92-95` `helm-validate` pipe has no `pipefail` — a broken
   `helm template` yields zero docs and `kubeconform` exits 0, greening CI on an unrenderable chart.
   Add `SHELL := bash` + `.SHELLFLAGS := -eu -o pipefail -c`. **Ops-F1 [Med/XS]** docker-compose
-  Temporal UI vs the README quickstart both bind 8080. **Ops-F7/F8 [Med]** `image.yml` re-implements
+  Temporal UI vs the README quickstart both bind 8080 — **resolved in R1.3:
+  `infra/docker-compose.yml` binds the Temporal UI at `8081:8080`.** **Ops-F7/F8 [Med]** `image.yml` re-implements
   `make deps-audit` by hand (already diverged); `make check` ≠ the CI gate — add a `make ci`
   meta-target. **Ops-F12 [Med/XS]** syft installed from `main` unpinned in the SBOM step. **Ops
   [XS]** F2/F3 onboarding gaps, F4 `.env.example` quickstart banner, F9 CI concurrency groups, F10
@@ -267,7 +292,7 @@ Each phase runs behind a Fable orchestrator. Each work package is one auto-merge
 
 | WP | Model | Scope |
 |---|---|---|
-| R2.1 | Opus | R1 move `api/metrics.py` → `core/metrics.py` (+ delete metrics_bridge hack). |
+| R2.1 | Opus | R1 move `api/metrics.py` → `core/metrics.py` (+ delete metrics_bridge hack — **executed as: delete the lazy import only; the defensive swallow stayed**, see R1 above). |
 | R2.2 | Opus | R2 move ambient-context primitives → `core/`. |
 | R2.3 | Sonnet | R4 move cli library halves → `durable/` (shims in cli); + S6 dry-run ContextVar relocation. |
 | R2.4 | **Fable** | R6 split `core/config.py` → `core/config/` package (import path unchanged) — the wide-blast-radius unlock. |
@@ -288,7 +313,7 @@ Each phase runs behind a Fable orchestrator. Each work package is one auto-merge
 | R4.2 | Sonnet | retrieval/: reindex incrementality (Retrieval-1). |
 | R4.3 | Haiku | cli/ exit-code unification (CLI-1) + Conn-F7 dead fields + Conn-F5 URL-key validator. |
 | R4.4 | Sonnet | Conn-F1 start_workflow framing + Conn-F4 MCP exception-sanitizing (after the spike). |
-| R4.5 | Haiku | Test-2 121→11 subprocesses + Test-3 `_free_port` → conftest + Test-4 parametrize invalid-SMILES + P2 executemany. |
+| R4.5 | Haiku | Test-2 121→11 subprocesses (**executed in R1.1 as a derived allow-list; real prior count was 132**, see Test-2 above) + Test-3 `_free_port` → conftest + Test-4 parametrize invalid-SMILES + P2 executemany. |
 
 ### R5 — Docs & onboarding (parallel, low-risk)
 

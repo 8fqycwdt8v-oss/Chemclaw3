@@ -34,7 +34,6 @@ import csv
 import io
 import logging
 import re
-from collections import OrderedDict
 from collections.abc import Callable
 
 from docx import Document
@@ -44,6 +43,7 @@ from pydantic import BaseModel, Field
 from pypdf import PdfReader
 
 from chemclaw.agent.framing import frame_untrusted
+from chemclaw.core.bounded import BoundedLru
 from chemclaw.core.config import settings
 from chemclaw.core.session_context import get_current_session_id
 from chemclaw.core.tool_registry import tool
@@ -289,23 +289,34 @@ class AttachmentStore:
     """
 
     def __init__(self) -> None:
-        """Start empty; bounds come from config so a deployment can tune them."""
-        self._by_session: OrderedDict[str, list[Attachment]] = OrderedDict()
+        """Start empty; bounds come from config so a deployment can tune them.
+
+        The session map is the shared `chemclaw.core.bounded.BoundedLru` (S2), capped at the same
+        `service_max_live_sessions` the front door's live-session cache uses — attachments are
+        working material for a live conversation, so they live and die on the same bound.
+        """
+        self._by_session: BoundedLru[str, list[Attachment]] = BoundedLru(
+            lambda: settings.service_max_live_sessions
+        )
 
     def add(self, session_id: str, attachment: Attachment) -> None:
         """Attach a file to a session, evicting the oldest session when over the global bound."""
-        items = self._by_session.setdefault(session_id, [])
+        items = self._by_session.get(session_id)  # an upload marks the session recently active
+        if items is None:
+            items = []
         items.append(attachment)
         # Per-session bound: a chemist who uploads all morning must not fill the pod's memory.
         while len(items) > settings.attachment_max_per_session:
             items.pop(0)
-        self._by_session.move_to_end(session_id)
-        while len(self._by_session) > settings.service_max_live_sessions:
-            self._by_session.popitem(last=False)
+        self._by_session.put(session_id, items)  # inserting evicts the LRU session past the cap
 
     def for_session(self, session_id: str) -> list[Attachment]:
-        """Everything attached to a session, oldest first."""
-        return list(self._by_session.get(session_id, []))
+        """Everything attached to a session, oldest first.
+
+        `peek`, not `get`: reading a session's files is not the recency signal the eviction bound
+        measures (uploads are), so a read must not extend the session's slot.
+        """
+        return list(self._by_session.peek(session_id) or [])
 
 
 # One process-wide store, mirroring the front door's live-session cache: attachments belong to the
