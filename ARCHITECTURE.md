@@ -26,9 +26,9 @@ generates enters the graph through a **PR-gate**, so a human signs off before it
 
 | Subpackage | Layer | What it is |
 | --- | --- | --- |
-| `core/` | — | The shared kernel: config, database, HTTP, ids, logging, errors, embeddings, the Temporal client, the process metrics registry, and the ambient-turn primitives every layer stamps or reads (identity, session id, turn signals, the capability-tool registry). Everything imports it; it imports no sibling, and `test_layering.py` proves that. |
+| `core/` | — | The shared kernel: config, database, HTTP, ids, logging, errors, embeddings, the Temporal client, the process metrics registry, the bounded-LRU (`bounded.py`, the one eviction policy the R3.2 consolidation gave the four call sites that used to hand-roll it — the front door's session/budget/rate-limiter state and the agent's attachment store), and the ambient-turn primitives every layer stamps or reads (identity, session id, turn signals, the capability-tool registry). Everything imports it; it has zero module-scope import of a sibling, and exactly one declared *lazy* (function-scope) exception — `core/logging.py`'s redaction filter, which resolves connector bearer-token env-var names by importing `connectors.registry` inside a function so the value can be redacted from logs. `tests/test_layering.py` enforces both halves. |
 | `agent/` | 1 (MAF) | Conversation orchestration: the agent, its tool surface, sessions, identity, authorization, the plan/execute harness. |
-| `api/` | 1 (MAF) | The FastAPI + SSE front door that serves `agent/` over HTTP, behind OIDC. |
+| `api/` | 1 (MAF) | The FastAPI + SSE front door that serves `agent/` over HTTP, behind OIDC. `create_app` (`api/app.py`) is the sole composition root; the routes themselves live one level down in `api/routes/`, one module per resource (R3.2 split of a ~1100-line closure — see `api/routes/README.md`). |
 | `durable/` | 2 (Temporal) | Workflows, activities, and the `background-jobs` worker that hosts them. |
 | `connectors/` | 2 + 3 | The capability seam. One bundle per capability (`chem`, `calc`, `bo`, `qm`, `safety`, `molfp`, `rxnfp`), each colocating its `connector.yaml` manifest, its MCP tool server, its Temporal worker, and its own `skills/`. Adding a capability is adding a directory here — no core edit. |
 | `science/` | — | The pure-computation engines: `calc` (xTB/GFN2, conformers, pKa, solubility, thermochemistry), `bo` (BoFire), `safety` (hazard screening), `fingerprints` (ECFP4/DRFP + Tanimoto). No Temporal, no MCP. |
@@ -57,6 +57,15 @@ inside each connector.
 | `examples/` | A runnable walkthrough. Deliberately not shipped in the wheel. |
 | `tasks/` | The working files `CLAUDE.md` requires: `todo.md` and `lessons.md`. Plus `live-test/` — the transcripts and per-slice findings of a live probe run (`chemclaw.evals.live`), kept because the archived report cites them per probe and a finding whose reproduction is not on disk is a claim rather than evidence. Run output, never source: nothing imports it, and a later run overwrites it. |
 | `.github/workflows/` | CI. The **only** place GitHub Actions reads workflows from — see D-146. |
+
+## Entry points (`CHEMCLAW_COMPONENT`)
+
+One image, four process roles, chosen by `CHEMCLAW_COMPONENT` and dispatched by `deploy/entrypoint.sh`.
+The role → module → what-it-serves table lives once, in `deploy/README.md`, rather than forked here —
+the two would drift the way the map itself drifts if nobody re-derives it. The one thing worth stating
+here, because it is a property of the dispatch itself rather than of any one role: `entrypoint.sh`
+matches `connector-worker-*` **before** `connector-*` in its `case`, so a bundle's own Temporal worker
+is never swallowed by the more general connector-server pattern that shares its prefix.
 
 ## Names that look like duplicates and are not
 
