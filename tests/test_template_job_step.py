@@ -32,7 +32,7 @@ from pydantic import ValidationError
 from temporalio import workflow
 
 from chemclaw.agent.authz import AuthorizationError
-from chemclaw.connectors.registry import ConnectorError, discovered, enabled
+from chemclaw.connectors.registry import ConnectorError, enabled
 from chemclaw.core.config import settings
 from chemclaw.durable.registry import registered_activities
 from chemclaw.durable.template_activities import (
@@ -55,14 +55,15 @@ def fixture_bundle(monkeypatch: pytest.MonkeyPatch) -> Iterator[str]:
     resolving (D-168), which is the behaviour under test rather than an obstacle to it. The fixture
     bundle exists precisely so the durable path can be exercised without inventing a production
     capability, and its one job takes a single declared string.
+
+    Discovery is cached, but `tests/conftest.py`'s autouse fixture clears it around every test, so
+    repointing `connectors_dir` here needs no local `cache_clear()`.
     """
     monkeypatch.setattr("chemclaw.core.config.settings.connectors_dir", str(_FIXTURE_DIR))
     monkeypatch.setattr("chemclaw.core.config.settings.connectors_enabled", "")
-    discovered.cache_clear()
     (manifest,) = enabled()
     (job,) = manifest.jobs
     yield job.name
-    discovered.cache_clear()
 
 
 def _step(job: str, **arguments: object) -> JobStepInput:
@@ -252,15 +253,16 @@ def costly_bundle(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Iterator[s
     Written to disk and read back through the real registry rather than hand-built, because the
     two fields under test are exactly the ones `ResolvedJob` used to drop between the manifest and
     the launch — a hand-constructed `JobSpec` would prove nothing about that journey.
+
+    Discovery is cached, but `tests/conftest.py`'s autouse fixture clears it around every test, so
+    repointing `connectors_dir` here needs no local `cache_clear()`.
     """
     bundle = tmp_path / "costly"
     bundle.mkdir()
     (bundle / "connector.yaml").write_text(_EXPENSIVE_BUNDLE, encoding="utf-8")
     monkeypatch.setattr("chemclaw.core.config.settings.connectors_dir", str(tmp_path))
     monkeypatch.setattr("chemclaw.core.config.settings.connectors_enabled", "")
-    discovered.cache_clear()
     yield "run_costly_job"
-    discovered.cache_clear()
 
 
 def test_an_expensive_job_step_is_refused_for_an_unentitled_requester(

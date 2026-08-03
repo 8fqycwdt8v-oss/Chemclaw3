@@ -18,7 +18,6 @@ and is covered in CI (`test_molfp_postgres.py`, `test_rxnfp_postgres.py`) agains
 """
 
 import asyncio
-import socket
 import threading
 from collections.abc import Iterator
 from typing import Any
@@ -39,6 +38,7 @@ from chemclaw.connectors.server import connector_app
 from chemclaw.connectors.transport import DegradingHttpConnector
 from chemclaw.core.identity_context import reset_current_identity, set_current_identity
 from chemclaw.core.session_context import reset_current_session_id, set_current_session_id
+from tests.conftest import _free_port
 
 # Every discovered bundle that ships a local HTTP server, as `(name, manifest)`. Parametrizing
 # over discovery rather than a hardcoded list means a new bundle is covered on the day it is
@@ -48,13 +48,6 @@ _LOCAL_HTTP = [
     for name, (_dir, manifest) in sorted(discovered().items())
     if isinstance(manifest.endpoint, HttpEndpoint)
 ]
-
-
-def _free_port() -> int:
-    """An unused localhost port, so concurrent test runs cannot collide on a fixed one."""
-    with socket.socket() as sock:
-        sock.bind(("127.0.0.1", 0))
-        return int(sock.getsockname()[1])
 
 
 class _Server:

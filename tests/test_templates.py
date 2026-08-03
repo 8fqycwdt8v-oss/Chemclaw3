@@ -283,12 +283,8 @@ def test_a_broken_template_file_fails_discovery(
         encoding="utf-8",
     )
     monkeypatch.setattr("chemclaw.core.config.settings.templates_dir", str(tmp_path))
-    discovered.cache_clear()
-    try:
-        with pytest.raises(TemplateError, match="invalid template"):
-            discovered()
-    finally:
-        discovered.cache_clear()
+    with pytest.raises(TemplateError, match="invalid template"):
+        discovered()
 
 
 def test_the_name_lives_in_the_filename_only(
@@ -300,12 +296,8 @@ def test_the_name_lives_in_the_filename_only(
         encoding="utf-8",
     )
     monkeypatch.setattr("chemclaw.core.config.settings.templates_dir", str(tmp_path))
-    discovered.cache_clear()
-    try:
-        with pytest.raises(TemplateError, match="name is its filename"):
-            discovered()
-    finally:
-        discovered.cache_clear()
+    with pytest.raises(TemplateError, match="name is its filename"):
+        discovered()
 
 
 def test_the_validator_catches_a_step_naming_a_tool_that_does_not_exist(
@@ -318,11 +310,7 @@ def test_the_validator_catches_a_step_naming_a_tool_that_does_not_exist(
         "summary: x\nsteps:\n  - {id: one, kind: tool, tool: no_such_tool}\n", encoding="utf-8"
     )
     monkeypatch.setattr("chemclaw.core.config.settings.templates_dir", str(tmp_path))
-    discovered.cache_clear()
-    try:
-        problems = validate_templates()
-    finally:
-        discovered.cache_clear()
+    problems = validate_templates()
     assert any("unknown tool 'no_such_tool'" in problem for problem in problems)
 
 

@@ -18,7 +18,6 @@ module and these are one test file.
 """
 
 import asyncio
-import socket
 from collections.abc import Callable, Iterator
 
 import pytest
@@ -26,18 +25,12 @@ from starlette.testclient import TestClient
 
 from chemclaw.core.metrics_bridge import record_metric
 from chemclaw.core.worker_http import _build_app, worker_http
+from tests.conftest import _free_port
 
 
 def _client(ready: Callable[[], bool] = lambda: True) -> TestClient:
     """A client over the probe surface, without binding a port."""
     return TestClient(_build_app("test-worker", ready))
-
-
-def _free_port() -> int:
-    """A port the OS says is free — for the one test that must really bind one."""
-    with socket.socket() as probe:
-        probe.bind(("127.0.0.1", 0))
-        return int(probe.getsockname()[1])
 
 
 @pytest.fixture

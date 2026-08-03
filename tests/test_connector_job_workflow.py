@@ -33,7 +33,7 @@ from temporalio.worker import Worker
 
 from chemclaw.agent.session_events import record_session_event
 from chemclaw.connectors.jobs import build_job_tool, job_workflow_id
-from chemclaw.connectors.registry import discovered, enabled
+from chemclaw.connectors.registry import enabled
 from chemclaw.durable.connector_job import ConnectorJobResult, ConnectorJobWorkflow
 from chemclaw.durable.job_record import JobRecord, record_job
 from chemclaw.durable.memory_jobs import publish_memory_note_activity
@@ -129,11 +129,12 @@ def _fixture_job_tool(monkeypatch: pytest.MonkeyPatch) -> Any:
     """Point the registry at the fixture bundle and return its generated launch tool.
 
     Built through the registry rather than hand-constructed, so this exercises the real manifest
-    → tool path: a mistake in the fixture's YAML fails here as it would in production.
+    → tool path: a mistake in the fixture's YAML fails here as it would in production. Discovery
+    is cached, but `tests/conftest.py`'s autouse fixture guarantees it is empty on entry, so
+    repointing `connectors_dir` here takes effect without a local `cache_clear()`.
     """
     monkeypatch.setattr("chemclaw.core.config.settings.connectors_dir", str(_FIXTURE_DIR))
     monkeypatch.setattr("chemclaw.core.config.settings.connectors_enabled", "")
-    discovered.cache_clear()
     (manifest,) = enabled()
     (job,) = manifest.jobs
     return build_job_tool(manifest.name, job)

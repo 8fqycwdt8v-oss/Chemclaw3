@@ -23,7 +23,6 @@ is governance of the *call*, which is what this file pins.
 """
 
 import asyncio
-import socket
 import threading
 from collections.abc import Awaitable, Callable, Iterator, Mapping, Sequence
 from contextlib import AsyncExitStack
@@ -46,8 +45,9 @@ from mcp.server.fastmcp import FastMCP
 from chemclaw.agent.audit import AuditEvent
 from chemclaw.agent.chemclaw_agent import build_agent, connector_tools
 from chemclaw.connectors.identity import HEADER_ACTOR
-from chemclaw.connectors.registry import discovered, open_reachable
+from chemclaw.connectors.registry import open_reachable
 from chemclaw.core.identity_context import reset_current_identity, set_current_identity
+from tests.conftest import _free_port
 
 _BUNDLE = """\
 name: governed
@@ -132,13 +132,6 @@ class _RecordingSink:
         self.events.append(event)
 
 
-def _free_port() -> int:
-    """An unused localhost port, so concurrent runs cannot collide."""
-    with socket.socket() as sock:
-        sock.bind(("127.0.0.1", 0))
-        return int(sock.getsockname()[1])
-
-
 class _Server:
     """A uvicorn server on a background thread, started and stopped around one test."""
 
@@ -178,7 +171,11 @@ class _Observed:
 
 @pytest.fixture
 def governed(tmp_path: Any, monkeypatch: pytest.MonkeyPatch) -> Iterator[_Observed]:
-    """Serve a one-tool connector and point the registry at its bundle; yields what it observed."""
+    """Serve a one-tool connector and point the registry at its bundle; yields what it observed.
+
+    Discovery is cached, but `tests/conftest.py`'s autouse fixture clears it around every test, so
+    repointing `connectors_dir` here needs no local `cache_clear()`.
+    """
     from chemclaw.connectors.server import connector_app
 
     observed = _Observed()
@@ -208,12 +205,8 @@ def governed(tmp_path: Any, monkeypatch: pytest.MonkeyPatch) -> Iterator[_Observ
     )
     monkeypatch.setattr("chemclaw.core.config.settings.connectors_dir", str(tmp_path))
     monkeypatch.setattr("chemclaw.core.config.settings.connectors_enabled", "")
-    discovered.cache_clear()
-    try:
-        with _Server(app, port):
-            yield observed
-    finally:
-        discovered.cache_clear()
+    with _Server(app, port):
+        yield observed
 
 
 def _run_turn_calling(tool_name: str, sink: _RecordingSink) -> str:

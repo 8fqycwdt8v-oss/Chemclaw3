@@ -11,7 +11,6 @@ Bundles are written to `tmp_path` and `connectors_dir` is pointed at it, so noth
 on which connectors the repo happens to ship today.
 """
 
-from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
@@ -39,18 +38,6 @@ jobs:
 """
 
 
-@pytest.fixture(autouse=True)
-def _clear_discovery_cache() -> Iterator[None]:
-    """Discovery is cached for the process, so every test starts and leaves it empty.
-
-    Both directions matter: a stale cache would make a test see another test's bundles, and
-    leaving one behind would leak `tmp_path` bundles into the rest of the suite.
-    """
-    discovered.cache_clear()
-    yield
-    discovered.cache_clear()
-
-
 def _bundle(root: Path, name: str, body: str) -> Path:
     """Write one bundle directory with `connector.yaml` and return it."""
     bundle = root / name
@@ -76,10 +63,14 @@ def _http_manifest(name: str, port: int = 9001, tools: str = "search") -> str:
 
 
 def _use(monkeypatch: pytest.MonkeyPatch, root: Path, *, enabled_list: str = "") -> None:
-    """Point the registry at `root` as its only connectors dir, with the given enable-list."""
+    """Point the registry at `root` as its only connectors dir, with the given enable-list.
+
+    Every test here calls this exactly once, before its first `discovered()`/`enabled()` call, so
+    no local `cache_clear()` is needed: `tests/conftest.py`'s autouse fixture guarantees the cache
+    is already empty when this test started.
+    """
     monkeypatch.setattr("chemclaw.core.config.settings.connectors_dir", str(root))
     monkeypatch.setattr("chemclaw.core.config.settings.connectors_enabled", enabled_list)
-    discovered.cache_clear()
 
 
 def test_discovery_finds_bundles_by_folder_and_ignores_everything_else(
@@ -300,7 +291,6 @@ def test_the_first_connectors_dir_wins_a_name_collision(
     _bundle(shipped, "alpha", _http_manifest("alpha", port=8888))
     monkeypatch.setattr("chemclaw.core.config.settings.connectors_dir", f"{private}:{shipped}")
     monkeypatch.setattr("chemclaw.core.config.settings.connectors_enabled", "")
-    discovered.cache_clear()
     (manifest,) = enabled()
     assert isinstance(manifest.endpoint, HttpEndpoint | StdioEndpoint)
     assert "7777" in str(manifest.endpoint)
