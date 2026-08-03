@@ -1,0 +1,49 @@
+{
+  "probe": {
+    "id": "gr-22",
+    "section": 16,
+    "persona": "manager",
+    "bucket": "A",
+    "question": "That energy calculation from yesterday - where did it land, and does it change anything?",
+    "expects_tools": [
+      "find_past_jobs",
+      "get_durable_job_status",
+      "gather_evidence",
+      "find_calculations"
+    ],
+    "forbids_claims": [
+      "a job outcome described without having looked it up",
+      "a job invented when none matching is found"
+    ],
+    "direction": "Looks up what actually ran, reports its real state, and only then reasons about consequences. If nothing matches, saying so and asking which job is meant is correct."
+  },
+  "outcome": {
+    "probe_id": "gr-22",
+    "section": 16,
+    "persona": "manager",
+    "bucket": "A",
+    "question": "That energy calculation from yesterday - where did it land, and does it change anything?",
+    "answer": "I don't have the earlier part of this conversation in view right now, so I can't see which energy calculation you're referring to. Could you give me a bit more detail so I can find it?\n\nA few things that would help:\n- **What molecule or reaction** was the calculation on? (A SMILES, a compound name, or \"the Suzuki coupling we were optimizing\")\n- **What kind of calculation** — a single-molecule energy, a reaction energy, a solvent screen, or something else?\n- **Do you have the job id** if it was launched as a durable job, or did it complete inline?\n\nOnce I have that, I can look up the result and walk through what it means for whatever we're deciding.",
+    "answered": true,
+    "tools_called": [],
+    "tool_results": [],
+    "tools_failed": [],
+    "expected_tools_met": false,
+    "uncited_note_ids": [],
+    "failed_loudly": true,
+    "error_code": null,
+    "degraded": [
+      "durable-jobs (Temporal)"
+    ],
+    "jobs_started": [],
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "latency_seconds": 4.26,
+    "event_counts": {
+      "capability_degraded": 1,
+      "token": 11,
+      "answer": 1
+    },
+    "transport_error": null
+  }
+}

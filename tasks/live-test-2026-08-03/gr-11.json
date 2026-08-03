@@ -1,0 +1,46 @@
+{
+  "probe": {
+    "id": "gr-11",
+    "section": 4,
+    "persona": "lab_leader",
+    "bucket": "A",
+    "question": "Four factors, twelve experiments of budget, no prior data. How do I spend them?",
+    "expects_tools": [
+      "generate_screening_design"
+    ],
+    "forbids_claims": [
+      "the design called exhaustive, full or complete",
+      "a design offered with no statement of what is confounded with what"
+    ],
+    "direction": "A screening design, with its resolution and its aliasing said out loud. Twelve runs over four factors is a real constraint and the answer has to name what it buys and what it gives up."
+  },
+  "outcome": {
+    "probe_id": "gr-11",
+    "section": 4,
+    "persona": "lab_leader",
+    "bucket": "A",
+    "question": "Four factors, twelve experiments of budget, no prior data. How do I spend them?",
+    "answer": "I need to know what you're optimizing and what the four factors are before I can give you a design.\n\n**Tell me:**\n\n1. **What transformation or process?** (e.g., a specific coupling, condensation, cyclization — something I can look up for precedent)\n2. **The four factors** — are they continuous (temperature, equivalents, time) or categorical (catalyst choice, solvent, base)?\n3. **The outcome you're measuring** (yield, conversion, selectivity, ee, purity)?\n\nOnce I have that, I can either:\n- **Screen the full factorial** if all four are categorical or two-level (12 runs covers a lot of ground)\n- **Seed a Bayesian-optimization campaign** if any are continuous, so your 12 experiments adapt to what the early ones show rather than committing to a fixed grid\n- **Look for precedent** — if this transformation has been run before, I can see what worked and propose points that build on that rather than starting blind\n\nWhat are the factors?",
+    "answered": true,
+    "tools_called": [],
+    "tool_results": [],
+    "tools_failed": [],
+    "expected_tools_met": false,
+    "uncited_note_ids": [],
+    "failed_loudly": true,
+    "error_code": null,
+    "degraded": [
+      "durable-jobs (Temporal)"
+    ],
+    "jobs_started": [],
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "latency_seconds": 4.71,
+    "event_counts": {
+      "capability_degraded": 1,
+      "token": 16,
+      "answer": 1
+    },
+    "transport_error": null
+  }
+}

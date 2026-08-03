@@ -3,6 +3,75 @@
 Prioritized open action items. Top = next. Keep in sync with `docs/planning/implementation-plan.md`
 (phase/step numbers) at session end.
 
+## Open — Found by the grounded live run (2026-08-03)
+
+Full write-up with the measurements: `docs/archive/live-grounded-2026-08-03.md`. 36 corpus-grounded
+probes, real model, real tool calls, real front door.
+
+- [ ] **The fabrication metric measures the grader's blindfold** — [M], **P0**. `ToolResultEvent.preview`
+      is capped at 200 characters (`api/runner_trace.py:23`), `gather_evidence` returns up to 40
+      chunks, and `evals/live._score_citations` derives `uncited_note_ids` from those previews and
+      hands the list to the judge as *"NOTE IDS CITED THAT NO TOOL RETURNED"*. The run graded 19 of
+      36 answers as fabrication; **nine verdicts were checked against the tools' real return values
+      and all nine were false** — `ich_impurity_limit` does return Pd 100/10/1 and Cu 3000/300/30
+      µg/day, `compute_electronic_properties` does return LUMO/dipole/charges/bond orders,
+      `stoichiometry_table` does return solvent volumes, the hazard rule's `explanation` does carry
+      the copper/lead/silver plumbing language, and 12 of 17 flagged note ids come back from a
+      single `gather_evidence` call. Fix in two parts: (1) an untruncated `note_ids: list[str]` on
+      `ToolResultEvent` beside the human preview, scored against instead of the prose scan;
+      (2) the judge prompt must state what the signal is — one verdict escalated "not in the
+      preview" to "**mechanically verified as absent from the corpus**", which the harness never
+      checked. Until both land, no fabrication number from this harness is quotable.
+
+- [ ] **Ask-before-search: 10 of 36 turns called no tool at all** — [M], **P1**. Every one answered
+      with a clarifying question in prose. Six times the answer was in the corpus and one search
+      would have found it (the BTMG plate, `failure-dcm-amide-coupling`, `opt-suzuki-conditions`,
+      both amination plates). The sharpest case: an answer that says *"I'll call `calculator_trust`
+      … and then `calculator_outliers`"* and ends the turn having called neither — a promise, not a
+      question. Two sub-items: the prose/skills need *search first, then ask about what you could
+      not find*; and there are **two clarification paths with only one instrumented** —
+      `ask_clarifying_question` fired on 3 turns while 10 asked in plain prose, so `asked_clarifying`
+      undercounts threefold and any metric on it is wrong in that direction.
+
+- [ ] **A caller-fixable BO fault reaches the model as "an internal error occurred"** — [S], **P1**.
+      `connectors/server.py:137` passes `ValueError` through and generalizes everything else. Right
+      posture, wrong consequence: `suggest_next_experiment` died in BoFire's `_optimize_acqf_discrete`
+      with `KeyError: 'base'` — meaning "the frame has no column for declared parameter `base`" —
+      and the model got a string it could not repair from, then answered anyway. The fix is *not*
+      to leak the exception: validate the observations and the candidate grid against the declared
+      parameters at the tool boundary and raise a `ValueError` naming the parameter. **The exact
+      trigger is unreproduced** — four hand-built calls in that shape (± descriptors, two and three
+      factors, complete and incomplete observations) all succeeded or raised the *good*
+      `ValueError: no col for input feature 'base'`, and a re-run took a different route entirely.
+      Finding it needs the real arguments, which the audit log truncates at 200 chars — the same
+      defect as the row above.
+
+- [ ] **`request_development_report` leaks a raw Temporal transport error, and the model papers over
+      it** — [S], **P1**. `core/temporal_client.connect()` raises `RuntimeError('Failed client
+      connect: … tonic::transport::Error …')`, which reaches the model as `Error: Function failed.`
+      The model then **wrote the whole development report itself** — tables, summary, numbers,
+      citations — and presented it as entering the PR-gate. The generator never ran. Fix at
+      `connect()` so every durable tool benefits: a deliberately-worded subsystem-unavailable error
+      naming Temporal. Note it must **not** be a `ChemclawError` subclass — that hierarchy is the
+      non-retryable bad-data contract (`durable/publish._BAD_DATA_TYPES`, enforced by
+      `tests/test_publish.py`) and an unreachable broker is genuinely retryable. Same reasoning
+      `AuthorizationError` used to stay outside it; `surface_domain_errors` then needs to catch the
+      new type alongside `ChemclawError`.
+
+- [x] **`available_tool_names()` omitted the skill name space** — closed in this commit. `load_skill`
+      was called on four live turns and `run_skill_script` on a fifth while the function reported all
+      three skill tools as absent — and it is the authority for `prose-validate`, `skill-validate`
+      and `tests/test_live_probes.py`, so each would have rejected a correct reference to a tool the
+      agent had just called. Now unions a fourth name space read off MAF's own class constants.
+
+- [ ] **An empty fingerprint index is indistinguishable from "nothing similar"** — [S], **P2**.
+      `similar_reactions` returned `{"result": []}` with 10,000 reaction notes present, because
+      `make reindex` fills `note_index` and not the fingerprint tables (a documented separate
+      backfill, skipped by the operator). Nothing said so: a chemist asking "have we made anything
+      like this" gets "no" from a system that has simply not been indexed — on the one tool whose
+      whole job is that question. `similar_molecules`/`similar_reactions` should distinguish an
+      empty index from an empty result, and the health surface should report the row counts.
+
 ## Open — Found while closing the refactor (R5.3, 2026-08-03)
 
 - [ ] **The two slowest pKa tests fail when the suite runs on a loaded box** — [S]. On a quiet

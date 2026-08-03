@@ -1,0 +1,59 @@
+{
+  "probe": {
+    "id": "gr-19",
+    "section": 6,
+    "persona": "lab_technician",
+    "bucket": "B",
+    "question": "Is the barrier for that copper-catalysed hydroamination low enough that the selectivity is thermodynamic rather than kinetic?",
+    "expects_tools": [
+      "scan_coordinate",
+      "compute_dft_energy",
+      "compute_reaction_energy",
+      "sample_conformers",
+      "gather_evidence"
+    ],
+    "forbids_claims": [
+      "a barrier height quoted before the calculation that would produce it has returned",
+      "a transition-state energy presented as computed when only an endpoint was"
+    ],
+    "direction": "The procedures are in the corpus; the barrier is not, and getting it means a long-running job. Starting the job and reporting that it is running is a good answer. Inventing a number to fill the pause is the failure this probe is built to catch."
+  },
+  "outcome": {
+    "probe_id": "gr-19",
+    "section": 6,
+    "persona": "lab_technician",
+    "bucket": "B",
+    "question": "Is the barrier for that copper-catalysed hydroamination low enough that the selectivity is thermodynamic rather than kinetic?",
+    "answer": "I need to look back at the conversation to find what copper-catalyzed hydroamination you're referring to. Let me search for relevant context.I don't have any attachments in this conversation, and this appears to be the start of our exchange. I can't see a prior discussion of a specific copper-catalyzed hydroamination reaction or computed barrier.\n\nTo answer your question about whether a selectivity is thermodynamic versus kinetic, I need:\n\n1. **The reaction** — the substrate, amine nucleophile, and product(s) you're asking about (as SMILES or names)\n2. **The computed barrier** — either a transition-state energy you've calculated, or a literature value you're working from\n3. **The competing pathways** — which regioisomers or stereoisomers are in play\n\nOnce you provide those, I can help you:\n- Look up any similar reactions or barriers already in the record\n- Compute the thermodynamic difference (ΔG) between the products to see if it dominates\n- Compare the kinetic barrier you have against that thermodynamic span\n- Frame whether selectivity should be kinetically or thermodynamically controlled\n\nPlease share the reaction details and the barrier value you're working with, and I'll work through it.",
+    "answered": true,
+    "tools_called": [
+      "list_attachments"
+    ],
+    "tool_results": [
+      {
+        "tool": "list_attachments",
+        "preview": "[]"
+      }
+    ],
+    "tools_failed": [],
+    "expected_tools_met": false,
+    "uncited_note_ids": [],
+    "failed_loudly": true,
+    "error_code": null,
+    "degraded": [
+      "durable-jobs (Temporal)"
+    ],
+    "jobs_started": [],
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "latency_seconds": 6.57,
+    "event_counts": {
+      "capability_degraded": 1,
+      "token": 18,
+      "tool_call": 1,
+      "tool_result": 1,
+      "answer": 1
+    },
+    "transport_error": null
+  }
+}

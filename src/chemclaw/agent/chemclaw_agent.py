@@ -533,18 +533,43 @@ def _capability_tools(profile: AgentProfile | None = None) -> list[Any]:
     return inprocess
 
 
-def available_tool_names() -> set[str]:
-    """Every tool name the agent can resolve, across all three name spaces.
+def skill_tool_names() -> set[str]:
+    """The tools MAF's `SkillsProvider` registers on every agent it is attached to.
 
-    The three are genuinely separate — in-process `@tool` functions this process holds as symbols,
-    connector endpoint tools named only by a manifest allow-list, and the `run_<name>` launchers
-    generated from step templates — and only the union is meaningful. Exposed rather than inlined
-    because four other places need exactly this set: the skill validator, the template validator,
-    the prose-contract validator, and the test that checks the instructions against it. Three of
-    those unioned only the first two name spaces, so a skill or template step naming a template
-    launcher failed validation although the tool exists (D-117). One definition, one answer.
+    Read off MAF's own class constants rather than spelled out here, so an upstream rename becomes
+    a changed value instead of a silently stale allow-list.
     """
-    return {*registered_tool_names(), *connector_tool_names(), *template_tool_names()}
+    return {
+        SkillsProvider.LOAD_SKILL_TOOL_NAME,
+        SkillsProvider.READ_SKILL_RESOURCE_TOOL_NAME,
+        SkillsProvider.RUN_SKILL_SCRIPT_TOOL_NAME,
+    }
+
+
+def available_tool_names() -> set[str]:
+    """Every tool name the agent can resolve, across all four name spaces.
+
+    The four are genuinely separate — in-process `@tool` functions this process holds as symbols,
+    connector endpoint tools named only by a manifest allow-list, the `run_<name>` launchers
+    generated from step templates, and the skill tools MAF attaches — and only the union is
+    meaningful. Exposed rather than inlined because four other places need exactly this set: the
+    skill validator, the template validator, the prose-contract validator, and the test that checks
+    the instructions against it. Three of those unioned only the first two name spaces, so a skill
+    or template step naming a template launcher failed validation although the tool exists (D-117).
+    One definition, one answer.
+
+    The skill name space was the same omission a second time. `build_agent` attaches a
+    `SkillsProvider` unconditionally, and a live run recorded `load_skill` on four turns and
+    `run_skill_script` on a fifth — while this function reported all three as absent, so every
+    validator built on it would have rejected a correct reference to a tool the agent had just
+    called.
+    """
+    return {
+        *registered_tool_names(),
+        *connector_tool_names(),
+        *template_tool_names(),
+        *skill_tool_names(),
+    }
 
 
 def _reject_unknown_tool_names(profile: AgentProfile) -> None:

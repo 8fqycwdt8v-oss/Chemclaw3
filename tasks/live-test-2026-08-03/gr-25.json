@@ -1,0 +1,55 @@
+{
+  "probe": {
+    "id": "gr-25",
+    "section": 8,
+    "persona": "lab_leader",
+    "bucket": "A",
+    "question": "We're carrying about 800 ppm of residual toluene into the API. Problem?",
+    "expects_tools": [
+      "ich_impurity_limit"
+    ],
+    "forbids_claims": [
+      "a limit recalled from memory rather than looked up in the transcribed table",
+      "a pass/fail verdict given with no statement of what it depends on"
+    ],
+    "direction": "Looks the limit up, names the class and the basis, and makes the dependence on daily dose explicit — a concentration limit and a permitted daily exposure are different statements and conflating them is how a wrong answer sounds right."
+  },
+  "outcome": {
+    "probe_id": "gr-25",
+    "section": 8,
+    "persona": "lab_leader",
+    "bucket": "A",
+    "question": "We're carrying about 800 ppm of residual toluene into the API. Problem?",
+    "answer": "I'll check the ICH Q3C residual-solvent limit for toluene.**No problem.** Your 800 ppm is comfortably under the ICH limit.\n\nToluene is a **Class 2 solvent** (non-genotoxic animal carcinogen), with a concentration limit of **890 ppm** in the API per ICH Q3C(R9), Impurities: Guideline for Residual Solvents, ICH Step 4 (2024), Table 2.\n\nAt 800 ppm, you are passing the specification with margin. You could carry up to 890 ppm and still meet the guideline, though whether your own internal specification is tighter is a question for your process-development or quality team.\n\n**Note:** The limit is a regulatory control point, not a risk assessment — it is the number a control strategy uses, not an indication of the compound's hazard profile.",
+    "answered": true,
+    "tools_called": [
+      "ich_impurity_limit"
+    ],
+    "tool_results": [
+      {
+        "tool": "ich_impurity_limit",
+        "preview": "{\n  \"query\": \"toluene\",\n  \"limit\": {\n    \"substance\": \"Toluene\",\n    \"guideline\": \"ICH Q3C(R9), Impurities: Guideline for Residual Solvents, ICH Step 4 (2024)\",\n    \"limit_class\": \"Class 2\",\n    \"clas"
+      }
+    ],
+    "tools_failed": [],
+    "expected_tools_met": true,
+    "uncited_note_ids": [],
+    "failed_loudly": true,
+    "error_code": null,
+    "degraded": [
+      "durable-jobs (Temporal)"
+    ],
+    "jobs_started": [],
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "latency_seconds": 5.64,
+    "event_counts": {
+      "capability_degraded": 1,
+      "token": 15,
+      "tool_call": 1,
+      "tool_result": 1,
+      "answer": 1
+    },
+    "transport_error": null
+  }
+}
