@@ -102,9 +102,10 @@ and out, so a skill cannot outlive the tool it teaches.
 Set `CHEMCLAW_POSTGRES_DSN` and run `make db-migrate` (applies `infra/sql/*.sql` in filename
 order; each migration is idempotent, so re-running is safe). A new capability's table is a new
 hand-written `infra/sql/00N_*.sql`. Note the bit-width coupling: a `bit(N)` fingerprint column
-must match `CHEMCLAW_ECFP_BITS` / `CHEMCLAW_DRFP_BITS` (see `config.py`). Applied migrations are
-recorded in the `schema_migrations` ledger with a checksum (D-034), so re-running is safe and an
-edited already-applied file is flagged as drift rather than silently skipped.
+must match `CHEMCLAW_ECFP_BITS` / `CHEMCLAW_DRFP_BITS` (see `core/config/fingerprints.py`).
+Applied migrations are recorded in the `schema_migrations` ledger with a checksum (D-034), so
+re-running is safe and an edited already-applied file is flagged as drift rather than silently
+skipped.
 
 **`job_records` is the one table a chemist's answers now depend on** (023, D-157): every finished
 connector job writes what it ran, on what arguments, its whole result, and the reason it was
@@ -503,6 +504,19 @@ port and the worker probe port.
 Migrations run as a Helm `pre-install,pre-upgrade` hook Job that completes before any app container
 starts (D-034), so a failure here blocks the release rather than half-applying it. Three things were
 missing until D-2026-08-01-a-migration-waits-in-front-of-live-traffic, and each has its own symptom.
+
+**Why `helm rollback` below is safe: every migration in `infra/sql/` only expands.** Checked over
+the whole directory, not one `infra/sql/*.sql` file contains a `DROP TABLE` or `DROP COLUMN` — every
+one is a new table or an `ADD COLUMN`, and `chemclaw.science.calc.migrate` refuses to let an applied
+file change afterward (a checksum mismatch raises `MigrationError`; see (ii)). So the schema only
+ever grows, which is exactly what a rollback needs: the older binary a rollback restores was written
+against a schema that is still a strict subset of whatever is live, so every table and column it
+expects is still there. That is the *expand* half of expand/contract, and this repo has practiced it
+consistently — measured, not assumed. The **contract** half — dropping a column only once no
+deployed code still reads or writes it — has never actually been exercised here: nothing has ever
+been dropped, and no test or gate enforces the ordering the way `migrate`'s checksum check enforces
+immutability. A migration that drops something would have to earn that safety by the same judgement
+any production migration needs, not by a mechanism this repo has built for it.
 
 **The Job failed after ~5 s with `canceling statement due to lock timeout`.** Working as intended:
 an `ALTER TABLE` needs `ACCESS EXCLUSIVE` and could not get it, because something else holds a lock

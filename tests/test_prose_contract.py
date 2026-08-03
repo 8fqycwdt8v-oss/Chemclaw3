@@ -8,6 +8,8 @@ fail at call time. `mypy` cannot see prose, `pytest` did not read it, and `make 
 checks frontmatter.
 """
 
+from pathlib import Path
+
 import pytest
 
 import chemclaw.cli.validate_prose_contract as prose
@@ -109,6 +111,11 @@ def test_the_allowlist_is_small_and_deliberate() -> None:
 # too, and a literal backticked path that does not resolve is exactly what it fails on — which is
 # the same rule, one corpus over.
 _MISSING = "/".join(("vanished", "module.py"))
+# A second one, for the Makefile tests below that need two distinct nonexistent paths in the same
+# fixture (one in a comment, one in a recipe command) to tell which was scanned. Same reason as
+# `_MISSING`: joined, not written contiguously, so `test_docstring_paths.py`'s whole-file scan
+# does not read it as a dangling pointer of its own.
+_MISSING_RECIPE = "/".join(("nonexistent", "recipe.py"))
 
 
 def test_the_shipped_operator_documents_name_only_things_that_exist() -> None:
@@ -224,3 +231,71 @@ def test_the_planning_documents_are_deliberately_out_of_scope() -> None:
     assert not any("docs/planning/" in origin for origin in prose._operator_sources())
     assert not any("docs/decisions/" in origin for origin in prose._operator_sources())
     assert not any("docs/archive/" in origin for origin in prose._operator_sources())
+
+
+def test_makefile_and_env_example_join_the_operator_corpus() -> None:
+    """F17: both were outside `_OPERATOR_DOCS`.
+
+    Exactly how `.env.example:3` naming the pre-split, bare-filename `config.py` survived a gate
+    built to catch precisely that.
+    """
+    sources = prose._operator_sources()
+    assert "Makefile" in sources
+    assert ".env.example" in sources
+
+
+def test_a_makefile_recipe_command_is_not_read_as_prose(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A recipe command's backtick is shell command substitution, not a code span.
+
+    Only the actual shell command line is excluded, so a recipe naming a path that does not
+    exist — the shape a future `helm template` invocation could take — must not be reported.
+    """
+    (tmp_path / "Makefile").write_text(
+        f"# comment mentioning `{_MISSING}`\nlint:\n\techo `{_MISSING_RECIPE}`\n"
+    )
+    monkeypatch.setattr(prose, "_ROOT", tmp_path)
+    sources = prose._operator_sources()
+    assert _MISSING in sources["Makefile"]
+    assert _MISSING_RECIPE not in sources["Makefile"]
+
+
+def test_a_makefile_atsign_comment_is_read_as_prose(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A recipe's `@#`-prefixed line is a real comment.
+
+    Shell treats `#...` as inert too, so the prose after it — including the
+    `helm-validate`/`deps-audit` rationale blocks — is scanned.
+    """
+    (tmp_path / "Makefile").write_text(f"target:\n\t@# see `{_MISSING}`\n")
+    monkeypatch.setattr(prose, "_ROOT", tmp_path)
+    sources = prose._operator_sources()
+    assert _MISSING in sources["Makefile"]
+
+
+def test_a_targets_trailing_help_text_is_read_as_prose(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """`target: ## help text (D-999)` is Make syntax, never handed to a shell.
+
+    The case that makes scoping to bare `#`-only lines the wrong rule: `explain: ## ... (D-166)`
+    is exactly this shape in the shipped `Makefile` and is a real citation, not a recipe.
+    """
+    (tmp_path / "Makefile").write_text(f"explain:  ## see `{_MISSING}`\n\tuv run true\n")
+    monkeypatch.setattr(prose, "_ROOT", tmp_path)
+    sources = prose._operator_sources()
+    assert _MISSING in sources["Makefile"]
+
+
+def test_env_example_is_read_whole(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """`.env.example` has no comment marker to strip.
+
+    It is comments plus `KEY=VALUE` throughout, so every line, backticked or not, is scanned.
+    """
+    text = f"# maps to `{_MISSING}`\nCHEMCLAW_LOG_LEVEL=INFO\n"
+    (tmp_path / ".env.example").write_text(text)
+    monkeypatch.setattr(prose, "_ROOT", tmp_path)
+    sources = prose._operator_sources()
+    assert sources[".env.example"] == text
