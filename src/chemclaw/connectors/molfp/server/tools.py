@@ -22,7 +22,12 @@ from chemclaw.science.fingerprints.molfp.search import (
     find_substructure_matches,
     record_for,
 )
-from chemclaw.science.fingerprints.store import FingerprintStore, default_molecule_store
+from chemclaw.science.fingerprints.store import (
+    FingerprintSearch,
+    FingerprintStore,
+    default_molecule_store,
+    log_index_size,
+)
 
 server = FastMCP("mcp-molfp")
 _store: FingerprintStore = default_molecule_store()
@@ -31,20 +36,26 @@ _store: FingerprintStore = default_molecule_store()
 @server.tool()
 async def similar_molecules(
     smiles: str, top_k: int | None = None, threshold: float | None = None
-) -> list[MoleculeHit]:
+) -> FingerprintSearch[MoleculeHit]:
     """Find stored molecules structurally similar to `smiles`, most similar first.
 
     Each hit carries `compound_note_id` — cite that note rather than searching for the SMILES.
     `top_k` and `threshold` (Tanimoto floor) default to the configured values.
+
+    **Read `verdict` before answering.** Empty `hits` with `index_empty: true` means the index
+    holds nothing and the question was not answered — it is not a finding of novelty.
     """
     return await find_similar_molecules(_store, smiles, top_k, threshold)
 
 
 @server.tool()
-async def substructure_matches(query: str) -> list[MoleculeHit]:
+async def substructure_matches(query: str) -> FingerprintSearch[MoleculeHit]:
     """Return stored molecules containing the `query` fragment (SMARTS or SMILES).
 
     Each hit carries `compound_note_id` — cite that note rather than searching for the SMILES.
+
+    **Read `verdict` before answering.** Empty `hits` with `index_empty: true` means the index
+    holds nothing and the question was not answered — not that no molecule bears the fragment.
     """
     return await find_substructure_matches(_store, query)
 
@@ -54,6 +65,17 @@ async def index_molecule(record_id: str, smiles: str) -> str:
     """Add or replace a molecule in the fingerprint index; return its id."""
     await _store.add(record_for(record_id, smiles))
     return record_id
+
+
+async def report_index_size() -> None:
+    """Log this connector's index size at startup — the operator half of the empty-index defect.
+
+    Wired into the app's lifespan (`src/chemclaw/connectors/molfp/server/app.py`), so the pod
+    that owns `molecule_fingerprints` says on its first line whether it has anything to search.
+    Lives here rather than in the app module because `_store` is this module's, and the transport
+    layer has no business reaching for it.
+    """
+    await log_index_size(_store, "molecule")
 
 
 def main() -> None:

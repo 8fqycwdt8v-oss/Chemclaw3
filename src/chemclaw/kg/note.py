@@ -89,6 +89,59 @@ def cited_ids(text: str) -> list[str]:
     return list(ordered)
 
 
+# How this system serializes a note's id into a tool result: the `id="..."` attribute of the
+# `<retrieved-note-...>` envelope `gather_evidence` wraps chunks in, and the `id` / `note_id` /
+# `source_note_id` fields of anything dumped as JSON (`expand_note`, `find_notes`, `EvidenceChunk`,
+# every connector returning a note model). These are *our own* output formats rather than guesses
+# about arbitrary text, which is what makes scanning for them honest — and `tests/test_note.py`
+# pins them against real tool output, so a fourth serialization breaks a test instead of silently
+# narrowing the scan.
+#
+# The three keys are enumerated rather than matched as a `*_id` suffix, because that would also
+# swallow `structure_id`, `calc_id`, `job_id` and `session_id` — none of which names a note, and
+# every one of which would make an answer look grounded in something it never saw.
+#
+# The `\\?` before each quote is not defensive padding. A `gather_evidence` result is JSON whose
+# `content` field holds the `<retrieved-note ... id="X">` envelope as *text*, so on the wire the
+# envelope's quotes arrive escaped — `id=\"X\"` — and a pattern insisting on a bare quote matches
+# nothing at all on the one tool this check exists for. Found by pinning the fixture to a real
+# result instead of an idealized one.
+_SERIALIZED_ID = re.compile(
+    r"""\\?["']?\b(?:source_note_id|note_id|id)\\?["']?\s*[=:]\s*"""
+    r"""\\?["']([A-Za-z0-9][A-Za-z0-9_.-]*)"""
+)
+
+
+def mentioned_ids(text: str) -> list[str]:
+    """Every note id a *tool result* put in front of the model, deduped, in first-seen order.
+
+    The counterpart to `cited_ids`, and deliberately a different question. `cited_ids` reads what
+    an author *claims* (`[[wikilinks]]`); this reads what a payload *contains* — the ids of notes
+    the turn actually retrieved, however they were serialized. Both live here for the same reason:
+    a citation reader and a citation writer that disagree about what an id looks like is how a
+    grounding check silently stops working.
+
+    Wikilinks count too. If `expand_note` returns a note whose body cites `[[playbook-degassing]]`,
+    that id was in the context window this turn, and an answer repeating it is traceable to
+    something the turn saw rather than to the model's memory — which is the only question a
+    grounding check is entitled to ask.
+
+    Why this exists at all: the live harness scored citations against `ToolResultEvent.preview`,
+    truncated to 200 characters for the browser, while `gather_evidence` returns up to 40 chunks.
+    Every id past the first chunk read as fabricated, and a run graded 19 of 36 answers as
+    fabrication with nine of nine checked verdicts false — see
+    `docs/archive/live-grounded-2026-08-03.md`.
+    The preview's budget is right for a UI and wrong for a grounding check, so the two now read
+    different fields off one event instead of sharing the wrong one.
+    """
+    ordered: dict[str, None] = {}
+    for note_id in _SERIALIZED_ID.findall(text):
+        ordered.setdefault(note_id, None)
+    for note_id in cited_ids(text):
+        ordered.setdefault(note_id, None)
+    return list(ordered)
+
+
 # `id` and `type` become file-path segments (`knowledge/<type>/<id>.md`) and a git
 # branch (`note/<id>`) in the PR-gate, and ELN entry ids flow in from external JSON.
 # Constraining them to a plain slug at the model is the traversal/ref-injection

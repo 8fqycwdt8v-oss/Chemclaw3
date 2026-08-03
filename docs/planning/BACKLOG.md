@@ -3,12 +3,33 @@
 Prioritized open action items. Top = next. Keep in sync with `docs/planning/implementation-plan.md`
 (phase/step numbers) at session end.
 
+## Open — Found while fixing the grounded live run (2026-08-03)
+
+- [ ] **There is no documented way to populate the fingerprint index** — [S]. Chasing F5 turned up
+      that the "separate documented backfill" the operator was assumed to have skipped does not
+      exist. `make reindex` is note-index-only; the fingerprint tables are filled as a side effect
+      of the ELN sync (`ElnSyncWorkflow`) or by `index_molecule`/`index_reaction` one record at a
+      time, and `docs/guides/runbook.md` covers only re-indexing after a *definition* change (§vi).
+      An operator standing up a corpus has no procedure to follow, which is how a live run reached
+      1,025 indexed notes and 0 fingerprints. The connectors now say so loudly at startup, so this
+      is a documentation gap rather than a silent one — but a runbook section (or a `make` target)
+      is what actually closes it.
+
+- [ ] **A BO observation naming an undeclared parameter is silently dropped** — [S], and it is a
+      *fabrication* vector rather than an error-handling one, so it is worth a second look beyond
+      the input validation that now rejects it. Measured while fixing F3: BoFire ignores the stray
+      column and returns candidates, so `ligand: PPh3` against a problem that never declared
+      `ligand` yielded a confident `predicted_value=66.5` from a decision space that had discarded
+      it. The boundary check closes the path from the tool; what is not checked is whether any
+      other caller (the durable campaign path builds its own observations) can reach the same
+      silent drop.
+
 ## Open — Found by the grounded live run (2026-08-03)
 
 Full write-up with the measurements: `docs/archive/live-grounded-2026-08-03.md`. 36 corpus-grounded
 probes, real model, real tool calls, real front door.
 
-- [ ] **The fabrication metric measures the grader's blindfold** — [M], **P0**. `ToolResultEvent.preview`
+- [x] **The fabrication metric measures the grader's blindfold** — [M], **P0**. `ToolResultEvent.preview`
       is capped at 200 characters (`api/runner_trace.py:23`), `gather_evidence` returns up to 40
       chunks, and `evals/live._score_citations` derives `uncited_note_ids` from those previews and
       hands the list to the judge as *"NOTE IDS CITED THAT NO TOOL RETURNED"*. The run graded 19 of
@@ -22,8 +43,9 @@ probes, real model, real tool calls, real front door.
       (2) the judge prompt must state what the signal is — one verdict escalated "not in the
       preview" to "**mechanically verified as absent from the corpus**", which the harness never
       checked. Until both land, no fabrication number from this harness is quotable.
+      **Closed. `ToolResultEvent` now carries an untruncated `note_ids`, filled from the full tool output by `runner_trace`; `_score_citations` is a set difference against it, which also closed the hyphen-suffix hole the substring scan had. The judge prompt states what the signal does and does not claim, since telling a grader to trust a number obliges us to say what it sees.**
 
-- [ ] **Ask-before-search: 10 of 36 turns called no tool at all** — [M], **P1**. Every one answered
+- [x] **Ask-before-search: 10 of 36 turns called no tool at all** — [M], **P1**. Every one answered
       with a clarifying question in prose. Six times the answer was in the corpus and one search
       would have found it (the BTMG plate, `failure-dcm-amide-coupling`, `opt-suzuki-conditions`,
       both amination plates). The sharpest case: an answer that says *"I'll call `calculator_trust`
@@ -32,8 +54,9 @@ probes, real model, real tool calls, real front door.
       not find*; and there are **two clarification paths with only one instrumented** —
       `ask_clarifying_question` fired on 3 turns while 10 asked in plain prose, so `asked_clarifying`
       undercounts threefold and any metric on it is wrong in that direction.
+      **Closed, with the diagnosis corrected: "Look before you ask" was already in the instructions and was ignored on all ten turns, so restating it would have changed nothing. What is missing is that `ask_clarifying_question` is never *named* there — which is why 10 of 13 clarifications took the uninstrumented prose path — and that nothing forbade naming a tool you do not call. Both added, and `evals/live` counts the prose path separately so the metric stops being wrong in a known direction.**
 
-- [ ] **A caller-fixable BO fault reaches the model as "an internal error occurred"** — [S], **P1**.
+- [x] **A caller-fixable BO fault reaches the model as "an internal error occurred"** — [S], **P1**.
       `connectors/server.py:137` passes `ValueError` through and generalizes everything else. Right
       posture, wrong consequence: `suggest_next_experiment` died in BoFire's `_optimize_acqf_discrete`
       with `KeyError: 'base'` — meaning "the frame has no column for declared parameter `base`" —
@@ -45,18 +68,20 @@ probes, real model, real tool calls, real front door.
       `ValueError: no col for input feature 'base'`, and a re-run took a different route entirely.
       Finding it needs the real arguments, which the audit log truncates at 200 chars — the same
       defect as the row above.
+      **Closed by validating at the tool boundary, naming the parameter and the observation index. The exact live trigger is still unreproduced and the code says so rather than claiming otherwise. Measuring the two directions separately changed what the finding is — see the silent-drop row above, which is the worse half.**
 
-- [ ] **`request_development_report` leaks a raw Temporal transport error, and the model papers over
-      it** — [S], **P1**. `core/temporal_client.connect()` raises `RuntimeError('Failed client
-      connect: … tonic::transport::Error …')`, which reaches the model as `Error: Function failed.`
-      The model then **wrote the whole development report itself** — tables, summary, numbers,
-      citations — and presented it as entering the PR-gate. The generator never ran. Fix at
-      `connect()` so every durable tool benefits: a deliberately-worded subsystem-unavailable error
-      naming Temporal. Note it must **not** be a `ChemclawError` subclass — that hierarchy is the
-      non-retryable bad-data contract (`durable/publish._BAD_DATA_TYPES`, enforced by
-      `tests/test_publish.py`) and an unreachable broker is genuinely retryable. Same reasoning
-      `AuthorizationError` used to stay outside it; `surface_domain_errors` then needs to catch the
-      new type alongside `ChemclawError`.
+- [x] **`request_development_report` leaked a raw Temporal transport error, and the model papered
+      over it** — closed in this commit. `connect()` raised `RuntimeError('Failed client connect: …
+      tonic::transport::Error …')`, which reached the model as `Error: Function failed.`; the model
+      then **wrote the whole development report itself** — tables, summary, numbers, citations —
+      and presented it as entering the PR-gate. `connect()` now raises `SubsystemUnavailableError`
+      (`core/errors.py`) naming Temporal and saying nothing was queued, with the transport error as
+      `__cause__`, and `surface_domain_errors` hands it to the model verbatim. Deliberately **not**
+      a `ChemclawError`: that hierarchy is the non-retryable bad-data contract, and an unreachable
+      broker is retryable — `tests/test_publish.py` now asserts its *absence* from `_BAD_DATA_TYPES`
+      with the reason, so a completeness sweep cannot quietly add it. `connectors/jobs.py`'s own
+      copy of the message is gone with it: one client, one message, and that copy had been
+      mislabelling the outage as non-retryable bad data on the template activity path.
 
 - [x] **`available_tool_names()` omitted the skill name space** — closed in this commit. `load_skill`
       was called on four live turns and `run_skill_script` on a fifth while the function reported all
@@ -64,7 +89,7 @@ probes, real model, real tool calls, real front door.
       and `tests/test_live_probes.py`, so each would have rejected a correct reference to a tool the
       agent had just called. Now unions a fourth name space read off MAF's own class constants.
 
-- [ ] **An empty fingerprint index is indistinguishable from "nothing similar"** — [S], **P2**.
+- [x] **An empty fingerprint index is indistinguishable from "nothing similar"** — [S], **P2**.
       `similar_reactions` returned `{"result": []}` with 10,000 reaction notes present, because
       `make reindex` fills `note_index` and not the fingerprint tables (a documented separate
       backfill, skipped by the operator). Nothing said so: a chemist asking "have we made anything
@@ -73,6 +98,7 @@ probes, real model, real tool calls, real front door.
       empty index from an empty result, and the health surface should report the row counts.
 
 ## Open — Found while closing the refactor (R5.3, 2026-08-03)
+      **Closed. A `FingerprintSearch` envelope carries the distinction as a `computed_field` (a bare property would not survive `model_dump()`), the emptiness probe runs only when a search found nothing, and each bundle logs its index size at startup — the connector owns the table, so core never reaches into it. Extended to `substructure_matches`, which fails the same way.**
 
 - [ ] **The two slowest pKa tests fail when the suite runs on a loaded box** — [S]. On a quiet
       machine the suite is green in ~312 s (2852 passed, 127 skipped, measured twice on

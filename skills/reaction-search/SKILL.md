@@ -44,6 +44,10 @@ correctly but uses them well (G6).
   "no precedent exists." If a core-substrate-only query returns nothing, say that caveat, try
   widening the query with plausible reagents/conditions, or fall back to `similar_molecules` on
   the substrates before concluding there is no precedent.
+- **An unbuilt index is not an empty answer.** Every fingerprint search returns a `verdict`
+  beside its `hits`. When `index_empty` is true, nothing has been indexed and the search never
+  ran: report that the fingerprint index has not been populated and that an operator must build
+  it. Do not say "we have no precedent for this" — that claim needs a corpus to be false about.
 
 ## What Tanimoto counts as precedent
 

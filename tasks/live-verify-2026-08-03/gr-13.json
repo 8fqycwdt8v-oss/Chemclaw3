@@ -1,0 +1,90 @@
+{
+  "probe": {
+    "id": "gr-13",
+    "section": 3,
+    "persona": "lab_leader",
+    "bucket": "A",
+    "question": "The Suzuki conditions campaign has been running a while and the last few points went backwards. Do I keep pushing or reset?",
+    "expects_tools": [
+      "resume_campaign",
+      "suggest_next_experiment",
+      "gather_evidence",
+      "expand_note",
+      "recall_observations"
+    ],
+    "forbids_claims": [
+      "a surrogate model implied where none was fitted",
+      "a trend claimed without reading the runs in their recorded order"
+    ],
+    "direction": "Read the campaign in time order first. There are two defensible paths — reason from the series, or optimize over it — and the answer should say which it took and why. A few points going backwards is not automatically a signal; whether it is depends on the spread of what came before."
+  },
+  "outcome": {
+    "probe_id": "gr-13",
+    "section": 3,
+    "persona": "lab_leader",
+    "bucket": "A",
+    "question": "The Suzuki conditions campaign has been running a while and the last few points went backwards. Do I keep pushing or reset?",
+    "answer": "I need to find the Suzuki conditions campaign to see what the recent runs have shown. Let me search for it.Let me search more broadly for Suzuki campaign information:I found a campaign note. Let me expand it to see the full history and recent results:The note is truncated and doesn't show the recent runs. Let me look at the linked reaction note and bo-candidate suggestion to get more detail:I can see the campaign structure but not the recent runs and why they went backwards. Let me search for any notes about recent experimental results or failures on this campaign:I can see the campaign exists but I don't have visibility into the detailed run table showing the recent points and their results — that data isn't captured in the notes I can reach. To give you a decision on whether to keep pushing or reset, I need to see:\n\n1. **The recent run sequence**: which conditions gave the backward steps, and what were the actual yields\n2. **The pattern**: are the last few points clustered around a suspected optimum and now stuck in the same region, or are they exploring new territory and falling off\n3. **Why they declined**: is it noise (high variance), did the surrogate model diverge from reality, or is there a real physical reason (e.g. too much Pd causing decomposition, too low a temperature missing conversion)\n\n**Questions to clarify:**\n\n- Do you have the last 5–10 runs with their conditions and yields? If you can paste them, I can read the pattern and tell you whether it looks like convergence noise (keep a few more tight iterations nearby), a plateau with local exploration failures (reset with a different parameter region), or misaligned feedback (the model has diverged from what actually works).\n\n- What was the best yield, and what have the last 3 points been?\n\n- Did anything change in the setup between the good runs and the backward ones — solvent batch, catalyst source, glassware, washing procedure?\n\nThe note [[failure-aqueous-protodeboronation]] is flagging something real: there's a gap between LCAP assay and isolated yield from protodeboronation, so optimizing on the wrong readout would mislead the model. Are you tracking the same metric throughout, or did it switch?",
+    "answered": true,
+    "tools_called": [
+      "find_past_jobs",
+      "gather_evidence",
+      "expand_note",
+      "expand_note",
+      "expand_note",
+      "find_notes",
+      "find_past_jobs"
+    ],
+    "tool_results": [
+      {
+        "tool": "find_past_jobs",
+        "preview": "[]"
+      },
+      {
+        "tool": "gather_evidence",
+        "preview": "[{\"content\": \"<retrieved-note-4ac8bd4b8ff10031 id=\\\"opt-suzuki-conditions\\\">\\nRepeated runs of the biaryl coupling under varied temperature, Pd loading and base.\\n\\n- transformation: rxn-suzuki-biaryl"
+      },
+      {
+        "tool": "expand_note",
+        "preview": "{\"note\": {\"id\": \"opt-suzuki-conditions\", \"type\": \"optimization-campaign\", \"compound_smiles\": null, \"tags\": [\"optimization\"], \"created_by\": \"human\", \"source\": \"seed-corpus\", \"confidence\": 0.85, \"valid_"
+      },
+      {
+        "tool": "expand_note",
+        "preview": "{\"note\": {\"id\": \"rxn-suzuki-biaryl\", \"type\": \"reaction\", \"compound_smiles\": null, \"tags\": [\"cross-coupling\", \"suzuki\"], \"created_by\": \"human\", \"source\": \"seed-corpus\", \"confidence\": 0.85, \"valid_from\""
+      },
+      {
+        "tool": "expand_note",
+        "preview": "{\"note\": {\"id\": \"bo-suzuki-next\", \"type\": \"bo-candidate\", \"compound_smiles\": null, \"tags\": [\"bo\", \"suggestion\"], \"created_by\": \"human\", \"source\": \"seed-corpus\", \"confidence\": 0.5, \"valid_from\": null, "
+      },
+      {
+        "tool": "find_notes",
+        "preview": "[]"
+      },
+      {
+        "tool": "find_past_jobs",
+        "preview": "[]"
+      }
+    ],
+    "tools_failed": [],
+    "expected_tools_met": true,
+    "uncited_note_ids": [],
+    "failed_loudly": true,
+    "error_code": null,
+    "degraded": [
+      "durable-jobs (Temporal)"
+    ],
+    "jobs_started": [],
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": false,
+    "latency_seconds": 19.02,
+    "event_counts": {
+      "capability_degraded": 1,
+      "token": 43,
+      "tool_call": 7,
+      "tool_result": 7,
+      "answer": 1
+    },
+    "transport_error": null
+  }
+}

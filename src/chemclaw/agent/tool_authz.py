@@ -23,7 +23,7 @@ from agent_framework import FunctionInvocationContext, function_middleware
 
 from chemclaw.agent.authz import AuthorizationError, authorize_tool, side_effecting_tools
 from chemclaw.agent.turn_flags import is_dry_run
-from chemclaw.core.errors import ChemclawError
+from chemclaw.core.errors import ChemclawError, SubsystemUnavailableError
 from chemclaw.core.turn_signals import record_tool_failure
 
 # How much of a failure message reaches the trace. Long enough for a chemist to recognise the
@@ -131,9 +131,9 @@ async def surface_domain_errors(
     context: FunctionInvocationContext,
     call_next: Callable[[], Awaitable[None]],
 ) -> None:
-    """Turn a tool's own bad-input error into its own clear result, not MAF's generic failure.
+    """Turn a tool's own bad-input or outage error into a clear result, not MAF's generic failure.
 
-    Same gap as `surface_authorization_denials`, a second known-safe exception type: every
+    Same gap as `surface_authorization_denials`, over the two known-safe exception types: every
     `ChemclawError` (`chemclaw.core.errors`) is chemclaw's own established "this input/data is
     invalid" contract, raised only with a deliberately-worded, caller-safe message (e.g.
     `expand_note`'s "no note with id 'X'" — it echoes back the id the model itself supplied,
@@ -146,13 +146,24 @@ async def surface_domain_errors(
     contract. Every other exception is left untouched, still falling through to MAF's generic
     (safe-by-omission) handling.
 
+    `SubsystemUnavailableError` (`chemclaw.core.errors`) is the second type, and qualifies as safe
+    for the same *deliberate wording* reason rather than by inheritance — it is not a
+    `ChemclawError`, because "the broker is down" is the opposite claim to "your data is invalid"
+    (see its docstring). It is raised in exactly one place, `chemclaw.core.temporal_client.connect`,
+    with one hand-written sentence that names the subsystem and the consequence and nothing else:
+    the driver text, the address and the port stay on `__cause__` for the log. A live finding again:
+    an unreachable Temporal reached `request_development_report` as "Error: Function failed.", and
+    the model answered by writing the entire development report by hand and presenting it as
+    PR-gated. Telling it "the durable backend is down, nothing was queued" is the whole difference
+    between a reported outage and a fabricated deliverable.
+
     Attach this alongside `surface_authorization_denials`, outside the audit middleware, for
     the same reason: the exception must still reach audit unchanged (recorded as an `error`
     outcome) before this layer converts it into what the model sees.
     """
     try:
         await call_next()
-    except ChemclawError as exc:
+    except (ChemclawError, SubsystemUnavailableError) as exc:
         context.result = f"Error: {exc}"
 
 

@@ -62,6 +62,14 @@ def _summary(probes: list[Probe], outcomes: list[ProbeOutcome], grades: list[Jud
     lines.append(f"| **failed silently** (no answer, no error) | **{len(silent)}** |")
     lines.append(f"| **answers citing a note no tool returned** | **{len(uncited)}** |")
     lines.append(
+        f"| clarified via ask_clarifying_question | "
+        f"{sum(1 for o in outcomes if o.asked_clarifying)} |"
+    )
+    lines.append(
+        f"| …and clarified in prose instead (the tool existed) | "
+        f"{sum(1 for o in outcomes if o.asked_clarifying_in_prose)} |"
+    )
+    lines.append(
         f"| turns that surfaced a failure | {sum(1 for o in outcomes if o.failed_loudly)} |"
     )
     lines.append(f"| durable jobs started | {sum(len(o.jobs_started) for o in outcomes)} |")

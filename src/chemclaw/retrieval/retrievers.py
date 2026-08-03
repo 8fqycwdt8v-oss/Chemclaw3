@@ -252,9 +252,15 @@ class FingerprintReactionRetriever:
         wanted = {key: filters[key] for key in _NOTE_FILTERS if filters.get(key) is not None}
         page = settings.fingerprint_top_k
         try:
-            matches = await find_similar_reactions(
-                self._store, query, top_k=self._depth(page) if wanted else None
-            )
+            # `.hits` here and not the whole search: a retriever's contract is evidence chunks, and
+            # an unbuilt index yields none of those. The distinction the search now carries is for
+            # the *conversational* tools, where a chemist reads "nothing similar" as an answer; a
+            # report leg that contributes no chunks is visible to its reviewer as a missing source.
+            matches = (
+                await find_similar_reactions(
+                    self._store, query, top_k=self._depth(page) if wanted else None
+                )
+            ).hits
         except FingerprintError:
             return []
         if wanted:

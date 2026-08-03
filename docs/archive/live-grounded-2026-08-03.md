@@ -146,6 +146,24 @@ the observations and the candidate grid against the declared parameters *before*
 BoFire, and raise a `ValueError` naming the parameter. The tool owns its contract; a library's
 internal `KeyError` is not an error message.
 
+**Correction, from measuring the two directions separately while implementing this.** They are not
+one defect, and the worse one is the direction this write-up treated as the mirror case:
+
+- *An observation missing a declared parameter* — BoFire already raises a good
+  `ValueError: invalid values for 'base', allowed are: [...]`, on both the mixed and the
+  all-categorical route. That would have reached the model intact. The boundary check only improves
+  the message here, by adding the observation index BoFire's lacks.
+- *An observation naming a parameter the problem never declared* — **BoFire silently succeeds.** It
+  drops the stray column and returns candidates. Measured directly: an observation carrying
+  `ligand: PPh3` against a problem that never declared `ligand` produced
+  `Candidate(params={'solvent': 'toluene', 'base': 'NEt3', 'catalyst': 'Pd'}, predicted_value=66.5)`
+  with no error at all.
+
+So a chemist who reports a condition the problem did not declare gets an answer computed from a
+decision space that quietly discarded it — confidently wrong, not failed. That is a fabrication
+vector, in the same family as the rest of this report rather than an error-handling nicety, and it
+is the half worth having found.
+
 ---
 
 ## Finding 4 — `request_development_report` leaks a raw transport error, and the model papers over it (P1)
@@ -237,6 +255,61 @@ Not everything is a defect, and these were checked against tool output rather th
 | 6 | empty fingerprint index must not read as "no similar reactions" | silently answers "never seen it" for an unindexed corpus |
 
 ---
+
+## Re-run after the fixes (same day, 15 probes)
+
+The 15 probes the findings above turned on, re-run against the fixed stack. Measured, not assumed:
+
+| | before | after |
+|---|---:|---:|
+| answers citing a note no tool returned | 10 / 15 | **0 / 15** |
+| turns calling no tool at all | 5 / 15 | **2 / 15** |
+| clarifications visible to the metric | 0 of 5 | 2 via the tool, 2 counted as prose |
+| silent failures | 0 | 0 |
+
+**What worked.** The citation signal is correct now: `uncited_note_ids` is empty across all 15,
+including gr-01, gr-05, gr-29, gr-31, gr-32 and gr-35, every one of which the first run flagged.
+Three of the five zero-tool turns now search before they ask — gr-34 does exactly the intended
+thing, `gather_evidence` and then `ask_clarifying_question`. The empty-index warning fires at
+connector startup with the reason and the pointer, which is the operator half of Finding 6 working
+on the very corpus that produced it.
+
+**What did not, and this is the more useful half.** Two turns still called nothing, and gr-21 still
+answered *"I'll call `calculator_trust` … and then `calculator_outliers`"* — the same sentence about
+the same two tools that the instruction added hours earlier explicitly forbids. A prompt rule did
+not bind the behaviour it names. So the rule became a scan: `promised_uncalled_tools` compares the
+answer against the turn's own tool surface and marks it for review, beside the parameter-shape gate
+whose docstring already said why — *"an instruction cannot be relied on to bind the model that is
+being asked not to invent; a scan over the finished text does not have to be."* Its evidence was a
+different failure and the same conclusion.
+
+**The number half, and why it is now closed differently than planned.** The judge's evidence block
+is *still* built from 200-character previews, so it went on calling verbatim tool output invented —
+gr-26's PDEs and gr-18's LUMO/dipole values flagged again, with the judge saying why in its own
+words: *"the tool results shown are truncated previews that do not display the numerical limits."*
+Same defect, same shape, one field short of done.
+
+`ToolResultEvent` now also carries the untruncated numeric values a result contained, and the
+harness reports which of the answer's figures those values support — matched by rounding the
+returned value to the precision the answer wrote it at, which is the only scale correct at both
+0.13 eV and 7112 g. gr-26's six PDEs, gr-18's six electronic-property figures and fourteen of
+gr-29's charge-table numbers now verify.
+
+**But the complement was built, measured and deliberately not shipped**, and that is the more
+important outcome. "Figures no tool returned" produced **11 flags and zero fabrications** on those
+three answers: the asker's own 40 and 99 from the question, six values the model correctly derived
+by arithmetic on numbers it was handed, two textbook van der Waals radii. Precision zero. A citation
+has a syntax — `[[id]]` means "I got this from you" and there is no other way to write one — and a
+number has none, so absence of a match means nothing. Shipping that list under a heading the judge
+is told to trust would have rebuilt this report's own defect one field over. The harness therefore
+asserts **membership, never absence**, and the prompt says so where the judge reads it.
+
+**And a limit worth stating plainly: a verified number is not a verified sentence.** gr-18's figures
+are all genuine tool output, and the argument built on them is still wrong — the answer prints the
+*para* SMILES while the tool was called on the *meta* isomer, so its "dipole is 24% higher" rests on
+comparing p-Cl against m-CF₃ (para actually returns 1.86 D, not 5.67). Every number checks out and
+the chemistry does not. No numeric check can see that, which is exactly why this signal vouches for
+a figure and not for the claim around it.
 
 ## The methodological lesson
 

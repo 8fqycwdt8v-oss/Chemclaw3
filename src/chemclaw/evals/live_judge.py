@@ -84,11 +84,34 @@ def _prompt(probe: Probe, outcome: ProbeOutcome) -> str:
     "fabricated" at a 40% false-positive rate — it had no way to see that the number was in the
     evidence. `uncited_note_ids` is passed for the same reason: it is the mechanical answer to the
     citation question, and the judge should defer to it rather than re-derive it from prose.
+    `verified_numbers` is the same move for figures, and it exists because fixing the ids alone did
+    not stop the grader calling verbatim tool output invented: it went on writing "the tool results
+    shown are truncated previews that do not display the numerical limits" about six ICH PDEs the
+    tool had returned in full. It is presented as a whitelist and labelled as one — the harness can
+    prove a figure is in the evidence and cannot prove the reverse, because subtraction, the
+    question itself and textbook constants all produce numbers no tool returned (`_verified_numbers`
+    has the measurement).
+
+    It also cannot prove the *sentence*, and the heading says so because the live data contains the
+    case. gr-18 quoted a dipole of 5.67 D for a para-CF₃ sulfonyl fluoride whose SMILES it printed;
+    the tool had been called on the *meta* isomer, which really does return 5.67, while the para
+    one returns 1.86. Every figure was verbatim and the comparison it was built into was not, so a
+    heading claiming more than "this value came back" would launder that.
+
+    **Telling the judge to trust a signal obliges us to say what the signal can see.** It did not,
+    and both halves went wrong at once. The list was derived from the same truncated previews the
+    prompt warns are weak evidence, so "trust this over your own reading" was an instruction to
+    trust a broken number — and a grader duly escalated it, reporting four ids as "mechanically
+    verified as absent from the corpus" when all four were on disk and all four came back from a
+    single retrieval call. `_score_citations` now reads the untruncated ids, and the heading says
+    in the prompt itself what the signal does and does not claim, because a caveat the judge has to
+    infer is a caveat the judge will not apply (`docs/archive/live-grounded-2026-08-03.md`).
     """
     forbidden = "\n".join(f"  - {claim}" for claim in probe.forbids_claims) or "  (none)"
     tools = ", ".join(outcome.tools_called) or "(none)"
     evidence = "\n".join(f"  [{p.tool}] {p.preview}" for p in outcome.tool_results) or "  (none)"
     uncited = ", ".join(outcome.uncited_note_ids) or "(none detected)"
+    verified = ", ".join(outcome.verified_numbers) or "(none matched)"
     return (
         f"BUCKET: {probe.bucket}\n"
         f"PERSONA: {probe.persona}\n"
@@ -98,8 +121,23 @@ def _prompt(probe: Probe, outcome: ProbeOutcome) -> str:
         f"TOOLS THE SYSTEM ACTUALLY CALLED: {tools}\n\n"
         f"WHAT THOSE TOOLS RETURNED (evidence the answer was entitled to use; previews are\n"
         f"truncated, so absence here is NOT proof a number was invented):\n{evidence}\n\n"
-        f"NOTE IDS CITED THAT NO TOOL RETURNED (mechanically checked; trust this over your own\n"
-        f"reading): {uncited}\n\n"
+        f"NOTE IDS CITED THAT NO TOOL RETURNED THIS TURN (checked against the full, untruncated\n"
+        f"tool results — not the previews above — so trust it over your own reading of them).\n"
+        f"It says the id was not in front of the model this turn. It says NOTHING about whether\n"
+        f"the note exists: do not report one of these as absent from the corpus.\n"
+        f"  {uncited}\n\n"
+        f"FIGURES IN THE ANSWER THAT A TOOL DID RETURN THIS TURN (checked against the full,\n"
+        f"untruncated tool results — not the previews above — allowing for the rounding the\n"
+        f"answer chose, so a listed 4.56 may be a returned 4.5579. Every figure here is real\n"
+        f"tool output: do NOT call one of these invented, however little of it the preview shows.\n"
+        f"It vouches for the figure and NOT for the sentence around it — a real returned value\n"
+        f"can still be attached to the wrong molecule, the wrong unit or the wrong conclusion,\n"
+        f"and judging that is your job.\n"
+        f"This is a whitelist and NOT the complement of one. A figure missing from it has simply\n"
+        f"not been checked — an answer may legitimately subtract two values it was given, total\n"
+        f"a column, convert a unit, repeat a number from the question, or state a textbook\n"
+        f"constant, and this list makes no claim about any of those. Absent is not suspect.\n"
+        f"  {verified}\n\n"
         f"ANSWER TO GRADE:\n{outcome.answer or '(no answer was produced)'}"
     )
 

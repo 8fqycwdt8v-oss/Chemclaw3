@@ -354,3 +354,47 @@ def ungrounded_parameter_shapes(answer: str, tool_outputs: Sequence[str]) -> lis
             continue
         found.append(f"{name}: {match.group(0).strip()}")
     return found
+
+
+def promised_uncalled_tools(answer: str, tools_called: Sequence[str]) -> list[str]:
+    """Tools the answer names that this turn never called.
+
+    The same argument as `ungrounded_parameter_shapes`, from the same evidence. A live run produced
+    an answer reading *"I'll call `calculator_trust` to show you the average bias … and then
+    `calculator_outliers` to show you where it was most wrong"* — and ended the turn having called
+    neither. The chemist is told two numbers are coming; nothing arrives; the reply reads exactly
+    like an answer. An instruction against it was added and the very next run produced the same
+    sentence about the same two tools, which is the second time a prompt has failed to bind this
+    class of behaviour (`docs/archive/live-grounded-2026-08-03.md`).
+
+    Unlike the shape scan, this is exact rather than heuristic: it matches whole tokens against the
+    turn's own surface (`available_tool_names()`), so it cannot fire on a word that merely looks
+    like a tool, and it cannot miss a rename. The one honest false positive is an answer *about*
+    the toolset — "I have predict_pka and predict_solubility for that" — which is a real thing to
+    say and is why this stays behind the same operator knob as its sibling rather than becoming an
+    unconditional refusal.
+
+    Args:
+        answer: The finished answer text.
+        tools_called: Every tool this turn actually invoked, successful or not — a call that failed
+            was still made, and an answer naming it is describing something that happened.
+
+    Returns:
+        One `"promised but not called: <name>"` per offending tool, in first-mention order.
+    """
+    # Imported here, not at module scope: `chemclaw_agent` imports this module's verifier for the
+    # turn path, so a top-level import would close the cycle.
+    from chemclaw.agent.chemclaw_agent import available_tool_names
+
+    called = set(tools_called)
+    # Sorted by where the answer first names each tool, which requires the match *position* and not
+    # merely the boolean `_mentions` returns. Iterating the name set directly gave whatever order
+    # the set happened to hash into — stable within a run, arbitrary across them — so a caller
+    # reading top-down got a different first item on a different interpreter, and the reviewer is
+    # meant to read this list as the answer reads.
+    at: list[tuple[int, str]] = []
+    for name in available_tool_names() - called:
+        match = re.search(rf"(?<![\w-]){re.escape(name)}(?![\w-])", answer)
+        if match is not None:
+            at.append((match.start(), name))
+    return [f"promised but not called: {name}" for _, name in sorted(at)]

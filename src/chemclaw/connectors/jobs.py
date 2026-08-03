@@ -356,20 +356,13 @@ def build_job_tool(connector: str, job: JobSpec) -> CapabilityTool:
         workflow_id = job_workflow_id(connector, job.name, payload)
         # `require_actor` is the core rule (F4-T3): under Entra, refuse durable work with no user.
         requested_by = require_actor()
-        try:
-            client = await connect()
-        except Exception as exc:  # noqa: BLE001 - any transport fault means the same thing here
-            # An unreachable broker is not a bad argument, and the model has no other way to tell.
-            # In the 2026-08-02 live run this surfaced as MAF's "Error: Function failed.", so the
-            # model read it as malformed input and retried with different SMILES three times before
-            # ending the turn mid-sentence with no number and no explanation. Saying "nothing was
-            # started" is the part that matters: a chemist who thinks a job may be queued will wait
-            # for it.
-            raise ConnectorJobError(
-                f"the durable execution backend is unreachable, so the {job.name!r} job was not "
-                f"started and nothing is queued ({type(exc).__name__}). This is an infrastructure "
-                "outage, not a problem with the request — the same call will work once it is back."
-            ) from exc
+        # An unreachable broker is framed by `connect()` itself, as `SubsystemUnavailableError` —
+        # one client, one message, and `chemclaw.agent.tool_authz.surface_domain_errors` hands it to
+        # the model verbatim. This site used to re-frame it as a `ConnectorJobError`, which was the
+        # same sentence maintained twice and, worse, mislabelled a *retryable* outage as bad data:
+        # `ConnectorJobError` is registered non-retryable in `chemclaw.durable.publish`, and this
+        # tool does run inside an activity on the template path (`durable.template_activities`).
+        client = await connect()
         try:
             handle = await client.start_workflow(
                 ConnectorJobWorkflow.run,
@@ -412,7 +405,7 @@ def build_job_tool(connector: str, job: JobSpec) -> CapabilityTool:
             # "running" forever.
             return workflow_id
         except Exception as exc:  # noqa: BLE001 - any launch fault means the same thing here
-            # `connect()` above already handles the broker being unreachable; this is the
+            # `connect()` above already frames the broker being unreachable; this is the
             # remaining gap the 2026-08-02 incident exposed one call later — a task queue with no
             # worker registered, a transient RPC timeout, a payload serialization error — all of
             # which reached MAF raw as "Error: Function failed." and reproduced the exact retry

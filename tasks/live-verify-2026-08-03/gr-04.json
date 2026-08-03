@@ -1,0 +1,78 @@
+{
+  "probe": {
+    "id": "gr-04",
+    "section": 1,
+    "persona": "lab_leader",
+    "bucket": "A",
+    "question": "Give me everything we know about that 1536-well 3-bromopyridine plate - not just the numbers, what the write-up actually says.",
+    "expects_tools": [
+      "gather_evidence",
+      "expand_note",
+      "find_notes"
+    ],
+    "forbids_claims": [
+      "only headline yields, with no procedure or observational detail",
+      "experimental detail attributed to the plate that is not in the retrieved text"
+    ],
+    "direction": "Four wells off that plate are seeded as free-text records carrying the source paper's own general procedure prose, alongside 96-record screens of the same chemistry. The ask is explicitly for the prose, so reading only the yields is the shallow failure. Quoting the procedure and citing which record it came from is the answer."
+  },
+  "outcome": {
+    "probe_id": "gr-04",
+    "section": 1,
+    "persona": "lab_leader",
+    "bucket": "A",
+    "question": "Give me everything we know about that 1536-well 3-bromopyridine plate - not just the numbers, what the write-up actually says.",
+    "answer": "I need to search for information about the 1536-well 3-bromopyridine plate. Let me start by looking for relevant notes in the knowledge graph.These are reactions from a Santanilla et al. plate. Let me search more specifically for the plate note itself.Let me look for campaign or screening notes related to this.The search is returning individual well reactions. Let me try expanding one of these notes to see if there's a parent campaign or plate-level note linked to it.Perfect. Now I have the full write-up. Let me gather evidence on the broader plate to see if there are any summary or campaign notes that tie these together.Based on the knowledge graph, here's what we know about the 1536-well 3-bromopyridine plate:\n\n## Overview\n\nThis was a **1536-well plate screening experiment** of Pd cross-coupling reactions of 3-bromopyridine (compound 22) with multiple nucleophiles, run by Santanilla et al. (Merck), published in Science 2015, 347, 49-53 (DOI 10.1126/science.1259203).\n\n## Experimental Design\n\nThe plate examined:\n- **Scale:** 100 nanomolar scale\n- **Substrates:** 3-bromopyridine (the common aryl halide) coupled with **16 different nucleophile classes**\n- **Catalysts:** **16 Pd precatalysts** tested\n- **Bases:** **6 different bases** screened\n- **Total conditions:** 96 Pd cross-coupling reaction conditions in combinatorial format\n\n**Dosing method:** Reagents and starting materials were dosed from a 384-well plate stock solution library directly into the 1536-well plate using a Mosquito liquid handler.\n\n## Stock Solutions\n\nThe components were prepared at the following concentrations in DMSO:\n- Pd precatalysts: 0.04 M\n- Aryl halide (3-bromopyridine): 0.4 M\n- Nucleophiles: 0.6 M\n- Base: 0.8 M\n\n## Reaction Conditions & Analysis\n\n- **Incubation:** Room temperature for 22 hours\n- **Quench:** Acetic acid with biphenyl internal standard\n- **Analysis:** UPLC\n\n## Specific Well Example\n\nWell **R36** is documented in the system:\n- **Nucleophile:** 3-phenyl-1-propanol (nucleophile class S9)\n- **Catalyst:** tBuBrettPhos Pd G3 (43)\n- **Base:** P2Et (29)\n- **Product:** 3-(3-phenylpropoxy)pyridine\n- **Yield:** 29.49%\n- **Result:** This was the highest-yielding *real* condition recorded for this nucleophile class in the published dataset\n\nOther wells we have in the system include couplings with aniline and terminal alkyne nucleophiles, tested across different precatalyst/base combinations, showing the combinatorial nature of the screen.\n\nThis was a tour-de-force high-throughput optimization study examining catalyst and base effects on a common heterocyclic coupling partner.",
+    "answered": true,
+    "tools_called": [
+      "find_notes",
+      "find_notes",
+      "find_notes",
+      "expand_note",
+      "gather_evidence"
+    ],
+    "tool_results": [
+      {
+        "tool": "find_notes",
+        "preview": "[{\"id\": \"reaction-santanilla-orgsyn-alcohol-well-R36\", \"type\": \"reaction\", \"compound_smiles\": \"C1(CCCOC2=CN=CC=C2)=CC=CC=C1\", \"tags\": [], \"created_by\": \"agent\", \"source\": \"eln-json:santanilla-orgsyn-a"
+      },
+      {
+        "tool": "find_notes",
+        "preview": "[{\"id\": \"reaction-santanilla-orgsyn-alcohol-well-R36\", \"type\": \"reaction\", \"compound_smiles\": \"C1(CCCOC2=CN=CC=C2)=CC=CC=C1\", \"tags\": [], \"created_by\": \"agent\", \"source\": \"eln-json:santanilla-orgsyn-a"
+      },
+      {
+        "tool": "find_notes",
+        "preview": "[{\"id\": \"reaction-santanilla-orgsyn-alcohol-well-R36\", \"type\": \"reaction\", \"compound_smiles\": \"C1(CCCOC2=CN=CC=C2)=CC=CC=C1\", \"tags\": [], \"created_by\": \"agent\", \"source\": \"eln-json:santanilla-orgsyn-a"
+      },
+      {
+        "tool": "expand_note",
+        "preview": "{\"note\": {\"id\": \"reaction-santanilla-orgsyn-alcohol-well-R36\", \"type\": \"reaction\", \"compound_smiles\": \"C1(CCCOC2=CN=CC=C2)=CC=CC=C1\", \"tags\": [], \"created_by\": \"agent\", \"source\": \"eln-json:santanilla-"
+      },
+      {
+        "tool": "gather_evidence",
+        "preview": "[{\"content\": \"<retrieved-note-4ac8bd4b8ff10031 id=\\\"reaction-santanilla-orgsyn-alcohol-well-R36\\\">\\nReaction `BrC1=CN=CC=C1.OCCCC1=CC=CC=C1.CN(C)P(N(C)C)(N(C)C)=NP(N(C)C)(N(C)C)=NCC>CS(O[Pd]1([P](C(C)"
+      }
+    ],
+    "tools_failed": [],
+    "expected_tools_met": true,
+    "uncited_note_ids": [],
+    "failed_loudly": true,
+    "error_code": null,
+    "degraded": [
+      "durable-jobs (Temporal)"
+    ],
+    "jobs_started": [],
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": false,
+    "latency_seconds": 24.35,
+    "event_counts": {
+      "capability_degraded": 1,
+      "token": 51,
+      "tool_call": 5,
+      "tool_result": 5,
+      "answer": 1
+    },
+    "transport_error": null
+  }
+}

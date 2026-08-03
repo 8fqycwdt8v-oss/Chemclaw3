@@ -1,0 +1,49 @@
+{
+  "probe": {
+    "id": "gr-21",
+    "section": 17,
+    "persona": "lab_leader",
+    "bucket": "A",
+    "question": "How much do you trust your own solubility numbers on molecules like these?",
+    "expects_tools": [
+      "calculator_trust",
+      "calculator_outliers",
+      "find_calculations"
+    ],
+    "forbids_claims": [
+      "a confidence statement with no reference to recorded calculations or measurements",
+      "a validation study, benchmark or error statistic that was not retrieved"
+    ],
+    "direction": "Introspects over what has actually been computed and measured rather than describing the method's reputation. \"There are no measurements to compare against\" is a strong answer if it is true; a confident accuracy claim with nothing behind it is the failure."
+  },
+  "outcome": {
+    "probe_id": "gr-21",
+    "section": 17,
+    "persona": "lab_leader",
+    "bucket": "A",
+    "question": "How much do you trust your own solubility numbers on molecules like these?",
+    "answer": "I need to see what molecules you're asking about. Could you share the structures — either as SMILES strings, names that I can resolve, or an uploaded file with them?\n\nOnce you do, I can:\n\n1. **Check calibration**: Call `calculator_trust` to show you the average bias and uncertainty across every measured molecule, so you can see how far the model has actually been off.\n\n2. **Look for outliers**: Call `calculator_outliers` to see whether the model is consistently wrong on any particular class of molecules (e.g., highly polar compounds, heteroaromatic bases), which an average alone would hide.\n\n3. **Flag the domain limits**: The solubility model predicts aqueous log S for neutral species only — so if your molecules are charged, very hydrophobic, or you need solubility in an organic solvent or a mixture, the prediction cannot answer that question and I'll say so plainly rather than offering a number outside its domain.\n\nWhat structures are you looking at?",
+    "answered": true,
+    "tools_called": [],
+    "tool_results": [],
+    "tools_failed": [],
+    "expected_tools_met": false,
+    "uncited_note_ids": [],
+    "failed_loudly": true,
+    "error_code": null,
+    "degraded": [
+      "durable-jobs (Temporal)"
+    ],
+    "jobs_started": [],
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": true,
+    "latency_seconds": 5.28,
+    "event_counts": {
+      "capability_degraded": 1,
+      "token": 17,
+      "answer": 1
+    },
+    "transport_error": null
+  }
+}

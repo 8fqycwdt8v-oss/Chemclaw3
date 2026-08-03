@@ -23,7 +23,7 @@ from chemclaw.agent.authz import AuthorizationError
 from chemclaw.agent.profile_discovery import ProfileError
 from chemclaw.connectors.registry import ConnectorError
 from chemclaw.core.config import settings
-from chemclaw.core.errors import ChemclawError
+from chemclaw.core.errors import ChemclawError, SubsystemUnavailableError
 from chemclaw.durable.publish import BAD_DATA_RETRY, note_publish_retry, publish_note_best_effort
 from chemclaw.ingest.sources.registry import DataSourceError
 from chemclaw.templates.registry import TemplateError
@@ -98,6 +98,34 @@ def test_every_authorization_error_subclass_is_listed_non_retryable() -> None:
     _import_first_party_tree()
     missing = names(AuthorizationError) - set(BAD_DATA_RETRY.non_retryable_error_types or [])
     assert not missing, f"AuthorizationError subclasses not registered: {missing}"
+
+
+def test_no_subsystem_outage_error_is_listed_non_retryable() -> None:
+    """The third hierarchy is absent from `_BAD_DATA_TYPES` **on purpose** — do not "fix" this.
+
+    `SubsystemUnavailableError` (`chemclaw.core.errors`) means "the infrastructure this needs is not
+    answering", which is the *retryable* failure par excellence: the identical call succeeds once
+    the broker is back. Registering it would tell Temporal to fail an activity fast on precisely the
+    fault a retry fixes — the QM/BO/report workflows would give up on a broker restart instead of
+    riding it out.
+
+    It reads like an omission next to the two walks above, and the walks are exactly what would
+    invite someone to close the gap: both fail loudly when a subclass is *missing* from the list.
+    So this one fails loudly when a subclass is *present*, and the assertion message says why. The
+    completeness sweep and this test cannot both be satisfied by accident — only by reading.
+    """
+    _import_first_party_tree()
+
+    def names(cls: type) -> set[str]:
+        return {cls.__name__}.union(*(names(sub) for sub in cls.__subclasses__()), set())
+
+    listed = set(BAD_DATA_RETRY.non_retryable_error_types or [])
+    registered = names(SubsystemUnavailableError) & listed
+    assert not registered, (
+        f"{registered} is registered non-retryable, but an unreachable subsystem is retryable by "
+        "definition — a retry is the fix, not a wasted attempt. If a genuinely non-retryable error "
+        "needs a home, it does not belong under SubsystemUnavailableError."
+    )
 
 
 @pytest.mark.parametrize(

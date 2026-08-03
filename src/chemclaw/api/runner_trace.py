@@ -12,15 +12,27 @@ not stable top-level exports and their shape varies by version, so these match o
 """
 
 import json
+import logging
 from collections.abc import Mapping
 from typing import Any
 
 from chemclaw.api.events import Event, ToolCallEvent, ToolResultEvent
+from chemclaw.core.quantities import returned_values
+from chemclaw.kg.note import mentioned_ids
+
+logger = logging.getLogger(__name__)
 
 # How many characters of a tool call's arguments the trace event carries — enough to see *what*
 # was called without streaming a whole evidence payload to the UI (mirrors the audit trail
 # truncation).
 _ARG_PREVIEW_CHARS = 200
+
+# How many distinct numeric values one result may put on `ToolResultEvent.numbers`. A ceiling
+# rather than a budget: the largest real result measured holds 49 (a full electronic-properties
+# calculation, every atom charge and bond order), so this is an order of magnitude clear of normal
+# traffic and exists only so a pathological result — a thousand-row table dump — cannot put
+# megabytes on a browser's event stream.
+_MAX_RESULT_NUMBERS = 512
 
 
 class ToolCallTrace:
@@ -80,6 +92,17 @@ class ToolCallTrace:
         # Bounded by the calls in one turn, like `_issued`, and never leaves the process.
         self.outputs: list[str] = []
 
+    @property
+    def called_tools(self) -> list[str]:
+        """Every tool this turn issued a call for, in the order the calls were announced.
+
+        Read off `_issued`, which already exists so a result can be reported under its call's name
+        — so this is a view of state the trace keeps, not a second ledger that could disagree with
+        the `tool_call` events the surface saw. Includes calls that went on to fail: the answer
+        gate's question is whether the turn *reached* for a tool, and a failed call did.
+        """
+        return list(self._issued.values())
+
     def feed(self, update: Any) -> list[Event]:
         """Take one streamed update; return the calls it issued and the results it returned."""
         growing: set[str] = set()
@@ -107,7 +130,20 @@ class ToolCallTrace:
                 if text is not None:
                     self.outputs.append(text)
                     tool = self._issued.get(key) or self._names.get(key, key)
-                    results.append(ToolResultEvent(tool=tool, preview=text[:_ARG_PREVIEW_CHARS]))
+                    # Ids and values off the *full* text, preview off the truncated one: the same
+                    # reason `outputs` exists at all. A grounding check asking "was this in front
+                    # of the model?" against 200 characters of a 40-chunk sweep calls 39 of 40
+                    # citations fabricated, which is what a live run measured — and the re-run with
+                    # the ids fixed still called six verbatim ICH limits invented, because the
+                    # figures were still only in the preview.
+                    results.append(
+                        ToolResultEvent(
+                            tool=tool,
+                            preview=text[:_ARG_PREVIEW_CHARS],
+                            note_ids=mentioned_ids(text),
+                            numbers=_capped_numbers(tool, text),
+                        )
+                    )
                 continue
             if name and arguments:
                 # The name and the complete arguments in one content: the call arrived whole
@@ -147,6 +183,27 @@ class ToolCallTrace:
             self._issued[key] = name
             events.append(ToolCallEvent(tool=name, arguments=arguments))
         return events
+
+
+def _capped_numbers(tool: str, text: str) -> list[float]:
+    """The distinct values a result returned, bounded for the wire, saying so when it bounds them.
+
+    The cap is unreachable in normal traffic (see `_MAX_RESULT_NUMBERS`), which is exactly why the
+    log line matters: the one time it fires, a consumer told to trust this list would be trusting
+    an incomplete one, and nothing else in the event would say so. This repository's rule is that a
+    silent truncation reads as completeness — it is the whole reason the preview needed a companion
+    field in the first place.
+    """
+    values = returned_values(text)
+    if len(values) <= _MAX_RESULT_NUMBERS:
+        return values
+    logger.warning(
+        "tool %s returned %d distinct numeric values; the trace event carries the first %d",
+        tool,
+        len(values),
+        _MAX_RESULT_NUMBERS,
+    )
+    return values[:_MAX_RESULT_NUMBERS]
 
 
 def _arguments_complete(fragments: list[str] | None) -> bool:

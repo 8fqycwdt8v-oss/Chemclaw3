@@ -505,3 +505,30 @@ def test_a_deliberate_domain_error_still_reaches_the_caller_unchanged() -> None:
     with _Server(app, port):
         message = asyncio.run(_call())
     assert "could not parse SMILES 'not-a-molecule'" in message
+
+
+def test_a_bundles_startup_report_cannot_delay_it_becoming_ready() -> None:
+    """The `on_start` hook is started, never awaited — readiness must not depend on it.
+
+    `molfp`/`rxnfp` use the hook to log how many fingerprints their index holds, which is a
+    database round trip. Awaiting it made the connector's startup wait out the pool timeout when
+    Postgres was unreachable, which is the wrong trade twice over: the pod is slower to become
+    ready exactly when the operator most needs it up to read the log line. Proven with a hook that
+    never returns at all — if the lifespan awaited it, this test would time out instead of pass.
+    """
+    from mcp.server.fastmcp import FastMCP
+
+    running = asyncio.Event()
+
+    async def _never_finishes() -> None:
+        running.set()
+        await asyncio.sleep(3600)
+
+    app = connector_app(FastMCP("hook-probe"), name="hook-probe", on_start=_never_finishes)
+
+    async def _serve_and_stop() -> None:
+        async with app.router.lifespan_context(app):
+            # The hook really was launched (not silently skipped), yet startup already completed.
+            await asyncio.wait_for(running.wait(), timeout=5)
+
+    asyncio.run(asyncio.wait_for(_serve_and_stop(), timeout=10))
