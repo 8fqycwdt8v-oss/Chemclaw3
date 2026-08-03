@@ -314,8 +314,8 @@ async def record_failure(
         The submitted PR reference. Nothing changes in the graph until a human merges it.
 
     Raises:
-        ChemclawError: When `refutes` names no note, or `held_until` predates that note's own
-            `valid_from`.
+        ChemclawError: When `refutes` names no note, when `held_until` predates that note's own
+            `valid_from`, or when the note has already been retired on some other date.
     """
     graph = await asyncio.to_thread(build_graph, settings.knowledge_path)
     refuted = _require_note(graph, refutes)
@@ -329,14 +329,22 @@ async def record_failure(
         compound_smiles=compound_smiles,
         confidence=confidence,
     )
+    # An already-retired note is refused rather than quietly left alone. Re-closing it would
+    # extend its validity or append the marker twice, so it must not happen — but `held_until`
+    # came from a person, and dropping a date somebody supplied is the same silent-correction
+    # failure `close_refuted_note` refuses when the window ends before it starts. Say which date
+    # already holds, and let them decide.
+    if held_until is not None and refuted.valid_to is not None:
+        raise ChemclawError(
+            f"{refutes} was already retired on {refuted.valid_to.isoformat()}, so it cannot also "
+            f"be retired on {held_until.isoformat()} — file the refutation without `held_until`, "
+            "or correct the existing date first"
+        )
     # Both files ride in one submission, so the reviewer signs off on the refutation and the
     # retirement as the single decision they are (STO-7's `dependencies`, used here for a note that
-    # is amended rather than newly minted). A note that already carries a `valid_to` is left alone:
-    # re-closing it would extend its validity or append the marker twice.
+    # is amended rather than newly minted).
     retirement = (
-        [close_refuted_note(refuted, note.id, held_until)]
-        if held_until is not None and refuted.valid_to is None
-        else []
+        [close_refuted_note(refuted, note.id, held_until)] if held_until is not None else []
     )
     reference = await propose_note(note, default_submitter(), dependencies=retirement)
     record_proposal(note.id, reference)

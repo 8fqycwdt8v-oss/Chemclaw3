@@ -16,6 +16,7 @@ import pytest
 from chemclaw.agent.verifier import (
     ClaimCheck,
     VerificationResult,
+    _verifier_prompt,
     turn_evidence,
     ungrounded_parameter_shapes,
     verify_answer,
@@ -253,6 +254,44 @@ def test_ordinary_chemistry_prose_does_not_trip_the_scan() -> None:
     """
     prose = "The base deprotonates the amide to form a stabilised anion; warming drives it to bar."
     assert ungrounded_parameter_shapes(prose, []) == []
+
+
+def test_one_tool_result_reaches_the_judge_once_however_many_ids_it_grounds() -> None:
+    """The judge prompt is linear in the evidence, not in the citations naming it.
+
+    `turn_evidence` emits a chunk per *(tool output x cited id)* pair because the citation gate
+    downstream reads only the set of `source_note_id`s. Rendering that shape verbatim sent the
+    same text once per citation: a `gather_evidence` result is ~20,000 characters and an answer
+    citing it well names ~40 ids, which measured at a 40x prompt — quadratic in exactly the
+    behaviour the verifier exists to encourage.
+
+    The fixture is one result naming three ids, so a naive implementation gives the wrong answer:
+    every id must still appear (they are what the judge attributes a claim to), and the body must
+    appear once.
+    """
+    body = "gather_evidence: [[reaction-1]] [[reaction-2]] [[reaction-3]] all used K2CO3 in THF."
+    answer = "They used K2CO3 [[reaction-1]] [[reaction-2]] [[reaction-3]]."
+    evidence = turn_evidence(answer, [body])
+    assert len(evidence) == 3, "the citation gate still needs one chunk per grounded id"
+
+    prompt = _verifier_prompt(answer, evidence)
+    assert prompt.count(body) == 1, "the evidence body was sent once per citation"
+    assert prompt.count("<evidence") == 1
+    assert 'note="reaction-1 reaction-2 reaction-3"' in prompt, "every grounded id must be named"
+
+
+def test_distinct_tool_results_each_get_their_own_envelope() -> None:
+    """Grouping is by content, so two different results must not be collapsed into one."""
+    first, second = (
+        "gather_evidence: [[reaction-1]] used K2CO3.",
+        "eln: [[reaction-2]] used Cs2CO3.",
+    )
+    prompt = _verifier_prompt(
+        "Both [[reaction-1]] [[reaction-2]].",
+        turn_evidence("Both [[reaction-1]] [[reaction-2]].", [first, second]),
+    )
+    assert prompt.count("<evidence") == 2
+    assert first in prompt and second in prompt
 
 
 def test_a_longer_note_id_does_not_ground_a_citation_to_its_prefix() -> None:

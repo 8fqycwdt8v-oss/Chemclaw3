@@ -888,6 +888,38 @@ worktree, a container, a `sys.path` entry and an editable install all give you a
 lies about which code is running. The check costs one line and is the difference between evidence
 and theatre — this is the third variant of the same trap in one session.
 
+## 2026-08-02 — Reviewing my own fix commit, and the shape a "shared" data structure hides
+
+The adversarial pass reviewed waves 1–3. It did **not** review `7033c1c`, the commit that fixed
+its own findings, and that is where the one real defect was.
+
+**Rule: the fix commit for a review needs its own review.** It is written fastest, under the most
+confidence, and by the person who just proved they missed something.
+
+**The defect: a data structure shaped for one consumer, rendered verbatim by another.**
+`turn_evidence` emits one `EvidenceChunk` per *(tool output x cited id)* pair, each carrying the
+full output text. That is right for `verify_claims`, which reads only `{chunk.source_note_id}` and
+never touches `content`. It is quadratic for `_verifier_prompt`, which renders every chunk — one
+~20,000-character `gather_evidence` result cited by 40 ids became a **749,531-character** judge
+prompt, 40.1x. Grouping by content in the prompt builder alone takes it to 1.1x.
+
+Two things made it invisible. The duplication is *free* on the default path (`verifier_enabled`
+defaults False), so no test and no run could feel it. And it scales with the behaviour the system
+is trying to encourage — an answer that cites its sources well is the answer that blows up.
+
+**Rule: when one producer feeds two consumers, check what each actually reads.** "The list has N
+entries" and "each entry carries 20 KB of text" are different facts, and a consumer that only
+needs the keys will not tell you the values are being copied.
+
+**Rule: measure a size before shipping a structure that carries text.** One loop over
+1/5/10/40 citations turned an opinion into a table, and the table is what made the fix obviously
+worth doing rather than arguably worth doing.
+
+**A smaller one, twice now: a correction has to be applied everywhere the claim appears.** The
+"the eval harness scores this way too" sentence was refuted once and lived in three places; I
+fixed the module docstring and the ADR and left the function docstring asserting it twelve lines
+below the disclaimer. `grep` for the *claim*, not for the file you remember writing it in.
+
 ## 2026-08-02 — Fanning six worktree agents out twice: what the R0/R1 waves taught
 
 **A subagent's own gate claim is not evidence; the integration run is.** One R1 package reported
