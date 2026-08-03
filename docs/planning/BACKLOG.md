@@ -3,39 +3,54 @@
 Prioritized open action items. Top = next. Keep in sync with `docs/planning/implementation-plan.md`
 (phase/step numbers) at session end.
 
-## Open — Found while implementing R2 of the refactor plan (2026-08-02)
+## Open — Found while closing the refactor (R5.3, 2026-08-03)
 
-- [ ] **`chemclaw.core -> chemclaw.connectors` is the last lazy kernel edge** — [S, may be
-      "won't fix"]. R2.A took `core`'s lazy sibling edges from three to one. The survivor is
-      `core/logging.py`'s redaction filter resolving each connector's bearer-token env-var name so
-      the value can be redacted from logs (Sec-6, R0.4). Unlike the three that went, this is not a
-      misfiled primitive — the connector registry is a real capability layer — so no move retires
-      it. Either accept it permanently and say so in `core/README.md`, or invert it: have the
-      registry *push* its token env-var names into a `core`-owned redaction inventory at startup,
-      so `core` reads a list it owns instead of importing the registry.
+- [ ] **The two slowest pKa tests fail when the suite runs on a loaded box** — [S]. On a quiet
+      machine the suite is green in ~312 s (2852 passed, 127 skipped, measured twice on
+      2026-08-03). With concurrent heavy processes on the same box the same suite took 1330 s
+      (4.25×) and failed exactly two tests:
+      `test_pka.py::test_predicted_pkah_ranks_aromatic_bases_correctly` and
+      `::test_in_sample_pkah_errors_are_far_below_the_acid_calibrations` — the file's two slowest
+      (11.8 s / 11.2 s alone, 3× the next), both green 27/27 in isolation. The failure text was
+      not captured (the observing run piped through `tail`), so the cause is *unconfirmed*: the
+      180 s signal-based per-test timeout in `pyproject.toml` is the obvious suspect at 4× slowdown,
+      but stating that as the mechanism would be exactly the prose-over-measurement claim this repo
+      keeps catching. To close: reproduce under load with output captured, read the actual failure,
+      then either raise/architect around the timeout or fix whatever it actually is. Until then the
+      operational rule stands (`tasks/lessons.md` 2026-08-03): never run the gate while other
+      processes load the box.
 
-## Open — Found while implementing R0 of the refactor plan (2026-08-02)
+## Done — Found while implementing R2 of the refactor plan (2026-08-02; closed 2026-08-03)
+
+- [x] **`chemclaw.core -> chemclaw.connectors` is the last lazy kernel edge** — closed by taking
+      the row's first option: accepted permanently, and said so where the row asked.
+      `core/README.md` states the kernel rule with its "exactly one declared lazy exception", and
+      `tests/test_layering.py::_ALLOWED_LAZY_EDGES` declares the edge with the reason (the
+      connector registry is a real capability layer, not a misfiled primitive, so no move retires
+      it — the same argument against the inversion, which would trade one declared edge for a
+      startup-ordering contract between two layers). The R5.3 import-graph diff against `39f9135`
+      confirmed it is the *only* core→sibling edge at any scope
+      (D-2026-08-03-the-refactor-closes-what-it-measured).
+
+## Done — Found while implementing R0 of the refactor plan (2026-08-02; closed by R1.6, `ca562d7`)
 
 Each was found by an implementation agent working a *different* task, verified, and deliberately
 left unfixed rather than scope-crept into an unrelated commit. See
-`docs/planning/refactor-hardening-plan.md`.
+`docs/planning/refactor-hardening-plan.md`. Both rows were closed by R1.6 and re-verified against
+the shipped tree in R5.3.
 
-- [ ] **Two more error classes bypass the non-retryable registry** — [XS]. R0.6 reparented
-      `ConnectorError`, `DataSourceError`, `TemplateError` and `UnresolvedReference` to
-      `ChemclawError` and registered their names in `durable/publish.py::_BAD_DATA_TYPES`, because
-      Temporal matches `non_retryable_error_types` by exact class-name string. Two classes have the
-      identical gap and were outside that ticket: `agent/profile_discovery.py::ProfileError(ValueError)`
-      and `agent/authz.py::AuthorizationError(Exception)` — neither derives from `ChemclawError`, so
-      neither is caught by `tests/test_publish.py`'s completeness walk, and neither is registered.
-      Bad data on those paths burns all `activity_max_attempts` before failing.
-- [ ] **A second false retry claim in the same docstring block** — [XS, fix with the row above].
-      `durable/template_activities.py` (~line 128) states `AuthorizationError` is "a `ValueError`
-      which `BAD_DATA_RETRY` lists non-retryable". It is a bare `Exception`, registered nowhere.
-      R0.6 corrected the *adjacent* paragraph making the same false claim about `ConnectorError`
-      (measured against Temporal's `DefaultFailureConverter`) and left this one, which is a
-      different class and a different fix. This is the plan's named anti-pattern — prose asserting
-      a guard that nothing enforces — so the fix is the registration above **plus** deleting the
-      claim, not rewording it.
+- [x] **Two more error classes bypass the non-retryable registry** — closed. `ProfileError` and
+      `AuthorizationError` are registered in `durable/publish.py::_BAD_DATA_TYPES` (lines 54 and
+      71 as of R5.3). `AuthorizationError` is deliberately *not* reparented to `ChemclawError` —
+      that would have made `surface_domain_errors` swallow authorization refusals ahead of
+      `surface_authorization_denials` — so it is listed by exact name, and
+      `tests/test_publish.py` walks its hierarchy the same way it walks `ChemclawError`'s so a
+      future subclass cannot go unregistered unnoticed.
+- [x] **A second false retry claim in the same docstring block** — closed with the row above, the
+      way the row demanded: the false "a `ValueError` which `BAD_DATA_RETRY` lists non-retryable"
+      claim is deleted, and `durable/template_activities.py`'s docstring now states the true
+      mechanism (Temporal matches `non_retryable_error_types` by the exact string
+      `"AuthorizationError"`, which `BAD_DATA_RETRY` lists by name).
 
 ## Open — Confirmed by the 190-probe live run (2026-08-02)
 

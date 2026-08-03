@@ -58,26 +58,26 @@ restructure.
 
 ## R3 — Decompose the two hot files (after R1.2 + R2)
 
-- [ ] **R3.1 [Fable]** `api/app.py` decomposition (app/state/deps/schemas/middleware + routes/×8);
+- [x] **R3.1 [Fable]** `api/app.py` decomposition (app/state/deps/schemas/middleware + routes/×8);
       gate-preserving, no test changes.
-- [ ] **R3.2 [Fable]** `runner.py` split (runner/trace/usage/answer) + A3 lease + A5 pin + A4
+- [x] **R3.2 [Fable]** `runner.py` split (runner/trace/usage/answer) + A3 lease + A5 pin + A4
       pending-completions.
-- [ ] **R3.3 [Sonnet]** S2 `core/bounded.py::BoundedLru` (5 maps) + S3 no-leak-404 helper.
+- [x] **R3.3 [Sonnet]** S2 `core/bounded.py::BoundedLru` (5 maps) + S3 no-leak-404 helper.
 
 ## R4 — Per-package cleanup (parallel once R6 lands)
 
-- [ ] **R4.1 [Sonnet]** science/ constants module (Science-2 drifted constant) + pka decomposition.
-- [ ] **R4.2 [Sonnet]** retrieval/ reindex incrementality + `--full` recovery path.
-- [ ] **R4.3 [Haiku]** cli/ exit-code unification; Conn-F7 dead fields; Conn-F5 URL-key validator.
-- [ ] **R4.4 [Sonnet]** Conn-F1 start_workflow framing; Conn-F4 MCP exception-sanitizing (after spike).
-- [ ] **R4.5 [Haiku]** Test-2 121→11 subprocesses; Test-3 `_free_port` → conftest; Test-4 parametrize;
+- [x] **R4.1 [Sonnet]** science/ constants module (Science-2 drifted constant) + pka decomposition.
+- [x] **R4.2 [Sonnet]** retrieval/ reindex incrementality + `--full` recovery path.
+- [x] **R4.3 [Haiku]** cli/ exit-code unification; Conn-F7 dead fields; Conn-F5 URL-key validator.
+- [x] **R4.4 [Sonnet]** Conn-F1 start_workflow framing; Conn-F4 MCP exception-sanitizing (after spike).
+- [x] **R4.5 [Haiku]** Test-2 121→11 subprocesses; Test-3 `_free_port` → conftest; Test-4 parametrize;
       P2 executemany.
 
 ## R5 — Docs & onboarding
 
-- [ ] **R5.1 [Sonnet]** R8/R9 stale docstrings + Entry-points table in ARCHITECTURE.md.
-- [ ] **R5.2 [Sonnet]** Ops F2/F3/F4 onboarding + F14 migration note + F17 prose-validate over Makefile.
-- [ ] **R5.3 [Fable]** Final integration + completeness critic: `make ci`, import-graph diff, re-check
+- [x] **R5.1 [Sonnet]** R8/R9 stale docstrings + Entry-points table in ARCHITECTURE.md.
+- [x] **R5.2 [Sonnet]** Ops F2/F3/F4 onboarding + F14 migration note + F17 prose-validate over Makefile.
+- [x] **R5.3 [Fable]** Final integration + completeness critic: `make ci`, import-graph diff, re-check
       every claim, closing ADR(s), update BACKLOG/DEFERRED/lessons.md.
 
 ## Deferred (see plan for reasons)
@@ -86,6 +86,35 @@ restructure.
   new-code convention only; Conn-F3 documented (no change); H7/A7 behind the retention BACKLOG row;
   agent-pool unification stays DEFERRED (upstream trigger).
 
-## Review
+## Review (R5.3, 2026-08-03 — the completeness pass; full record in
+D-2026-08-03-the-refactor-closes-what-it-measured)
 
-_(filled at session end — one line per merged WP, plus anything the completeness critic reopened.)_
+One line per phase, then what re-verification changed:
+
+- **R0** — both data-loss bugs, both security Mediums and the four Lows closed, each with a
+  mutation-proven test; the redirect fix needed *both* proposed remedies, not either.
+- **R1** — the derived layering allow-list, the route-auth walk, the ops one-liners; R1.6 closed
+  the two `_BAD_DATA_TYPES` gaps R0.6 had left (registered by name, deliberately not reparented).
+- **R2** — the four misfiled-module moves and the config split; `metrics_bridge` kept (the plan's
+  "delete" was half wrong — the swallow guards 11 call sites, only the lazy import went).
+- **R3** — `app.py` → routes/state/deps/schemas/middleware with **zero** test-file changes;
+  `runner.py` → runner/trace/usage/answer with import re-points in four test files, no assertion
+  changed; the three turn-lifecycle races closed; `BoundedLru` consolidated **four** maps (not the
+  planned five — metrics' cap is refuse-new and stays) and the 404 helper **two** gates (not
+  three — `_visible_proposal` carries a reviewer allowance).
+- **R4** — science constants + pKa split, incremental reindex, CLI unification,
+  `start_workflow` framing + MCP exception sanitization (probed over the real transport),
+  subprocess-count and fixture cleanups.
+- **R5** — stale-docstring/ARCHITECTURE corrections, onboarding + prose-gate widening, and this
+  closing pass.
+
+Closing gate (quiet box): 2852 passed / 127 skipped / 0 failed in 311 s; lint and
+`mypy --strict` clean; every validator green **except** `helm-validate`, which has no `helm`/
+`kubeconform` here — `make ci` therefore cannot pass locally and is not claimed. Import-graph
+diff vs `39f9135`: 8 edges removed, 3 added, `core` at zero module-scope sibling edges plus the
+one declared lazy edge. Docstrings 98.3 %, 208 ADRs, largest source file 808 lines (was 2157).
+
+Reopened/corrected by the critic: the plan's six disproven statements (metrics_bridge, five→four
+LRUs, three→two 404 gates, 121→132 subprocesses, Ops-F1 resolved, A3's two release sites) are
+corrected in the plan in place; one new BACKLOG row (pKa tests fail under box load, cause
+uncaptured); the two R1.6-closed BACKLOG rows and the accepted lazy-edge row are marked Done.
