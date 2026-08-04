@@ -254,4 +254,5 @@ and is kept only for reservations that were in flight when this changed.
 | [D-2026-08-04-a-plateau-needs-the-noise-you-measured-it-with](D-2026-08-04-a-plateau-needs-the-noise-you-measured-it-with.md) | A plateau needs the noise you measured it with |
 | [D-2026-08-04-a-screen-may-hold-a-continuous-factor-at-its-bounds](D-2026-08-04-a-screen-may-hold-a-continuous-factor-at-its-bounds.md) | A screen may hold a continuous factor at its bounds |
 | [D-2026-08-04-the-schema-is-a-file](D-2026-08-04-the-schema-is-a-file.md) | A warehouse ELN's schema is a binding document, not an adapter |
+| [D-2026-08-04-the-schema-only-goes-forward](D-2026-08-04-the-schema-only-goes-forward.md) | The schema only goes forward, and a test says so |
 | [D-2026-08-04-what-bofire-does-when-you-actually-run-it](D-2026-08-04-what-bofire-does-when-you-actually-run-it.md) | What BoFire does when you actually run it, and the roadmap that survived it |

@@ -24,17 +24,24 @@ Prioritized open action items. Top = next. Keep in sync with `docs/planning/impl
       was not weighed. Left unexecuted deliberately; the tests above pin today's behaviour so the
       fix has a regression target.
 
-- [ ] **The storm claims eight scenario families and runs six** — [S]. `run_storm` wires A, B, C,
-      D, F, G; **E (chaos) and H (data edges) were never implemented**, and six behaviours
-      (`a-retrieval`, `d-status`, `f-slow`, `h-bad-smiles`, `h-injection`, `h-unicode`) are defined
-      and asserted by nothing. The report says "17/17" and is silent about what does not run, which
-      is the shape of every coverage overstatement this repository has already been bitten by. The
-      harness should print a families-run count so it cannot claim coverage it does not have.
+- [ ] **A SIGKILLed connector worker costs 600 s before its job resumes, and one setting decides
+      that for every calc job** — [M]. Measured by the storm's chaos family: the workflow is
+      interrupted at `species 1/5`, the activity stays `Started` against a worker identity that no
+      longer exists, and Temporal reschedules it only when `xtb_job_heartbeat_timeout_seconds`
+      expires — exactly the configured 600 s, after which the job completes normally. Durability
+      holds; the *latency* is the finding, and it had never been measured.
+      The coupling is the real issue. That one setting has to be longer than the slowest legitimate
+      gap between heartbeats — a CREST search, whose manifest says its cost "is not bounded by the
+      input's size" — **and** it is the only signal that detects a dead worker. So every calc job
+      pays the CREST-sized detection window, including the ones that heartbeat every few seconds.
+      A per-job value (long for the two `expensive: true` searches, short for everything else)
+      would decouple them; that is a config-surface decision, not a diff to slip in beside a test
+      pass. On OpenShift, where pod eviction is routine rather than exotic, this is ten minutes of
+      dead time per eviction.
 
-- [ ] **SCALE-3 is still open, and the storm does not close it** — [M]. The sweep varies *offered*
-      load; it never touches `service_max_concurrent_turns`. Deriving the cap needs the front door
-      restarted at each value with offered load held fixed. The row has waited since July for a
-      measurement no harness has yet made.
+Closed by this pass: the storm's two missing families (E and H are wired, and `FAMILIES` plus the
+coverage table make an overstatement structurally impossible), and **SCALE-3** — see
+`docs/archive/storm-2026-08-04.md` for the per-cap table.
 
 ## Open — Left by the live full-stack pass (2026-08-04)
 
