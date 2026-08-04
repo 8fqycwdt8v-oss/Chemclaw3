@@ -3,6 +3,39 @@
 Prioritized open action items. Top = next. Keep in sync with `docs/planning/implementation-plan.md`
 (phase/step numbers) at session end.
 
+## Open — Found by the deeper testing pass (2026-08-04)
+
+- [ ] **The PR-gate has a read window: an unreviewed note is readable as knowledge while the
+      submission holds the checkout** — [M], and it is a **compliance** finding rather than a
+      reliability one, because the PR-gate is the "AI proposes, human signs off" line (D-005).
+      Measured, not argued (`tests/test_pr_gate_read_window.py`): `settings.knowledge_path` is
+      `note_repo_dir / knowledge_dir`, the same working tree `GitNoteSubmitter` switches with
+      `git checkout -B note/<id>`; the note is committed into that tree; `invalidate_cache()` runs
+      only in `_return_to_base`, and `load_notes` caches for `graph_cache_ttl_seconds` (60 s). So a
+      concurrent reader — `find_notes`, `gather_evidence`, the digest job, the ELN sync — can read
+      the unreviewed note during the window **and keep serving it for up to a TTL afterwards**.
+      Nothing filters it: `created_by == "agent"` is read in exactly one place
+      (`retrieval/harness.py`, to label a chunk "agent-authored" in a report) and no reader consults
+      `note_proposals.state`. Reachable in the shipped topology, not only in dev — the runbook says
+      the retriever serves from that same tree "because it has to be".
+      **The fix is architectural**: `git worktree add` for the submission, so the shared tree is
+      never switched at all. `git_submitter.py`'s docstring already considered per-note worktrees
+      and rejected them as over-engineering *for concurrency* — this is a different reason, and it
+      was not weighed. Left unexecuted deliberately; the tests above pin today's behaviour so the
+      fix has a regression target.
+
+- [ ] **The storm claims eight scenario families and runs six** — [S]. `run_storm` wires A, B, C,
+      D, F, G; **E (chaos) and H (data edges) were never implemented**, and six behaviours
+      (`a-retrieval`, `d-status`, `f-slow`, `h-bad-smiles`, `h-injection`, `h-unicode`) are defined
+      and asserted by nothing. The report says "17/17" and is silent about what does not run, which
+      is the shape of every coverage overstatement this repository has already been bitten by. The
+      harness should print a families-run count so it cannot claim coverage it does not have.
+
+- [ ] **SCALE-3 is still open, and the storm does not close it** — [M]. The sweep varies *offered*
+      load; it never touches `service_max_concurrent_turns`. Deriving the cap needs the front door
+      restarted at each value with offered load held fixed. The row has waited since July for a
+      measurement no harness has yet made.
+
 ## Open — Left by the live full-stack pass (2026-08-04)
 
 Full record with the measurements: `docs/archive/live-full-stack-2026-08-04.md`. Every layer live
