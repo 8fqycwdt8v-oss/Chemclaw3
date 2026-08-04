@@ -127,6 +127,11 @@ module = [
     "drfp",
     "openpyxl",
     "linear_operator.*",
+    # The Snowflake client is not a dependency of this repository: the warehouse driver module is
+    # imported only where a binding names it, on a deployment that installed the client (see
+    # `chemclaw/ingest/eln/warehouse/README.md`). Listed so `mypy --strict` checks that module's own
+    # code rather than failing on an import it is designed not to have.
+    "snowflake.*",
 ]
 follow_imports = "skip"
 follow_imports_for_stubs = true
