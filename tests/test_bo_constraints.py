@@ -73,8 +73,15 @@ def test_the_seeding_path_honours_the_constraint() -> None:
 
 
 def test_the_proposing_path_honours_the_constraint() -> None:
-    """And so does the model-guided ask, on a mixed domain."""
-    for candidate in propose_candidates(_capped_problem(), _feasible_runs(), n=5):
+    """And so does the model-guided ask, on a mixed domain.
+
+    **Two candidates, not five, and the number is measured.** A constraint makes the acquisition
+    step several times more expensive — 10.3s against 3.2s for one candidate on this domain, then
+    about 9s per further candidate, so five took 46s locally and blew a 180s CI timeout under
+    coverage. The property under test is that every returned point satisfies the relation, which two
+    points prove as well as five.
+    """
+    for candidate in propose_candidates(_capped_problem(), _feasible_runs(), n=2):
         total = float(candidate.params["base"]) + float(candidate.params["acid"])
         assert total <= 3.0 + TOLERANCE, candidate.params
 
@@ -173,7 +180,7 @@ def test_a_screen_refuses_a_constrained_problem_rather_than_violating_it() -> No
 
 def test_the_tool_honours_a_constraint_end_to_end() -> None:
     """The agent-facing path, not just the engine."""
-    suggestion = asyncio.run(suggest_next_experiment(_capped_problem(), _feasible_runs(), count=3))
+    suggestion = asyncio.run(suggest_next_experiment(_capped_problem(), _feasible_runs(), count=2))
     for candidate in suggestion.candidates:
         total = float(candidate.params["base"]) + float(candidate.params["acid"])
         assert total <= 3.0 + TOLERANCE, candidate.params

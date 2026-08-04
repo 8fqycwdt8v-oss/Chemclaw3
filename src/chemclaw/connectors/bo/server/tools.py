@@ -255,7 +255,10 @@ async def suggest_next_experiment(
 
     A limit on **one** parameter is not a constraint: "keep the temperature under 80 °C" is that
     parameter's upper bound, and writing it as a constraint instead is a worse way to say the same
-    thing. That linear form applies to continuous parameters only.
+    thing. That linear form applies to continuous parameters only. Note that a constraint makes the
+    search **several times slower** — measured, about three times the unconstrained cost for one
+    candidate and roughly nine seconds per further candidate — so ask for a small batch on a
+    constrained problem.
 
     **A forbidden pairing of options is the other constraint shape.** "Never Pd(OAc)₂ in DMSO" is
     `{"kind": "exclude", "parameters": [...], "options": [[...], [...]]}` — for options that are

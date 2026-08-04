@@ -109,6 +109,14 @@ still hashes to the id it had before either wave, pinned against `campaign-6958b
 - Nonlinear constraints stay refused (`BotorchOptimizer` does not support them; it would take pymoo
   and a worse acquisition optimizer), as do `NChooseK` and interpoint constraints. `DEFERRED.md`
   carries all three with their triggers.
+- **A constraint costs real time, and CI is where that surfaced.** Measured on the mixed domain
+  these tests use: an unconstrained ask is 3.2s for one candidate and 6.9s for five; a constrained
+  one is 10.3s and **46.1s**. Roughly three times the cost at n=1, then about nine seconds per
+  further candidate, because the acquisition optimizer now solves a constrained problem per
+  categorical combination. Two tests asked for five and three candidates and blew CI's 180s
+  per-test timeout under coverage; they ask for two now, which proves the same property. The
+  latency is a property of the capability rather than of the tests, so the tool description tells
+  the model to keep constrained batches small.
 - `space_exhausted` and `MIN_SEED_OBSERVATIONS` themselves are untouched: a constraint changes how
   large the feasible space is, not how the loop reasons about running out of it. What changed is the
   number they are handed.
