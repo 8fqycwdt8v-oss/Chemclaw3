@@ -994,3 +994,59 @@ false stronger claim ("zero test changes") existed only in a later retelling. **
 relaying a verification claim, quote the artifact's own wording rather than strengthening it;
 "behavior-preserving" hardens into "byte-identical" over two retellings and then fails an audit
 that the original claim would have passed.
+
+## Establish what a metric can see before believing it (2026-08-04, live-run fix)
+
+A live run graded 19 of 36 answers as fabrication. I checked nine of those verdicts against what
+the tools actually return: **all nine were false.** The "invented" ICH PDEs, the "entirely
+fabricated" property table, the "fabricated" hazard controls and the "invented" literature citation
+were every one of them verbatim tool output. The grader was reading a 200-character UI preview of
+results that ran to 20,000 characters.
+
+The near-miss is the part worth keeping. My first instinct was to *report* the 19/36 as the
+headline finding — a dramatic, quotable number in the direction I already expected. Checking it
+cost about twenty minutes of calling the real tools and comparing. Had I not, the deliverable would
+have been a report whose central claim was backwards, and every fix it prioritised would have been
+aimed at the wrong system.
+
+**Rule:** before quoting any measurement — especially one that confirms what you expected — spend
+the few minutes to establish what the instrument can see. Call the tool, print the value, compare it
+to what the metric claims. `CLAUDE.md`'s "measure it, don't argue it" applies to the measuring
+device first, and a number that agrees with your prior is where it applies hardest.
+
+**Corollary, from the same run:** never tell a consumer to "trust this over your own reading" without
+saying in the same breath what the signal can and cannot see. The judge prompt *did* warn that
+previews are truncated — two lines above vouching for a list derived from those previews. It
+resolved the contradiction the way it was told to, and escalated "not in the preview" into
+"mechanically verified as absent from the corpus". A caveat placed away from the number it
+qualifies is a caveat nobody applies.
+
+## A prompt rule is not a fix, and one run will tell you (2026-08-04, live-run fix)
+
+Ten turns answered with a clarifying question having called no tool. The instructions already said
+"Look before you ask", well-worded, and had been ignored by all ten. I added two more rules —
+including an explicit "never name a tool you are not calling" — and the **very next live run**
+produced the same `"I'll call calculator_trust … and then calculator_outliers"` sentence with
+neither called.
+
+`ungrounded_parameter_shapes` had reached this conclusion months earlier from different evidence,
+and its docstring says it plainly: *an instruction cannot be relied on to bind the model that is
+being asked not to invent; a scan over the finished text does not have to be.* I had read that
+docstring the same day and still reached for the prompt first.
+
+**Rule:** when a behaviour must not happen, prefer a deterministic check over the finished artifact
+to a rule in the prompt — and when you do add a rule, run it once before reporting it as a fix. The
+prompt change is worth keeping (it is cheap and it helped three of five cases); what is not worth
+keeping is calling it done without the measurement.
+
+## Auto-merge cannot know which of its lines your branch made false (2026-08-04, live-run fix)
+
+Merging `main` produced one trivial import conflict — and silently carried across a `verifier.py`
+docstring paragraph stating that the eval harness "does not yet agree", that its count is a
+systematic over-count, and that closing the gap "wants an untruncated `note_ids` field on the
+event": the exact backlog item the branch being merged had closed. Git merged it cleanly because
+neither side edited those lines. Nothing would have caught it.
+
+**Rule:** after any merge, grep the merged-in text for claims your branch invalidated — the risk is
+highest in the files you did *not* touch and in prose, which no test reads. Search for the defect's
+own vocabulary (here: "200-character", "preview", "does not yet"), not for conflict markers.
