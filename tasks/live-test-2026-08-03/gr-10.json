@@ -1,0 +1,75 @@
+{
+  "probe": {
+    "id": "gr-10",
+    "section": 3,
+    "persona": "lab_leader",
+    "bucket": "A",
+    "question": "We're starting the same C-N coupling on a new aryl chloride next month. Given the screening we already have, what should the first eight experiments be?",
+    "expects_tools": [
+      "suggest_next_experiment",
+      "start_optimization_campaign",
+      "gather_evidence",
+      "generate_screening_design"
+    ],
+    "forbids_claims": [
+      "the proposed conditions described as validated, recommended or expected to work",
+      "a predicted yield for any proposed point",
+      "historic runs used as the prior without saying which and how many"
+    ],
+    "direction": "Thousands of records on this exact transformation are available as a prior. A good answer turns them into observations, proposes points, and lands the result as a proposal a human runs — with the reasoning for the decision space visible. Silently ignoring the historic data and proposing a generic grid is the weak outcome."
+  },
+  "outcome": {
+    "probe_id": "gr-10",
+    "section": 3,
+    "persona": "lab_leader",
+    "bucket": "A",
+    "question": "We're starting the same C-N coupling on a new aryl chloride next month. Given the screening we already have, what should the first eight experiments be?",
+    "answer": "I'll help you design the next screening experiments. First, let me search for your existing C-N coupling screening data.The search picked up Buchwald amination and general amide coupling, but didn't narrow to your specific C-N coupling screening. Let me search more specifically for your prior optimization campaigns or screening work on aryl chlorides.I'm not finding specific screening data on C-N coupling with aryl chlorides in the current record. Let me ask for clarification so I can give you the right answer:Once you provide that pointer, I'll:\n\n1. **Retrieve the full screening dataset** — every run you already have, with conditions (catalyst, ligand, base, solvent, temperature) and outcomes (yield, selectivity, conversion)\n2. **Identify the decision space** — which factors varied in your screening and which ranges/options showed promise\n3. **Design the next eight experiments** — either by continuing an established factor sweep, or by running a statistically efficient reduced factorial design if you have many factors\n4. **Cite the precedent** — so you can see exactly which runs informed each proposed condition\n\nIf the screening was in a different reaction format (e.g., aryl bromides instead of chlorides, or different nucleophile), I can also search for structurally similar reactions to mine for analogies. But I need to know which data you want me to build from.",
+    "answered": true,
+    "tools_called": [
+      "gather_evidence",
+      "find_notes",
+      "find_past_jobs",
+      "ask_clarifying_question"
+    ],
+    "tool_results": [
+      {
+        "tool": "gather_evidence",
+        "preview": "[{\"content\": \"<retrieved-note-4216b6a377548e22 id=\\\"reaction-santanilla-orgsyn-alcohol-well-R36\\\">\\nReaction `BrC1=CN=CC=C1.OCCCC1=CC=CC=C1.CN(C)P(N(C)C)(N(C)C)=NP(N(C)C)(N(C)C)=NCC>CS(O[Pd]1([P](C(C)"
+      },
+      {
+        "tool": "find_notes",
+        "preview": "[]"
+      },
+      {
+        "tool": "find_past_jobs",
+        "preview": "[]"
+      },
+      {
+        "tool": "ask_clarifying_question",
+        "preview": "Question put to the chemist; awaiting their answer."
+      }
+    ],
+    "tools_failed": [],
+    "expected_tools_met": true,
+    "uncited_note_ids": [],
+    "failed_loudly": true,
+    "error_code": null,
+    "degraded": [
+      "durable-jobs (Temporal)"
+    ],
+    "jobs_started": [],
+    "notes_proposed": [],
+    "asked_clarifying": true,
+    "latency_seconds": 12.29,
+    "event_counts": {
+      "capability_degraded": 1,
+      "token": 24,
+      "tool_call": 4,
+      "tool_result": 4,
+      "question": 1,
+      "answer": 1
+    },
+    "transport_error": null
+  }
+}

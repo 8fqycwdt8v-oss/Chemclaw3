@@ -31,7 +31,11 @@ from chemclaw.science.fingerprints.molfp.search import (
     find_substructure_matches as _substructure_matches,
 )
 from chemclaw.science.fingerprints.rxnfp.search import find_similar_reactions as _similar_reactions
-from chemclaw.science.fingerprints.store import default_molecule_store, default_reaction_store
+from chemclaw.science.fingerprints.store import (
+    FingerprintSearch,
+    default_molecule_store,
+    default_reaction_store,
+)
 
 __all__ = [
     "MoleculeHit",
@@ -57,7 +61,7 @@ class ReactionHit(BaseModel):
 
 async def find_similar_reactions(
     reaction_smiles: str, top_k: int | None = None
-) -> list[ReactionHit]:
+) -> FingerprintSearch[ReactionHit]:
     """Find past reactions structurally similar to a query reaction (DRFP Tanimoto).
 
     Use this to gather what has been tried for a transformation — each hit is a real,
@@ -69,18 +73,28 @@ async def find_similar_reactions(
         top_k: How many neighbors to return (defaults to the configured value).
 
     Returns:
-        Similar reactions with their note id, SMILES, and similarity (0–1).
+        The search: `hits` (note id, SMILES, similarity 0–1) plus `verdict`/`index_empty`. Read
+        `verdict` first — no hits with `index_empty` set means nothing is indexed, so the question
+        was not answered; it is never evidence that the transformation is new to us.
     """
-    matches = await _similar_reactions(_reaction_store(), reaction_smiles, top_k)
-    return [
-        ReactionHit(
-            reaction_note_id=f"reaction-{m.id}", reaction_smiles=m.label, similarity=m.similarity
-        )
-        for m in matches
-    ]
+    search = await _similar_reactions(_reaction_store(), reaction_smiles, top_k)
+    return FingerprintSearch[ReactionHit](
+        subject=search.subject,
+        hits=[
+            ReactionHit(
+                reaction_note_id=f"reaction-{m.id}",
+                reaction_smiles=m.label,
+                similarity=m.similarity,
+            )
+            for m in search.hits
+        ],
+        index_empty=search.index_empty,
+    )
 
 
-async def find_similar_molecules(smiles: str, top_k: int | None = None) -> list[MoleculeHit]:
+async def find_similar_molecules(
+    smiles: str, top_k: int | None = None
+) -> FingerprintSearch[MoleculeHit]:
     """Find molecules structurally similar to a query structure (ECFP4 Tanimoto).
 
     Use this for analogy across substrates ("have we handled a close analog of this
@@ -91,13 +105,15 @@ async def find_similar_molecules(smiles: str, top_k: int | None = None) -> list[
         top_k: How many neighbors to return (defaults to the configured value).
 
     Returns:
-        Similar molecules with their compound note id, canonical SMILES and similarity (0–1).
-        Cite the note id; it is `null` only for an indexed structure that no longer parses.
+        The search: `hits` (compound note id, canonical SMILES, similarity 0–1) plus
+        `verdict`/`index_empty`. Cite the note id; it is `null` only for an indexed structure that
+        no longer parses. Read `verdict` first — no hits with `index_empty` set means nothing is
+        indexed, not that no analog exists.
     """
     return await _similar_molecules(_molecule_store(), smiles, top_k)
 
 
-async def find_substructure_matches(pattern: str) -> list[MoleculeHit]:
+async def find_substructure_matches(pattern: str) -> FingerprintSearch[MoleculeHit]:
     """Find indexed molecules that contain a substructure (SMARTS, or a SMILES fragment).
 
     Use this for functional-group-conditioned questions ("what do we know when a boronic
@@ -109,6 +125,8 @@ async def find_substructure_matches(pattern: str) -> list[MoleculeHit]:
         pattern: The substructure query as SMARTS (a plain SMILES is also valid SMARTS).
 
     Returns:
-        Matching molecules with their compound note id and canonical SMILES (no similarity).
+        The search: `hits` (compound note id, canonical SMILES; no similarity) plus
+        `verdict`/`index_empty`. Read `verdict` first — no hits with `index_empty` set means
+        nothing is indexed, not that no molecule bears the fragment.
     """
     return await _substructure_matches(_molecule_store(), pattern)

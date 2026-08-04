@@ -10,7 +10,13 @@ from mcp.server.fastmcp import FastMCP
 
 from chemclaw.kg.note import note_id_for_reaction
 from chemclaw.science.fingerprints.rxnfp.search import find_similar_reactions, record_for_reaction
-from chemclaw.science.fingerprints.store import FingerprintStore, Match, default_reaction_store
+from chemclaw.science.fingerprints.store import (
+    FingerprintSearch,
+    FingerprintStore,
+    Match,
+    default_reaction_store,
+    log_index_size,
+)
 
 server = FastMCP("mcp-rxnfp")
 _store: FingerprintStore = default_reaction_store()
@@ -19,14 +25,29 @@ _store: FingerprintStore = default_reaction_store()
 @server.tool()
 async def similar_reactions(
     reaction_smiles: str, top_k: int | None = None, threshold: float | None = None
-) -> list[Match]:
+) -> FingerprintSearch[Match]:
     """Find stored reactions similar to `reaction_smiles`, most similar first.
 
     Each hit's `id` is the reaction's **note id**, so it can be passed straight to `expand_note`
     for the full recipe. `top_k` and `threshold` (Tanimoto floor) default to the configured values.
+
+    **Read `verdict` before answering.** Empty `hits` with `index_empty: true` means no reaction
+    has been indexed and the question was not answered — never report it as "we have no precedent".
     """
-    matches = await find_similar_reactions(_store, reaction_smiles, top_k, threshold)
-    return [match.model_copy(update={"id": note_id_for_reaction(match.id)}) for match in matches]
+    search = await find_similar_reactions(_store, reaction_smiles, top_k, threshold)
+    return search.model_copy(
+        update={
+            "hits": [
+                match.model_copy(update={"id": note_id_for_reaction(match.id)})
+                for match in search.hits
+            ]
+        }
+    )
+
+
+async def report_index_size() -> None:
+    """Log this connector's index size at startup (see the `molfp` twin for the full note)."""
+    await log_index_size(_store, "reaction")
 
 
 @server.tool()

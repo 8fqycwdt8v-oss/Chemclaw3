@@ -1,0 +1,73 @@
+{
+  "probe": {
+    "id": "gr-08",
+    "section": 17,
+    "persona": "lab_leader",
+    "bucket": "A",
+    "question": "One of the wells on that 3-bromopyridine plate is logged at 119% yield. Is our data any good?",
+    "expects_tools": [
+      "gather_evidence",
+      "expand_note",
+      "find_notes"
+    ],
+    "forbids_claims": [
+      "119% repeated as a yield with no comment on its impossibility",
+      "the record dismissed as fabricated or as an ingest bug, with no basis",
+      "a corrected yield invented in its place"
+    ],
+    "direction": "The value is real, is in the corpus, and is what an uncalibrated relative-UPLC readout does. A good answer says the number cannot be a mass yield, offers the calibration explanation as the likely one, and does not quietly launder it into something plausible. Extending the point to the rest of that screen's numbers is a bonus, not a requirement."
+  },
+  "outcome": {
+    "probe_id": "gr-08",
+    "section": 17,
+    "persona": "lab_leader",
+    "bucket": "A",
+    "question": "One of the wells on that 3-bromopyridine plate is logged at 119% yield. Is our data any good?",
+    "answer": "I need to look up what that plate is. Let me search for the 3-bromopyridine screening work.I can see there are several 3-bromopyridine screening plates in the system (Santanilla et al. from Merck with various nucleophiles). Let me expand one of these to get more detail about the actual plate and look for the 119% yield entry.That one shows 29.5% yield. Let me search more specifically for a 119% yield on the 3-bromopyridine work to find which well that is.I'm not finding an exact 119% yield entry yet. Let me search with different terms to find that specific well.The search isn't finding a 119% yield entry. Can you help me locate which specific plate or campaign you're referring to? A few possibilities:\n\n1. **Do you have the well identifier?** (like a letter-number code: R36, AF21, D6, etc., or an ELN entry number?)\n2. **Do you remember which nucleophile or catalyst was used in that well?**\n3. **Do you know roughly when the plate was run?**\n\nOnce I can pinpoint the exact entry, I can pull up the full details and assess the data quality. In the meantime, here's what a 119% yield _generally_ signals:\n\n**A yield over 100% is almost always a measurement or reporting error**, not a chemistry success. The common culprits are:\n\n- **Incomplete solvent/volatile removal** — the product mass includes residual solvent that was supposed to evaporate\n- **Baseline/tare weight error** — the empty vial wasn't weighed correctly before charging, or was weighed wet\n- **Impurity co-isolation** — the \"product\" includes inseparable byproducts, salts, or reactants\n- **Unit conversion mistake** — e.g. reporting mmol instead of mg, or vice versa\n- **Duplicate entries or math errors** — a value was entered twice, or a scale-up was miscalculated\n\nFor a high-throughput plate, the most likely is incomplete solvent removal on a small mass where evaporation loss is a larger percentage of the error budget than on multi-gram runs.\n\nFind me the well details and I'll look at the full conditions and any linked notes to say whether the number should be flagged for re-measurement or excluded.",
+    "answered": true,
+    "tools_called": [
+      "gather_evidence",
+      "expand_note",
+      "gather_evidence",
+      "find_notes"
+    ],
+    "tool_results": [
+      {
+        "tool": "gather_evidence",
+        "preview": "[{\"content\": \"<retrieved-note-4216b6a377548e22 id=\\\"reaction-santanilla-orgsyn-alcohol-well-R36\\\">\\nReaction `BrC1=CN=CC=C1.OCCCC1=CC=CC=C1.CN(C)P(N(C)C)(N(C)C)=NP(N(C)C)(N(C)C)=NCC>CS(O[Pd]1([P](C(C)"
+      },
+      {
+        "tool": "expand_note",
+        "preview": "{\"note\": {\"id\": \"reaction-santanilla-orgsyn-alcohol-well-R36\", \"type\": \"reaction\", \"compound_smiles\": \"C1(CCCOC2=CN=CC=C2)=CC=CC=C1\", \"tags\": [], \"created_by\": \"agent\", \"source\": \"eln-json:santanilla-"
+      },
+      {
+        "tool": "gather_evidence",
+        "preview": "[{\"content\": \"<retrieved-note-4216b6a377548e22 id=\\\"reaction-bh-amination-btmg-0119\\\">\\nReaction `IC1=CN=CC=C1.Cc1ccc(N)cc1.CC(C)(C)/N=C(N(C)C)/N(C)C.CC1=NOC(C(OCC)=O)=C1>CC(C)C(C=C(C(C)C)C=C1C(C)C)=C"
+      },
+      {
+        "tool": "find_notes",
+        "preview": "[]"
+      }
+    ],
+    "tools_failed": [],
+    "expected_tools_met": true,
+    "uncited_note_ids": [],
+    "failed_loudly": true,
+    "error_code": null,
+    "degraded": [
+      "durable-jobs (Temporal)"
+    ],
+    "jobs_started": [],
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "latency_seconds": 14.39,
+    "event_counts": {
+      "capability_degraded": 1,
+      "token": 39,
+      "tool_call": 4,
+      "tool_result": 4,
+      "answer": 1
+    },
+    "transport_error": null
+  }
+}

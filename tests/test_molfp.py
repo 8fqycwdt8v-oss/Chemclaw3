@@ -30,6 +30,7 @@ from chemclaw.science.fingerprints.store import (
     Match,
     PostgresFingerprintStore,
     find_matches,
+    log_index_size,
     tanimoto,
 )
 
@@ -80,7 +81,7 @@ def test_find_similar_ranks_by_tanimoto() -> None:
         ]:
             await store.add(record_for(cid, smiles))
 
-        hits = await find_similar_molecules(store, "CCO", threshold=0.1)
+        hits = (await find_similar_molecules(store, "CCO", threshold=0.1)).hits
         found = [h.smiles for h in hits]
         assert found[0] == "CCO"  # exact match ranks first
         assert "c1ccccc1" not in found  # disjoint, below threshold
@@ -91,7 +92,7 @@ def test_find_similar_ranks_by_tanimoto() -> None:
         )
 
         # top_k truncates to the closest neighbors only.
-        assert len(await find_similar_molecules(store, "CCO", top_k=2, threshold=0.1)) == 2
+        assert len((await find_similar_molecules(store, "CCO", top_k=2, threshold=0.1)).hits) == 2
 
     asyncio.run(_run())
 
@@ -103,8 +104,8 @@ def test_threshold_excludes_weak_matches() -> None:
         store = InMemoryFingerprintStore()
         await store.add(record_for("propanol", "CCCO"))
         # Ethanol vs propanol ~0.56; a 0.9 threshold rejects it.
-        assert await find_similar_molecules(store, "CCO", threshold=0.9) == []
-        assert len(await find_similar_molecules(store, "CCO", threshold=0.5)) == 1
+        assert (await find_similar_molecules(store, "CCO", threshold=0.9)).hits == []
+        assert len((await find_similar_molecules(store, "CCO", threshold=0.5)).hits) == 1
 
     asyncio.run(_run())
 
@@ -126,7 +127,7 @@ def test_similarity_excludes_other_fingerprint_definitions() -> None:
         )
         await store.add(stale)
 
-        hits = await find_similar_molecules(store, "CCO", threshold=0.1)
+        hits = (await find_similar_molecules(store, "CCO", threshold=0.1)).hits
         # Both rows carry the same structure, so the exclusion shows in the count: the
         # stale-definition row is filtered out by the store, not ranked below the current one.
         assert len(hits) == 1
@@ -148,10 +149,10 @@ def test_substructure_matches_fragment() -> None:
         ]:
             await store.add(record_for(cid, smiles))
 
-        ring = {r.smiles for r in await find_substructure_matches(store, "c1ccccc1")}
+        ring = {r.smiles for r in (await find_substructure_matches(store, "c1ccccc1")).hits}
         assert ring == {"CC(=O)Oc1ccccc1C(=O)O", "c1ccccc1"}  # only the aromatic molecules
 
-        acids = {r.smiles for r in await find_substructure_matches(store, "C(=O)[OH]")}
+        acids = {r.smiles for r in (await find_substructure_matches(store, "C(=O)[OH]")).hits}
         assert acids == {"CC(=O)Oc1ccccc1C(=O)O", "CC(=O)O"}  # carboxylic-acid SMARTS
 
     asyncio.run(_run())
@@ -214,7 +215,7 @@ def test_substructure_hits_are_lean_and_capped(
         for cid, smiles in [("ethanol", "CCO"), ("propanol", "CCCO"), ("butanol", "CCCCO")]:
             await store.add(record_for(cid, smiles))
         with caplog.at_level("WARNING"):
-            hits = await find_substructure_matches(store, "CO")
+            hits = (await find_substructure_matches(store, "CO")).hits
         assert len(hits) == 2  # three molecules match; the cap truncates to two
         assert any("substructure result capped" in r.message for r in caplog.records)
         assert not any(hasattr(h, "bits") for h in hits)  # lean shape: no fingerprint payload
@@ -304,7 +305,7 @@ def test_agent_supplied_top_k_is_clamped(monkeypatch: pytest.MonkeyPatch) -> Non
             await store.add(record_for(cid, smiles))
 
         # Four records clear the threshold, but the clamp caps the returned neighbors at 2.
-        hits = await find_similar_molecules(store, "CCO", top_k=1_000_000, threshold=0.1)
+        hits = (await find_similar_molecules(store, "CCO", top_k=1_000_000, threshold=0.1)).hits
         assert len(hits) == 2
 
     asyncio.run(_run())
@@ -335,6 +336,12 @@ def test_agent_supplied_threshold_is_clamped() -> None:
             self.thresholds.append(threshold)
             return []
 
+        async def is_empty(self) -> bool:
+            raise NotImplementedError
+
+        async def count(self) -> int:
+            raise NotImplementedError
+
     async def _run() -> None:
         recording = _RecordingStore()
         await find_matches(recording, "01", threshold=-5.0)
@@ -344,7 +351,7 @@ def test_agent_supplied_threshold_is_clamped() -> None:
         # End to end: an over-1 threshold still returns the exact match instead of [].
         store = InMemoryFingerprintStore()
         await store.add(record_for("ethanol", "CCO"))
-        hits = await find_similar_molecules(store, "CCO", threshold=99.0)
+        hits = (await find_similar_molecules(store, "CCO", threshold=99.0)).hits
         assert [h.smiles for h in hits] == ["CCO"]
 
     asyncio.run(_run())
@@ -374,7 +381,7 @@ def test_substructure_scan_caps_and_warns(
         for cid in ["aspirin", "benzene", "toluene"]:
             await store.add(record_for(cid, "c1ccccc1" if cid != "aspirin" else "Cc1ccccc1"))
         with caplog.at_level("WARNING"):
-            hits = await find_substructure_matches(store, "c1ccccc1")
+            hits = (await find_substructure_matches(store, "c1ccccc1")).hits
         # Only the one capped record is scanned, so at most one match is returned.
         assert len(hits) <= 1
         assert any("substructure scan hit" in r.message for r in caplog.records)
@@ -411,3 +418,174 @@ def test_postgres_store_applies_the_configured_statement_timeout(
     asyncio.run(_enter())
 
     assert captured["statement_timeout_seconds"] == settings.pg_statement_timeout_seconds
+
+
+# --- An empty index must not answer "nothing similar" --------------------------------------------
+#
+# The live-run defect (docs/archive/live-grounded-2026-08-03.md, finding 6): the fingerprint tables
+# were never backfilled, so the one tool whose job is "have we seen this before" answered `[]` —
+# indistinguishable from a genuinely novel structure. These tests pin the distinction *and* that it
+# survives serialization, which is where the same fix failed before (`ScreenResult.verdict`).
+
+
+def test_an_empty_index_reports_that_the_search_was_not_run() -> None:
+    """No records: the result says the question was not answered, not that the answer is no."""
+
+    async def _run() -> None:
+        search_result = await find_similar_molecules(InMemoryFingerprintStore(), "CCO")
+        assert search_result.hits == []
+        assert search_result.index_empty is True
+        assert "SEARCH NOT RUN" in search_result.verdict
+        assert "NOT evidence" in search_result.verdict
+
+    asyncio.run(_run())
+
+
+def test_the_empty_index_signal_survives_model_dump() -> None:
+    """The verdict must be *serialized*, or the model that writes the answer never sees it.
+
+    This is the whole reason `verdict` is a `computed_field` and not a bare `property`: MCP ships
+    `model_dump()`, and a plain property is dropped there — exactly how `ScreenResult.verdict`
+    ended up with zero production callers while a chemist was told "no hazards detected".
+    """
+
+    async def _run() -> None:
+        payload = (await find_similar_molecules(InMemoryFingerprintStore(), "CCO")).model_dump()
+        assert payload["index_empty"] is True
+        assert "SEARCH NOT RUN" in payload["verdict"]
+
+    asyncio.run(_run())
+
+
+def test_a_populated_index_with_no_match_is_a_genuine_negative() -> None:
+    """Records exist and none matched: the ordinary "no precedent" answer, clearly distinguished."""
+
+    async def _run() -> None:
+        store = InMemoryFingerprintStore()
+        await store.add(record_for("benzene", "c1ccccc1"))
+        # Ethanol vs benzene share no bits, so the search is real and finds nothing.
+        search_result = await find_similar_molecules(store, "CCO", threshold=0.5)
+        assert search_result.hits == []
+        assert search_result.index_empty is False
+        assert "SEARCH NOT RUN" not in search_result.verdict
+        assert "genuine negative" in search_result.verdict
+
+    asyncio.run(_run())
+
+
+def test_a_hit_is_unaffected_by_the_emptiness_signal() -> None:
+    """Regression guard: a real match still reports its hits, with the index not flagged empty."""
+
+    async def _run() -> None:
+        store = InMemoryFingerprintStore()
+        await store.add(record_for("ethanol", "CCO"))
+        search_result = await find_similar_molecules(store, "CCO", threshold=0.1)
+        assert [h.smiles for h in search_result.hits] == ["CCO"]
+        assert search_result.index_empty is False
+        assert search_result.verdict.startswith("1 indexed molecule(s) matched")
+
+    asyncio.run(_run())
+
+
+def test_an_index_of_only_stale_definitions_counts_as_empty() -> None:
+    """Rows the store cannot rank are not "records we searched" — they are nothing, honestly.
+
+    A definition change orphans every row until it is re-indexed (runbook (vi)). Search returns
+    none of them, so reporting the index as populated would produce exactly the defect this
+    distinction exists to prevent, one config change further along.
+    """
+
+    async def _run() -> None:
+        store = InMemoryFingerprintStore(definition=molecule_definition())
+        await store.add(
+            FingerprintRecord(
+                id="stale", label="CCO", bits=ecfp_bitstring("CCO"), definition="ecfp:r9:b2048"
+            )
+        )
+        search_result = await find_similar_molecules(store, "CCO", threshold=0.1)
+        assert search_result.index_empty is True
+        assert await store.count() == 0
+
+    asyncio.run(_run())
+
+
+def test_substructure_search_makes_the_same_distinction() -> None:
+    """The third tool over the same index has the same failure mode, so it gets the same answer."""
+
+    async def _run() -> None:
+        empty = await find_substructure_matches(InMemoryFingerprintStore(), "c1ccccc1")
+        assert empty.hits == [] and empty.index_empty is True
+        assert "SEARCH NOT RUN" in empty.model_dump()["verdict"]
+
+        store = InMemoryFingerprintStore()
+        await store.add(record_for("ethanol", "CCO"))
+        populated = await find_substructure_matches(store, "c1ccccc1")
+        assert populated.hits == [] and populated.index_empty is False
+        assert "genuine negative" in populated.verdict
+
+    asyncio.run(_run())
+
+
+def test_the_emptiness_probe_is_skipped_when_the_search_found_hits() -> None:
+    """The probe may not become a per-call cost: a search with hits already proved the index full.
+
+    `is_empty` runs on the durable backend as a real query; paying for it when the answer is
+    already known would be a performance defect on the hot path.
+    """
+
+    class _CountingStore(InMemoryFingerprintStore):
+        """An in-memory store that records how often it was asked whether it is empty."""
+
+        probes = 0
+
+        async def is_empty(self) -> bool:
+            type(self).probes += 1
+            return await super().is_empty()
+
+    async def _run() -> None:
+        store = _CountingStore()
+        await store.add(record_for("ethanol", "CCO"))
+        assert (await find_similar_molecules(store, "CCO", threshold=0.1)).hits  # a hit
+        assert _CountingStore.probes == 0
+        # Benzene shares no bits with the indexed ethanol, so this search legitimately finds none.
+        assert (await find_similar_molecules(store, "c1ccccc1", threshold=0.1)).hits == []
+        assert _CountingStore.probes == 1  # asked only once the result was empty
+
+    asyncio.run(_run())
+
+
+def test_the_startup_report_warns_only_when_the_index_is_empty(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The operator half: the owning connector says at startup what its index holds.
+
+    WARNING for an empty index (actionable and wrong), INFO with the count otherwise — so a
+    half-finished backfill is visible as a number rather than hidden behind a boolean.
+    """
+
+    async def _run() -> None:
+        store = InMemoryFingerprintStore()
+        with caplog.at_level("INFO"):
+            await log_index_size(store, "molecule")
+            empty_records = [r for r in caplog.records if r.levelname == "WARNING"]
+            assert any("index is EMPTY" in r.getMessage() for r in empty_records)
+
+            caplog.clear()
+            await store.add(record_for("ethanol", "CCO"))
+            await log_index_size(store, "molecule")
+            assert any("1 record(s) indexed" in r.getMessage() for r in caplog.records)
+            assert not [r for r in caplog.records if r.levelname == "WARNING"]
+
+    asyncio.run(_run())
+
+
+def test_the_startup_report_never_takes_the_connector_down() -> None:
+    """A report that cannot read the database logs and returns — a diagnostic may not be fatal."""
+
+    class _BrokenStore(InMemoryFingerprintStore):
+        """A store whose count fails the way an unreachable Postgres does."""
+
+        async def count(self) -> int:
+            raise ConnectionError("Postgres unreachable at postgres://host/db")
+
+    asyncio.run(log_index_size(_BrokenStore(), "molecule"))  # must not raise

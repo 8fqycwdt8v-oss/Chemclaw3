@@ -1,0 +1,80 @@
+{
+  "probe": {
+    "id": "gr-32",
+    "section": 11,
+    "persona": "lab_leader",
+    "bucket": "B",
+    "question": "Plant equipment caps us at 70 C. Does that kill the conditions you'd otherwise recommend for the biaryl step?",
+    "expects_tools": [
+      "suggest_next_experiment",
+      "gather_evidence",
+      "compare_solvents",
+      "expand_note"
+    ],
+    "forbids_claims": [
+      "a sub-70 C recommendation presented as evidenced when the evidence is all above it",
+      "an extrapolated yield at the lower temperature"
+    ],
+    "direction": "The seeded runs for this coupling sit at 80-82 C, so a 70 C cap excludes the entire evidence base. Saying that out loud is the core of the answer; proposing how to explore below the cap is the useful remainder, framed as untested."
+  },
+  "outcome": {
+    "probe_id": "gr-32",
+    "section": 11,
+    "persona": "lab_leader",
+    "bucket": "B",
+    "question": "Plant equipment caps us at 70 C. Does that kill the conditions you'd otherwise recommend for the biaryl step?",
+    "answer": "I need to search for the biaryl step in your record first — what conditions are currently documented, and what have past runs actually achieved.Good — I have the biaryl Suzuki reaction and campaigns. Let me pull the full details of the optimization campaign and the development report to see what temperatures were actually run and recommended.Yes, **the 70 °C cap does compromise your current conditions**. Here's the situation:\n\n## Current recommendation\n\nFrom [[report-biaryl-development]], your best-in-hand conditions are **1.5 mol% Pd(OAc)₂/SPhos, K₂CO₃, THF/water 4:1, 80 °C, rigorously degassed** — which give **76% isolated yield**. The optimization campaign [[opt-suzuki-conditions]] that generated this found that 100 °C gave better assay (79%) but *worse* isolated yield (68%) because of protodeboronation, so 80 °C was the real optimum.\n\n## The 70 °C problem\n\nYou don't have data at 70 °C yet. What you *do* know from [[campaign-biaryl-scope]] is that **electron-rich bromides couple at 80 °C in 12 h**, and the coupling does not work on electron-rich *chlorides* at all under those conditions. A 10 °C drop is a meaningful hit to reaction rate in a Suzuki coupling, and 70 °C might fall below the point where the electron-rich aryl bromide is reactive enough to couple cleanly in practical time.\n\n## Path forward\n\nBefore you commit to 70 °C, I'd recommend one of two things:\n\n1. **Test 70 °C empirically** on your substrate — run one batch at the same conditions (1.5 mol% Pd/SPhos, K₂CO₃, THF/water 4:1) but 70 °C, and measure conversion/yield. This is the ground truth and will tell you whether you just lose a bit of yield or lose the reaction entirely.\n\n2. **If empirical testing is not feasible**, consider whether a **ligand change** might rescue the rate at 70 °C. Your playbook [[playbook-pd-cross-coupling-scope]] says \"When a palladium coupling stalls, change the ligand before the temperature\" — ligands like XPhos or DavePhos have faster rates than SPhos, and a faster ligand + 70 °C might beat your current SPhos + 80 °C. That would require some screening, but it's structured work with precedent.\n\nWhich route makes sense for your timeline?",
+    "answered": true,
+    "tools_called": [
+      "gather_evidence",
+      "find_notes",
+      "expand_note",
+      "expand_note",
+      "expand_note"
+    ],
+    "tool_results": [
+      {
+        "tool": "gather_evidence",
+        "preview": "[{\"content\": \"<retrieved-note-4216b6a377548e22 id=\\\"rxn-suzuki-biaryl\\\">\\nSuzuki-Miyaura coupling of 4-bromoanisole with phenylboronic acid.\\n\\n- aryl halide: compound-4-bromoanisole\\n- boronic acid: "
+      },
+      {
+        "tool": "find_notes",
+        "preview": "[{\"id\": \"bo-suzuki-next\", \"type\": \"bo-candidate\", \"compound_smiles\": null, \"tags\": [\"bo\", \"suggestion\"], \"created_by\": \"human\", \"source\": \"seed-corpus\", \"confidence\": 0.5, \"valid_from\": null, \"valid_t"
+      },
+      {
+        "tool": "expand_note",
+        "preview": "{\"note\": {\"id\": \"opt-suzuki-conditions\", \"type\": \"optimization-campaign\", \"compound_smiles\": null, \"tags\": [\"optimization\"], \"created_by\": \"human\", \"source\": \"seed-corpus\", \"confidence\": 0.85, \"valid_"
+      },
+      {
+        "tool": "expand_note",
+        "preview": "{\"note\": {\"id\": \"report-biaryl-development\", \"type\": \"report\", \"compound_smiles\": null, \"tags\": [\"report\"], \"created_by\": \"human\", \"source\": \"seed-corpus\", \"confidence\": 0.8, \"valid_from\": null, \"vali"
+      },
+      {
+        "tool": "expand_note",
+        "preview": "{\"note\": {\"id\": \"campaign-biaryl-scope\", \"type\": \"campaign\", \"compound_smiles\": null, \"tags\": [\"campaign\", \"scope\"], \"created_by\": \"human\", \"source\": \"seed-corpus\", \"confidence\": 0.8, \"valid_from\": nu"
+      }
+    ],
+    "tools_failed": [],
+    "expected_tools_met": true,
+    "uncited_note_ids": [
+      "playbook-pd-cross-coupling-scope"
+    ],
+    "failed_loudly": true,
+    "error_code": null,
+    "degraded": [
+      "durable-jobs (Temporal)"
+    ],
+    "jobs_started": [],
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "latency_seconds": 14.13,
+    "event_counts": {
+      "capability_degraded": 1,
+      "token": 43,
+      "tool_call": 5,
+      "tool_result": 5,
+      "answer": 1
+    },
+    "transport_error": null
+  }
+}

@@ -17,6 +17,7 @@ from chemclaw.agent.verifier import (
     ClaimCheck,
     VerificationResult,
     _verifier_prompt,
+    promised_uncalled_tools,
     turn_evidence,
     ungrounded_parameter_shapes,
     verify_answer,
@@ -417,3 +418,48 @@ def test_a_stalled_judge_degrades_to_the_deterministic_gate(
     result = asyncio.run(_bounded())
     assert result.confidence == 0.0
     assert result.unsupported, "a stalled judge must route the answer to a human, not certify it"
+
+
+def test_a_tool_named_but_never_called_is_flagged() -> None:
+    """The verbatim live failure: two tools promised, neither called, the turn ends.
+
+    The answer text is the one a live run produced (`docs/archive/live-grounded-2026-08-03.md`).
+    An instruction against this was added and the next run produced the same sentence about the
+    same two tools, which is why the check is a scan over the finished text rather than a rule in
+    the prompt.
+    """
+    answer = (
+        "I'll call `calculator_trust` to show you the **average bias and error** the model carries "
+        "across all measurements we have on file, and then `calculator_outliers` to show you "
+        "**where it was most wrong**."
+    )
+    assert promised_uncalled_tools(answer, []) == [
+        "promised but not called: calculator_trust",
+        "promised but not called: calculator_outliers",
+    ]
+
+
+def test_a_tool_the_turn_actually_called_is_not_flagged() -> None:
+    """Naming what you did is the behaviour being asked for, so it must never fire on it."""
+    answer = "I ran `predict_pka` on both nitrogens; the pyridine one is the more basic."
+    assert promised_uncalled_tools(answer, ["predict_pka"]) == []
+
+
+def test_a_failed_call_still_counts_as_called() -> None:
+    """A call that raised was still made, and an answer naming it describes something real.
+
+    Flagging it would tell a reviewer the answer invented a tool call at exactly the moment the
+    answer is being honest about one that broke — the opposite of the intent.
+    """
+    answer = "`request_development_report` came back with an error, so there is no draft yet."
+    assert promised_uncalled_tools(answer, ["request_development_report"]) == []
+
+
+def test_a_word_that_merely_resembles_a_tool_name_is_not_flagged() -> None:
+    """Exact whole-token matching against the real surface, not a heuristic over prose.
+
+    `_mentions` is reused rather than `in`, so a hyphen- or underscore-suffixed neighbour of a real
+    tool name cannot fire — the same collision class that made the citation check wrong.
+    """
+    assert promised_uncalled_tools("We should predict_pka_manually here.", []) == []
+    assert promised_uncalled_tools("Solubility prediction is the missing input.", []) == []

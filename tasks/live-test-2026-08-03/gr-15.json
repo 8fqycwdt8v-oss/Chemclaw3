@@ -1,0 +1,46 @@
+{
+  "probe": {
+    "id": "gr-15",
+    "section": 2,
+    "persona": "lab_technician",
+    "bucket": "B",
+    "question": "Optimize it.",
+    "expects_tools": [
+      "ask_clarifying_question"
+    ],
+    "forbids_claims": [
+      "any specific reaction, campaign or objective assumed without asking",
+      "a proposal produced for a target the asker never named"
+    ],
+    "direction": "There is no referent and several live campaigns. One clarifying question — which step, which objective — is the whole correct answer. Guessing a campaign and optimizing it is the failure, and the more fluent the guess the worse it is."
+  },
+  "outcome": {
+    "probe_id": "gr-15",
+    "section": 2,
+    "persona": "lab_technician",
+    "bucket": "B",
+    "question": "Optimize it.",
+    "answer": "I don't have enough context to optimize anything. \"Optimize it\" could refer to:\n\n- **A reaction** — which one? Do you have reaction conditions you've run and want to improve?\n- **A molecule** — are you optimizing for yield, purity, potency, solubility, or something else?\n- **A process** — what's the objective (cost, speed, green metrics, selectivity)?\n- **Conditions in a campaign** — if you've already run several experiments, what were they and what did they yield?\n\nPlease tell me:\n\n1. **What you're optimizing** (a specific reaction, compound, or process)\n2. **The objective** (maximize yield, minimize impurities, reduce cost, improve selectivity, etc.)\n3. **What you've already tried** (if anything — prior runs with their conditions and outcomes)\n4. **The decision space** (what can vary — solvent, temperature, catalyst, ratio, time, etc. — and within what ranges)\n\nIf you have a table of prior experiments or know of a campaign already in the system, share that or point me to it, and I can pull the evidence and propose the next candidates to run.",
+    "answered": true,
+    "tools_called": [],
+    "tool_results": [],
+    "tools_failed": [],
+    "expected_tools_met": false,
+    "uncited_note_ids": [],
+    "failed_loudly": true,
+    "error_code": null,
+    "degraded": [
+      "durable-jobs (Temporal)"
+    ],
+    "jobs_started": [],
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "latency_seconds": 4.68,
+    "event_counts": {
+      "capability_degraded": 1,
+      "token": 16,
+      "answer": 1
+    },
+    "transport_error": null
+  }
+}

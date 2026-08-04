@@ -9,7 +9,7 @@ each as one SSE `data:` line via `model_dump_json()`.
 
 from typing import Literal
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 
 class QueuedEvent(BaseModel):
@@ -193,11 +193,37 @@ class ToolResultEvent(BaseModel):
 
     `preview` is truncated the same way `ToolCallEvent.arguments` is: enough to see the value,
     never a whole evidence sweep streamed to a browser.
+
+    `note_ids` is the machine-readable half, and it is **not** truncated — because it answers a
+    different question. A grounding check asks "was this id in front of the model this turn?", and
+    scoring that against the preview meant scoring 40 retrieved chunks against the first 200
+    characters of them: a live run graded 19 of 36 answers as fabrication and nine of nine checked
+    verdicts were false, every one an id or a number the tool really had returned
+    (`docs/archive/live-grounded-2026-08-03.md`). Widening the preview would have fixed the check
+    by breaking the budget it exists to keep, so the two now coexist: prose for a human, ids for a
+    scorer. Bounded by the notes one call can return, which is far smaller than their text.
+
+    `numbers` sits beside `note_ids` for that same stated reason, one step further on. Fixing the
+    ids left the *figures* unfixed, and the re-run said so in the grader's own words: "the tool
+    results shown are truncated previews that do not display the numerical limits", written about
+    the six ICH PDEs `ich_impurity_limit` had returned in full. So the same split is applied to the
+    same event — prose for a human, values for a scorer — and a consumer can now ask "did a tool in
+    this turn return this figure?" of something other than the first 200 characters.
+
+    Deduplicated, and capped by the producer at `_MAX_RESULT_NUMBERS`: a result is arbitrary text
+    and the event goes to a browser, so the list must be bounded. Truncation degrades in the safe
+    direction — a dropped value can only cost a figure its verification, never manufacture an
+    accusation — and the producer logs what it dropped, because a silent truncation reads as
+    completeness. Measured on real results the cap is far out of reach: 5 values for an ICH
+    lookup, 27 for a charge table, 49 for a full electronic-properties calculation, 36 for an
+    18-chunk evidence sweep.
     """
 
     type: Literal["tool_result"] = "tool_result"
     tool: str
     preview: str = ""
+    note_ids: list[str] = Field(default_factory=list)
+    numbers: list[float] = Field(default_factory=list)
 
 
 # The closed taxonomy. Each member is a *different thing for the user to do* — retry, wait, fix the

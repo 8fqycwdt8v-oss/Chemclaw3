@@ -4,10 +4,18 @@ Proves the agent can turn a decision space + historic runs into a concrete sugge
 a durable workflow: a fresh problem yields seed points, a problem with observations yields
 model-guided candidates inside the space, and a batch returns the asked-for count. BoFire runs
 in-process (no Temporal), the same as the campaign tests.
+
+Also pins the tool's own input contract: an observation whose parameters do not match the declared
+decision space is refused here, naming the observation and the parameter, rather than reaching
+BoFire and coming back as an internal `KeyError` the connector must sanitize into an unrepairable
+"an internal error occurred".
 """
 
 import asyncio
 
+import pytest
+
+from chemclaw.connectors.bo.server import tools as bo_tools
 from chemclaw.connectors.bo.server.tools import suggest_next_experiment
 from chemclaw.science.bo.problem import (
     CategoricalParameter,
@@ -16,6 +24,7 @@ from chemclaw.science.bo.problem import (
     Observation,
     OptimizationProblem,
 )
+from chemclaw.science.calc.store import InMemoryStore
 
 
 def _problem() -> OptimizationProblem:
@@ -103,6 +112,106 @@ def test_accepts_observations_json_encoded_as_a_string() -> None:
     assert len(candidates) == 1
     temperature = candidates[0].params["temperature"]
     assert isinstance(temperature, float) and 20.0 <= temperature <= 120.0
+
+
+def _three_factor_problem() -> OptimizationProblem:
+    """The live-run shape: a base choice beside the temperature and solvent factors."""
+    return OptimizationProblem(
+        parameters=[
+            ContinuousParameter(name="temperature", lower=20.0, upper=120.0),
+            CategoricalParameter(name="solvent", categories=["THF", "toluene"]),
+            CategoricalParameter(name="base", categories=["NEt3", "pyridine"]),
+        ],
+        objective=Objective(name="yield", direction="maximize"),
+    )
+
+
+def test_an_observation_missing_a_declared_parameter_names_it_and_its_index() -> None:
+    """A declared parameter absent from an observation is refused before BoFire sees anything.
+
+    This is the class of fault behind the live `KeyError: 'base'` from inside BoFire's
+    `_optimize_acqf_discrete`, which `connectors/server.py` correctly refuses to forward verbatim
+    and so delivered to the model as "an internal error occurred". BoFire does already raise a
+    well-worded `ValueError` of its own on this direction (measured), so what is pinned here is
+    the *index*: with six observations in the call, "invalid values for `base`" does not say which
+    one to repair, and this message does.
+    """
+    observations = [
+        Observation(params={"temperature": 40.0, "solvent": "THF", "base": "NEt3"}, value=55.0),
+        Observation(params={"temperature": 80.0, "solvent": "THF"}, value=78.0),
+    ]
+    with pytest.raises(ValueError, match=r"observations\[1\].*'base'"):
+        asyncio.run(suggest_next_experiment(_three_factor_problem(), observations))
+
+
+def test_an_observation_naming_an_undeclared_parameter_names_it() -> None:
+    """The mirror fault, and the one that was not failing loudly at all.
+
+    Measured against this BoFire version before the check existed: an extra key is *silently
+    ignored*, the ask succeeds, and candidates come back from a decision space that quietly
+    dropped a condition the chemist reported. So this direction is not about error wording — it
+    turns a confidently wrong answer into a question the caller can fix.
+    """
+    observations = [
+        Observation(
+            params={"temperature": 40.0, "solvent": "THF", "base": "NEt3", "ligand": "PPh3"},
+            value=55.0,
+        ),
+        Observation(params={"temperature": 80.0, "solvent": "THF", "base": "pyridine"}, value=78.0),
+    ]
+    with pytest.raises(ValueError, match=r"observations\[0\].*'ligand'.*does not declare"):
+        asyncio.run(suggest_next_experiment(_three_factor_problem(), observations))
+
+
+def test_matching_observations_are_unaffected() -> None:
+    """Regression guard: the check passes a well-formed three-factor call straight through."""
+    observations = [
+        Observation(params={"temperature": 40.0, "solvent": "THF", "base": "NEt3"}, value=55.0),
+        Observation(params={"temperature": 80.0, "solvent": "THF", "base": "pyridine"}, value=78.0),
+        Observation(
+            params={"temperature": 100.0, "solvent": "toluene", "base": "NEt3"}, value=64.0
+        ),
+    ]
+    candidates = asyncio.run(
+        suggest_next_experiment(_three_factor_problem(), observations)
+    ).candidates
+    assert len(candidates) == 1
+    assert candidates[0].params["base"] in {"NEt3", "pyridine"}
+
+
+def test_the_descriptor_bearing_path_is_unaffected(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Regression guard on the `structures` path, which the boundary check now runs ahead of.
+
+    Featurization rewrites the *parameters* (it fills `descriptors`) but never their names, so
+    the check has to sit before it and still agree with what BoFire is finally handed. Real xTB
+    through an in-memory store, so this exercises the whole path rather than a stubbed one.
+    """
+    monkeypatch.setattr(bo_tools, "default_store", InMemoryStore)
+    problem = OptimizationProblem(
+        parameters=[
+            ContinuousParameter(name="temperature", lower=20.0, upper=120.0),
+            CategoricalParameter(
+                name="base",
+                categories=["NEt3", "pyridine"],
+                structures={"NEt3": "CCN(CC)CC", "pyridine": "c1ccncc1"},
+            ),
+        ],
+        objective=Objective(name="yield", direction="maximize"),
+    )
+    observations = [
+        Observation(params={"temperature": 40.0, "base": "NEt3"}, value=55.0),
+        Observation(params={"temperature": 80.0, "base": "pyridine"}, value=78.0),
+    ]
+    suggestion = asyncio.run(suggest_next_experiment(problem, observations))
+    assert len(suggestion.candidates) == 1
+    assert suggestion.candidates[0].params["base"] in {"NEt3", "pyridine"}
+    assert suggestion.calc_refs  # the descriptors really were computed, not skipped
+
+
+def test_the_seeding_path_with_no_observations_is_unaffected() -> None:
+    """Nothing to check when there are no observations — seeding must not be made harder."""
+    suggestion = asyncio.run(suggest_next_experiment(_three_factor_problem(), [], count=2))
+    assert len(suggestion.candidates) == 2
 
 
 def test_the_tool_the_model_sees_states_that_one_objective_is_all_there_is() -> None:

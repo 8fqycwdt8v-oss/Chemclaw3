@@ -46,7 +46,7 @@ def test_similarity_ranking_in_sql() -> None:
         ]:
             await store.add(record_for(cid, smiles))
 
-        hits = await find_similar_molecules(store, "CCO", top_k=3, threshold=0.1)
+        hits = (await find_similar_molecules(store, "CCO", top_k=3, threshold=0.1)).hits
         assert hits[0].smiles == "CCO"
         assert hits[0].similarity == pytest.approx(1.0)
         assert "c1ccccc1" not in {h.smiles for h in hits}  # disjoint, below threshold
@@ -97,7 +97,39 @@ def test_upsert_and_substructure_over_postgres() -> None:
         await store.add(record_for("pg-mol", "CCO"))
         await store.add(record_for("pg-mol", "CC(=O)O"))  # replace ethanol with acetic acid
 
-        acids = {r.smiles for r in await find_substructure_matches(store, "C(=O)[OH]")}
+        acids = {r.smiles for r in (await find_substructure_matches(store, "C(=O)[OH]")).hits}
         assert "CC(=O)O" in acids  # the replaced record now matches the acid pattern
+
+    asyncio.run(_run())
+
+
+def test_emptiness_and_count_are_scoped_to_the_stores_definition() -> None:
+    """The durable backend must answer "is anything searchable here?" as honestly as memory does.
+
+    Asserted through a store pinned to a definition nothing was ever indexed under, which is both
+    the robust way to test emptiness against a shared database (other tests' rows are invisible to
+    it) and a real deployment state: after a fingerprint-definition change every existing row falls
+    out of search (runbook (vi)), so a table full of stale rows is an index that answers nothing.
+    """
+
+    async def _run() -> None:
+        await migrated_db_or_skip()
+        orphaned = PostgresFingerprintStore(
+            "molecule_fingerprints", settings.ecfp_bits, "ecfp:never-indexed:b2048"
+        )
+        assert await orphaned.is_empty() is True
+        assert await orphaned.count() == 0
+        # And the honesty travels all the way out to the search a chemist sees.
+        search = await find_similar_molecules(orphaned, "CCO", threshold=0.1)
+        assert search.hits == []
+        assert search.index_empty is True
+        assert "SEARCH NOT RUN" in search.model_dump()["verdict"]
+
+        current = await _store_or_skip()
+        await current.add(record_for("pg-count", "CCO"))
+        assert await current.is_empty() is False
+        assert await current.count() >= 1
+        populated = await find_similar_molecules(current, "CCO", threshold=0.1)
+        assert populated.index_empty is False
 
     asyncio.run(_run())

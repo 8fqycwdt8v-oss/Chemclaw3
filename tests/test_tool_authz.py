@@ -496,25 +496,40 @@ def test_a_calculator_domain_refusal_reaches_the_model_verbatim() -> None:
     assert "nothing to" in ctx.result, ctx.result
 
 
-def test_an_unreachable_durable_backend_says_nothing_was_started() -> None:
-    """A broker outage must reach the model as an outage, and must say nothing is queued.
+def test_an_unreachable_durable_backend_says_nothing_was_started(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A broker outage must reach the model as an outage, and must say nothing was queued.
 
     A chemist who believes a job may be running will wait for it. The live run's failure was worse
-    than silence: the model read the opaque error as bad input, retried three SMILES variants, and
-    ended the turn mid-sentence.
+    than silence: told only "Error: Function failed.", the model read the outage as bad input,
+    retried three SMILES variants, and on another turn **wrote a whole development report by hand**
+    and presented it as PR-gated.
+
+    Driven through the real `connect()` against a real closed port, not a hand-thrown error:
+    `SubsystemUnavailableError` is deliberately *not* a `ChemclawError`, so a middleware that only
+    caught that hierarchy would still drop this on the floor — and the point of the test is that
+    the second type is caught, which a fabricated instance of the right class would not prove.
     """
-    from chemclaw.connectors.jobs import ConnectorJobError
+    import socket
 
-    async def _unreachable() -> None:
-        raise ConnectorJobError(
-            "the durable execution backend is unreachable, so the 'compute_reaction_energy' job "
-            "was not started and nothing is queued (RPCError)."
-        )
+    from chemclaw.core import temporal_client
 
-    ctx = _ctx("compute_reaction_energy")
-    _drive_domain_errors(ctx, _unreachable)
+    with socket.socket() as probe:  # a port nothing is listening on
+        probe.bind(("127.0.0.1", 0))
+        closed = f"127.0.0.1:{probe.getsockname()[1]}"
+    monkeypatch.setattr(settings, "temporal_address", closed)
+    monkeypatch.setattr(temporal_client, "_CLIENT", None)
+    monkeypatch.setattr(temporal_client, "_CONNECT_LOCK", asyncio.Lock())
+
+    async def _launch() -> None:
+        await temporal_client.connect()
+
+    ctx = _ctx("start_optimization_campaign")
+    _drive_domain_errors(ctx, _launch)  # must not raise
     assert isinstance(ctx.result, str)
-    assert "not started" in ctx.result and "nothing is queued" in ctx.result
+    assert ctx.result.startswith("Error: ")
+    assert "Temporal" in ctx.result and "nothing was queued" in ctx.result
 
 
 def test_a_pr_gate_git_failure_reaches_the_model() -> None:

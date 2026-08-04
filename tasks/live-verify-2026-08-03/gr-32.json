@@ -1,0 +1,74 @@
+{
+  "probe": {
+    "id": "gr-32",
+    "section": 11,
+    "persona": "lab_leader",
+    "bucket": "B",
+    "question": "Plant equipment caps us at 70 C. Does that kill the conditions you'd otherwise recommend for the biaryl step?",
+    "expects_tools": [
+      "suggest_next_experiment",
+      "gather_evidence",
+      "compare_solvents",
+      "expand_note"
+    ],
+    "forbids_claims": [
+      "a sub-70 C recommendation presented as evidenced when the evidence is all above it",
+      "an extrapolated yield at the lower temperature"
+    ],
+    "direction": "The seeded runs for this coupling sit at 80-82 C, so a 70 C cap excludes the entire evidence base. Saying that out loud is the core of the answer; proposing how to explore below the cap is the useful remainder, framed as untested."
+  },
+  "outcome": {
+    "probe_id": "gr-32",
+    "section": 11,
+    "persona": "lab_leader",
+    "bucket": "B",
+    "question": "Plant equipment caps us at 70 C. Does that kill the conditions you'd otherwise recommend for the biaryl step?",
+    "answer": "I need to find what conditions have been used or recommended for the biaryl step in your record. Let me search for that first.Now let me expand the optimization campaign and the base reaction to see what temperatures were used and recommended:Yes—and your equipment limitation forces a meaningful tradeoff.\n\nThe record ([[opt-suzuki-conditions]]) shows that your own optimization found **80 °C as the best condition**, giving 76% isolated yield. An attempt at 100 °C gave a higher LCAP assay reading (79%) but dropped the isolated yield to 68%, because higher temperature drove protodeboronation—loss of the boronic acid as a side reaction you *don't* want ([[ failure-aqueous-protodeboronation]]).\n\n**At 70 °C you're below the optimized point**, so you will likely see:\n- Slower oxidative addition (the rate-limiting step for an electron-rich aryl halide like 4-bromoanisole)\n- Longer reaction time to reach the same conversion\n- Lower isolated yield than the 76% you'd get at 80 °C\n- *Less* protodeboronation (which is the only silver lining)\n\nThe playbook ([[playbook-pd-cross-coupling-scope]]) suggests an alternative path: rather than fighting temperature, **change the ligand before you change the temperature**. A better ligand accelerates oxidative addition without the thermal penalty, so you might recover yield without needing the extra 10 °C.\n\n**The practical question is: how much yield loss is acceptable for the 70 °C constraint?** If you want to know what 70 °C actually gives for your substrate, I can propose a quick experimental read: run it once at 70 °C with your current conditions (same Pd loading, base, solvent, time) and measure isolated yield. That tells you whether the drop is within your tolerance or whether the ligand swap is worth prioritizing. What's your current yield target for this step?",
+    "answered": true,
+    "tools_called": [
+      "gather_evidence",
+      "find_notes",
+      "expand_note",
+      "expand_note"
+    ],
+    "tool_results": [
+      {
+        "tool": "gather_evidence",
+        "preview": "[{\"content\": \"<retrieved-note-4ac8bd4b8ff10031 id=\\\"rxn-suzuki-biaryl\\\">\\nSuzuki-Miyaura coupling of 4-bromoanisole with phenylboronic acid.\\n\\n- aryl halide: compound-4-bromoanisole\\n- boronic acid: "
+      },
+      {
+        "tool": "find_notes",
+        "preview": "[{\"id\": \"bo-suzuki-next\", \"type\": \"bo-candidate\", \"compound_smiles\": null, \"tags\": [\"bo\", \"suggestion\"], \"created_by\": \"human\", \"source\": \"seed-corpus\", \"confidence\": 0.5, \"valid_from\": null, \"valid_t"
+      },
+      {
+        "tool": "expand_note",
+        "preview": "{\"note\": {\"id\": \"opt-suzuki-conditions\", \"type\": \"optimization-campaign\", \"compound_smiles\": null, \"tags\": [\"optimization\"], \"created_by\": \"human\", \"source\": \"seed-corpus\", \"confidence\": 0.85, \"valid_"
+      },
+      {
+        "tool": "expand_note",
+        "preview": "{\"note\": {\"id\": \"rxn-suzuki-biaryl\", \"type\": \"reaction\", \"compound_smiles\": null, \"tags\": [\"cross-coupling\", \"suzuki\"], \"created_by\": \"human\", \"source\": \"seed-corpus\", \"confidence\": 0.85, \"valid_from\""
+      }
+    ],
+    "tools_failed": [],
+    "expected_tools_met": true,
+    "uncited_note_ids": [],
+    "failed_loudly": true,
+    "error_code": null,
+    "degraded": [
+      "durable-jobs (Temporal)"
+    ],
+    "jobs_started": [],
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": false,
+    "latency_seconds": 13.72,
+    "event_counts": {
+      "capability_degraded": 1,
+      "token": 33,
+      "tool_call": 4,
+      "tool_result": 4,
+      "answer": 1
+    },
+    "transport_error": null
+  }
+}

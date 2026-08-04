@@ -1,0 +1,74 @@
+{
+  "probe": {
+    "id": "gr-03",
+    "section": 1,
+    "persona": "lab_technician",
+    "bucket": "A",
+    "question": "Have we ever coupled anything that looks like Brc1ccc2ncccc2c1 before?",
+    "expects_tools": [
+      "similar_reactions",
+      "substructure_matches",
+      "similar_molecules",
+      "gather_evidence",
+      "find_notes"
+    ],
+    "forbids_claims": [
+      "'no prior work found' or equivalent, when over a thousand records on this exact halide are seeded",
+      "a count of matching records stated without any identifier a reader could check"
+    ],
+    "direction": "6-bromoquinoline is one of seven halides in the seeded flow-HTE Suzuki screen, with over a thousand records behind it and three sibling halides (chloride, iodide, triflate) on the same grid. A good answer finds them, says roughly how many and what varied, and points at something identifiable. A \"no\" here is a retrieval defect, not an honest absence."
+  },
+  "outcome": {
+    "probe_id": "gr-03",
+    "section": 1,
+    "persona": "lab_technician",
+    "bucket": "A",
+    "question": "Have we ever coupled anything that looks like Brc1ccc2ncccc2c1 before?",
+    "answer": "I'll search for similar reactions involving that brominated quinoline structure.Let me also search the knowledge graph more broadly for any couplings of halogenated quinolines:No direct match. The knowledge graph has no reactions involving 6-bromoquinoline (or this isomer, 5-bromoquinoline — Brc1ccc2ncccc2c1) and no stored molecules with that exact structure.\n\nThe evidence returned is mostly on amide couplings and unrelated transformations. There are a couple of Buchwald-Hartwig amination and Suzuki-Miyaura examples on simpler aromatics (4-bromoanisole), but nothing specific to quinoline couplings.\n\n**Summary**: We have not coupled anything that looks like that bromoquinoline before, at least not in the current record. If you're planning a coupling on it, I can help you:\n\n1. **Compute electrophilicity and site reactivity** — to predict which position would react fastest if you're doing, say, a Suzuki or Negishi\n2. **Find similar halogenated aromatics** we *have* coupled — to pull conditions from nearby precedent\n3. **Search literature** precedent — quinolines are common in synthesis, so a Suzuki on a 6-bromoquinoline should have published examples\n\nWhat's the coupling you're considering, and what partner are you planning to use?",
+    "answered": true,
+    "tools_called": [
+      "similar_reactions",
+      "similar_molecules",
+      "gather_evidence",
+      "substructure_matches"
+    ],
+    "tool_results": [
+      {
+        "tool": "similar_reactions",
+        "preview": "{\"result\": []}"
+      },
+      {
+        "tool": "similar_molecules",
+        "preview": "{\"result\": []}"
+      },
+      {
+        "tool": "gather_evidence",
+        "preview": "[{\"content\": \"<retrieved-note-4216b6a377548e22 id=\\\"rxn-amide-edc\\\">\\nEDC/HOBt amide coupling of benzoic acid with benzylamine.\\n\\n- base: compound-dipea (2.5 equiv)\\n- solvent: DMF, 0 \\u00b0C to rt, "
+      },
+      {
+        "tool": "substructure_matches",
+        "preview": "{\"result\": []}"
+      }
+    ],
+    "tools_failed": [],
+    "expected_tools_met": true,
+    "uncited_note_ids": [],
+    "failed_loudly": true,
+    "error_code": null,
+    "degraded": [
+      "durable-jobs (Temporal)"
+    ],
+    "jobs_started": [],
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "latency_seconds": 11.17,
+    "event_counts": {
+      "capability_degraded": 1,
+      "token": 25,
+      "tool_call": 4,
+      "tool_result": 4,
+      "answer": 1
+    },
+    "transport_error": null
+  }
+}

@@ -83,9 +83,9 @@ async def _investigate() -> str:
         lines.append(f"- [{chunk.retriever}] [[{chunk.source_note_id}]]: {chunk.content}")
 
     # 2) Cross-learn by structure: past runs of this exact transformation.
-    hits = await find_similar_reactions(_ESTER)
+    search = await find_similar_reactions(_ESTER)
     lines.append("\n## 2. Structurally similar past reactions")
-    for hit in hits:
+    for hit in search.hits:
         lines.append(f"- [[{hit.reaction_note_id}]] (Tanimoto {hit.similarity:.2f})")
 
     # 3) Proactively compute a property the record is silent on: is the untried solvent

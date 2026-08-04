@@ -1,0 +1,48 @@
+{
+  "probe": {
+    "id": "gr-20",
+    "section": 6,
+    "persona": "lab_technician",
+    "bucket": "B",
+    "question": "We have two conformers of the ligand complex and they disagree. Which one do I use?",
+    "expects_tools": [
+      "sample_conformers",
+      "optimize_geometry",
+      "compute_xtb_energy"
+    ],
+    "forbids_claims": [
+      "a conformer declared correct with no relative energy and no method named",
+      "a solution-phase conclusion drawn from a gas-phase calculation without saying so"
+    ],
+    "direction": "Relative energies with the method and its limits stated. \"Which one is right\" often has no single answer at room temperature, and a Boltzmann-weighted picture is a better answer than a winner."
+  },
+  "outcome": {
+    "probe_id": "gr-20",
+    "section": 6,
+    "persona": "lab_technician",
+    "bucket": "B",
+    "question": "We have two conformers of the ligand complex and they disagree. Which one do I use?",
+    "answer": "I need more specifics to help you decide. Could you clarify:\n\n1. **What is the ligand/complex?** (SMILES or name, so I can look up what's on file)\n2. **What do the conformers disagree about?** (e.g., a computed energy, a property prediction, a reactivity ranking, a geometry feature)\n3. **How were they generated?** (e.g., different initial geometries relaxed with xTB, a conformer ensemble search, hand-built structures)\n4. **What decision hangs on which one you use?** (e.g., choosing a catalyst, predicting a regioisomer, modeling a binding pose)\n\nOnce I have those, I can load the **conformational-analysis** skill and walk through which conformer is the right input for your question — because the answer depends entirely on what question you're asking it.\n\nThe short version: if the complex is flexible (multiple rotatable bonds), *both* conformers might be correct minima on the energy surface, and you may need to weigh them by a Boltzmann population rather than picking one. But if one is a true minimum and the other is strained, or if they disagree on something that should be invariant (like a bond order), that's a different story.",
+    "answered": true,
+    "tools_called": [],
+    "tool_results": [],
+    "tools_failed": [],
+    "expected_tools_met": false,
+    "uncited_note_ids": [],
+    "failed_loudly": true,
+    "error_code": null,
+    "degraded": [
+      "durable-jobs (Temporal)"
+    ],
+    "jobs_started": [],
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "latency_seconds": 5.39,
+    "event_counts": {
+      "capability_degraded": 1,
+      "token": 20,
+      "answer": 1
+    },
+    "transport_error": null
+  }
+}

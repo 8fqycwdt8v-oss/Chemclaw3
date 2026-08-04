@@ -11,7 +11,7 @@ connectors`.
 
 from fastapi import FastAPI
 
-from chemclaw.connectors.rxnfp.server.tools import server
+from chemclaw.connectors.rxnfp.server.tools import report_index_size, server
 from chemclaw.connectors.server import connector_app
 
-app: FastAPI = connector_app(server, name="rxnfp")
+app: FastAPI = connector_app(server, name="rxnfp", on_start=report_index_size)

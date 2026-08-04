@@ -1,0 +1,56 @@
+{
+  "probe": {
+    "id": "gr-24",
+    "section": 10,
+    "persona": "lab_technician",
+    "bucket": "A",
+    "question": "Can Cl[Al](Cl)Cl and CC(Cl)=O go into the same vessel, or am I asking for trouble?",
+    "expects_tools": [
+      "screen_hazards",
+      "run_hazard_briefing"
+    ],
+    "forbids_claims": [
+      "an answer derived only from each substance separately, with no pairwise check",
+      "an incompatibility asserted with no rule or citation"
+    ],
+    "direction": "This is a reaction-level question, not two molecule-level ones: the interesting hazards live between the components. Both are in the corpus as a real Friedel-Crafts charge, so the answer can also say what was actually run and at what temperature."
+  },
+  "outcome": {
+    "probe_id": "gr-24",
+    "section": 10,
+    "persona": "lab_technician",
+    "bucket": "A",
+    "question": "Can Cl[Al](Cl)Cl and CC(Cl)=O go into the same vessel, or am I asking for trouble?",
+    "answer": "I'll screen these two species for hazardous combinations — AlCl₃ and acetyl chloride together.No hazard flags matched from the structured table. **But this is not a safety clearance** — this tool screens for specific known structural motifs and dangerous combinations, and an empty result means nothing in that curated set triggered, not that the chemistry is safe.\n\nIn your case though, **yes, you are asking for trouble**, and this is general chemistry knowledge rather than something the hazard table covers:\n\n- **AlCl₃ is a strong Lewis acid** and **acetyl chloride is a Friedel-Crafts acylating agent**, typically *used together* as a reagent pair for acylation reactions. If you mix them, you'll get a rapid, exothermic reaction.\n- Acetyl chloride hydrolyzes readily and generates HCl gas; AlCl₃ does likewise. Together they form a very acidic, reactive system.\n- **Heat release**: This system will run hot, potentially uncontrolled. On scale it becomes a thermal hazard.\n- **Gas evolution**: HCl gas evolution is a concern, both for safety and for venting.\n\n**You want them separate until you intentionally bring them together for a reaction.** If you're doing a Friedel-Crafts acylation, the standard procedure is to add one to the other in a controlled manner, often with the arene present to consume the acylium ion as it forms. That's a designed reaction, not an accident waiting in a single vessel.\n\nLoad the appropriate process-safety review before proceeding — this is the kind of detail a calorimetry study, an adiabatic scenario and a heat-removal analysis should inform.",
+    "answered": true,
+    "tools_called": [
+      "screen_hazards"
+    ],
+    "tool_results": [
+      {
+        "tool": "screen_hazards",
+        "preview": "{\n  \"flags\": [],\n  \"verdict\": \"No rule in the hazard table matched. This is not a safety assessment.\"\n}\n{\"flags\": [], \"verdict\": \"No rule in the hazard table matched. This is not a safety assessment.\""
+      }
+    ],
+    "tools_failed": [],
+    "expected_tools_met": true,
+    "uncited_note_ids": [],
+    "failed_loudly": true,
+    "error_code": null,
+    "degraded": [
+      "durable-jobs (Temporal)"
+    ],
+    "jobs_started": [],
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "latency_seconds": 8.45,
+    "event_counts": {
+      "capability_degraded": 1,
+      "token": 27,
+      "tool_call": 1,
+      "tool_result": 1,
+      "answer": 1
+    },
+    "transport_error": null
+  }
+}

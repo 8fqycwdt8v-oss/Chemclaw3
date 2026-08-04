@@ -61,6 +61,61 @@ class ExperimentSuggestion(BaseModel):
     calc_refs: list[str] = Field(default_factory=list)
 
 
+def _require_observed_params_match(
+    problem: OptimizationProblem, history: list[Observation]
+) -> None:
+    """Reject an observation whose parameters are not exactly the problem's declared ones.
+
+    BoFire indexes the experiments dataframe by the domain's input keys, so a parameter the
+    problem declares but an observation omits — or a key an observation carries that the problem
+    never declared — is discovered deep inside the library rather than at the call. In the live
+    run that prompted this check it surfaced as `KeyError: 'base'` from
+    `bofire...acqf_optimization._optimize_acqf_discrete`, and `chemclaw.connectors.server`
+    deliberately forwards only `ValueError` verbatim, so what actually reached the model was
+    "an internal error occurred" — a string nothing can be repaired from. Raising here instead
+    makes the same fault a caller-fixable message naming the observation and the parameter, which
+    that sanitizer passes through untouched.
+
+    **What this does not claim.** The live trigger was never reproduced — not by the four
+    hand-built calls in the report (with and without `structures`, two and three factors,
+    observations complete and incomplete), and not by the two more measured while writing this,
+    which drove the all-categorical domain the traceback's `_optimize_acqf_discrete` frame implies.
+    So this closes the *class* of fault — a declared/observed parameter mismatch reaching BoFire as
+    an internal error — and whether it closes that specific live failure is **unproven**. Do not
+    write it up as the fix for the observed `KeyError`.
+
+    **What was measured, since the two directions are not worth the same.** A *missing* declared
+    parameter already fails well without this check: BoFire's own `validate_experimental` raises
+    `ValueError: invalid values for 'base', ...` on both the continuous-plus-categorical and the
+    all-categorical route, and the connector forwards that intact — so here the gain is only a
+    better message (which observation, and what to do). An *undeclared* extra parameter, by
+    contrast, **silently succeeds**: BoFire ignores the stray column and returns candidates, so a
+    chemist who reported a condition the problem never declared was answered from a decision space
+    that quietly dropped it. That direction is the one this turns from a wrong answer into a
+    question the caller can fix.
+
+    Raises:
+        ValueError: Naming the offending observation's index and the parameter(s) at fault.
+    """
+    declared = {parameter.name for parameter in problem.parameters}
+    for index, observation in enumerate(history):
+        observed = set(observation.params)
+        missing = sorted(declared - observed)
+        undeclared = sorted(observed - declared)
+        if not missing and not undeclared:
+            continue
+        faults = []
+        if missing:
+            faults.append(f"no value for the declared parameter(s) {missing}")
+        if undeclared:
+            faults.append(f"a value for {undeclared}, which the problem does not declare")
+        raise ValueError(
+            f"observations[{index}] has {' and '.join(faults)} — every observation must give a "
+            "value for exactly the parameters the problem declares. Add the missing value(s), "
+            "drop the extra one(s), or change the problem's parameters to match the runs you have."
+        )
+
+
 @server.tool()
 async def suggest_next_experiment(
     problem: OptimizationProblem,
@@ -104,7 +159,9 @@ async def suggest_next_experiment(
             (name + minimize/maximize). Set a categorical's `structures` when its options are
             molecules.
         observations: Runs already done, each mapping the parameter values to the objective
-            value. Omit or pass an empty list to get seed points for a fresh campaign.
+            value. Every observation must give a value for *every* parameter `problem` declares
+            and name no others — a run whose conditions you only partly know cannot seed this.
+            Omit or pass an empty list to get seed points for a fresh campaign.
         count: How many candidates to propose (a batch).
 
     The suggestion is **recorded** against the campaign this problem defines, and the returned
@@ -134,6 +191,9 @@ async def suggest_next_experiment(
     if isinstance(observations, str):
         observations = json.loads(observations)
     history = [Observation.model_validate(item) for item in observations] if observations else []
+    # The tool owns its contract, so the declared/observed parameter agreement is checked here —
+    # after the models exist and before anything downstream indexes by parameter name.
+    _require_observed_params_match(problem, history)
     # Featurize before the engine sees the problem: descriptors change how the surrogate
     # models the categorical space, so this must happen for the seeding path too — otherwise
     # a problem that declares structures would silently fall back to an opaque category.

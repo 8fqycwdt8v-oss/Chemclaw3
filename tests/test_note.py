@@ -7,7 +7,7 @@ import pytest
 from pydantic import ValidationError
 
 from chemclaw.core.errors import ChemclawError
-from chemclaw.kg.note import Note, NoteError, parse_note, read_note
+from chemclaw.kg.note import Note, NoteError, mentioned_ids, parse_note, read_note
 
 
 def test_is_current_honors_validity_window() -> None:
@@ -167,3 +167,37 @@ def test_agent_authored_provenance(tmp_path: Path) -> None:
     )
     assert note.created_by == "agent"
     assert isinstance(note, Note)
+
+
+def test_mentioned_ids_reads_the_serializations_the_real_tools_emit() -> None:
+    """The drift guard `mentioned_ids`' comment promises.
+
+    `mentioned_ids` scans for this system's *own* two note serializations, which is what makes
+    scanning honest rather than a guess about arbitrary text — and worthless the moment a tool
+    starts emitting a third. These two fixtures are verbatim shapes taken off a live run's tool
+    results (`docs/archive/live-grounded-2026-08-03.md`): a `gather_evidence` chunk envelope and a
+    JSON-dumped note. A serialization change breaks this instead of silently narrowing the scan
+    back to what it was.
+    """
+    gathered = '[{"content": "<retrieved-note-4216b6a377548e22 id=\\"rxn-suzuki-biaryl\\">\\nSuzuki'
+    expanded = '{"note": {"id": "opt-suzuki-conditions", "type": "optimization-campaign", "tags":'
+
+    assert mentioned_ids(gathered) == ["rxn-suzuki-biaryl"]
+    assert mentioned_ids(expanded) == ["opt-suzuki-conditions"]
+
+
+def test_mentioned_ids_counts_an_id_a_retrieved_body_cites() -> None:
+    """A wikilink inside a returned note body was in front of the model, so it grounds a citation.
+
+    The alternative reading — only ids the tool named as *its own* result count — would flag an
+    answer for repeating a link it demonstrably read, which is a stricter question than "did this
+    turn see it" and not the one the grounding check asks.
+    """
+    body = '{"note": {"id": "campaign-biaryl-scope"}, "body": "supersedes [[playbook-degassing]]"}'
+    assert mentioned_ids(body) == ["campaign-biaryl-scope", "playbook-degassing"]
+
+
+def test_mentioned_ids_deduplicates_and_keeps_first_seen_order() -> None:
+    """Same contract as `cited_ids`, so the two readers stay interchangeable to a caller."""
+    text = '{"id": "a-note"} {"id": "b-note"} {"id": "a-note"} [[b-note]] [[c-note]]'
+    assert mentioned_ids(text) == ["a-note", "b-note", "c-note"]

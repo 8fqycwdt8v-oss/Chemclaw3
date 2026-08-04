@@ -116,6 +116,15 @@ _INSTRUCTIONS = (
     "chemist is answering a narrowed question rather than filling in a form. Partial data is "
     "still an answer: compute what the question allows, and name the one missing input, rather "
     "than withholding everything until every field is supplied.\n"
+    "When you do ask, ask with ask_clarifying_question rather than ending your turn on a question "
+    "in prose. The tool is what lets a surface render the choices as something to click, and a "
+    "prose question reaches the chemist as an ordinary answer they must retype around.\n"
+    "Never name a tool you are not calling in this turn. Writing \"I'll call calculator_trust to "
+    'show you the average bias, then calculator_outliers for where it was most wrong" and then '
+    "ending the turn promises work that never happened, and the chemist has no way to see that "
+    "the numbers never arrived — it reads exactly like an answer. Call it, or say plainly that you "
+    "are not going to and why. This applies to the same turn: a tool you intend to call after the "
+    "chemist replies is described by what it will tell them, not by its name.\n"
     "Traceability: every tool call is recorded in a tamper-evident audit trail — actor, tool, "
     "arguments, outcome, latency, correlation id and deployment revision — hash-chained so that "
     "altering or removing a past entry breaks verification, which an operator runs with "
@@ -291,8 +300,9 @@ def build_agent(
         sink=audit_sink,
     )
     # Five function middlewares over every tool call, outermost first: `surface_authorization_
-    # denials` and `surface_domain_errors` each turn one known-safe exception type (an
-    # authorization refusal; chemclaw's own `ChemclawError` bad-input contract) into its own
+    # denials` and `surface_domain_errors` turn the known-safe exception types (an authorization
+    # refusal; chemclaw's own `ChemclawError` bad-input contract and its `SubsystemUnavailableError`
+    # outage contract) into their own
     # clear, safe result instead of MAF's opaque "Function failed." — audit records the call
     # underneath both, so a denial or bad-input error is still logged as an `error` outcome
     # exactly as before; per-tool authorization (F10-C) gates it next. `announce_tool_failures`
@@ -533,18 +543,43 @@ def _capability_tools(profile: AgentProfile | None = None) -> list[Any]:
     return inprocess
 
 
-def available_tool_names() -> set[str]:
-    """Every tool name the agent can resolve, across all three name spaces.
+def skill_tool_names() -> set[str]:
+    """The tools MAF's `SkillsProvider` registers on every agent it is attached to.
 
-    The three are genuinely separate — in-process `@tool` functions this process holds as symbols,
-    connector endpoint tools named only by a manifest allow-list, and the `run_<name>` launchers
-    generated from step templates — and only the union is meaningful. Exposed rather than inlined
-    because four other places need exactly this set: the skill validator, the template validator,
-    the prose-contract validator, and the test that checks the instructions against it. Three of
-    those unioned only the first two name spaces, so a skill or template step naming a template
-    launcher failed validation although the tool exists (D-117). One definition, one answer.
+    Read off MAF's own class constants rather than spelled out here, so an upstream rename becomes
+    a changed value instead of a silently stale allow-list.
     """
-    return {*registered_tool_names(), *connector_tool_names(), *template_tool_names()}
+    return {
+        SkillsProvider.LOAD_SKILL_TOOL_NAME,
+        SkillsProvider.READ_SKILL_RESOURCE_TOOL_NAME,
+        SkillsProvider.RUN_SKILL_SCRIPT_TOOL_NAME,
+    }
+
+
+def available_tool_names() -> set[str]:
+    """Every tool name the agent can resolve, across all four name spaces.
+
+    The four are genuinely separate — in-process `@tool` functions this process holds as symbols,
+    connector endpoint tools named only by a manifest allow-list, the `run_<name>` launchers
+    generated from step templates, and the skill tools MAF attaches — and only the union is
+    meaningful. Exposed rather than inlined because four other places need exactly this set: the
+    skill validator, the template validator, the prose-contract validator, and the test that checks
+    the instructions against it. Three of those unioned only the first two name spaces, so a skill
+    or template step naming a template launcher failed validation although the tool exists (D-117).
+    One definition, one answer.
+
+    The skill name space was the same omission a second time. `build_agent` attaches a
+    `SkillsProvider` unconditionally, and a live run recorded `load_skill` on four turns and
+    `run_skill_script` on a fifth — while this function reported all three as absent, so every
+    validator built on it would have rejected a correct reference to a tool the agent had just
+    called.
+    """
+    return {
+        *registered_tool_names(),
+        *connector_tool_names(),
+        *template_tool_names(),
+        *skill_tool_names(),
+    }
 
 
 def _reject_unknown_tool_names(profile: AgentProfile) -> None:

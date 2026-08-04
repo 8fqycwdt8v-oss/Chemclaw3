@@ -145,7 +145,7 @@ def _indexed(*smiles: str) -> InMemoryFingerprintStore:
 def test_a_substructure_hit_cites_the_compound_note_for_what_it_matched() -> None:
     """The functional-group question lands on the graph instead of on a substring search."""
     store = _indexed("CC(=O)Oc1ccccc1C(=O)O", "CCO")
-    hits = asyncio.run(find_substructure_matches(store, "c1ccccc1"))
+    hits = asyncio.run(find_substructure_matches(store, "c1ccccc1")).hits
     assert [h.smiles for h in hits] == ["CC(=O)Oc1ccccc1C(=O)O"]
     assert hits[0].compound_note_id == compound_note("CC(=O)Oc1ccccc1C(=O)O").id
 
@@ -153,14 +153,14 @@ def test_a_substructure_hit_cites_the_compound_note_for_what_it_matched() -> Non
 def test_a_similarity_hit_cites_the_same_note_the_ingest_would_have_written() -> None:
     """The id on the hit is the *note's* id, not a second identity scheme beside it."""
     store = _indexed("CCO")
-    hits = asyncio.run(find_similar_molecules(store, "CCO", threshold=0.1))
+    hits = asyncio.run(find_similar_molecules(store, "CCO", threshold=0.1)).hits
     assert hits[0].compound_note_id == compound_note("CCO").id
 
 
 def test_two_spellings_of_one_molecule_cite_one_note() -> None:
     """The point of a structure-derived id: the citation does not fork on how it was written."""
     store = _indexed("CN(C)C=O")
-    hits = asyncio.run(find_similar_molecules(store, "O=CN(C)C", threshold=0.1))
+    hits = asyncio.run(find_similar_molecules(store, "O=CN(C)C", threshold=0.1)).hits
     assert hits[0].compound_note_id == compound_id("CN(C)C=O")
 
 
@@ -182,8 +182,8 @@ def test_an_unciteable_row_yields_no_citation_rather_than_sinking_the_search() -
                 definition=molecule_definition(),
             )
         )
-        hits = await find_similar_molecules(store, "CCO", threshold=0.0)
-        return [h.compound_note_id for h in hits]
+        search = await find_similar_molecules(store, "CCO", threshold=0.0)
+        return [h.compound_note_id for h in search.hits]
 
     cited = asyncio.run(_run())
     assert compound_id("CCO") in cited

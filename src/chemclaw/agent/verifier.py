@@ -22,10 +22,11 @@ passed whenever the note happened to exist, which is most of the time. The turn'
 are now threaded in from `api/runner.py` and are the only thing a citation is checked against.
 
 The eval harness has always scored against the turn's results rather than the graph, and states the
-reason (`chemclaw.evals.live._score_citations`) — but it reads them off the SSE event, which
-carries a 200-character preview, so its `uncited_note_ids` is a systematic *over*-count and does not
-yet agree with this. That gap is a backlog row; closing it wants an untruncated `note_ids` field on
-the event rather than a bigger preview.
+reason (`chemclaw.evals.live._score_citations`). It used to read them off the SSE event's
+200-character preview, which made its `uncited_note_ids` a systematic *over*-count — measured at
+19 of 36 answers graded as fabrication with nine of nine checked verdicts false. The event now
+carries an untruncated `note_ids` beside the preview and the harness scores against that, so the
+two agree (`docs/decisions/D-2026-08-03-a-metric-must-declare-what-it-can-see.md`).
 
 Beside the citation gate sits `ungrounded_parameter_shapes`: a deterministic scan for *method
 parameter shapes* in an answer that no tool in the turn produced. It is a heuristic keyed on shape,
@@ -367,3 +368,47 @@ def ungrounded_parameter_shapes(answer: str, tool_outputs: Sequence[str]) -> lis
             continue
         found.append(f"{name}: {match.group(0).strip()}")
     return found
+
+
+def promised_uncalled_tools(answer: str, tools_called: Sequence[str]) -> list[str]:
+    """Tools the answer names that this turn never called.
+
+    The same argument as `ungrounded_parameter_shapes`, from the same evidence. A live run produced
+    an answer reading *"I'll call `calculator_trust` to show you the average bias … and then
+    `calculator_outliers` to show you where it was most wrong"* — and ended the turn having called
+    neither. The chemist is told two numbers are coming; nothing arrives; the reply reads exactly
+    like an answer. An instruction against it was added and the very next run produced the same
+    sentence about the same two tools, which is the second time a prompt has failed to bind this
+    class of behaviour (`docs/archive/live-grounded-2026-08-03.md`).
+
+    Unlike the shape scan, this is exact rather than heuristic: it matches whole tokens against the
+    turn's own surface (`available_tool_names()`), so it cannot fire on a word that merely looks
+    like a tool, and it cannot miss a rename. The one honest false positive is an answer *about*
+    the toolset — "I have predict_pka and predict_solubility for that" — which is a real thing to
+    say and is why this stays behind the same operator knob as its sibling rather than becoming an
+    unconditional refusal.
+
+    Args:
+        answer: The finished answer text.
+        tools_called: Every tool this turn actually invoked, successful or not — a call that failed
+            was still made, and an answer naming it is describing something that happened.
+
+    Returns:
+        One `"promised but not called: <name>"` per offending tool, in first-mention order.
+    """
+    # Imported here, not at module scope: `chemclaw_agent` imports this module's verifier for the
+    # turn path, so a top-level import would close the cycle.
+    from chemclaw.agent.chemclaw_agent import available_tool_names
+
+    called = set(tools_called)
+    # Sorted by where the answer first names each tool, which requires the match *position* and not
+    # merely the boolean `_mentions` returns. Iterating the name set directly gave whatever order
+    # the set happened to hash into — stable within a run, arbitrary across them — so a caller
+    # reading top-down got a different first item on a different interpreter, and the reviewer is
+    # meant to read this list as the answer reads.
+    at: list[tuple[int, str]] = []
+    for name in available_tool_names() - called:
+        match = re.search(rf"(?<![\w-]){re.escape(name)}(?![\w-])", answer)
+        if match is not None:
+            at.append((match.start(), name))
+    return [f"promised but not called: {name}" for _, name in sorted(at)]

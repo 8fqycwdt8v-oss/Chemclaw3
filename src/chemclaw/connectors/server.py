@@ -19,8 +19,9 @@ cannot be forgotten per connector:
   is not evidence of anything a connector should act on.
 """
 
+import asyncio
 import logging
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable, Coroutine
 from contextlib import asynccontextmanager
 from typing import Any
 
@@ -147,7 +148,9 @@ def _sanitize_tool_errors(server: FastMCP, *, name: str) -> None:
     manager.call_tool = _call_tool  # type: ignore[method-assign,assignment]
 
 
-def connector_app(server: FastMCP, *, name: str) -> FastAPI:
+def connector_app(
+    server: FastMCP, *, name: str, on_start: Callable[[], Coroutine[Any, Any, None]] | None = None
+) -> FastAPI:
     """Build the FastAPI app that serves one connector's MCP capability.
 
     Args:
@@ -157,6 +160,12 @@ def connector_app(server: FastMCP, *, name: str) -> FastAPI:
             path.
         name: The connector's name (must match its bundle folder and manifest `name`), used in the
             health payload and the request log.
+        on_start: Optional coroutine started once at startup — the hook a bundle uses to report
+            the state of what it serves (`molfp`/`rxnfp` log how many fingerprints their index
+            actually holds, so an operator learns of an unbuilt index before a chemist does).
+            Diagnostics only, and treated as such: it is *started*, not awaited (see the lifespan),
+            and a bundle's hook owns swallowing its own failures — a connector that refuses to
+            start because it could not describe itself is strictly worse than one that starts.
 
     Returns:
         A FastAPI app exposing `GET /healthz`, `GET /metrics`, and the MCP endpoint at `/mcp`.
@@ -173,9 +182,24 @@ def connector_app(server: FastMCP, *, name: str) -> FastAPI:
         connector that touches a store (`calc` reads and writes the calculation cache) otherwise
         opens a connection per tool call, and the handshake lands on the same event loop that
         serves every other request on this process.
+
+        `on_start` is launched inside the pool (so a bundle's report borrows a pooled connection
+        rather than paying its own handshake) but deliberately **not awaited**: it touches the
+        database, and an unreachable one would hold readiness for the whole pool timeout — a
+        diagnostic that can delay a connector becoming ready is worse than the blindness it cures.
+        Measured, not assumed: awaiting it kept the connector composite from starting inside the
+        transport test's window with no Postgres running. The task is kept referenced so it is not
+        garbage-collected mid-flight, and cancelled if shutdown beats it.
         """
         async with db.pooling(), server.session_manager.run():
-            yield
+            report: asyncio.Task[None] | None = (
+                asyncio.create_task(on_start()) if on_start is not None else None
+            )
+            try:
+                yield
+            finally:
+                if report is not None:
+                    report.cancel()
 
     app = FastAPI(title=f"chemclaw-connector-{name}", lifespan=lifespan)
     app.add_middleware(CallerLogMiddleware, connector=name)

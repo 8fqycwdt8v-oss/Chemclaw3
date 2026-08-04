@@ -40,7 +40,7 @@ def test_find_similar_reactions_returns_note_linked_hits(monkeypatch: pytest.Mon
     """A reaction query returns hits whose ids map to reaction notes, best match first."""
     store = _reaction_store()
     monkeypatch.setattr(search_tools, "_reaction_store", lambda: store)
-    hits = asyncio.run(find_similar_reactions("CCO.CC(=O)O>>CCOC(C)=O"))
+    hits = asyncio.run(find_similar_reactions("CCO.CC(=O)O>>CCOC(C)=O")).hits
     assert hits[0].reaction_note_id == "reaction-rxn-1"
     assert hits[0].similarity == 1.0  # identical reaction
 
@@ -49,7 +49,7 @@ def test_find_similar_molecules_ranks_by_similarity(monkeypatch: pytest.MonkeyPa
     """A molecule query returns the closest analog above the identical match."""
     store = _molecule_store()
     monkeypatch.setattr(search_tools, "_molecule_store", lambda: store)
-    hits = asyncio.run(find_similar_molecules("CCO"))
+    hits = asyncio.run(find_similar_molecules("CCO")).hits
     assert hits[0].smiles == "CCO" and hits[0].similarity == 1.0
     assert "CCCO" in {h.smiles for h in hits}  # the propanol analog is retrieved
 
@@ -58,6 +58,6 @@ def test_find_substructure_matches_filters_by_fragment(monkeypatch: pytest.Monke
     """A substructure query returns only molecules containing the fragment (no score)."""
     store = _molecule_store()
     monkeypatch.setattr(search_tools, "_molecule_store", lambda: store)
-    hits = asyncio.run(find_substructure_matches("OB(O)"))  # a boronic acid fragment
+    hits = asyncio.run(find_substructure_matches("OB(O)")).hits  # a boronic acid fragment
     assert {h.smiles for h in hits} == {"OB(O)c1ccccc1"}
     assert all(h.similarity is None for h in hits)

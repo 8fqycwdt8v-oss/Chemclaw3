@@ -11,7 +11,7 @@ local connector, on one port) through `make connectors`.
 
 from fastapi import FastAPI
 
-from chemclaw.connectors.molfp.server.tools import server
+from chemclaw.connectors.molfp.server.tools import report_index_size, server
 from chemclaw.connectors.server import connector_app
 
-app: FastAPI = connector_app(server, name="molfp")
+app: FastAPI = connector_app(server, name="molfp", on_start=report_index_size)

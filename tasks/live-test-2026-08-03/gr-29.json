@@ -1,0 +1,70 @@
+{
+  "probe": {
+    "id": "gr-29",
+    "section": 11,
+    "persona": "lab_technician",
+    "bucket": "A",
+    "question": "Scale the biaryl coupling to 2 kg of COc1ccc(Br)cc1 and tell me what I'm charging.",
+    "expects_tools": [
+      "stoichiometry_table",
+      "resolve_compound",
+      "gather_evidence"
+    ],
+    "forbids_claims": [
+      "a mass or volume produced without the equivalents basis it came from",
+      "a solvent volume invented where no density or volume basis was given",
+      "the seeded lab-scale charge rescaled silently, with no note that it was"
+    ],
+    "direction": "The lab-scale charge is in the corpus with real equivalents. A good answer builds the table from those equivalents, shows the arithmetic, and refuses rather than guesses where a volume basis is ambiguous. Naming what changes at 2 kg that a charge table cannot capture is a bonus."
+  },
+  "outcome": {
+    "probe_id": "gr-29",
+    "section": 11,
+    "persona": "lab_technician",
+    "bucket": "A",
+    "question": "Scale the biaryl coupling to 2 kg of COc1ccc(Br)cc1 and tell me what I'm charging.",
+    "answer": "I'll help you scale that biaryl coupling to 2 kg. First, let me look up what coupling this refers to in your records, then I'll build the charge table.Good — I found a Suzuki-Miyaura coupling on your 4-bromoanisole. Let me pull the full recipe to get all the conditions and stoichiometry.Perfect. Now I have the full recipe. Let me build your charge table for 2 kg of 4-bromoanisole (COc1ccc(Br)cc1):\n\n**Reaction:**\n- Aryl halide: 4-bromoanisole (COc1ccc(Br)cc1) — **2000 g** (your basis)\n- Boronic acid: phenylboronic acid (OB(O)c1ccccc1) — 1.0 equiv\n- Base: K₂CO₃ — 2.0 equiv\n- Catalyst: Pd(OAc)₂ — 1.5 mol%\n- Solvent: THF/water 4:1 at 10 total volumesHere's your charge for the 2 kg Suzuki coupling on 4-bromoanisole ([[rxn-suzuki-biaryl]]):\n\n| Species | Role | Mass to weigh | Molar equiv | Notes |\n|---------|------|---------------|------------|-------|\n| **4-bromoanisole** | Aryl halide (basis) | **2000.0 g** | 1.0× | — |\n| **Phenylboronic acid** | Boronic acid | **1303.8 g** | 1.0× | — |\n| **K₂CO₃** | Base | **2955.7 g** | 2.0× | — |\n| **Pd(OAc)₂** | Catalyst | **36.0 g** | 1.5 mol% | Pre-weigh precisely |\n| **THF** | Solvent | 14,224 g | — | **16,000 mL** (8 volumes of basis) |\n| **Water** | Solvent | 3,992 g | — | **4,000 mL** (2 volumes of basis) |\n\n**Total solvent:** 20 L (10 volumes relative to the starting bromoanisole)\n\n**Expected product (at 76% isolated yield):** ~1,650 g of 4-methoxybiphenyl\n\nThe reaction conditions from your record are: **80 °C, 12 h, degassed atmosphere**. Note that this is an electron-rich aryl bromide, so the coupling is slower than typical aryl chlorides or iodides — your ligand and temperature choices matter here ([[playbook-pd-cross-coupling-scope]] has the scope detail).",
+    "answered": true,
+    "tools_called": [
+      "gather_evidence",
+      "expand_note",
+      "stoichiometry_table"
+    ],
+    "tool_results": [
+      {
+        "tool": "gather_evidence",
+        "preview": "[{\"content\": \"<retrieved-note-4216b6a377548e22 id=\\\"rxn-suzuki-biaryl\\\">\\nSuzuki-Miyaura coupling of 4-bromoanisole with phenylboronic acid.\\n\\n- aryl halide: compound-4-bromoanisole\\n- boronic acid: "
+      },
+      {
+        "tool": "expand_note",
+        "preview": "{\"note\": {\"id\": \"rxn-suzuki-biaryl\", \"type\": \"reaction\", \"compound_smiles\": null, \"tags\": [\"cross-coupling\", \"suzuki\"], \"created_by\": \"human\", \"source\": \"seed-corpus\", \"confidence\": 0.85, \"valid_from\""
+      },
+      {
+        "tool": "stoichiometry_table",
+        "preview": "{\n  \"basis_name\": \"COc1ccc(Br)cc1\",\n  \"basis_mass_g\": 2000.0,\n  \"rows\": [\n    {\n      \"name\": \"COc1ccc(Br)cc1\",\n      \"smiles\": \"COc1ccc(Br)cc1\",\n      \"role\": \"basis\",\n      \"equivalents\": 1.0,\n     "
+      }
+    ],
+    "tools_failed": [],
+    "expected_tools_met": true,
+    "uncited_note_ids": [
+      "playbook-pd-cross-coupling-scope"
+    ],
+    "failed_loudly": true,
+    "error_code": null,
+    "degraded": [
+      "durable-jobs (Temporal)"
+    ],
+    "jobs_started": [],
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "latency_seconds": 13.09,
+    "event_counts": {
+      "capability_degraded": 1,
+      "token": 38,
+      "tool_call": 3,
+      "tool_result": 3,
+      "answer": 1
+    },
+    "transport_error": null
+  }
+}

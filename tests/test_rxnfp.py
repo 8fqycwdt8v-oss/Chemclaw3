@@ -65,7 +65,7 @@ def test_find_similar_reactions_ranks_by_tanimoto() -> None:
         ]:
             await store.add(record_for_reaction(rid, rxn))
 
-        hits = await find_similar_reactions(store, _ESTER_ETHYL, threshold=0.1)
+        hits = (await find_similar_reactions(store, _ESTER_ETHYL, threshold=0.1)).hits
         assert hits[0].id == "ethyl"  # exact match ranks first
         assert hits[0].similarity == pytest.approx(1.0)
         assert "halogenation" not in {h.id for h in hits}  # unrelated reaction excluded
@@ -236,7 +236,7 @@ def test_a_charged_species_query_matches_the_row_indexed_from_its_neutral_form()
         # The query spells the acid as its conjugate base (acetate), not the neutral form the
         # index was built from.
         charged_query = "CCO.CC(=O)[O-]>>CCOC(C)=O"
-        hits = await find_similar_reactions(store, charged_query, threshold=0.99)
+        hits = (await find_similar_reactions(store, charged_query, threshold=0.99)).hits
         assert hits and hits[0].id == "ester"
         assert hits[0].similarity == pytest.approx(1.0)
 
@@ -265,7 +265,7 @@ def test_a_tautomer_query_matches_the_row_indexed_from_its_canonical_tautomer() 
         await store.add(record_for_reaction("acac-amine", indexed.transformation_smiles()))
 
         enol_query = "CC(O)=CC(C)=O.CCN>>CCNC(C)=CC(C)=O"
-        hits = await find_similar_reactions(store, enol_query, threshold=0.99)
+        hits = (await find_similar_reactions(store, enol_query, threshold=0.99)).hits
         assert hits and hits[0].id == "acac-amine"
         assert hits[0].similarity == pytest.approx(1.0)
 
@@ -283,3 +283,53 @@ def test_an_already_standardized_query_is_bits_neutral() -> None:
     direct = DrfpEncoder.encode(_ESTER_ETHYL, n_folded_length=settings.drfp_bits)[0]
     direct_bits = "".join("1" if value else "0" for value in direct)
     assert drfp_bitstring(_ESTER_ETHYL) == direct_bits
+
+
+# --- An empty index must not answer "we have never run this" -------------------------------------
+
+
+def test_an_empty_reaction_index_reports_that_the_search_was_not_run() -> None:
+    """The live-run defect, on the exact tool that produced it (finding 6 of the grounded run).
+
+    `similar_reactions` returning `{"result": []}` over a never-backfilled table was read as "we
+    have no precedent for this transformation". The empty index must say so itself.
+    """
+
+    async def _run() -> None:
+        search = await find_similar_reactions(InMemoryFingerprintStore(), _ESTER_ETHYL)
+        assert search.hits == []
+        assert search.index_empty is True
+        payload = search.model_dump()  # what MCP ships to the model
+        assert "SEARCH NOT RUN" in payload["verdict"]
+        assert "NOT evidence" in payload["verdict"]
+
+    asyncio.run(_run())
+
+
+def test_a_populated_reaction_index_with_no_match_is_a_genuine_negative() -> None:
+    """An indexed corpus that simply holds nothing similar reads as a real answer, not a gap."""
+
+    async def _run() -> None:
+        store = InMemoryFingerprintStore()
+        await store.add(record_for_reaction("halogenation", _HALOGENATION))
+        search = await find_similar_reactions(store, _ESTER_ETHYL, threshold=0.9)
+        assert search.hits == []
+        assert search.index_empty is False
+        assert "genuine negative" in search.verdict
+        assert "SEARCH NOT RUN" not in search.verdict
+
+    asyncio.run(_run())
+
+
+def test_a_reaction_hit_is_unaffected() -> None:
+    """Regression guard: a real precedent still comes back, with the index not flagged empty."""
+
+    async def _run() -> None:
+        store = InMemoryFingerprintStore()
+        await store.add(record_for_reaction("ethyl", _ESTER_ETHYL))
+        search = await find_similar_reactions(store, _ESTER_ETHYL, threshold=0.1)
+        assert [h.id for h in search.hits] == ["ethyl"]
+        assert search.index_empty is False
+        assert search.verdict.startswith("1 indexed reaction(s) matched")
+
+    asyncio.run(_run())
