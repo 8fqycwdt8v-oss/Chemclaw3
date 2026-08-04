@@ -42,7 +42,7 @@ there is no second config source.
 ```sh
 # The front-door chat service (FastAPI + SSE). Browse to the served page, start a
 # session, watch a plan + tool use, get a cited answer.
-uvicorn chemclaw.api.app:create_app --factory --port 8080
+uvicorn chemclaw.api.app:create_app --factory --host 127.0.0.1 --port 8000
 
 # Durable workers (separate processes; need Temporal + Postgres from `make up`).
 python -m chemclaw.durable.background_worker    # background-jobs (ELN sync, reports, memory)
@@ -50,6 +50,11 @@ python -m chemclaw.connectors.qm.worker         # connector-qm (the durable QM/D
 python -m chemclaw.connectors.calc.worker       # connector-calc (the expensive xTB calculations)
 python -m chemclaw.connectors.bo.worker         # connector-bo (optimization campaigns)
 ```
+
+`make live-up` starts all of these together, readiness-polled, and `make live-jobs` then runs a
+real durable job end to end — see "Live-test the whole stack" in `docs/guides/runbook.md`. Port
+`8000` is not arbitrary: it is what `CHEMCLAW_LIVE_PROBE_BASE_URL` defaults to, so the probe
+runner reaches the front door with no override.
 
 The LLM provider is config-selected (`CHEMCLAW_LLM_PROVIDER`): an internal
 OpenAI-compatible endpoint in production (one generic credential, not Entra), or

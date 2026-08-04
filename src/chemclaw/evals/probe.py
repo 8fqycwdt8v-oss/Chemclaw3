@@ -47,6 +47,17 @@ class Probe(BaseModel):
     # Any-of, not all-of: several tools can legitimately serve one question, and demanding a
     # specific one would grade the model's routing taste rather than the system's reach.
     expects_tools: list[str] = Field(default_factory=list)
+    # True when a satisfying answer requires a *durable* job to have actually run — not merely a
+    # tool named in `expects_tools` to have been called. The distinction is the whole reason this
+    # field exists: a job tool returns a workflow id the moment the launch is accepted, so an
+    # answer can report a started job that Temporal never ran, and every signal derived from the
+    # event stream alone would score it as success. Marking a probe here lets the runner ask the
+    # broker for the workflow's terminal state instead of believing the turn's account of it.
+    #
+    # A bool rather than a job name: the probe is a *question*, and naming the job it must reach
+    # would grade the model's routing taste, which is the same argument `expects_tools` settles by
+    # being any-of.
+    expects_job: bool = False
     forbids_claims: list[str] = Field(default_factory=list)
     direction: str = Field(min_length=1)
 

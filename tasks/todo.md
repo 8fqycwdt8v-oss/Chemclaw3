@@ -1,71 +1,84 @@
-# Task: analyse the BO capability, and plan the features worth adding
+# Task: a live-test lane for Temporal + durable workflows + LLM + Postgres
 
-Branch: `claude/bofire-capabilities-roadmap-pmeipd`. Deliverable: **documentation only, no `src/`
-change** — a capability map, an ADR holding the measured numbers, and the backlog/deferred rows
-that make the roadmap actionable.
+Branch: `claude/temporal-workflows-llm-testing-5nziyp`. Decision:
+`docs/decisions/D-2026-08-04-a-lane-that-only-runs-where-docker-runs.md`.
 
-_(The previous occupant of this file was the 2026-08-03 grounded-live-run fix list, merged in
-`1f10ae3`; it is in `git log`.)_
+**The question was whether the durable engine can be live-tested together with the model and the
+database. It could not be — not because the pieces were missing, but because nothing crossed
+them.** The Temporal tests use the time-skipping test server with no model and no database; the
+live probe run uses a real model and a real database with no broker, and said so in its own probe
+headers; the Postgres tests use neither. The path a durable capability actually takes had been
+exercised only in pieces.
+
+_(The previous occupant of this file was the BoFire capability map and roadmap (#111, `3ed77cf`),
+which landed on `main` while this branch was in flight; it is in `git log`, and its outcome is in
+`docs/reference/bo-capability-map.md` and its own ADR. Before that, the 2026-08-03
+grounded-live-run fix list.)_
 
 ---
 
-## What was asked
+## Plan
 
-Three things: which chemical- and analytical-development use cases the current BoFire wiring already
-serves; what BoFire can do that is not wired up; and a plan of features to integrate. Scope
-confirmed with the user as **analysis and roadmap only**, covering all four use-case families
-(reaction/process optimisation, DoE/HTE screening, analytical method development, campaign health).
+- [x] **1. Bootstrap the stack without Docker.** `infra/live/bootstrap.sh` — defers to
+      `docker compose` when a daemon answers, otherwise builds pgvector and the Temporal CLI from
+      git clones and starts a native cluster on the same ports.
+- [x] **2. Supervise the processes.** `infra/live/processes.sh` — connectors, the four Temporal
+      workers, the front door; readiness-polled, never slept; one probe port per worker.
+- [x] **3. Stage A, the durable smoke.** `chemclaw.cli.live_jobs` — a real declared job through
+      the real generated tool, six mechanical checks against Temporal and Postgres, no model.
+- [x] **4. Stage B, the model on top.** `data/evals/probes/durable.yaml` (4 probes),
+      `Probe.expects_job`, and `evals/live._job_outcomes` resolving every launched workflow id
+      against the broker instead of believing the turn.
+- [x] **5. Un-hard-code the deployment from the corpus.** Six probe directions across three files
+      asserted "Temporal is not running in this test"; rewritten to grade behaviour, with a test
+      that pins the class.
+- [x] **6. Targets, tests, docs.** Seven `make live-*` targets; `tests/test_live_jobs.py` and five
+      new cases in `tests/test_live_probes.py`; runbook section, README port fix, ADR, BACKLOG.
 
-## Done
+---
 
-- [x] Map the implementation from source — one BoFire-importing module, three strategies, two
-      objectives, four feature types, `Domain(constraints=…)` never passed.
-- [x] Catalogue BoFire 0.4.1's full surface and diff it against that.
-- [x] Locate the demand side: `tasks/story-audit-optimization.md` §2/§3/§4,
-      `story-audit-analytical.md` §7/§8, and what `OrdReaction` actually records.
-- [x] **Run the measurement register M-1…M-7 before writing the roadmap** (`uv sync` first; bofire
-      was not installed in the session).
-- [x] `docs/reference/bo-capability-map.md` — §1 wiring, §2 what it serves, §3 what is unused,
-      §4 the gap by family, §5 five waves, §6 what the map does not tell you.
-- [x] `docs/decisions/D-2026-08-04-what-bofire-does-when-you-actually-run-it.md` + ledger row.
-- [x] BACKLOG rows (one per wave, plus the `method` note type), five DEFERRED rows with triggers,
-      the `docs/README.md` reference row.
-- [x] Gate: `make lint` · `make type` (537 files) · `make test` (2908 passed, 129 skipped) ·
-      `prose-validate` · `kg-validate` · `skill-validate` · `connector-validate` ·
-      `test_decision_log` · `test_deferred_register` · `test_repo_map`.
+## Review — what was actually measured
 
-## Review
+**The stack, in this container, with no Docker daemon:** PostgreSQL 16 + pgvector **0.8.6** on
+5432, Temporal **Server 1.31.2** (CLI 1.8.2, built from source) on 7233, all 34 migrations applied,
+six connectors on 8810, four workers ready on 9000-9003.
 
-**The measurement register earned its cost, which was the open question going in.** It was run
-because `tasks/lessons.md` requires it — the last BO roadmap said "just thread `n_generators`
-through" about a parameter that was inert — and the worry was that it would only confirm a plan
-already written. It did not. Three of seven measurements changed a wave and one reversed a refusal:
+**`make live-jobs` — 6/6**, on a workflow started by that run
+(`calc-compute_reaction_energy-f47443a513e5db4b`):
 
-- **M-5** turned "admit continuous factors, and also thread the four unused knobs" into "admitting
-  continuous factors is the *precondition* for three of those knobs" — on the all-categorical domain
-  `factorial_design` accepts today, `n_repetitions` and `n_center` are as inert as `n_generators`
-  was. The same trap as D-2026-08-02, two parameters wider, and it would have shipped as three
-  no-ops implemented elegantly.
-- **M-3** could have grown the constraints wave: `RandomStrategy` seeds every cold start, and had it
-  ignored `Domain.constraints` the schema would have claimed a limit was honoured while every seed
-  point violated it. It honours them, so no rejection-sampling path is needed.
-- **M-7** reversed a refusal already written down as settled. The argument against a
-  cross-validation tool was that it forces naming a surrogate class in `engine.py`;
-  `strategy.surrogate_specs` exposes the one BoFire itself chose, so the number describes the model
-  that made the recommendation and no class is named.
+| check | observed |
+| --- | --- |
+| workflow reached COMPLETED | COMPLETED, started 2026-08-04T05:54:06+00:00 |
+| calculation cached in Postgres | 6 `xtb*` rows in `calculation_results` |
+| job recorded in Postgres | `calc/compute_reaction_energy` by `service-account`, with its rationale |
+| duplicate launch rejoins the same run | id matches; cache rows 12 → 12 (nothing recomputed) |
+| wedged worker yields a pending job | returned the id after 20 s, then COMPLETED once resumed |
+| audit chain verifies | OK: the audit trail hash chain is intact |
 
-**The most useful finding is a negative one.** Analytical method development is the largest family
-by story count (24 stories) and gets no wave: it is blocked on a missing `method` note type, not on
-BO. Building `TargetObjective` for it first would have been building on air. Naming that explicitly
-is worth more than any single one of the five waves.
+**`make lint type test`:** green — 3015 passed, 34 skipped. Worth noting what changed underneath
+that number: with Postgres up, the 22 Postgres-backed test files **ran** rather than skipped. A
+green suite in an offline sandbox had been reporting on a suite that largely did not execute.
 
-**One process note.** `prose-validate` caught the map naming `science/bo/progress.py` — a file the
-roadmap proposes and the tree does not have. That is the validator working exactly as intended on a
-document class it was not written for: a roadmap that names paths reads as a claim about the tree.
-Rephrased to describe the module without asserting it exists.
+### Three things the lane caught while being built, which is the argument for it
 
-## Not done, deliberately
+1. **The pid files recorded the wrong process.** `uv run python -m …` puts `uv` in the pid file and
+   the worker one fork below it, so `kill` reached the launcher. Found only because the
+   wedged-worker check sends a signal and got `ProcessLookupError`. Fixed by resolving the
+   interpreter once and starting it directly — a layer removed rather than worked around.
+2. **The wedged-worker payload was invalid.** It inherited the smoke's symmetry numbers onto a
+   different equation, and `_checked_symmetry_numbers` rejected it correctly. The lane reported a
+   real failure; the failure was mine. Now pinned by a test, because a bad probe that reads as a
+   system fault is the worst kind.
+3. **A rerun would have passed on residue.** A durable job's id is a hash of its payload and a
+   duplicate launch deliberately rejoins rather than recomputes — so with a fixed payload the
+   *second* `make live-jobs` against one database starts nothing, computes nothing, and passes
+   every check against the first run's rows. The payload now varies per run on a real physical
+   input. This is the failure the whole lane exists to remove; building it into the lane would have
+   been the joke writing itself.
 
-No `src/` change. Each wave carries its own ADR, its own tests and its own gating measurement, and
-those are what stop these findings from rotting. The numbers were taken on one machine at
-`bofire==0.4.1`; a version bump invalidates them.
+### What is not done
+
+Stage B (`make live-probes`) needs an `ANTHROPIC_API_KEY`, which this container does not have —
+`ANTHROPIC_BASE_URL` is set without one. Everything it depends on is verified and it runs
+unchanged the moment a key is present. That and two smaller follow-ups are in
+`docs/planning/BACKLOG.md`.

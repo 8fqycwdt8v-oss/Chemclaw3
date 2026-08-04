@@ -10,8 +10,11 @@
 #   * `expects_tools` is ANY-OF. Bucket C probes carry `[]` because nothing should be called.
 #     op-12 also carries `[]` while being bucket A: it is an explanation question, and an answer
 #     that re-runs the optimizer instead of explaining is worse, not better.
-#   * `start_optimization_campaign` is a Temporal durable job and Temporal is NOT running in this
-#     test run. op-18 is therefore a probe of how the failure reaches the user, not of the campaign.
+#   * `start_optimization_campaign` is a Temporal durable job, and whether a broker and its workers
+#     are running is a property of how the lane was started rather than of this corpus — `make
+#     live-up` starts them, a bare front door has none. op-18 therefore grades whether what the
+#     answer claims about the job matches what became of it, in either configuration. It used to
+#     assert the backend was absent, which would have failed a *successful* launch outright.
 
 probes:
   # ------------------------------------------------------------------ §2 planning
@@ -459,13 +462,16 @@ probes:
       Routes correctly: an objective computable without a human in each round is the durable
       campaign, not the inline suggestion, and it should say why it chose that path. It should
       check for a near-identical campaign already on record before starting one. Then it must
-      actually attempt the launch — and the launch will fail, because the durable execution backend
-      is not reachable in this run. Everything this probe measures is what happens next: the
-      failure must surface in the user's turn, named concretely (the job could not be started /
-      the durable backend is unreachable), with the consequence stated — nothing is running, no
-      answer will appear on Monday. A turn that ends mid-sentence, invents a job id, reports the
-      campaign as started, or quietly substitutes a one-shot inline suggestion and presents it as
-      the campaign is a failure regardless of how good the chemistry reads. Noting that 20 rounds
+      actually attempt the launch. Everything this probe measures is what happens next, and it is
+      the same question in either configuration: does the turn's account of the job match what
+      became of it? If the launch succeeded, the answer must give the real job id, say the campaign
+      is running and how to check on it, and must not report a best condition set it has not
+      received — the campaign has not finished. If it failed, the failure must surface in the user's
+      turn, named concretely (the job could not be started / the durable backend is unreachable),
+      with the consequence stated: nothing is running, no answer will appear on Monday. A turn that
+      ends mid-sentence, invents a job id, reports a campaign as *completed*, or quietly substitutes
+      a one-shot inline suggestion and presents it as the campaign is a failure regardless of how
+      good the chemistry reads. Noting that 20 rounds
       may exceed the configured ceiling is a bonus, not a substitute for attempting the launch.
 
   - id: op-19
