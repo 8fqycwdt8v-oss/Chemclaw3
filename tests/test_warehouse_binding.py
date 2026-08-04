@@ -309,3 +309,61 @@ def test_a_template_renders_a_falsy_value_rather_than_dropping_it() -> None:
     scope = {"root": {"ID": 0, "OPERATOR": "", "PAGE": 12}}
     assert render_template("eln:${root.ID}:${root.PAGE}", scope) == "eln:0:12"
     assert render_template("eln:${root.MISSING}", scope) == "eln:"
+
+
+def test_a_numeric_site_vocabulary_maps_rather_than_rejecting_every_row() -> None:
+    """A transform's options are untyped, so YAML's scalar rules decide what a map key becomes.
+
+    A site with numeric material-type codes writes `map: {1: reactant}` and gets an *integer* key.
+    Comparing the row's text against that matched nothing, so every row was rejected — and the
+    message said `no entry for '1'; known: [1, 2]`, showing the key apparently present. Both sides
+    are compared as text now, which is what makes a numeric vocabulary work at all.
+    """
+    numeric = [{"value_map": {"map": {1: "reactant", 2: "solvent"}}}]
+
+    assert apply_transforms(1, numeric) == "reactant", "an integer row value"
+    assert apply_transforms("2", numeric) == "solvent", "and its string spelling"
+
+
+def test_a_yaml_boolean_map_key_is_refused_with_the_fix_named() -> None:
+    """`ON`/`OFF`/`YES`/`NO`/`Y`/`N` are YAML booleans, and the spelling is gone before we see it.
+
+    Unrecoverable rather than merely wrong: `True` and `1` are also the same dict key in Python, so
+    a map carrying both loses an entry before any of this code runs. Refused at load, naming the
+    line to quote, instead of failing every row against a file that reads correctly.
+    """
+    with pytest.raises(BindingError, match="boolean key"):
+        load_binding(
+            _ingest(
+                components=[
+                    {
+                        "from": "charges",
+                        "smiles": {"path": "SMILES"},
+                        "role": {
+                            "path": "TYPE",
+                            # `Y:` in the source YAML — a boolean by the time pydantic sees it.
+                            "transform": [{"value_map": {"map": {True: "reactant"}}}],
+                        },
+                    }
+                ]
+            )
+        )
+
+
+def test_a_regex_transform_is_compiled_when_the_binding_loads() -> None:
+    """An unbalanced bracket must not wait for the first row of the first sync to be discovered.
+
+    The `group:` check is the same argument one step further out: a group the pattern does not have
+    only raises on the first row that *matches*, which can be days later and on a subset of the
+    corpus.
+    """
+    binding = _ingest()
+    binding["ingest"]["reaction"]["reaction_id"]["transform"] = [{"regex": {"pattern": "["}}]
+    with pytest.raises(BindingError, match="invalid pattern"):
+        load_binding(binding)
+
+    binding["ingest"]["reaction"]["reaction_id"]["transform"] = [
+        {"regex": {"pattern": "L-(\\d+)", "group": 5}}
+    ]
+    with pytest.raises(BindingError, match="asks for group 5"):
+        load_binding(binding)
