@@ -27,9 +27,10 @@ questions.
 
 import asyncio
 import json
+import statistics
 
 from mcp.server.fastmcp import FastMCP
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, computed_field
 
 from chemclaw.connectors.caller import caller_provenance
 from chemclaw.science.bo.campaign_record import (
@@ -40,9 +41,51 @@ from chemclaw.science.bo.campaign_record import (
 from chemclaw.science.bo.engine import factorial_design, initial_candidates, propose_candidates
 from chemclaw.science.bo.featurize import featurize_problem
 from chemclaw.science.bo.problem import Candidate, Observation, OptimizationProblem, ScreeningDesign
+from chemclaw.science.bo.progress import CampaignProgress
+from chemclaw.science.bo.progress import campaign_progress as read_progress
 from chemclaw.science.calc.postgres_store import default_store
 
 server = FastMCP("bo")
+
+
+class ObjectiveScale(BaseModel):
+    """What the objective's numbers actually span in the runs supplied, so an sd can be read.
+
+    `Candidate.predicted_sd` comes back in the objective's own units with nothing beside it, and a
+    number with no scale is not an explanation: +/-3 is an exploit of chemistry the model has
+    learned when the observed yields span 40 points, and an excursion into chemistry it has not
+    when they span 4. The audit called story 3.4 "a rubric gap, not a computation gap" — the sd was
+    already computed and returned; what was missing was the thing to compare it to.
+    """
+
+    name: str = Field(min_length=1)
+    direction: str = Field(min_length=1)
+    n: int = Field(ge=0)
+    observed_min: float | None = None
+    observed_max: float | None = None
+    # Sample standard deviation of the observed values; None below two runs, where it is undefined
+    # rather than zero.
+    observed_sd: float | None = Field(default=None, ge=0.0)
+
+    @property
+    def spread(self) -> float | None:
+        """Observed max minus min, or None when there is nothing to span."""
+        if self.observed_min is None or self.observed_max is None:
+            return None
+        return self.observed_max - self.observed_min
+
+
+def _objective_scale(problem: OptimizationProblem, history: list[Observation]) -> ObjectiveScale:
+    """Summarize what the objective did across the runs supplied."""
+    values = [observation.value for observation in history]
+    return ObjectiveScale(
+        name=problem.objective.name,
+        direction=problem.objective.direction,
+        n=len(values),
+        observed_min=min(values) if values else None,
+        observed_max=max(values) if values else None,
+        observed_sd=statistics.stdev(values) if len(values) > 1 else None,
+    )
 
 
 class ExperimentSuggestion(BaseModel):
@@ -59,6 +102,49 @@ class ExperimentSuggestion(BaseModel):
     campaign_id: str = Field(min_length=1)
     candidates: list[Candidate] = Field(default_factory=list)
     calc_refs: list[str] = Field(default_factory=list)
+    # What the objective spans in the runs behind these candidates, so each candidate's
+    # `predicted_sd` can be read against something.
+    scale: ObjectiveScale | None = None
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def summary(self) -> str:
+        """Each candidate's posterior sd read against the observed spread, in one sentence each.
+
+        A `computed_field` rather than a bare property, for the reason
+        `chemclaw.science.safety.screen.ScreenResult.verdict` is one: a plain property is not
+        serialized, so the reading would never reach the model composing the answer. The skill can
+        say "compare the sd to the spread"; only this is in the context window at the moment the
+        comparison has to be made.
+        """
+        if not self.candidates:
+            return "No candidates were proposed."
+        spread = self.scale.spread if self.scale else None
+        readings = []
+        for index, candidate in enumerate(self.candidates, start=1):
+            if candidate.predicted_sd is None:
+                readings.append(
+                    f"Candidate {index} is a space-filling seed point — no surrogate had an "
+                    "opinion about it. That is not an endorsement."
+                )
+                continue
+            if spread is None or spread <= 0:
+                readings.append(
+                    f"Candidate {index}: posterior sd +/-{candidate.predicted_sd:.3g}, with too "
+                    "little spread in the runs supplied to say whether that is large or small."
+                )
+                continue
+            share = candidate.predicted_sd / spread
+            reading = "an exploit of a region the model has learned"
+            if share >= 0.5:
+                reading = "an excursion into chemistry the model has not seen"
+            elif share >= 0.2:
+                reading = "a step beyond the runs supplied, but not a leap"
+            readings.append(
+                f"Candidate {index}: posterior sd +/-{candidate.predicted_sd:.3g} against an "
+                f"observed spread of {spread:.3g} ({share:.0%}) — {reading}."
+            )
+        return " ".join(readings)
 
 
 def _require_observed_params_match(
@@ -215,8 +301,66 @@ async def suggest_next_experiment(
         provenance=caller_provenance(),
     )
     return ExperimentSuggestion(
-        campaign_id=campaign_id, candidates=candidates, calc_refs=featurized.calc_refs
+        campaign_id=campaign_id,
+        candidates=candidates,
+        calc_refs=featurized.calc_refs,
+        scale=_objective_scale(problem, history),
     )
+
+
+@server.tool()
+async def campaign_progress(
+    problem: OptimizationProblem,
+    observations: list[Observation] | str,
+    assay_noise: float,
+    window: int | None = None,
+) -> CampaignProgress:
+    """Has this optimization plateaued, or is there more in it? Read against the assay's own noise.
+
+    Use this whenever a chemist asks whether to keep going — "have we plateaued", "is there more in
+    it", "I don't want to burn another two weeks" — instead of reflexively proposing another
+    candidate. It answers from the runs themselves: the best so far, how long since a gain larger
+    than the noise, and whether the most recent results differ from each other at all.
+
+    **`assay_noise` is required and you must get it from the chemist**, in the objective's own
+    units — "assay reproducibility is about +/-2%" means `assay_noise=2.0` for a yield objective. If
+    they have not said, ask before calling; do not invent one and do not call this without it. A
+    gain of 1-2% against a +/-2% assay is not a gain, and saying it is has already been graded a
+    fabrication once.
+
+    **What this does and does not establish.** It reads the runs you supply and nothing else, so it
+    can never show a global optimum has been reached — only that recent points *in the region
+    already explored* have not beaten the noise. The returned `summary` says so; repeat that limit
+    rather than rounding it up to "converged".
+
+    **To speak to what the model expects next**, call `suggest_next_experiment` as well and compare
+    its candidates' `predicted_value` against the same `assay_noise`: a predicted improvement inside
+    the noise is not a reason to run another experiment, and a large `predicted_sd` somewhere
+    untried is. This tool deliberately asks no surrogate — "the record stopped moving" and "the
+    model expects nothing" are different claims with different evidence.
+
+    Args:
+        problem: The decision space and objective, in the same shape `suggest_next_experiment`
+            takes — pass the one `resume_campaign` returned, or the one you just built.
+        observations: The runs so far, **in the order they were performed**. Order matters: a list
+            sorted by value would report a campaign that never stopped improving.
+        assay_noise: The assay's reproducibility in the objective's own units. Required.
+        window: How many recent evaluations the "do these differ at all" statement covers. Defaults
+            to the configured window; set it explicitly when the chemist points at a specific tail
+            ("the last four runs").
+
+    Returns:
+        The best so far, the running best per evaluation, how many evaluations since a real gain,
+        the spread of the recent window, a plateau verdict, and a `summary` stating the limit.
+    """
+    problem = OptimizationProblem.model_validate(problem)
+    # Same tolerance as `suggest_next_experiment`: the model sometimes emits the observations array
+    # JSON-encoded as one string, and rejecting the call teaches it nothing.
+    if isinstance(observations, str):
+        observations = json.loads(observations)
+    history = [Observation.model_validate(item) for item in observations]
+    _require_observed_params_match(problem, history)
+    return read_progress(problem, history, assay_noise, window)
 
 
 @server.tool()
