@@ -3,6 +3,33 @@
 Prioritized open action items. Top = next. Keep in sync with `docs/planning/implementation-plan.md`
 (phase/step numbers) at session end.
 
+## Open — Left by the live lane (2026-08-04, D-2026-08-04-a-lane-that-only-runs-where-docker-runs)
+
+The lane itself is done: `make live-infra` / `live-up` / `live-jobs` / `live-probes`, six mechanical
+checks green against a real Temporal + Postgres in a container with no Docker daemon. What it did
+not close:
+
+- [ ] **The Temporal-backed tests still skip wherever `temporal.download` is blocked** — [M]. All
+      13 modules fetch the *time-skipping* test server, so a live broker on 7233 cannot substitute:
+      a workflow that sleeps would really sleep. But not every one of them skips time — the ones
+      that only need a real server (`test_connector_job_workflow`, `test_workers`) could take
+      `WorkflowEnvironment.from_client()` against `settings.temporal_address` when it answers, which
+      would turn a silent skip into a real run in exactly the environments that currently prove
+      least. Needs a per-module judgement about which tests depend on time skipping, which is why
+      it was not guessed at inside the lane's own change.
+
+- [ ] **Stage B has never been run** — [S]. `make live-probes` with the four workers up is the
+      first time the `du-*` probes and the `expects_job` → Temporal resolution meet a real model,
+      and it needs an `ANTHROPIC_API_KEY` that no CI runner or agent container here has. Everything
+      it depends on is verified; the run itself is outstanding, and its findings are unknown rather
+      than assumed absent.
+
+- [ ] **`make live-jobs` exercises one connector** — [S]. `compute_reaction_energy` on `connector-calc`
+      is deliberate (in-process `tblite`, no HPC, writes to the cache so D-011 is observable), but
+      `connector-bo`'s campaign and `connector-qm`'s Nextflow job take different shapes — a campaign
+      outlives its turn, and QM needs a cluster. The BO one is reachable now and is the obvious
+      second case; the QM one belongs with the deferred cluster work.
+
 ## Open — Found while fixing the grounded live run (2026-08-03)
 
 - [ ] **There is no documented way to populate the fingerprint index** — [S]. Chasing F5 turned up
@@ -2276,10 +2303,17 @@ MAF ships the harness natively (`create_harness_agent` + `TodoProvider`/`AgentMo
       (`data_sources` config → `active_ingest_sources()`/`active_retrieve_sources()`). Re-hosted with
       no behavior change: `gather_evidence` fans out over the registry; `eln_sync` ingests active
       sources. All existing ELN/research tests pass unchanged. ADR D-050. `test_datasource_seam.py`.
-- [ ] **F7 deferred (the first live connector)**: custom Snowflake ELN source — one registry entry
-      (ingest half over the internal data pipeline) + per-source pipeline cursor over Snowflake's
-      load-timestamp; Snowflake specifics stay inside that one adapter, nothing Snowflake-shaped above
-      the seam. Also: LIMS/MES/analytical/literature adapters.
+- [x] **F7 (the first live connector)**: custom Snowflake ELN source. Done
+      (D-2026-08-04-the-schema-is-a-file), except the tenant itself. It landed one step further than
+      this row asked for: the Snowflake specifics do not live "inside that one adapter", they live
+      in the manifest's `binding:` block, because a schema nobody can see yet cannot be written into
+      Python. `chemclaw.ingest.eln.warehouse` is a generic engine naming no table and no column;
+      both halves ship (ingest through the PR-gate, plus similarity search run inside the warehouse
+      over its own embedding column), proven against a fake driver with no tenant. Remaining work is
+      infrastructure only — see `docs/planning/DEFERRED.md`.
+- [ ] **The other F7 adapters**: LIMS/MES/analytical/literature. Each is now a question of whether
+      it is reaction-shaped: one that is becomes a binding over the same engine, one that is not is
+      the trigger for the "universal ingest abstraction" row in `docs/planning/DEFERRED.md`.
 
 ## Later — Phase 6 items now folded into F4 above (infra-gated pieces need live Entra/Temporal)
 

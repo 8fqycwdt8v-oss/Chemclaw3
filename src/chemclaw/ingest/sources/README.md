@@ -18,16 +18,22 @@ Three steps. None of them is an edit to core Python.
 `retrieve`). Both protocols are re-exported from `sources/base.py`. Put it wherever it belongs —
 a warehouse client belongs beside its peers, not in this folder.
 
+**For a SQL warehouse, skip this step.** `chemclaw.ingest.eln.warehouse` is a generic ELN adapter
+whose knowledge of the source is a *binding* in the manifest rather than code, so attaching one is
+steps 2 and 3 only. See its README for the binding's shape, and
+`sources/eln-snowflake/datasource.yaml` for a complete worked example.
+
 **2. Declare it** as `sources/<name>/datasource.yaml`:
 
 ```yaml
 name: eln-snowflake            # must equal the folder name — it is the enable token
 description: >-
   The corporate ELN, read from the Snowflake reactions view.
-ingest: eln.snowflake_adapter:SnowflakeElnAdapter    # module:callable
+ingest: chemclaw.ingest.eln.warehouse.adapter:WarehouseElnAdapter    # module:callable
 config:                        # keyword arguments for that callable
-  warehouse: RND_WH
-  schema: ELN_PROD
+  binding:                     # ... which for this adapter is the site's whole schema
+    connection: {driver: chemclaw.ingest.eln.warehouse.snowflake:SnowflakeWarehouse, ...}
+    ingest: {entry: {relation: V_REACTION, key: REACTION_ID, ...}, ...}
 ```
 
 Declare `ingest:`, `retrieve:`, or both. A source with neither is rejected.
