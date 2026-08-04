@@ -1,0 +1,92 @@
+{
+  "probe": {
+    "id": "gr-05",
+    "section": 1,
+    "persona": "lab_leader",
+    "bucket": "A",
+    "question": "Where are the holes in what we know about the benzamide coupling onto 3-bromopyridine?",
+    "expects_tools": [
+      "find_knowledge_gaps",
+      "gather_evidence",
+      "find_notes",
+      "expand_note"
+    ],
+    "forbids_claims": [
+      "a gap list with no reference to what the existing records do cover",
+      "an implied dataset, assay or study that is not in the corpus"
+    ],
+    "direction": "96 records exist and their mean yield is around 8% with a maximum in the forties — a screen that mostly failed is a real and useful thing to say. Naming the absence is the deliverable here: what was never varied, what has no replicate, what has no observation attached."
+  },
+  "outcome": {
+    "probe_id": "gr-05",
+    "section": 1,
+    "persona": "lab_leader",
+    "bucket": "A",
+    "question": "Where are the holes in what we know about the benzamide coupling onto 3-bromopyridine?",
+    "answer": "I'll search the knowledge graph to see what we have on record about benzamide coupling onto 3-bromopyridine, then identify the gaps.The search returned amide coupling data and 3-bromopyridine couplings, but not the specific combination. Let me check the knowledge graph more directly and also search for similar reactions involving 3-bromopyridine and benzamide.Good news and bad news. **We have no specific entry for benzamide coupling onto 3-bromopyridine in the knowledge graph,** and the reaction fingerprint index is empty, so I cannot search structurally similar precedents. However, I can tell you what kinds of information would matter for this transformation and what is missing from the record:\n\n## What the record lacks specifically:\n\n1. **No runs of this exact transformation** — benzamide + 3-bromopyridine. The search returned 3-bromopyridine couplings (Santanilla et al. alcohol/alkyne/aniline cross-couplings), but nothing on amidation.\n\n2. **No optimization campaign for aryl amidations** — we have EDC-based amide couplings on aliphatic substrates (rxn-amide-edc: benzoic acid + benzylamine at 81% yield), and we know the solvent/reagent landscape (DMF, MeCN, 2-MeTHF; EDC/HOBt superior to EDC alone). But those runs paired carboxylic acids with primary amines. A substituted pyridine as the amide partner is a different electrostatic and steric picture.\n\n3. **Aryl-pyridine coupling scope is undistilled** — playbook-pd-cross-coupling-scope (from campaign-biaryl-scope and opt-suzuki-conditions) generalizes Pd couplings to electron-rich halides, but says nothing about which aryl acyl donors couple well with heteroaromatic halides. The three 3-bromopyridine reactions we do have (Santanilla alcohol/alkyne/aniline) are Pd-catalyzed C-N/C-C couplings, not acylations.\n\n4. **No thermochemistry for pyridine amides** — we can predict pKa, solubility, and electronic properties of the product (3-benzamidopyridine), but have not computed whether the amidation is thermodynamically favored or how solvent pH affects it.\n\n5. **Regioselectivity is silent** — 3-bromopyridine has a NH2 at position 3. Reactivity at the N vs. the C-Br under amidation conditions (base, coupling reagent, solvent, temperature) is not documented or predicted.\n\n## What we can and should compute before running:\n\nI can answer some of these gaps:The reaction energy calculation hit an infrastructure issue, but the pKa is clear: the product NH has a pKa of ~5.5 (±1.0 uncertainty). That means **at the pH of most amidation conditions (DMF or DCM + base, working pH 8–12), the amide NH is deprotonated.** This is actually common for aromatic amides, but worth noting because it means:\n\n- The N-H can participate in H-bond donation to pyridine N during coupling (either helpful for site-selectivity *or* problematic if it complexes the base)\n- Base concentration matters: you need enough to deprotonate the amide NH but not so much that you over-activate the pyridine as a nucleophile\n\n## Summary of holes:\n\n| Question | Current evidence | Gap | How to fill it |\n|----------|------------------|-----|----------------|\n| **Is this thermodynamically favored?** | None | Need ΔG in DMF | Retry reaction-energy when Temporal is back; if unfavorable, coupling depends on kinetics or one product precipitates |\n| **Which amidation reagent for Ar-pyridine?** | EDC/HOBt works on aliphatic; no aryl data | Real gap | Run 1–2 test runs: EDC/HOBt vs. T3P vs. coupling-reagent-free (direct pyridine acyl halide) on small scale |\n| **Solvent for this pair?** | DMF/MeCN best for Ar-amine couplings; 2-MeTHF 5 points lower | Applicable but unvalidated | Try 2-MeTHF if HSE/GMP allows; DMF likely safest for first run |\n| **Base & equivalents?** | 2.5 equiv DIPEA for Ar-NH2; pyridine likely more basic | Unclear | Start 1 equiv base (enough to deprotonate NH, less likely to disrupt coupling) |\n| **Temperature?** | 0 °C→RT for Ar-NH2 to avoid rearrangement; pyridine less reactive | Lower risk | 0 °C→RT is defensible; might tolerate 25 °C throughout |\n| **Regioselectivity?** | Pyridines often N-alkylated in strong nucleophile conditions | Real concern | Compute Fukui on 3-bromopyridine; watch NMR for N- vs. C-coupling if yield is low |\n\nThe **biggest blind spot**: whether this is even the *goal* — coupling benzamide to the C-Br, vs. acylating the pyridine N (making a pyridinium salt or N-acyl-pyridinium). That changes the entire strategy. Does the literature or your chemistry intent clarify which one you want?",
+    "answered": true,
+    "tools_called": [
+      "gather_evidence",
+      "find_notes",
+      "similar_reactions",
+      "gather_evidence",
+      "find_knowledge_gaps",
+      "compute_reaction_energy",
+      "predict_pka"
+    ],
+    "tool_results": [
+      {
+        "tool": "gather_evidence",
+        "preview": "[{\"content\": \"<retrieved-note-4ac8bd4b8ff10031 id=\\\"reaction-santanilla-orgsyn-alcohol-well-R36\\\">\\nReaction `BrC1=CN=CC=C1.OCCCC1=CC=CC=C1.CN(C)P(N(C)C)(N(C)C)=NP(N(C)C)(N(C)C)=NCC>CS(O[Pd]1([P](C(C)"
+      },
+      {
+        "tool": "find_notes",
+        "preview": "[]"
+      },
+      {
+        "tool": "similar_reactions",
+        "preview": "{\n  \"subject\": \"reaction\",\n  \"hits\": [],\n  \"index_empty\": true,\n  \"verdict\": \"SEARCH NOT RUN: the reaction fingerprint index is empty — it holds no searchable record, so the query was compared against"
+      },
+      {
+        "tool": "gather_evidence",
+        "preview": "[{\"content\": \"<retrieved-note-4ac8bd4b8ff10031 id=\\\"reaction-santanilla-orgsyn-alcohol-well-R36\\\">\\nReaction `BrC1=CN=CC=C1.OCCCC1=CC=CC=C1.CN(C)P(N(C)C)(N(C)C)=NP(N(C)C)(N(C)C)=NCC>CS(O[Pd]1([P](C(C)"
+      },
+      {
+        "tool": "find_knowledge_gaps",
+        "preview": "{\"total_notes\": 1025, \"isolated_note_ids\": [\"reaction-bh-amination-btmg-0000\", \"reaction-bh-amination-btmg-0001\", \"reaction-bh-amination-btmg-0002\", \"reaction-bh-amination-btmg-0003\", \"reaction-bh-ami"
+      },
+      {
+        "tool": "compute_reaction_energy",
+        "preview": "Error: the durable execution backend (Temporal) is unreachable, so durable jobs cannot be started or inspected right now — nothing was queued by this call. This is an infrastructure outage, not a prob"
+      },
+      {
+        "tool": "predict_pka",
+        "preview": "{\n  \"smiles\": \"O=C(Nc1cccnc1)c1ccccc1\",\n  \"method\": \"GFN2-xTB/ALPB-water\",\n  \"pka\": 5.491923560894303,\n  \"deprotonation_energy_kcal\": 114.65071318867878,\n  \"uncertainty\": 1.0,\n  \"site\": \"base\"\n}\n{\"smi"
+      }
+    ],
+    "tools_failed": [
+      "compute_reaction_energy"
+    ],
+    "expected_tools_met": true,
+    "uncited_note_ids": [],
+    "failed_loudly": true,
+    "error_code": null,
+    "degraded": [
+      "durable-jobs (Temporal)"
+    ],
+    "jobs_started": [],
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": false,
+    "latency_seconds": 31.93,
+    "event_counts": {
+      "capability_degraded": 1,
+      "token": 84,
+      "tool_call": 7,
+      "tool_result": 7,
+      "tool_failed": 1,
+      "answer": 1
+    },
+    "transport_error": null
+  }
+}

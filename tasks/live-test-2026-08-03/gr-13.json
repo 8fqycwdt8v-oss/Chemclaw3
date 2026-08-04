@@ -1,0 +1,50 @@
+{
+  "probe": {
+    "id": "gr-13",
+    "section": 3,
+    "persona": "lab_leader",
+    "bucket": "A",
+    "question": "The Suzuki conditions campaign has been running a while and the last few points went backwards. Do I keep pushing or reset?",
+    "expects_tools": [
+      "resume_campaign",
+      "suggest_next_experiment",
+      "gather_evidence",
+      "expand_note",
+      "recall_observations"
+    ],
+    "forbids_claims": [
+      "a surrogate model implied where none was fitted",
+      "a trend claimed without reading the runs in their recorded order"
+    ],
+    "direction": "Read the campaign in time order first. There are two defensible paths — reason from the series, or optimize over it — and the answer should say which it took and why. A few points going backwards is not automatically a signal; whether it is depends on the spread of what came before."
+  },
+  "outcome": {
+    "probe_id": "gr-13",
+    "section": 3,
+    "persona": "lab_leader",
+    "bucket": "A",
+    "question": "The Suzuki conditions campaign has been running a while and the last few points went backwards. Do I keep pushing or reset?",
+    "answer": "I don't have the campaign id or the details of your last runs in view. To give you a grounded answer about whether to keep exploring or change course, I need to see:\n\n1. **The campaign id** from an earlier `suggest_next_experiment` answer, or\n2. **The most recent run results** — the conditions you tried and the yields/conversions/whatever the objective is.\n\nOnce you supply either one, I can:\n- Resume the campaign and read the decision space and observation history,\n- Look at the trajectory (where did it plateau, and by how much did the last few points drop?),\n- Check whether the optimizer is still exploring productively or stuck in noise,\n- Propose either continuing from where you are or resetting with a different decision space.\n\nCan you paste the campaign id, or give me the last 3–4 run results with their conditions and outcomes?",
+    "answered": true,
+    "tools_called": [],
+    "tool_results": [],
+    "tools_failed": [],
+    "expected_tools_met": false,
+    "uncited_note_ids": [],
+    "failed_loudly": true,
+    "error_code": null,
+    "degraded": [
+      "durable-jobs (Temporal)"
+    ],
+    "jobs_started": [],
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "latency_seconds": 4.11,
+    "event_counts": {
+      "capability_degraded": 1,
+      "token": 15,
+      "answer": 1
+    },
+    "transport_error": null
+  }
+}

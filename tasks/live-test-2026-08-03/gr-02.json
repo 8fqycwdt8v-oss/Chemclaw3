@@ -1,0 +1,77 @@
+{
+  "probe": {
+    "id": "gr-02",
+    "section": 1,
+    "persona": "lab_technician",
+    "bucket": "A",
+    "question": "Someone's asking why we degas the Suzuki. I wasn't here when that was decided - can you reconstruct it?",
+    "expects_tools": [
+      "gather_evidence",
+      "find_notes",
+      "expand_note"
+    ],
+    "forbids_claims": [
+      "the content of the retired note presented as current practice",
+      "a rationale asserted with no note id behind it"
+    ],
+    "direction": "Two notes cover degassing and only one is current; the other has been retired. A good answer quotes the current rationale, cites it, and either ignores the retired note or names it as superseded. Quoting the retired one as what we do today is the failure this probe exists to catch."
+  },
+  "outcome": {
+    "probe_id": "gr-02",
+    "section": 1,
+    "persona": "lab_technician",
+    "bucket": "A",
+    "question": "Someone's asking why we degas the Suzuki. I wasn't here when that was decided - can you reconstruct it?",
+    "answer": "I'll search the knowledge graph for the reasoning behind degassing in Suzuki coupling reactions.Good—there's a playbook on degassing. Let me expand that to see the reasoning, and also pull the full Suzuki reaction notes to check for degassing mentions:Perfect. Let me also check the optimization campaign that the playbook cites, to see what the actual decision point was:## Here's why we degas the Suzuki:\n\n**The core issue** ([**playbook-degassing**](playbook-degassing)): Pd(0) is oxidised by dissolved oxygen and forms a black precipitate that is catalytically dead. The signature is a **bimodal yield distribution** — nominally identical runs give either 70%+ or under 20%, rarely anything in between. It depends on whether the catalyst survived its first few minutes in the presence of O₂.\n\n**The decision** ([**playbook-degassing**](playbook-degassing)): To avoid this, use either:\n- **Three freeze-pump-thaw cycles**, or  \n- **Sparging for 20 minutes per 100 mL**\n\nThe playbook explicitly notes that sparging for only two minutes is the same as not degassing at all — that brief treatment doesn't remove enough oxygen.\n\n**Why this matters in practice** ([**rxn-suzuki-biaryl**](rxn-suzuki-biaryl)): Our standard biaryl coupling uses 4-bromoanisole (an electron-rich, challenging substrate where oxidative addition is the rate-limiting step). This makes the reaction even more sensitive to ligand and temperature than activated aryl bromides would be — which also means it's more sensitive to losing catalyst to oxygen oxidation early on.\n\nThe distilled rule came from [[**opt-suzuki-conditions**](opt-suzuki-conditions)], an optimization campaign over temperature, Pd loading, and base. The bimodal behavior under degassed vs. undegassed conditions was the observation that crystallized the requirement.",
+    "answered": true,
+    "tools_called": [
+      "gather_evidence",
+      "find_notes",
+      "expand_note",
+      "expand_note",
+      "expand_note"
+    ],
+    "tool_results": [
+      {
+        "tool": "gather_evidence",
+        "preview": "[{\"content\": \"<retrieved-note-4216b6a377548e22 id=\\\"rxn-suzuki-biaryl\\\">\\nSuzuki-Miyaura coupling of 4-bromoanisole with phenylboronic acid.\\n\\n- aryl halide: compound-4-bromoanisole\\n- boronic acid: "
+      },
+      {
+        "tool": "find_notes",
+        "preview": "[{\"id\": \"playbook-degassing\", \"type\": \"playbook\", \"compound_smiles\": null, \"tags\": [\"playbook\", \"technique\"], \"created_by\": \"human\", \"source\": \"seed-corpus\", \"confidence\": 0.85, \"valid_from\": null, \"v"
+      },
+      {
+        "tool": "expand_note",
+        "preview": "{\"note\": {\"id\": \"playbook-degassing\", \"type\": \"playbook\", \"compound_smiles\": null, \"tags\": [\"playbook\", \"technique\"], \"created_by\": \"human\", \"source\": \"seed-corpus\", \"confidence\": 0.85, \"valid_from\": "
+      },
+      {
+        "tool": "expand_note",
+        "preview": "{\"note\": {\"id\": \"rxn-suzuki-biaryl\", \"type\": \"reaction\", \"compound_smiles\": null, \"tags\": [\"cross-coupling\", \"suzuki\"], \"created_by\": \"human\", \"source\": \"seed-corpus\", \"confidence\": 0.85, \"valid_from\""
+      },
+      {
+        "tool": "expand_note",
+        "preview": "{\"note\": {\"id\": \"opt-suzuki-conditions\", \"type\": \"optimization-campaign\", \"compound_smiles\": null, \"tags\": [\"optimization\"], \"created_by\": \"human\", \"source\": \"seed-corpus\", \"confidence\": 0.85, \"valid_"
+      }
+    ],
+    "tools_failed": [],
+    "expected_tools_met": true,
+    "uncited_note_ids": [],
+    "failed_loudly": true,
+    "error_code": null,
+    "degraded": [
+      "durable-jobs (Temporal)"
+    ],
+    "jobs_started": [],
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "latency_seconds": 16.53,
+    "event_counts": {
+      "capability_degraded": 1,
+      "token": 36,
+      "tool_call": 5,
+      "tool_result": 5,
+      "answer": 1
+    },
+    "transport_error": null
+  }
+}

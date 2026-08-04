@@ -1,0 +1,75 @@
+{
+  "probe": {
+    "id": "gr-14",
+    "section": 4,
+    "persona": "lab_leader",
+    "bucket": "B",
+    "question": "Take whatever we learned on the P2Et plate and tell me what changes for BTMG.",
+    "expects_tools": [
+      "gather_evidence",
+      "expand_note",
+      "generate_screening_design",
+      "suggest_next_experiment"
+    ],
+    "forbids_claims": [
+      "a transfer asserted with no statement of what differs between the two plates",
+      "per-plate numbers quoted without saying which plate they came from"
+    ],
+    "direction": "The two plates share their grid and differ in the base. That makes the transfer legitimate and bounded, and the answer should say where it holds and where the base change plausibly breaks it. Treating the two as interchangeable is the failure."
+  },
+  "outcome": {
+    "probe_id": "gr-14",
+    "section": 4,
+    "persona": "lab_leader",
+    "bucket": "B",
+    "question": "Take whatever we learned on the P2Et plate and tell me what changes for BTMG.",
+    "answer": "I don't have context from earlier in this conversation about what was learned on the \"P2Et plate,\" so I can't compare it to BTMG conditions yet. Let me search the knowledge graph for this.That search came back empty. Let me try searching for each separately:I found BTMG reactions but the P2Et plate search came back empty. The issue is I don't have the context from earlier in this conversation — that part may have aged out of what I can currently see. Let me ask directly:",
+    "answered": true,
+    "tools_called": [
+      "find_notes",
+      "find_notes",
+      "find_notes",
+      "ask_clarifying_question"
+    ],
+    "tool_results": [
+      {
+        "tool": "find_notes",
+        "preview": "[]"
+      },
+      {
+        "tool": "find_notes",
+        "preview": "[{\"id\": \"reaction-santanilla-orgsyn-alcohol-well-R36\", \"type\": \"reaction\", \"compound_smiles\": \"C1(CCCOC2=CN=CC=C2)=CC=CC=C1\", \"tags\": [], \"created_by\": \"agent\", \"source\": \"eln-json:santanilla-orgsyn-a"
+      },
+      {
+        "tool": "find_notes",
+        "preview": "[{\"id\": \"reaction-bh-amination-btmg-0000\", \"type\": \"reaction\", \"compound_smiles\": \"Cc1ccc(Nc2ccc(C(F)(F)F)cc2)cc1\", \"tags\": [], \"created_by\": \"agent\", \"source\": \"ord:Real HTE dataset import\", \"confide"
+      },
+      {
+        "tool": "ask_clarifying_question",
+        "preview": "Question put to the chemist; awaiting their answer."
+      }
+    ],
+    "tools_failed": [],
+    "expected_tools_met": false,
+    "uncited_note_ids": [],
+    "failed_loudly": true,
+    "error_code": null,
+    "degraded": [
+      "durable-jobs (Temporal)"
+    ],
+    "jobs_started": [],
+    "notes_proposed": [],
+    "asked_clarifying": true,
+    "asked_clarifying_in_prose": false,
+    "latency_seconds": 10.99,
+    "event_counts": {
+      "capability_degraded": 1,
+      "token": 11,
+      "tool_call": 4,
+      "tool_result": 4,
+      "question": 1,
+      "answer": 1
+    },
+    "transport_error": null
+  }
+}

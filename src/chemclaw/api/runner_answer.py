@@ -12,14 +12,20 @@ deployment and how their verdicts combine into the one routing flag a surface re
 import logging
 from collections.abc import Sequence
 
-from chemclaw.agent.verifier import ungrounded_parameter_shapes, verify_turn_answer
+from chemclaw.agent.verifier import (
+    promised_uncalled_tools,
+    ungrounded_parameter_shapes,
+    verify_turn_answer,
+)
 from chemclaw.api.events import AnswerEvent
 from chemclaw.core.config import settings
 
 logger = logging.getLogger(__name__)
 
 
-async def build_answer_event(answer: str, tool_outputs: Sequence[str]) -> AnswerEvent:
+async def build_answer_event(
+    answer: str, tool_outputs: Sequence[str], tools_called: Sequence[str] = ()
+) -> AnswerEvent:
     """Assemble the turn's final `AnswerEvent`, scoring it against what this turn retrieved (F10-B).
 
     Two independent checks, each behind its own knob and each able to set `review_required` — the
@@ -29,12 +35,15 @@ async def build_answer_event(answer: str, tool_outputs: Sequence[str]) -> Answer
 
     - `verifier_enabled`: citation faithfulness against `tool_outputs`, stamping the aggregate
       confidence and flagging below `verifier_confidence_threshold`.
-    - `answer_shape_gate_enabled`: the deterministic scan for method parameters no tool in this
-      turn produced. It flags outright rather than moving a confidence, because it is not a measure
-      of anything — it either found an ungrounded shape or it did not. Off by default and a
-      deployment decision rather than a default-on behaviour, because it is a shape heuristic that
-      both misses and over-fires (see `ungrounded_parameter_shapes`), and an answer marked for
-      review that did not need it costs a chemist trust in every mark that follows.
+    - `answer_shape_gate_enabled`: two deterministic scans over the finished text — for method
+      parameters no tool in this turn produced, and for tools the answer *names* but never called.
+      Both flag outright rather than moving a confidence, because neither is a measure of anything:
+      each either found something or did not. Off by default and a deployment decision rather than
+      a default-on behaviour, because the shape half is a heuristic that both misses and over-fires
+      (see `ungrounded_parameter_shapes`) and the naming half has its own honest false positive —
+      an answer *about* the toolset — and an answer marked for review that did not need it costs a
+      chemist trust in every mark that follows. They share one knob because they share a purpose:
+      catching in the text what an instruction failed to prevent in the generation.
 
     `tool_outputs` is what the turn's tools actually returned, untruncated, and it is the whole
     point of both checks. Verification used to re-resolve the answer's citations from the graph on
@@ -55,7 +64,10 @@ async def build_answer_event(answer: str, tool_outputs: Sequence[str]) -> Answer
             unsupported = [claim.text for claim in result.unsupported]
             review = result.confidence < settings.verifier_confidence_threshold
     if settings.answer_shape_gate_enabled:
-        shapes = ungrounded_parameter_shapes(answer, tool_outputs)
+        shapes = [
+            *ungrounded_parameter_shapes(answer, tool_outputs),
+            *promised_uncalled_tools(answer, tools_called),
+        ]
         if shapes:
             # WARNING because this is the signal an operator tunes the gate on — how often it
             # fires, and on what — and the matched text is in the message so a false positive is
@@ -63,7 +75,7 @@ async def build_answer_event(answer: str, tool_outputs: Sequence[str]) -> Answer
             # the rate, but `core/metrics` refuses an undeclared name and declaring one is a
             # cross-package edit this change does not own.
             logger.warning(
-                "answer marked for review: parameter shape(s) no tool in this turn produced (%s)",
+                "answer marked for review: claims no tool in this turn supports (%s)",
                 "; ".join(shapes),
             )
             unsupported = [*unsupported, *shapes]

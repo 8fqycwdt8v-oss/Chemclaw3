@@ -8,17 +8,24 @@ Rule-of-Three extraction: the second fingerprint domain (reactions) made the dup
 real, so the ranking lives in exactly one place (DRY), just like the calculation store.
 """
 
-from collections.abc import AsyncIterator
+import logging
+from collections.abc import AsyncIterator, Sequence
 from contextlib import asynccontextmanager
-from typing import Protocol, runtime_checkable
+from typing import Generic, Literal, Protocol, TypeVar, runtime_checkable
 
 import psycopg
 from psycopg.rows import TupleRow
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, computed_field
 
 from chemclaw.core import db
 from chemclaw.core.config import settings
 from chemclaw.core.errors import ChemclawError
+
+log = logging.getLogger(__name__)
+
+# Which corpus a search ran over. A closed set rather than a free string: it is interpolated into
+# the sentence the model reads, and there are exactly two fingerprint indexes.
+Subject = Literal["molecule", "reaction"]
 
 
 class FingerprintError(ChemclawError):
@@ -66,6 +73,60 @@ class Match(BaseModel):
     similarity: float
 
 
+HitT = TypeVar("HitT", bound=BaseModel)
+
+
+class FingerprintSearch(BaseModel, Generic[HitT]):
+    """One search over a fingerprint index: the hits, **and whether the index could answer**.
+
+    Why this is not a bare `list`: an empty list meant two things a chemist must never see
+    conflated — "we have no precedent for this structure" and "nothing has been indexed". A live
+    run hit exactly that (`docs/archive/live-grounded-2026-08-03.md`, finding 6): 1,025 notes were
+    indexed, the fingerprint tables were never backfilled, and `similar_reactions` answered
+    `{"result": []}` — read by the model, and then by the chemist, as "we have never made anything
+    like this". On the one tool whose entire job is "have we seen this before", an unanswerable
+    question must not render as a negative answer.
+
+    Generic over the hit type because both fingerprint domains need the same distinction and their
+    hits differ (`MoleculeHit` cites a compound note, `Match` carries a reaction's index id).
+    """
+
+    subject: Subject
+    hits: list[HitT] = Field(default_factory=list)
+    # True only when the index holds nothing searchable — never a hit list that merely came back
+    # short. Probed (cheaply) at the one moment it can change the meaning of the result: no hits.
+    index_empty: bool = False
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def verdict(self) -> str:
+        """The one sentence the model must read before it writes an answer.
+
+        `computed_field`, not a bare `property`, and that is the whole point of this method. A
+        plain property is *not serialized*: `model_dump()` would return `{"subject": …, "hits": [],
+        "index_empty": true}` and the sentence explaining what that means would never leave this
+        process. `ScreenResult.verdict` (`chemclaw.science.safety.screen`) carried its "this is not
+        a safety assessment" disclaimer as a bare property for exactly this reason and had **zero**
+        production callers, until a live run showed a chemist being told "no hazards detected" six
+        times. The tool docstring is read once when the tool is defined; the result payload is what
+        sits in the context window when the answer is written.
+        """
+        if self.index_empty:
+            return (
+                f"SEARCH NOT RUN: the {self.subject} fingerprint index is empty — it holds no "
+                "searchable record, so the query was compared against nothing. This is NOT "
+                f"evidence that no similar {self.subject} exists; the question was not answered. "
+                "Report that the fingerprint index has not been built and that an operator must "
+                "populate it. Do not say that nothing similar was found."
+            )
+        if not self.hits:
+            return (
+                f"No indexed {self.subject} matched this query. The {self.subject} fingerprint "
+                "index holds records and was searched, so this is a genuine negative result."
+            )
+        return f"{len(self.hits)} indexed {self.subject}(s) matched this query."
+
+
 @runtime_checkable
 class FingerprintStore(Protocol):
     """Persistence + similarity-search contract. Backends implement this."""
@@ -84,6 +145,24 @@ class FingerprintStore(Protocol):
 
     async def find_similar(self, query_bits: str, top_k: int, threshold: float) -> list[Match]:
         """Return up to `top_k` records with Tanimoto >= `threshold`, most similar first."""
+        ...
+
+    async def is_empty(self) -> bool:
+        """Whether this store holds nothing it could search — asked only when a search found none.
+
+        Deliberately *not* `count() == 0`, which is the same question asked expensively: this runs
+        on the "no hits" path of every similarity search, and an exact count over a million-row
+        fingerprint table is a sequential scan. Existence stops at the first row.
+        """
+        ...
+
+    async def count(self) -> int:
+        """How many records this store can search — the operator-facing number, not a hot path.
+
+        Separate from `is_empty` because it answers a different question for a different reader: an
+        operator needs "3 of 10,000 reactions are indexed" (a half-finished backfill looks exactly
+        like a healthy one to a boolean), and pays for the scan once per process start.
+        """
         ...
 
 
@@ -123,6 +202,27 @@ class InMemoryFingerprintStore:
             return records
         return sorted(records, key=lambda r: r.id)[:limit]
 
+    def _searchable(self) -> list[FingerprintRecord]:
+        """The records this store may rank: its own definition's, or all when it pins none.
+
+        One place decides what "in this index" means, so `find_similar`, `is_empty` and `count`
+        cannot disagree — an index full of stale-definition rows is unsearchable, and reporting it
+        as populated would be the same lie in a different place.
+        """
+        return [
+            r
+            for r in self._records.values()
+            if self._definition is None or r.definition == self._definition
+        ]
+
+    async def is_empty(self) -> bool:
+        """Whether nothing here is searchable under this store's definition."""
+        return not self._searchable()
+
+    async def count(self) -> int:
+        """How many records are searchable under this store's definition."""
+        return len(self._searchable())
+
     async def find_similar(self, query_bits: str, top_k: int, threshold: float) -> list[Match]:
         """Rank stored records by Tanimoto to `query_bits`, filtered and truncated.
 
@@ -133,8 +233,7 @@ class InMemoryFingerprintStore:
         """
         scored = [
             Match(id=r.id, label=r.label, similarity=tanimoto(query_bits, r.bits))
-            for r in self._records.values()
-            if self._definition is None or r.definition == self._definition
+            for r in self._searchable()
         ]
         hits = [m for m in scored if m.similarity >= threshold]
         hits.sort(key=lambda m: (-m.similarity, m.id))
@@ -181,6 +280,11 @@ class PostgresFingerprintStore:
             f"label = EXCLUDED.label, bits = EXCLUDED.bits, definition = EXCLUDED.definition"
         )
         self._all = f"SELECT id, label, bits::text, definition FROM {table}"
+        # Both scoped to this store's definition, for the reason `find_similar` is: rows indexed
+        # under a superseded definition are not searchable here, so counting them would report a
+        # populated index to an operator whose searches all return nothing.
+        self._exists = f"SELECT 1 FROM {table} WHERE definition = %(definition)s LIMIT 1"
+        self._count = f"SELECT count(*) FROM {table} WHERE definition = %(definition)s"
         # `<%%>` is pgvector's Jaccard-distance operator (`%` doubled to escape psycopg).
         # Threshold-filter first (and to this store's definition), then rank by distance and
         # truncate — the in-memory backend's "threshold then top-k"; ties break by id under
@@ -244,6 +348,26 @@ class PostgresFingerprintStore:
                 rows = await cur.fetchall()
         return [FingerprintRecord(id=r[0], label=r[1], bits=r[2], definition=r[3]) for r in rows]
 
+    async def is_empty(self) -> bool:
+        """Whether this table holds no row under this store's definition.
+
+        `SELECT 1 … LIMIT 1`, not `count(*)`: Postgres stops at the first matching row, so the
+        probe costs one index/heap fetch however large the corpus is. It runs on the no-hits path
+        of a live similarity search, which is exactly where a full scan would be a defect.
+        """
+        async with self._connection() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(self._exists, {"definition": self._definition})
+                return await cur.fetchone() is None
+
+    async def count(self) -> int:
+        """Exact number of searchable rows — the operator's number (see the protocol's note)."""
+        async with self._connection() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(self._count, {"definition": self._definition})
+                row = await cur.fetchone()
+        return int(row[0]) if row else 0
+
     async def find_similar(self, query_bits: str, top_k: int, threshold: float) -> list[Match]:
         """Return up to `top_k` records with Tanimoto >= `threshold`, most similar first."""
         async with self._connection() as conn:
@@ -282,6 +406,52 @@ async def find_matches(
     t = threshold if threshold is not None else settings.fingerprint_similarity_threshold
     t = min(max(t, 0.0), 1.0)
     return await store.find_similar(query_bits, k, t)
+
+
+async def index_is_empty(store: FingerprintStore, hits: Sequence[BaseModel]) -> bool:
+    """Whether an empty result means "nothing is indexed" rather than "nothing matched".
+
+    The one place the cost of asking is decided, so all three search entry points share it: the
+    store is probed **only** when there are no hits. A search that found something has already
+    proved the index is populated, and a `COUNT`/`EXISTS` on every call would be a performance
+    defect on the hot path — the answer would also be redundant.
+    """
+    return not hits and await store.is_empty()
+
+
+async def log_index_size(store: FingerprintStore, subject: Subject) -> None:
+    """Log how many records a fingerprint index holds — loudly when it holds none.
+
+    The operator half of the same defect: `similar_reactions` returning nothing because the
+    fingerprint backfill was never run is visible to a *chemist* mid-conversation, and by then it
+    has already cost an answer. Run once at the owning connector's startup, so the pod that serves
+    the index says on its first line whether it has anything to serve.
+
+    WARNING (not INFO) for an empty index because it is actionable and wrong, and never fatal:
+    diagnostics must not be able to take down a connector, so an unreachable database is reported
+    here and the server starts anyway — the tools themselves fail loudly if it is really down.
+    """
+    try:
+        records = await store.count()
+    except (ChemclawError, ConnectionError, psycopg.Error) as exc:
+        log.warning("cannot report the %s fingerprint index size: %s", subject, exc)
+        return
+    if records:
+        log.info(
+            "%s fingerprint index: %d record(s) indexed under the current definition",
+            subject,
+            records,
+        )
+    else:
+        log.warning(
+            "%s fingerprint index is EMPTY: 0 records indexed under the current definition, so "
+            "every %s similarity search will report that it could not be answered. `make reindex` "
+            "rebuilds the *note* index only — the fingerprint index is populated by the ELN sync "
+            "(ElnSyncWorkflow), and rows predating a definition change need re-indexing too "
+            "(docs/guides/runbook.md (vi)).",
+            subject,
+            subject,
+        )
 
 
 def default_molecule_store() -> PostgresFingerprintStore:

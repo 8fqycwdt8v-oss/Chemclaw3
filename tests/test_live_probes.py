@@ -25,10 +25,21 @@ import pytest
 import yaml
 
 from chemclaw.agent.chemclaw_agent import available_tool_names
+from chemclaw.core.errors import SubsystemUnavailableError
 from chemclaw.evals.live import ProbeOutcome, _score_citations, load_probes, run_probe
 from chemclaw.evals.probe import Probe, ProbeSet
+from chemclaw.kg.note import mentioned_ids
 
 PROBE_DIR = Path(__file__).resolve().parent.parent / "data" / "evals" / "probes"
+
+
+def _fake_job_outcomes(states: dict[str, str]) -> object:
+    """A stand-in for the Temporal lookup that returns a fixed verdict per workflow id."""
+
+    async def _lookup(job_ids: list[str]) -> dict[str, str]:
+        return {job_id: states[job_id] for job_id in job_ids}
+
+    return _lookup
 
 
 def _probe(**overrides: object) -> Probe:
@@ -71,6 +82,24 @@ def _run(probe: Probe, *events: dict[str, object]) -> ProbeOutcome:
             return await run_probe(client, probe)
 
     return asyncio.run(go())
+
+
+def _result_event(tool: str, text: str) -> dict[str, object]:
+    """A `tool_result` frame shaped exactly as `api.runner_trace` builds one from a full result.
+
+    The point of going through the real derivation rather than hand-writing the fields is that the
+    truncation is *in* the fixture: `preview` is cut at the wire budget while `numbers` is not, so
+    a test can show the two answering differently about the same result.
+    """
+    from chemclaw.core.quantities import returned_values
+
+    return {
+        "type": "tool_result",
+        "tool": tool,
+        "preview": text[:200],
+        "note_ids": [],
+        "numbers": returned_values(text),
+    }
 
 
 def test_tool_call_arguments_and_answer_are_recorded() -> None:
@@ -151,10 +180,103 @@ def test_a_citation_counts_only_when_a_tool_result_actually_returned_it() -> Non
     though the note genuinely exists in the corpus, because the question is whether *this turn*
     saw it. A check that re-retrieved instead would pass the invented citation.
     """
-    previews = ["matched note rxn-suzuki-biaryl (confidence 0.8)"]
-    assert _score_citations("see [[rxn-suzuki-biaryl]]", previews) == []
-    assert _score_citations("see [[evidence-for:rxn-suzuki-biaryl]]", previews) == []
-    assert _score_citations("see [[rxn-never-retrieved]]", previews) == ["rxn-never-retrieved"]
+    returned = {"rxn-suzuki-biaryl"}
+    assert _score_citations("see [[rxn-suzuki-biaryl]]", returned) == []
+    assert _score_citations("see [[evidence-for:rxn-suzuki-biaryl]]", returned) == []
+    assert _score_citations("see [[rxn-never-retrieved]]", returned) == ["rxn-never-retrieved"]
+
+
+def test_a_citation_past_the_preview_budget_is_still_grounded() -> None:
+    """The defect that made the metric unusable: 40 retrieved chunks scored against 200 characters.
+
+    Built so a substring scan over previews gives the wrong answer and nothing else does. Only the
+    first id fits inside the preview budget, so the old form reported the other 39 as ungrounded —
+    which is how a live run graded 19 of 36 answers as fabrication with nine of nine checked
+    verdicts false.
+    """
+    ids = [f"reaction-bh-amination-btmg-{n:04d}" for n in range(40)]
+    result = "".join(
+        f'<retrieved-note-abc id="{note_id}">\nsome body text\n</retrieved-note>\n'
+        for note_id in ids
+    )
+    answer = " ".join(f"[[{note_id}]]" for note_id in ids)
+
+    returned = set(mentioned_ids(result))
+    assert _score_citations(answer, returned) == []
+
+    # The old shape, kept as the contrast rather than described: scoring against a preview-sized
+    # window would have called the overwhelming majority of these citations ungrounded.
+    preview_grounded = [note_id for note_id in ids if note_id in result[:200]]
+    assert len(preview_grounded) < 5
+    assert len(ids) - len(preview_grounded) >= 35
+
+
+def test_the_figures_a_live_judge_called_invented_are_verified_against_the_real_tool_result() -> (
+    None
+):
+    """gr-26, rebuilt from the real tool and the real answer: the six PDEs are quotations.
+
+    The tool result is produced by calling `ich_impurity_limit`'s own implementation, not copied
+    into a fixture — a transcribed table can drift, and a check that passes against a stale copy
+    of the evidence proves nothing about the live one.
+
+    This is the defect that survived the `note_ids` fix. On the re-run with untruncated ids in
+    place the judge still wrote "the answer invents specific PDE numbers (Pd: 100/10/1 µg/day; Cu:
+    3000/300/30 µg/day)… the tool results shown are truncated previews that do not display the
+    numerical limits" — and it was right about the previews, which is why the assertion below on
+    where character 200 falls is part of the test rather than a comment.
+    """
+    from chemclaw.science.safety.ich import impurity_limit
+
+    results = [impurity_limit(name).model_dump_json(indent=2) for name in ("palladium", "copper")]
+    answer = (
+        "## **Palladium** — *Class 2B*\n"
+        "- **Oral:** 100 µg/day\n- **Parenteral:** 10 µg/day\n- **Inhalation:** 1 µg/day\n"
+        "## **Copper** — *Class 3*\n"
+        "- **Oral:** 3000 µg/day\n- **Parenteral:** 300 µg/day\n- **Inhalation:** 30 µg/day\n"
+    )
+    outcome = _run(
+        _probe(),
+        _result_event("ich_impurity_limit", results[0]),
+        _result_event("ich_impurity_limit", results[1]),
+        {"type": "answer", "text": answer},
+    )
+    # "3" is the class, which the copper result states in prose ("Class 3 — relatively low oral
+    # toxicity"). It belongs on the list for the same reason the PDEs do: a tool returned it.
+    assert outcome.verified_numbers == ["100", "10", "1", "3", "3000", "300", "30"]
+
+    # Why the event needed a second field at all: not one of those figures is inside the preview
+    # the browser gets, so a check reading `preview` reports every one of them as unsupported.
+    assert not any(figure in results[0][:200] for figure in ("100.0", "10.0", "1.0"))
+
+
+def test_a_figure_no_tool_returned_is_simply_not_on_the_verified_list() -> None:
+    """The whitelist's boundary: it vouches for what it saw and stays silent about the rest.
+
+    Deliberately *not* the inverse of `uncited_note_ids`. A citation has a syntax that can only
+    come from retrieval; a number has none — an answer legitimately subtracts two values it was
+    given, totals a column or quotes a textbook constant — so "no tool returned this" was measured
+    on gr-18 and gr-29 and produced eleven flags and zero fabrications (`_verified_numbers`). The
+    harness therefore asserts membership and never absence, and this pins that: the unsupported
+    figure is missing from the list, not reported by it.
+    """
+    text = '{"limits": [{"basis": "oral PDE", "value": 100.0, "unit": "\\u00b5g/day"}]}'
+    outcome = _run(
+        _probe(),
+        _result_event("ich_impurity_limit", text),
+        {"type": "answer", "text": "The oral PDE is 100 µg/day; parenteral is 250 µg/day."},
+    )
+    assert outcome.verified_numbers == ["100"]
+
+
+def test_a_hyphen_suffixed_id_does_not_ground_its_prefix() -> None:
+    """Set membership closed a hole the substring scan had, and this pins it closed.
+
+    `playbook-degassing-old` containing `playbook-degassing` made the retired note ground a
+    citation of the live one — both are in the committed corpus, so this was reachable.
+    """
+    returned = set(mentioned_ids('{"id": "playbook-degassing-old"}'))
+    assert _score_citations("see [[playbook-degassing]]", returned) == ["playbook-degassing"]
 
 
 def test_duplicate_probe_ids_across_files_are_fatal(tmp_path: Path) -> None:
@@ -243,3 +365,106 @@ def test_outputs_land_beside_their_own_transcripts(tmp_path: Path) -> None:
     # The shared parent must hold neither, which is what made the collision possible.
     assert not (tmp_path / "summary.md").exists()
     assert not (tmp_path / "grades.json").exists()
+
+
+def test_a_probe_expecting_a_job_resolves_its_workflow_against_the_broker(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`expects_job` is what turns "the turn said it started a job" into an observation.
+
+    The stream below is a *truthful* one: the turn really did start a workflow and really does say
+    so. That is exactly the case the event stream alone cannot grade, because a job tool returns an
+    id the moment the launch is accepted — so an answer can be honest about starting work the
+    broker never ran. The outcome must therefore carry what Temporal says, not what the turn said.
+    """
+    monkeypatch.setattr(
+        "chemclaw.evals.live._job_outcomes",
+        _fake_job_outcomes({"calc-compute_reaction_energy-abc": "FAILED"}),
+    )
+    outcome = _run(
+        _probe(expects_tools=["compute_reaction_energy"], expects_job=True),
+        {"type": "tool_call", "tool": "compute_reaction_energy", "arguments": "{}"},
+        {"type": "job_started", "job_id": "calc-compute_reaction_energy-abc"},
+        {"type": "answer", "text": "Started it — I'll have the energy shortly."},
+    )
+    assert outcome.jobs_started == ["calc-compute_reaction_energy-abc"]
+    assert outcome.job_outcomes == {"calc-compute_reaction_energy-abc": "FAILED"}
+
+
+def test_a_probe_not_expecting_a_job_never_asks_the_broker(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The lookup is opt-in, so an ordinary probe run costs no Temporal round trip.
+
+    Not merely an efficiency point: `_job_outcomes` records `unreachable` when it cannot connect,
+    and running it for every probe would put that string on 200-odd outcomes of a run that never
+    cared about durable work — noise indistinguishable from a finding.
+    """
+    called = False
+
+    async def _boom(job_ids: list[str]) -> dict[str, str]:
+        nonlocal called
+        called = True
+        return {}
+
+    monkeypatch.setattr("chemclaw.evals.live._job_outcomes", _boom)
+    outcome = _run(
+        _probe(expects_tools=["gather_evidence"]),
+        {"type": "job_started", "job_id": "calc-x"},
+        {"type": "answer", "text": "done"},
+    )
+    assert outcome.jobs_started == ["calc-x"]
+    assert outcome.job_outcomes == {}
+    assert called is False
+
+
+def test_an_unreachable_broker_is_recorded_as_such_rather_than_as_a_dead_job(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A failure to reach the broker and a failed job are different findings.
+
+    Collapsing them would make every probe run without a broker report fabricated durable work,
+    which is the mirror image of the defect this signal exists to catch.
+    """
+
+    async def _unreachable() -> object:
+        raise SubsystemUnavailableError("the durable execution backend is unreachable")
+
+    monkeypatch.setattr("chemclaw.evals.live.temporal_connect", _unreachable)
+    outcome = _run(
+        _probe(expects_job=True),
+        {"type": "job_started", "job_id": "calc-y"},
+        {"type": "answer", "text": "started"},
+    )
+    assert outcome.job_outcomes == {"calc-y": "unreachable"}
+
+
+def test_every_durable_probe_declares_the_job_expectation_it_is_named_for() -> None:
+    """The `du-*` corpus exists to exercise the durable path, so it must ask to be checked.
+
+    A `du-` probe with `expects_job` left off would run, pass and prove nothing about Temporal —
+    the precise shape of the gap the file was written to close.
+    """
+    durable = [p for p in load_probes(str(PROBE_DIR)) if p.id.startswith("du-")]
+    assert durable, "no durable probes found — this test would assert nothing"
+    # du-04 is deliberately the exception: it asks about the *record* of past jobs, and starting
+    # one to answer it would be the wrong instinct. Its direction says so; this pins that the
+    # exception is one probe rather than a habit.
+    expecting = [p.id for p in durable if p.expects_job]
+    assert expecting == ["du-01", "du-02", "du-03"]
+
+
+def test_no_probe_direction_asserts_which_deployment_it_meets() -> None:
+    """A grading key that names one configuration stops being true when the stack changes.
+
+    Six directions across three files asserted "Temporal is not running in this test". They were
+    honest when written and became wrong the day `make live-up` started the workers: a *successful*
+    launch would have been graded a failure. Directions describe behaviour; the environment is the
+    runner's business.
+    """
+    offenders: list[str] = []
+    for probe in load_probes(str(PROBE_DIR)):
+        text = probe.direction.lower()
+        if "is not running" in text or "not reachable in this run" in text:
+            offenders.append(probe.id)
+    assert not offenders, f"probe directions asserting the deployment they meet: {offenders}"

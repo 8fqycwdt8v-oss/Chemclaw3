@@ -1,0 +1,49 @@
+{
+  "probe": {
+    "id": "gr-34",
+    "section": 15,
+    "persona": "lab_technician",
+    "bucket": "A",
+    "question": "The amide coupling in DCM has failed for the third time. Put it on record so nobody repeats it.",
+    "expects_tools": [
+      "record_failure",
+      "propose_knowledge_note",
+      "gather_evidence",
+      "find_notes"
+    ],
+    "forbids_claims": [
+      "a new failure record filed with no reference to the existing one",
+      "an existing note described as retired or superseded when it was not"
+    ],
+    "direction": "A failure note for this already exists. The right move is to reconcile with it — reinforce, supersede or extend — rather than file a duplicate, and any retirement date has to be handled explicitly rather than assumed."
+  },
+  "outcome": {
+    "probe_id": "gr-34",
+    "section": 15,
+    "persona": "lab_technician",
+    "bucket": "A",
+    "question": "The amide coupling in DCM has failed for the third time. Put it on record so nobody repeats it.",
+    "answer": "I need to record this failure, but I need a few specifics first to make it searchable and useful:\n\n1. **Which amide coupling reaction?** Do you have the reaction note id (e.g. `reaction-amide-x`), or should I search for it? If you give me the starting material and coupling partner/reagent (names or SMILES), I can find the existing note.\n\n2. **What exactly failed?** — did it not go to completion, give a side product, give no product at all, or something else? What evidence showed it failed (TLC, LCMS, yield)?\n\n3. **Any details about conditions?** — temperature, time, reagents used, scale? This helps someone avoid repeating the exact setup.\n\nOnce you give me the reaction and what happened, I'll record it as a failure mode contradicting the existing note, so the next person searching for that coupling will see it marked as disputed and read both the original claim and the report of what went wrong.",
+    "answered": true,
+    "tools_called": [],
+    "tool_results": [],
+    "tools_failed": [],
+    "expected_tools_met": false,
+    "uncited_note_ids": [],
+    "failed_loudly": true,
+    "error_code": null,
+    "degraded": [
+      "durable-jobs (Temporal)"
+    ],
+    "jobs_started": [],
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "latency_seconds": 4.26,
+    "event_counts": {
+      "capability_degraded": 1,
+      "token": 15,
+      "answer": 1
+    },
+    "transport_error": null
+  }
+}

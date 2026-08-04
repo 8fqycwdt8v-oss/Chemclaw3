@@ -1,0 +1,79 @@
+{
+  "probe": {
+    "id": "gr-29",
+    "section": 11,
+    "persona": "lab_technician",
+    "bucket": "A",
+    "question": "Scale the biaryl coupling to 2 kg of COc1ccc(Br)cc1 and tell me what I'm charging.",
+    "expects_tools": [
+      "stoichiometry_table",
+      "resolve_compound",
+      "gather_evidence"
+    ],
+    "forbids_claims": [
+      "a mass or volume produced without the equivalents basis it came from",
+      "a solvent volume invented where no density or volume basis was given",
+      "the seeded lab-scale charge rescaled silently, with no note that it was"
+    ],
+    "direction": "The lab-scale charge is in the corpus with real equivalents. A good answer builds the table from those equivalents, shows the arithmetic, and refuses rather than guesses where a volume basis is ambiguous. Naming what changes at 2 kg that a charge table cannot capture is a bonus."
+  },
+  "outcome": {
+    "probe_id": "gr-29",
+    "section": 11,
+    "persona": "lab_technician",
+    "bucket": "A",
+    "question": "Scale the biaryl coupling to 2 kg of COc1ccc(Br)cc1 and tell me what I'm charging.",
+    "answer": "I'll help you scale up the biaryl coupling to 2 kg. First, let me search for the reaction conditions and details in the knowledge graph.Good, I found the reaction. Let me expand the full reaction note to get all the conditions:Perfect. Now I have the reaction conditions. Let me build the charge table for 2 kg of 4-bromoanisole:I notice the reaction conditions from the note specify K₂CO₃ as the base (2.0 equiv), but the table resolved \"C(C)(C)C\" as a reagent (isobutane, which is not what we want). Let me recalculate with the correct base:Perfect. Here's your charge table for **2 kg of 4-bromoanisole** in the Suzuki-Miyaura coupling from **[[rxn-suzuki-biaryl]]**:\n\n| Material | Role | Mass | Notes |\n|----------|------|------|-------|\n| **4-bromoanisole** (COc1ccc(Br)cc1) | Limiting reagent | **2000 g** | Starting material |\n| **Phenylboronic acid** (OB(O)c1ccccc1) | Coupling partner | **1565 g** | 1.2 equiv |\n| **Pd(OAc)₂** | Catalyst | **36.0 g** | 1.5 mol% Pd |\n| **K₂CO₃** | Base | **2956 g** | 2.0 equiv |\n| **THF** | Solvent | **8000 mL** (7112 g) | 4 volumes |\n| **Water** | Co-solvent | **2000 mL** | 1 volume (mixed 4:1 THF:water) |\n\n**Total input: ~13.6 kg** (reagents + solvents)\n\n**Reaction conditions:** 80 °C, 12 h, under inert atmosphere (degassed). Based on the noted conditions, this coupling is sensitive to the slow oxidative addition step with an electron-rich aryl bromide; the playbook [[playbook-pd-cross-coupling-scope]] has guidance on ligand and temperature adjustments if needed.",
+    "answered": true,
+    "tools_called": [
+      "gather_evidence",
+      "find_notes",
+      "expand_note",
+      "stoichiometry_table",
+      "stoichiometry_table"
+    ],
+    "tool_results": [
+      {
+        "tool": "gather_evidence",
+        "preview": "[{\"content\": \"<retrieved-note-4ac8bd4b8ff10031 id=\\\"rxn-suzuki-biaryl\\\">\\nSuzuki-Miyaura coupling of 4-bromoanisole with phenylboronic acid.\\n\\n- aryl halide: compound-4-bromoanisole\\n- boronic acid: "
+      },
+      {
+        "tool": "find_notes",
+        "preview": "[{\"id\": \"bo-suzuki-next\", \"type\": \"bo-candidate\", \"compound_smiles\": null, \"tags\": [\"bo\", \"suggestion\"], \"created_by\": \"human\", \"source\": \"seed-corpus\", \"confidence\": 0.5, \"valid_from\": null, \"valid_t"
+      },
+      {
+        "tool": "expand_note",
+        "preview": "{\"note\": {\"id\": \"rxn-suzuki-biaryl\", \"type\": \"reaction\", \"compound_smiles\": null, \"tags\": [\"cross-coupling\", \"suzuki\"], \"created_by\": \"human\", \"source\": \"seed-corpus\", \"confidence\": 0.85, \"valid_from\""
+      },
+      {
+        "tool": "stoichiometry_table",
+        "preview": "{\n  \"basis_name\": \"COc1ccc(Br)cc1\",\n  \"basis_mass_g\": 2000.0,\n  \"rows\": [\n    {\n      \"name\": \"COc1ccc(Br)cc1\",\n      \"smiles\": \"COc1ccc(Br)cc1\",\n      \"role\": \"basis\",\n      \"equivalents\": 1.0,\n     "
+      },
+      {
+        "tool": "stoichiometry_table",
+        "preview": "{\n  \"basis_name\": \"COc1ccc(Br)cc1\",\n  \"basis_mass_g\": 2000.0,\n  \"rows\": [\n    {\n      \"name\": \"COc1ccc(Br)cc1\",\n      \"smiles\": \"COc1ccc(Br)cc1\",\n      \"role\": \"basis\",\n      \"equivalents\": 1.0,\n     "
+      }
+    ],
+    "tools_failed": [],
+    "expected_tools_met": true,
+    "uncited_note_ids": [],
+    "failed_loudly": true,
+    "error_code": null,
+    "degraded": [
+      "durable-jobs (Temporal)"
+    ],
+    "jobs_started": [],
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": false,
+    "latency_seconds": 16.45,
+    "event_counts": {
+      "capability_degraded": 1,
+      "token": 34,
+      "tool_call": 5,
+      "tool_result": 5,
+      "answer": 1
+    },
+    "transport_error": null
+  }
+}

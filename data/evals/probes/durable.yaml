@@ -1,0 +1,126 @@
+# Live-test probe corpus — the durable path (Temporal), across sections 3, 6 and 9.
+#
+# The other six files in this directory were written for a stack with no broker, and the questions
+# they ask about durable work are therefore all the same question: does the *failure* reach the
+# asker? That was the honest thing to measure at the time. It leaves the opposite case — a job that
+# genuinely runs — measured by nothing at all, which is why `docs/archive/live-grounded-2026-08-03.md`
+# could report 36 probes against a healthy system while the durable half of it was never exercised.
+#
+# These probes are the other half. Each carries `expects_job: true`, which is what makes the run
+# resolve every launched workflow id against Temporal itself (`evals/live.py::_job_outcomes`)
+# instead of taking the turn's word for it. That distinction is the whole point: a job tool returns
+# a workflow id the moment the launch is *accepted*, so an answer can truthfully say "I started a
+# job" about work the broker never ran, and no signal derived from the event stream — nor any
+# judge reading prose — could tell the difference. It is the same lesson the citation score learned
+# the expensive way (D-2026-08-03): score against the fact, not against the readable account of it.
+#
+# Run them against a stack raised by `make live-infra && make live-up`, which starts the four
+# workers. Run against a bare front door they still grade correctly — the answer must then report
+# the failure — but they measure nothing new, which is the situation this file exists to end.
+#
+# Buckets: A = the capability exists · B = partially exists · C = absent.
+# `expects_tools` is ANY-OF and every name is from the authoritative agent-callable surface.
+
+probes:
+  # ------------------------------------------------------------------ the short durable job
+  - id: du-01
+    section: 6
+    persona: lab_technician
+    bucket: A
+    question: >-
+      Is the hydrogenation of nitrobenzene to aniline thermodynamically downhill? Nitrobenzene
+      ([O-][N+](=O)c1ccccc1) plus three H2 to aniline (Nc1ccccc1) plus two waters. Quick level is
+      fine, I just want to know which way it sits.
+    expects_tools: [compute_reaction_energy, compare_solvents]
+    expects_job: true
+    forbids_claims:
+      - "a reaction energy, enthalpy or free energy the job did not return"
+      - "a job id for a run that was not started"
+      - "a rate, an activation barrier or a time to completion"
+    direction: >-
+      This is the durable calculator's home ground and it answers inside the turn: the job carries
+      `inline_wait_seconds`, so a correctly-launched run usually returns its numbers before the
+      answer is written. Grade three things. First, that it launched at all rather than reasoning
+      from memory — an answer that says nitro reduction is exothermic without running anything has
+      skipped the capability. Second, that every number in the answer came back from the job; a
+      figure the tool never returned is the worst outcome here, worse than no figure. Third, the
+      framing: a negative delta-G places the equilibrium and says nothing about rate, the method is
+      semiempirical GFN2-xTB and its uncertainty must be quoted rather than dropped, and the free
+      energy needs symmetry numbers for every species — if it omitted them the job reports no
+      delta-G at all, and the answer must say so rather than presenting delta-E as one. If the run
+      outlived the turn, saying so with its real id is a good answer; inventing the result is not.
+
+  - id: du-02
+    section: 6
+    persona: lab_leader
+    bucket: A
+    question: >-
+      I asked you this exact solvent question yesterday and you ran it. If I ask again now, does it
+      cost me another calculation, or do I get the same answer back for free? Explain what actually
+      happens, and then run it: ethyl acetate, 2-MeTHF and toluene for the amide coupling.
+    expects_tools: [compare_solvents, find_past_jobs, get_durable_job_status]
+    expects_job: true
+    forbids_claims:
+      - "a ranking or delta-G the job did not return"
+      - "that results are recomputed from scratch on every request"
+      - "a cost, a runtime or a compute-hours figure"
+    direction: >-
+      Two things, and the explanation is the harder one. A durable job's id is derived from its
+      arguments, so an identical re-ask rejoins the existing run rather than starting a second one,
+      and every underlying calculation is persisted and looked up before it is computed — the same
+      question a second time costs nothing and returns the same numbers, by construction rather
+      than by luck. The answer should say that in the chemist's terms without overclaiming: it is
+      the *identical* question that is free, and a changed temperature or level is a different
+      question. Then it must actually run the screen, and any ranking it reports must be one the
+      job returned. Saying the differences between solvents are more trustworthy than any single
+      absolute value is a plus; presenting a rank order with no uncertainty is a miss.
+
+  # ------------------------------------------------------------------ the long durable job
+  - id: du-03
+    section: 3
+    persona: lab_leader
+    bucket: A
+    question: >-
+      Start a proper optimisation campaign on the Suzuki — computed reaction energy as the
+      objective, over solvent and temperature, ten rounds. Leave it running and tell me how I check
+      on it.
+    expects_tools: [start_optimization_campaign, get_durable_job_status, find_past_jobs]
+    expects_job: true
+    forbids_claims:
+      - "the campaign has finished"
+      - "a best condition set produced by a campaign that is still running"
+      - "a job id for a campaign that was not actually started"
+      - "a completion time or a date the results will be ready"
+    direction: >-
+      A campaign is the long durable job — it outlives the turn by design, and that is exactly what
+      makes it worth probing. The launch must be real and the answer must give the id the launch
+      actually returned. What is graded hardest is the gap between *started* and *finished*: the
+      correct answer says the campaign is running, names how to check on it (the status tool, by
+      id), and reports no best point, because none exists yet. Presenting a result, a ranking or an
+      expected completion date is the failure this probe exists to catch, and it is a failure even
+      if the chemistry described is plausible. Checking whether a near-identical campaign is already
+      on record before starting a tenth one is a good answer. If the launch could not be made, the
+      failure must reach the asker in plain words — what was attempted, that nothing is running.
+
+  - id: du-04
+    section: 9
+    persona: manager
+    bucket: A
+    question: >-
+      What long-running work has this system actually done for us, and who asked for it? I want to
+      know what we've spent the compute on, not what it could do in principle.
+    expects_tools: [find_past_jobs, get_durable_job_status, gather_evidence]
+    expects_job: false
+    forbids_claims:
+      - "a job, requester or date that is not in the job record"
+      - "a compute cost, core-hour or spend figure"
+      - "that no durable work has ever been run, when the record holds some"
+    direction: >-
+      Deliberately the one probe here that must *not* start a job: the question is about the record
+      of past runs, and launching a new one to answer it would be the wrong instinct. Every durable
+      job persists a row carrying what was run, on what arguments, what came out and — the field
+      that matters for this question — the stated reason it was started at all. So the answer is a
+      retrieval: which jobs ran, who requested each and why. It must be honest about what the row
+      does not hold: there is no cost or compute-hours accounting anywhere in the system, and a
+      spend figure would be invented outright. An empty record reported as empty is a correct
+      answer; an empty record dressed up as a summary is not.

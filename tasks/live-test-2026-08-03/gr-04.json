@@ -1,0 +1,62 @@
+{
+  "probe": {
+    "id": "gr-04",
+    "section": 1,
+    "persona": "lab_leader",
+    "bucket": "A",
+    "question": "Give me everything we know about that 1536-well 3-bromopyridine plate - not just the numbers, what the write-up actually says.",
+    "expects_tools": [
+      "gather_evidence",
+      "expand_note",
+      "find_notes"
+    ],
+    "forbids_claims": [
+      "only headline yields, with no procedure or observational detail",
+      "experimental detail attributed to the plate that is not in the retrieved text"
+    ],
+    "direction": "Four wells off that plate are seeded as free-text records carrying the source paper's own general procedure prose, alongside 96-record screens of the same chemistry. The ask is explicitly for the prose, so reading only the yields is the shallow failure. Quoting the procedure and citing which record it came from is the answer."
+  },
+  "outcome": {
+    "probe_id": "gr-04",
+    "section": 1,
+    "persona": "lab_leader",
+    "bucket": "A",
+    "question": "Give me everything we know about that 1536-well 3-bromopyridine plate - not just the numbers, what the write-up actually says.",
+    "answer": "I don't have context about which plate you're referring to. Let me search for it in the knowledge graph.The search found some 3-bromopyridine reactions from Santanilla et al., but I need to get the full write-up. Let me expand one of these notes to see the complete details:Got it. Here is what we know about that 1536-well plate from the write-up:\n\n## The 1536-Well 3-Bromopyridine Plate\n\n**Source:** Santanilla et al., *Science* 2015, 347, 49–53 (DOI 10.1126/science.1259203)\n\n**Plate Design:**\nA 1536-well plate screening experiment examining the reactivity of **3-bromopyridine (22)** with **16 different classes of nucleophiles** under **96 Pd cross-coupling reaction conditions** — this is a 16×6 matrix of nucleophiles × bases.\n\n**Scale & Dosing:**\n- Run at **100 nanomolar scale** (extremely small)\n- Reagents dosed from a 384-well plate into the 1536-well plate using a **Mosquito liquid handler** (acoustic transfer)\n\n**Stock Concentrations Prepared:**\n- Pd-precatalysts: 0.04 M in DMSO\n- Aryl halide (3-bromopyridine): 0.4 M in DMSO\n- Nucleophiles: 0.6 M in DMSO\n- Base: 0.8 M in DMSO\n\n**Reaction Conditions:**\n- **Room temperature**, 22 hours (no heating)\n- Quenched with acetic acid\n- Biphenyl added as internal standard\n- **UPLC** analysis\n\n**Best Result Recorded (Well R36):**\n- **Nucleophile:** 3-phenyl-1-propanol (class S9)\n- **Precatalyst:** tBuBrettPhos Pd G3 (43)\n- **Base:** P2Et (29)\n- **Product:** 3-(3-phenylpropoxy)pyridine\n- **Yield:** 29.5%\n- **Note:** This was the highest-yielding real condition for this nucleophile class in the published dataset\n\nThis is a high-throughput screening plate from a major pharmaceutical optimization study on Pd-catalyzed cross-coupling of 3-bromopyridine.",
+    "answered": true,
+    "tools_called": [
+      "gather_evidence",
+      "expand_note"
+    ],
+    "tool_results": [
+      {
+        "tool": "gather_evidence",
+        "preview": "[{\"content\": \"<retrieved-note-4216b6a377548e22 id=\\\"reaction-santanilla-orgsyn-alcohol-well-R36\\\">\\nReaction `BrC1=CN=CC=C1.OCCCC1=CC=CC=C1.CN(C)P(N(C)C)(N(C)C)=NP(N(C)C)(N(C)C)=NCC>CS(O[Pd]1([P](C(C)"
+      },
+      {
+        "tool": "expand_note",
+        "preview": "{\"note\": {\"id\": \"reaction-santanilla-orgsyn-alcohol-well-R36\", \"type\": \"reaction\", \"compound_smiles\": \"C1(CCCOC2=CN=CC=C2)=CC=CC=C1\", \"tags\": [], \"created_by\": \"agent\", \"source\": \"eln-json:santanilla-"
+      }
+    ],
+    "tools_failed": [],
+    "expected_tools_met": true,
+    "uncited_note_ids": [],
+    "failed_loudly": true,
+    "error_code": null,
+    "degraded": [
+      "durable-jobs (Temporal)"
+    ],
+    "jobs_started": [],
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "latency_seconds": 8.16,
+    "event_counts": {
+      "capability_degraded": 1,
+      "token": 25,
+      "tool_call": 2,
+      "tool_result": 2,
+      "answer": 1
+    },
+    "transport_error": null
+  }
+}

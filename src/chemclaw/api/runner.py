@@ -415,7 +415,9 @@ async def run_turn(
                 retryable=False,
                 correlation_id=correlation_id,
             )
-        answer = await build_answer_event("".join(answer_parts), tool_trace.outputs)
+        answer = await build_answer_event(
+            "".join(answer_parts), tool_trace.outputs, tool_trace.called_tools
+        )
         # **Before the yield, not after it.** `agent.run` has ended by now, so the history provider
         # has already committed this turn's rows and they are a complete, paired exchange — there is
         # nothing half-written left to undo. The cancellation that reaches a finished turn is

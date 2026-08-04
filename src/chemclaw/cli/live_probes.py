@@ -62,9 +62,33 @@ def _summary(probes: list[Probe], outcomes: list[ProbeOutcome], grades: list[Jud
     lines.append(f"| **failed silently** (no answer, no error) | **{len(silent)}** |")
     lines.append(f"| **answers citing a note no tool returned** | **{len(uncited)}** |")
     lines.append(
+        f"| clarified via ask_clarifying_question | "
+        f"{sum(1 for o in outcomes if o.asked_clarifying)} |"
+    )
+    lines.append(
+        f"| …and clarified in prose instead (the tool existed) | "
+        f"{sum(1 for o in outcomes if o.asked_clarifying_in_prose)} |"
+    )
+    lines.append(
         f"| turns that surfaced a failure | {sum(1 for o in outcomes if o.failed_loudly)} |"
     )
     lines.append(f"| durable jobs started | {sum(len(o.jobs_started) for o in outcomes)} |")
+
+    # What the broker says became of those jobs, for the probes that declared they needed one.
+    # Reported beside the launch count and never folded into it, for the same reason tool reach is
+    # kept beside the verdicts: "started" and "ran" are different facts, and a run that collapsed
+    # them would report a durable system it had not observed. `RUNNING` is not a failure — a
+    # campaign outlives its turn by design — so the states are listed rather than scored.
+    job_states = Counter(state for outcome in outcomes for state in outcome.job_outcomes.values())
+    if job_states:
+        summary = " · ".join(f"{state} {count}" for state, count in sorted(job_states.items()))
+        lines.append(f"| …and what Temporal says became of them | {summary} |")
+        expected_job = [p.id for p in probes if p.expects_job]
+        launched = {o.probe_id for o in outcomes if o.job_outcomes}
+        missed = sorted(set(expected_job) - launched)
+        if missed:
+            names = ", ".join(missed)
+            lines.append(f"| **probes needing a job that started none** | **{names}** |")
 
     latencies = sorted(o.latency_seconds for o in outcomes)
     if latencies:

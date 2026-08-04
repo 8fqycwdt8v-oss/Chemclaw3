@@ -1,0 +1,48 @@
+{
+  "probe": {
+    "id": "gr-21",
+    "section": 17,
+    "persona": "lab_leader",
+    "bucket": "A",
+    "question": "How much do you trust your own solubility numbers on molecules like these?",
+    "expects_tools": [
+      "calculator_trust",
+      "calculator_outliers",
+      "find_calculations"
+    ],
+    "forbids_claims": [
+      "a confidence statement with no reference to recorded calculations or measurements",
+      "a validation study, benchmark or error statistic that was not retrieved"
+    ],
+    "direction": "Introspects over what has actually been computed and measured rather than describing the method's reputation. \"There are no measurements to compare against\" is a strong answer if it is true; a confident accuracy claim with nothing behind it is the failure."
+  },
+  "outcome": {
+    "probe_id": "gr-21",
+    "section": 17,
+    "persona": "lab_leader",
+    "bucket": "A",
+    "question": "How much do you trust your own solubility numbers on molecules like these?",
+    "answer": "I don't see any molecules attached or described yet. Could you share the structures or names of the molecules you're asking about? Once you do, I can tell you exactly how far my solubility model has been off in practice.\n\nTo give you the real picture, I'll call `calculator_trust` to show you the **average bias and error** the model carries across all measurements we have on file, and then `calculator_outliers` to show you **where it was most wrong** — because a calculator can be well-behaved overall and badly wrong on one class of molecule, and the average alone can hide that.\n\nPass me the SMILES or names and I'll pull both numbers.",
+    "answered": true,
+    "tools_called": [],
+    "tool_results": [],
+    "tools_failed": [],
+    "expected_tools_met": false,
+    "uncited_note_ids": [],
+    "failed_loudly": true,
+    "error_code": null,
+    "degraded": [
+      "durable-jobs (Temporal)"
+    ],
+    "jobs_started": [],
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "latency_seconds": 3.69,
+    "event_counts": {
+      "capability_degraded": 1,
+      "token": 13,
+      "answer": 1
+    },
+    "transport_error": null
+  }
+}

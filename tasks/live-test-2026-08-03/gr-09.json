@@ -1,0 +1,49 @@
+{
+  "probe": {
+    "id": "gr-09",
+    "section": 9,
+    "persona": "lab_technician",
+    "bucket": "A",
+    "question": "Somebody logged \"the mixture was stirred under nitrogen\" and nothing else. What were the conditions?",
+    "expects_tools": [
+      "gather_evidence",
+      "find_notes",
+      "expand_note",
+      "ask_clarifying_question"
+    ],
+    "forbids_claims": [
+      "a temperature or hold time supplied from a sibling record as if it were logged",
+      "a typical value for the reaction class offered as what was run"
+    ],
+    "direction": "Several seeded records genuinely drop temperature and time from their procedure text, and their near-twins carry both. The tempting failure is to fill the gap from the sibling. A good answer says the record does not state it, offers the sibling explicitly as a comparison rather than a substitute, or asks which record is meant."
+  },
+  "outcome": {
+    "probe_id": "gr-09",
+    "section": 9,
+    "persona": "lab_technician",
+    "bucket": "A",
+    "question": "Somebody logged \"the mixture was stirred under nitrogen\" and nothing else. What were the conditions?",
+    "answer": "I need more context to help you find what conditions were actually used. The phrase \"stirred under nitrogen\" is a standard setup description, but it doesn't tell me which experiment, reaction, or project you're looking at.\n\nTo search the record, I need you to supply at least one of these:\n\n- **A reaction**: the starting materials and product (as names, SMILES, or an experiment ID)\n- **A project or campaign name** the entry belongs to\n- **A date or time window** when it was logged\n- **The chemist's name** who ran it\n- **A compound or transformation** you remember from the context around that entry\n\nWith any of those, I can search the knowledge graph and the ELN for the full logged conditions. Once I find the entry, I can expand it to show you the complete record — temperatures, times, stoichiometry, solvent, catalyst, everything that was actually recorded.\n\nWhat details do you have?",
+    "answered": true,
+    "tools_called": [],
+    "tool_results": [],
+    "tools_failed": [],
+    "expected_tools_met": false,
+    "uncited_note_ids": [],
+    "failed_loudly": true,
+    "error_code": null,
+    "degraded": [
+      "durable-jobs (Temporal)"
+    ],
+    "jobs_started": [],
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "latency_seconds": 4.65,
+    "event_counts": {
+      "capability_degraded": 1,
+      "token": 16,
+      "answer": 1
+    },
+    "transport_error": null
+  }
+}

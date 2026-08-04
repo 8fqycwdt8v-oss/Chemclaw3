@@ -9,9 +9,11 @@ fingerprint, not a substructure screen — so this module exposes similarity onl
 from chemclaw.science.fingerprints.rxnfp.fingerprint import drfp_bitstring, reaction_definition
 from chemclaw.science.fingerprints.store import (
     FingerprintRecord,
+    FingerprintSearch,
     FingerprintStore,
     Match,
     find_matches,
+    index_is_empty,
 )
 
 
@@ -30,10 +32,17 @@ async def find_similar_reactions(
     reaction_smiles: str,
     top_k: int | None = None,
     threshold: float | None = None,
-) -> list[Match]:
+) -> FingerprintSearch[Match]:
     """Return reactions similar to `reaction_smiles`, most similar first.
 
     `top_k` and `threshold` default to the configured values. Raises `FingerprintError`
     on an invalid reaction so the caller never searches with a meaningless fingerprint.
+
+    Returns a `FingerprintSearch`, not a bare list: this is the tool a chemist asks "have we ever
+    run something like this?", and an unindexed corpus must not answer it with "no" (see that
+    model's docstring for the live run that did exactly that).
     """
-    return await find_matches(store, drfp_bitstring(reaction_smiles), top_k, threshold)
+    matches = await find_matches(store, drfp_bitstring(reaction_smiles), top_k, threshold)
+    return FingerprintSearch[Match](
+        subject="reaction", hits=matches, index_empty=await index_is_empty(store, matches)
+    )

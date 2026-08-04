@@ -27,6 +27,7 @@ from temporalio.client import Client, TLSConfig
 from temporalio.contrib.pydantic import pydantic_data_converter
 
 from chemclaw.core.config import settings
+from chemclaw.core.errors import SubsystemUnavailableError
 
 # The process's client, built on first use. A module singleton for the same reason the metrics
 # registry and the logging configuration are: the thing being shared is a process-wide resource,
@@ -86,12 +87,40 @@ async def connect() -> Client:
     `connect_options` is built in a worker thread because it reads the mTLS PEMs from disk — three
     blocking reads that would otherwise land on the event loop serving the chat surface. It runs
     once per process, but "once" on a slow mount is still a stall nobody can attribute.
+
+    **A failure is translated here, once, for all of `connect()`'s callers.** temporalio reports an
+    unreachable broker as `RuntimeError('Failed client connect: Server connection error:
+    tonic::transport::Error(Transport, ConnectError(...))')`, which MAF collapses to "Error:
+    Function failed." for the model — and in the 2026-08-03 live run the model met that in
+    `request_development_report` and wrote the whole report by hand instead. There is one client, so
+    there is one message: framing it per call site would be the same sentence maintained N times,
+    and only one of the callers ever grew it — the connector-job launcher, i.e. the one path someone
+    had already sat and debugged. Every other durable tool was still leaking the raw error.
+
+    Nothing is cached on the failure path — `_CLIENT` is assigned only from a successful
+    `Client.connect`, and the `async with` releases the lock however the body leaves — so an outage
+    does not poison the singleton and the next call retries for real.
+
+    Raises:
+        SubsystemUnavailableError: When the broker cannot be reached, or the configured mTLS
+            material cannot be read. The underlying exception is attached as `__cause__`.
     """
     global _CLIENT
     if _CLIENT is not None:
         return _CLIENT
     async with _CONNECT_LOCK:
         if _CLIENT is None:
-            options = await asyncio.to_thread(connect_options)
-            _CLIENT = await Client.connect(settings.temporal_address, **options)
+            try:
+                options = await asyncio.to_thread(connect_options)
+                _CLIENT = await Client.connect(settings.temporal_address, **options)
+            except Exception as exc:
+                # Every fault reachable here means the same thing to a caller: the transport is
+                # down, an unreadable PEM included — one is fixed by an operator and the other by
+                # waiting, and neither is something the chemist or the model can act on differently.
+                raise SubsystemUnavailableError(
+                    "the durable execution backend (Temporal) is unreachable, so durable jobs "
+                    "cannot be started or inspected right now — nothing was queued by this call. "
+                    "This is an infrastructure outage, not a problem with the request; the same "
+                    "call will work once the backend is back."
+                ) from exc
     return _CLIENT

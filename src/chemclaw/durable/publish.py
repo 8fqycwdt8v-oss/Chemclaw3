@@ -81,6 +81,12 @@ _BAD_DATA_TYPES = [
     "AuthorizationError",
     "DryRunRefusal",
     "PlanNotApprovedError",
+    # NOT here, deliberately: `SubsystemUnavailableError` (`chemclaw.core.errors`). It reads like
+    # a sibling of the two entries above — a non-`ChemclawError` that crosses an activity boundary
+    # (a connector-job tool invoked inside `durable.template_activities`) — but it means the
+    # opposite thing. An unreachable broker is *retryable*: the identical call succeeds once the
+    # subsystem is back, so listing it would make a workflow give up on a broker restart it would
+    # otherwise ride out. `tests/test_publish.py` asserts its absence, with the reason.
 ]
 
 # Bad data is non-retryable by type; `maximum_attempts` bounds the *transient* retries

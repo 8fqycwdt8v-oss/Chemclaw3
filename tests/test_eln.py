@@ -1460,7 +1460,7 @@ def test_an_identified_impurity_is_findable_by_structure() -> None:
         await ingest_reaction(
             _with_impurities(Impurity(name="ether", smiles="CCOCC")), rxn, mol, sub
         )
-        hits = await find_similar_molecules(mol, "CCOCC", threshold=0.99)
+        hits = (await find_similar_molecules(mol, "CCOCC", threshold=0.99)).hits
         assert [hit.smiles for hit in hits] == ["CCOCC"]
 
     asyncio.run(_run())

@@ -1,0 +1,63 @@
+{
+  "probe": {
+    "id": "gr-26",
+    "section": 8,
+    "persona": "lab_leader",
+    "bucket": "A",
+    "question": "We use palladium and copper catalysts across this route. What elemental impurity testing does that commit us to?",
+    "expects_tools": [
+      "ich_impurity_limit",
+      "gather_evidence"
+    ],
+    "forbids_claims": [
+      "a permitted daily exposure recalled rather than retrieved",
+      "a limit for an element the table does not carry, given as though it did",
+      "a drug-product exposure limit presented as an intermediate specification"
+    ],
+    "direction": "Both metals are in the transcribed table with route-dependent values. A good answer gives the numbers with their route, says they are drug-product exposure limits rather than intermediate specs, and — if asked about an element the table deliberately omits — says the table does not carry it instead of filling in."
+  },
+  "outcome": {
+    "probe_id": "gr-26",
+    "section": 8,
+    "persona": "lab_leader",
+    "bucket": "A",
+    "question": "We use palladium and copper catalysts across this route. What elemental impurity testing does that commit us to?",
+    "answer": "I'll look up the ICH Q3D permitted daily exposure (PDE) limits for both palladium and copper, which define the regulatory framework for elemental-impurity controls.Both palladium and copper fall under ICH Q3D(R2) **because they are intentionally added as catalysts**, which triggers assessment in every route:\n\n## **Palladium** — *Class 2B*\nBecause you are intentionally using it, assessment is required. The PDEs are:\n- **Oral:** 100 µg/day\n- **Parenteral:** 10 µg/day  \n- **Inhalation:** 1 µg/day\n\nPalladium has a narrow margin between routes (10-fold drop from oral to parenteral, another 10-fold to inhalation).\n\n## **Copper** — *Class 3*\nAssessment is warranted for parenteral and inhalation routes; for oral products, assessment is only needed *because you are intentionally adding it*. The PDEs are:\n- **Oral:** 3000 µg/day\n- **Parenteral:** 300 µg/day\n- **Inhalation:** 30 µg/day\n\nCopper has broader acceptance orally but still requires control if intentionally used.\n\n---\n\n**What this means for testing:**\n- Every intermediate and the final API require elemental assay (typically ICP-MS) for Pd and Cu residues.\n- Each assay feeds into a mass-balance calculation: how much catalyst was charged, how much can reasonably carry forward, and whether process purge factors or final purification steps bring the residue below the route-specific limit.\n- The route (oral/IV/inhalation) determines which PDE binds first — palladium's inhalation PDE is the tightest constraint by far, and copper's oral is the most permissive.\n\nA limit is not a risk assessment; whether these numbers are acceptable for your API requires that evaluation against your intended dose and formulation. That said, the ICH Q3D(R2) citation is what you cite to regulators.",
+    "answered": true,
+    "tools_called": [
+      "ich_impurity_limit",
+      "ich_impurity_limit"
+    ],
+    "tool_results": [
+      {
+        "tool": "ich_impurity_limit",
+        "preview": "{\n  \"query\": \"palladium\",\n  \"limit\": {\n    \"substance\": \"Palladium (Pd)\",\n    \"guideline\": \"ICH Q3D(R2), Guideline for Elemental Impurities, ICH Step 4 (2022)\",\n    \"limit_class\": \"Class 2B\",\n    \"cla"
+      },
+      {
+        "tool": "ich_impurity_limit",
+        "preview": "{\n  \"query\": \"copper\",\n  \"limit\": {\n    \"substance\": \"Copper (Cu)\",\n    \"guideline\": \"ICH Q3D(R2), Guideline for Elemental Impurities, ICH Step 4 (2022)\",\n    \"limit_class\": \"Class 3\",\n    \"class_mean"
+      }
+    ],
+    "tools_failed": [],
+    "expected_tools_met": true,
+    "uncited_note_ids": [],
+    "failed_loudly": true,
+    "error_code": null,
+    "degraded": [
+      "durable-jobs (Temporal)"
+    ],
+    "jobs_started": [],
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": false,
+    "latency_seconds": 9.66,
+    "event_counts": {
+      "capability_degraded": 1,
+      "token": 28,
+      "tool_call": 2,
+      "tool_result": 2,
+      "answer": 1
+    },
+    "transport_error": null
+  }
+}

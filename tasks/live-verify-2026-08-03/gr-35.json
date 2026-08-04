@@ -1,0 +1,86 @@
+{
+  "probe": {
+    "id": "gr-35",
+    "section": 9,
+    "persona": "manager",
+    "bucket": "A",
+    "question": "Draft the development report for the biaryl campaign - I'll review it before it goes out.",
+    "expects_tools": [
+      "request_development_report",
+      "gather_evidence",
+      "expand_note"
+    ],
+    "forbids_claims": [
+      "the report described as final, issued or approved",
+      "a figure or conclusion in the draft with no note id behind it"
+    ],
+    "direction": "Long-running and cited. The asker has said they will review it, so the answer should land as a draft awaiting that review, with every number traceable. Reporting it as done before the job has returned is the failure."
+  },
+  "outcome": {
+    "probe_id": "gr-35",
+    "section": 9,
+    "persona": "manager",
+    "bucket": "A",
+    "question": "Draft the development report for the biaryl campaign - I'll review it before it goes out.",
+    "answer": "I'll draft a development report for the biaryl campaign. Let me start by gathering information about this campaign from the system.Let me expand the campaign note and the optimization campaign to get more detail:Now let me load the development-report skill to structure this correctly:Now I'll draft the development report using the durable job harness to structure it properly:The durable job system is temporarily unavailable. Let me draft the report directly from the evidence I've already retrieved, following the development-report skill's guidance:\n\n---\n\n## **Biaryl Coupling Development Report** (DRAFT FOR REVIEW)\n\n### **Scope: Aryl Halide Reactivity**\n\nThis campaign explored the boundary conditions for Pd-catalyzed cross-coupling of aryl halides with phenylboronic acid [[campaign-biaryl-scope]].\n\n**Key Finding:** Electron-rich bromides couple successfully at 80 °C in 12 hours, but electron-rich chlorides do not couple under these conditions [[campaign-biaryl-scope]]. This halide-dependent boundary, rather than specific yields, represents the transferable result from this work.\n\n**Substrate Used:** 4-bromoanisole [[compound-4-bromoanisole]] was the test substrate for reactivity assessment, coupling to form 4-methoxybiphenyl [[compound-4-methoxybiphenyl]].\n\n---\n\n### **Condition Optimization**\n\nA series of optimization runs varied temperature, Pd loading, and base on the biaryl Suzuki coupling [[rxn-suzuki-biaryl]] transformation [[opt-suzuki-conditions]].\n\n**Best Conditions Found:**\n- Pd loading: 1.5 mol%\n- Base: K₂CO₃\n- Temperature: 80 °C\n- **Result: 76% isolated yield**\n\nHigher temperature (100 °C) produced 79% by LCAP assay but only 68% isolated yield [[opt-suzuki-conditions]].\n\n**Catalyst & Solvent:** Pd(OAc)₂ [[compound-pd-oac2]] in THF [[compound-thf]].\n\n---\n\n### **Critical Finding: Assay vs. Isolated Yield Divergence**\n\nThe gap between LCAP assay yield (79%) and isolated yield (68%) at 100 °C is not a measurement artifact—it reflects protodeboronation in the aqueous workup [[opt-suzuki-conditions]]. This finding has a direct process consequence: **optimizing on assay readout alone would have selected an inferior condition.**\n\nSee [[failure-aqueous-protodeboronation]] for details on this failure mode.\n\n---\n\n### **Transferable Guidance**\n\nCross-coupling scope and condition setting are covered in [[playbook-pd-cross-coupling-scope]]. The key lesson from this campaign is to **measure both assay and isolated yield** when boronic acids are present and aqueous workup is necessary, since in-situ hydrolysis can mask a lower true yield.\n\n---\n\n### **Outstanding Questions**\n\n- Whether the halide scope boundary (bromides vs. chlorides) holds with other electron-rich heterocycles or only with oxygen-substituted rings\n- Whether higher temperature + additives (e.g., phosphine ligands) can overcome the chloride limitation [[bo-suzuki-next]] suggests as a next exploration\n\n---\n\n**Report Status:** Agent-drafted from retrieved notes [[campaign-biaryl-scope]], [[opt-suzuki-conditions]], [[failure-aqueous-protodeboronation]], and related compounds. All claims are cited to source. Pending human review before use.\n\n---\n\n**Notes for your review:**\n\n1. **Scope:** I've structured this around three core findings from the campaign: the halide-dependent boundary, the optimization conditions, and the critical assay/isolated yield gap. Each is grounded in specific notes.\n\n2. **Separation of evidence and guidance:** The first three sections are what was observed (episodic/evidence layer); the fourth section references the transferable playbook (semantic layer) and is labeled as such.\n\n3. **What I did NOT include:** Specific yield percentages for every intermediate run, reaction mechanisms, or general cross-coupling theory—only findings the notes actually support. I also omitted the Buchwald amination (tagged as part of the campaign) since the notes focus on the Suzuki scope; should that be included?\n\n4. **Gaps:** The report doesn't address scale-up, cost, green metrics, or safety—the notes don't carry that data. If you want those sections, I'd need either additional notes or calculation results to cite.\n\nWould you like me to:\n- Expand any section with more detail from the notes?\n- Add sections on specific topics (safety screen, solvent choice rationale, scale considerations)?\n- Adjust the tone or emphasis?",
+    "answered": true,
+    "tools_called": [
+      "find_notes",
+      "gather_evidence",
+      "expand_note",
+      "expand_note",
+      "load_skill",
+      "request_development_report"
+    ],
+    "tool_results": [
+      {
+        "tool": "find_notes",
+        "preview": "[{\"id\": \"bo-suzuki-next\", \"type\": \"bo-candidate\", \"compound_smiles\": null, \"tags\": [\"bo\", \"suggestion\"], \"created_by\": \"human\", \"source\": \"seed-corpus\", \"confidence\": 0.5, \"valid_from\": null, \"valid_t"
+      },
+      {
+        "tool": "gather_evidence",
+        "preview": "[{\"content\": \"<retrieved-note-4ac8bd4b8ff10031 id=\\\"campaign-biaryl-scope\\\">\\nSix couplings exploring aryl-halide scope at fixed catalyst and base, run to answer one question:\\nwhere does this system "
+      },
+      {
+        "tool": "expand_note",
+        "preview": "{\"note\": {\"id\": \"campaign-biaryl-scope\", \"type\": \"campaign\", \"compound_smiles\": null, \"tags\": [\"campaign\", \"scope\"], \"created_by\": \"human\", \"source\": \"seed-corpus\", \"confidence\": 0.8, \"valid_from\": nu"
+      },
+      {
+        "tool": "expand_note",
+        "preview": "{\"note\": {\"id\": \"opt-suzuki-conditions\", \"type\": \"optimization-campaign\", \"compound_smiles\": null, \"tags\": [\"optimization\"], \"created_by\": \"human\", \"source\": \"seed-corpus\", \"confidence\": 0.85, \"valid_"
+      },
+      {
+        "tool": "load_skill",
+        "preview": "---\nname: development-report\ndescription: >-\n  Judgment for drafting a cited development report from the system's own data: decompose the\n  request into sections, retrieve evidence per section, discar"
+      },
+      {
+        "tool": "request_development_report",
+        "preview": "Error: the durable execution backend (Temporal) is unreachable, so durable jobs cannot be started or inspected right now — nothing was queued by this call. This is an infrastructure outage, not a prob"
+      }
+    ],
+    "tools_failed": [
+      "request_development_report"
+    ],
+    "expected_tools_met": true,
+    "uncited_note_ids": [],
+    "failed_loudly": true,
+    "error_code": null,
+    "degraded": [
+      "durable-jobs (Temporal)"
+    ],
+    "jobs_started": [],
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": false,
+    "latency_seconds": 22.03,
+    "event_counts": {
+      "capability_degraded": 1,
+      "token": 68,
+      "tool_call": 6,
+      "tool_result": 6,
+      "tool_failed": 1,
+      "answer": 1
+    },
+    "transport_error": null
+  }
+}

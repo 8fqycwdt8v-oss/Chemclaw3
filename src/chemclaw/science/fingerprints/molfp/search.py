@@ -19,8 +19,10 @@ from chemclaw.science.fingerprints.molfp.fingerprint import ecfp_bitstring, mole
 from chemclaw.science.fingerprints.store import (
     FingerprintError,
     FingerprintRecord,
+    FingerprintSearch,
     FingerprintStore,
     find_matches,
+    index_is_empty,
 )
 
 log = logging.getLogger(__name__)
@@ -76,17 +78,26 @@ async def find_similar_molecules(
     smiles: str,
     top_k: int | None = None,
     threshold: float | None = None,
-) -> list[MoleculeHit]:
+) -> FingerprintSearch[MoleculeHit]:
     """Return molecules structurally similar to `smiles`, most similar first.
 
     `top_k` and `threshold` default to the configured values. Raises `FingerprintError`
     on an unparseable query so the caller never searches with a meaningless fingerprint.
+
+    Returns a `FingerprintSearch`, not a bare list, so "we have no analog on file" and "nothing
+    has been indexed" cannot arrive as the same empty list — see that model's docstring.
     """
     matches = await find_matches(store, ecfp_bitstring(smiles), top_k, threshold)
-    return [MoleculeHit.for_molecule(match.label, match.similarity) for match in matches]
+    return FingerprintSearch[MoleculeHit](
+        subject="molecule",
+        hits=[MoleculeHit.for_molecule(match.label, match.similarity) for match in matches],
+        index_empty=await index_is_empty(store, matches),
+    )
 
 
-async def find_substructure_matches(store: FingerprintStore, query: str) -> list[MoleculeHit]:
+async def find_substructure_matches(
+    store: FingerprintStore, query: str
+) -> FingerprintSearch[MoleculeHit]:
     """Return stored molecules that contain the `query` fragment.
 
     The query is interpreted as SMARTS (the right language for a substructure pattern; a
@@ -106,6 +117,12 @@ async def find_substructure_matches(store: FingerprintStore, query: str) -> list
 
     Each hit carries the compound note to cite (`MoleculeHit`), so a functional-group query
     lands on the graph directly instead of via a substring search for the SMILES.
+
+    Returns a `FingerprintSearch` for the same reason similarity search does: "no indexed molecule
+    bears this group" and "nothing is indexed" are different answers. Here the distinction is free
+    — the scan already holds every record it could have matched — and it is *not* scoped to the
+    store's fingerprint definition, because this search re-matches the stored SMILES with RDKit and
+    never touches the bits, so a stale-definition row is still a real molecule in the corpus.
 
     The matching itself runs **off the event loop** in a worker thread, bounded by
     `substructure_match_timeout_seconds`. Bounding the inputs is not enough: a short but
@@ -137,7 +154,7 @@ async def find_substructure_matches(store: FingerprintStore, query: str) -> list
         )
     timeout = settings.substructure_match_timeout_seconds
     try:
-        return await asyncio.wait_for(
+        hits = await asyncio.wait_for(
             asyncio.to_thread(_scan_for_matches, records, pattern), timeout=timeout
         )
     except TimeoutError as exc:
@@ -145,6 +162,7 @@ async def find_substructure_matches(store: FingerprintStore, query: str) -> list
             f"substructure match for {query!r} exceeded {timeout}s over {len(records)} molecules; "
             "narrow the pattern (or raise CHEMCLAW_SUBSTRUCTURE_MATCH_TIMEOUT_SECONDS)"
         ) from exc
+    return FingerprintSearch[MoleculeHit](subject="molecule", hits=hits, index_empty=not records)
 
 
 def _scan_for_matches(records: list[FingerprintRecord], pattern: Chem.Mol) -> list[MoleculeHit]:

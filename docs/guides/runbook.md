@@ -84,6 +84,60 @@ in the environment — the chat client preflights it and fails with a clear mess
 - **Attribute the run:** `--actor alice@lab` overrides the audit actor. `--audit-postgres`
   persists the tool-audit trail to Postgres (default is log-only).
 
+## Live-test the whole stack (Temporal + workers + Postgres, then the model)
+
+The lane that proves the durable half actually works. Everything before this section tests one
+layer; this runs the path a durable capability really takes — agent tool → `ConnectorJobWorkflow`
+on `background-jobs` → the bundle's workflow on `connector-<name>` → the calculation cache →
+`job_records` → the audit chain — against a real broker and a real database.
+
+It exists because that path had never been run end to end. The Temporal tests use the
+time-skipping test server with no model and no database; the live probe run
+(`docs/archive/live-grounded-2026-08-03.md`) had **no Temporal worker at all**, and its probe files
+said so in their own headers. See `docs/decisions/D-2026-08-04-a-lane-that-only-runs-where-docker-runs.md`.
+
+```sh
+make live-infra     # Postgres/pgvector + Temporal — uses docker-compose when a daemon is
+                    # reachable, otherwise builds and starts them natively (infra/live/)
+make db-migrate     # apply infra/sql
+make live-up        # connectors (:8810), the four Temporal workers, the front door (:8000)
+make live-status    # what is running
+make live-jobs      # STAGE A: a real durable job, no model needed
+make live-probes    # STAGE B: the probe corpus through the front door (needs ANTHROPIC_API_KEY)
+make live-down && make live-infra-down
+```
+
+**Stage A (`make live-jobs`) needs no model credential and is the load-bearing one.** It launches
+`compute_reaction_energy` through the *real* generated job tool and then asks the live system six
+questions that have mechanical answers — the workflow's terminal state from Temporal, the cache row
+and the `job_records` row from Postgres, whether a duplicate launch rejoins rather than recomputes,
+whether a job whose worker is wedged comes back *pending* rather than hanging or crashing, and
+whether the audit chain still verifies. Nothing is scored from prose. The report lands in
+`tasks/live-test/transcripts/durable-smoke.md`.
+
+**Stage B (`make live-probes`) adds the model.** With the workers up, the `du-*` probes in
+`data/evals/probes/durable.yaml` exercise durable work for the first time, and every workflow id a
+probe launches is resolved against Temporal rather than taken from the turn's account of it — a job
+tool returns an id the moment the launch is *accepted*, so "I started a job" can be true about work
+that never ran. Pass `ARGS='--only du-01 --no-judge'` to narrow a run.
+
+Notes on the stack itself:
+
+- **The front door will not boot without a model credential.** It builds the agent during startup,
+  so `ANTHROPIC_API_KEY` (or `CHEMCLAW_LLM_PROVIDER=openai_compatible` plus a base URL) is required
+  for Stage B. `make live-up` skips it and says so when neither is set; the workers still come up,
+  which is why Stage A is independent of it.
+- **The lane pins `CHEMCLAW_SERVICE_HOST=127.0.0.1`.** With `entra_required=false` the front door
+  refuses a non-loopback bind (SEC-2) and the default is `0.0.0.0`, so without this it would
+  correctly fail to start.
+- **Each worker gets its own probe port** (9000-9003). `worker_http` otherwise has them all
+  contend for 9000; setting the port to 0 would silence the readiness signal this lane polls.
+- **Without a Docker daemon** the bootstrap builds pgvector and the Temporal CLI from git clones.
+  That is not a preference: `temporal.download` and `codeload.github.com` archives are both denied
+  by a filtering egress proxy, while git-over-HTTPS and the Go module proxy are not. PostgreSQL
+  server headers are the one prerequisite it cannot install for you
+  (`apt-get install postgresql-server-dev-16`).
+
 ## (i) Add a skill
 
 Drop a `skills/<name>/SKILL.md` (front-matter schema + template in `skills/README.md`) and
