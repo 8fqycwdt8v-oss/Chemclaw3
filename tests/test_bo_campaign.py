@@ -40,6 +40,8 @@ from chemclaw.science.bo.problem import (
     best_of,
     discrete_candidate_count,
     distinct_candidate_count,
+    pareto_front,
+    require_campaign_startable,
     require_rounds_within_ceiling,
 )
 from chemclaw.science.calc.solubility import SolubilityInput, predict_solubility
@@ -98,10 +100,10 @@ def test_best_of_honors_direction() -> None:
         Observation(params={"x": 1.0}, value=5.0),
     ]
     maximize = OptimizationProblem(
-        parameters=params, objective=Objective(name="y", direction="maximize")
+        parameters=params, objectives=[Objective(name="y", direction="maximize")]
     )
     minimize = OptimizationProblem(
-        parameters=params, objective=Objective(name="y", direction="minimize")
+        parameters=params, objectives=[Objective(name="y", direction="minimize")]
     )
     assert best_of(maximize, observations).value == 5.0
     assert best_of(minimize, observations).value == 1.0
@@ -308,3 +310,135 @@ def test_optimize_rejects_rounds_beyond_the_ceiling(monkeypatch: pytest.MonkeyPa
 
     with pytest.raises(ValueError, match="bo_max_rounds=3"):
         asyncio.run(optimize(problem, _never, n_initial=2, n_rounds=4))
+
+
+# --- multi-objective boundaries (W3) -----------------------------------------------------------
+
+
+def _two_objective_problem() -> OptimizationProblem:
+    """Maximize yield, minimize impurity, over one continuous factor."""
+    return OptimizationProblem(
+        parameters=[ContinuousParameter(name="t", lower=0.0, upper=100.0)],
+        objectives=[
+            Objective(name="yield", direction="maximize"),
+            Objective(name="impurity", direction="minimize"),
+        ],
+    )
+
+
+def _point(t: float, yield_: float, impurity: float) -> Observation:
+    """One run reporting both objectives, with `value` mirroring the lead one."""
+    return Observation(
+        params={"t": t}, value=yield_, values={"yield": yield_, "impurity": impurity}
+    )
+
+
+def test_best_of_refuses_a_trade_off_rather_than_picking_an_axis() -> None:
+    """A "best" on a trade-off is the overclaim this whole wave exists to make impossible.
+
+    Silently returning the lead objective's winner would answer "the best conditions" for a
+    campaign whose premise is that no such point exists — the same shape as the fabrication the
+    old single-objective refusal was written to prevent, arrived at from the other direction.
+    """
+    with pytest.raises(ValueError, match="pareto_front"):
+        best_of(_two_objective_problem(), [_point(10.0, 50.0, 1.0), _point(90.0, 80.0, 5.0)])
+
+
+def test_the_front_keeps_what_nothing_beats_on_both_axes() -> None:
+    """Dominance: at least as good everywhere, strictly better somewhere."""
+    problem = _two_objective_problem()
+    runs = [
+        _point(10.0, 50.0, 1.0),  # best impurity
+        _point(50.0, 70.0, 3.0),  # middle, on the front
+        _point(90.0, 80.0, 5.0),  # best yield
+        _point(30.0, 60.0, 4.0),  # beaten by the middle run on both -> off the front
+    ]
+    front = pareto_front(problem, runs)
+    assert [(o.values["yield"], o.values["impurity"]) for o in front] == [
+        (50.0, 1.0),
+        (70.0, 3.0),
+        (80.0, 5.0),
+    ]
+
+
+def test_a_duplicated_point_stays_on_the_front_twice() -> None:
+    """Neither dominates the other, and dropping one would discard a replicate silently."""
+    problem = _two_objective_problem()
+    runs = [_point(10.0, 50.0, 1.0), _point(10.0, 50.0, 1.0)]
+    assert len(pareto_front(problem, runs)) == 2
+
+
+def test_one_run_dominating_everything_gives_a_front_of_one() -> None:
+    """A real and unusual finding, not an error — the skill is told to say so."""
+    problem = _two_objective_problem()
+    runs = [_point(10.0, 90.0, 0.5), _point(50.0, 70.0, 3.0), _point(90.0, 60.0, 4.0)]
+    front = pareto_front(problem, runs)
+    assert len(front) == 1
+    assert front[0].values == {"yield": 90.0, "impurity": 0.5}
+
+
+def test_a_single_objective_front_is_just_the_winner() -> None:
+    """Dominance collapses to the ordinary comparison when there is one axis."""
+    problem = OptimizationProblem(
+        parameters=[ContinuousParameter(name="t", lower=0.0, upper=100.0)],
+        objectives=[Objective(name="yield", direction="maximize")],
+    )
+    runs = [
+        Observation(params={"t": 10.0}, value=50.0),
+        Observation(params={"t": 50.0}, value=80.0),
+        Observation(params={"t": 90.0}, value=70.0),
+    ]
+    assert [o.value for o in pareto_front(problem, runs)] == [80.0]
+    assert best_of(problem, runs).value == 80.0
+
+
+def test_the_durable_campaign_refuses_a_multi_objective_spec() -> None:
+    """The registry maps a name to one scalar-returning callable, so a trade-off has no evaluator.
+
+    Refused at launch with a message naming the inline tool, rather than optimizing the lead
+    objective for ten rounds and reporting a "best" nobody asked for.
+    """
+    spec = CampaignSpec(
+        problem=_two_objective_problem(), objective_name="reizman_suzuki", n_rounds=3
+    )
+    with pytest.raises(ValueError, match="suggest_next_experiment"):
+        require_campaign_startable(spec)
+
+
+def test_the_precondition_still_enforces_the_round_ceiling() -> None:
+    """Folding two rules into one function must not drop the one that was already there."""
+    spec = CampaignSpec(
+        problem=OptimizationProblem(
+            parameters=[ContinuousParameter(name="t", lower=0.0, upper=1.0)],
+            objectives=[Objective(name="yield", direction="maximize")],
+        ),
+        objective_name="reizman_suzuki",
+        n_rounds=settings.bo_max_rounds + 1,
+    )
+    with pytest.raises(ValueError, match="bo_max_rounds"):
+        require_campaign_startable(spec)
+
+
+def test_the_manifest_names_a_precondition_that_accepts_the_params_model() -> None:
+    """`connector-validate` checks this, and an earlier manifest named a function taking an int.
+
+    Every `start_optimization_campaign` call then raised `TypeError` while CI stayed green, so the
+    reference connector's flagship job could not be started at all. Pinned here too, because this
+    wave renamed the function the manifest points at.
+    """
+    from chemclaw.connectors.jobs import resolve_precondition
+    from chemclaw.connectors.registry import discovered
+
+    _, manifest = discovered()["bo"]
+    job = next(job for job in manifest.jobs if job.name == "start_optimization_campaign")
+    assert job.precondition is not None
+    resolve_precondition(job.precondition)(
+        CampaignSpec(
+            problem=OptimizationProblem(
+                parameters=[ContinuousParameter(name="t", lower=0.0, upper=1.0)],
+                objectives=[Objective(name="yield", direction="maximize")],
+            ),
+            objective_name="reizman_suzuki",
+            n_rounds=2,
+        )
+    )

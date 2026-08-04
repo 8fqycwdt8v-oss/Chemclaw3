@@ -37,6 +37,7 @@ from bofire.data_models.features.api import (
 from bofire.data_models.objectives.api import MaximizeObjective, MinimizeObjective
 from bofire.data_models.strategies.api import (
     FractionalFactorialStrategy,
+    MoboStrategy,
     RandomStrategy,
     SoboStrategy,
 )
@@ -57,6 +58,7 @@ from chemclaw.science.bo.problem import (
     ParamValue,
     ScreeningDesign,
     discrete_candidate_count,
+    observed_value,
     params_key,
 )
 
@@ -147,17 +149,32 @@ def _categorical_input(
 
 
 def _objective_output(problem: OptimizationProblem) -> ContinuousOutput:
-    """The problem's single objective as a BoFire output, whichever domain shape needs it."""
-    objective = (
-        MinimizeObjective(w=1.0)
-        if problem.objective.direction == "minimize"
-        else MaximizeObjective(w=1.0)
-    )
-    return ContinuousOutput(key=problem.objective.name, objective=objective)
+    """The problem's **lead** objective as a BoFire output.
+
+    Kept for the classical design paths, which have no objective at all: `factorial_design` builds a
+    domain only because BoFire requires outputs, and its direction is never read. A screen over a
+    multi-objective problem is still one screen.
+    """
+    return _outputs(problem)[0]
+
+
+def _outputs(problem: OptimizationProblem) -> list[ContinuousOutput]:
+    """Every objective as a BoFire output, in declaration order (W3)."""
+    return [
+        ContinuousOutput(
+            key=objective.name,
+            objective=(
+                MinimizeObjective(w=1.0)
+                if objective.direction == "minimize"
+                else MaximizeObjective(w=1.0)
+            ),
+        )
+        for objective in problem.objectives
+    ]
 
 
 def _to_domain(problem: OptimizationProblem) -> Domain:
-    """Translate our problem into a BoFire `Domain` (inputs + one objective output)."""
+    """Translate our problem into a BoFire `Domain` (inputs + one output per objective)."""
     inputs = []
     for parameter in problem.parameters:
         if isinstance(parameter, ContinuousParameter):
@@ -166,9 +183,7 @@ def _to_domain(problem: OptimizationProblem) -> Domain:
             )
         else:
             inputs.append(_categorical_input(parameter))
-    return Domain(
-        inputs=Inputs(features=inputs), outputs=Outputs(features=[_objective_output(problem)])
-    )
+    return Domain(inputs=Inputs(features=inputs), outputs=Outputs(features=_outputs(problem)))
 
 
 def _cast(parameter: ContinuousParameter | CategoricalParameter, raw: Any) -> ParamValue:
@@ -179,13 +194,13 @@ def _cast(parameter: ContinuousParameter | CategoricalParameter, raw: Any) -> Pa
 def _observations_to_frame(
     problem: OptimizationProblem, observations: list[Observation]
 ) -> pd.DataFrame:
-    """Build the experiments dataframe BoFire's `tell` expects."""
-    objective_key = problem.objective.name
+    """Build the experiments dataframe BoFire's `tell` expects, one column pair per objective."""
     rows = []
     for obs in observations:
         row: dict[str, object] = dict(obs.params)
-        row[objective_key] = obs.value
-        row[f"valid_{objective_key}"] = 1
+        for objective in problem.objectives:
+            row[objective.name] = observed_value(problem, obs, objective.name)
+            row[f"valid_{objective.name}"] = 1
         rows.append(row)
     return pd.DataFrame(rows)
 
@@ -202,15 +217,42 @@ def _frame_to_candidates(problem: OptimizationProblem, frame: pd.DataFrame) -> l
     `_des` is deliberately left behind. It is the acquisition/desirability score — a ranking
     quantity in the strategy's own units, not a statement about the chemistry — and carrying it
     would invite reading it as a confidence.
+
+    **A multi-objective ask returns the same columns per objective** (measured, M-1:
+    `yield_pred, impurity_pred, yield_sd, impurity_sd, …`), so the per-objective vectors are filled
+    from the same reader. The scalars keep the lead objective, which is what every persisted row and
+    every existing consumer already holds.
     """
-    predicted, sd = f"{problem.objective.name}_pred", f"{problem.objective.name}_sd"
+    predicted_values, predicted_sds = {}, {}
+    for objective in problem.objectives:
+        name = objective.name
+        if f"{name}_pred" in frame.columns:
+            predicted_values[name] = f"{name}_pred"
+        if f"{name}_sd" in frame.columns:
+            predicted_sds[name] = f"{name}_sd"
+    lead = problem.objective.name
+    multi = len(problem.objectives) > 1
     return [
         Candidate(
             params={p.name: _cast(p, row[p.name]) for p in problem.parameters},
-            predicted_value=float(row[predicted]) if predicted in frame.columns else None,
+            predicted_value=(
+                float(row[predicted_values[lead]]) if lead in predicted_values else None
+            ),
             # abs(): a posterior sd is non-negative by definition, and the field enforces it, but
             # a float round-trip through the surrogate can land a hair below zero.
-            predicted_sd=abs(float(row[sd])) if sd in frame.columns else None,
+            predicted_sd=abs(float(row[predicted_sds[lead]])) if lead in predicted_sds else None,
+            # Empty on a single-objective problem: the scalars above are the whole answer there, and
+            # a duplicate of them would be a second place for the same number to drift.
+            predicted_values=(
+                {name: float(row[column]) for name, column in predicted_values.items()}
+                if multi
+                else {}
+            ),
+            predicted_sds=(
+                {name: abs(float(row[column])) for name, column in predicted_sds.items()}
+                if multi
+                else {}
+            ),
         )
         for _, row in frame.iterrows()
     ]
@@ -255,17 +297,30 @@ def propose_candidates(
     n: int = 1,
     seed: int | None = None,
 ) -> list[Candidate]:
-    """Propose the next `n` candidates from past observations via SOBO.
+    """Propose the next `n` candidates from past observations — SOBO, or MOBO for a trade-off.
 
     Requires at least `MIN_SEED_OBSERVATIONS` observations to fit the surrogate
     (BoFire's floor); call `initial_candidates` first to seed. Raises `ValueError`
     below that floor rather than surfacing an opaque BoFire error (gate G4).
+
+    **The strategy follows the problem, not a setting** (W3). One objective gets `SoboStrategy`;
+    more than one gets `MoboStrategy`, whose default acquisition is `qLogNEHVI`. Measured (M-1):
+    `MoboStrategy` validates with `ref_point` unset — it derives a *moving* reference per objective
+    (`AbsoluteMovingReferenceValue`) from the data rather than hiding a fixed one — and it fits at
+    two observations, the same floor SOBO has, so `MIN_SEED_OBSERVATIONS` is unchanged.
     """
     if len(observations) < MIN_SEED_OBSERVATIONS:
         raise ValueError(
             f"propose_candidates needs at least {MIN_SEED_OBSERVATIONS} observations; seed first"
         )
-    strategy = strategies.map(SoboStrategy(domain=_to_domain(problem), seed=_resolve_seed(seed)))
+    domain = _to_domain(problem)
+    resolved = _resolve_seed(seed)
+    specification = (
+        MoboStrategy(domain=domain, seed=resolved)
+        if len(problem.objectives) > 1
+        else SoboStrategy(domain=domain, seed=resolved)
+    )
+    strategy = strategies.map(specification)
     context = f"fitting the surrogate to {len(observations)} observation(s)"
     with _translating_surrogate_errors(context):
         strategy.tell(_observations_to_frame(problem, observations))

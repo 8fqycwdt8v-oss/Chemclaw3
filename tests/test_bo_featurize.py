@@ -44,7 +44,7 @@ def _ligand_problem(structures: dict[str, str] | None = _LIGANDS) -> Optimizatio
             CategoricalParameter(name="ligand", categories=sorted(_LIGANDS), structures=structures),
             ContinuousParameter(name="temperature", lower=20.0, upper=100.0),
         ],
-        objective=Objective(name="yield", direction="maximize"),
+        objectives=[Objective(name="yield", direction="maximize")],
     )
 
 

@@ -388,7 +388,7 @@ def _real_bo_candidate() -> Note:
             ),
             ContinuousParameter(name="temperature", lower=20.0, upper=100.0),
         ],
-        objective=Objective(name="yield", direction="maximize"),
+        objectives=[Objective(name="yield", direction="maximize")],
     )
     best = Observation(
         params={"molecule": "CCCN=[N+]=[N-]", "ligand": "L1", "temperature": 80.0},

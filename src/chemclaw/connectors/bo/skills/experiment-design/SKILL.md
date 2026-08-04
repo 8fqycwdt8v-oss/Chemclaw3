@@ -31,13 +31,21 @@ line of enquiry into a design space just because a design space is what this too
 
 ## Frame the problem from evidence
 
-1. **Fix the objective.** One scalar, and its direction — maximize yield, minimize an impurity,
-   minimize E-factor. If the user names several, **pick the one they lead with, say so
-   explicitly, and call the tool for that one only.** Do not dress up a single-objective call
-   as if it were a real multi-objective/Pareto optimization — if you also want to speak to the
-   other objective, do it as a separate, clearly-labeled qualitative read of the cited evidence
-   (e.g. "separately, the data shows degassing is what controls the impurity"), not as
-   "candidates" implied to come from a trade-off computation that did not actually run.
+1. **Fix the objectives.** Each is a name and a direction — maximize yield, minimize an impurity,
+   minimize E-factor. **If the user names several, give them all.** `objectives` is a list, and the
+   optimizer searches the trade-off rather than one axis. This is the one instruction in this file
+   that reversed: it used to say pick the one they lead with, because nothing could do more.
+
+   With more than one objective, every run you supply must report **every** objective, in its
+   `values` map — the tool refuses an observation that reports fewer, naming which. What comes back
+   is a `front`: the runs among those you supplied that nothing else beats on every objective at
+   once. **Present that front and let the chemist choose along it.** Do not announce a single best
+   point for a trade-off; there is not one, and saying otherwise is the same overclaim in the
+   opposite direction from the old refusal. Where the front has one member, say that too — it means
+   one run dominated every other, which is a real and unusual finding.
+
+   Keep a single objective when the chemist has one. A trade-off between yield and a cost the
+   record does not measure is not a second objective; it is a conversation.
 2. **Choose the decision variables** the user can actually change: continuous (temperature,
    time, equivalents, concentration) with realistic bounds, categorical (solvent, catalyst,
    base) with the specific options in play. Do not invent variables the lab cannot set, and

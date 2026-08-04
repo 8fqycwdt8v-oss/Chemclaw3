@@ -40,7 +40,16 @@ from chemclaw.science.bo.campaign_record import (
 )
 from chemclaw.science.bo.engine import factorial_design, initial_candidates, propose_candidates
 from chemclaw.science.bo.featurize import featurize_problem
-from chemclaw.science.bo.problem import Candidate, Observation, OptimizationProblem, ScreeningDesign
+from chemclaw.science.bo.problem import (
+    Candidate,
+    Objective,
+    Observation,
+    OptimizationProblem,
+    ScreeningDesign,
+    observed_value,
+    pareto_front,
+    require_observations_cover_objectives,
+)
 from chemclaw.science.bo.progress import CampaignProgress
 from chemclaw.science.bo.progress import campaign_progress as read_progress
 from chemclaw.science.calc.postgres_store import default_store
@@ -75,12 +84,14 @@ class ObjectiveScale(BaseModel):
         return self.observed_max - self.observed_min
 
 
-def _objective_scale(problem: OptimizationProblem, history: list[Observation]) -> ObjectiveScale:
-    """Summarize what the objective did across the runs supplied."""
-    values = [observation.value for observation in history]
+def _objective_scale(
+    problem: OptimizationProblem, history: list[Observation], objective: Objective
+) -> ObjectiveScale:
+    """Summarize what one objective did across the runs supplied."""
+    values = [observed_value(problem, observation, objective.name) for observation in history]
     return ObjectiveScale(
-        name=problem.objective.name,
-        direction=problem.objective.direction,
+        name=objective.name,
+        direction=objective.direction,
         n=len(values),
         observed_min=min(values) if values else None,
         observed_max=max(values) if values else None,
@@ -103,8 +114,13 @@ class ExperimentSuggestion(BaseModel):
     candidates: list[Candidate] = Field(default_factory=list)
     calc_refs: list[str] = Field(default_factory=list)
     # What the objective spans in the runs behind these candidates, so each candidate's
-    # `predicted_sd` can be read against something.
+    # `predicted_sd` can be read against something. One per objective, lead first.
     scale: ObjectiveScale | None = None
+    scales: list[ObjectiveScale] = Field(default_factory=list)
+    # The non-dominated subset of the observations the **caller supplied** — the trade-off the runs
+    # actually show. Empty on a single-objective problem, where there is one best point and no front
+    # to draw. This is what turns "here is the trade-off" from a sentence into a computation (W3).
+    front: list[Observation] = Field(default_factory=list)
 
     @computed_field  # type: ignore[prop-decorator]
     @property
@@ -121,6 +137,14 @@ class ExperimentSuggestion(BaseModel):
             return "No candidates were proposed."
         spread = self.scale.spread if self.scale else None
         readings = []
+        if len(self.scales) > 1:
+            named = ", ".join(f"{scale.direction} {scale.name}" for scale in self.scales)
+            readings.append(
+                f"This is a trade-off over {len(self.scales)} objectives ({named}), so there is no "
+                f"single best point. `front` holds the {len(self.front)} run(s) of those supplied "
+                "that nothing else beats on every objective at once — quote those as the "
+                "trade-off, and read the sd below against the lead objective only."
+            )
         for index, candidate in enumerate(self.candidates, start=1):
             if candidate.predicted_sd is None:
                 readings.append(
@@ -216,15 +240,20 @@ async def suggest_next_experiment(
     no observations yet it returns space-filling seed points instead (a model needs data first).
     These are *proposals a human runs* — surface them, do not treat them as results.
 
-    **One objective, no constraints.** `problem` carries exactly one `objective`, and there is no
-    field for a constraint of any kind — they are not partially supported, they are
-    unrepresentable. If the chemist named several objectives (yield *and* selectivity, cost *and*
-    throughput), pick the one they led with, say which one you optimized, and never present the
-    result as a trade-off or a Pareto front: nothing here computed one. Speak to the other
-    objectives, if at all, as a separate qualitative reading of the evidence you cited. A limit the
-    chemist stated ("keep the temperature under 80 °C", "no more than 2 equivalents") has to be
-    built into the parameter bounds or the category list, because the optimizer will not honour it
-    otherwise.
+    **Several objectives are supported: give them all.** `problem.objectives` is a list, so yield
+    *and* selectivity, or conversion *and* impurity, go in together with a direction each. The
+    optimizer then searches the trade-off rather than one axis, and the return's `front` holds the
+    runs among those you supplied that nothing else beats on every objective at once. Present that
+    front as the trade-off and let the chemist choose along it — do **not** announce a single
+    "best" point for a multi-objective problem, because there is not one. Every observation must
+    then report every objective, in its `values` map.
+
+    **Constraints are still unrepresentable.** There is no field for a limit of any kind — not
+    partially supported, absent. A limit the chemist stated ("keep the temperature under 80 °C", "no
+    more than 2 equivalents") has to be built into the parameter bounds or the category list,
+    because the optimizer will not honour it otherwise. A limit *across* parameters ("base plus acid
+    under 3 equivalents") cannot be expressed at all yet — say so rather than approximating it with
+    a bound that does not mean the same thing.
 
     **Continuing an earlier campaign?** Call `resume_campaign(campaign_id)` first to recover the
     decision space and the runs it already has, then add the new results and call this tool.
@@ -241,12 +270,13 @@ async def suggest_next_experiment(
     data. This costs one fast calculation per option and is cached thereafter.
 
     Args:
-        problem: The decision variables (continuous/categorical) and the single objective
-            (name + minimize/maximize). Set a categorical's `structures` when its options are
+        problem: The decision variables (continuous/categorical) and the objective(s) — each a
+            name plus minimize/maximize. Set a categorical's `structures` when its options are
             molecules.
         observations: Runs already done, each mapping the parameter values to the objective
             value. Every observation must give a value for *every* parameter `problem` declares
-            and name no others — a run whose conditions you only partly know cannot seed this.
+            and name no others — a run whose conditions you only partly know cannot seed this. For
+            several objectives, give each run's `values` map naming every one of them.
             Omit or pass an empty list to get seed points for a fresh campaign.
         count: How many candidates to propose (a batch).
 
@@ -280,6 +310,7 @@ async def suggest_next_experiment(
     # The tool owns its contract, so the declared/observed parameter agreement is checked here —
     # after the models exist and before anything downstream indexes by parameter name.
     _require_observed_params_match(problem, history)
+    require_observations_cover_objectives(problem, history)
     # Featurize before the engine sees the problem: descriptors change how the surrogate
     # models the categorical space, so this must happen for the seeding path too — otherwise
     # a problem that declares structures would silently fall back to an opaque category.
@@ -300,11 +331,17 @@ async def suggest_next_experiment(
         calc_refs=featurized.calc_refs,
         provenance=caller_provenance(),
     )
+    scales = [_objective_scale(problem, history, obj) for obj in problem.objectives]
     return ExperimentSuggestion(
         campaign_id=campaign_id,
         candidates=candidates,
         calc_refs=featurized.calc_refs,
-        scale=_objective_scale(problem, history),
+        scale=scales[0],
+        scales=scales,
+        # The front of the runs the caller gave us, not of anything the model predicted — a
+        # trade-off is a statement about measurements. Empty for one objective, where `best_of`
+        # already answers "which run won".
+        front=pareto_front(problem, history) if len(problem.objectives) > 1 else [],
     )
 
 
@@ -314,6 +351,7 @@ async def campaign_progress(
     observations: list[Observation] | str,
     assay_noise: float,
     window: int | None = None,
+    objective: str | None = None,
 ) -> CampaignProgress:
     """Has this optimization plateaued, or is there more in it? Read against the assay's own noise.
 
@@ -348,6 +386,9 @@ async def campaign_progress(
         window: How many recent evaluations the "do these differ at all" statement covers. Defaults
             to the configured window; set it explicitly when the chemist points at a specific tail
             ("the last four runs").
+        objective: Which objective to read, when the problem has several. A trade-off plateaus per
+            axis — yield can stop moving while the impurity is still falling — so this is required
+            there and the call is refused without it.
 
     Returns:
         The best so far, the running best per evaluation, how many evaluations since a real gain,
@@ -360,7 +401,8 @@ async def campaign_progress(
         observations = json.loads(observations)
     history = [Observation.model_validate(item) for item in observations]
     _require_observed_params_match(problem, history)
-    return read_progress(problem, history, assay_noise, window)
+    require_observations_cover_objectives(problem, history)
+    return read_progress(problem, history, assay_noise, window, objective)
 
 
 @server.tool()

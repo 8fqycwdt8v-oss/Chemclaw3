@@ -24,7 +24,7 @@ def _screening_problem() -> OptimizationProblem:
             CategoricalParameter(name="solvent", categories=["THF", "toluene"]),
             CategoricalParameter(name="base", categories=["K2CO3", "Cs2CO3", "Et3N"]),
         ],
-        objective=Objective(name="yield", direction="maximize"),
+        objectives=[Objective(name="yield", direction="maximize")],
     )
 
 
@@ -53,7 +53,7 @@ def test_a_continuous_factor_is_screened_at_its_two_bounds_and_said_to_be() -> N
             ContinuousParameter(name="temperature", lower=20.0, upper=100.0),
             CategoricalParameter(name="solvent", categories=["THF", "toluene"]),
         ],
-        objective=Objective(name="yield", direction="maximize"),
+        objectives=[Objective(name="yield", direction="maximize")],
     )
     design = factorial_design(problem)
     assert {run["temperature"] for run in design.runs} == {20.0, 100.0}
@@ -79,7 +79,7 @@ def _seven_two_level_factors() -> OptimizationProblem:
         parameters=[
             CategoricalParameter(name=f"factor_{i}", categories=["low", "high"]) for i in range(7)
         ],
-        objective=Objective(name="yield", direction="maximize"),
+        objectives=[Objective(name="yield", direction="maximize")],
     )
 
 
@@ -148,7 +148,7 @@ def test_a_three_level_factor_is_refused_rather_than_crossed_in_full() -> None:
             CategoricalParameter(name="base", categories=["K2CO3", "Cs2CO3"]),
             CategoricalParameter(name="ligand", categories=["PPh3", "dppf"]),
         ],
-        objective=Objective(name="yield", direction="maximize"),
+        objectives=[Objective(name="yield", direction="maximize")],
     )
     with pytest.raises(ValueError, match="solvent"):
         factorial_design(problem, n_generators=1)
@@ -163,7 +163,7 @@ def test_an_impossible_reduction_is_a_plain_error_not_a_validation_dump() -> Non
             CategoricalParameter(name="solvent", categories=["THF", "toluene"]),
             CategoricalParameter(name="base", categories=["K2CO3", "Cs2CO3"]),
         ],
-        objective=Objective(name="yield", direction="maximize"),
+        objectives=[Objective(name="yield", direction="maximize")],
     )
     with pytest.raises(ValueError, match="confounded"):
         factorial_design(problem, n_generators=1)
@@ -196,7 +196,7 @@ def _mixed_problem() -> OptimizationProblem:
             ContinuousParameter(name="equiv", lower=1.0, upper=3.0),
             CategoricalParameter(name="solvent", categories=["THF", "toluene"]),
         ],
-        objective=Objective(name="yield", direction="maximize"),
+        objectives=[Objective(name="yield", direction="maximize")],
     )
 
 
