@@ -31,17 +31,33 @@ the run reported "17/17 checks passed", which is true of what ran and silent abo
 
 from __future__ import annotations
 
+import time
+
 from chemclaw.cli.mock_llm import Behaviour, ToolCall
 
-# The reaction the durable family launches. Fixed on purpose: the workflow id is a hash of the
-# payload (`connectors.jobs.job_workflow_id`), so many sessions launching *this* simultaneously is
-# the idempotency collision the D-011 guarantee is about — and the only honest way to check it is
-# to count what the cache did, not to read a summary.
-_COLLISION_PAYLOAD = {
+# The reaction the durable family launches. The workflow id is a hash of the payload
+# (`connectors.jobs.job_workflow_id`), so many sessions launching *this* simultaneously is the
+# idempotency collision the D-011 guarantee is about — and the only honest way to check it is to
+# count what the database did, not to read a summary.
+#
+# **The temperature varies per run, and that is load-bearing rather than decorative.** With a fixed
+# payload the *second* storm against one database finds the answer already cached: it launches
+# nothing, computes nothing, and satisfies every "at most one run" bound with zero. Measured — a
+# storm on 2026-08-04 reported "0 distinct workflow id(s) across 12 turns; calculation_results
+# 113 → 113" as a pass. `cli/live_jobs.py` documents this failure at length and designs
+# `_RUN_TEMPERATURE_K` against it; the storm inherited the hazard without the fix.
+#
+# A real physical input rather than a nonce, for the same reason: any temperature in this range is
+# a question a chemist could ask, and the answer genuinely changes with it. Constant within the
+# process, so all twelve simultaneous launches still derive the identical id — which is the whole
+# point of the family.
+_COLLISION_TEMPERATURE_K = 298.15 + (int(time.time()) % 719) / 100.0
+_COLLISION_PAYLOAD: dict[str, object] = {
     "kind": "reaction",
     "reactants": ["N#N", "[H][H]", "[H][H]", "[H][H]"],
     "products": ["N", "N"],
     "level": "quick",
+    "temperature_k": _COLLISION_TEMPERATURE_K,
     "symmetry_numbers": {"N#N": 2, "[H][H]": 2, "N": 3},
 }
 

@@ -308,32 +308,72 @@ async def family_d_durable(sessions: int) -> list[Finding]:
     """D · many sessions launching the *identical* durable payload at the same moment.
 
     The D-011 guarantee under contention: a duplicate launch must rejoin the existing run rather
-    than recompute. Measured by what the calculation cache did, never by what a summary said —
-    `k` simultaneous launches of one payload must add the rows of a single computation.
+    than recompute. Measured by what the database did, never by what a summary said — `k`
+    simultaneous launches of one payload must produce one `job_records` row and one computation's
+    worth of cache rows.
+
+    **The first version of this family passed by measuring nothing, and the report said so in the
+    numbers rather than in the verdict**: "0 distinct workflow id(s) announced across 12 turns;
+    calculation_results 113 → 113". The collision payload was fixed across runs, so the *second*
+    storm against one database found the answer already cached, launched no workflow, and satisfied
+    `len(launched) <= 1` with zero — the exact failure `cli/live_jobs.py` documents at length and
+    designs `_RUN_TEMPERATURE_K` against. `<= 1` is the tell: a bound that a run doing nothing also
+    meets.
+
+    Two things follow from that, and the second was only found by fixing the first.
+
+    **The payload has to be cold, and the process that owns it is the mock.** Giving
+    `COLLISION_PAYLOAD` a per-run temperature is not enough, because the mock is a *separate
+    process* that imported the catalogue when the lane came up — its temperature is minutes or
+    hours older than this process's, and the two disagree. Restarting the mock is what actually
+    makes the payload new, so this family restarts it rather than assuming a shared clock.
+
+    **And that means this process cannot know the workflow id**, which is the better design anyway.
+    The verdict is asked of `job_records` by *time* — rows the database stamped after the launch
+    began, on its own clock — so it is authoritative regardless of what the mock chose and immune
+    to a shared-constant drift of exactly the kind that produced the vacuous pass. It also has to
+    be: a job finishing inside `inline_wait_seconds` emits no `job_started` event, so the stream was
+    never going to see it.
+
+    Stated as **exactly one**, both times. Zero is the failure this family exists to make visible.
     """
+    await asyncio.to_thread(_lane, "processes.sh", "restart", "mock-llm")
+    since = await _scalar("select now()")
     before = await _scalar("select count(*) from calculation_results")
-    jobs_before = await _scalar("select count(*) from job_records")
     results = await storm("d-collide", turns=sessions, concurrency=sessions)
     after = await _scalar("select count(*) from calculation_results")
-    jobs_after = await _scalar("select count(*) from job_records")
+    recorded = await _scalar("select count(*) from job_records where completed_at >= %s", (since,))
 
-    launched = {job for r in results for job in r.jobs_started}
     ok_turns = sum(1 for r in results if r.status == 200)
     return [
         Finding(
             family="D",
-            name=f"{sessions} simultaneous identical launches share one run",
-            ok=len(launched) <= 1,
-            observed=f"{len(launched)} distinct workflow id(s) announced across {ok_turns} turns",
+            name=f"{sessions} simultaneous identical launches produce exactly one run",
+            ok=recorded == 1,
+            observed=f"{recorded} job_records row(s) written across {ok_turns} simultaneous turns",
+            detail=(
+                "one row means the collision happened and rejoined; zero means it never ran and "
+                "this measured nothing; more than one means the idempotency key did not hold"
+            ),
         ),
         Finding(
             family="D",
             name="the collision computed at most one result set",
-            ok=(after - before) <= 6,
-            observed=(
-                f"calculation_results {before} → {after}; job_records {jobs_before} → {jobs_after}"
-            ),
-            detail="a rejoin computes nothing; one cold run writes ~3-6 rows",
+            ok=(after - before) <= 8,
+            observed=f"calculation_results {before} → {after} (one cold run writes ~3-6 rows)",
+            # **Zero is a legitimate outcome here, and demanding otherwise was this check being
+            # wrong about the system rather than the reverse.** It first asserted `0 < delta`, on
+            # the reasoning that a new workflow must compute something. Measured: one new job
+            # record, zero new cache rows. Both are right — the workflow id is a hash of the whole
+            # payload including `temperature_k`, while `calculation_results` is keyed on the
+            # species and method, so a new temperature is a genuinely new *reaction* question
+            # answered entirely from cached *species*. That is D-011 working one level down, which
+            # is the opposite of the failure the assertion was written to catch.
+            #
+            # "Did anything run at all" is the row above's question, asked of `job_records` where
+            # it has a real answer. This one only bounds the recompute: twelve simultaneous
+            # launches must not cost twelve computations.
+            detail="twelve launches must not cost twelve computations; zero is a full cache hit",
         ),
     ]
 
