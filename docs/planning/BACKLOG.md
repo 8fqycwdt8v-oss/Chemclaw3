@@ -250,7 +250,7 @@ ADR; three of the seven measurements changed a row below, and one reversed a ref
       `campaign_progress` gained the same refusal `best_of` has — a plateau is per axis, so a
       trade-off must name which objective to read.
 
-- [ ] **W4 — a limit the chemist states cannot be expressed** — [M]. `Domain(constraints=…)` is
+- [x] **W4 — a limit the chemist states cannot be expressed** — [M]. `Domain(constraints=…)` is
       never passed, so "keep base plus acid under 3 equivalents" has to be smuggled into a bound or
       silently ignored. Measured (M-3), and the question that mattered was not SOBO but
       `RandomStrategy`, which seeds every cold start: **0 violations of 20** random points, **0 of
@@ -267,6 +267,16 @@ ADR; three of the seven measurements changed a row below, and one reversed a ref
       "Searched over:" block becomes untrue the moment constraints reach the durable path — it would
       describe a box when the campaign searched a polytope — so it gains a "Subject to:" block in
       the same diff. Closes 3.3's constraint half.
+      **Closed by D-2026-08-04-a-limit-across-parameters-is-not-a-bound.** Two claims above did not
+      survive the build. The exclusion is **not** expressible for a screen: M-4 had measured it
+      against `SoboStrategy` and `RandomStrategy` only, and measured against
+      `FractionalFactorialStrategy` (M-4c/M-4d) that strategy rejects *every* constraint class at
+      construction — linear included. So `factorial_design`'s refusal is the message, not the
+      safety: it raises where the caller can act instead of surfacing a pydantic error naming a
+      BoFire class. The two constraint shapes are a two-member discriminated union on `kind`, which
+      is what `kind` was put there for; an exclusion additionally needs an all-categorical problem,
+      and the validator names the caller's own continuous parameters rather than repeating BoFire's
+      "pure categorical/discrete search spaces".
 
 - [ ] **W5 — nothing reads the surrogate back** — [S]. (i) `predict_outcome`: "what would the model
       predict for 90 °C in toluene with L3", the question a chemist asks *instead of* trusting a

@@ -76,6 +76,12 @@ def campaign_id_for(problem: OptimizationProblem) -> str:
         identity["objectives"] = [
             objective.model_dump(mode="json") for objective in problem.objectives
         ]
+    # A constraint narrows the space, so a constrained problem is a different campaign from the
+    # unconstrained one over the same bounds — the runs mean different things.
+    if problem.constraints:
+        identity["constraints"] = [
+            constraint.model_dump(mode="json") for constraint in problem.constraints
+        ]
     return f"campaign-{stable_hash(identity)}"
 
 

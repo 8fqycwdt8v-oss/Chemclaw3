@@ -27,7 +27,13 @@ from typing import Any
 import numpy.linalg
 import pandas as pd
 import torch
-from bofire.data_models.domain.api import Domain, Inputs, Outputs
+from bofire.data_models.constraints.api import (
+    CategoricalExcludeConstraint,
+    LinearEqualityConstraint,
+    LinearInequalityConstraint,
+    SelectionCondition,
+)
+from bofire.data_models.domain.api import Constraints, Domain, Inputs, Outputs
 from bofire.data_models.features.api import (
     CategoricalDescriptorInput,
     CategoricalInput,
@@ -52,7 +58,9 @@ from chemclaw.science.bo.problem import (
     MIN_SEED_OBSERVATIONS,
     Candidate,
     CategoricalParameter,
+    Constraint,
     ContinuousParameter,
+    ExcludeConstraint,
     Observation,
     OptimizationProblem,
     ParamValue,
@@ -173,8 +181,51 @@ def _outputs(problem: OptimizationProblem) -> list[ContinuousOutput]:
     ]
 
 
+def _exclusion(constraint: ExcludeConstraint) -> CategoricalExcludeConstraint:
+    """Map a forbidden pairing of categorical options.
+
+    BoFire's conditions are positional — one per feature, combined by `logical_op` — so an `AND` of
+    two selections excludes exactly the cross product of the two option lists, which is what our
+    `parameters`/`options` pairing means.
+    """
+    return CategoricalExcludeConstraint(
+        features=list(constraint.parameters),
+        conditions=[SelectionCondition(selection=list(options)) for options in constraint.options],
+        logical_op="AND",
+    )
+
+
+def _constraint(
+    constraint: Constraint,
+) -> LinearEqualityConstraint | LinearInequalityConstraint | CategoricalExcludeConstraint:
+    """Map one neutral constraint, normalizing `>=` by negation.
+
+    BoFire's inequality is `coefficients · x <= rhs` (measured, M-3a: 20 of 20 random points
+    satisfied `a + b <= 3`, none satisfied the reverse). That sense is *asserted by a test* rather
+    than assumed, because getting it backwards silently inverts a limit the chemist stated — the one
+    bug in this wave that produces a confidently wrong experiment rather than an error.
+
+    `>=` has no BoFire class, so it is the same inequality with every sign flipped: `a + b >= 3`
+    is `-a - b <= -3`.
+    """
+    if isinstance(constraint, ExcludeConstraint):
+        return _exclusion(constraint)
+    if constraint.relation == "==":
+        return LinearEqualityConstraint(
+            features=list(constraint.parameters),
+            coefficients=list(constraint.coefficients),
+            rhs=constraint.rhs,
+        )
+    sign = -1.0 if constraint.relation == ">=" else 1.0
+    return LinearInequalityConstraint(
+        features=list(constraint.parameters),
+        coefficients=[sign * coefficient for coefficient in constraint.coefficients],
+        rhs=sign * constraint.rhs,
+    )
+
+
 def _to_domain(problem: OptimizationProblem) -> Domain:
-    """Translate our problem into a BoFire `Domain` (inputs + one output per objective)."""
+    """Translate our problem into a BoFire `Domain` (inputs, one output per objective, limits)."""
     inputs = []
     for parameter in problem.parameters:
         if isinstance(parameter, ContinuousParameter):
@@ -183,7 +234,18 @@ def _to_domain(problem: OptimizationProblem) -> Domain:
             )
         else:
             inputs.append(_categorical_input(parameter))
-    return Domain(inputs=Inputs(features=inputs), outputs=Outputs(features=_outputs(problem)))
+    return Domain(
+        inputs=Inputs(features=inputs),
+        outputs=Outputs(features=_outputs(problem)),
+        # Honoured by **both** strategies that see this domain, which is the measurement that
+        # decided this wave: `RandomStrategy` seeds every cold-start campaign, and had it ignored
+        # constraints the schema would have claimed a limit was honoured while every seed point
+        # violated it. Measured 0 violations of 20 random points and 0 of 5 SOBO proposals, so no
+        # rejection-sampling path is needed here.
+        constraints=Constraints(
+            constraints=[_constraint(constraint) for constraint in problem.constraints]
+        ),
+    )
 
 
 def _cast(parameter: ContinuousParameter | CategoricalParameter, raw: Any) -> ParamValue:
@@ -551,6 +613,19 @@ def factorial_design(
     The returned `ScreeningDesign` carries the design's `resolution` and a `summary` naming it, so
     a reduced design cannot be presented as an exhaustive one.
     """
+    if problem.constraints:
+        # Measured: `FractionalFactorialStrategy` rejects *every* constraint class at construction
+        # ("is not implemented for strategy FractionalFactorialStrategy"), linear and exclusion
+        # alike — a screen enumerates corners and there is no feasible-region step in it. So this
+        # refusal is not the safety; it is the message, raised where the caller can act on it
+        # instead of arriving as a pydantic error naming a BoFire class.
+        stated = "; ".join(constraint.describe() for constraint in problem.constraints)
+        raise ValueError(
+            f"a factorial screen cannot honour a constraint ({stated}): it enumerates the corners "
+            "of the space, and BoFire refuses a constrained design outright. Drop the constraint "
+            "and filter the returned runs yourself — saying that you did — or use "
+            "`suggest_next_experiment`, which does honour it."
+        )
     if n_generators < 0:
         # Not left to BoFire: a negative count reaches `fracfact` as a malformed generator string
         # and comes back as a pydantic ValidationError about a generator the caller never wrote.

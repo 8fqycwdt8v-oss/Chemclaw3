@@ -75,6 +75,14 @@ def note_from_campaign_result(
         for name, value in sorted(best.params.items())
     )
     space = "\n".join(f"- {_parameter_range(parameter)}" for parameter in problem.parameters)
+    # The "Searched over:" block describes a box. The moment a constraint reaches the durable path
+    # the campaign searched a *polytope* instead, and a reviewer reading only the bounds would
+    # believe a corner was available that never was — the same defect D-157 fixed one field over,
+    # where the note recorded a recommendation with no decision space at all.
+    limits = ""
+    if problem.constraints:
+        stated = "\n".join(f"- {constraint.describe()}" for constraint in problem.constraints)
+        limits = f"\nSubject to:\n{stated}\n"
     body = (
         f"Bayesian-optimization recommendation for objective `{objective_name}`, "
         f"from {len(result.history)} evaluation(s).\n\n"
@@ -82,7 +90,7 @@ def note_from_campaign_result(
         f"({best.provenance}; {_surrogate_belief(best, result.history)})\n"
         f"- direction: {problem.objective.direction} `{problem.objective.name}`\n\n"
         f"Recommended conditions:\n{conditions}\n\n"
-        f"Searched over:\n{space}\n"
+        f"Searched over:\n{space}\n{limits}"
     )
     return Note(
         id=f"bo-{objective_name}-{stable_hash(dict(best.params), chars=12)}",

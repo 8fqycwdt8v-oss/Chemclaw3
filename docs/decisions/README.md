@@ -251,6 +251,7 @@ and is kept only for reservations that were in flight when this changed.
 | [D-2026-08-03-the-refactor-closes-what-it-measured](D-2026-08-03-the-refactor-closes-what-it-measured.md) | Closing the grand refactor on re-measured numbers |
 | [D-2026-08-04-a-failure-that-says-nothing-is-read-as-proceed](D-2026-08-04-a-failure-that-says-nothing-is-read-as-proceed.md) | A failure that says nothing is read as "proceed" |
 | [D-2026-08-04-a-lane-that-only-runs-where-docker-runs](D-2026-08-04-a-lane-that-only-runs-where-docker-runs.md) | A lane that only runs where Docker runs is a lane that does not run |
+| [D-2026-08-04-a-limit-across-parameters-is-not-a-bound](D-2026-08-04-a-limit-across-parameters-is-not-a-bound.md) | A limit across parameters is not a bound |
 | [D-2026-08-04-a-plateau-needs-the-noise-you-measured-it-with](D-2026-08-04-a-plateau-needs-the-noise-you-measured-it-with.md) | A plateau needs the noise you measured it with |
 | [D-2026-08-04-a-screen-may-hold-a-continuous-factor-at-its-bounds](D-2026-08-04-a-screen-may-hold-a-continuous-factor-at-its-bounds.md) | A screen may hold a continuous factor at its bounds |
 | [D-2026-08-04-a-trade-off-has-no-single-best-point](D-2026-08-04-a-trade-off-has-no-single-best-point.md) | A trade-off has no single best point |

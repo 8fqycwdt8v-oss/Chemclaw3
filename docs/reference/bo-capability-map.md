@@ -41,7 +41,7 @@ BoTorch strategies and the RDKit/Mordred featurisers — are installed and almos
 | strategies | `RandomStrategy` (seeding), `SoboStrategy` (proposing), `FractionalFactorialStrategy` (screens) | `domain` and `seed` only |
 | acquisition function | — | **never set**; BoFire's `SoboStrategy` default stands |
 | surrogate | — | **never set**; BoFire picks per domain |
-| `Domain` | `Domain(inputs=…, outputs=…)` | **`constraints=` is never passed** (`engine.py:158-170`) |
+| `Domain` | `Domain(inputs=…, outputs=…, constraints=…)` | linear limits and categorical exclusions are passed since **W4** |
 
 The neutral spec that crosses the connector boundary has two fields:
 
@@ -74,7 +74,7 @@ statement about *why* it proposed a point reaches the note a human signs.
 | 2.3 / 4.4 | a screening plan; the full grid or a smarter reduced one | `SERVED` | `generate_screening_design` — full grid or a fractional design whose `resolution` and `summary` state what was confounded, over categorical **and** continuous factors (the latter held at their two bounds and named as such), plus centre points, replication and seeded run-order randomisation (W2) |
 | — | pick the best molecule from a library without evaluating all of it | `SERVED` | `molecule_library_problem` + candidate-set BO by exhaustive discrete acquisition |
 | 3.4 | explain why it suggests these conditions (exploring vs exploiting) | `SERVED` | `ExperimentSuggestion.scale` gives what the objective spans in the runs supplied, and its `summary` reads each candidate's `predicted_sd` against that spread in three bands, naming a missing sd as a seed point rather than as confidence (W1) |
-| 3.3 | set up a BO from natural language: ranges, **constraints**, one **or more** objectives | ranges and objectives `SERVED`; constraints `UNREPRESENTABLE` | `objectives` is a list; `MoboStrategy` searches the trade-off and `ExperimentSuggestion.front` returns the non-dominated subset of the runs supplied. `best_of` raises rather than picking an axis (W3). Constraints still have no field at all, and the tool now says exactly that rather than one sentence covering both halves |
+| 3.3 | set up a BO from natural language: ranges, **constraints**, one **or more** objectives | `SERVED` | `objectives` is a list; `MoboStrategy` searches the trade-off and `ExperimentSuggestion.front` returns the non-dominated subset of the runs supplied, `best_of` raising rather than picking an axis (W3). `constraints` carries a linear limit over continuous parameters (`<=`/`>=`/`==`, so a mixture summing to 1 comes free) or an exclusion forbidding a pairing of categorical options; both the seeding and the proposing strategy honour them, and a screen refuses them (W4) |
 | 3.5 | has this optimization plateaued | `SERVED` | `campaign_progress(problem, observations, assay_noise, window)` — evaluations since a gain beyond the noise, the recent window's spread, a plateau verdict, and a summary stating the limit. `assay_noise` is required with no default, which is what stops `op-13`'s fabrication recurring with a tool behind it (W1) |
 | 4.5 | rank a completed campaign against my objectives | `PARTIAL` | plural objectives now expressible (W3), so what remains is the aggregate-over-a-set half — a retrieval gap, not a BO one |
 | 3.6 | how much effort did optimization save versus screening | `PARTIAL` | no cost or labour field exists on any record, so the effort half stays blocked. The design-space half is served: `campaign_progress` reports distinct conditions against the full grid, which is a defensible efficiency claim with zero labour data (W1) |
@@ -100,12 +100,12 @@ told about one side of it.
 
 Grouped by what it would buy. The verdict column resolves in §4/§5.
 
-**Constraints** — `Domain(constraints=…)`, never passed.
+**Constraints** — `Domain(constraints=…)`, passed since W4; the rows below are what is *still* unused.
 
 | class | the chemical question | verdict |
 | --- | --- | --- |
-| `LinearInequalityConstraint`, `LinearEqualityConstraint` | "base plus acid must not exceed 3 equivalents"; "water is at most 5% of the solvent"; "these three fractions sum to 1" | **W4** |
-| `CategoricalExcludeConstraint` (+ `Selection`/`Threshold` conditions) | "never combine Pd(OAc)₂ with DMSO" | **W4**, all-categorical spaces only — measured |
+| `LinearInequalityConstraint`, `LinearEqualityConstraint` | "base plus acid must not exceed 3 equivalents"; "water is at most 5% of the solvent"; "these three fractions sum to 1" | `SERVED` — one `LinearConstraint` over `<=`/`>=`/`==` (W4) |
+| `CategoricalExcludeConstraint` (+ `Selection`/`Threshold` conditions) | "never combine Pd(OAc)₂ with DMSO" | `SERVED` for an all-categorical problem (W4). **Not** for a screen: measured, `FractionalFactorialStrategy` rejects every constraint class outright, so the roadmap's "expressible for a screen" did not survive |
 | `NChooseKConstraint` | "at most 3 of these 8 additives" | `REFUSED` — no story |
 | `InterpointEqualityConstraint` | "all four wells share one temperature" | `REFUSED` — needs a plate entity |
 | `Nonlinear*`, `Product*` | — | `REFUSED` — `BotorchOptimizer` does not support nonlinear; would need pymoo |
@@ -274,9 +274,12 @@ sentence, not to be the safety.
 The mixture/formulation case *is* `relation: "=="` and therefore comes free — ship the mechanism,
 and say nothing about formulations in the skill until a dataset exists to validate it against.
 `CategoricalExcludeConstraint` joins this wave in scoped form: measured, it is refused on a mixed
-domain and works on a pure categorical one, which is exactly the shape a screen has — so "never
-combine Pd(OAc)₂ with DMSO" is expressible for a screen and for an all-categorical campaign, and
-refused with a clear message otherwise.
+domain and works on a pure categorical one, so "never combine Pd(OAc)₂ with DMSO" is expressible for
+an all-categorical campaign and refused with a clear message otherwise. **Corrected during the
+build:** the sentence above originally said "for a screen and for an all-categorical campaign". M-4
+had measured the exclusion against `SoboStrategy` and `RandomStrategy` only; measured against
+`FractionalFactorialStrategy` (M-4c), *every* constraint class is rejected at strategy construction,
+so a screen can carry none of them. The verdict table in §3 records what shipped.
 
 `note_from_campaign_result`'s "Searched over:" block becomes untrue the moment constraints reach the
 durable path — it would describe a box when the campaign searched a polytope — so it gains a
