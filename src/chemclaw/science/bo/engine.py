@@ -17,6 +17,7 @@ or acquisition step can raise and re-raise `SurrogateFitError` — see
 
 import itertools
 import operator
+import random
 import string
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -300,7 +301,52 @@ def _resolution(generator: str) -> int:
     )
 
 
-def _fractional_design(problem: OptimizationProblem, n_generators: int) -> ScreeningDesign:
+def _two_level_names(problem: OptimizationProblem) -> list[str]:
+    """The continuous factors a screen holds at their two bounds, in declaration order."""
+    return [p.name for p in problem.parameters if isinstance(p, ContinuousParameter)]
+
+
+def _require_knobs_are_honoured(
+    problem: OptimizationProblem, n_center: int, n_repetitions: int, reduced: bool
+) -> None:
+    """Refuse the two knobs BoFire silently ignores rather than passing them into a no-op (W2).
+
+    Measured (M-5): on an all-categorical domain `n_center` and `n_repetitions` are **inert** —
+    three two-level categoricals give 8 runs at every value of either, exactly as `n_generators`
+    does. Threading an argument into a call that ignores it is how `n_generators` came to be
+    documented, imported and dead; a refusal naming the reason is the only honest alternative,
+    because there is no partial behaviour to fall back on.
+
+    A centre point also has to *mean* something. On the reduced path a categorical factor is
+    re-encoded onto [0, 1], so a centre row would put it at 0.5 — which decodes to neither of its
+    levels, and is why `n_center=0` was forced there from the start (D-2026-08-02).
+    """
+    continuous = _two_level_names(problem)
+    if n_center and not continuous:
+        raise ValueError(
+            "n_center needs at least one continuous factor: a centre point is the midpoint of a "
+            "range, and this problem declares only categorical factors, which have no midpoint. "
+            "BoFire ignores the argument on such a design rather than erroring, so it is refused "
+            "here instead of silently doing nothing."
+        )
+    if n_center and reduced and len(continuous) != len(problem.parameters):
+        raise ValueError(
+            "a reduced design encodes each categorical factor onto two numeric levels, so a centre "
+            "run would place it halfway between them, which is not one of its categories. Ask for "
+            "centre points on the full grid (n_generators=0), or drop the categorical factors."
+        )
+    if n_repetitions > 1 and not continuous:
+        raise ValueError(
+            "n_repetitions needs at least one continuous factor: BoFire replicates the continuous "
+            "half of a design and crosses the categorical half in full, so on an all-categorical "
+            "problem it is ignored rather than honoured. Repeat the returned runs yourself if you "
+            "want replicates of a categorical screen."
+        )
+
+
+def _fractional_design(
+    problem: OptimizationProblem, n_generators: int, n_center: int, n_repetitions: int
+) -> ScreeningDesign:
     """A reduced two-level screen: `2**-n_generators` of the grid, with its resolution stated.
 
     BoFire fractionates the *continuous* half of a domain and always crosses the categorical half
@@ -308,18 +354,22 @@ def _fractional_design(problem: OptimizationProblem, n_generators: int) -> Scree
     never consults `n_generators`) — measured: seven two-level `CategoricalInput`s give 128 runs at
     every `n_generators` value that validates at all. So the only way to express a reduced screen
     over categorical factors is to hand BoFire the factors as continuous inputs on [0, 1], let it
-    build the fractional design at those two bounds, and map each bound back to its label. That is
-    what this does; `n_center=0` because a centre point at 0.5 would decode to neither level.
+    build the fractional design at those two bounds, and map each bound back to its label.
 
-    Two-level only, and a factor with a different number of levels is **refused** rather than
-    quietly crossed in full: this is a two-level design by construction, and a three-level factor
-    smuggled in would make the returned resolution describe only part of the design — the exact
-    "looks complete while omitting a factor" failure `factorial_design` refuses continuous inputs
-    to avoid.
+    **A continuous factor joins that set on its own bounds, and the union fractionates as one**
+    (measured, M-8): two real continuous factors beside three re-encoded categoricals give 32, 16
+    and 8 runs at `n_generators` 0, 1 and 2, with every factor at exactly two levels and the real
+    ones at their declared bounds. So `n_generators` counts against the *total* factor count, and
+    the generator — hence the resolution derived from it — describes the whole design rather than
+    part of it, which is what makes returning a resolution honest at all.
+
+    Two-level only, and a *categorical* factor with a different number of levels is **refused**
+    rather than quietly crossed in full: this is a two-level design by construction, and a
+    three-level factor smuggled in would make the returned resolution describe only part of the
+    design.
     """
-    # Total: `factorial_design` has already refused any continuous parameter before calling here.
-    parameters = [p for p in problem.parameters if isinstance(p, CategoricalParameter)]
-    wrong_levels = [p.name for p in parameters if len(p.categories) != 2]
+    categoricals = [p for p in problem.parameters if isinstance(p, CategoricalParameter)]
+    wrong_levels = [p.name for p in categoricals if len(p.categories) != 2]
     if wrong_levels:
         raise ValueError(
             f"a fractional design is a two-level design; {wrong_levels!r} have a different "
@@ -329,59 +379,135 @@ def _fractional_design(problem: OptimizationProblem, n_generators: int) -> Scree
     # Raised here rather than from inside the strategy's validator so the caller sees a plain
     # ValueError ("Design not possible, as main factors are confounded with each other") instead of
     # a pydantic ValidationError wrapping it.
-    generator = get_generator(n_factors=len(parameters), n_generators=n_generators)
+    generator = get_generator(n_factors=len(problem.parameters), n_generators=n_generators)
     domain = Domain(
         inputs=Inputs(
-            features=[ContinuousInput(key=p.name, bounds=(0.0, 1.0)) for p in parameters]
+            features=[
+                ContinuousInput(key=p.name, bounds=(p.lower, p.upper))
+                if isinstance(p, ContinuousParameter)
+                # [0, 1] rather than the labels: this is the encoding BoFire will fractionate.
+                else ContinuousInput(key=p.name, bounds=(0.0, 1.0))
+                for p in problem.parameters
+            ]
         ),
         outputs=Outputs(features=[_objective_output(problem)]),
     )
     frame = strategies.map(
-        FractionalFactorialStrategy(domain=domain, generator=generator, n_center=0)
+        FractionalFactorialStrategy(
+            domain=domain,
+            generator=generator,
+            n_center=n_center,
+            n_repetitions=n_repetitions,
+        )
     ).ask()
-    levels = {p.name: p.categories for p in parameters}
+    levels = {p.name: p.categories for p in categoricals}
     runs: list[dict[str, ParamValue]] = [
-        {name: options[0] if row[name] < 0.5 else options[1] for name, options in levels.items()}
+        {
+            p.name: (
+                (levels[p.name][0] if row[p.name] < 0.5 else levels[p.name][1])
+                if p.name in levels
+                else float(row[p.name])
+            )
+            for p in problem.parameters
+        }
         for _, row in frame.iterrows()
     ]
-    return ScreeningDesign(runs=runs, resolution=_resolution(generator))
+    return ScreeningDesign(
+        runs=runs,
+        resolution=_resolution(generator),
+        two_level_continuous=_two_level_names(problem),
+        n_center=n_center,
+        n_repetitions=n_repetitions,
+    )
 
 
-def factorial_design(problem: OptimizationProblem, n_generators: int = 0) -> ScreeningDesign:
-    """Screen `problem`'s categorical factors — the full grid, or a reduced fraction of it.
+def _full_design(
+    problem: OptimizationProblem, n_center: int, n_repetitions: int
+) -> ScreeningDesign:
+    """Every combination: categorical levels crossed with each continuous factor's two bounds.
 
-    `n_generators=0` (the default) is every combination: the plain Cartesian product, which is what
-    BoFire's `FractionalFactorialStrategy` returns on an all-categorical domain. Each generator
-    beyond that halves the run count, so seven two-level factors go from 128 runs to 64, 32 or 16 —
-    which is the difference between a design that fits a 96-well plate and one that does not.
-
-    Raises `ValueError` if `problem` names any continuous parameter (D-092 research follow-up):
-    the same class silently *fractionates* a continuous input to its two bounds instead of erroring,
-    and a design that looks complete but quietly omits or fractionates a factor is worse than a
-    clear refusal (gate G4). Reformulate a continuous factor as a small set of discrete levels
-    (e.g. temperature as "low"/"high") to include it in a screen, or use
-    `propose_candidates`/`initial_candidates` for a continuous decision space.
-
-    The returned `ScreeningDesign` carries the design's `resolution` and a `summary` sentence
-    naming it, so a reduced design cannot be presented as an exhaustive one — the same reason the
-    continuous refusal above exists, applied to the reduction this function now performs itself.
+    `n_center` is passed explicitly on **every** path, including the default of 0, because BoFire's
+    own default is **1** (measured, M-5) — leaving it unset would have this function silently start
+    returning midpoint rows nobody asked for the moment a continuous factor was admitted.
     """
-    continuous = [p.name for p in problem.parameters if isinstance(p, ContinuousParameter)]
-    if continuous:
-        raise ValueError(
-            "factorial_design only supports categorical parameters; "
-            f"{continuous!r} are continuous — discretize them into levels first"
+    frame = strategies.map(
+        FractionalFactorialStrategy(
+            domain=_to_domain(problem), n_center=n_center, n_repetitions=n_repetitions
         )
+    ).ask()
+    runs: list[dict[str, ParamValue]] = [
+        {p.name: _cast(p, row[p.name]) for p in problem.parameters} for _, row in frame.iterrows()
+    ]
+    return ScreeningDesign(
+        runs=runs,
+        two_level_continuous=_two_level_names(problem),
+        n_center=n_center,
+        n_repetitions=n_repetitions,
+    )
+
+
+def _randomized(design: ScreeningDesign, seed: int | None) -> ScreeningDesign:
+    """Shuffle the run order reproducibly, and record that it was shuffled.
+
+    Done here rather than through `FractionalFactorialStrategy.randomize_runorder`, which exists
+    and works (measured: seed-reproducible and seed-sensitive). Two reasons for the boundary: the
+    two design paths construct their strategies differently, so shuffling once here is what makes
+    them randomize identically under one `bo_seed` default; and it keeps the guarantee ours if a
+    future BoFire release changes what that argument seeds from.
+    """
+    shuffled = list(design.runs)
+    random.Random(_resolve_seed(seed)).shuffle(shuffled)
+    return design.model_copy(update={"runs": shuffled, "randomized": True})
+
+
+def factorial_design(
+    problem: OptimizationProblem,
+    n_generators: int = 0,
+    n_center: int = 0,
+    n_repetitions: int = 1,
+    randomize: bool = False,
+    seed: int | None = None,
+) -> ScreeningDesign:
+    """Screen `problem`'s factors — the full grid, or a reduced fraction of it.
+
+    `n_generators=0` (the default) is every combination of the categorical levels crossed with each
+    continuous factor's two bounds. Each generator beyond that halves the run count, so seven
+    two-level factors go from 128 runs to 64, 32 or 16 — the difference between a design that fits a
+    96-well plate and one that does not.
+
+    **A continuous factor is admitted and held at its two bounds** (W2). This used to be refused
+    (D-092), because the class silently fractionates a continuous input to its two bounds and a
+    design that looks complete while quietly reshaping a factor is worse than a clear refusal. That
+    was right while nothing in the return could say what had been done; `ScreeningDesign` now
+    carries `two_level_continuous` and a `summary` naming every collapsed factor, so the condition
+    the refusal was waiting for is met. A screen still says nothing about what happens *between*
+    those bounds — use `propose_candidates` for that.
+
+    `n_center` adds centre runs at the midpoint of every continuous factor, which is what detects
+    curvature a two-level design cannot see; **BoFire adds them per categorical combination**, so
+    the total is not `corners + n_center` (measured: 4·2^k + n_center·2^k over k categoricals).
+    `n_repetitions` replicates the factorial part, which is what gives the screen a pure-error
+    estimate. `randomize` shuffles the run order against a drift over the session, reproducibly
+    under `seed`.
+
+    Both `n_center` and `n_repetitions` are **refused** on an all-categorical problem rather than
+    passed into a call that ignores them — see `_require_knobs_are_honoured`.
+
+    The returned `ScreeningDesign` carries the design's `resolution` and a `summary` naming it, so
+    a reduced design cannot be presented as an exhaustive one.
+    """
     if n_generators < 0:
         # Not left to BoFire: a negative count reaches `fracfact` as a malformed generator string
         # and comes back as a pydantic ValidationError about a generator the caller never wrote.
         raise ValueError(f"n_generators must be 0 (the full grid) or more; got {n_generators}")
-    if n_generators:
-        return _fractional_design(problem, n_generators)
-    strategy = strategies.map(FractionalFactorialStrategy(domain=_to_domain(problem)))
-    frame = strategy.ask()
-    categorical_names = [p.name for p in problem.parameters]
-    runs: list[dict[str, ParamValue]] = [
-        {name: str(row[name]) for name in categorical_names} for _, row in frame.iterrows()
-    ]
-    return ScreeningDesign(runs=runs)
+    if n_center < 0:
+        raise ValueError(f"n_center must be 0 or more; got {n_center}")
+    if n_repetitions < 1:
+        raise ValueError(f"n_repetitions must be 1 or more; got {n_repetitions}")
+    _require_knobs_are_honoured(problem, n_center, n_repetitions, reduced=bool(n_generators))
+    design = (
+        _fractional_design(problem, n_generators, n_center, n_repetitions)
+        if n_generators
+        else _full_design(problem, n_center, n_repetitions)
+    )
+    return _randomized(design, seed) if randomize else design

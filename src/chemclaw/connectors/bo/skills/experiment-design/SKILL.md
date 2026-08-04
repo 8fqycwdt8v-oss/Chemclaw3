@@ -186,11 +186,16 @@ campaign, run that search: a near-identical campaign that already ran is evidenc
 `suggest_next_experiment` and `start_optimization_campaign` both propose points *adaptively*, one
 batch at a time. Sometimes the real ask is the classical, complete-up-front design instead —
 "give me every combination of these catalyst/solvent/base choices to screen" before narrowing to
-BO. That is `generate_screening_design(problem)`: a factorial design over the problem's
-*categorical* parameters only. It raises if `problem` names a continuous parameter (temperature,
-equivalents) rather than silently dropping it — reformulate a continuous factor as discrete levels
-(e.g. "low"/"high") to include it, or use the adaptive tools instead if the space is genuinely
-continuous. Present the returned runs as a batch a human executes, exactly like a BO suggestion.
+BO. That is `generate_screening_design(problem)`: a factorial design over the problem's factors.
+Present the returned runs as a batch a human executes, exactly like a BO suggestion.
+
+**Continuous factors belong in a screen, and you no longer discretize them by hand.** Declare
+temperature or equivalents as the continuous parameters they are; the screen holds each at the two
+ends of its declared range. Two things to say to the chemist when it does: the design tests
+*whether* that factor matters, not *where* in the range the optimum is; and a column reading 20/120
+is a collapsed range rather than a considered pair of levels — the return names every factor
+treated that way, so use its wording. If the real question is where in the range to sit, that is
+`suggest_next_experiment`, not a screen.
 
 **Size the grid against the chemist's budget before you present it.** Multiply the level counts:
 seven two-level factors is 128 runs, which does not fit a 96-well plate, and handing over a design
@@ -206,5 +211,25 @@ generator halves the design (128 → 64 → 32 → 16). Two rules on doing that:
   design shown as "here is your screen" is the failure mode; it looks exactly like a smaller
   complete one.
 
-A reduced design needs every factor to have exactly two levels. A three-level factor is refused,
-not quietly crossed in full — pick the two levels that matter, or run the full grid.
+A reduced design needs every factor to have exactly two levels. A three-level categorical is
+refused, not quietly crossed in full — pick the two levels that matter, or run the full grid.
+
+**Three knobs that make a screen worth analysing, and when to reach for each.**
+
+- **Centre points** (`n_center`) sit at the midpoint of every continuous factor, and they are the
+  only thing in a two-level screen that can see curvature. A factor that helps up to a point and
+  then hurts reads as "no effect at all" without them, which is the most expensive way a screen can
+  mislead. Ask for them whenever a continuous factor is in play and the chemist cares whether the
+  effect is monotonic. Watch the count when you present it: they are added **per combination of the
+  categorical factors**, so the total is not the corner count plus the number you asked for — read
+  the run count off the returned design rather than computing it.
+- **Replication** (`n_repetitions`) is what gives the screen a pure-error estimate. Without it, no
+  effect the screen reports has a significance you can honestly quote — you can say a factor moved
+  the number, not that it moved it more than the assay would have anyway.
+- **Randomized run order** (`randomize`) protects against a drift over the session — a decaying
+  reagent, a warming room — being read as a factor effect. It costs nothing. Tell the chemist to
+  run them in the order returned, or the protection is lost.
+
+Both `n_center` and `n_repetitions` need at least one continuous factor and are refused on an
+all-categorical problem, because BoFire ignores them there. If the chemist wants replicates of an
+all-categorical screen, say that they should run the returned list twice.

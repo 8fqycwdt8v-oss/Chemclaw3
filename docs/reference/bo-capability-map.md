@@ -71,7 +71,7 @@ statement about *why* it proposed a point reaches the note a human signs.
 | 3.1 | which few experiments should I run next, given the results so far | `SERVED` | `suggest_next_experiment` → `propose_candidates` → SOBO over mixed continuous/categorical space; `count` gives a batch; inline, no Temporal |
 | 3.2 | feed a result back and get the next conditions, across bench sessions | `SERVED` | `resume_campaign(campaign_id)` over the content-addressed campaign record |
 | 4.3 | which reagents/catalysts should go in the campaign | `SERVED` for the electronic axis | `featurize.py`'s xTB descriptors let the surrogate speak about a ligand nobody has run. **No steric axis** — two ligands differing mainly in bulk look alike |
-| 2.3 / 4.4 | a screening plan; the full grid or a smarter reduced one | `SERVED` for categorical factors | `generate_screening_design` — full Cartesian product, or a fractional design whose `resolution` and `summary` state what was confounded |
+| 2.3 / 4.4 | a screening plan; the full grid or a smarter reduced one | `SERVED` | `generate_screening_design` — full grid or a fractional design whose `resolution` and `summary` state what was confounded, over categorical **and** continuous factors (the latter held at their two bounds and named as such), plus centre points, replication and seeded run-order randomisation (W2) |
 | — | pick the best molecule from a library without evaluating all of it | `SERVED` | `molecule_library_problem` + candidate-set BO by exhaustive discrete acquisition |
 | 3.4 | explain why it suggests these conditions (exploring vs exploiting) | `SERVED` | `ExperimentSuggestion.scale` gives what the objective spans in the runs supplied, and its `summary` reads each candidate's `predicted_sd` against that spread in three bands, naming a missing sd as a seed point rather than as confidence (W1) |
 | 3.3 | set up a BO from natural language: ranges, **constraints**, one **or more** objectives | ranges `SERVED`; the rest `UNREPRESENTABLE` | `OptimizationProblem` has two fields. There is no constraint concept and no second objective — the tool docstring spends a bold paragraph telling the model to refuse, and live probe `op-16` was graded *fabricated* for promising "both objectives" anyway |
@@ -123,9 +123,9 @@ method target — and it is blocked on the missing `method` note type, not on Bo
 
 **Design of experiments** — `DoEStrategy` with D/A/E/G/K/I-optimality and `SpaceFillingCriterion`
 (model-based optimal design, and the only route to a real LHS): `REFUSED`, it needs cyipopt + SCIP.
-The four unused `FractionalFactorialStrategy` knobs — `n_center`, `n_repetitions`,
-`randomize_runorder`, `block_feature_key` — are **W2**, except blocking, which needs a plate/day
-entity.
+Three of the four unused `FractionalFactorialStrategy` knobs — `n_center`, `n_repetitions`,
+`randomize_runorder` — shipped in **W2**. `block_feature_key` did not: blocking needs a block
+factor, and no plate, day or operator entity exists in `src/`.
 
 **Features** — `DiscreteInput` (a numeric factor on a fixed grid: 5/10/20 mol%, today expressible
 only as strings or as a continuous range), `CategoricalMolecularInput` + `Fingerprints` /
@@ -214,10 +214,16 @@ exist. `_fractional_design` now performs exactly that re-encoding deliberately, 
 carries a `resolution` and an unavoidable `summary` naming what was given up. The condition the
 refusal was waiting for has been met.
 
-Two traps the measurement found, which must be in the diff: **`n_center` defaults to 1**, so a naive
+Two traps the measurement found, both now in the diff: **`n_center` defaults to 1**, so a naive
 change would start silently returning midpoint rows; and it adds `n_center` rows *per categorical
 combination* (measured: 4·2^k + n_center·2^k), so the run count a chemist is handed is not
 `corners + n_center`. `randomize_runorder` is available today and independently of everything else.
+
+**Shipped** as `D-2026-08-04-a-screen-may-hold-a-continuous-factor-at-its-bounds`. One further
+measurement gated the reduced half: M-8 asked whether real continuous factors and re-encoded
+categoricals fractionate as one factor set, because if they did not, the stated resolution would
+describe only part of the design. They do — 32/16/8 runs at `n_generators` 0/1/2 over five factors,
+every one at exactly two levels.
 
 ### W3 · `M` · Multi-objective, inline only
 

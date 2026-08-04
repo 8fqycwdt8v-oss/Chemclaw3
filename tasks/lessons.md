@@ -994,3 +994,31 @@ false stronger claim ("zero test changes") existed only in a later retelling. **
 relaying a verification claim, quote the artifact's own wording rather than strengthening it;
 "behavior-preserving" hardens into "byte-identical" over two retellings and then fails an audit
 that the original claim would have passed.
+
+## 2026-08-04 — A wait loop that cannot terminate is a defect that reports itself as a test failure
+
+**Three "failures" in the W2 gate were all my own busy-loop.** The merged-W2 run took 30:37 against
+a normal 4:34 and produced three timeout failures; `test_pka` and `test_reizman` then reproduced
+timing out *alone*, which is exactly the signature of a real defect. They were not. One of my own
+wait commands was `until [ "$(date -u +%s)" -ge "$(( $(date -u +%s) + 1 ))" ]; do :; done` — a
+condition comparing *now* against *now + 1*, which can never be true. It had been spinning a full
+core of a 4-core box for 43 minutes. Killed it; both tests passed together in 69 s, and the full
+suite in 4:34.
+
+This is the exact shape the R5.3 lesson above already names — "a red test observed under load is an
+*observation about load* until reproduced quiet" — and I re-ran the tests quiet and still got red,
+which felt like the reproduction that rule asks for. It was not, because the load was **mine and
+invisible**: no `pytest`, no `make`, nothing in the task list, just a shell. `uptime` showed load
+5.30 on 4 cores against a `ps` whose top consumer was 17% `bash`, and that mismatch was the only
+evidence available.
+
+**Rule: before believing a timeout, read `uptime` — and if load is high while `ps` shows no obvious
+consumer, the consumer is a shell loop of your own.** A busy-wait does not look like work.
+
+**Rule: `until ! pgrep -f pytest; do sleep 20; done` never exits.** The waiter's own command line
+contains "pytest", so it matches itself and waits forever. Match on something the waiter cannot
+contain (a marker file, a completion sentinel) or use the harness's own completion notification,
+which is what it is for.
+
+**Rule: a wait condition gets read twice before it is run.** `>= now + 1` and `> now` differ by a
+character and by whether the machine stays usable.
