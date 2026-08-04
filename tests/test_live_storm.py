@@ -286,3 +286,29 @@ def test_a_request_carrying_tool_output_is_recognised_as_a_continuation() -> Non
     assert already_has_tool_results(after_tools)
     assert not already_has_tool_results({"input": "a bare string"})
     assert not already_has_tool_results({})
+
+
+def test_every_declared_behaviour_is_reached_by_some_check() -> None:
+    """A behaviour nothing drives is a scenario the catalogue advertises and the run never has.
+
+    **This test exists because the claim it enforces was false when it was written.** The
+    catalogue's docstring said "every behaviour here is reached by some check in
+    `cli/live_storm.py`, and that is enforced rather than intended" — and `a-retrieval` and
+    `d-status` were reached by nothing, one round after six other dead behaviours had been the
+    finding that started this pass. Confident prose about coverage is exactly what this repository
+    has learned not to trust, including its own.
+
+    Checked by reading the harness's source for each name rather than by instrumenting a run,
+    because the alternative — noticing during a twenty-five minute live run — is how the previous
+    six survived. The names travel as `[[selector]]` strings inside turn messages, so the source is
+    genuinely where the reference lives; there is no symbol to resolve.
+    """
+    harness = (live_storm._LANE_DIR.parents[1] / "src/chemclaw/cli/live_storm.py").read_text(
+        encoding="utf-8"
+    )
+    unreached = [b.name for b in BEHAVIOURS if b.name not in harness]
+    assert not unreached, (
+        f"{len(unreached)} behaviour(s) are declared and driven by nothing: {unreached}. "
+        "Wire a check that asserts something about them, or delete them — a catalogue entry that "
+        "no run reaches is coverage the report cannot claim and a reader will assume."
+    )

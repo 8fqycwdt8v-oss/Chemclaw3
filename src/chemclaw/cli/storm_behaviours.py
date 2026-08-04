@@ -22,11 +22,14 @@ Families B (tool-path truth) and G (limits) need no behaviour of their own: B is
 **E (chaos) borrows** — it kills processes around `a-cheap`, `f-slow` and a directly-launched
 durable job rather than asking the model for anything new.
 
-Every behaviour here is reached by some check in `cli/live_storm.py`, and that is enforced rather
-than intended: `FAMILIES` there declares the planned set and the report names any family that
-produced no findings. The first version of this file defined six behaviours nothing ever asserted
-against — `a-retrieval`, `d-status`, `f-slow`, `h-bad-smiles`, `h-injection`, `h-unicode` — while
-the run reported "17/17 checks passed", which is true of what ran and silent about what did not.
+Every behaviour here is reached by some check in `cli/live_storm.py`, and
+`tests/test_live_storm.py::test_every_declared_behaviour_is_reached_by_some_check` is what makes
+that a fact rather than a hope. It was written because the sentence above it was **false when it
+was first written**: six behaviours — `a-retrieval`, `d-status`, `f-slow`, `h-bad-smiles`,
+`h-injection`, `h-unicode` — were declared and asserted by nothing while the run reported "17/17
+checks passed", and after four of them were wired the same claim was made again with two still
+dead. Confident prose about coverage is what this repository has learned not to trust, including
+its own; a test is the only form of it that stays true.
 """
 
 from __future__ import annotations

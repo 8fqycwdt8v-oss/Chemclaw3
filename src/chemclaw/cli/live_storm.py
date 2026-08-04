@@ -346,8 +346,21 @@ async def family_d_durable(sessions: int) -> list[Finding]:
     after = await _scalar("select count(*) from calculation_results")
     recorded = await _scalar("select count(*) from job_records where completed_at >= %s", (since,))
 
+    # And the run is findable afterwards, which is the other half of a durable job being durable.
+    # `find_past_jobs` reads `job_records` through the agent's own tool, so this asks the question a
+    # chemist asks the next morning — "what did we run?" — of the row the collision just wrote,
+    # rather than asking the database twice.
+    (listed,) = await storm("d-status", turns=1, concurrency=1)
+
     ok_turns = sum(1 for r in results if r.status == 200)
     return [
+        Finding(
+            family="D",
+            name="a completed job is findable through find_past_jobs afterwards",
+            ok=listed.returned > 0 and any("reaction" in p for p in listed.result_previews),
+            observed=f"{listed.returned} tool result(s); result[0]={_first_preview(listed)!r}",
+            detail="a job record nothing can read back is an archive with no reader",
+        ),
         Finding(
             family="D",
             name=f"{sessions} simultaneous identical launches produce exactly one run",
@@ -553,6 +566,12 @@ async def family_b_tool_truth(expect_tools: Sequence[str]) -> list[Finding]:
     ran; the truth was only recoverable afterwards from `audit_events`. So a turn count is never
     allowed to stand in for a tool count here.
     """
+    # One turn that reaches for all three, so the audit question below is asked of something this
+    # run actually did rather than of residue an earlier run left in the table. `find_notes` is
+    # exercised by nearly every family; `gather_evidence` and `expand_note` are not, and without
+    # this the two of them would be answered by rows of unknown age.
+    await storm("a-retrieval", turns=1, concurrency=1)
+
     findings: list[Finding] = []
     for tool in expect_tools:
         count = await _scalar("select count(*) from audit_events where tool = %s", (tool,))
@@ -1140,7 +1159,7 @@ async def run_storm(
     if "E" in selected:
         findings.extend(await family_e_chaos())
     if "B" in selected:
-        findings.extend(await family_b_tool_truth(["find_notes", "gather_evidence"]))
+        findings.extend(await family_b_tool_truth(["find_notes", "gather_evidence", "expand_note"]))
     return findings, sweep
 
 
