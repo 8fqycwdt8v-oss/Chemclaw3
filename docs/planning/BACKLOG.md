@@ -2295,10 +2295,17 @@ MAF ships the harness natively (`create_harness_agent` + `TodoProvider`/`AgentMo
       (`data_sources` config → `active_ingest_sources()`/`active_retrieve_sources()`). Re-hosted with
       no behavior change: `gather_evidence` fans out over the registry; `eln_sync` ingests active
       sources. All existing ELN/research tests pass unchanged. ADR D-050. `test_datasource_seam.py`.
-- [ ] **F7 deferred (the first live connector)**: custom Snowflake ELN source — one registry entry
-      (ingest half over the internal data pipeline) + per-source pipeline cursor over Snowflake's
-      load-timestamp; Snowflake specifics stay inside that one adapter, nothing Snowflake-shaped above
-      the seam. Also: LIMS/MES/analytical/literature adapters.
+- [x] **F7 (the first live connector)**: custom Snowflake ELN source. Done
+      (D-2026-08-04-the-schema-is-a-file), except the tenant itself. It landed one step further than
+      this row asked for: the Snowflake specifics do not live "inside that one adapter", they live
+      in the manifest's `binding:` block, because a schema nobody can see yet cannot be written into
+      Python. `chemclaw.ingest.eln.warehouse` is a generic engine naming no table and no column;
+      both halves ship (ingest through the PR-gate, plus similarity search run inside the warehouse
+      over its own embedding column), proven against a fake driver with no tenant. Remaining work is
+      infrastructure only — see `docs/planning/DEFERRED.md`.
+- [ ] **The other F7 adapters**: LIMS/MES/analytical/literature. Each is now a question of whether
+      it is reaction-shaped: one that is becomes a binding over the same engine, one that is not is
+      the trigger for the "universal ingest abstraction" row in `docs/planning/DEFERRED.md`.
 
 ## Later — Phase 6 items now folded into F4 above (infra-gated pieces need live Entra/Temporal)
 

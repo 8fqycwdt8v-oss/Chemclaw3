@@ -33,7 +33,12 @@ from typing import TypedDict
 # are deliberately absent: `core/chem.py` imports rdkit for canonical SMILES, so a worker may
 # hold it for reasons that have nothing to do with this seam, and asserting on it would make the
 # test a lie the day some unrelated core import changes.
-_RETRIEVE_ONLY_CLOSURE = ("drfp", "psycopg")
+#
+# `snowflake` is here for the mirror-image reason: it is a *driver*, brought by a warehouse source's
+# half and by nothing else. It is the closure the manifest seam was built to keep out of processes
+# that do not query a warehouse (`ingest/sources/manifest.py` names this case explicitly), so
+# asserting on it is asserting the seam still holds now that such a source exists.
+_RETRIEVE_ONLY_CLOSURE = ("drfp", "psycopg", "snowflake")
 
 _PROBE = textwrap.dedent(
     """

@@ -118,6 +118,31 @@ _SECRET_SETTINGS = (
 # than inventing one.
 _KNOWLEDGE_REPO_TOKEN_ENV = "CHEMCLAW_KNOWLEDGE_REPO_TOKEN"
 
+# Credential variable names contributed at runtime by something that reads its own configuration
+# rather than this process's settings — today, a data source whose manifest names the environment
+# variables holding its warehouse credentials (`ingest.eln.warehouse.connect`).
+#
+# **Names, never values**, so this stays consistent with everything above it: `_secret_values` reads
+# `os.environ` fresh on every call, and caching a value here would keep redacting a rotated
+# credential's *old* text while the new one flowed through unredacted.
+#
+# A set rather than a `Settings` field because the whole point of the manifest seam is that
+# attaching a source costs no core edit — a source that had to add a config field to be redactable
+# would have given that property back. Registration is idempotent and additive; nothing removes.
+_RUNTIME_SECRET_ENVS: set[str] = set()
+
+
+def register_secret_env(name: str) -> None:
+    """Add an environment variable to the redaction inventory for the life of this process.
+
+    For a credential this process holds but does not configure: a manifest names the variable, the
+    thing that reads it says so here, and every log line from then on has its value scrubbed. Call
+    it where the variable is read, so the registration cannot drift from the use.
+    """
+    if name:
+        _RUNTIME_SECRET_ENVS.add(name)
+
+
 # Below this length a "secret" is more likely to be a placeholder, an empty default, or a string
 # that occurs in ordinary prose — redacting it would corrupt every line containing that substring.
 _MIN_REDACTABLE = 8
@@ -150,7 +175,11 @@ def _secret_values(connector_token_envs: tuple[str, ...] = ()) -> tuple[str, ...
                     password = userinfo.split(":", 1)[1]
                     if len(password) >= _MIN_REDACTABLE:
                         values.add(password)
-    for env_name in (_KNOWLEDGE_REPO_TOKEN_ENV, *connector_token_envs):
+    for env_name in (
+        _KNOWLEDGE_REPO_TOKEN_ENV,
+        *connector_token_envs,
+        *sorted(_RUNTIME_SECRET_ENVS),
+    ):
         value = os.environ.get(env_name, "")
         if len(value) >= _MIN_REDACTABLE:
             values.add(value)
